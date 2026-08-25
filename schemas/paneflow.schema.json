@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/arthjean/paneflow/raw/main/schemas/paneflow.schema.json",
   "title": "Paneflow configuration",
-  "description": "Schema for paneflow.json. Lives at ~/.config/paneflow/paneflow.json on Linux, ~/Library/Application Support/paneflow/paneflow.json on macOS, and %APPDATA%\\paneflow\\paneflow.json on Windows. The runtime is lenient: unknown top-level keys are ignored, so the schema's `additionalProperties: false` is an editor-side aid, not a runtime constraint.",
+  "description": "Schema for paneflow.json. Lives at ~/Library/Application Support/paneflow/paneflow.json. The runtime is lenient: unknown top-level keys are ignored, so the schema's `additionalProperties: false` is an editor-side aid, not a runtime constraint.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -17,7 +17,7 @@
     },
     "default_shell": {
       "type": ["string", "null"],
-      "description": "Shell binary path. When null or omitted, Unix falls back to $SHELL then /bin/sh. Windows falls back to PowerShell 7 (pwsh.exe), Windows PowerShell 5.1 (powershell.exe), %ComSpec%, C:\\Windows\\System32\\cmd.exe, then bare cmd.exe."
+      "description": "Shell binary path. When null or omitted, the live chain is configured -> $SHELL -> /bin/sh."
     },
     "theme": {
       "type": ["string", "null"],

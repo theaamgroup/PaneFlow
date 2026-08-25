@@ -2562,12 +2562,12 @@ fn main() {
              \x20 Use `paneflow mcp install` so capable agents can read pane output\n\
              \n\
              Keybindings:\n\
-             \x20 Ctrl+Shift+D/E   Split horizontal/vertical\n\
-             \x20 Ctrl+Shift+W     Close pane\n\
+             \x20 Cmd+Shift+D/E    Split horizontal/vertical\n\
+             \x20 Cmd+Shift+W      Close pane\n\
              \x20 Alt+Arrow        Focus adjacent pane\n\
-             \x20 Ctrl+Shift+N     New workspace\n\
-             \x20 Ctrl+Tab         Next workspace\n\
-             \x20 Ctrl+1-9         Switch to workspace N\n\
+             \x20 Cmd+Shift+N      New workspace\n\
+             \x20 Cmd+Tab          Next workspace\n\
+             \x20 Cmd+1-9          Switch to workspace N\n\
              \n\
              Config paths and IPC endpoints are documented in the README.\n\
              https://github.com/arthjean/paneflow",

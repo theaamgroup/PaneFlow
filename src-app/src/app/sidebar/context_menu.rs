@@ -157,7 +157,7 @@ impl PaneFlowApp {
     pub(crate) fn open_workspace_service_url(&mut self, url: &str, cx: &mut Context<Self>) {
         if let Err(err) = crate::external_open::open_url(url) {
             let message = if err.kind() == std::io::ErrorKind::NotFound {
-                "Could not open URL - install xdg-utils (Linux), or check your default browser"
+                "Could not open URL - check that /usr/bin/open exists, or set a default browser"
                     .to_string()
             } else {
                 format!("Could not open URL: {err}")

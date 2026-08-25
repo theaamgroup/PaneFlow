@@ -246,9 +246,8 @@ enum Commands {
     /// Block until a pane goes idle, or a regex appears in its output (orchestration).
     Wait {
         /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
-        /// Note: `cmdline:` matches the full argv on Linux but only the
-        /// executable basename on macOS/Windows; prefer `cwd:` or a name for a
-        /// portable selector.
+        /// Note: `cmdline:` matches only the executable basename on macOS;
+        /// prefer `cwd:` or a name for a more stable selector.
         #[arg(long = "match", value_name = "SELECTOR")]
         selector: String,
         /// Regex to wait for in the pane's recent scrollback. Required unless

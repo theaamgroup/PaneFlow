@@ -691,16 +691,7 @@ fn first_command_token(command: &str) -> Option<&str> {
 }
 
 fn command_executable_stem(token: &str) -> &str {
-    let file_name = token.rsplit(['/', '\\']).next().unwrap_or(token);
-    for suffix in [".exe", ".cmd", ".bat"] {
-        if file_name
-            .get(file_name.len().saturating_sub(suffix.len())..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
-        {
-            return &file_name[..file_name.len() - suffix.len()];
-        }
-    }
-    file_name
+    token.rsplit('/').next().unwrap_or(token)
 }
 
 fn agent_from_command(command: &str) -> Option<TerminalAgent> {
@@ -4028,10 +4019,8 @@ pub(crate) fn canonicalize_workspace_cwd(raw: &str) -> Result<std::path::PathBuf
             "cwd is not a directory: {raw}"
         )));
     }
-    let spawn_cwd = strip_verbatim_prefix(canonical.clone());
-    log::info!(
-        "ipc::workspace.create: canonical cwd resolved {raw:?} -> {canonical:?}; spawn cwd {spawn_cwd:?}"
-    );
+    let spawn_cwd = canonical;
+    log::info!("ipc::workspace.create: canonical cwd resolved {raw:?} -> {spawn_cwd:?}");
     Ok(spawn_cwd)
 }
 
@@ -4046,25 +4035,9 @@ fn expand_tilde_with_home(raw: &str, home: Option<&std::path::Path>) -> PathBuf 
             .unwrap_or_else(|| PathBuf::from(raw)),
         _ => raw
             .strip_prefix("~/")
-            .or_else(|| raw.strip_prefix("~\\"))
             .and_then(|rest| home.map(|home| home.join(rest)))
             .unwrap_or_else(|| PathBuf::from(raw)),
     }
-}
-
-/// Strip Windows verbatim prefixes after canonical validation.
-///
-/// Windows `canonicalize` commonly returns `\\?\C:\...`; that is useful for
-/// filesystem APIs but `cmd.exe` treats it as an unsupported UNC cwd and falls
-/// back to `C:\Windows`. Keep validation on the canonical path, then spawn with
-/// the normal DOS/UNC spelling. No-op on non-verbatim paths and Unix paths.
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
-    let stripped = path.to_str().and_then(|s| {
-        s.strip_prefix(r"\\?\UNC\")
-            .map(|rest| PathBuf::from(format!(r"\\{rest}")))
-            .or_else(|| s.strip_prefix(r"\\?\").map(PathBuf::from))
-    });
-    stripped.unwrap_or(path)
 }
 
 /// Parse the optional `layout` field from a `workspace.create` params object.
@@ -4250,11 +4223,7 @@ mod tests {
             Some(TerminalAgent::ClaudeCode)
         );
         assert_eq!(
-            agent_from_command(r#""codex.exe" --model x"#),
-            Some(TerminalAgent::Codex)
-        );
-        assert_eq!(
-            agent_from_command(r#""C:\Program Files\Codex\codex.exe" --model x"#),
+            agent_from_command("/opt/homebrew/bin/codex --model x"),
             Some(TerminalAgent::Codex)
         );
         assert_eq!(
@@ -4737,31 +4706,11 @@ mod tests {
         );
         assert_eq!(
             super::expand_tilde_with_home("~\\dev\\backend", Some(&home)),
-            home.join("dev\\backend")
+            PathBuf::from(r"~\dev\backend")
         );
         assert_eq!(
             super::expand_tilde_with_home("rel/~not-home", Some(&home)),
             PathBuf::from("rel/~not-home")
-        );
-    }
-
-    #[test]
-    fn strip_verbatim_prefix_disk_unc_and_passthrough() {
-        assert_eq!(
-            super::strip_verbatim_prefix(PathBuf::from(r"\\?\C:\work\paneflow")),
-            PathBuf::from(r"C:\work\paneflow")
-        );
-        assert_eq!(
-            super::strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\paneflow")),
-            PathBuf::from(r"\\server\share\paneflow")
-        );
-        assert_eq!(
-            super::strip_verbatim_prefix(PathBuf::from(r"C:\work\paneflow")),
-            PathBuf::from(r"C:\work\paneflow")
-        );
-        assert_eq!(
-            super::strip_verbatim_prefix(PathBuf::from("/tmp/paneflow")),
-            PathBuf::from("/tmp/paneflow")
         );
     }
 

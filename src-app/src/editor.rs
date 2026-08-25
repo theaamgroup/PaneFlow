@@ -10,8 +10,8 @@
 //! 2. Probed fallback chain - `code`, `cursor`, `zed`, `subl`, `nvim`,
 //!    `vim`, `hx`, `emacs` (in that order). First binary found on `PATH`
 //!    wins.
-//! 3. Last-resort: `open::that(path)` so the OS launcher (`xdg-open` /
-//!    `open` / `start`) hands the file to its registered handler. Loses
+//! 3. Last-resort: `open::that(path)` so the OS launcher (`open`) hands
+//!    the file to its registered handler. Loses
 //!    the line/col target but always does something useful.
 //!
 //! Platform notes:

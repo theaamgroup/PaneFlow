@@ -138,20 +138,6 @@ fn classify_frontend_argv<'a>(args: impl Iterator<Item = &'a str>) -> Option<&'s
     None
 }
 
-#[cfg(test)]
-fn normalize_process_basename(name: &str) -> &str {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    for suffix in [".exe", ".cmd", ".bat", ".ps1"] {
-        if base
-            .get(base.len().saturating_sub(suffix.len())..)
-            .is_some_and(|s| s.eq_ignore_ascii_case(suffix))
-        {
-            return &base[..base.len() - suffix.len()];
-        }
-    }
-    base
-}
-
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
@@ -528,14 +514,6 @@ mod tests {
         let argv = ["python3", "-m", "http.server"];
         assert_eq!(classify_frontend_argv(argv.into_iter()), None);
         assert_eq!(classify_frontend_argv(std::iter::empty()), None);
-    }
-
-    #[test]
-    fn normalize_process_basename_strips_common_windows_wrappers() {
-        assert_eq!(normalize_process_basename(r"C:\tools\codex.exe"), "codex");
-        assert_eq!(normalize_process_basename("vite.CMD"), "vite");
-        assert_eq!(normalize_process_basename("vite.cmd"), "vite");
-        assert_eq!(normalize_process_basename("script.ps1"), "script");
     }
 
     #[cfg(target_os = "macos")]

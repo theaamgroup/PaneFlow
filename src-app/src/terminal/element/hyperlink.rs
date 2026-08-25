@@ -113,7 +113,7 @@ pub(super) fn sanitize_url_punctuation(url: &str) -> &str {
 ///
 /// Mirrors the regex above: all schemes captured by `URL_REGEX_PATTERN` are
 /// considered openable, since `open::that` ultimately defers to the OS handler
-/// (`xdg-open` / `open` / `start`) which knows whether a scheme is registered.
+/// (`open`) which knows whether a scheme is registered.
 /// `file://` is intentionally excluded from the generic URL path. Local files
 /// must go through the canonicalized file/code scanners instead of OS scheme
 /// dispatch.
@@ -245,7 +245,7 @@ fn stem_len(path_str: &str) -> usize {
 /// `:`. Single-letter prefixes (`C:`, `D:`) are Windows drive letters, not
 /// schemes, and are NOT classified as schemes here. Used to bar terminal
 /// output like `file:///etc/passwd.md` from being passed to `open::that`,
-/// where `xdg-open` would honour the URI scheme rather than treat it as a
+/// where `open` would honour the URI scheme rather than treat it as a
 /// local file.
 fn has_url_scheme_prefix(candidate: &str) -> bool {
     let Some(colon_idx) = candidate.find(':') else {

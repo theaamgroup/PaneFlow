@@ -132,8 +132,8 @@ pub struct PaneFlowConfig {
     /// Accepted values:
     /// - `"auto"` (default when absent): detect the first CLI present
     ///   on PATH from the preferred order `zed`, `cursor`, `windsurf`,
-    ///   `code`. Falls back to the system opener (xdg-open / open /
-    ///   start) when none are installed.
+    ///   `code`. Falls back to the system opener (`open`) when none are
+    ///   installed.
     /// - `"system"`: always defer to the OS-level opener.
     /// - `"zed"` | `"cursor"` | `"windsurf"` | `"code"`: force the
     ///   named CLI even if other editors are also installed.
@@ -557,9 +557,8 @@ pub enum CursorBlinkConfig {
     TerminalControlled,
 }
 
-/// Terminal engine requested for newly-created sessions. `Auto` selects
-/// Ghostty in standard Linux and supported Windows x64 MSVC builds. macOS and
-/// builds without the target's native Ghostty feature use Alacritty.
+/// Terminal engine requested for newly-created sessions. `Auto` always
+/// resolves to Alacritty.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalBackendConfig {
@@ -686,10 +685,8 @@ impl TerminalSurfaceProfile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TerminalConfig {
-    /// Backend requested for new sessions. `auto` resolves to Ghostty in
-    /// standard Linux and supported Windows x64 MSVC builds. macOS and builds
-    /// without the target's native Ghostty feature use Alacritty.
-    /// `alacritty` is the explicit cross-platform rollback.
+    /// Backend requested for new sessions. `auto` always resolves to
+    /// Alacritty. `alacritty` is the explicit rollback.
     #[serde(default, deserialize_with = "lenient_terminal_backend")]
     pub backend: TerminalBackendConfig,
     /// Render programming-font ligatures (FiraCode `=>`, `!=`, …) when
