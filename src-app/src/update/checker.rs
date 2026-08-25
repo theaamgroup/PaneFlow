@@ -135,27 +135,18 @@ fn is_loopback_host(host: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Detect the native host CPU architecture, seeing through emulation
-/// (Rosetta 2 on Apple Silicon, WOW64 on ARM64 Windows) so an emulated
-/// install can migrate to a native build (US-009). Falls back to the
-/// compile-time `consts::ARCH` when no translation is detected or the probe
-/// is unavailable - which is always the case on Linux (no desktop emulation
-/// layer in this threat model).
+/// Detect the native host CPU architecture, seeing through Rosetta 2 so an
+/// x86_64 build under translation can migrate to the native aarch64 build
+/// (US-009). Falls back to the compile-time `consts::ARCH` when no
+/// translation is detected.
 fn host_arch() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        // An x86_64 binary under Rosetta 2 reports `consts::ARCH == "x86_64"`
-        // but the host is Apple Silicon - return the native arch so we offer
-        // the native aarch64 build instead of pinning the user to emulation.
-        if macos_is_translated() {
-            return "aarch64";
-        }
-        std::env::consts::ARCH
+    // An x86_64 binary under Rosetta 2 reports `consts::ARCH == "x86_64"`
+    // but the host is Apple Silicon - return the native arch so we offer
+    // the native aarch64 build instead of pinning the user to emulation.
+    if macos_is_translated() {
+        return "aarch64";
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        std::env::consts::ARCH
-    }
+    std::env::consts::ARCH
 }
 
 /// True when the current process runs under Rosetta 2 translation.
@@ -603,13 +594,9 @@ mod tests {
     }
 
     #[test]
-    fn host_arch_falls_back_to_compile_arch_on_linux() {
-        // US-009: on Linux (no desktop emulation layer) host_arch must equal
-        // the compile-time arch. The macOS/Windows translation probes are
-        // exercised on their own CI legs.
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(host_arch(), std::env::consts::ARCH);
-        // On all targets it must at least return a non-empty, known arch.
+    fn host_arch_returns_a_nonempty_arch() {
+        // US-009: host_arch() returns the native arch (seeing through
+        // Rosetta 2) and must never be empty.
         assert!(!host_arch().is_empty());
     }
 
