@@ -24,18 +24,10 @@ use crate::terminal::types::{
 use super::probe_enabled;
 use super::{TerminalEvent, TerminalView};
 
-/// Returns true when the platform-appropriate "open link" modifier is held:
-/// Cmd on macOS, Ctrl on Linux/Windows (US-019 AC).
+/// Returns true when the "open link" modifier is held: Cmd on macOS.
 #[inline]
 fn open_link_modifier_held(modifiers: &gpui::Modifiers) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        modifiers.platform
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        modifiers.control
-    }
+    modifiers.platform
 }
 
 fn key_escape_sequence(
@@ -709,22 +701,13 @@ impl TerminalView {
 
         let (point, side) = self.pixel_to_grid(event.position);
 
-        let primary_text = self
+        // macOS has no PRIMARY selection buffer, so the formatted in-progress
+        // selection this returns is unused; `finish_selection` writes the
+        // committed value to the clipboard on mouse-up.
+        let _ = self
             .terminal
             .session_backend()
             .update_selection(point, side);
-        // On Linux/freebsd, mirror backends that can format the in-progress
-        // selection without blocking into the X11/Wayland PRIMARY buffer.
-        // Ghostty defers formatting until mouse-up to keep this UI hot path
-        // asynchronous; `finish_selection` writes the committed value below.
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let Some(text) = primary_text
-            && !text.is_empty()
-        {
-            cx.write_to_primary(ClipboardItem::new_string(text));
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        drop(primary_text);
 
         cx.notify();
     }
@@ -851,19 +834,9 @@ impl TerminalView {
             return;
         }
 
-        // Middle-click: paste from primary selection (X11/Wayland only;
-        // `read_from_primary` is gated to linux+freebsd in GPUI - mirror
-        // the same gate here. On macOS/Windows middle-click has no primary
-        // paste convention, so the block is a no-op and we just return.
+        // Middle-click has no primary-selection paste convention on macOS;
+        // swallow it so it does not fall through to selection handling.
         if event.button == MouseButton::Middle {
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            {
-                if let Some(item) = cx.read_from_primary()
-                    && let Some(text) = item.text()
-                {
-                    self.write_paste_text(&text, mode);
-                }
-            }
             return;
         }
 
@@ -878,8 +851,8 @@ impl TerminalView {
         let down_link = self.mouse_down_link.take();
 
         // Clear empty selections, or auto-copy non-empty selections (tmux-style):
-        // write to both PRIMARY (middle-click paste) and CLIPBOARD (Ctrl+V),
-        // then clear the selection so the disappearing highlight signals the copy.
+        // write to the clipboard (Cmd+V), then clear the selection so the
+        // disappearing highlight signals the copy.
         let (selection_empty, copied) = self.terminal.session_backend().finish_selection();
 
         // US-012: open on a genuine click (empty selection = no drag).
@@ -893,8 +866,6 @@ impl TerminalView {
         }
 
         if let Some(text) = copied {
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            cx.write_to_primary(ClipboardItem::new_string(text.clone()));
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             cx.emit(TerminalEvent::SelectionCopied);
         }

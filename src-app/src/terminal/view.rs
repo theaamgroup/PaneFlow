@@ -47,8 +47,11 @@ fn policy_requests_ghostty(requested: TerminalBackendConfig, auto_selects: bool)
     }
 }
 
+/// This fork ships only the Alacritty backend, so nothing ever auto-selects
+/// Ghostty. Kept as a function because the backend-policy tests and the
+/// availability warning below both read it.
 fn auto_selects_ghostty_for_target() -> bool {
-    cfg!(target_os = "linux")
+    false
 }
 
 #[cfg(test)]

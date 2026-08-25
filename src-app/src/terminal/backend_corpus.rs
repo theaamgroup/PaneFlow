@@ -472,59 +472,15 @@ pub(crate) fn percentile_us(values: &[Duration], percentile: usize) -> u128 {
     percentile_duration(values, percentile).as_micros()
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) fn resident_set_bytes() -> u64 {
-    let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
-    let resident_pages = statm
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(0) as u64;
-    resident_pages.saturating_mul(page_size)
-}
-
-#[cfg(not(target_os = "linux"))]
+/// macOS stubs: RSS and CPU time are not sampled here (libproc is tracked separately).
 pub(crate) fn resident_set_bytes() -> u64 {
     0
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) fn process_cpu_time() -> Duration {
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
-    let fields = stat
-        .rsplit_once(')')
-        .map(|(_, fields)| fields)
-        .unwrap_or("");
-    let mut values = fields.split_whitespace();
-    let user_ticks = values
-        .nth(11)
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let system_ticks = values
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
-    Duration::from_secs_f64((user_ticks + system_ticks) as f64 / ticks_per_second as f64)
-}
-
-#[cfg(not(target_os = "linux"))]
 pub(crate) fn process_cpu_time() -> Duration {
     Duration::ZERO
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) fn cpu_model() -> String {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .unwrap_or_default()
-        .lines()
-        .find_map(|line| line.strip_prefix("model name\t: "))
-        .unwrap_or("unknown")
-        .to_owned()
-}
-
-#[cfg(not(target_os = "linux"))]
 pub(crate) fn cpu_model() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
