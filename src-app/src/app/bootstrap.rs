@@ -1173,53 +1173,6 @@ impl PaneFlowApp {
 // Free helper functions called from `fn main()` (US-002 extraction).
 // ---------------------------------------------------------------------------
 
-/// Build the copy-pasteable upgrade command for a system-package install.
-///
-/// `version` is safe to interpolate into a shell string without escaping: it
-/// comes from `UpdateStatus::Available { version }`, which is set from a
-/// `semver::Version::to_string()` - the semver parser rejects any input that
-/// would survive into `;`/`$()`/whitespace/bidi, so malformed GitHub tags
-/// short-circuit to `UpdateStatus::Failed` long before this function runs.
-///
-/// Version format notes:
-/// - apt pinning uses `name=upstream-debrev`. `cargo-deb` emits `-1` as the
-///   debian revision by default, so `paneflow=<v>-1` targets the exact tag.
-/// - dnf accepts `name-upstream` as a NEVR prefix match. The `<v>` we pass is
-///   already the raw upstream version from GitHub Releases.
-/// - zypper accepts `name=upstream` for exact version selection.
-/// - `PackageManager::Other` gets a plain-English hint rather than a command,
-///   because we don't know the syntax (eopkg/xbps/apk all differ).
-pub(crate) fn system_package_update_command(
-    manager: Option<&update::install_method::PackageManager>,
-    version: &str,
-) -> String {
-    match manager {
-        Some(update::install_method::PackageManager::Apt) => {
-            format!("sudo apt update && sudo apt install paneflow={version}-1")
-        }
-        Some(update::install_method::PackageManager::Dnf) => {
-            // Match the validated pkexec argv (`dnf --refresh install …`): plain
-            // `dnf upgrade <pkg>-<ver>` hits "No match for argument" right after
-            // a publish because the cached metadata predates the new version.
-            // `--refresh install` forces a metadata sync and installs the exact
-            // version (dnf treats install of a higher version as an upgrade).
-            format!("sudo dnf --refresh install paneflow-{version}")
-        }
-        Some(update::install_method::PackageManager::Zypper) => {
-            format!(
-                "sudo zypper --non-interactive --gpg-auto-import-keys refresh && sudo zypper --non-interactive install --no-recommends --force paneflow={version}"
-            )
-        }
-        // US-004: `rpm-ostree upgrade` takes no package argument - it
-        // rebases the whole deployment. Version string is intentionally
-        // NOT included, unlike the apt/dnf arms.
-        Some(update::install_method::PackageManager::RpmOstree) => "rpm-ostree upgrade".to_string(),
-        Some(update::install_method::PackageManager::Other) | None => {
-            "Update PaneFlow via your system's package manager".to_string()
-        }
-    }
-}
-
 /// Install the macOS menu bar.
 ///
 /// US-012: three top-level menus - PaneFlow / Edit / Window - populated with
@@ -1388,32 +1341,6 @@ pub(crate) fn warn_if_rosetta_translated() {
             "running under Rosetta 2 translation - GPU rendering will be \
              degraded. For best performance, download the matching \
              architecture from https://github.com/arthjean/paneflow/releases"
-        );
-    }
-}
-
-/// The old `.run` installer (removed in US-007) dropped a standalone binary
-/// at `~/.local/bin/paneflow`. The new tar.gz installer instead drops a
-/// `~/.local/paneflow.app/` directory and symlinks `~/.local/bin/paneflow`
-/// into it. We warn when the old layout is detected so users know why the
-/// in-app updater can no longer fetch a `.run` asset (there are none).
-pub(crate) fn warn_if_legacy_run_install() {
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
-        return;
-    };
-    let app_dir = home.join(".local/paneflow.app");
-    let legacy_bin = home.join(".local/bin/paneflow");
-
-    let legacy_bin_is_regular_file = legacy_bin
-        .symlink_metadata()
-        .map(|m| m.file_type().is_file())
-        .unwrap_or(false);
-
-    if !app_dir.exists() && legacy_bin_is_regular_file {
-        log::warn!(
-            "legacy .run install detected at {} - see README for migration \
-             to the .tar.gz / .deb / .AppImage formats",
-            legacy_bin.display()
         );
     }
 }

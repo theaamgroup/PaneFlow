@@ -1,20 +1,16 @@
 //! In-app self-update flow + install-method detection + GitHub release polling.
 //!
-//! Current on-the-wire update strategies:
+//! There is exactly one on-the-wire update strategy on this fork:
 //!
-//! - **AppImage** - handed off to `appimageupdatetool` for a zsync delta
-//!   update in place (see [`linux::appimage::run_update`]). Preferred on any
-//!   `InstallMethod::AppImage` install.
-//! - **Linux tar.gz** - downloaded, minisign-verified, hardened-extracted,
-//!   and atomically swapped under `$HOME/.local/paneflow.app/`.
-//! - **Linux system packages** - delegated to the native package manager
-//!   through `pkexec`.
 //! - **macOS DMG** - minisign-verified, Gatekeeper-checked, copied and swapped
 //!   in place inside `/Applications` or `~/Applications`.
-//! - **Windows MSI** - minisign-verified, Authenticode-checked, staged, then
-//!   installed by a detached relay after the GUI exits.
 //!
-//! Both strategies eventually call GPUI's `cx.set_restart_path(path) +
+//! Any install that is not a `.app` bundle (an ad-hoc copy, a dev build under
+//! `target/`, or an install a packager has claimed via
+//! `PANEFLOW_UPDATE_EXPLANATION`) disables in-app updates and says why,
+//! rather than showing a prompt that can never fire.
+//!
+//! The strategy eventually calls GPUI's `cx.set_restart_path(path) +
 //! cx.restart()` - the "launcher pattern" where GPUI spawns a detached
 //! `bash` script that waits for our PID to exit (via `kill -0` polling) and
 //! then execs the new binary. Safe for Wayland/GPU apps because the current
@@ -28,36 +24,24 @@
 //! Module layout (US-031):
 //! - [`error`] - `UpdateError`, `IntegrityMismatch`, `classify`, `is_disk_full`
 //! - [`checker`] - GitHub release polling + asset picking
-//! - [`install_method`] - install source detection (AppImage / TarGz / SystemPackage / Unknown)
-//! - [`linux`] - platform-specific update runners (AppImage zsync, tar.gz atomic swap)
+//! - [`install_method`] - install source detection (AppBundle / ExternallyManaged / Unknown)
 //! - [`macos`] - DMG update runner
 
 pub mod checker;
 pub mod error;
 pub mod install_method;
-pub mod linux;
 pub mod macos;
 // US-001 (prd-audit-remediation): minisign detached-signature verification -
 // the independent root of trust shared by every installer path.
 pub mod signature;
 pub(crate) mod verified_download;
 
-// US-008 - install-method hygiene migrations. Linux-only by construction
-// (the only crossover this cleans up is tar.gz → rpm/deb, which has no
-// equivalent on macOS or Windows).
-#[cfg(target_os = "linux")]
-pub mod migrations;
-
 // Ergonomic re-export: callers use `crate::update::UpdateError` without
-// reaching into `update::error::UpdateError`. `IntegrityMismatch` stays
-// accessible via `update::error::IntegrityMismatch` (only constructed inside
-// `update/linux/targz.rs`, not re-exported to avoid a dead `pub use`).
+// reaching into `update::error::UpdateError`.
 pub use error::UpdateError;
 
 use std::path::PathBuf;
 
-#[cfg(all(unix, not(target_os = "macos")))]
-use anyhow::Context;
 use anyhow::Result;
 
 /// Rendering-facing state of the self-update flow.
@@ -91,25 +75,13 @@ impl SelfUpdateStatus {
 /// installer writes here; callers pass this path to `cx.set_restart_path()` so
 /// GPUI's relaunch script execs the freshly installed binary.
 ///
-/// Per-OS semantics:
-///
-/// - **Linux / BSD**: `~/.local/bin/paneflow`, retained for legacy callers.
-///   The active tar.gz updater returns its own restart path instead.
-/// - **macOS** (US-009 AC3): unused by the DMG updater. The dispatcher passes
-///   `InstallMethod::AppBundle { bundle_path }` directly to the macOS install
-///   flow, which returns the promoted `.app` bundle path for GPUI's `open`
-///   based restart.
+/// US-009 AC3: unused by the DMG updater itself. The dispatcher passes
+/// `InstallMethod::AppBundle { bundle_path }` directly to the macOS install
+/// flow, which returns the promoted `.app` bundle path for GPUI's `open`
+/// based restart. Retained for callers that want the canonical location.
 #[allow(dead_code)]
 pub fn installed_binary_path() -> Result<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(PathBuf::from(
-            "/Applications/PaneFlow.app/Contents/MacOS/paneflow",
-        ))
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let home = std::env::var_os("HOME").context("HOME environment variable is not set")?;
-        Ok(PathBuf::from(home).join(".local/bin/paneflow"))
-    }
+    Ok(PathBuf::from(
+        "/Applications/PaneFlow.app/Contents/MacOS/paneflow",
+    ))
 }

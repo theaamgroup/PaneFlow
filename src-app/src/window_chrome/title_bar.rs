@@ -96,14 +96,9 @@ pub enum SelfUpdatePillState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SystemPackageKind {
-    /// Immutable Fedora variants (Silverblue / Kinoite / Bazzite) -
-    /// detected via `/run/ostree-booted`. The pill surfaces a
-    /// `rpm-ostree upgrade` hint rather than the usual `dnf`/`apt` copy.
-    RpmOstree,
-    /// `SystemPackage` was detected but neither apt, dnf, zypper, nor ostree
-    /// markers were present (e.g., `eopkg` on Solus, `xbps` on Void).
-    /// Apt/Dnf are intentionally absent: they route through the in-app
-    /// pkexec installer (UpdatePillKind::InApp), not SystemManaged.
+    /// A packager claimed this install via `PANEFLOW_UPDATE_EXPLANATION`.
+    /// The pill renders a generic system-managed hint and the click handler
+    /// surfaces the packager's own explanation.
     Other,
 }
 
@@ -557,7 +552,6 @@ impl Render for TitleBar {
                     },
                     UpdatePillKind::SystemManaged(kind) => {
                         let label = match kind {
-                            SystemPackageKind::RpmOstree => "Update via rpm-ostree".to_string(),
                             SystemPackageKind::Other => "Update via package manager".to_string(),
                         };
                         (label, PillStyle::SystemHint)

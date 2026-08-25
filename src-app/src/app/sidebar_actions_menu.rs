@@ -47,7 +47,6 @@ impl PaneFlowApp {
             },
             UpdatePillKind::SystemManaged(kind) => {
                 let label = match kind {
-                    SystemPackageKind::RpmOstree => "Update via rpm-ostree".to_string(),
                     SystemPackageKind::Other => "Update via package manager".to_string(),
                 };
                 (label, false, true)

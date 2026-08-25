@@ -1,15 +1,14 @@
 //! Runtime detection of how PaneFlow was installed.
 //!
-//! The in-app updater needs to pick different strategies depending on whether
-//! the running binary came from a distro package, an AppImage, a user-local
-//! tar.gz install, or an unknown location. We determine this from the binary
-//! path alone - no config, no env var (except `$APPIMAGE`, which the AppImage
-//! runtime already sets for us).
+//! The in-app updater ships a single strategy on this macOS-only fork: replace
+//! the `.app` bundle from a signed `.dmg`. Detection exists to tell that case
+//! apart from a binary running outside a bundle (an ad-hoc copy, or a dev
+//! build under `target/`), where in-app updates cannot work and must be
+//! disabled with an accurate explanation rather than a never-firing prompt.
 //!
 //! Detection runs at startup. The caller canonicalises `current_exe()` before
-//! classifying, so a symlink like `~/.local/bin/paneflow ->
-//! ~/.local/paneflow.app/bin/paneflow` resolves to the real path and is
-//! correctly identified as `TarGz`.
+//! classifying, so a symlinked launcher resolves to the real path inside the
+//! bundle.
 //!
 //! Every public API in this module is consumed by the updater work in
 //! US-009/010/011/012. Until those stories land, much of it is only
@@ -19,49 +18,11 @@
 #![allow(dead_code)]
 
 use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
-
-/// Package manager used for system-wide installs. Advisory only - the updater
-/// uses this to pick the correct in-app update strategy (pkexec dnf/apt) or
-/// UI hint (generic clipboard-copy / rpm-ostree informational toast).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PackageManager {
-    Apt,
-    Dnf,
-    Zypper,
-    /// Immutable Fedora variants (Silverblue, Kinoite, Bazzite). Detected
-    /// via `/run/ostree-booted` - these systems have `/etc/fedora-release`
-    /// too, so the ostree probe MUST run before the Dnf probe. `dnf`
-    /// cannot mutate the read-only `/usr`; updates must go through
-    /// `rpm-ostree upgrade` which stages a new deployment for next boot.
-    /// US-004 only surfaces an informational toast + clipboard copy; a
-    /// full in-place `pkexec rpm-ostree install …` flow is deferred.
-    RpmOstree,
-    /// `/usr/bin/paneflow` exists but no supported package-manager marker is
-    /// present (e.g., `eopkg` on Solus, `xbps` on Void). The UI falls back to
-    /// a generic "via your package manager" hint.
-    Other,
-}
+use std::path::{Path, PathBuf};
 
 /// How the running binary was installed on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallMethod {
-    /// `/usr/bin/paneflow` or `/usr/local/bin/paneflow` - the apt/dnf managed
-    /// binary. In-app updates are disabled; user is pointed at the system
-    /// package manager.
-    SystemPackage { manager: PackageManager },
-
-    /// Launched from a mounted AppImage (`/tmp/.mount_*/...`). Update flow
-    /// delegates to `appimageupdatetool` on the source `.AppImage` file.
-    AppImage {
-        mount_point: PathBuf,
-        source_path: PathBuf,
-    },
-
-    /// Installed by the tar.gz installer under `$HOME/.local/paneflow.app/`.
-    /// Update flow downloads a new tarball and atomically swaps the app dir.
-    TarGz { app_dir: PathBuf },
-
     /// macOS `.app` bundle layout (US-007) - the running binary lives at
     /// `<bundle_path>/Contents/MacOS/paneflow`, whether under
     /// `/Applications`, `$HOME/Applications`, or anywhere the user dragged
@@ -69,17 +30,16 @@ pub enum InstallMethod {
     /// (US-008) to download a matching `.dmg`.
     AppBundle { bundle_path: PathBuf },
 
-    /// In-app updates are disabled by the host environment. Set when the
-    /// process is sandboxed (Flatpak / Snap) or when the build / runtime
-    /// environment carries `PANEFLOW_UPDATE_EXPLANATION`. The pill renders
-    /// a system-managed hint and clicking copies the explanation copy
-    /// rather than attempting any download.
+    /// In-app updates are disabled by the host environment, signalled by
+    /// `PANEFLOW_UPDATE_EXPLANATION` at build or run time. The pill renders
+    /// a system-managed hint and clicking copies the explanation rather than
+    /// attempting any download.
     ///
-    /// This mirrors Zed's `ZED_UPDATE_EXPLANATION` convention: distro and
-    /// store packagers (Flatpak, Snap, Solus, NixOS, Fedora COPR, …) bake
-    /// the env var into their wrapper / manifest at build time, and the
-    /// in-app updater stays out of their way at runtime - the package
-    /// manager is the only path to a new version.
+    /// This mirrors Zed's `ZED_UPDATE_EXPLANATION` convention: a packager
+    /// bakes the variable into its wrapper or formula, and the in-app updater
+    /// stays out of the way. It is driven purely by that variable, never by
+    /// platform, so it remains reachable here - a Homebrew cask is exactly
+    /// the case it exists for.
     ExternallyManaged { explanation: String },
 
     /// Binary location doesn't match any known layout (legacy `.run` install,
@@ -89,52 +49,13 @@ pub enum InstallMethod {
 
 /// Probe the filesystem and environment to classify the running binary.
 pub fn detect() -> InstallMethod {
-    // Dev-only override: lets `cargo run` simulate any install-method
-    // branch without having to reinstall over /usr/bin/paneflow. Only
-    // compiled in debug builds - release binaries ignore it.
-    #[cfg(debug_assertions)]
-    if let Ok(force) = std::env::var("PANEFLOW_DEV_INSTALL_METHOD") {
-        match force.trim().to_ascii_lowercase().as_str() {
-            "dnf" => {
-                return InstallMethod::SystemPackage {
-                    manager: PackageManager::Dnf,
-                };
-            }
-            "apt" => {
-                return InstallMethod::SystemPackage {
-                    manager: PackageManager::Apt,
-                };
-            }
-            "zypper" | "opensuse" => {
-                return InstallMethod::SystemPackage {
-                    manager: PackageManager::Zypper,
-                };
-            }
-            "rpm-ostree" | "ostree" => {
-                return InstallMethod::SystemPackage {
-                    manager: PackageManager::RpmOstree,
-                };
-            }
-            _ => {}
-        }
-    }
-
-    // Sandboxed / packager-managed environments take priority over any
-    // path-based heuristic. A Flatpak install of PaneFlow has its real
-    // binary at `/app/bin/paneflow` (which would otherwise look like an
-    // ad-hoc system install), and a Snap install lives in
-    // `/snap/paneflow/current/bin/paneflow` - both are immutable and the
-    // in-app updater would silently fail. We disable it up front so the
-    // pill copies the right `flatpak update` / `snap refresh` command
-    // instead of attempting a download. Mirrors Zed's
-    // `ZED_UPDATE_EXPLANATION` convention (see `crates/auto_update`
-    // and `crates/cli/src/main.rs::try_restart_to_host` in
-    // /home/arthur/dev/zed).
+    // An explicit packager opt-out takes priority over any path-based
+    // heuristic: a cask or wrapper that sets `PANEFLOW_UPDATE_EXPLANATION`
+    // owns updates for this install, so the pill copies its instruction
+    // instead of attempting a download it cannot complete.
     if let Some(externally_managed) = detect_externally_managed(
         std::env::var_os("PANEFLOW_UPDATE_EXPLANATION"),
         option_env!("PANEFLOW_UPDATE_EXPLANATION"),
-        std::env::var_os("FLATPAK_ID"),
-        std::env::var_os("SNAP"),
     ) {
         return externally_managed;
     }
@@ -155,11 +76,7 @@ pub fn detect() -> InstallMethod {
     // path. Strip the verbatim prefix so the comparison lines up.
     let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
 
-    let result = classify(
-        &canonical,
-        std::env::var_os("HOME"),
-        std::env::var_os("APPIMAGE"),
-    );
+    let result = classify(&canonical);
 
     // US-007 AC3 - on macOS, a binary that is NOT inside a .app bundle means
     // someone extracted paneflow ad-hoc (e.g. copied to ~/bin/). In-app
@@ -187,26 +104,20 @@ pub fn detect() -> InstallMethod {
 }
 
 /// Pure detector for sandboxed / packager-managed environments. Returns
-/// `Some(InstallMethod::ExternallyManaged)` when any of the inputs signals
-/// that a third party owns this install:
+/// `Some(InstallMethod::ExternallyManaged)` when a packager has claimed this
+/// install:
 ///
 /// - `runtime_explanation` - `PANEFLOW_UPDATE_EXPLANATION` env var read at
 ///   startup. Highest priority because it's the explicit opt-out a packager
 ///   set in the host wrapper / launcher.
 /// - `build_explanation` - same env var captured at build time via
-///   `option_env!("PANEFLOW_UPDATE_EXPLANATION")`. Distro packagers (Fedora
-///   COPR, AUR, Solus, NixOS) bake this into their RPM/PKGBUILD/derivation.
-/// - `flatpak_id` - `FLATPAK_ID` is set by `flatpak-spawn` when the binary
-///   runs inside a Flatpak sandbox. Fixed copy: `flatpak update <id>`.
-/// - `snap` - `SNAP` env var is set by snapd for Snap packages. Fixed
-///   copy: `sudo snap refresh paneflow`.
+///   `option_env!("PANEFLOW_UPDATE_EXPLANATION")`, baked in by the formula
+///   or cask that produced the binary.
 ///
-/// Pure (no I/O, no FS reads) so the unit tests can mock all four signals.
+/// Pure (no I/O, no FS reads) so the unit tests can mock both signals.
 fn detect_externally_managed(
     runtime_explanation: Option<OsString>,
     build_explanation: Option<&str>,
-    flatpak_id: Option<OsString>,
-    snap: Option<OsString>,
 ) -> Option<InstallMethod> {
     if let Some(value) = runtime_explanation
         && let Some(text) = value.to_str()
@@ -223,153 +134,22 @@ fn detect_externally_managed(
             explanation: text.trim().to_string(),
         });
     }
-    if let Some(value) = flatpak_id
-        && let Some(id) = value.to_str()
-        && !id.trim().is_empty()
-    {
-        return Some(InstallMethod::ExternallyManaged {
-            explanation: format!(
-                "PaneFlow is installed as a Flatpak. Run `flatpak update {}` to upgrade.",
-                id.trim()
-            ),
-        });
-    }
-    if snap.is_some() {
-        return Some(InstallMethod::ExternallyManaged {
-            explanation:
-                "PaneFlow is installed as a Snap. Run `sudo snap refresh paneflow` to upgrade."
-                    .to_string(),
-        });
-    }
     None
 }
 
-/// Pure classifier - no I/O beyond the `/etc/*-release` probe for package
-/// manager inference, which is only reached on the SystemPackage arm. All
-/// other inputs are parameters so callers (and tests) control them.
-fn classify(canonical: &Path, home: Option<OsString>, appimage: Option<OsString>) -> InstallMethod {
-    // 0. macOS `.app` bundle (US-007). Structural check on the path
-    //    components: `<bundle>/Contents/MacOS/<binary>`. Placed first
-    //    because it's the cheapest and cannot false-positive on a Linux
-    //    path (no Linux layout has `Contents/MacOS/` in the tail).
+/// Pure classifier - no I/O at all. Every input is a parameter so callers
+/// (and tests) control them.
+///
+/// On this fork there is exactly one updatable layout: the macOS `.app`
+/// bundle. The check is structural on the path components
+/// (`<bundle>/Contents/MacOS/<binary>`), so a drag-install to an arbitrary
+/// directory is detected, not just `/Applications`. Anything else is
+/// `Unknown`, and `detect()` logs why.
+fn classify(canonical: &Path) -> InstallMethod {
     if let Some(bundle_path) = app_bundle_path(canonical) {
         return InstallMethod::AppBundle { bundle_path };
     }
-
-    // 1. System package (apt/dnf).
-    if canonical == Path::new("/usr/bin/paneflow")
-        || canonical == Path::new("/usr/local/bin/paneflow")
-    {
-        return InstallMethod::SystemPackage {
-            manager: detect_package_manager(),
-        };
-    }
-
-    // 2. AppImage. The type-2 runtime ALWAYS exports $APPIMAGE (the absolute
-    //    path to the .AppImage), which is exactly what the updater needs, so a
-    //    non-empty $APPIMAGE is the PRIMARY signal. The `/tmp/.mount_` path
-    //    heuristic alone breaks when the runtime mounts under $TMPDIR instead of
-    //    /tmp (NixOS, systemd `PrivateTmp=yes`, sandboxes), which silently
-    //    dropped self-update to `Unknown`. The heuristic stays as a fallback for
-    //    a non-standard launch that didn't set $APPIMAGE.
-    let appimage_source = appimage
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
-    let mount_point = appimage_mount_point(canonical);
-    if appimage_source.is_some() || mount_point.is_some() {
-        return InstallMethod::AppImage {
-            // The updater only consumes `source_path`; `mount_point` is
-            // diagnostic, so best-effort: the real `/tmp/.mount_` dir when the
-            // heuristic matched, else the running binary's parent.
-            mount_point: mount_point
-                .or_else(|| canonical.parent().map(Path::to_path_buf))
-                .unwrap_or_default(),
-            source_path: appimage_source.unwrap_or_default(),
-        };
-    }
-
-    // 3. Tar.gz install under $HOME/.local/paneflow.app/.
-    if let Some(home_path) = home.map(PathBuf::from) {
-        let app_dir = home_path.join(".local").join("paneflow.app");
-        if canonical.starts_with(&app_dir) {
-            return InstallMethod::TarGz { app_dir };
-        }
-    }
-
     InstallMethod::Unknown
-}
-
-/// Infer the system package manager from distro-identifier files.
-///
-/// Only reached when the binary is at `/usr/bin` or `/usr/local/bin` - i.e.
-/// we already know a system package put it there. Returns `Other` when no
-/// recognised marker is found so the UI can degrade to a generic hint
-/// instead of pretending `apt` is available.
-///
-/// Precedence matters: Silverblue / Kinoite carry BOTH `/etc/fedora-release`
-/// AND `/run/ostree-booted`. The ostree probe must run first, otherwise we
-/// would route those users to a broken `dnf install` (US-004).
-fn detect_package_manager() -> PackageManager {
-    detect_package_manager_with_probes(
-        Path::new("/etc/debian_version").exists(),
-        Path::new("/etc/fedora-release").exists(),
-        Path::new("/etc/SuSE-release").exists()
-            || Path::new("/etc/zypp").exists()
-            || os_release_id_like_suse(Path::new("/etc/os-release")),
-        Path::new("/run/ostree-booted").exists(),
-    )
-}
-
-fn os_release_id_like_suse(path: &Path) -> bool {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    contents.lines().any(|line| {
-        let Some((key, value)) = line.split_once('=') else {
-            return false;
-        };
-        if key != "ID" && key != "ID_LIKE" {
-            return false;
-        }
-        value
-            .trim_matches('"')
-            .split_whitespace()
-            .any(|token| matches!(token, "opensuse" | "suse" | "sles"))
-    })
-}
-
-/// Pure, parameter-driven version of [`detect_package_manager`] so the
-/// precedence logic is unit-testable without touching the real filesystem.
-/// Each `bool` is the result of a `Path::exists()` probe the caller runs.
-fn detect_package_manager_with_probes(
-    debian_marker: bool,
-    fedora_marker: bool,
-    suse_marker: bool,
-    ostree_booted: bool,
-) -> PackageManager {
-    // Endless OS is Debian-based but boots ostree (immutable rootfs), so it
-    // carries BOTH `/etc/debian_version` AND `/run/ostree-booted`. An
-    // `apt install` would fail on its read-only deployment, and it is NOT
-    // rpm-ostree either - route it to the generic externally-managed hint
-    // rather than the broken `apt` path.
-    if debian_marker && ostree_booted {
-        return PackageManager::Other;
-    }
-    // A plain Debian/Ubuntu (no ostree) uses apt.
-    if debian_marker {
-        return PackageManager::Apt;
-    }
-    // Ostree marker beats the Fedora marker - Silverblue has both.
-    if ostree_booted {
-        return PackageManager::RpmOstree;
-    }
-    if fedora_marker {
-        return PackageManager::Dnf;
-    }
-    if suse_marker {
-        return PackageManager::Zypper;
-    }
-    PackageManager::Other
 }
 
 /// Return the enclosing `.app` bundle path if `path` points at a binary
@@ -396,118 +176,19 @@ fn app_bundle_path(path: &Path) -> Option<PathBuf> {
     Some(bundle.to_path_buf())
 }
 
-/// Return the `/tmp/.mount_XXXXXX/` directory if `path` lives inside a
-/// mounted AppImage, else `None`. Matches the AppImage runtime's naming
-/// convention.
-fn appimage_mount_point(path: &Path) -> Option<PathBuf> {
-    let mut comps = path.components();
-    // `/` (root)
-    if !matches!(comps.next()?, Component::RootDir) {
-        return None;
-    }
-    // `tmp`
-    if comps.next()?.as_os_str() != "tmp" {
-        return None;
-    }
-    // `.mount_XXXXXX`
-    let mount = comps.next()?;
-    let mount_str = mount.as_os_str().to_str()?;
-    if !mount_str.starts_with(".mount_") {
-        return None;
-    }
-    // Require at least one component after the mount dir - `current_exe()`
-    // always returns a file path, so a bare mount dir would be impossible,
-    // but the guard makes the classifier resistant to malformed inputs.
-    comps.next()?;
-
-    Some(Path::new("/tmp").join(mount_str))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn system_package_usr_bin() {
-        let r = classify(Path::new("/usr/bin/paneflow"), None, None);
-        assert!(matches!(r, InstallMethod::SystemPackage { .. }));
-    }
-
-    #[test]
-    fn system_package_usr_local_bin() {
-        let r = classify(Path::new("/usr/local/bin/paneflow"), None, None);
-        assert!(matches!(r, InstallMethod::SystemPackage { .. }));
-    }
-
-    #[test]
-    fn appimage_with_env() {
-        let r = classify(
-            Path::new("/tmp/.mount_abc123/usr/bin/paneflow"),
-            None,
-            Some(OsString::from("/home/u/Downloads/paneflow.AppImage")),
-        );
-        match r {
-            InstallMethod::AppImage {
-                mount_point,
-                source_path,
-            } => {
-                assert_eq!(mount_point, Path::new("/tmp/.mount_abc123"));
-                assert_eq!(
-                    source_path,
-                    Path::new("/home/u/Downloads/paneflow.AppImage")
-                );
-            }
-            other => panic!("expected AppImage, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn appimage_without_env_still_detected() {
-        let r = classify(Path::new("/tmp/.mount_abc123/usr/bin/paneflow"), None, None);
-        match r {
-            InstallMethod::AppImage {
-                mount_point,
-                source_path,
-            } => {
-                assert_eq!(mount_point, Path::new("/tmp/.mount_abc123"));
-                assert_eq!(source_path, PathBuf::new());
-            }
-            other => panic!("expected AppImage, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tar_gz_under_home_app_dir() {
-        let r = classify(
-            Path::new("/home/u/.local/paneflow.app/bin/paneflow"),
-            Some(OsString::from("/home/u")),
-            None,
-        );
-        match r {
-            InstallMethod::TarGz { app_dir } => {
-                assert_eq!(app_dir, Path::new("/home/u/.local/paneflow.app"));
-            }
-            other => panic!("expected TarGz, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn unknown_for_legacy_run_install() {
-        let r = classify(
-            Path::new("/home/u/.local/bin/paneflow"),
-            Some(OsString::from("/home/u")),
-            None,
-        );
+        let r = classify(Path::new("/home/u/.local/bin/paneflow"));
         assert_eq!(r, InstallMethod::Unknown);
     }
 
     #[test]
     fn unknown_for_random_path() {
-        let r = classify(
-            Path::new("/opt/random/paneflow"),
-            Some(OsString::from("/home/u")),
-            None,
-        );
+        let r = classify(Path::new("/opt/random/paneflow"));
         assert_eq!(r, InstallMethod::Unknown);
     }
 
@@ -515,11 +196,9 @@ mod tests {
 
     #[test]
     fn app_bundle_in_slash_applications() {
-        let r = classify(
-            Path::new("/Applications/PaneFlow.app/Contents/MacOS/paneflow"),
-            Some(OsString::from("/Users/alice")),
-            None,
-        );
+        let r = classify(Path::new(
+            "/Applications/PaneFlow.app/Contents/MacOS/paneflow",
+        ));
         match r {
             InstallMethod::AppBundle { bundle_path } => {
                 assert_eq!(bundle_path, Path::new("/Applications/PaneFlow.app"));
@@ -530,11 +209,9 @@ mod tests {
 
     #[test]
     fn app_bundle_in_home_applications() {
-        let r = classify(
-            Path::new("/Users/alice/Applications/PaneFlow.app/Contents/MacOS/paneflow"),
-            Some(OsString::from("/Users/alice")),
-            None,
-        );
+        let r = classify(Path::new(
+            "/Users/alice/Applications/PaneFlow.app/Contents/MacOS/paneflow",
+        ));
         match r {
             InstallMethod::AppBundle { bundle_path } => {
                 assert_eq!(
@@ -549,22 +226,16 @@ mod tests {
     #[test]
     fn app_bundle_at_arbitrary_drag_install_location() {
         // Structural check matches any location, not just /Applications.
-        let r = classify(
-            Path::new("/opt/third-party/PaneFlow.app/Contents/MacOS/paneflow"),
-            None,
-            None,
-        );
+        let r = classify(Path::new(
+            "/opt/third-party/PaneFlow.app/Contents/MacOS/paneflow",
+        ));
         assert!(matches!(r, InstallMethod::AppBundle { .. }));
     }
 
     #[test]
     fn macos_binary_outside_bundle_is_unknown() {
         // A user who extracted paneflow to ~/bin/ gets Unknown (AC3).
-        let r = classify(
-            Path::new("/Users/alice/bin/paneflow"),
-            Some(OsString::from("/Users/alice")),
-            None,
-        );
+        let r = classify(Path::new("/Users/alice/bin/paneflow"));
         assert_eq!(r, InstallMethod::Unknown);
     }
 
@@ -594,142 +265,5 @@ mod tests {
         assert!(app_bundle_path(Path::new("/paneflow")).is_none());
     }
 
-    #[test]
-    fn appimage_mount_parsing() {
-        assert_eq!(
-            appimage_mount_point(Path::new("/tmp/.mount_abc/usr/bin/paneflow")),
-            Some(PathBuf::from("/tmp/.mount_abc"))
-        );
-        // Non-`/tmp` root
-        assert!(appimage_mount_point(Path::new("/var/.mount_abc/paneflow")).is_none());
-        // Non-`.mount_` prefix
-        assert!(appimage_mount_point(Path::new("/tmp/foo/paneflow")).is_none());
-        // Bare mount dir (no binary beneath)
-        assert!(appimage_mount_point(Path::new("/tmp/.mount_x")).is_none());
-    }
-
-    /// Proves that `canonicalize` resolves a symlink chain mimicking the
-    /// tar.gz install layout. Detection in `detect()` relies on this so the
-    /// symlink at `~/.local/bin/paneflow` doesn't get misclassified.
-    ///
-    /// Linux-only: on macOS the `.local/paneflow.app` suffix collides with
-    /// the `.app` bundle detector and the classifier returns `AppBundle`
-    /// instead of `TarGz`. The tar.gz install layout is a Linux convention
-    /// (Zed/Ghostty-style `$HOME/.local/paneflow.app/`) that doesn't exist
-    /// on macOS, so the test has no meaning there.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn canonicalize_resolves_tar_gz_symlink() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let app_dir = tmp.path().join(".local/paneflow.app/bin");
-        std::fs::create_dir_all(&app_dir).unwrap();
-        let real_bin = app_dir.join("paneflow");
-        std::fs::write(&real_bin, b"").unwrap();
-
-        let bin_dir = tmp.path().join(".local/bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let sym = bin_dir.join("paneflow");
-        std::os::unix::fs::symlink(&real_bin, &sym).unwrap();
-
-        let canonical = std::fs::canonicalize(&sym).unwrap();
-        let r = classify(&canonical, Some(OsString::from(tmp.path())), None);
-        match r {
-            InstallMethod::TarGz { app_dir } => {
-                assert_eq!(app_dir, tmp.path().join(".local/paneflow.app"));
-            }
-            other => panic!("expected TarGz, got {other:?}"),
-        }
-    }
-
     // ─── US-004: rpm-ostree (Silverblue / Kinoite) detection precedence ───
-
-    #[test]
-    fn detect_package_manager_debian_marker_wins() {
-        // Debian-family systems never carry `/run/ostree-booted`, but if
-        // they did, Apt still wins because apt is the one ground truth
-        // for package routing on those hosts.
-        assert_eq!(
-            detect_package_manager_with_probes(true, false, false, false),
-            PackageManager::Apt
-        );
-    }
-
-    #[test]
-    fn detect_package_manager_fedora_marker_returns_dnf() {
-        assert_eq!(
-            detect_package_manager_with_probes(false, true, false, false),
-            PackageManager::Dnf
-        );
-    }
-
-    #[test]
-    fn detect_package_manager_suse_marker_returns_zypper() {
-        assert_eq!(
-            detect_package_manager_with_probes(false, false, true, false),
-            PackageManager::Zypper
-        );
-    }
-
-    #[test]
-    fn os_release_id_like_suse_matches_id_and_id_like() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let file = tmp.path().join("os-release");
-        std::fs::write(&file, "ID=opensuse-tumbleweed\nID_LIKE=\"suse rhel\"\n").unwrap();
-        assert!(os_release_id_like_suse(&file));
-    }
-
-    #[test]
-    fn classify_system_package_detects_rpm_ostree_via_ostree_booted_marker() {
-        // US-004 AC: Silverblue / Kinoite carry BOTH /etc/fedora-release AND
-        // /run/ostree-booted. The ostree probe must fire first so these
-        // users get routed to the informational `rpm-ostree upgrade` toast
-        // instead of a broken `dnf install` that would fail on the
-        // read-only /usr.
-        assert_eq!(
-            detect_package_manager_with_probes(false, true, false, true),
-            PackageManager::RpmOstree
-        );
-    }
-
-    #[test]
-    fn detect_package_manager_ostree_without_fedora_marker_still_rpm_ostree() {
-        // Bazzite / custom ostree spins that don't ship /etc/fedora-release
-        // should still be detected correctly.
-        assert_eq!(
-            detect_package_manager_with_probes(false, false, false, true),
-            PackageManager::RpmOstree
-        );
-    }
-
-    #[test]
-    fn detect_package_manager_no_markers_returns_other() {
-        assert_eq!(
-            detect_package_manager_with_probes(false, false, false, false),
-            PackageManager::Other
-        );
-    }
-
-    #[test]
-    fn detect_package_manager_debian_plus_ostree_is_externally_managed() {
-        // Endless OS (Debian-based with an ostree layer) carries BOTH
-        // `/etc/debian_version` and `/run/ostree-booted`. An `apt install`
-        // would fail against its read-only ostree base, and it is NOT
-        // rpm-ostree either - so `(debian && ostree)` routes to the generic
-        // externally-managed `Other` hint, checked BEFORE the plain-Debian
-        // `Apt` arm.
-        assert_eq!(
-            detect_package_manager_with_probes(true, false, false, true),
-            PackageManager::Other
-        );
-        // Plain Debian (no ostree) still uses apt …
-        assert_eq!(
-            detect_package_manager_with_probes(true, false, false, false),
-            PackageManager::Apt
-        );
-        // … and Fedora Silverblue (ostree, no debian) is still rpm-ostree.
-        assert_eq!(
-            detect_package_manager_with_probes(false, true, false, true),
-            PackageManager::RpmOstree
-        );
-    }
 }

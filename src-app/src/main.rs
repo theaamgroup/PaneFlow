@@ -92,12 +92,10 @@ pub(crate) use app::constants::{
 pub(crate) use app::drag::{WorkspaceDrag, WorkspaceDragPreview};
 pub(crate) use app::notifications::{Toast, ToastAction};
 // Free helpers extracted to bootstrap.rs but still callable as
-// `crate::system_package_update_command` etc. from sibling modules.
 #[cfg(target_os = "macos")]
 pub(crate) use app::bootstrap::{
     install_macos_menu_action_fallbacks, install_macos_menu_bar, warn_if_rosetta_translated,
 };
-pub(crate) use app::bootstrap::{system_package_update_command, warn_if_legacy_run_install};
 
 // Terminal-routing helpers (`find_first_terminal`, `find_terminal_by_surface_id`)
 // live in `app::ipc_handler` - its only consumer.
@@ -2401,7 +2399,7 @@ impl Render for PaneFlowApp {
 /// not a substring of the generic "update failed" toast.
 fn run_update_and_exit() -> i32 {
     use crate::update::checker::{UpdateStatus, check_github_release};
-    use crate::update::install_method::{self, InstallMethod};
+    use crate::update::install_method;
 
     let method = install_method::detect();
     log::info!("--update-and-exit: install method = {method:?}");
@@ -2447,54 +2445,19 @@ fn run_update_and_exit() -> i32 {
 
     log::info!("--update-and-exit: installing v{version} from {asset_url}");
 
-    match method {
-        InstallMethod::TarGz { .. } => match crate::update::linux::targz::run_update(&asset_url) {
-            Ok(new_bin) => {
-                println!("paneflow-update: ok new={}", new_bin.display());
-                0
-            }
-            Err(err) => {
-                let classified = crate::update::error::UpdateError::classify(&err);
-                if matches!(
-                    classified,
-                    crate::update::error::UpdateError::IntegrityMismatch { .. }
-                ) {
-                    eprintln!("paneflow-update: hash mismatch - {err}");
-                    return 4;
-                }
-                eprintln!("paneflow-update: install failed - {err}");
-                1
-            }
-        },
-        InstallMethod::AppImage { source_path, .. } => {
-            // AC3a deferred: appimageupdatetool isn't part of the default
-            // CI image, and it has no in-process SHA verify path (the tool
-            // fetches via embedded zsync metadata). The tar.gz path covers
-            // the same regression surface (download + SHA verify + atomic
-            // swap + restart-path). Leaving the wiring in place so a
-            // follow-up can opt in by installing the tool.
-            match crate::update::linux::appimage::run_update(&source_path, &asset_url) {
-                Ok(new_bin) => {
-                    println!("paneflow-update: ok new={}", new_bin.display());
-                    0
-                }
-                Err(err) => {
-                    eprintln!("paneflow-update: AppImage install failed - {err}");
-                    1
-                }
-            }
-        }
-        // SystemPackage (.deb/.rpm/dnf/apt) updates need pkexec + a
-        // running polkit agent - neither belongs in `--update-and-exit`,
-        // which is designed to be deterministic and non-interactive.
-        // AppBundle: the e2e harness covers the bundle path separately.
-        other => {
-            eprintln!(
-                "paneflow-update: --update-and-exit does not support install method {other:?}"
-            );
-            5
-        }
-    }
+    // `--update-and-exit` has never supported the `.app` bundle path: the
+    // e2e harness covers bundle promotion separately, and an in-place bundle
+    // swap driven from a short-lived CLI invocation would race the GUI
+    // process it is meant to replace. The Linux TarGz and AppImage runners
+    // were the only methods it ever handled, and they are gone, so nothing
+    // is supported here now.
+    //
+    // Behaviour is unchanged for every install this fork can produce: an
+    // `.app` bundle already fell through to this same exit code before
+    // stage 2c. Wiring `AppBundle` to `update::macos::dmg`, or retiring the
+    // flag outright, is a product decision and not part of a platform strip.
+    eprintln!("paneflow-update: --update-and-exit does not support install method {method:?}");
+    5
 }
 
 // ---------------------------------------------------------------------------
@@ -2789,7 +2752,6 @@ fn main() {
         std::process::exit(2);
     }
 
-    warn_if_legacy_run_install();
     #[cfg(target_os = "macos")]
     warn_if_rosetta_translated();
 

@@ -20,7 +20,7 @@
 //! match.
 
 use crate::update::error::UpdateError;
-use crate::update::install_method::{InstallMethod, PackageManager};
+use crate::update::install_method::InstallMethod;
 
 /// Canonical install-method tag for the `install_method` property on
 /// `app_started` and `update_installed` events. Stable across releases.
@@ -28,19 +28,11 @@ use crate::update::install_method::{InstallMethod, PackageManager};
 /// See `tasks/compliance-analytics.md §5` for the committed vocabulary.
 pub fn install_method_tag(method: &InstallMethod) -> &'static str {
     match method {
-        InstallMethod::SystemPackage { manager } => match manager {
-            PackageManager::Apt => "deb",
-            PackageManager::Dnf | PackageManager::Zypper => "rpm",
-            PackageManager::RpmOstree => "rpm-ostree",
-            PackageManager::Other => "other",
-        },
-        InstallMethod::AppImage { .. } => "appimage",
-        InstallMethod::TarGz { .. } => "tar.gz",
         InstallMethod::AppBundle { .. } => "dmg",
-        // Sandboxed runtimes (Flatpak / Snap) and packager-baked
-        // `PANEFLOW_UPDATE_EXPLANATION` builds report a coarse tag
-        // - the in-app updater is disabled for these so finer-grained
-        // attribution would only confuse downstream dashboards.
+        // Packager-baked `PANEFLOW_UPDATE_EXPLANATION` builds report a
+        // coarse tag - the in-app updater is disabled for these so
+        // finer-grained attribution would only confuse downstream
+        // dashboards.
         InstallMethod::ExternallyManaged { .. } => "externally-managed",
         InstallMethod::Unknown => "unknown",
     }
@@ -54,7 +46,6 @@ pub fn install_method_tag(method: &InstallMethod) -> &'static str {
 pub fn error_category_tag(err: &UpdateError) -> &'static str {
     match err {
         UpdateError::Network(_) => "network",
-        UpdateError::ReleaseAssetMissing { .. } => "network",
         // A stalled download/install buckets with network: the dominant cause
         // is a half-open TCP or a mirror that accepts then stalls (U-002).
         UpdateError::Timeout => "network",
@@ -78,52 +69,15 @@ mod tests {
     fn install_method_tag_covers_every_variant() {
         let cases: &[(&str, InstallMethod)] = &[
             (
-                "deb",
-                InstallMethod::SystemPackage {
-                    manager: PackageManager::Apt,
-                },
-            ),
-            (
-                "rpm",
-                InstallMethod::SystemPackage {
-                    manager: PackageManager::Dnf,
-                },
-            ),
-            (
-                "rpm",
-                InstallMethod::SystemPackage {
-                    manager: PackageManager::Zypper,
-                },
-            ),
-            (
-                "rpm-ostree",
-                InstallMethod::SystemPackage {
-                    manager: PackageManager::RpmOstree,
-                },
-            ),
-            (
-                "other",
-                InstallMethod::SystemPackage {
-                    manager: PackageManager::Other,
-                },
-            ),
-            (
-                "appimage",
-                InstallMethod::AppImage {
-                    mount_point: PathBuf::new(),
-                    source_path: PathBuf::new(),
-                },
-            ),
-            (
-                "tar.gz",
-                InstallMethod::TarGz {
-                    app_dir: PathBuf::new(),
-                },
-            ),
-            (
                 "dmg",
                 InstallMethod::AppBundle {
                     bundle_path: PathBuf::new(),
+                },
+            ),
+            (
+                "externally-managed",
+                InstallMethod::ExternallyManaged {
+                    explanation: String::new(),
                 },
             ),
             ("unknown", InstallMethod::Unknown),
@@ -141,12 +95,6 @@ mod tests {
     fn error_category_tag_buckets_into_four_canonical_labels() {
         assert_eq!(
             error_category_tag(&UpdateError::Network("dns".into())),
-            "network"
-        );
-        assert_eq!(
-            error_category_tag(&UpdateError::ReleaseAssetMissing {
-                url: "https://example".into()
-            }),
             "network"
         );
         assert_eq!(

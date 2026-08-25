@@ -31,11 +31,6 @@ pub enum UpdateError {
     /// don't always know which write failed, in which case this is an empty
     /// `PathBuf` and the toast renders without the "at {path}" clause.
     DiskFull { path: PathBuf },
-    /// Pinned release asset returned 404 (US-005). Distinct from `Network`:
-    /// the user isn't offline, the upstream dated tag or asset path
-    /// disappeared - PaneFlow itself needs a new release with an updated
-    /// pin. `url` is the missing asset so the user can report it verbatim.
-    ReleaseAssetMissing { url: String },
     /// Install step was declined by the OS or user (US-009 / US-010 /
     /// US-002-pkexec). Distinct from `DiskFull` / `Other`: the update
     /// was downloaded and verified cleanly, but the actual installation
@@ -112,9 +107,6 @@ impl UpdateError {
                     )
                 }
             }
-            UpdateError::ReleaseAssetMissing { url } => format!(
-                "Update blocked: a required asset is no longer published ({url}). Please file a bug - PaneFlow needs a refreshed release pin."
-            ),
             UpdateError::InstallDeclined { message } => message.clone(),
             UpdateError::InstallFailed { log_path } => {
                 // Empty path = pkexec/dnf/apt branch (US-002-pkexec) -
@@ -538,31 +530,6 @@ mod tests {
     fn user_message_other_passes_through_raw() {
         let err = UpdateError::Other("raw detail".into());
         assert_eq!(err.user_message(), "raw detail");
-    }
-
-    #[test]
-    fn classify_release_asset_missing_roundtrips() {
-        // US-005 AC8: a 404 on the pinned appimageupdatetool asset must
-        // surface as ReleaseAssetMissing (not silently reclassified as
-        // Network or Other).
-        let tagged = UpdateError::ReleaseAssetMissing {
-            url: "https://example.test/asset.AppImage".into(),
-        };
-        let err = anyhow::Error::new(tagged.clone()).context("self-update/appimage");
-        assert_eq!(UpdateError::classify(&err), tagged);
-    }
-
-    #[test]
-    fn user_message_release_asset_missing_includes_url() {
-        let err = UpdateError::ReleaseAssetMissing {
-            url: "https://example.test/tool.AppImage".into(),
-        };
-        let msg = err.user_message();
-        assert!(
-            msg.contains("https://example.test/tool.AppImage"),
-            "got: {msg}"
-        );
-        assert!(msg.contains("no longer published"), "got: {msg}");
     }
 
     #[test]
