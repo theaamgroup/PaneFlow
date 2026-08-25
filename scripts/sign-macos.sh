@@ -124,7 +124,7 @@ security set-key-partition-list \
 
 # --- Extract signing identity --------------------------------------------
 # `security find-identity -v -p codesigning` prints lines like:
-#   1) ABCDE12345... "Developer ID Application: Arthur Jean (TEAM1234AB)"
+#   1) ABCDE12345... "Developer ID Application: Example Org (TEAM1234AB)"
 # We want the quoted name. awk splits on the literal double-quote.
 IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
     | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
