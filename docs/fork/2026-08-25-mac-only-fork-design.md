@@ -74,7 +74,7 @@ Docs: `docs/user/blog/`, `docs/user/installation/{linux,windows}.md`,
 `docs/{WINDOWS,WINDOWS-SMOKE-TEST,validation-aarch64,pkg-repo-runbook,release-runbook,release-signing}.md`.
 
 Cruft: `tasks/` (4M including a 3.8M demo mp4), `CHANGELOG.md`, `BUILD_WEEK.md`,
-`ABOUT.md`, `llms.txt`, `context7.json`, `skills/`, `assets/images/`,
+`ABOUT.md`, `llms.txt`, `context7.json`, `assets/images/`,
 `assets/icons/master/paneflow-icon-1024.png`, `assets/PaneFlow.ico`,
 `assets/paneflow.desktop`, `assets/io.github.arthurdev44.paneflow.metainfo.xml`,
 `assets/badges/`, `native/libghostty/prebuilt/`.
@@ -84,6 +84,10 @@ Scripts: the 5 PowerShell files, `bundle-appimage.sh`, `bundle-tarball.sh`,
 `test-update-e2e.sh`.
 
 `context7.json` carries upstream's Context7 API key, so it goes regardless.
+
+`skills/paneflow-conductor/` is deliberately NOT deleted. An earlier draft of
+this list included it, which contradicted the decision to keep and rename the
+conductor so it can be fixed here. It was never actually removed from the tree.
 
 ## Stage 2: Rust surgery
 
@@ -225,6 +229,28 @@ Found during the inventory. Each one would have cost a debugging session.
     permanently dangling breadcrumbs, not documentation.
 12. `.gitignore` names local-only upstream files we will never have, including
     `CMUX_ANALYSIS.md`, which `CLAUDE.md:261` cites as a 417-line reference spec.
+
+13. **Debug and release builds read different config files.** `APP_SUBDIR` in
+    `crates/paneflow-config/src/loader.rs:17` is `paneflow-dev` under
+    `debug_assertions` and `paneflow` otherwise, and this applies to every
+    persistence surface: config, session, threads, sockets, caches. So a
+    `cargo run` build does NOT read
+    `~/Library/Application Support/paneflow/paneflow.json`; it reads the
+    `paneflow-dev` sibling. The doc comment at `loader.rs:42` states the release
+    path as though it were universal, which makes this easy to miss. This is the
+    single most likely source of confusion for a build-from-source workflow,
+    which is now the only workflow here. The rename must produce both `panescli`
+    and `panescli-dev`.
+14. **`schemas/paneflow.schema.json` disagrees with the code on
+    `option_as_meta`.** The schema declares `"default": true` (line 101) while
+    `src-app/src/keys.rs:83` computes `!cfg!(target_os = "macos")`, so the real
+    macOS default is false. The schema description also reads as though the user
+    must set false on macOS, when macOS already defaults that way. Fix the schema,
+    not the code.
+15. **`schemas/paneflow.schema.json` omits the surface key `path` from
+    `definitions.surface`, which sets `additionalProperties: false`,** so editors
+    flag a legitimate key as invalid. The schema-drift test does not catch it
+    because `path` is `skip_serializing_if`.
 
 ## Verification: Ghostty is unreachable on macOS
 
