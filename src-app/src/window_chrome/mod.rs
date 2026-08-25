@@ -5,8 +5,6 @@
 //! directly via `window_chrome::csd::…` and `window_chrome::title_bar::…`.
 
 pub mod csd;
-#[cfg(target_os = "linux")]
-pub mod linux_backdrop;
 #[cfg(target_os = "macos")]
 pub mod macos_backdrop;
 pub mod title_bar;

@@ -1678,24 +1678,6 @@ impl Render for PaneFlowApp {
         } else {
             panel_corner_mask_bg
         };
-        #[cfg(target_os = "linux")]
-        {
-            crate::window_chrome::linux_backdrop::set_chrome_geometry(
-                crate::window_chrome::linux_backdrop::ChromeGeometry {
-                    left_sidebar_width: primary_sidebar_width,
-                    right_sidebar_width: if sessions_sidebar_mounted {
-                        sessions_sidebar_width
-                    } else if files_sidebar_mounted {
-                        files_sidebar_width
-                    } else {
-                        0.
-                    },
-                    title_bar_height: f32::from(title_bar_h),
-                    title_bar_spans_window: true,
-                },
-            );
-            crate::window_chrome::linux_backdrop::refresh_blur_region(window);
-        }
 
         // EP-003 US-009: focus the pane created by a drop-to-split. Deferred
         // here from the `DropSplit` subscription handler (no `Window` there).
@@ -2469,8 +2451,6 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
     view.update(cx, |_, cx| {
         let subscription = cx.observe_window_bounds(window, |this, window, cx| {
             crate::window_state::record_windowed_size(window);
-            #[cfg(target_os = "linux")]
-            crate::window_chrome::linux_backdrop::refresh_blur_region(window);
             if this.settings_section.is_some() {
                 this.reset_settings_scroll();
                 cx.notify();
@@ -2493,8 +2473,6 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
             // US-013 AC #2 - final chance to flush `app_exited` when the OS
             // close button or a keyboard shortcut closes the last window.
             app.emit_app_exited_and_flush();
-            #[cfg(target_os = "linux")]
-            crate::window_chrome::linux_backdrop::clear_subtle_chrome_material();
             cx.quit();
             false
         }
@@ -2504,8 +2482,6 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
     view.update(cx, |_, cx| {
         let subscription = cx.observe_window_activation(window, |_, window, cx| {
             crate::agents::notifications::set_window_active(window.is_window_active());
-            #[cfg(target_os = "linux")]
-            crate::window_chrome::linux_backdrop::refresh_blur_region(window);
             cx.notify();
         });
         subscription.detach();
@@ -2947,8 +2923,6 @@ fn main() {
                             config.macos_chrome_material_enabled(),
                         );
                     }
-                    #[cfg(target_os = "linux")]
-                    crate::window_chrome::linux_backdrop::apply_subtle_chrome_material(window);
 
                     cx.new(StartupSplashView::new)
                 },
