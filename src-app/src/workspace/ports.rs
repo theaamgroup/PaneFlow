@@ -9,30 +9,20 @@
 //! enrichment-only: exact URLs, backend labels).
 //!
 //! Cost contract (US-012): the process table is traversed ONCE per tick -
-//! a shared `visited` set spans all roots so no pid is walked twice, each
-//! pid's `comm` is read at most once, and `/proc/net/tcp[6]` is parsed a
-//! single time for the whole scan (the pre-refactor code re-walked the
+//! a shared `visited` set spans all roots so no pid is walked twice and each
+//! pid's `comm` is read at most once (the pre-refactor code re-walked the
 //! descendants once for ports and once for agents, so this is strictly
 //! cheaper per tick at any pane count).
 //!
-//! Three platform branches:
-//! - **Linux** - `/proc/{pid}/task/{pid}/children` BFS, `/proc/{pid}/comm`,
-//!   `/proc/{pid}/fd` socket inodes cross-referenced with `/proc/net/tcp[6]`.
-//! - **macOS** - `libc::proc_listchildpids` BFS, `libproc` name +
-//!   `listpidinfo::<ListFDs>`/`pidfdinfo::<SocketFDInfo>` (naturally
-//!   per-pid, so per-subtree attribution needs no global socket table).
-//! - **Windows** - ToolHelp process snapshot BFS plus `GetExtendedTcpTable`
-//!   owner-PID tables for IPv4 and IPv6 LISTEN sockets.
-//! - **Everything else (BSDs)** - stub returning an empty map; the sidebar
-//!   chips and tab badges degrade to absent without error.
+//! Implementation: `libc::proc_listchildpids` BFS, `libproc` name +
+//! `listpidinfo::<ListFDs>` / `pidfdinfo::<SocketFDInfo>`. Those are
+//! naturally per-pid, so per-subtree attribution needs no global socket
+//! table - unlike a `/proc/net/tcp`-style scan, which has to build one.
 //!
 //! BFS (not DFS) ordering is load-bearing: US-013 picks the agent binary
 //! NEAREST the subtree root ("the agent you launched, not its children"),
-//! which is exactly breadth-first visit order. Both walkers cap at 512 PIDs
+//! which is exactly breadth-first visit order. The walker caps at 512 PIDs
 //! per root to bound memory on fork-bombs.
-
-#[cfg(target_os = "linux")]
-use super::git::read_capped;
 
 /// One LISTEN port owned by a terminal's subtree.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,7 +58,7 @@ pub struct PaneScan {
 /// platforms). Checked at dequeue time, so one last fanout batch can
 /// overshoot it by up to one process's child count - the bound is
 /// "≈512", which is all the memory guarantee needs.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 const MAX_PIDS_PER_ROOT: usize = 512;
 
 // ---------------------------------------------------------------------------
@@ -81,7 +71,7 @@ const MAX_PIDS_PER_ROOT: usize = 512;
 /// not trigger (parity with the historical `AI_PROCESS_NAMES` contract).
 ///
 /// Consumed by the platform `scan_panes` paths and the unit tests.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn agents_in_bfs_order<'a>(
     comms_in_bfs_order: impl Iterator<Item = &'a str>,
     agent_binaries: &[&str],
@@ -98,57 +88,11 @@ fn agents_in_bfs_order<'a>(
     found
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn command_from_nul_args(bytes: &[u8]) -> Option<String> {
-    let parts: Vec<String> = bytes
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect();
-    (!parts.is_empty()).then(|| {
-        parts
-            .iter()
-            .map(|part| quote_command_arg(part))
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn quote_command_arg(arg: &str) -> String {
-    if !arg.chars().any(|c| c.is_whitespace() || c == '"') {
-        return arg.to_string();
-    }
-    format!("\"{}\"", arg.replace('"', "\\\""))
-}
-
-/// Parse one `/proc/net/tcp`-format line into `(port, socket_inode)` for a
-/// LISTEN-state (0A) socket. Pure string parsing, platform-neutral so the
-/// fixture test runs on every host; header/malformed lines yield `None`.
-/// Gated to Linux + test builds: only the `/proc` scan consumes it at
-/// runtime, and macOS/Windows compile with `-D warnings` (dead_code).
-#[cfg(any(target_os = "linux", test))]
-fn parse_listen_line(line: &str) -> Option<(u16, u64)> {
-    let mut fields = line.split_whitespace();
-    let _sl = fields.next()?;
-    // Field 1 is local_address (hex_ip:hex_port)
-    let local = fields.next()?;
-    let _remote = fields.next()?;
-    // Field 3 is TCP state; 0A = LISTEN
-    if fields.next()? != "0A" {
-        return None;
-    }
-    // Fields 4..8 (queues, timers, retrnsmt, uid, timeout) precede the inode.
-    let inode = fields.nth(5)?.parse::<u64>().ok()?;
-    let port = u16::from_str_radix(local.split(':').next_back()?, 16).ok()?;
-    Some((port, inode))
-}
-
 /// Frontend dev servers recognisable from the socket owner's argv. The table
 /// is deliberately frontend-only: a hit arms a CLICKABLE sidebar chip, so
 /// precision beats recall here - backend labels keep flowing from the
 /// PTY-text enrichment path, where a mislabel is cosmetic.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 const FRONTEND_ARGV: &[(&str, &str)] = &[
     ("vite", "Vite"),
     ("next", "Next.js"),
@@ -169,7 +113,7 @@ const FRONTEND_ARGV: &[(&str, &str)] = &[
 /// process title to `next-server (vX.Y.Z)` - a single argv token, matched by
 /// prefix. Only the leading args are inspected; launchers always carry the
 /// tool name up front.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn classify_frontend_argv<'a>(args: impl Iterator<Item = &'a str>) -> Option<&'static str> {
     for arg in args.take(8) {
         if arg
@@ -209,294 +153,7 @@ fn normalize_process_basename(name: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
-// Linux
 // ---------------------------------------------------------------------------
-
-/// BFS the descendants of `root_pid` via `/proc/{pid}/task/{pid}/children`
-/// (requires `CONFIG_PROC_CHILDREN=y`; absent kernels yield just the root).
-/// `visited` is SHARED across the tick's roots so a pid reparented between
-/// subtrees is only ever attributed once. Returns pids in breadth-first
-/// order, root first.
-#[cfg(target_os = "linux")]
-fn bfs_descendants_linux(root_pid: u32, visited: &mut std::collections::HashSet<u32>) -> Vec<u32> {
-    // Fast path: /proc/<pid>/task/<pid>/children. If that file is MISSING for
-    // the root (an `Err`, NOT an empty `Ok`), the kernel was built without
-    // CONFIG_PROC_CHILDREN (hardened / minimal / some container kernels) - fall
-    // back to a ppid map so agent-CLI and dev-server detection still work there
-    // instead of seeing only the shell.
-    let root_children = format!("/proc/{root_pid}/task/{root_pid}/children");
-    if read_capped(std::path::Path::new(&root_children), 4096).is_err() {
-        return bfs_descendants_via_ppid_linux(root_pid, visited);
-    }
-
-    let mut result = Vec::new();
-    if !visited.insert(root_pid) {
-        return result;
-    }
-    result.push(root_pid);
-    let mut queue = std::collections::VecDeque::from([root_pid]);
-    while let Some(pid) = queue.pop_front() {
-        if result.len() >= MAX_PIDS_PER_ROOT {
-            break;
-        }
-        let children_path = format!("/proc/{pid}/task/{pid}/children");
-        if let Ok(content) = read_capped(std::path::Path::new(&children_path), 4096) {
-            for token in content.split_whitespace() {
-                if let Ok(child_pid) = token.parse::<u32>()
-                    && visited.insert(child_pid)
-                {
-                    result.push(child_pid);
-                    queue.push_back(child_pid);
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Fallback descendant walk for kernels without `CONFIG_PROC_CHILDREN` (the
-/// `children` file is absent): scan every `/proc/<pid>/stat` ppid (proc(5)
-/// field 4) once into a parent→children map, then BFS it. Same
-/// `MAX_PIDS_PER_ROOT` bound and shared-`visited` semantics as the fast path.
-/// Only reached on the rare no-`children` kernel, so the extra full `/proc`
-/// scan is acceptable.
-#[cfg(target_os = "linux")]
-fn bfs_descendants_via_ppid_linux(
-    root_pid: u32,
-    visited: &mut std::collections::HashSet<u32>,
-) -> Vec<u32> {
-    let mut children_of: std::collections::HashMap<u32, Vec<u32>> =
-        std::collections::HashMap::new();
-    if let Ok(entries) = std::fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|s| s.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            if let Some(ppid) = ppid_of_linux(pid) {
-                children_of.entry(ppid).or_default().push(pid);
-            }
-        }
-    }
-
-    let mut result = Vec::new();
-    if !visited.insert(root_pid) {
-        return result;
-    }
-    result.push(root_pid);
-    let mut queue = std::collections::VecDeque::from([root_pid]);
-    while let Some(pid) = queue.pop_front() {
-        if result.len() >= MAX_PIDS_PER_ROOT {
-            break;
-        }
-        if let Some(kids) = children_of.get(&pid) {
-            for &child in kids {
-                if visited.insert(child) {
-                    result.push(child);
-                    queue.push_back(child);
-                }
-            }
-        }
-    }
-    result
-}
-
-/// ppid (proc(5) field 4) of `pid` from `/proc/<pid>/stat`. Fields are taken
-/// after the LAST `)` because the comm field (field 2) is parenthesized and may
-/// itself contain spaces/parens - the kernel-documented safe parse.
-#[cfg(target_os = "linux")]
-fn ppid_of_linux(pid: u32) -> Option<u32> {
-    let stat = read_capped(std::path::Path::new(&format!("/proc/{pid}/stat")), 4096).ok()?;
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    after_comm.split_whitespace().nth(1)?.parse().ok()
-}
-
-/// argv of a pid from `/proc/{pid}/cmdline` (NUL-separated). 4 KiB cap -
-/// the classifiable token always sits in the leading args; non-UTF-8 argv
-/// degrades to "unclassified", never an error.
-#[cfg(target_os = "linux")]
-fn cmdline_args_linux(pid: u32) -> Vec<String> {
-    let path = format!("/proc/{pid}/cmdline");
-    read_capped(std::path::Path::new(&path), 4096)
-        .map(|content| {
-            content
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "linux")]
-fn linux_command_for_pid(pid: u32) -> Option<String> {
-    if let Ok(bytes) = std::fs::read(format!("/proc/{pid}/cmdline"))
-        && let Some(command) = command_from_nul_args(&bytes)
-    {
-        return Some(command);
-    }
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    let trimmed = comm.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-#[cfg(target_os = "linux")]
-fn linux_representative_command(root_pid: u32, pids: &[u32]) -> Option<String> {
-    let children_path = format!("/proc/{root_pid}/task/{root_pid}/children");
-    let target = match read_capped(std::path::Path::new(&children_path), 4096) {
-        Ok(content) => content
-            .split_whitespace()
-            .last()
-            .and_then(|pid| pid.parse::<u32>().ok())
-            .unwrap_or(root_pid),
-        Err(_) => pids
-            .iter()
-            .copied()
-            .filter(|pid| *pid != root_pid)
-            .max()
-            .unwrap_or(root_pid),
-    };
-    linux_command_for_pid(target)
-}
-
-/// Collect socket inodes from `/proc/{pid}/fd/` for one PID.
-#[cfg(target_os = "linux")]
-fn socket_inodes_of(pid: u32, inodes: &mut Vec<u64>) {
-    let fd_dir = format!("/proc/{pid}/fd");
-    if let Ok(entries) = std::fs::read_dir(&fd_dir) {
-        for entry in entries.flatten() {
-            if let Ok(link) = std::fs::read_link(entry.path()) {
-                let link_str = link.to_string_lossy();
-                if let Some(rest) = link_str.strip_prefix("socket:[")
-                    && let Some(inode_str) = rest.strip_suffix(']')
-                    && let Ok(inode) = inode_str.parse::<u64>()
-                {
-                    inodes.push(inode);
-                }
-            }
-        }
-    }
-}
-
-/// Scan every terminal's PTY subtree in one pass (see module docs for the
-/// cost contract). `roots` pairs an opaque caller key (the terminal entity
-/// id) with the PTY child pid; `agent_binaries` is the recognition set -
-/// derived by the caller from `TerminalAgent::ALL` (US-012 vocabulary
-/// unification; matching is exact against `/proc/<pid>/comm`, which the
-/// kernel truncates to 15 chars - every current binary name fits).
-#[cfg(target_os = "linux")]
-pub fn scan_panes(
-    roots: &[(u64, u32)],
-    agent_binaries: &[&str],
-) -> std::collections::HashMap<u64, PaneScan> {
-    let mut results: std::collections::HashMap<u64, PaneScan> = std::collections::HashMap::new();
-    if roots.is_empty() {
-        return results;
-    }
-
-    // 1. One shared subtree walk (each pid visited once per tick).
-    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut subtrees: Vec<(u64, Vec<u32>)> = Vec::with_capacity(roots.len());
-    for &(key, root_pid) in roots {
-        if root_pid == 0 {
-            continue;
-        }
-        let pids = bfs_descendants_linux(root_pid, &mut visited);
-        subtrees.push((key, pids));
-    }
-
-    // 2. Agents per subtree: read each pid's comm once, match in BFS order.
-    //    3. Socket inodes per subtree → inode → (subtree index, pid) map.
-    let mut inode_owner: std::collections::HashMap<u64, (usize, u32)> =
-        std::collections::HashMap::new();
-    for (idx, (key, pids)) in subtrees.iter().enumerate() {
-        let foreground_command = roots
-            .iter()
-            .find(|(root_key, _)| root_key == key)
-            .and_then(|(_, root_pid)| linux_representative_command(*root_pid, pids));
-        let comms: Vec<String> = if agent_binaries.is_empty() {
-            Vec::new()
-        } else {
-            pids.iter()
-                .filter_map(|pid| {
-                    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                })
-                .collect()
-        };
-        let agents = agents_in_bfs_order(comms.iter().map(String::as_str), agent_binaries);
-
-        for &pid in pids {
-            let mut inodes: Vec<u64> = Vec::new();
-            socket_inodes_of(pid, &mut inodes);
-            for inode in inodes {
-                // First owner wins; subtrees are disjoint (shared `visited`)
-                // so a duplicate inode here means a shared/inherited socket -
-                // keep the earlier (older pane) attribution deterministically.
-                inode_owner.entry(inode).or_insert((idx, pid));
-            }
-        }
-
-        results.insert(
-            *key,
-            PaneScan {
-                ports: Vec::new(),
-                agents,
-                foreground_command,
-            },
-        );
-    }
-
-    // 4. /proc/net/tcp[6] parsed ONCE for the whole tick, streamed
-    //    line-by-line. The previous single capped read (256 KiB) silently
-    //    dropped the tail on socket-heavy hosts (Docker, busy dev boxes),
-    //    making ports vanish for whole ticks; streaming keeps memory at one
-    //    line while reading arbitrarily many sockets. The line cap below
-    //    only bounds a pathological /proc - and the scan runs under
-    //    `smol::unblock`, never on the render thread. The owning pid's argv
-    //    classifies the port (cached per pid).
-    const MAX_TCP_LINES: usize = 65_536;
-    let mut class_cache: std::collections::HashMap<u32, Option<&'static str>> =
-        std::collections::HashMap::new();
-    let mut per_idx_ports: Vec<Vec<PortEntry>> = vec![Vec::new(); subtrees.len()];
-    for path in &["/proc/net/tcp", "/proc/net/tcp6"] {
-        use std::io::BufRead;
-        let Ok(file) = std::fs::File::open(path) else {
-            continue;
-        };
-        for line in std::io::BufReader::new(file).lines().take(MAX_TCP_LINES) {
-            let Ok(line) = line else {
-                break;
-            };
-            let Some((port, inode)) = parse_listen_line(&line) else {
-                continue;
-            };
-            if let Some(&(idx, pid)) = inode_owner.get(&inode) {
-                let frontend = *class_cache.entry(pid).or_insert_with(|| {
-                    let args = cmdline_args_linux(pid);
-                    classify_frontend_argv(args.iter().map(String::as_str))
-                });
-                per_idx_ports[idx].push(PortEntry { port, frontend });
-            }
-        }
-    }
-    for (idx, (key, _)) in subtrees.iter().enumerate() {
-        let mut ports = std::mem::take(&mut per_idx_ports[idx]);
-        // Dual-stack v4+v6 binds yield two sockets on one port - keep one
-        // entry, preferring a classified one.
-        ports.sort_by_key(|e| (e.port, e.frontend.is_none()));
-        ports.dedup_by_key(|e| e.port);
-        if let Some(scan) = results.get_mut(key) {
-            scan.ports = ports;
-        }
-    }
-
-    results
-}
 
 // ---------------------------------------------------------------------------
 // macOS
@@ -510,7 +167,7 @@ pub fn scan_panes(
 /// we enumerate all pids (`listpids(ProcAllPIDS)`) and read each one's parent
 /// from `proc_bsdinfo.pbi_ppid` - the very same `proc_pidinfo(PROC_PIDTBSDINFO)`
 /// query that `name()` already succeeds with for same-user processes. Mirrors
-/// the Linux `bfs_descendants_via_ppid_linux` fallback. Processes we can't
+/// the parent-map walk. Processes we can't
 /// inspect (EPERM on SIP-protected / other-user pids, dead-pid races) are
 /// skipped - our agents are same-user PTY children, always readable.
 #[cfg(target_os = "macos")]
@@ -553,9 +210,9 @@ fn macos_children_map() -> std::collections::HashMap<u32, Vec<u32>> {
 }
 
 /// macOS descendant walker - BFS over the prebuilt `children_of` ppid map
-/// (see [`macos_children_map`]). Kernel equivalent of the Linux
+/// (see [`macos_children_map`]). Walks children breadth-first from the
 /// `/proc/{pid}/task/{pid}/children` traversal; `visited` is shared across
-/// roots (same single-walk contract as Linux). Returns pids in BFS order.
+/// roots in one pass. Returns pids in BFS order.
 #[cfg(target_os = "macos")]
 fn bfs_descendants_macos(
     root_pid: u32,
@@ -644,10 +301,10 @@ fn listen_ports_of(pid: u32, ports: &mut Vec<u16>) {
     }
 }
 
-/// argv of a pid via `sysctl(KERN_PROCARGS2)` - macOS's equivalent of Linux
+/// argv of a pid via `sysctl(KERN_PROCARGS2)` - the macOS source for
 /// `/proc/{pid}/cmdline`. EPERM (other-user pids, SIP-protected targets) and
 /// malformed buffers degrade to an empty vec: the port then simply stays
-/// unclassified, parity with the Linux non-UTF-8 fallback.
+/// unclassified rather than guessed at.
 #[cfg(target_os = "macos")]
 fn argv_of_macos(pid: u32) -> Vec<String> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
@@ -737,7 +394,7 @@ fn macos_representative_command(pids: &[u32]) -> Option<String> {
 /// Scan every terminal's PTY subtree in one pass (macOS). libproc's socket
 /// queries are naturally per-pid, so per-subtree attribution falls out of
 /// the BFS partition without a global socket table. Same shared-`visited` /
-/// single-walk contract as the Linux branch.
+/// single-walk contract throughout.
 #[cfg(target_os = "macos")]
 pub fn scan_panes(
     roots: &[(u64, u32)],
@@ -762,7 +419,7 @@ pub fn scan_panes(
         let pids = bfs_descendants_macos(root_pid, &children_of, &mut visited);
 
         // `libproc::name` returns the kernel's `p_comm` - same semantics
-        // and 16-char limit as Linux `/proc/<pid>/comm`. EPERM (sandbox /
+        // and 16-char limit as a process `comm` field. EPERM (sandbox /
         // SIP) skips silently.
         let comms: Vec<String> = if agent_binaries.is_empty() {
             Vec::new()
@@ -811,17 +468,6 @@ pub fn scan_panes(
 // Stub (BSDs / other targets)
 // ---------------------------------------------------------------------------
 
-/// Stub for unsupported platforms. An empty map means every tab renders without
-/// badges or pills and workspace aggregates stay empty - degradation without
-/// error.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn scan_panes(
-    _roots: &[(u64, u32)],
-    _agent_binaries: &[&str],
-) -> std::collections::HashMap<u64, PaneScan> {
-    std::collections::HashMap::new()
-}
-
 // ---------------------------------------------------------------------------
 // Tests (platform-neutral helpers)
 // ---------------------------------------------------------------------------
@@ -852,38 +498,6 @@ mod tests {
     fn agents_in_bfs_order_empty_inputs() {
         assert!(agents_in_bfs_order(std::iter::empty(), &["claude"]).is_empty());
         assert!(agents_in_bfs_order(["claude"].into_iter(), &[]).is_empty());
-    }
-
-    #[test]
-    fn command_from_nul_args_joins_argv() {
-        assert_eq!(
-            command_from_nul_args(b"cargo\0run\0--release\0"),
-            Some("cargo run --release".to_string())
-        );
-        assert_eq!(
-            command_from_nul_args(b"/opt/Program Files/node\0dev server.js\0"),
-            Some("\"/opt/Program Files/node\" \"dev server.js\"".to_string())
-        );
-        assert_eq!(
-            command_from_nul_args(b"\0node\0\0server.js\0"),
-            Some("node server.js".to_string())
-        );
-        assert_eq!(command_from_nul_args(b""), None);
-        assert_eq!(command_from_nul_args(b"\0\0"), None);
-    }
-
-    #[test]
-    fn parse_listen_line_filters_listen_state_and_malformed_lines() {
-        // LISTEN (port 0x1F90 = 8080, inode 4242) parses; header,
-        // ESTABLISHED (01) and garbage lines yield None.
-        let listen = "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242 1 0000000000000000 100 0 0 10 0";
-        assert_eq!(parse_listen_line(listen), Some((8080, 4242)));
-        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
-        assert_eq!(parse_listen_line(header), None);
-        let established = "   1: 0100007F:0050 0100007F:1234 01 00000000:00000000 00:00000000 00000000  1000        0 9999 1 0000000000000000 100 0 0 10 0";
-        assert_eq!(parse_listen_line(established), None);
-        assert_eq!(parse_listen_line("garbage line"), None);
-        assert_eq!(parse_listen_line(""), None);
     }
 
     #[test]
@@ -924,7 +538,7 @@ mod tests {
         assert_eq!(normalize_process_basename("script.ps1"), "script");
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn scan_panes_detects_current_process_listener() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -942,7 +556,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn scan_panes_ignores_pid_zero_roots() {
         let scan = scan_panes(&[(1, 0)], &[]);

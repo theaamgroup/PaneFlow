@@ -47,23 +47,11 @@ pub fn resolve_surface_for_pid(pid: u32, candidates: &HashMap<u32, u64>) -> Opti
     resolve_with(pid, candidates, parent_of)
 }
 
-#[cfg(target_os = "linux")]
-fn parent_of(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_stat_ppid(&stat)
-}
-
 /// Extract the ppid (field 4) from `/proc/<pid>/stat`. The comm field
 /// (field 2) is parenthesized and may itself contain spaces, parens or
 /// newlines, so fields are taken AFTER the LAST `)` - the kernel-documented
 /// safe parse (proc(5)).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn parse_stat_ppid(stat: &str) -> Option<u32> {
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    // after_comm = " R 1234 ..." → [state, ppid, …]
-    after_comm.split_whitespace().nth(1)?.parse().ok()
-}
-
 #[cfg(target_os = "macos")]
 fn parent_of(pid: u32) -> Option<u32> {
     use libproc::libproc::bsd_info::BSDInfo;
@@ -71,11 +59,6 @@ fn parent_of(pid: u32) -> Option<u32> {
     pidinfo::<BSDInfo>(pid as i32, 0)
         .ok()
         .map(|info| info.pbi_ppid)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn parent_of(_pid: u32) -> Option<u32> {
-    None
 }
 
 #[cfg(test)]
@@ -116,16 +99,5 @@ mod tests {
         let candidates = HashMap::from([(100u32, 7u64)]);
         let edges = [(300, 300)];
         assert_eq!(resolve_with(300, &candidates, tree(&edges)), None);
-    }
-
-    #[test]
-    fn parse_stat_ppid_survives_hostile_comm() {
-        // comm may contain spaces AND parens - fields come after the LAST ')'.
-        assert_eq!(
-            parse_stat_ppid("300 (my (weird) comm) S 200 300 1"),
-            Some(200)
-        );
-        assert_eq!(parse_stat_ppid("42 (bash) S 7 42 7"), Some(7));
-        assert_eq!(parse_stat_ppid("garbage"), None);
     }
 }

@@ -21,7 +21,6 @@ use crate::{PaneFlowApp, ai_types};
 /// "Is this PID still running?" probe used by the AI agent stale-PID sweep.
 /// Uses `kill(pid, 0)` + `ESRCH` semantics (EPERM ⇒ alive).
 fn pid_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
     {
         if pid > i32::MAX as u32 {
             return false;
@@ -36,15 +35,6 @@ fn pid_is_alive(pid: u32) -> bool {
             // can't signal it - keep the entry.
             return errno != libc::ESRCH;
         }
-        true
-    }
-
-    #[cfg(not(unix))]
-    {
-        // Conservative fallback for exotic targets: never sweep. Better to
-        // keep a stale entry than to drop a live one and confuse the AI
-        // badge state.
-        let _ = pid;
         true
     }
 }
@@ -65,29 +55,6 @@ fn split_pane_at_edge(
     true
 }
 
-/// Parse the `starttime` field (22) from `/proc/{pid}/stat` content. The
-/// comm field (2) is parenthesized and may contain spaces and parens
-/// (`(tmux: server)`, `(next-server (v15))`) - split after the LAST `)`
-/// (kernel-guaranteed unambiguous), then take the 20th whitespace field of
-/// the remainder (state is field 3 → index 0, so starttime is index 19).
-/// Platform-neutral pure parsing so the fixture test runs on every host.
-#[cfg(any(target_os = "linux", test))]
-fn parse_proc_stat_starttime(stat: &str) -> Option<u64> {
-    let after = stat.rsplit_once(')')?.1;
-    after.split_whitespace().nth(19)?.parse::<u64>().ok()
-}
-
-/// OS start time of a process, as an opaque value only ever compared for
-/// equality. Pinned on `AgentSession` at creation and re-probed by the
-/// sweep to detect PID reuse (a recycled PID passes `pid_is_alive` but
-/// carries a different start time). `None` on probe failure (EPERM, dead
-/// process, exotic target) - callers fall back to liveness-only.
-#[cfg(target_os = "linux")]
-pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
-    let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_proc_stat_starttime(&content)
-}
-
 #[cfg(target_os = "macos")]
 pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
     use libproc::libproc::bsd_info::BSDInfo;
@@ -100,11 +67,6 @@ pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
             .wrapping_mul(1_000_000)
             .wrapping_add(info.pbi_start_tvusec),
     )
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn pid_start_time(_pid: u32) -> Option<u64> {
-    None
 }
 
 /// [`pid_is_alive`] hardened against PID reuse: when the session pinned a
@@ -1609,27 +1571,13 @@ impl PaneFlowApp {
 mod tests {
     use super::{
         announced_port_conflicts, keep_session_after_surface_purge, merge_scan_workspace_state,
-        merge_service_label, parse_proc_stat_starttime, port_ownership,
-        stale_sweep_keeps_without_pid_probe,
+        merge_service_label, port_ownership, stale_sweep_keeps_without_pid_probe,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
     use crate::terminal::ServiceInfo;
     use crate::workspace::{PaneScan, PortEntry};
     use std::collections::{HashMap, HashSet};
-
-    #[test]
-    fn proc_stat_starttime_survives_hostile_comm_names() {
-        // Plain comm: starttime is the 22nd field (9876543 here).
-        let plain = "1234 (zsh) S 1 1234 1234 0 -1 4194304 0 0 0 0 5 3 0 0 20 0 11 0 9876543 123 456 18446744073709551615";
-        assert_eq!(parse_proc_stat_starttime(plain), Some(9876543));
-        // Comm with spaces AND parens - split must anchor on the LAST ')'.
-        let hostile = "1234 (next-server (v15)) S 1 1234 1234 0 -1 4194304 0 0 0 0 5 3 0 0 20 0 11 0 424242 123 456";
-        assert_eq!(parse_proc_stat_starttime(hostile), Some(424242));
-        // Truncated content (fewer than 22 fields) yields None, not a panic.
-        assert_eq!(parse_proc_stat_starttime("1234 (zsh) S 1 1234"), None);
-        assert_eq!(parse_proc_stat_starttime(""), None);
-    }
 
     #[test]
     fn surface_purge_drops_sessions_bound_to_dying_surface() {
