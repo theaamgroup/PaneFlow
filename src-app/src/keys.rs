@@ -29,10 +29,6 @@ impl TerminalKeySequence {
     }
 }
 
-#[cfg(target_os = "windows")]
-const LEGACY_SHIFT_ENTER_SEQUENCE: &str = "\x1b\r";
-
-#[cfg(not(target_os = "windows"))]
 const LEGACY_SHIFT_ENTER_SEQUENCE: &str = "\n";
 
 pub(crate) fn is_shift_enter(keystroke: &Keystroke, option_as_meta: bool) -> bool {
@@ -379,7 +375,6 @@ mod tests {
         assert_eq!(to_esc_str(&e_acute, &mode, true).as_deref(), Some("\x1bé"));
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn legacy_shift_enter_is_an_exact_line_feed_binding() {
         let mode = Modes::empty();
@@ -390,7 +385,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn kitty_shift_enter_preserves_the_physical_chord() {
         let mode = Modes::KITTY_KEYBOARD;
@@ -399,18 +393,6 @@ mod tests {
             terminal_key_sequence(&shift_enter, &mode, true),
             Some(TerminalKeySequence::Protocol(Cow::Borrowed("\x1b[13;2u")))
         );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn conpty_shift_enter_uses_alt_enter_transport() {
-        let shift_enter = Keystroke::parse("shift-enter").expect("valid keystroke");
-        for mode in [Modes::empty(), Modes::KITTY_KEYBOARD] {
-            assert_eq!(
-                terminal_key_sequence(&shift_enter, &mode, true),
-                Some(TerminalKeySequence::Literal(Cow::Borrowed("\x1b\r")))
-            );
-        }
     }
 
     #[test]

@@ -95,15 +95,7 @@ fn pane_content_background(
         return theme.background;
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        gpui::transparent_black()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        theme.background
-    }
+    theme.background
 }
 
 /// First line of an agent question, bounded for the collapsed peek badge
@@ -2945,9 +2937,6 @@ mod tests {
         );
 
         let material = pane_content_background(&theme, true, true);
-        #[cfg(target_os = "windows")]
-        assert_eq!(material.a, 0.0);
-        #[cfg(not(target_os = "windows"))]
         assert_eq!(material, theme.background);
     }
 

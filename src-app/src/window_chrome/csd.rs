@@ -310,40 +310,7 @@ pub(crate) fn render_button_group(
     )
 }
 
-#[cfg(target_os = "windows")]
-fn windows_maximize_command(is_maximized: bool) -> i32 {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_MAXIMIZE, SW_RESTORE};
-
-    if is_maximized {
-        SW_RESTORE
-    } else {
-        SW_MAXIMIZE
-    }
-}
-
 fn toggle_window_maximize(window: &Window) {
-    #[cfg(target_os = "windows")]
-    {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        use windows_sys::Win32::UI::WindowsAndMessaging::ShowWindowAsync;
-
-        let Ok(window_handle) = HasWindowHandle::window_handle(window) else {
-            log::warn!("Could not obtain the Win32 window handle for maximize/restore");
-            return;
-        };
-        let RawWindowHandle::Win32(window_handle) = window_handle.as_raw() else {
-            log::warn!("PaneFlow received a non-Win32 window handle on Windows");
-            return;
-        };
-        let hwnd = window_handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-        let command = windows_maximize_command(window.is_maximized());
-
-        // GPUI's Windows `zoom()` always sends SW_MAXIMIZE, unlike its toggle
-        // contract on other platforms. Select SW_RESTORE explicitly here.
-        let _ = unsafe { ShowWindowAsync(hwnd, command) };
-    }
-
-    #[cfg(not(target_os = "windows"))]
     window.zoom_window();
 }
 
@@ -455,15 +422,6 @@ pub(crate) fn render_window_button(
 mod tests {
     use super::ClientDecorationGeometry;
     use gpui::Tiling;
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_maximize_control_selects_restore_command() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_MAXIMIZE, SW_RESTORE};
-
-        assert_eq!(super::windows_maximize_command(false), SW_MAXIMIZE);
-        assert_eq!(super::windows_maximize_command(true), SW_RESTORE);
-    }
 
     #[test]
     fn free_window_rounds_and_insets_every_edge() {

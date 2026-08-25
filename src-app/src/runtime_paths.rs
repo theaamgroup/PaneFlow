@@ -140,24 +140,6 @@ pub(crate) fn socket_path_spec() -> Option<IpcSocketPath> {
     })
 }
 
-#[cfg(windows)]
-pub(crate) fn socket_path_spec() -> Option<IpcSocketPath> {
-    if let Some(path) = socket_path_from_env(std::env::var_os("PANEFLOW_SOCKET_PATH")) {
-        return Some(IpcSocketPath {
-            path,
-            owned_parent: false,
-        });
-    }
-    Some(IpcSocketPath {
-        path: PathBuf::from(if cfg!(debug_assertions) {
-            r"\\.\pipe\paneflow-dev"
-        } else {
-            r"\\.\pipe\paneflow"
-        }),
-        owned_parent: false,
-    })
-}
-
 pub(crate) fn socket_path() -> Option<PathBuf> {
     socket_path_spec().map(|spec| spec.path)
 }
@@ -203,29 +185,6 @@ pub fn augment_path_for_gui_launch() {
     {
         candidates.push(PathBuf::from("/opt/homebrew/bin"));
         candidates.push(PathBuf::from("/usr/local/bin"));
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(home) = dirs::home_dir() {
-            candidates.push(home.join(".bun").join("bin"));
-        }
-        // US-041: Git for Windows ships `git.exe` under `<install>\cmd`, but a
-        // GUI launch (Start Menu / Explorer) inherits a PATH that frequently
-        // omits it, so the diff viewer's `Command::new("git")` (`diff/git.rs`)
-        // fails with NotFound and the whole diff mode is dead on Windows. Add
-        // the standard system (`%ProgramFiles%`, `%ProgramFiles(x86)%`) and
-        // per-user (`%LOCALAPPDATA%\Programs`) Git locations; the `is_dir()`
-        // filter below drops whichever ones aren't present.
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            candidates.push(PathBuf::from(&program_files).join("Git").join("cmd"));
-        }
-        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
-            candidates.push(PathBuf::from(&program_files_x86).join("Git").join("cmd"));
-        }
-        if let Some(local) = dirs::data_local_dir() {
-            candidates.push(local.join("Programs").join("Git").join("cmd"));
-        }
     }
 
     let current = std::env::var_os("PATH").unwrap_or_default();
@@ -520,54 +479,6 @@ mod tests {
         assert!(
             socket_path().is_none(),
             "AC6: over-long sun_path must return None rather than a bind-time error"
-        );
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        socket: Option<String>,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl EnvGuard {
-        fn take() -> Self {
-            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            Self {
-                socket: std::env::var("PANEFLOW_SOCKET_PATH").ok(),
-                _guard: guard,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialised by ENV_LOCK (still held via _guard).
-            unsafe {
-                match &self.socket {
-                    Some(v) => std::env::set_var("PANEFLOW_SOCKET_PATH", v),
-                    None => std::env::remove_var("PANEFLOW_SOCKET_PATH"),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn paneflow_socket_path_env_wins_for_named_pipe() {
-        let _guard = EnvGuard::take();
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::set_var("PANEFLOW_SOCKET_PATH", r"\\.\pipe\paneflow-isolated-test");
-        }
-        assert_eq!(
-            socket_path(),
-            Some(PathBuf::from(r"\\.\pipe\paneflow-isolated-test"))
         );
     }
 }

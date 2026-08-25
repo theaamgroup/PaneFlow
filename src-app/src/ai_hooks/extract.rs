@@ -57,7 +57,6 @@ const TARGET_TRIPLE: &str = env!("PANEFLOW_TARGET_TRIPLE");
 /// Crate version - pins the cache-dir sub-folder so a `0.2.6 → 0.2.7`
 /// upgrade re-extracts rather than reusing stale bytes. Matches
 /// `CARGO_PKG_VERSION` from the outer build.
-#[cfg(any(not(windows), debug_assertions))]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Filenames the extractor materializes in the cache dir: one shim copy per
@@ -142,19 +141,6 @@ pub fn ensure_binaries_extracted() -> Result<PathBuf> {
 }
 
 fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
-    #[cfg(windows)]
-    if let Some(dir) = packaged_bin_dir_if_complete() {
-        return Ok(dir);
-    }
-
-    #[cfg(all(windows, not(debug_assertions)))]
-    {
-        Err(anyhow!(
-            "US-008: packaged Windows helper dir missing or incomplete; refusing to execute helper binaries from the per-user cache"
-        ))
-    }
-
-    #[cfg(any(not(windows), debug_assertions))]
     {
         let cache_root = dirs::cache_dir()
             .ok_or_else(|| anyhow!("US-008: dirs::cache_dir() returned None; cannot extract"))?;
@@ -183,23 +169,6 @@ fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
         extract_into(&entries, &target_dir)?;
         Ok(target_dir)
     }
-}
-
-/// On Windows, enterprise App Control / AppLocker deployments commonly block
-/// executables from `%LocalAppData%` regardless of whether the parent
-/// application is trusted. MSI releases therefore install the helper shims
-/// under the application directory (`Program Files\PaneFlow\bin`) and the
-/// terminal PATH should prefer that managed location.
-#[cfg(windows)]
-fn packaged_bin_dir_if_complete() -> Option<PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.join("bin");
-    let suffix = exe_suffix();
-    for (out_name, _) in extract_plan() {
-        if !dir.join(format!("{out_name}{suffix}")).is_file() {
-            return None;
-        }
-    }
-    Some(dir)
 }
 
 /// EP-001 US-003 - materialize the embedded `paneflow-mcp` bridge at the
@@ -450,39 +419,6 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<()> {
 /// Unix `rename(2)` is a single atomic syscall with no such scanner window, so
 /// it gets exactly one attempt and any error surfaces immediately (no masking).
 fn persist_atomic(tmp: tempfile::NamedTempFile, final_path: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        // 10 x 50 ms ≈ 0.5 s, comfortably past a Defender on-access scan of a
-        // ~300 KiB wrapper without hanging an unwritable-dir failure.
-        const MAX_ATTEMPTS: u32 = 10;
-        const BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
-        let mut tmp = tmp;
-        let mut attempt: u32 = 0;
-        loop {
-            match tmp.persist(final_path) {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    attempt += 1;
-                    // 5 = ERROR_ACCESS_DENIED, 32 = ERROR_SHARING_VIOLATION:
-                    // the transient AV-lock signatures. Anything else (or a
-                    // budget-exhausted lock) is a real failure.
-                    let transient = matches!(e.error.raw_os_error(), Some(5) | Some(32));
-                    if transient && attempt < MAX_ATTEMPTS {
-                        tmp = e.file;
-                        std::thread::sleep(BACKOFF);
-                        continue;
-                    }
-                    return Err(anyhow!(
-                        "US-008: atomic rename {} -> {} failed after {attempt} attempt(s): {}",
-                        e.file.path().display(),
-                        final_path.display(),
-                        e.error
-                    ));
-                }
-            }
-        }
-    }
-    #[cfg(not(windows))]
     {
         tmp.persist(final_path).map_err(|e| {
             anyhow!(
