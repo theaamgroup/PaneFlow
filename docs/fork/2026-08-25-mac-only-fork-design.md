@@ -1,0 +1,211 @@
+# PanesCLI: macOS-only private fork of PaneFlow
+
+Date: 2026-08-25
+Status: approved, Stage 1 in progress
+Fork point: `arthjean/paneflow` v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a`
+
+## Purpose
+
+Take PaneFlow private under `theaamgroup`, strip it to macOS only, and rebrand it
+as PanesCLI so The AAM Group can make improvements and fixes to it. The result is
+never published publicly.
+
+## Decisions
+
+| Decision | Choice | Consequence |
+|---|---|---|
+| Fork model | Keep all 1035 commits, keep `upstream` remote | `git blame` works, upstream fixes are cherry-pickable, `.git` stays 60M (no history rewrite, since `filter-repo` would destroy the merge base) |
+| Cut depth | Deep. Strip non-Mac `cfg` branches from shared source | Readable Mac-only source. Every future upstream merge conflicts across roughly 80 files. Accepted knowingly. |
+| Ghostty backend | Delete entirely | Verified unreachable on macOS. See Verification below. |
+| Self-update | Repoint feed at `theaamgroup/panescli` | Needs a Bearer token (private repo releases 404 without one) and our own minisign keypair |
+| Telemetry | PostHog stays wired, key stays unset | Inert. Never set `POSTHOG_API_KEY` in the new org. |
+| Branding | Full rebrand to PanesCLI | Bundle id, binary, CLI, config dir, MCP server, conductor skill all move |
+| gpui dependency | Keep pointing at `arthjean/zed`, take a cold-backup fork | `Cargo.lock` pins the rev with a checksum, so the risk is availability, not drift. Insurance without a diff. |
+| Apple signing | AAM Developer ID, signed and notarized DMG | Other AAM Macs can install without Gatekeeper warnings |
+
+## Naming
+
+| Thing | Was | Becomes |
+|---|---|---|
+| Product name | PaneFlow | PanesCLI |
+| Bundle identifier | `io.github.arthurdev44.paneflow` | `com.theaamgroup.panescli` |
+| Binary and CLI | `paneflow` | `panescli` |
+| Config dir | `paneflow` | `panescli` |
+| MCP server | `paneflow` | `panescli` (needs re-registering locally) |
+| Conductor skill | `paneflow-conductor` | `panescli-conductor` (references the binary name) |
+| Env var prefix | `PANEFLOW_*` | `PANESCLI_*` |
+
+## Toolchain prerequisites
+
+| Requirement | State |
+|---|---|
+| rustup + rustc 1.96.1 (pinned by `rust-toolchain.toml`) | installed 2026-08-25 |
+| Full Xcode, for the Metal shader compiler that GPUI needs at build time | downloading. Command Line Tools alone are NOT enough: `xcrun -f metal` fails under CLT. |
+| cmake | already present via Homebrew |
+| zig | not needed once the Ghostty backend is gone |
+
+## Do not delete
+
+Verified load-bearing. Each of these looks like cruft and is not.
+
+- `schemas/panescli.schema.json`: two tests in `crates/paneflow-config/src/schema.rs` (lines 1685, 1778) read it off disk. Drift fails the suite.
+- `examples/review-pipeline.flow.toml`: `include_str!` target at `src-app/src/cli/flow_spec.rs:749`. Deleting it breaks the build. `examples/TASK.md` is its fixture.
+- `clippy.toml`: the `allow-unwrap-in-tests` escape hatch for the workspace lint policy in `Cargo.toml`. Without it, test code starts warning.
+- `rust-toolchain.toml`: the 1.96.1 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
+- `LICENSE`: GPL-3.0-or-later, mandatory. GPUI is a Zed fork.
+- `CLAUDE.md`: the single most useful file in the repo. Real build and test commands, annotated module tree, thread model, keystroke-to-pixel data flow, and a Gotchas section with hard-won GPUI behaviour.
+- `ARCHITECTURE.md`, `docs/hooks.md`, `docs/mcp-bridge.md`, `docs/debugging-rendering.md`, `docs/memory-smoke-test.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
+- `src-app/assets/fonts/`: 23M of TTFs, `rust-embed`ed into the binary.
+- `assets/PaneFlow.icns`, `assets/Info.plist`, `assets/dmg-background.png`: macOS bundle inputs (icns to be regenerated for the rebrand).
+
+## Stage 1: file-level deletion
+
+No Rust source touched, so this needs no compiler. Working tree drops from
+roughly 60M to roughly 28M.
+
+Packaging: `packaging/{winget,wix,debian,rpm,apt,homebrew}`, `packaging/AppRun`,
+`packaging/paneflow-release.asc`, top-level `debian/`, `keys/`.
+
+CI: `.github/workflows/{repo_publish,update_cask,libghostty-linux,libghostty-windows}.yml`.
+The first two are the dangerous ones. See Leak register.
+
+Docs: `docs/user/blog/`, `docs/user/installation/{linux,windows}.md`,
+`docs/release/{linux-signing,windows-signing,windows-libghostty,libghostty-linux}.md`,
+`docs/{WINDOWS,WINDOWS-SMOKE-TEST,validation-aarch64,pkg-repo-runbook,release-runbook,release-signing}.md`.
+
+Cruft: `tasks/` (4M including a 3.8M demo mp4), `CHANGELOG.md`, `BUILD_WEEK.md`,
+`ABOUT.md`, `llms.txt`, `context7.json`, `skills/`, `assets/images/`,
+`assets/icons/master/paneflow-icon-1024.png`, `assets/PaneFlow.ico`,
+`assets/paneflow.desktop`, `assets/io.github.arthurdev44.paneflow.metainfo.xml`,
+`assets/badges/`, `native/libghostty/prebuilt/`.
+
+Scripts: the 5 PowerShell files, `bundle-appimage.sh`, `bundle-tarball.sh`,
+`tarball-install.sh`, `build-libghostty-linux.sh`, `verify-libghostty-package.sh`,
+`test-update-e2e.sh`.
+
+`context7.json` carries upstream's Context7 API key, so it goes regardless.
+
+## Stage 2: Rust surgery
+
+Blocked on Xcode. Establish a green `cargo build && cargo test` baseline first,
+then work in compiler-verified passes, committing after each: Ghostty removal,
+then Windows unwind, then Linux unwind, then rename, then update-feed repoint.
+
+Scale: roughly 170 `cfg` sites for Ghostty, 30 files with Windows `cfg` blocks,
+plus three enum removals (`InstallMethod::WindowsMsi`, `AssetFormat::Msi`,
+`PackageManager`) that each thread through about 20 call sites.
+
+### Ghostty removal, paired edits
+
+Deleting the four Ghostty paths alone breaks the build on macOS too, because
+Cargo resolves path dependencies for all targets. These must land together:
+
+1. `Cargo.toml` lines 8, 9, 15: drop the three workspace members.
+2. `src-app/Cargo.toml`: line 16 default features, lines 21 to 35 feature
+   definitions, line 295 and line 324 path deps, packaging assets at 519 and 579.
+3. Delete `src-app/src/terminal/ghostty_session.rs` (4453 lines) and
+   `ghostty_stress.rs` (1099 lines). Unwind `cfg` sites in `pty_session.rs` (88),
+   `view.rs` (28), `backend_corpus.rs` (21), `input.rs` (20, including
+   `use paneflow_terminal_ghostty as ghostty` at line 26), `service_detector.rs`
+   (13), `mod.rs` (2).
+4. Delete `fuzz/`. It fuzzes the Ghostty bindings and nothing else.
+5. Fix `src-app/tests/dependency_source_policy.rs` lines 59 to 96. It asserts
+   `libghostty-linux` is a default feature and is the only Ghostty-related test
+   that fails on macOS.
+6. Decide `TerminalBackendConfig::Ghostty` in `crates/paneflow-config/src/schema.rs:575`
+   and `schemas/*.schema.json:152`. Compiles fine if left, but becomes a dead
+   variant with a public schema contract.
+
+## Stage 3: signed release
+
+Generate our own minisign keypair (two-slot rotation, current and next).
+macOS-only `release.yml`. Wire `APPLE_DEVELOPER_CERT_P12`,
+`APPLE_DEVELOPER_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
+`APPLE_TEAM_ID`, `MINISIGN_SECRET_KEY`. Signed, notarized, stapled DMG.
+
+## Leak register
+
+Everything below points at upstream and must be cut or repointed.
+
+1. `src-app/src/update/checker.rs:28` hardcodes
+   `https://api.github.com/repos/arthjean/paneflow/releases/latest`, and
+   `src-app/src/app/bootstrap.rs:727` calls it from `App::new()` with no config
+   gate and no consent gate. Every launch polls his repo and would offer his
+   releases as self-updates. Highest-frequency leak, needs no tag to fire.
+2. `.github/workflows/repo_publish.yml` chains automatically off a successful
+   `release` run and `rclone sync`s into Cloudflare R2 at `pkg.paneflow.dev`,
+   then purges his Cloudflare zone.
+3. `.github/workflows/update_cask.yml` chains the same way and git-pushes a
+   version bump into the public `arthjean/homebrew-paneflow` tap.
+4. Never create these secrets in the new org: `R2_*`, `CLOUDFLARE_*`,
+   `HOMEBREW_TAP_DEPLOY_KEY`, `GPG_*`, `POSTHOG_API_KEY`, `AZURE_*`.
+5. Author identity to scrub: `src-app/src/app/about_dialog.rs:117` reads
+   "(c) Arthur Jean"; `src-app/Cargo.toml:490` maintainer email; five
+   `paneflow.dev` menu links at `src-app/src/app/profile_menu.rs:23` to `:27`;
+   `.github/SECURITY.md:13` and `.github/CODE_OF_CONDUCT.md:32`.
+
+## Traps register
+
+Found during the inventory. Each one would have cost a debugging session.
+
+1. `src-app/src/update/mod.rs:39` declares `pub mod linux;` unconditionally, so
+   `linux/appimage.rs` and `linux/targz.rs` compile on macOS today. Only
+   `system_package.rs` and `migrations.rs` are gated at declaration.
+2. `src-app/src/update/macos/dmg.rs:489` and `:494` are
+   `#[cfg(all(test, not(target_os = "macos")))]`, so those two test modules run
+   only on non-macOS hosts. Dropping Linux CI silently stops running them.
+   Un-gate, do not delete.
+3. `.github/workflows/run_tests.yml:1357` `tests_pass` aggregates every job in
+   its `needs:` list. Pruning jobs without editing that list yields a workflow
+   that never completes.
+4. The binary-size budget at `src-app/build.rs:61` and `run_tests.yml:399` is
+   baselined on Linux ELF. It needs a Mach-O re-baseline, not deletion.
+5. `src-app/Cargo.toml:53` warns that `gpui_platform` MUST carry the `font-kit`
+   feature on macOS. Without it the build succeeds and text renders as boxes.
+6. Many `#[cfg(any(test, target_os = "windows"))]` attributes keep code alive
+   for tests on all platforms. Removing the Windows arm leaves `#[cfg(test)]`,
+   which makes those items test-only rather than dead.
+7. `#[cfg(not(unix))]` and `#[cfg(not(windows))]` blocks are fallback arms. The
+   surviving twin must be un-gated, not deleted alongside them.
+8. `#[cfg(unix)]` appears 162 times and macOS needs nearly all of it. Only 6
+   attribute instances combine `unix` with `not(target_os = "macos")`. Do not
+   confuse unix-shared with Linux-only.
+9. `src-app/src/terminal/input.rs:1100` handles X11 and Wayland PRIMARY
+   selection via `cx.write_to_primary`. Those calls vanish on macOS and the
+   surrounding `primary_text` plumbing goes dead.
+10. Config keys `windows_terminal_material` and `windows_chrome_material` are in
+    the public JSON schema. The loader is lenient about unknown keys, so
+    leaving them as ignored no-ops is safer than a breaking config change.
+11. Every `US-NNN` comment in the Rust source points at a PRD under `tasks/`
+    that was gitignored and never committed. All 13 checked are absent. They are
+    permanently dangling breadcrumbs, not documentation.
+12. `.gitignore` names local-only upstream files we will never have, including
+    `CMUX_ANALYSIS.md`, which `CLAUDE.md:261` cites as a 417-line reference spec.
+
+## Verification: Ghostty is unreachable on macOS
+
+Proven, not assumed. `src-app/src/terminal/view.rs:70` `auto_selects_ghostty_for_target()`
+returns false on macOS. Line 91 `should_start_ghostty()` computes availability
+from features that are target-gated away. The only branch constructing a
+`GhosttySession` (lines 581 to 600) is `cfg`-excluded on macOS entirely. Lines
+602 to 618 are the macOS arm: warn once, record
+`TerminalBackendFailurePhase::Availability`, fall through to Alacritty. An
+explicit `terminal.backend = "ghostty"` lands there. No `PANESCLI_*` env var
+selects a backend. There is not one byte of macOS native Ghostty artifact in the
+tree, and `manifest.toml` declares only Linux and Windows targets.
+
+The two `libghostty-*` features ARE enabled on macOS builds, since macOS CI does
+not pass `--no-default-features`. They are inert because the deps they activate
+exist only in the Linux and Windows-x64-MSVC target tables and `resolver = "2"`
+does not unify features of target-inapplicable deps.
+
+## Known costs
+
+- Deep cut plus upstream merges means conflicts across roughly 80 files on every
+  `git fetch upstream` merge. This was chosen with the tradeoff stated.
+- `.git` stays at 60M. Roughly 43M of the pack is deletable blob history
+  (marketing images, master icons, the demo mp4, prebuilt static libs), but
+  reclaiming it needs `filter-repo`, which rewrites every SHA and destroys the
+  upstream merge base.
+- The rebrand orphans any existing local PaneFlow config and requires
+  re-registering the MCP server and the conductor skill.
