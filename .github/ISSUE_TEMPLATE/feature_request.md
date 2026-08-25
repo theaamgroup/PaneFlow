@@ -18,12 +18,10 @@ assignees: []
 
 <!-- Existing tools, workarounds, or smaller versions of the idea. -->
 
-## Platform impact
+## Scope
 
-- [ ] Linux
-- [ ] macOS
-- [ ] Windows
-- [ ] No platform-specific behavior expected
+<!-- Which subsystem does this touch (layout, terminal, agents, IPC, updater)?
+     Does it need a config key, a keybinding, or a settings tab entry? -->
 
 ## Additional context
 

@@ -15,13 +15,12 @@
 - [ ] `cargo test --workspace`
 - [ ] Manual UI check, if applicable
 
-## Cross-platform check
+## macOS check
 
-Paneflow targets Linux, macOS, and Windows. Confirm the relevant path for each:
+This fork targets macOS on Apple Silicon only.
 
-- [ ] Linux: Wayland and X11 considered
-- [ ] macOS: Apple Silicon and Intel considered
-- [ ] Windows: Windows 10/11 considered
+- [ ] Built and run on Apple Silicon
+- [ ] No new `#[cfg(target_os = "linux")]` or `#[cfg(windows)]` branches added
 
 ## Screenshots / recordings
 

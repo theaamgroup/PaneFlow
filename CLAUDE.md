@@ -1,6 +1,25 @@
 # CLAUDE.md - PaneFlow
 
-Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework and upstream `alacritty_terminal` (crates.io) for VT emulation, with Linux and macOS support today and Windows in progress.
+Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework and upstream `alacritty_terminal` (crates.io) for VT emulation. **This fork is macOS only.**
+
+Fork context, decisions, the upstream leak register, and a 12-item traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code, the updater, or anything under `src-app/src/update/`.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
+
+## Build prerequisites (macOS)
+
+Verified on 2026-08-25. Two of these are non-obvious and each one fails the build in a confusing way.
+
+1. **Rust 1.96.1**, pinned by `rust-toolchain.toml`. rustup honors the pin automatically. The dependency graph's actual floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates), so anything older fails to build before tests can start.
+2. **Full Xcode. Command Line Tools are NOT sufficient.** GPUI compiles its Metal shaders at build time, which needs the Metal compiler that ships only with Xcode.
+3. **Xcode alone is still not sufficient.** Xcode 26 ships the Metal toolchain as a separate downloadable component, so `xcrun metal` fails with `cannot execute tool 'metal' due to missing Metal Toolchain` until you run:
+
+   ```bash
+   xcodebuild -downloadComponent MetalToolchain
+   ```
+
+   **Do not check this with `xcrun -f metal`.** That resolves the tool's path successfully even when the toolchain is absent, so it reports success on a machine that cannot build. Verify with an actual compile, or with `xcrun metal --version`.
+4. `cmake` (Homebrew) for native dependencies.
+
+`gpui_platform` **must** carry the `font-kit` feature on macOS (`src-app/Cargo.toml:53`). Without it the build succeeds, the window opens, SVG icons and cursor quads paint, and every single text glyph rasterizes as an empty box. It is declared in the default dependency table, so this only bites if someone edits the feature list.
 
 ## Commands
 
@@ -10,13 +29,14 @@ cargo build
 cargo build --release          # LTO thin, strip, codegen-units=1
 
 # Run
-cargo run                      # debug build, needs GPUI GPU support (Vulkan)
+cargo run                      # debug build (src-app is the default workspace member)
 RUST_LOG=info cargo run        # with logging (env_logger)
 PANEFLOW_LATENCY_PROBE=1 cargo run  # keystroke→pixel latency tracing (debug only)
 
 # Test
 cargo test --workspace         # all workspace tests
 cargo test -p paneflow-config  # config crate tests only
+cargo test -p paneflow-app --test flex_nchild -- --nocapture  # GPUI layout integration tests
 cargo test <test_name> -- --nocapture  # single test with output
 
 # Lint
@@ -24,13 +44,11 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
 
+Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`), so a `cargo run` instance gets its own config dir, data dir, cache dir, and IPC socket and will not collide with an installed release build on the same machine.
+
 ### Fork-pin maintenance (Zed Markdown widget)
 
-The eight Zed git deps in `src-app/Cargo.toml` pin `arthjean/zed@3aaba57b95c22f4d21bbbf9f4b10b513173209db`, published from `paneflow/gpui-2026-07-14`. That commit is based on `zed-industries/zed@afc13dc8` and carries the Paneflow Markdown streaming optimization. To bump it, choose and freeze a tested upstream revision, create a new dated fork branch from that revision, reapply the Markdown patch while preserving Zed's current public API, validate and publish the fork commit, update all eight exact `rev` values, run `cargo update`, then run the workspace test, Clippy, and format gates. Once the optimization lands upstream, switch all eight entries back to `zed-industries/zed` at the exact tested merge revision.
-
-### Perf / heap profiling
-
-See `tasks/heaptrack-runbook.md` (US-029 of `prd-cli-hardening-followup-2026-Q3.md`) for the reproducible procedures behind every perf claim shipped by EP-001 / EP-004 / EP-005: heaptrack diffs for RAM stories, `cargo flamegraph` for CPU stories, `cargo bench -p paneflow-threads` for the criterion baselines (`blob_compress`, `markdown_append`), Linux `kill -9` orphan smoke for US-016, and the `ulimit -u 1` IPC-degradation smoke for US-005.
+The Zed git deps in `src-app/Cargo.toml` pin `arthjean/zed@3aaba57b95c22f4d21bbbf9f4b10b513173209db`, published from `paneflow/gpui-2026-07-14`. That commit is based on `zed-industries/zed@afc13dc8` and carries the Paneflow Markdown streaming optimization (`Markdown::append` accumulates streamed chunks in a private String buffer while preserving Zed's `source() -> &SharedString` contract). Six crates are pinned in `[dependencies]` (`gpui`, `gpui_platform`, `collections`, `markdown`, `theme`, `ui`, lines 64-84) plus a test-support `gpui` in `[dev-dependencies]` (line 417). To bump: choose and freeze a tested upstream revision, create a new dated fork branch from it, reapply the Markdown patch while preserving Zed's current public API, validate and publish the fork commit, update every exact `rev`, run `cargo update`, then run the workspace test, Clippy, and format gates. Once the optimization lands upstream, switch every entry back to `zed-industries/zed` at the exact tested merge revision.
 
 ## Pre-commit checks (mandatory)
 
@@ -44,86 +62,114 @@ If it reports any diff, run `cargo fmt`, re-stage the touched files, then commit
 
 Why this is non-negotiable on this repo:
 
-- The release pipeline (`.github/workflows/release.yml`) runs `cargo fmt --check` as step 9 of every Build job on all four matrix legs (Linux x86_64, Linux aarch64, macOS aarch64, Windows x86_64). A single mis-formatted line fails all four legs, skips the "Publish GitHub Release" step, and burns a ~25 min CI run before producing nothing.
-- It also blocks tag-push releases: if the tag commit is dirty, you have to delete + re-create the tag at the fix commit (force-update) to retry - the original tagged build cannot be salvaged.
-- rustfmt drifts between Rust point releases (`a4c75f6` was a v0.2.15 patch for rustfmt 1.9.0; `c292dfa` was the same patch for v0.2.16). Even code that compiled clean a week ago can need re-formatting after a toolchain bump.
+- The release pipeline (`.github/workflows/release.yml`) runs `cargo fmt --check` as a step inside every Build matrix leg. A single mis-formatted line fails the leg, skips the "Publish GitHub Release" step, and burns a ~25 min CI run before producing anything. (The matrix is being cut down to the single `aarch64-apple-darwin` leg for this fork; the failure mode does not change.)
+- It also blocks tag-push releases: if the tag commit is dirty, you have to delete and re-create the tag at the fix commit to retry. The original tagged build cannot be salvaged.
+- rustfmt drifts between Rust point releases. Even code that compiled clean a week ago can need re-formatting after a toolchain bump.
 
-For tag-push releases specifically: run `cargo fmt --check` *one last time* on the exact commit you're about to tag, before `git tag` and `git push origin <tag>`. This is the cheapest possible guard against a wasted 25 min release run.
+For tag-push releases specifically: run `cargo fmt --check` *one last time* on the exact commit you are about to tag, before `git tag` and `git push origin <tag>`. This is the cheapest possible guard against a wasted 25 min release run.
 
 ## Architecture
 
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 57 GPUI action types (paneflow namespace)
-│   ├── bootstrap.rs                   ← app init, window creation, GPUI setup
+│   ├── actions.rs                     ← 85 GPUI action types (paneflow namespace)
+│   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
-│   ├── ipc_handler.rs                 ← JSON-RPC handler dispatched to GPUI main thread
+│   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
 │   ├── self_update_flow.rs            ← check/download/install orchestration
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
-│   ├── sidebar/                       ← sidebar list + context menus
-│   └── workspace_ops/                 ← create/close/select/rename/reveal
+│   ├── agents_diff/ agents_sidebar/   ← agent panel, diff dock
+│   ├── diff_sidebar/ files_sidebar/   ← diff + file trees
+│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus
+│   ├── attention_queue.rs             ← "which agent needs me" queue
+│   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
+│   ├── fleet_search.rs                ← cross-pane search
+│   ├── launch_pad.rs / project_ops/   ← agent launcher UI, project actions
+│   ├── telemetry_events.rs            ← opt-in event emitters
+│   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
+├── cli/                               ← `paneflow up|flow|watch|wait|send|read` over the IPC socket
 ├── window_chrome/
 │   ├── csd.rs                         ← client-side decorations, resize edges
+│   ├── macos_backdrop.rs              ← native material behind sidebar/title bar
 │   └── title_bar.rs                   ← window controls, drag-to-move
 ├── workspace/                         ← Vec<Workspace> state
-│   ├── mod.rs                         ← Workspace struct, AI agent PIDs, ports
-│   ├── git.rs                         ← branch detection for badges
-│   └── ports.rs                       ← TCP port scan (Linux /proc, macOS libproc, Windows stub)
-├── layout/                            ← N-ary tree of panes (replaces old binary SplitNode)
-│   ├── tree.rs / mutations.rs / navigation.rs / close.rs
-│   ├── presets.rs                     ← even_h, even_v, main_vertical, tiled
-│   ├── render.rs                      ← GPUI flex emission
-│   └── queries.rs / serde.rs
-├── pane.rs                            ← Pane: tab strip + active terminal
+│   ├── mod.rs                         ← Workspace struct, AI agent PIDs, MAX_WORKSPACES = 20
+│   ├── git.rs / worktree.rs           ← branch detection for badges, worktree support
+│   ├── pid_resolve.rs                 ← PID-reuse-safe process identity
+│   ├── ports.rs                       ← TCP port scan (macOS libproc)
+│   └── surface_naming.rs              ← auto-naming panes from their process
+├── layout/                            ← N-ary tree of panes (replaced the old binary SplitNode)
+│   ├── tree.rs                        ← LayoutTree::{Leaf, Container}, DragState, size consts
+│   ├── mutations.rs / navigation.rs / close.rs
+│   ├── presets.rs                     ← from_panes_equal, main_vertical, tiled
+│   ├── render.rs                      ← GPUI flex emission + divider hitboxes
+│   └── queries.rs / serde.rs          ← MAX_PANES = 32 lives in layout/mod.rs
+├── pane.rs / pane_drag.rs             ← Pane: tab strip + active terminal; drag-to-split
 ├── terminal/                          ← PTY session + VT emulation + rendering
-│   ├── view.rs                        ← TerminalView (Entity<Render>)
-│   ├── pty_session.rs / pty_loops.rs  ← portable-pty session, I/O threads
-│   ├── listener.rs / input.rs         ← ZedListener, keystroke translation
-│   ├── scanners.rs / search.rs        ← grid scan, find-in-buffer
+│   ├── view.rs                        ← TerminalView (Entity<Render>), 4 ms wakeup coalescing
+│   ├── pty_session.rs                 ← alacritty_terminal session, EventLoop I/O thread
+│   ├── listener.rs / input.rs         ← ZedListener, keystroke translation, clipboard
+│   ├── search.rs / marks.rs           ← find-in-buffer, shell-integration prompt marks
 │   ├── service_detector.rs / shell.rs ← dev-server detection, shell resolution
-│   ├── types.rs                       ← shared terminal types
+│   ├── blink.rs / types.rs            ← cursor blink, shared terminal types
+│   ├── backend_corpus.rs              ← backend-parity corpus tests
 │   └── element/                       ← low-level GPUI Element rendering
 │       ├── mod.rs                     ← TerminalElement: layout → prepaint → paint
 │       ├── color.rs                   ← ANSI→Hsla, APCA contrast
-│       ├── geometry.rs                ← cell geometry
+│       ├── font.rs / geometry.rs      ← font resolution + cell geometry
 │       ├── hyperlink.rs               ← OSC 8 + URL scanning
-│       └── paint/                     ← paint-pass helpers
-├── theme/                             ← theme model + hot-reload (6 bundled themes)
-│   ├── mod.rs                         ← re-exports
-│   ├── model.rs                       ← TerminalTheme (35 slots), UiColors, ui_colors()
-│   ├── builtin.rs                     ← 6 themes + THEMES table + theme_by_name
-│   └── watcher.rs                     ← 500 ms mtime cache, active_theme()
+│       ├── paint/                     ← background, text, cursor, selection, scrollbar, box-drawing
+│       └── golden/ pixel_probe.rs     ← golden-image + pixel assertions
+├── theme/                             ← theme model + hot-reload (5 bundled themes)
+│   ├── model.rs                       ← TerminalTheme (36 Hsla slots + ui + syntax), UiColors
+│   ├── builtin.rs                     ← THEMES table + theme_by_name
+│   └── watcher.rs                     ← 500 ms mtime cache + notify events, active_theme()
 ├── keybindings/
-│   ├── defaults.rs / registry.rs      ← default bindings, action registry
+│   ├── defaults.rs                    ← DEFAULTS + MACOS_ONLY_DEFAULTS tables
 │   ├── apply.rs                       ← apply_keybindings() wires cx.bind_keys
-│   └── display.rs                     ← human-readable binding strings
+│   └── registry.rs / display.rs       ← action registry, human-readable binding strings
 ├── settings/                          ← embedded Codex-style settings (inline, not a window)
 │   ├── chrome.rs                      ← grouped nav rail + content panel (impl PaneFlowApp)
-│   ├── components.rs                  ← shared cards/toggles/section headers
-│   └── tabs/                          ← general, appearance, shortcuts, terminal, ai_agent, mcp
-├── update/                            ← self-update (replaces self_update/)
+│   ├── components.rs / nav_header.rs  ← shared cards/toggles/section headers
+│   └── tabs/                          ← general, appearance, shortcuts, terminal, ai_agent, mcp,
+│                                        notifications, workspaces
+├── diff/                              ← git diff engine + viewer (custom Element, own hscroll)
+├── markdown/                          ← streaming Markdown view (parser, security, theme)
+├── agents/ agents_view/               ← agent process supervision, agents pane, skills list
+├── ai_hooks/                          ← ai.* hook payload extraction
+├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
+├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
+├── update/                            ← self-update
 │   ├── checker.rs / error.rs          ← release checker, structured UpdateError
-│   ├── install_method.rs              ← detect install mode (AppImage / .deb / .msi / .app / .tar.gz)
-│   ├── linux/ / macos/ / windows/     ← per-OS install paths
-│   └── mod.rs
-├── fonts.rs                           ← load_mono_fonts (Linux/macOS fc-list, Windows stub)
+│   ├── install_method.rs              ← detect install mode (.app bundle / .tar.gz)
+│   ├── signature.rs / verified_download.rs ← minisign verify, fail-closed download
+│   └── macos/dmg.rs                   ← bundle replacement from a .dmg
+├── telemetry/                         ← opt-in telemetry id + tags
+├── widgets/                           ← text_input, text_area, scrollbar, callout
+├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
 ├── ai_types.rs                        ← AiToolState enum shared by workspace/event_handlers
-├── ipc.rs                             ← JSON-RPC server over interprocess (cross-platform)
-├── keys.rs / mouse.rs / pty.rs        ← key/mouse translation, portable-pty helpers
+├── ipc.rs / ipc_events.rs             ← JSON-RPC server over `interprocess`, event bus
+├── keys.rs / mouse.rs                 ← key/mouse translation
 ├── search.rs                          ← find-in-buffer UI glue
-├── runtime_paths.rs                   ← XDG + %APPDATA% path helpers
+├── limits.rs                          ← centralized ingress/egress size caps
+├── runtime_paths.rs                   ← runtime/data/config path helpers + sun_path guard
+├── login_shell_env.rs                 ← adopt the login shell's PATH (GUI launch has none)
 ├── config_writer.rs                   ← read-modify-write paneflow.json
-└── assets.rs                          ← rust-embed asset registry
+├── window_state.rs / editor.rs / external_open.rs
+└── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
+
+Ghostty leftovers (`terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, `crates/paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}`, `fuzz/`) are slated for deletion in this fork. They are unreachable on macOS. See the fork design doc for the paired-edit list, since deleting them piecemeal breaks the build (Cargo resolves path dependencies for all targets).
 
 ### Thread model
 
-- **Main thread**: GPUI event loop - owns all Entity state, rendering, input dispatch
-- **PTY I/O threads**: one per terminal (spawned by `alacritty_terminal::EventLoop::spawn()`)
-- **IPC thread**: Unix socket server under a runtime dir resolved via a fallback chain - `$XDG_RUNTIME_DIR` → `dirs::runtime_dir()` → `$TMPDIR` (macOS) → `dirs::cache_dir()/run` - at `<runtime_dir>/paneflow/paneflow.sock` (JSON-RPC 2.0). Windows uses the named pipe `\\.\pipe\paneflow`. The composed path is rejected if it would exceed the `sun_path` limit (≤103 bytes usable).
-- **Shared state**: `Arc<FairMutex<Term<ZedListener>>>` is the only cross-thread data (terminal grid)
+- **Main thread**: GPUI event loop, owns all Entity state, rendering, input dispatch. No locks around UI state.
+- **PTY I/O threads**: one per terminal, spawned by `alacritty_terminal::EventLoop::spawn()`.
+- **IPC thread**: Unix socket server. The runtime dir resolves through a fallback chain (`runtime_paths.rs`): `$XDG_RUNTIME_DIR` → `dirs::runtime_dir()` (None on macOS) → `$TMPDIR` (the macOS path, usually `/var/folders/xx/.../T/`) → `dirs::cache_dir()/run`. Socket at `<runtime_dir>/paneflow/paneflow.sock`. The composed path is rejected if it exceeds the `sockaddr_un.sun_path` ceiling (104 bytes on macOS). `PANEFLOW_SOCKET_PATH` overrides the computed path so an isolated debug instance and the panes it launches agree on one endpoint.
+- **Watcher threads**: config (notify, 300 ms debounce, 500 ms max-wait ceiling), theme, git state.
+- **Shared state**: `Arc<FairMutex<Term<ZedListener>>>` is the only cross-thread data (the terminal grid).
 
 ### Data flow: keystroke → pixel
 
@@ -132,216 +178,206 @@ KeyDownEvent → TerminalView::handle_key_down() → keys::to_esc_str()
 → write_to_pty() → Notifier → PTY EventLoop thread → shell
 → shell output → AlacEventLoop reads PTY → vte parser → Term grid mutations
 → ZedListener::send_event(Wakeup) → UnboundedChannel
-→ 4ms smol::Timer poll → sync() → dirty=true → cx.notify()
+→ 4ms coalescing batch (terminal/view.rs) → sync() → dirty=true → cx.notify()
 → TerminalElement::prepaint() → term.lock() → renderable_content()
-→ TerminalElement::paint() → paint_quad + shape_line → pixels
+→ TerminalElement::paint() → paint_quad + shape_line → Metal
 ```
 
 ### Workspace crates
 
 | Crate | Path | Type | Purpose |
 |-------|------|------|---------|
-| `paneflow-app` | `src-app/` | Binary | GPUI application - all UI, PTY, IPC |
+| `paneflow-app` | `src-app/` | Binary | GPUI application: all UI, PTY, IPC, CLI |
 | `paneflow-config` | `crates/paneflow-config/` | Library | Config schema, JSON loader, file watcher |
+| `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
+| `paneflow-mcp` | `crates/paneflow-mcp/` | Binary | Read-only stdio MCP server (see below) |
+| `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | GPU-free per-agent MCP config merge engine |
+| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 16 agent CLIs |
+| `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
+| `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
+| `paneflow-acp` | `crates/paneflow-acp/` | Library | Agent identity enum + `CLAUDECODE` env scrub |
+| `paneflow-telemetry` | `crates/paneflow-telemetry/` | Library | Opt-in telemetry client (inert without a key) |
+
+Everything that runs outside the GUI process must stay GPU-free and never link GPUI.
 
 ## Critical external dependencies
 
-GPUI and related crates are **git dependencies** pinned to the Paneflow Zed fork while the markdown streaming patch is in flight:
+GPUI and its sibling Zed crates are **git dependencies** pinned to the Paneflow Zed fork while the markdown streaming patch is in flight:
 
 ```toml
 gpui = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
-gpui_platform = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
-collections = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
+gpui_platform = { git = "...", rev = "3aaba57b...", features = ["font-kit"] }   # font-kit is mandatory on macOS
+collections = { git = "...", rev = "3aaba57b..." }
 ```
 
-Cargo fetches GPUI from git automatically - no local checkout required. Two crates-io patches are required by GPUI:
+Cargo fetches GPUI from git automatically. **There is no local checkout and no path dependency.** Two crates-io patches are required by GPUI:
 - `async-task` → `smol-rs/async-task` (specific git commit)
 - `calloop` → `zed-industries/calloop` fork
 
-Terminal emulation uses upstream `alacritty_terminal = "0.26"` from crates.io (migrated from Zed fork).
+Terminal emulation uses upstream `alacritty_terminal = "0.26"` from crates.io (`src-app/Cargo.toml:87`, resolved to 0.26.0 in `Cargo.lock`), migrated from Zed's fork. `polling = "3"` is named directly because the `TeePty` byte tap implements `alacritty_terminal`'s public `tty::EventedReadWrite` traits, whose signatures expose `polling` types the crate does not re-export.
 
 ## GPUI patterns
 
 - **Entity/Context model**: all mutable state lives in `Entity<T>`, mutated via `Context<Self>`. Use `cx.new()` to create, `cx.notify()` to trigger repaint, `cx.spawn()` for async tasks.
-- **`actions!` macro** (`main.rs:40`): generates zero-sized typed action structs in the `paneflow` namespace. Actions are dispatched through GPUI's focus chain.
+- **`actions!` macro** (`app/actions.rs`): generates zero-sized typed action structs in the `paneflow` namespace. Actions are dispatched through GPUI's focus chain.
 - **`Render` trait**: implement for high-level views (PaneFlowApp, TitleBar, TerminalView). Returns a div element tree.
-- **`Element` trait**: implement for low-level custom rendering (TerminalElement only). Has 3 phases: `request_layout()` → `prepaint()` → `paint()`.
-- **Focus**: each `TerminalView` owns a `FocusHandle`. Key context `"Terminal"` scopes terminal-only keybindings. Focus navigation is structural (binary tree traversal), not spatial.
-- **No `Arc`/`Mutex` for UI state** - use `Rc<Cell<f32>>` for single-threaded shared state (e.g., split ratios in render closures).
+- **`Element` trait**: implement for low-level custom rendering (TerminalElement and DiffElement only). Has 3 phases: `request_layout()` → `prepaint()` → `paint()`.
+- **Focus**: each `TerminalView` owns a `FocusHandle`. Key context `"Terminal"` scopes terminal-only keybindings; other contexts are `Search`, `Markdown`, `MarkdownSearch`, `DiffView`. Focus navigation is structural (layout-tree traversal), not spatial.
+- **No `Arc`/`Mutex` for UI state**: use `Rc<Cell<f32>>` for single-threaded shared state (e.g. split ratios in render closures).
 
 ## GPUI scroll & wheel (gotchas)
 
-Hard-won from the diff-dock horizontal-scroll saga (`src-app/src/app/agents_diff/mod.rs`). Verified against the Zed source. Do NOT re-derive these by guessing - it cost three wrong attempts.
+Hard-won from the diff-dock horizontal-scroll saga (`src-app/src/app/agents_diff/mod.rs`). Verified against the Zed source. Do NOT re-derive these by guessing, it cost three wrong attempts.
 
-- **Shift+wheel is axis-swapped to X at the platform layer**, before app code ever sees it. X11 (`gpui_linux/.../x11/client.rs::make_scroll_wheel_event`), Wayland (`wayland/client.rs`, forces `HorizontalScroll`), and Windows (`gpui_windows/events.rs`) all put the value in `delta.x` and zero `delta.y` when `modifiers.shift`. So: read `delta.x` for horizontal, NEVER branch on `modifiers.shift` (reading `delta.y` under Shift reads zero). macOS: the NSEvent delivers horizontal natively, same effect. The `div.rs` `delta_x = delta.y` line is a separate fallback (fires only when `delta.x == 0`), not the Shift mechanism.
+- **Shift+wheel is axis-swapped to X at the platform layer**, before app code ever sees it. On macOS the NSEvent delivers the horizontal component natively; the other platform backends do the swap explicitly. Either way the value lands in `delta.x` with `delta.y` zeroed. So: read `delta.x` for horizontal, NEVER branch on `modifiers.shift` (reading `delta.y` under Shift reads zero). The `div.rs` `delta_x = delta.y` line is a separate fallback (fires only when `delta.x == 0`), not the Shift mechanism.
 - **`overflow_hidden()` + `track_scroll()` does NOT scroll-translate children.** It only keeps the handle's bookkeeping (`offset()`/`bounds()`/`max_offset()`) live. GPUI only pushes the scroll offset onto the element-offset stack (which bakes into each child's `bounds.origin`) when the host overflow axis is `Overflow::Scroll`. A custom `Element` that positions content off its own `bounds.origin` (e.g. `DiffElement`) therefore only scrolls under `overflow_y_scroll`/`overflow_scroll`; `set_offset()` under `overflow_hidden` is stored but dead. Custom elements get the shift automatically via their passed `bounds` (no `window.element_offset()` call needed).
-- **Two-axis recipe (vertical list whose items also scroll horizontally)** - the canonical Zed pattern (`data_table.rs`, `thread_view.rs`, `markdown.rs`): host = `overflow_y_scroll()` + `track_scroll(&handle)` + `element.style().restrict_scroll_to_axis = Some(true)`. The flag is a raw `StyleRefinement` mutation (no builder method, but it compiles: non-`#[refineable]` `Style` fields still become `Option<T>`). It stops a vertical wheel bleeding into a horizontal child AND stops the native Y handler back-filling `delta_y = delta.x` under Shift+wheel (the "vertical scrolls when I Shift+wheel" bug). Per-item horizontal stays custom (an `on_scroll_wheel` reading `delta.x` only); native owns vertical.
+- **Two-axis recipe (vertical list whose items also scroll horizontally)**, the canonical Zed pattern (`data_table.rs`, `thread_view.rs`, `markdown.rs`): host = `overflow_y_scroll()` + `track_scroll(&handle)` + `element.style().restrict_scroll_to_axis = Some(true)`. The flag is a raw `StyleRefinement` mutation (no builder method, but it compiles: non-`#[refineable]` `Style` fields still become `Option<T>`). It stops a vertical wheel bleeding into a horizontal child AND stops the native Y handler back-filling `delta_y = delta.x` under Shift+wheel (the "vertical scrolls when I Shift+wheel" bug). Per-item horizontal stays custom (an `on_scroll_wheel` reading `delta.x` only); native owns vertical.
 
-## Split system (split.rs)
+## Split / layout system (`layout/`)
 
-- `SplitNode` is a binary tree: `Leaf(Entity<TerminalView>)` | `Split { direction, ratio, first, second }`
-- `Horizontal` = panes top/bottom (flex_col). `Vertical` = panes side-by-side (flex_row).
-- Layout uses GPUI flex divs with `flex_basis(relative(ratio))`. Min pane size: 80px. Ratio clamped to 0.1-0.9.
-- Max 32 panes, max 20 workspaces.
-- Divider is a 4px bar. Drag-to-resize uses `Rc<Cell<f32>>` - known issue: hardcoded 800px container estimate at `split.rs:141`.
+The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`) is an N-ary tree:
+
+- `LayoutTree::Leaf(Entity<Pane>)` | `LayoutTree::Container { direction, children: Vec<LayoutChild>, drag, container_size }`
+- Each `LayoutChild` carries `node` plus `ratio: Rc<Cell<f32>>`.
+- `SplitDirection::Horizontal` = **horizontal divider, panes stacked top/bottom** (`flex_col`). `Vertical` = panes side by side (`flex_row`). Counterintuitive but consistent throughout the codebase.
+- Layout uses GPUI flex divs with `flex_basis(relative(ratio))`. `MIN_PANE_SIZE = 80.0`, `DIVIDER_PX = 4.0`, `DIVIDER_HIT_PX = 7.0` (`layout/tree.rs:59-62`): the hitbox is wider than the visible bar and is centered on it.
+- `MAX_PANES = 32` (`layout/mod.rs:32`), `MAX_WORKSPACES = 20` (`workspace/mod.rs:24`). Both are enforced on the live create path *and* at session restore and config load; `limits.rs` documents the read/write cap pairs.
+- Drag-to-resize is pixel-accurate: `Container::container_size` captures the real main-axis pixel size each frame via a `canvas()` prepaint, so there is no hardcoded container estimate (the old `split.rs` 800px guess is gone).
+- Presets in `layout/presets.rs`: `from_panes_equal` (even horizontal / even vertical), `main_vertical`, `tiled`.
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 57 total actions (see `app/actions.rs`).
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 85 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
+
+**`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs:425`) adds `Cmd+C`, `Cmd+V` (Terminal) and `Cmd+Q` (quit) on top.
 
 | Key | Action | Context |
 |-----|--------|---------|
-| `Ctrl+Shift+D/E` | Split horizontal/vertical | Global |
-| `Ctrl+Shift+W` | Close pane | Global |
+| `Cmd+Shift+D` / `Cmd+Shift+E` | Split horizontal / vertical | Global |
+| `Cmd+Shift+W` / `Cmd+Shift+T` | Close pane / undo close pane | Global |
+| `Cmd+Alt+T` / `Cmd+W` | New tab / close tab | Global |
 | `Alt+Arrow` | Focus navigation | Global |
-| `Ctrl+Shift+N` | New workspace | Global |
-| `Ctrl+Shift+Q` | Close workspace | Global |
-| `Ctrl+Tab` | Next workspace | Global |
-| `Ctrl+1-9` | Select workspace | Global |
-| `Ctrl+Shift+C/V` | Copy/Paste | Terminal |
-| `Shift+PageUp/Down` | Scroll | Terminal |
+| `Cmd+Shift+N` / `Cmd+Shift+Q` | New / close workspace | Global |
+| `Cmd+Tab` | Next workspace | Global |
+| `Cmd+1`-`Cmd+9` | Select workspace | Global |
+| `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
+| `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
+| `Cmd+Shift+Z` | Toggle zoom | Global |
+| `Cmd+Shift+J` / `Cmd+Shift+K` | Jump to next waiting agent / open attention queue | Global |
+| `Cmd+Shift+A` / `Cmd+Shift+G` | Agents view / diff view | Global |
+| `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
+| `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
+| `Cmd+Alt+F` | Toggle files sidebar | Global |
+| `Ctrl+Alt+R` / `Ctrl+Shift+Alt+C` | Reveal in Finder / copy workspace path | Global |
+| `Ctrl+Alt+Z` / `C` / `V` / `W` | Open workspace in Zed / Cursor / VS Code / Windsurf | Global |
+| `Cmd+C` / `Cmd+V` | Copy / paste (macOS layer) | Terminal |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste (cross-platform layer, still bound) | Terminal |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll page | Terminal, Markdown |
+| `Cmd+Shift+Up` / `Cmd+Shift+Down` | Jump to prev / next shell prompt mark | Terminal |
+| `Ctrl+Shift+X` / `Ctrl+Shift+F` | Copy mode / find-in-buffer | Terminal |
+| `Cmd+=` / `Cmd+-` / `Cmd+0` | Font size up / down / reset | Terminal |
+| `Enter` / `Shift+Enter` / `Esc` | Next / prev / dismiss | Search, MarkdownSearch |
+| `Alt+R` / `Alt+F` | Toggle regex / fleet-wide search | Search |
+| `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
+| `Cmd+Q` | Quit (macOS only) | Global |
+
+`Cmd+Tab` for next-workspace is inherited from the cross-platform `secondary-tab` default. macOS reserves Cmd+Tab for the system application switcher, so treat this binding as suspect and verify it actually reaches the app before relying on it.
 
 ## Config
 
-Location: `~/.config/paneflow/paneflow.json` (Linux XDG).
+Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resolved via `dirs::config_dir()` in `crates/paneflow-config/src/loader.rs:42-45`. Debug builds use the `paneflow-dev` subdir instead. There is **no** `~/.config/paneflow/` on macOS.
 
 ```json
 {
   "default_shell": "/bin/zsh",
   "theme": "One Dark",
   "window_decorations": "client",
+  "font_family": "JetBrainsMono Nerd Font Mono",
+  "font_size": 13.0,
+  "option_as_meta": false,
   "shortcuts": {},
   "commands": []
 }
 ```
 
-- **Theme hot-reload**: 500ms mtime polling in a `cx.spawn` loop. 2 bundled themes: One Dark (default), PaneFlow Light.
-- **`window_decorations`**: read at startup only - requires restart. `"client"` = CSD, `"server"` = SSD.
-- **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings in config.
-- **`ConfigWatcher`** (notify crate, 300ms debounce): fully wired - background thread detects file changes and deposits new config for the GPUI main thread to apply.
+- **Themes**: **5 bundled** (`theme/builtin.rs:7-13`): `One Dark` (default), `PaneFlow Light`, `Vercel`, `Claude`, `Cursor`. Names are matched case-insensitively. Hot-reload is notify-driven with a 500 ms mtime-poll fallback (`theme/watcher.rs:37`).
+- **`window_decorations`**: read at startup only, requires restart. `"client"` = CSD (default), `"server"` = SSD. An invalid value logs a warning and falls back to `"client"`.
+- **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings here.
+- **`option_as_meta`**: macOS-relevant, and **defaults to `false` on macOS specifically**: `keys::default_option_as_meta()` is literally `!cfg!(target_os = "macos")` (`keys.rs:83-85`). So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior.
+- **`macos_chrome_material`**: opts the sidebar and title bar into a native AppKit material (`window_chrome/macos_backdrop.rs`). `windows_terminal_material` and `windows_chrome_material` still exist in the public schema; the loader accepts them as ignored no-ops rather than breaking existing config files.
+- **`ConfigWatcher`** (notify crate, 300 ms debounce with a 500 ms max-wait ceiling so a continuous event stream cannot starve the reload): fully wired, a background thread detects changes and deposits new config for the GPUI main thread to apply.
+- `MAX_CONFIG_SIZE_BYTES` is 1 MiB (`limits.rs`); the app's own writer never approaches it.
+- The full schema is published at `schemas/paneflow.schema.json` and **two tests in `crates/paneflow-config/src/schema.rs` read it off disk**, so schema drift fails the suite.
 
-## IPC (ipc.rs)
+## IPC (`ipc.rs`)
 
-Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock`, where `runtime_dir` resolves via `$XDG_RUNTIME_DIR` → `dirs::runtime_dir()` → `$TMPDIR` (macOS) → `dirs::cache_dir()/run` (Windows: the named pipe `\\.\pipe\paneflow`). Methods:
+Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thread model for the resolution chain). Methods:
 
 | Method | Thread | Description |
 |--------|--------|-------------|
-| `system.ping/capabilities/identify` | Socket | Stateless health checks |
-| `workspace.list/current/create/select/close` | GPUI | Workspace management |
-| `surface.list/send_text/split` | GPUI | Pane operations |
+| `system.ping` / `capabilities` / `identify` | Socket | Stateless health checks |
+| `workspace.list` / `current` / `create` / `select` / `close` | GPUI | Workspace management |
+| `workspace.up` / `restore_layout` | GPUI | Declarative bring-up, layout restore |
+| `surface.list` / `read` / `search` / `status` | GPUI | Read pane state and scrollback |
+| `surface.send_text` / `send_keystroke` | GPUI | Write into a pane (scripting-gated) |
+| `surface.split` / `focus` / `rename` | GPUI | Pane operations |
+| `fleet.list` | GPUI | Every surface across every workspace |
+| `events.subscribe` | Socket | Streaming event subscription |
+| `ai.session_start` / `prompt_submit` / `tool_use` / `notification` / `stop` / `exit` / `session_end` | GPUI | Agent lifecycle notifications from `paneflow-ai-hook` |
 
-Stateful methods dispatch to GPUI main thread via `mpsc::channel`, polled every 10ms.
+Stateful methods dispatch to the GPUI main thread via a channel drained by `PaneFlowApp::process_automation_tick`, which runs on a **50 ms** poll loop (`app/bootstrap.rs:537`, `app/ipc_handler.rs:1274-1282`). That same tick also drains surface-change broadcasts, config reloads, and update-check completion, so its ordering is a contract, not an accident.
 
 ## Styling conventions
 
 - **All styling is inline** via GPUI's Tailwind-like builder API: `.bg(rgb(0x181825)).px_3().rounded_md()`
-- **Sidebar/titlebar colors are hardcoded** dark hex values - they do NOT change with the terminal theme.
-- **Terminal colors** use the `TerminalTheme` struct (30 Hsla slots) resolved via `active_theme()`.
-- **Font**: defaults to a platform-specific installed monospace fallback at 14px (`terminal_element.rs`). Invalid Linux font names fall back to the first available preferred mono family.
+- **Sidebar/titlebar colors are hardcoded** dark hex values unless the active theme supplies a `UiColors` block. Legacy themes derive chrome colors from light/dark defaults; the bundled custom themes opt into exact UI tokens so the theme affects the whole app, not just ANSI colors.
+- **Terminal colors** come from `TerminalTheme` (36 `Hsla` slots plus optional `ui: UiColors` and a `syntax: SyntaxPalette`, `theme/model.rs:11`) resolved via `active_theme()`. `selection_foreground` is computed at theme-load time so `apca_contrast(selection_foreground, selection) >= 45.0` holds at every observation point; if you construct a theme by hand, call `recompute_selection_foreground()`.
+- **Font**: defaults to the embedded `JetBrainsMono Nerd Font Mono` at **13.0 pt** (`terminal/element/font.rs:24`, `:43`), range clamped to 8.0-32.0. Embedded families are always resolvable because `Assets::load_fonts` registers them with GPUI at boot. A configured `font_family` that is not an installed monospace family (checked against Core Text via `fonts.rs::load_mono_fonts`) logs a warning and falls back to the default.
 
 ## Gotchas
 
-- **GPUI is not on crates.io** - it is consumed from the pinned Zed git fork above. Never replace it with a crates.io dependency.
-- **Never recommend iced** for this project - it was evaluated and rejected (unstable, custom WGPU glyph atlas too complex). The decision is final.
-- **`SplitDirection::Horizontal`** means a horizontal divider bar (panes stacked top/bottom), NOT side-by-side. This is counterintuitive but consistent with the codebase.
-- **`alacritty_terminal` is upstream** (crates.io `0.26`), migrated from Zed's fork. Uses `ZedListener` and `FairMutex` from the GPUI integration layer.
-- **`dirs` version mismatch**: `src-app` uses `dirs = "5.0"`, config crate uses `dirs = "6"`. They coexist but are separate semver releases.
-- **Config `default_shell` is wired** - `TerminalState::new()` uses fallback chain: config `default_shell` → `$SHELL` → `/bin/sh`.
-- **The `_io_thread` handle is discarded** (`terminal.rs:139`) - PTY I/O threads run detached. Shutdown is via `Msg::Shutdown` in `Drop`.
-- **Tests + CI exist** - run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`; UI changes still need manual verification.
-- **License** - the project is GPL-3.0-or-later; keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
-
-## PRD reference
-
-Active PRDs in `tasks/`:
-- `prd-v2-gpui-terminal.md` - 19 stories, all delivered (US-001 through US-019)
-- `prd-v2-title-bar.md` - 12 stories, all delivered (US-001 through US-012)
-
-Architecture decision: `tasks/audit-v2-options-final.md`
-Historical cmux reference spec: `CMUX_ANALYSIS.md` (417 lines, covers the Swift architecture that inspired some workspace ergonomics; Paneflow is an independent codebase, not a fork.)
+- **GPUI is not on crates.io.** It is consumed from the pinned Zed git fork above. Never replace it with a crates.io dependency, and never assume there is a local checkout to edit.
+- **Never recommend iced** for this project. It was evaluated and rejected (unstable, custom WGPU glyph atlas too complex). The decision is final.
+- **`SplitDirection::Horizontal`** means a horizontal divider bar (panes stacked top/bottom), NOT side-by-side. Counterintuitive but consistent.
+- **`alacritty_terminal` is upstream** (crates.io `0.26`), migrated from Zed's fork. It still uses `ZedListener` and `FairMutex` from the GPUI integration layer, and its imports are confined to an allowlist enforced by the `alacritty_confined_to_backend_allowlist` test (`src-app/src/terminal/types.rs:1002`). Separately, `src-app/tests/dependency_source_policy.rs` asserts every git source in `Cargo.lock` is pinned to an immutable revision, so a floating branch cannot sneak in.
+- **`dirs` is a single workspace dependency at version 6** (`Cargo.toml` `[workspace.dependencies]`; both `src-app/Cargo.toml:148` and `crates/paneflow-config/Cargo.toml:14` use `dirs.workspace = true`). An older note about a 5.0/6 split between the two crates is stale.
+- **Config `default_shell` is wired**: `resolve_default_shell` (`terminal/shell.rs:263`) validates the configured path is present and executable, warns and falls back if not, then uses the `$SHELL` → `/bin/sh` chain.
+- **The `_io_thread` handle is discarded** (`terminal/pty_session.rs:2677`). PTY I/O threads run detached; shutdown is via `Msg::Shutdown` in `Drop`.
+- **A GUI-launched app inherits launchd's minimal PATH, not the user's.** `login_shell_env.rs` runs the user's login shell once and adopts **only its `PATH`**, deliberately importing nothing else (a login profile that re-exports session variables would corrupt them). Without this, `/opt/homebrew/bin` is missing, terminals cannot find the user's tools, and agent-CLI detection (`which::which(...)`) comes up empty. Do not "simplify" it into a full env import.
+- **Every `US-NNN` comment in the Rust source is a dangling breadcrumb.** They point at PRD files that lived under `tasks/`, were gitignored upstream, never committed, and `tasks/` is now deleted. Same for every `prd-*.md` and `EP-NNN` reference in a comment. Roughly 2,200 such comments across ~190 files: treat them as historical noise, do not go looking for the document, and do not add new ones.
+- **Tests + CI exist**: run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`. UI changes still need manual verification.
+- **Two macOS test modules are inverted-gated.** `update/macos/dmg.rs` has `#[cfg(all(test, not(target_os = "macos")))]` modules, so they only ever ran on the Linux CI legs. Un-gate them rather than deleting them.
+- **The binary-size budget** (`src-app/build.rs`, `run_tests.yml`) is baselined on a Linux ELF. It needs a Mach-O re-baseline, not deletion.
+- **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
+- **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
 
 ## MCP bridge (`paneflow-mcp`)
 
-`crates/paneflow-mcp/` is a stdio MCP server letting CLI agents (Claude Code,
-Codex, Gemini, opencode) read other panes' terminal output via the existing IPC
-socket. Read-only (`list_panes` / `read_pane` / `search_pane`).
+`crates/paneflow-mcp/` is a stdio MCP server letting CLI agents (Claude Code, Codex, Gemini, opencode) read other panes' terminal output via the existing IPC socket. Read-only (`list_panes` / `read_pane` / `search_pane`).
 
-**Distribution (`paneflow mcp install`).** The bridge ships embedded in the
-`paneflow` binary (staged by `build.rs`, extracted at launch to a stable,
-non-versioned path under `data_dir()/paneflow/bin/` that survives updates -
-`runtime_paths::bridge_binary_path()`). `paneflow mcp install | uninstall |
-status` (intercepted in `main.rs` before GUI init) registers/removes/inspects
-the `paneflow` MCP entry across every detected agent. The engine is the
-GPU-free `crates/paneflow-mcp-install/` crate (idempotent, no-clobber, backup +
-atomic write; `toml_edit` kept out of the embedded bridge per budget). Per-agent
-shapes: Claude Code `~/.claude.json` `mcpServers` (prefers `claude mcp add`),
-Codex `~/.codex/config.toml` `[mcp_servers.*]` (prefers `codex mcp add`), Gemini
-`~/.gemini/settings.json` `mcpServers` (`trust:true`), opencode
-`~/.config/opencode/opencode.json` key `mcp` (`command` array, `type:local`).
-The repo's `.mcp.json` still auto-wires Claude Code inside this project. Full
-setup + per-agent config: `docs/mcp-bridge.md`. There is also a Settings →
-AI Agent → "MCP bridge" button that runs the same install off the render
-thread (state-aware label: Install / Repair / Reinstall). PRDs:
-`tasks/prd-pane-context-bridge-2026-Q3.md` (bridge),
-`tasks/prd-mcp-bridge-distribution-2026-Q3.md` (distribution, all 12 stories /
-EP-001..004 done).
+**Distribution (`paneflow mcp install`).** The bridge ships embedded in the `paneflow` binary (staged by `build.rs`, extracted at launch to a stable, non-versioned path under `data_dir()/paneflow/bin/` that survives updates: `runtime_paths::bridge_binary_path()`). `paneflow mcp install | uninstall | status` (intercepted in `main.rs` before GUI init) registers, removes, or inspects the `paneflow` MCP entry across every detected agent. The engine is the GPU-free `crates/paneflow-mcp-install/` crate (idempotent, no-clobber, backup + atomic write; `toml_edit` kept out of the embedded bridge per budget). Per-agent shapes: Claude Code `~/.claude.json` `mcpServers` (prefers `claude mcp add`), Codex `~/.codex/config.toml` `[mcp_servers.*]` (prefers `codex mcp add`), Gemini `~/.gemini/settings.json` `mcpServers` (`trust:true`), opencode `~/.config/opencode/opencode.json` key `mcp` (`command` array, `type:local`). The repo's `.mcp.json` still auto-wires Claude Code inside this project. Full setup and per-agent config: `docs/mcp-bridge.md`. There is also a Settings → AI Agent → "MCP bridge" button that runs the same install off the render thread (state-aware label: Install / Repair / Reinstall).
 
 ## Commit convention
 
 ```
-feat(module): US-NNN - description
+feat(module): description
+fix(module): description
 refactor(module): description
 docs: description
 chore: description
 ```
 
-Atomic commits per user story. Branch naming: `feat/description`.
+Atomic commits per logical change. Branch naming: `feat/description`. Do not add new `US-NNN` story IDs to commit messages: there is no story tracker in this fork.
 
-## Cross-platform compatibility (mandatory)
+## Platform (macOS only)
 
-Any new code, refactor, or change that touches the codebase in any way **must** be fully compatible with all three target platforms:
+This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`.
 
-- **Linux** - every major distribution (Fedora, Ubuntu/Debian, Arch, openSUSE, etc.), both Wayland and X11.
-- **macOS (Apple)** - Intel and Apple Silicon.
-- **Windows** - Windows 10 and 11 (x64, and ARM64 where applicable).
+- Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, no Ghostty backend.
+- **`#[cfg(unix)]` is not Linux-only.** It appears over 160 times and macOS needs nearly all of it. Only 6 attribute instances combine `unix` with `not(target_os = "macos")`. Do not prune unix-shared code while removing Linux code.
+- `#[cfg(not(unix))]` and `#[cfg(not(windows))]` blocks are fallback arms. When you remove one, un-gate its surviving twin rather than deleting both.
+- `#[cfg(any(test, target_os = "windows"))]` keeps items alive for tests on every platform. Dropping the Windows arm leaves `#[cfg(test)]`, which makes the item test-only, not dead.
+- Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
+- `update/mod.rs:39` and `:45` declare `pub mod linux;` and `pub mod windows;` unconditionally, so `linux/appimage.rs` and `linux/targz.rs` compile on macOS today. Only `linux/system_package.rs` and `update/migrations.rs` are gated at declaration. The tarball install method is genuinely reachable on macOS (`$HOME/.local/paneflow.app/`); the AppImage one is not.
 
-Concretely this means:
-
-- Never hardcode POSIX-only paths, shell commands, env vars, or separators. Use `std::path::PathBuf`, `std::env`, and the `dirs` crate (or equivalent) for all filesystem and environment access.
-- Guard platform-specific code with `#[cfg(target_os = "…")]` and always provide a working path for the other two platforms (at minimum a graceful fallback or documented stub).
-- Prefer cross-platform crates (`portable-pty`, `notify`, `dirs`, `which`, etc.) over POSIX-only APIs. If a POSIX-only crate is unavoidable, isolate it behind a trait with per-OS implementations.
-- PTY, IPC, packaging, auto-update, keybindings, fonts, and file watching must each have Linux + macOS + Windows paths - never Linux-only.
-- Before shipping a change, mentally (or actually) verify it compiles and behaves correctly on all three platforms. If you cannot verify, say so explicitly rather than assume.
-
-This rule overrides any older "Linux-only" gotcha in this file - the project is actively porting to macOS and Windows, and all new work must land cross-platform by default.
-
-## Anti-Friction Rules (claude-doctor)
-
-Règles pour éviter les patterns de friction détectés par `claude-doctor` sur ce projet : edit-thrashing, restart-cluster, repeated-instructions, negative-drift, error-loop, excessive-exploration.
-
-### Editing discipline (anti edit-thrashing)
-
-- Read the full file before editing. Plan all changes, then make ONE complete edit.
-- If you've edited the same file 3+ times, STOP. Re-read the user's original requirements and re-plan from scratch.
-- Prefer one large coherent edit over multiple small incremental ones.
-
-### Stay aligned with the user (anti repeated-instructions, rapid-corrections)
-
-- Re-read the user's last message before responding. Follow through on every instruction completely - don't partially address requests.
-- Every few turns on a long task, re-read the original request to verify you haven't drifted from the goal.
-- When the user corrects you: stop, re-read their message, quote back what they actually asked for, and confirm understanding before proceeding.
-
-### Act, don't explore (anti excessive-exploration)
-
-- Don't read more than 3-5 files before making a change. Get a basic understanding, make the change, then iterate.
-- Prefer acting early and correcting via feedback over prolonged reading and planning.
-
-### Break loops (anti error-loop, restart-cluster)
-
-- After 2 consecutive tool failures or the same error twice, STOP. Change your approach entirely - don't retry the same strategy. Explain what failed and try something genuinely different.
-- When truly stuck, summarize what you've tried and ask the user for guidance rather than retrying.
-
-### Verify output (anti negative-drift)
-
-- Before presenting your result, double-check it actually addresses what the user asked for.
-- If the diff doesn't map cleanly to the user's request, don't ship it - re-plan.
+The full removal plan, with the paired edits that have to land together, is in `docs/fork/2026-08-25-mac-only-fork-design.md`.

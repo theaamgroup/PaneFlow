@@ -4,6 +4,11 @@ PaneFlow ships two complementary debug-only probes for the terminal renderer.
 Both are gated `#[cfg(debug_assertions)]` and compile to no-ops in release
 builds, so they cost nothing to leave in the source tree.
 
+Rendering goes through GPUI's Metal backend, the only backend this fork builds
+against, so every coordinate the probes log is a Metal-path coordinate. A
+fractional value here is a geometry bug in our own layout math, not a driver
+difference: there is no second backend to compare against or blame.
+
 ## `PANEFLOW_LATENCY_PROBE=1` - keystroke-to-pixel timing
 
 Captures per-phase latency from `KeyDownEvent` through `paint()` to the next
@@ -46,8 +51,9 @@ always surface there first.
 
 ### Example session
 
-Reproduce the Claude Code banner gap regression from
-`debug_block_char_rendering.md`:
+The canonical repro is the Claude Code banner gap: a TUI that draws its border
+out of block characters shows hairline gaps between cells, because a fractional
+cell width reached the paint path. To capture it:
 
 ```sh
 PANEFLOW_PIXEL_PROBE=1 RUST_LOG=paneflow::pixel_probe=debug cargo run 2> probe.log

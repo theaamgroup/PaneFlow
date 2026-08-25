@@ -18,9 +18,8 @@ dependent stories are in review:
   retention are bounded.
 - `US-010`: GPUI-bound IPC requests are queued with backpressure.
 
-Run the full 30-minute desktop smoke on every OS you can access. If Linux,
-macOS, or Windows cannot be exercised locally, write `not verified on <OS>` in
-the PR note instead of assuming parity.
+Run the full 30-minute desktop smoke on macOS (Apple Silicon). This fork
+targets macOS only, so there is no second platform to reconcile.
 
 ---
 
@@ -40,15 +39,6 @@ build scripts, proc macros, tests, and the app itself; `--locked` keeps the
 dependency graph pinned to the reviewed `Cargo.lock`.
 
 For the interactive run, launch PaneFlow from a terminal so logs are visible.
-
-PowerShell:
-
-```powershell
-$env:RUST_LOG = "info,paneflow=debug"
-cargo run -p paneflow-app --locked
-```
-
-Bash:
 
 ```bash
 RUST_LOG=info,paneflow=debug cargo run -p paneflow-app --locked
@@ -121,16 +111,7 @@ Target duration: 30 minutes.
 2. Start 6-8 agent or shell surfaces. A valid mix is:
    - 4-6 hooked agent sessions producing periodic output.
    - 2 plain shell panes running harmless loop output.
-3. Make at least one workload produce steady output for the whole run. Use a
-   cross-platform command when possible:
-
-   PowerShell:
-
-   ```powershell
-   1..1800 | ForEach-Object { "memory-smoke $_ $(Get-Date -Format o)"; Start-Sleep -Seconds 1 }
-   ```
-
-   Bash:
+3. Make at least one workload produce steady output for the whole run:
 
    ```bash
    for i in $(seq 1 1800); do echo "memory-smoke $i $(date -Is)"; sleep 1; done
@@ -159,14 +140,6 @@ Target duration: 30 minutes.
   overload should be reported as a clear retryable error if the queue fills.
   Read-only `ps` bursts are safe for this:
 
-  PowerShell:
-
-  ```powershell
-  1..128 | ForEach-Object { paneflow ps --json > $null }
-  ```
-
-  Bash:
-
   ```bash
   for i in $(seq 1 128); do paneflow ps --json >/dev/null; done
   ```
@@ -185,7 +158,6 @@ Target duration: 30 minutes.
   released.
 - IPC overload, if triggered, fails fast with the existing overload error rather
   than blocking indefinitely or growing an unbounded queue.
-- Any OS not exercised is explicitly listed as not verified.
 
 ### Failure triage
 
@@ -234,9 +206,7 @@ not by killing active agents or claiming a fragile RSS benchmark.
 - [ ] `cargo clippy --workspace --locked -- -D warnings`
 - [ ] `cargo test --workspace --locked`
 - [ ] Targeted cap tests listed in `docs/memory-smoke-test.md`
-- [ ] 30-minute 6-8 agent smoke on Linux: PASS / FAIL / not verified on Linux
-- [ ] 30-minute 6-8 agent smoke on macOS: PASS / FAIL / not verified on macOS
-- [ ] 30-minute 6-8 agent smoke on Windows: PASS / FAIL / not verified on Windows
+- [ ] 30-minute 6-8 agent smoke on macOS: PASS / FAIL
 
 ### Smoke result
 
@@ -245,6 +215,5 @@ not by killing active agents or claiming a fragile RSS benchmark.
 - Review hide/reopen:
 - Active agent protection:
 - IPC burst behavior:
-- OS verification gaps:
 - Log handling: raw logs not shared / sanitized if shared
 ```

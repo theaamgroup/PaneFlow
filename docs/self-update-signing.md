@@ -1,34 +1,56 @@
 # Self-update signing runbook (minisign / Ed25519)
 
-This is the **root of trust for the in-app self-updater** (EP-001 of
-`tasks/prd-audit-remediation-2026-Q3.md`). It is a *different* key from the
-GPG key in `release-signing.md` (which signs `.deb`/`.rpm` packages + apt/dnf
-repo metadata). This minisign key signs the release **artifacts the updater
-downloads** (`.tar.gz`, `.AppImage`, `.dmg`, `.msi`) so a running PaneFlow can
-prove a download came from us before it extracts, mounts, or executes it.
+This is the **root of trust for the in-app self-updater**. It signs the release
+artifact the updater downloads (the `.dmg`) so a running PaneFlow can prove a
+download came from us before it mounts or executes it.
+
+It is a **different mechanism from macOS code signing**, and the two are not
+interchangeable. Developer ID codesign plus notarization
+([`docs/release/macos-signing.md`](release/macos-signing.md)) is what Gatekeeper
+checks when a user launches the app. minisign is what *Paneflow itself* checks
+before it installs an update. See
+[`docs/release-signing.md`](release-signing.md) for the side-by-side, including
+why the old GPG key is not part of either path.
+
+> **This fork needs its own keypair.** Do not reuse upstream's. Generate a fresh
+> one per §1 and populate our own repository variables and environment secret.
+> Inheriting upstream's key would mean anchoring our updater's trust in a
+> signing key we do not control.
 
 How it fits together:
 
-- The **public** key(s) are baked into every release binary at build time
-  (`option_env!` in `src-app/src/update/signature.rs`). They are public -
+- The **public** key(s) are baked into every release binary at build time from
+  the env vars `PANEFLOW_MINISIGN_PUBKEY` and `PANEFLOW_MINISIGN_PUBKEY_NEXT`,
+  read through `option_env!` at `src-app/src/update/signature.rs:71` and `:77`.
+  `option_env!` is evaluated at compile time, so a build that does not set them
+  embeds `None` and every update then fails closed. These are public values,
   stored as GitHub **repository variables**, never secrets.
 - The **private** key signs each artifact in CI, producing a detached
   `<artifact>.minisig` uploaded alongside it. It lives only in a GitHub
   **environment secret** on the `release` environment.
 - At update time the client fetches `<asset_url>.minisig`, verifies the bytes
   on disk against an embedded key, and **fails closed** on any mismatch,
-  missing signature, or unsigned build (no `.sha256` fallback). On macOS and
-  Windows a second OS-native layer runs on top (`codesign`/`spctl`,
-  `WinVerifyTrust`).
+  missing signature, or unsigned build (no `.sha256` fallback). Gatekeeper's
+  `codesign` / `spctl` check is a second, independent layer on top.
 
-Two public-key **slots** are embedded - current + next - so the key can be
-rotated with zero downtime (see §5).
+Two public-key **slots** are embedded, current and next, so the key can be
+rotated with zero downtime (see §5). A slot that fails to parse is logged and
+skipped rather than aborting, so one malformed variable cannot disable the
+other, good key.
 
-> ⚠️ Introducing this root of trust is a one-way step. The first signed
-> release is the boundary: clients on it (and later) verify every future
-> update. Clients on an *older* release have no embedded key, so their
-> in-app updater fails closed until the user installs one signed build
-> manually. That is the intended, documented cost of adding a trust anchor.
+> **Local-rebuild trap.** `src-app/build.rs` registers
+> `cargo:rerun-if-env-changed` for `POSTHOG_API_KEY`, `POSTHOG_HOST`, and
+> `PANEFLOW_SKIP_EMBED_BUILD` only. Neither minisign variable is registered, so
+> changing `PANEFLOW_MINISIGN_PUBKEY` locally can reuse a cached object file and
+> silently keep the previously embedded key. Force a rebuild
+> (`touch src-app/src/update/signature.rs`, or `cargo clean -p paneflow-app`)
+> when you change it by hand.
+
+> Introducing this root of trust is a one-way step. The first signed release is
+> the boundary: clients on it (and later) verify every future update. Clients on
+> an *older* release have no embedded key, so their in-app updater fails closed
+> until the user installs one signed build manually. That is the intended,
+> documented cost of adding a trust anchor.
 
 ---
 
@@ -43,7 +65,7 @@ GitHub secret is the protection. Keep an *encrypted* backup in your password
 manager.
 
 ```bash
-# Option A - minisign (C tool; `apt install minisign` / `brew install minisign`)
+# Option A - minisign (C tool; `brew install minisign`)
 minisign -G -W -p paneflow-minisign.pub -s paneflow-minisign.key
 #   -W : no passphrase on the secret key (required for unattended CI signing)
 
@@ -80,8 +102,8 @@ Wiring already in `release.yml`:
 - The per-target **Build** step passes both public vars into the compile so
   `option_env!` bakes them in.
 - The **Publish** job's *Sign release artifacts (minisign)* step writes the
-  secret to a temp file and signs every primary artifact (skipping
-  `.sha256`/`.minisig`/`.zsync` siblings) → `<artifact>.minisig`, which
+  secret to a temp file and signs every primary artifact (skipping `.sha256`
+  and `.minisig` siblings) → `<artifact>.minisig`, which
   `files: release-assets/*` then uploads.
 
 If `MINISIGN_SECRET_KEY` is unset the signing step fails the release job.
@@ -95,7 +117,7 @@ path.
 
 ```bash
 # pub.txt = the 2-line public key file
-minisign -V -p pub.txt -m paneflow-0.3.9-x86_64.tar.gz
+minisign -V -p pub.txt -m paneflow-0.3.9-aarch64-apple-darwin.dmg
 #   → "Signature and comment signature verified" on success.
 ```
 
@@ -115,10 +137,9 @@ verification and are never run. This is the RCE-class hole the old same-host
 Does **not** cover: a compromised *signing key* or a compromised *build host*
 that signs malicious bytes. Mitigations: keep the secret key only as an
 environment secret with reviewer protection; the dual-key rotation below; and
-the per-OS code-signing/notarization layers (`codesign`+`spctl`,
-`WinVerifyTrust`) which chain to Apple/Microsoft roots independently of
-minisign. Server-compromise-resistant schemes (TUF, sigstore transparency
-logs) are deliberately out of scope for a solo OSS project.
+Apple code signing plus notarization (`codesign` + `spctl`), which chains to
+Apple's root independently of minisign. Server-compromise-resistant schemes
+(TUF, sigstore transparency logs) are out of scope.
 
 ---
 
@@ -153,11 +174,10 @@ If the **private key** leaks:
 1. Immediately rotate `MINISIGN_SECRET_KEY` to a freshly generated key and run
    the §5 rotation, but compress the timeline - ship the dual-key build and
    the re-signed build back to back.
-2. Treat any release the leaked key could have signed as suspect. The OS code
-   signatures (Apple notarization, Authenticode) are an independent second
-   factor: an attacker with only the minisign key still cannot pass
-   `spctl`/`WinVerifyTrust`, so macOS/Windows clients remain protected on
-   those paths.
+2. Treat any release the leaked key could have signed as suspect. Apple
+   notarization is an independent second factor: an attacker holding only the
+   minisign key still cannot produce a bundle that passes `spctl`, so a user
+   launching the app is protected even if the updater were fooled.
 3. Once every supported client has updated past a build carrying the new key,
    drop the compromised key from both slots so a stolen-key signature no
    longer verifies anywhere.
@@ -174,5 +194,7 @@ audit the release artifacts against the source tree.
 - [ ] `MINISIGN_SECRET_KEY` environment secret present on `release`.
 - [ ] After the run: every primary artifact has a sibling `.minisig` in the
       GitHub release. `minisign -V -p pub.txt -m <artifact>` passes for each.
-- [ ] An install of the *new* release can self-update to a hand-built
-      fixture (the `auto-update-e2e` job covers the tar.gz path).
+- [ ] An install of the *new* release can self-update to a hand-built DMG
+      fixture. **There is no CI coverage for the macOS DMG update path** -
+      upstream's `auto-update-e2e` job exercised the Linux tar.gz path only, so
+      this check is manual until a macOS e2e job exists.

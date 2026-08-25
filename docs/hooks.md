@@ -73,7 +73,7 @@ scan.
 | Agent | Mechanism | Where the shim writes | Events mapped |
 |-------|-----------|----------------------|---------------|
 | Claude Code | Claude hooks (matcher groups) | `./.claude/settings.local.json` | UserPromptSubmit, Notification, Stop, Pre/PostToolUse |
-| Codex | hooks.json + TOML feature flag (Unix); JSONL tee (Windows) | `./.codex/hooks.json` | SessionStart, UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest |
+| Codex | hooks.json + TOML feature flag | `./.codex/hooks.json` | SessionStart, UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest |
 | CodeBuddy | Claude-compatible clone | `./.codebuddy/settings.local.json` | same five as Claude Code |
 | Qoder | Claude-compatible clone | `./.qoder/settings.local.json` | four (no Notification) |
 | Gemini CLI | matcher-group hooks in settings | `~/.gemini/settings.json` | BeforeAgent→UserPromptSubmit, AfterAgent→Stop, Before/AfterTool→Pre/PostToolUse |
@@ -88,11 +88,9 @@ ownership detection by command basename (`paneflow-ai-hook`), orphan sweep on
 the next launch after a SIGKILL, and refusal paths that protect user files -
 a symlinked config dir, an unparseable PRIMARY config (`opencode.json`,
 `~/.hermes/config.yaml` with an existing `hooks:` key), or a `.jsonc`-only
-OpenCode setup all skip the install instead of clobbering. Agents without a
-documented Windows-specific hook field receive a single `command` string with
-Windows-safe quoting on Windows rather than an undocumented extra field. The
-TS bridges are env-gated on `PANEFLOW_SOCKET_PATH`, so they are inert when the
-CLI runs outside a Paneflow terminal.
+OpenCode setup all skip the install instead of clobbering. The TS bridges are
+env-gated on `PANEFLOW_SOCKET_PATH`, so they are inert when the CLI runs
+outside a Paneflow terminal.
 
 Deliberately not integrated (no safe surface): **Copilot CLI** (no hooks, no
 JSON stream), **Factory Droid** (dashboard-managed hooks), **Kiro** (hooks
@@ -101,40 +99,29 @@ live inside per-agent definition files - no per-session surface),
 hook surface). They still get the universal exit/session-end lifecycle and
 the "running" row.
 
-On Windows, Codex uses a JSONL tee rather than file hooks; the shim handles that
-path at launch.
+## Parent-death and interrupt guards
 
-## Parent-death and interrupt guards (cross-platform)
-
-The shim (`paneflow-shim`) wraps each agent so two reliability gaps are closed on
-every OS (EP-005 US-017):
+The shim (`paneflow-shim`) wraps each agent so two reliability gaps are closed
+(EP-005 US-017):
 
 - **Orphan guard** (Paneflow is hard-killed, e.g. `kill -9`): the agent must not
-  survive and keep burning API tokens.
-  - **Linux**: the agent is spawned with `PR_SET_PDEATHSIG = SIGKILL` plus a
-    `getppid()` race-close, so the kernel kills it the moment the shim's parent
-    dies.
-  - **macOS**: kqueue `NOTE_EXIT` is not arm-able from the post-`execve` child,
-    so the shim runs a tiny thread that polls `getppid()`; a reparent to
-    `launchd` means Paneflow exited and the agent is `SIGKILL`ed (the AC's
-    "ou équivalent").
+  survive and keep burning API tokens. kqueue `NOTE_EXIT` is not arm-able from
+  the post-`execve` child, so the shim runs a tiny thread that polls
+  `getppid()`; a reparent to `launchd` means Paneflow exited and the agent is
+  `SIGKILL`ed (`spawn_parent_death_guard`, `crates/paneflow-shim/src/exec.rs`).
+  The guard is told the child was reaped before its PID can be recycled, so a
+  late tick never signals a reused PID.
 - **Interrupt guard** (the user Ctrl+C's an agent mid-turn, which interrupts the
   turn WITHOUT the agent exiting or firing a Stop hook): the sidebar loader must
-  not stick.
-  - **Unix**: a blocked-`SIGINT` + `sigwait` thread emits one `ai.stop` per
-    Ctrl+C.
-  - **Windows**: a `ctrlc` / `SetConsoleCtrlHandler` callback emits the same
-    `ai.stop`; the agent still receives `CTRL_C_EVENT` directly from the OS, so
-    its turn is interrupted as usual and the shim survives to keep waiting.
+  not stick. A blocked-`SIGINT` + `sigwait` thread emits one `ai.stop` per
+  Ctrl+C.
 
-The macOS and Windows branches are compile-verified from the Linux host via
-`cargo check --target {x86_64-apple-darwin,x86_64-pc-windows-msvc}` (the build
-gate runs all three). They still need a one-time RUNTIME smoke on real hardware:
+Both guards still need a one-time RUNTIME smoke on real hardware:
 
-- **macOS orphan smoke**: launch an agent in a pane, note its PID
-  (`paneflow ps`), `kill -9` the Paneflow process, then confirm the agent PID is
-  gone within ~1 s (`ps -p <pid>` returns nothing). PASS = no orphan.
-- **Windows interrupt smoke**: launch an agent, start a turn so the sidebar shows
-  the "thinking" loader, press `Ctrl+C` to interrupt mid-turn (the agent stays
+- **Orphan smoke**: launch an agent in a pane, note its PID (`paneflow ps`),
+  `kill -9` the Paneflow process, then confirm the agent PID is gone within
+  ~1 s (`ps -p <pid>` returns nothing). PASS = no orphan.
+- **Interrupt smoke**: launch an agent, start a turn so the sidebar shows the
+  "thinking" loader, press `Ctrl+C` to interrupt mid-turn (the agent stays
   alive at its prompt), then confirm the loader clears within ~5 s. PASS = no
   stuck spinner.

@@ -43,9 +43,8 @@ MCP resources use stable `surface_id` URIs:
 
 The bridge binary **ships inside Paneflow** - no build step. On every launch,
 Paneflow extracts it to a stable, non-versioned path
-(`~/.local/share/paneflow/bin/paneflow-mcp` on Linux,
-`~/Library/Application Support/paneflow/bin/paneflow-mcp` on macOS,
-`%LOCALAPPDATA%\paneflow\bin\paneflow-mcp.exe` on Windows) that survives updates.
+(`~/Library/Application Support/paneflow/bin/paneflow-mcp`) that survives
+updates.
 
 To register the bridge with every CLI agent installed on your machine:
 
@@ -57,8 +56,8 @@ It detects which agents are present (Claude Code, Codex, Gemini CLI, opencode),
 writes the `paneflow` entry into each one's config, and reports per agent:
 
 ```text
-claude-code: installed (/home/you/.local/share/paneflow/bin/paneflow-mcp)
-codex: installed (/home/you/.local/share/paneflow/bin/paneflow-mcp)
+claude-code: installed (/Users/you/Library/Application Support/paneflow/bin/paneflow-mcp)
+codex: installed (/Users/you/Library/Application Support/paneflow/bin/paneflow-mcp)
 gemini: skipped (not detected)
 opencode: skipped (not detected)
 ```

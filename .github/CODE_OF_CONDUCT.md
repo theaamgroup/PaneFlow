@@ -29,5 +29,6 @@ made to protect contributors and keep the project productive.
 
 ## Reporting
 
-If you see behavior that violates this code, email **arthur.jean@strivex.fr**
-with a short description and links or screenshots when available.
+If you see behavior that violates this code, raise it with the repository owner
+directly, or through the normal internal escalation path, with a short
+description and links or screenshots when available.

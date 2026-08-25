@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible Paneflow problem on Linux or macOS
+about: Report a reproducible Paneflow problem on macOS
 title: "[bug] "
 labels: ["bug"]
 assignees: []
@@ -8,13 +8,11 @@ assignees: []
 
 ## Environment
 
-- **OS + version**:
-- **Architecture**: x86_64 / aarch64 / other:
-- **Display server**: Wayland / X11 / macOS / other:
-- **Desktop environment or window manager**:
+- **macOS version** (`sw_vers -productVersion`):
+- **Chip**: Apple Silicon (M-series, state which) / other:
 - **Paneflow version** (`paneflow --version`):
-- **Install format**: .deb / .rpm / AppImage / tar.gz / DMG / built from source:
-- **Shell**: bash / zsh / fish / PowerShell / other:
+- **Install format**: DMG / built from source:
+- **Shell**: zsh / bash / fish / other:
 
 ## Steps to reproduce
 
