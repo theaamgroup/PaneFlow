@@ -16,7 +16,7 @@ session learned the hard way.
 | | |
 |---|---|
 | Local clone | `~/Github/paneflow` (directory still carries the upstream name) |
-| Branch | `mac-only-fork`, 21 commits ahead of the fork point |
+| Branch | `mac-only-fork`, 34 commits ahead of the fork point |
 | `origin` | `github.com/theaamgroup/panescli` (private) |
 | `upstream` | `github.com/arthjean/paneflow` (read-only, kept for cherry-picks) |
 | Fork point | v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a` |
@@ -50,7 +50,7 @@ the only workflow here, so this is the most likely source of confusion.
 | 1. File-level deletion | **Done.** Non-macOS packaging, the two upstream-publishing workflows, non-macOS docs and scripts and assets, and upstream's project-management cruft. |
 | Docs correctness pass | **Done.** 36 files, +2124/-2355. Turned out to be more a correctness fix than a platform strip. |
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
-| 2b. Windows unwind | **Not started.** 158 `target_os = "windows"` occurrences across 56 files. |
+| 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
 | 2c. Linux unwind | **Not started.** 78 `target_os = "linux"` occurrences, plus 24 `not(target_os = "macos")` branches that become dead. |
 | 2d. Rename to PanesCLI | **Not started.** 271 files mention `paneflow`. Must be one atomic pass across prose and code together. |
 | 3. Signed release | **Not started.** Needs a fresh minisign keypair, a macOS-only `release.yml`, and the six `APPLE_*` secrets. |
@@ -59,17 +59,36 @@ the only workflow here, so this is the most likely source of confusion.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1806 passed, 0 failed
+cargo test --workspace                       # 1790 passed, 0 failed
 cargo clippy --workspace --all-targets       # exit 0
+cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.8.2
+./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
+```
+
+**`cargo fmt --check` is now in the list and was not before.** It had been
+failing since c925ece (stage 2a) with 27 hunks across four terminal files, and
+nothing local caught it because the four-command block above did not include
+it. The release pipeline runs it inside every build-matrix leg, so a tag push
+would have burned a ~25 min run before failing. Fixed in 1b1af25.
+
+1806 -> 1790 is 16 tests removed, every one Windows/MSI. Verify a test-count
+change by DIFFING TEST NAMES, never by trusting the count:
+
+```bash
+grep -oE '^test [a-zA-Z0-9_:]+ \.\.\.' <log> | sed 's/^test //; s/ \.\.\.$//' | sort
 ```
 
 The only clippy warning is a pre-existing `block v0.1.6` future-incompat notice
 from a transitive dependency. It was present in the very first baseline build
 and is not ours.
 
-**Run all four before and after every pass.** Two real breakages this session
-were caught by the test run and by nothing else.
+**Run all five before and after every pass.** Two real breakages were caught by
+the test run and by nothing else, and a third (`unused_braces`, introduced when
+rustfmt collapsed a ghostty leftover onto one line) was caught only by reading
+clippy's WARNING COUNT rather than its exit code. Clippy exits 0 with warnings,
+so "clippy exit=0" is not evidence on its own -- compare the warning count to
+the one known `block v0.1.6` notice.
 
 ## The single most useful technique found
 
@@ -89,6 +108,27 @@ count read 278 without it and 338 with it.
 This does NOT apply to the Windows and Linux unwind, because `target_os` is a
 real cfg value and never warns. Those passes have no compiler-provided
 worklist, which makes them harder than Ghostty was, not easier.
+
+**The substitute, proven on 2b: a committed census script with a zero
+condition** (`scripts/win-census.sh`). Reuse it for 2c by swapping the
+predicate. Four things made it trustworthy, and the last two are the ones that
+actually caught bugs:
+
+1. A negative control BEFORE trusting it. A census returning 0 because its
+   regex is broken looks exactly like one returning 0 because the work is done.
+   Confirm it still flags known-present sites first.
+2. Comment-only lines counted separately. A doc comment explaining WHY an item
+   is `#[cfg(unix)]`-gated legitimately names Windows; counting those as code
+   made the zero condition unreachable.
+3. **A multi-line pass.** Every line-oriented grep is blind to
+   `cfg!(any(\n  target_os = "windows", ...))` because `cfg!(` and the arm sit
+   on different lines. One real site (`terminal/view.rs`) hid there.
+4. **A sweep over a DIFFERENT term space** - `.exe`, named pipes, `msiexec`,
+   AUMID, Win32, drive letters, target triples. Re-running the cfg grep only
+   reproduces its own blind spots. This is what found `window_chrome/backdrop.rs`:
+   an orphaned file whose `mod` declaration had been removed, leaving it
+   uncompiled and invisible to a cfg scan PRECISELY because it no longer had a
+   cfg gate.
 
 ## Method rules this session paid for
 
@@ -135,16 +175,30 @@ For these passes specifically:
 - `#[cfg(unix)]` appears 162 times and macOS needs nearly all of it. Only about
   6 attribute instances combine `unix` with `not(target_os = "macos")`. Do not
   confuse unix-shared with Linux-only. This is the single highest-risk
-  distinction in the remaining work.
+  distinction in the remaining work. **2b left 5 of the 6 standing**, having
+  stripped only their `windows` arm; 2c deletes them.
 - `#[cfg(not(windows))]` and `#[cfg(not(unix))]` blocks are fallback arms. The
   surviving twin must be **un-gated**, not deleted alongside them.
 - Predicates like `any(test, target_os = "windows")` keep code alive for tests
   on all platforms. Removing the Windows arm leaves `#[cfg(test)]`, which makes
   the item test-only rather than dead. That is a reduction, not a deletion.
-- `agents/notifications.rs` still has two dangling references to the deleted
-  `windows_app_identity` module at roughly lines 12 and 187. Both sit inside
-  `#[cfg(target_os = "windows")]` blocks so they do not compile on macOS, but
-  they must go with that pass.
+- **The inverted twin is the dangerous one.** `any(test, not(windows))` reduces
+  the OPPOSITE way: `not(windows)` is ALREADY TRUE on macOS, so the predicate
+  is a tautology and the item becomes UNCONDITIONAL. Turning it into
+  `cfg(test)` deletes live code from the release binary while every test still
+  passes. 2b hit two (`ipc.rs`, `ipc-client/lib.rs`). Expect more polarities in
+  2c: `any(not(windows), debug_assertions)` and `not(any(macos, windows))` both
+  turned up, and each reduces differently.
+- **`cfg!(...)` with the bang is a runtime expression, not a gate.** Nothing in
+  the build catches a wrong edit. 2b had 31 and they were deliberately withheld
+  from every parallel worker and done in one reviewed pass. The trap: three
+  sites read `cfg!(macos) || cfg!(windows)`, which is TRUE on macOS - deleting
+  that branch because it names windows would have silently disabled
+  case-insensitive path dedup in the diff dock.
+- ~~`agents/notifications.rs` dangling `windows_app_identity` references~~
+  **Resolved in 2b.** Note the correction: both sat INSIDE
+  `#[cfg(target_os = "windows")]` blocks, so the delete rule removed them as a
+  side effect. They did not need separate handling and did not survive to 2c.
 - `TerminalBackendConfig::Ghostty` is still a live variant in
   `crates/paneflow-config/src/schema.rs` and in `schemas/paneflow.schema.json`.
   It is now permanently dead. Decide its fate during the config-schema work, and
