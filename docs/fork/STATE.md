@@ -1,6 +1,6 @@
 # PanesCLI fork: current state
 
-Living handoff record. Updated 2026-08-25.
+Living handoff record. Updated 2026-08-25, after stage 2c landed.
 
 Companion documents:
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
@@ -16,7 +16,7 @@ session learned the hard way.
 | | |
 |---|---|
 | Local clone | `~/Github/paneflow` (directory still carries the upstream name) |
-| Branch | `mac-only-fork`, 34 commits ahead of the fork point |
+| Branch | `mac-only-fork`, 51 commits ahead of the fork point |
 | `origin` | `github.com/theaamgroup/panescli` (private) |
 | `upstream` | `github.com/arthjean/paneflow` (read-only, kept for cherry-picks) |
 | Fork point | v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a` |
@@ -51,8 +51,8 @@ the only workflow here, so this is the most likely source of confusion.
 | Docs correctness pass | **Done.** 36 files, +2124/-2355. Turned out to be more a correctness fix than a platform strip. |
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
-| 2c. Linux unwind | **Not started. Planned:** `docs/fork/2026-08-25-stage-2c-linux-unwind-plan.md`. 78 `target_os = "linux"` sites / 20 files, plus 26 `not(macos)` and 31 `not(unix)`, all folded in. Includes the full updater collapse to DMG-only. |
-| Config-schema pass | **Not started.** Between 2c and 2d. `TerminalBackendConfig::Ghostty` and the `windows_*_material` no-op fields. schema.rs + schemas/paneflow.schema.json + docs/user/configuration/schema.md move together (drift test). |
+| 2c. Linux unwind | **Done.** 13 commits, 63 files, +468/-8814. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session) then **eight delegated grok batches** covering all 85 remaining sites. Also took the last Windows residue: the WSL launcher, `cmd.exe` support and `.exe`/backslash path mechanics, which were UNGATED and compiling into the macOS binary. |
+| Config-schema pass | **Not started. Next.** `TerminalBackendConfig::Ghostty` (`schema.rs:568`), `windows_terminal_material` (`:57`), `windows_chrome_material` (`:60`), `windows_terminal_material_enabled` (`:310`), the `pane.rs` material call sites and their two `terminal_material_scopes_*` tests, and the loader's `set_field!` material keys. 2c deliberately left all 15 of these standing. schema.rs + schemas/paneflow.schema.json + docs/user/configuration/schema.md move together (drift test). |
 | 2d. Rename to PanesCLI | **Not started.** 273 files mention `paneflow` (202 `.rs`, 40 `.md`, 13 `.toml`). Must be one atomic pass across prose and code together. |
 | 3. Signed release | **Not started.** Needs a fresh minisign keypair, a macOS-only `release.yml`, and the six `APPLE_*` secrets. |
 
@@ -60,12 +60,20 @@ the only workflow here, so this is the most likely source of confusion.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1790 passed, 0 failed
-cargo clippy --workspace --all-targets       # exit 0
+cargo test --workspace                       # 1739 passed, 0 failed, 2 ignored
+cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.8.2
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
+./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
+                                             # negative control: cfg(unix) 152, cfg(macos) 77
 ```
+
+The census negative control is not decoration. Read it every time: a census
+printing 0 because its regex broke looks exactly like one printing 0 because
+the work is done, and that has already happened twice in this project (once
+when the regex matched the `update/linux/` PATH, once when it could not see
+`!cfg!`).
 
 **`cargo fmt --check` is now in the list and was not before.** It had been
 failing since c925ece (stage 2a) with 27 hunks across four terminal files, and
@@ -73,7 +81,9 @@ nothing local caught it because the four-command block above did not include
 it. The release pipeline runs it inside every build-matrix leg, so a tag push
 would have burned a ~25 min run before failing. Fixed in 1b1af25.
 
-1806 -> 1790 is 16 tests removed, every one Windows/MSI. Verify a test-count
+1806 -> 1790 -> 1739. The 2b step removed 16 Windows/MSI tests; 2c removed 51
+more (45 in the four orchestrator increments, 6 in the delegated batches) and
+renamed 2. Every single one was accounted for BY NAME. Verify a test-count
 change by DIFFING TEST NAMES, never by trusting the count:
 
 ```bash
@@ -124,6 +134,11 @@ actually caught bugs:
 3. **A multi-line pass.** Every line-oriented grep is blind to
    `cfg!(any(\n  target_os = "windows", ...))` because `cfg!(` and the arm sit
    on different lines. One real site (`terminal/view.rs`) hid there.
+The 2c census ended at `STAGE 2c ZERO-CONDITION: 0` with all six components
+zero (attribute gates, runtime `cfg!()`, Cargo target tables, target-triple
+string checks, multi-line cfg expressions, negated `cfg!`). Adding a component
+is cheap and is how the tool stays honest as new spellings turn up.
+
 4. **A sweep over a DIFFERENT term space** - `.exe`, named pipes, `msiexec`,
    AUMID, Win32, drive letters, target triples. Re-running the cfg grep only
    reproduces its own blind spots. This is what found `window_chrome/backdrop.rs`:
@@ -155,8 +170,30 @@ actually caught bugs:
 5. **A green `cargo build` is not a green tree.** Stage 1 built clean and failed
    `cargo test`, because a `#[cfg(test)]` block did `include_str!` on a deleted
    WiX manifest and its `mod` declaration was never cfg-gated.
+6. **A measurement that cannot see a whole syntactic form is not a
+   measurement.** `scripts/linux-census.sh` matched the `not(target_os =
+   "macos")` predicate but not operator negation `!cfg!(target_os = "macos")`.
+   Two live sites in `keys.rs` were invisible to it, so "zero-condition reached
+   0" would have been claimed over them. The fix is committed with its own
+   before/after proof: the new `negated cfg!(target_os)` component read **2**
+   on the tree that contained both sites and **0** after they were removed. A
+   new detector that reads 0 on its first run has not been tested - it has been
+   assumed.
+7. **Before acting on a documented claim, check whether two gates are
+   complementary definitions of the SAME item.** `CLAUDE.md` said to un-gate
+   `dmg.rs`'s `#[cfg(all(test, not(macos)))]` items rather than delete them.
+   They were the second half of a pair with `#[cfg(any(not(test), macos))]`, so
+   un-gating produced `error[E0428]`, a duplicate definition. Three documented
+   claims in this project have now been falsified by executing something; the
+   pattern is always the same, someone reasoned about code they had read.
+8. **Line numbers in an inventory go stale the moment you commit.** 76 of 2c's
+   85 sites still matched `worklist.tsv` exactly, but 9 had drifted - the four
+   files earlier increments had touched, plus three `Cargo.toml` tables the
+   inventory never covered. Re-derive `file:line` from the live tree before
+   writing a brief, and have the agent stop and report if a line does not say
+   what the brief claims.
 
-## Notes for the Windows and Linux passes
+## Notes from the Windows and Linux passes (2b, 2c - both DONE)
 
 The Ghostty pass used a scripted cfg pruner. It was **wrong four times**, each
 caught by the compiler, and each a real Rust syntax subtlety worth knowing
@@ -171,13 +208,26 @@ before writing another one:
 4. `Enum::Variant { a, b } => {}` has a **braced pattern**, which is not the
    match arm's body.
 
-For these passes specifically:
+What those passes proved, kept because the next platform-shaped pass will
+need it:
 
-- `#[cfg(unix)]` appears 162 times and macOS needs nearly all of it. Only about
-  6 attribute instances combine `unix` with `not(target_os = "macos")`. Do not
-  confuse unix-shared with Linux-only. This is the single highest-risk
-  distinction in the remaining work. **2b left 5 of the 6 standing**, having
-  stripped only their `windows` arm; 2c deletes them.
+- `#[cfg(unix)]` now appears **152 times** and macOS needs nearly all of it.
+  `#[cfg(target_os = "macos")]` appears **77 times**. Both are live arms; both
+  stay. This was the highest-risk distinction in 2c and no batch got it wrong -
+  because every brief opened with the same four lines, verbatim:
+
+  > `#[cfg(unix)]` is TRUE on macOS. macOS IS a unix. Never remove one.
+  > `unix` is not `linux`. Only `all(unix, not(target_os = "macos"))` is Linux.
+
+  The `all(unix, not(macos))` sites 2b left standing are gone. What remains
+  spelled that way is `all(unix, not(test))` in `terminal/pty_session.rs`,
+  which is a test-isolation gate, not a platform gate.
+- **A single-arm survivor should be hoisted, not left gated.** When the other
+  platform's arm is deleted and one `#[cfg]` block is all that is left inside a
+  function, rustfmt collapses it and clippy fires `unused_braces` - or, if the
+  block was `let x = ...; x`, `let_and_return`. Eight such hoists landed in 2c
+  and each dropped the `cfg(macos)` count by one; that is why the negative
+  control moved 92 -> 77 and every step of it is accounted for.
 - `#[cfg(not(windows))]` and `#[cfg(not(unix))]` blocks are fallback arms. The
   surviving twin must be **un-gated**, not deleted alongside them.
 - Predicates like `any(test, target_os = "windows")` keep code alive for tests
@@ -201,9 +251,12 @@ For these passes specifically:
   `#[cfg(target_os = "windows")]` blocks, so the delete rule removed them as a
   side effect. They did not need separate handling and did not survive to 2c.
 - `TerminalBackendConfig::Ghostty` is still a live variant in
-  `crates/paneflow-config/src/schema.rs` and in `schemas/paneflow.schema.json`.
-  It is now permanently dead. Decide its fate during the config-schema work, and
-  note that a drift test asserts every schema key appears in
+  `crates/paneflow-config/src/schema.rs:568` and in `schemas/paneflow.schema.json`.
+  It is permanently dead: 2c reduced `terminal/view.rs`'s
+  `auto_selects_ghostty_for_target()` to a literal `false`, so `auto` never
+  selects it and an explicit `ghostty` logs the unavailable warning and runs
+  Alacritty. Decide its fate during the config-schema work, and note that a
+  drift test asserts every schema key appears in
   `docs/user/configuration/schema.md`.
 - The binary-size budget at `src-app/build.rs:61` and in `run_tests.yml` is
   baselined on Linux ELF. It needs a Mach-O re-baseline, not deletion.
@@ -223,8 +276,32 @@ app and it does not work reliably, which is recorded as known defect 1 in the
 design doc. Use the `grok-subagents` skill, or headless agent processes as
 background jobs with one git worktree per task.
 
-Note what does and does not fan out here. The docs pass parallelised well
-because the files were disjoint. The Rust passes do not: the enum removals and
-feature removals are whole-workspace edits, the same files carry Windows and
-Linux and test concerns at once, and every worker would need its own multi-gigabyte
-`target/` to verify anything.
+**This section used to say the Rust passes do not fan out. 2c falsified that.**
+All eight of its remaining batches ran on headless grok in isolated worktrees,
+and every one came back green on the first attempt with no re-brief. What
+changed was not the code - it was that the briefs stopped saying "find the
+Linux code" and started carrying **the exact site list**: `file:line`, the cfg
+expression as written, the action, and the reduction. That came from a
+read-only inventory phase (nine grok shards, 325 classified sites) run BEFORE
+any edit.
+
+So the real rule is: **fan-out works when the worker does not have to discover
+anything.** A batch that must find its own targets in a codebase this
+interleaved will delete a `cfg(unix)` arm sooner or later.
+
+The mechanics that made it cheap:
+
+- One `git worktree` per batch, seeded with `cp -c -R target <wt>/target`. On
+  APFS that is a clone: 27 seconds for three worktrees of a 19 GB target dir,
+  ~0 bytes on disk, and a warm incremental rebuild instead of a 15-25 minute
+  cold GPUI build.
+- Worktrees are reusable between waves: `git -C <wt> reset --hard` then
+  `git -C <wt> checkout -B <branch> mac-only-fork`.
+- Agents never touch git. They leave edits unstaged; the orchestrator collects
+  `git -C <wt> diff`, applies it to the main worktree, re-runs all five gates
+  itself, and writes the commit. Agent "green" claims are never the evidence -
+  in 2b one batch reported green from a clippy run that predated its own final
+  edits.
+- Three concurrent batches was the working cap on this machine. Disjoint file
+  sets are what make that safe: two batches editing the same file collide at
+  `git apply` time even when their edits are six lines apart.

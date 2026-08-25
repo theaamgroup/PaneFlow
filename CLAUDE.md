@@ -15,7 +15,7 @@ Run all four, before and after any pass, and quote the actual output:
 
 ```bash
 cargo build                                # exit 0
-cargo test --workspace                     # 1806 passed, 0 failed
+cargo test --workspace                     # 1739 passed, 0 failed
 cargo clippy --workspace --all-targets     # exit 0, one pre-existing block v0.1.6 notice
 ./target/debug/paneflow --version
 ```
@@ -196,7 +196,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
-Ghostty leftovers (`terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, `crates/paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}`, `fuzz/`) are slated for deletion in this fork. They are unreachable on macOS. See the fork design doc for the paired-edit list, since deleting them piecemeal breaks the build (Cargo resolves path dependencies for all targets).
+The Ghostty backend is gone: `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/` were all deleted in stage 2a, and stage 2c reduced `terminal/view.rs`'s `auto_selects_ghostty_for_target()` to a literal `false`. What survives is config-schema surface only - `TerminalBackendConfig::Ghostty` in `crates/paneflow-config/src/schema.rs:568` and its `"ghostty"` string parse - which the config-schema stage owns. Setting `terminal.backend` to `ghostty` today logs the unavailable-backend warning and runs Alacritty.
 
 ### Thread model
 
@@ -284,7 +284,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 85 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
 
-**`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs:425`) adds `Cmd+C`, `Cmd+V` (Terminal) and `Cmd+Q` (quit) on top.
+**`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs:424`) adds `Cmd+C`, `Cmd+V` (Terminal) and `Cmd+Q` (quit) on top.
 
 | Key | Action | Context |
 |-----|--------|---------|
@@ -338,7 +338,7 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 - **Themes**: **5 bundled** (`theme/builtin.rs:7-13`): `One Dark` (default), `PaneFlow Light`, `Vercel`, `Claude`, `Cursor`. Names are matched case-insensitively. Hot-reload is notify-driven with a 500 ms mtime-poll fallback (`theme/watcher.rs:37`).
 - **`window_decorations`**: read at startup only, requires restart. `"client"` = CSD (default), `"server"` = SSD. An invalid value logs a warning and falls back to `"client"`.
 - **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings here.
-- **`option_as_meta`**: macOS-relevant, and **defaults to `false` on macOS specifically**: `keys::default_option_as_meta()` is literally `!cfg!(target_os = "macos")` (`keys.rs:83-85`). So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior.
+- **`option_as_meta`**: **defaults to `false`**. `keys::default_option_as_meta()` returns the literal `false` (`keys.rs:76-78`); it used to compute `!cfg!(target_os = "macos")`, which was a runtime expression that is constant in a macOS-only fork. So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior. The published JSON Schema and `docs/user/configuration/schema.md` both declare `false` too - they moved together in `6a7b14d` and a drift test reads the doc off disk.
 - **`macos_chrome_material`**: opts the sidebar and title bar into a native AppKit material (`window_chrome/macos_backdrop.rs`). `windows_terminal_material` and `windows_chrome_material` still exist in the public schema; the loader accepts them as ignored no-ops rather than breaking existing config files.
 - **`ConfigWatcher`** (notify crate, 300 ms debounce with a 500 ms max-wait ceiling so a continuous event stream cannot starve the reload): fully wired, a background thread detects changes and deposits new config for the GPUI main thread to apply.
 - `MAX_CONFIG_SIZE_BYTES` is 1 MiB (`limits.rs`); the app's own writer never approaches it.
@@ -376,12 +376,12 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **`SplitDirection::Horizontal`** means a horizontal divider bar (panes stacked top/bottom), NOT side-by-side. Counterintuitive but consistent.
 - **`alacritty_terminal` is upstream** (crates.io `0.26`), migrated from Zed's fork. It still uses `ZedListener` and `FairMutex` from the GPUI integration layer, and its imports are confined to an allowlist enforced by the `alacritty_confined_to_backend_allowlist` test (`src-app/src/terminal/types.rs:1002`). Separately, `src-app/tests/dependency_source_policy.rs` asserts every git source in `Cargo.lock` is pinned to an immutable revision, so a floating branch cannot sneak in.
 - **`dirs` is a single workspace dependency at version 6** (`Cargo.toml` `[workspace.dependencies]`; both `src-app/Cargo.toml:148` and `crates/paneflow-config/Cargo.toml:14` use `dirs.workspace = true`). An older note about a 5.0/6 split between the two crates is stale.
-- **Config `default_shell` is wired**: `resolve_default_shell` (`terminal/shell.rs:263`) validates the configured path is present and executable, warns and falls back if not, then uses the `$SHELL` → `/bin/sh` chain.
+- **Config `default_shell` is wired**: `resolve_default_shell` (`terminal/shell.rs:214`) validates the configured path is present and executable, warns and falls back if not, then uses the `$SHELL` → `/bin/sh` chain.
 - **The `_io_thread` handle is discarded** (`terminal/pty_session.rs:2677`). PTY I/O threads run detached; shutdown is via `Msg::Shutdown` in `Drop`.
 - **A GUI-launched app inherits launchd's minimal PATH, not the user's.** `login_shell_env.rs` runs the user's login shell once and adopts **only its `PATH`**, deliberately importing nothing else (a login profile that re-exports session variables would corrupt them). Without this, `/opt/homebrew/bin` is missing, terminals cannot find the user's tools, and agent-CLI detection (`which::which(...)`) comes up empty. Do not "simplify" it into a full env import.
 - **Every `US-NNN` comment in the Rust source is a dangling breadcrumb.** They point at PRD files that lived under `tasks/`, were gitignored upstream, never committed, and `tasks/` is now deleted. Same for every `prd-*.md` and `EP-NNN` reference in a comment. Roughly 2,200 such comments across ~190 files: treat them as historical noise, do not go looking for the document, and do not add new ones.
 - **Tests + CI exist**: run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`. UI changes still need manual verification.
-- **Two macOS test modules are inverted-gated.** `update/macos/dmg.rs` has `#[cfg(all(test, not(target_os = "macos")))]` modules, so they only ever ran on the Linux CI legs. Un-gate them rather than deleting them.
+- **A note that used to live here was wrong, and the correction is worth keeping.** It said `update/macos/dmg.rs`'s two `#[cfg(all(test, not(target_os = "macos")))]` items should be un-gated rather than deleted. They could not be: they were the second half of a complementary pair - `#[cfg(any(not(test), target_os = "macos"))] fn copy_bundle_to_staging` (the real `cp -R`) and `#[cfg(all(test, not(target_os = "macos")))] fn copy_bundle_to_staging` (a test-host shim) - so un-gating the second one is a duplicate definition, `error[E0428]`. Stage 2c deleted the shim and `copy_tree_for_test` and reduced the real one to unconditional (`aff3f7d`). Before acting on a claim like that, check whether the two gates are complementary definitions of ONE item.
 - **The binary-size budget** (`src-app/build.rs`, `run_tests.yml`) is baselined on a Linux ELF. It needs a Mach-O re-baseline, not deletion.
 - **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
 - **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
@@ -409,10 +409,10 @@ Atomic commits per logical change. Branch naming: `feat/description`. Do not add
 This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`.
 
 - Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, no Ghostty backend.
-- **`#[cfg(unix)]` is not Linux-only.** It appears over 160 times and macOS needs nearly all of it. Only 6 attribute instances combine `unix` with `not(target_os = "macos")`. Do not prune unix-shared code while removing Linux code.
-- `#[cfg(not(unix))]` and `#[cfg(not(windows))]` blocks are fallback arms. When you remove one, un-gate its surviving twin rather than deleting both.
-- `#[cfg(any(test, target_os = "windows"))]` keeps items alive for tests on every platform. Dropping the Windows arm leaves `#[cfg(test)]`, which makes the item test-only, not dead.
+- **`#[cfg(unix)]` is not Linux-only.** It appears **152 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears 77 times. Both are live arms and both stay.
+- **After stage 2c those two are the ONLY platform predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`, no `[target.'cfg(...)']` table in any `Cargo.toml`. `./scripts/linux-census.sh` enforces this with a zero-condition; it prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done.
+- `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.
 - Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
-- `update/mod.rs:39` and `:45` declare `pub mod linux;` and `pub mod windows;` unconditionally, so `linux/appimage.rs` and `linux/targz.rs` compile on macOS today. Only `linux/system_package.rs` and `update/migrations.rs` are gated at declaration. The tarball install method is genuinely reachable on macOS (`$HOME/.local/paneflow.app/`); the AppImage one is not.
+- **The updater is DMG-only.** `update/mod.rs` declares `checker`, `error`, `install_method`, `macos`, `signature` and nothing else: `update/linux/`, `update/windows/` and `update/migrations.rs` are deleted, and `InstallMethod` / `AssetFormat` are collapsed to the macOS-reachable set. An older note here claimed `TarGz` was "genuinely reachable on macOS" via `$HOME/.local/paneflow.app/`; that was decided against and TarGz is gone. `ExternallyManaged` stays - it is driven by `PANEFLOW_UPDATE_EXPLANATION`, not by platform.
 
 The full removal plan, with the paired edits that have to land together, is in `docs/fork/2026-08-25-mac-only-fork-design.md`.
