@@ -68,7 +68,7 @@ pub struct PaneScan {
 /// platforms). Checked at dequeue time, so one last fanout batch can
 /// overshoot it by up to one process's child count - the bound is
 /// "≈512", which is all the memory guarantee needs.
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PIDS_PER_ROOT: usize = 512;
 
 // ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ const MAX_PIDS_PER_ROOT: usize = 512;
 /// not trigger (parity with the historical `AI_PROCESS_NAMES` contract).
 ///
 /// Consumed by the platform `scan_panes` paths and the unit tests.
-#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn agents_in_bfs_order<'a>(
     comms_in_bfs_order: impl Iterator<Item = &'a str>,
     agent_binaries: &[&str],
@@ -148,7 +148,7 @@ fn parse_listen_line(line: &str) -> Option<(u16, u64)> {
 /// is deliberately frontend-only: a hit arms a CLICKABLE sidebar chip, so
 /// precision beats recall here - backend labels keep flowing from the
 /// PTY-text enrichment path, where a mislabel is cosmetic.
-#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 const FRONTEND_ARGV: &[(&str, &str)] = &[
     ("vite", "Vite"),
     ("next", "Next.js"),
@@ -169,7 +169,7 @@ const FRONTEND_ARGV: &[(&str, &str)] = &[
 /// process title to `next-server (vX.Y.Z)` - a single argv token, matched by
 /// prefix. Only the leading args are inspected; launchers always carry the
 /// tool name up front.
-#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn classify_frontend_argv<'a>(args: impl Iterator<Item = &'a str>) -> Option<&'static str> {
     for arg in args.take(8) {
         if arg
@@ -194,7 +194,7 @@ fn classify_frontend_argv<'a>(args: impl Iterator<Item = &'a str>) -> Option<&'s
     None
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 fn normalize_process_basename(name: &str) -> &str {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     for suffix in [".exe", ".cmd", ".bat", ".ps1"] {
@@ -808,448 +808,13 @@ pub fn scan_panes(
 }
 
 // ---------------------------------------------------------------------------
-// Windows
-// ---------------------------------------------------------------------------
-
-#[cfg(windows)]
-#[derive(Clone, Debug)]
-struct WindowsProcessEntry {
-    pid: u32,
-    parent_pid: u32,
-    exe: String,
-}
-
-#[cfg(windows)]
-fn windows_process_entries() -> Vec<WindowsProcessEntry> {
-    use std::mem;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-        TH32CS_SNAPPROCESS,
-    };
-
-    // SAFETY: Win32 call; a successful snapshot handle is closed below.
-    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snap == INVALID_HANDLE_VALUE {
-        return Vec::new();
-    }
-
-    let mut entries = Vec::with_capacity(256);
-    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
-    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
-    // SAFETY: `snap` is valid, and `entry` has the documented `dwSize`.
-    if unsafe { Process32FirstW(snap, &mut entry) } != 0 {
-        loop {
-            let len = entry
-                .szExeFile
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(entry.szExeFile.len());
-            let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
-            entries.push(WindowsProcessEntry {
-                pid: entry.th32ProcessID,
-                parent_pid: entry.th32ParentProcessID,
-                exe,
-            });
-            // SAFETY: same invariants as Process32FirstW; stops at exhaustion.
-            if unsafe { Process32NextW(snap, &mut entry) } == 0 {
-                break;
-            }
-        }
-    }
-    // SAFETY: `snap` is a valid handle returned by CreateToolhelp32Snapshot.
-    unsafe { CloseHandle(snap) };
-    entries
-}
-
-#[cfg(windows)]
-fn bfs_descendants_windows(
-    root_pid: u32,
-    entries: &[WindowsProcessEntry],
-    visited: &mut std::collections::HashSet<u32>,
-) -> Vec<u32> {
-    let mut children_of: std::collections::HashMap<u32, Vec<u32>> =
-        std::collections::HashMap::new();
-    for entry in entries {
-        children_of
-            .entry(entry.parent_pid)
-            .or_default()
-            .push(entry.pid);
-    }
-
-    let mut result = Vec::new();
-    if !visited.insert(root_pid) {
-        return result;
-    }
-    result.push(root_pid);
-    let mut queue = std::collections::VecDeque::from([root_pid]);
-    while let Some(pid) = queue.pop_front() {
-        if result.len() >= MAX_PIDS_PER_ROOT {
-            break;
-        }
-        if let Some(children) = children_of.get(&pid) {
-            for &child in children {
-                if visited.insert(child) {
-                    result.push(child);
-                    queue.push_back(child);
-                }
-            }
-        }
-    }
-    result
-}
-
-#[cfg(windows)]
-fn windows_representative_command(
-    root_pid: u32,
-    entries: &[WindowsProcessEntry],
-    exe_by_pid: &std::collections::HashMap<u32, String>,
-) -> Option<String> {
-    let mut current = root_pid;
-    let mut visited = std::collections::HashSet::new();
-    while visited.insert(current) {
-        match entries
-            .iter()
-            .filter(|entry| entry.parent_pid == current)
-            .max_by_key(|entry| entry.pid)
-        {
-            Some(child) => current = child.pid,
-            None => break,
-        }
-    }
-    exe_by_pid
-        .get(&current)
-        .map(|exe| normalize_process_basename(exe).to_string())
-        .filter(|name| !name.is_empty())
-}
-
-#[cfg(windows)]
-fn windows_port_from_network_order(raw: u32) -> u16 {
-    u16::from_be(raw as u16)
-}
-
-#[cfg(windows)]
-fn windows_listen_ports_by_pid() -> std::collections::HashMap<u32, Vec<u16>> {
-    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
-        MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
-    };
-    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
-
-    fn collect_table<TTable, TRow>(
-        family: u32,
-        row_slice: unsafe fn(*const TTable) -> Vec<TRow>,
-        row_pid_port: fn(&TRow) -> (u32, u16),
-        out: &mut std::collections::HashMap<u32, Vec<u16>>,
-    ) {
-        let mut size = 0u32;
-        // SAFETY: first call intentionally passes a null buffer so the API
-        // fills `size` with the required byte count.
-        let rc = unsafe {
-            GetExtendedTcpTable(
-                std::ptr::null_mut(),
-                &mut size,
-                0,
-                family,
-                TCP_TABLE_OWNER_PID_LISTENER,
-                0,
-            )
-        };
-        if rc != ERROR_INSUFFICIENT_BUFFER || size == 0 {
-            return;
-        }
-
-        let word_count = (size as usize).div_ceil(std::mem::size_of::<usize>());
-        let mut buf = vec![0usize; word_count];
-        // SAFETY: `buf` has at least `size` bytes with pointer-size alignment;
-        // the API writes a table selected by `family` + table class.
-        let rc = unsafe {
-            GetExtendedTcpTable(
-                buf.as_mut_ptr().cast(),
-                &mut size,
-                0,
-                family,
-                TCP_TABLE_OWNER_PID_LISTENER,
-                0,
-            )
-        };
-        if rc != NO_ERROR {
-            return;
-        }
-
-        // SAFETY: the successful call initialized the buffer as `TTable`.
-        for row in unsafe { row_slice(buf.as_ptr().cast::<TTable>()) } {
-            let (pid, port) = row_pid_port(&row);
-            if pid != 0 && port != 0 {
-                out.entry(pid).or_default().push(port);
-            }
-        }
-    }
-
-    unsafe fn ipv4_rows(table: *const MIB_TCPTABLE_OWNER_PID) -> Vec<MIB_TCPROW_OWNER_PID> {
-        let count = unsafe { (*table).dwNumEntries as usize };
-        let first = unsafe { (*table).table.as_ptr() };
-        unsafe { std::slice::from_raw_parts(first, count) }.to_vec()
-    }
-
-    unsafe fn ipv6_rows(table: *const MIB_TCP6TABLE_OWNER_PID) -> Vec<MIB_TCP6ROW_OWNER_PID> {
-        let count = unsafe { (*table).dwNumEntries as usize };
-        let first = unsafe { (*table).table.as_ptr() };
-        unsafe { std::slice::from_raw_parts(first, count) }.to_vec()
-    }
-
-    let mut by_pid: std::collections::HashMap<u32, Vec<u16>> = std::collections::HashMap::new();
-    collect_table(
-        AF_INET as u32,
-        ipv4_rows,
-        |row| {
-            (
-                row.dwOwningPid,
-                windows_port_from_network_order(row.dwLocalPort),
-            )
-        },
-        &mut by_pid,
-    );
-    collect_table(
-        AF_INET6 as u32,
-        ipv6_rows,
-        |row| {
-            (
-                row.dwOwningPid,
-                windows_port_from_network_order(row.dwLocalPort),
-            )
-        },
-        &mut by_pid,
-    );
-    for ports in by_pid.values_mut() {
-        ports.sort_unstable();
-        ports.dedup();
-    }
-    by_pid
-}
-
-#[cfg(windows)]
-fn argv_of_windows(pid: u32) -> Vec<String> {
-    windows_command_line(pid)
-        .map(|line| windows_command_line_to_argv(&line))
-        .unwrap_or_default()
-}
-
-#[cfg(windows)]
-fn windows_command_line(pid: u32) -> Option<String> {
-    use std::mem;
-    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
-    use windows_sys::Win32::Foundation::{CloseHandle, UNICODE_STRING};
-    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PEB, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_VM_READ, RTL_USER_PROCESS_PARAMETERS,
-    };
-
-    const MAX_COMMAND_LINE_BYTES: usize = 64 * 1024;
-
-    if pid == 0 {
-        return None;
-    }
-
-    unsafe fn read_remote<T: Copy>(
-        handle: windows_sys::Win32::Foundation::HANDLE,
-        ptr: *const T,
-    ) -> Option<T> {
-        let mut value: T = unsafe { mem::zeroed() };
-        let mut read = 0usize;
-        let ok = unsafe {
-            ReadProcessMemory(
-                handle,
-                ptr.cast(),
-                (&mut value as *mut T).cast(),
-                mem::size_of::<T>(),
-                &mut read,
-            )
-        };
-        (ok != 0 && read == mem::size_of::<T>()).then_some(value)
-    }
-
-    unsafe fn read_unicode_string(
-        handle: windows_sys::Win32::Foundation::HANDLE,
-        value: UNICODE_STRING,
-    ) -> Option<String> {
-        let len = value.Length as usize;
-        if len == 0
-            || len > MAX_COMMAND_LINE_BYTES
-            || !len.is_multiple_of(2)
-            || value.Buffer.is_null()
-        {
-            return None;
-        }
-        let mut bytes = vec![0u16; len / 2];
-        let mut read = 0usize;
-        let ok = unsafe {
-            ReadProcessMemory(
-                handle,
-                value.Buffer.cast(),
-                bytes.as_mut_ptr().cast(),
-                len,
-                &mut read,
-            )
-        };
-        (ok != 0 && read == len).then(|| String::from_utf16_lossy(&bytes))
-    }
-
-    // SAFETY: the handle is closed before returning on every path.
-    let handle =
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-
-    let result = (|| {
-        let mut info: PROCESS_BASIC_INFORMATION = unsafe { mem::zeroed() };
-        let status = unsafe {
-            NtQueryInformationProcess(
-                handle,
-                ProcessBasicInformation,
-                (&mut info as *mut PROCESS_BASIC_INFORMATION).cast(),
-                mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
-                std::ptr::null_mut(),
-            )
-        };
-        if status < 0 || info.PebBaseAddress.is_null() {
-            return None;
-        }
-        let peb: PEB = unsafe { read_remote(handle, info.PebBaseAddress.cast())? };
-        if peb.ProcessParameters.is_null() {
-            return None;
-        }
-        let params: RTL_USER_PROCESS_PARAMETERS =
-            unsafe { read_remote(handle, peb.ProcessParameters.cast())? };
-        unsafe { read_unicode_string(handle, params.CommandLine) }
-    })();
-
-    // SAFETY: `handle` is owned by this function.
-    unsafe { CloseHandle(handle) };
-    result
-}
-
-#[cfg(windows)]
-fn windows_command_line_to_argv(command_line: &str) -> Vec<String> {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
-
-    let mut wide: Vec<u16> = command_line
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut argc = 0i32;
-    // SAFETY: `wide` is NUL-terminated and lives until CommandLineToArgvW
-    // returns. The returned allocation is released with LocalFree.
-    let argv = unsafe { CommandLineToArgvW(wide.as_mut_ptr(), &mut argc) };
-    if argv.is_null() || argc <= 0 {
-        return command_line
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-    }
-
-    let mut args = Vec::with_capacity(argc as usize);
-    // SAFETY: CommandLineToArgvW returns `argc` pointers on success.
-    let slice = unsafe { std::slice::from_raw_parts(argv, argc as usize) };
-    for &ptr in slice {
-        if ptr.is_null() {
-            continue;
-        }
-        let mut len = 0usize;
-        // SAFETY: each pointer is a NUL-terminated UTF-16 string owned by the
-        // CommandLineToArgvW result allocation.
-        unsafe {
-            while *ptr.add(len) != 0 {
-                len += 1;
-            }
-            args.push(String::from_utf16_lossy(std::slice::from_raw_parts(
-                ptr, len,
-            )));
-        }
-    }
-    // SAFETY: `argv` was allocated by CommandLineToArgvW.
-    unsafe { LocalFree(argv.cast()) };
-    args
-}
-
-#[cfg(windows)]
-pub fn scan_panes(
-    roots: &[(u64, u32)],
-    agent_binaries: &[&str],
-) -> std::collections::HashMap<u64, PaneScan> {
-    let mut results: std::collections::HashMap<u64, PaneScan> = std::collections::HashMap::new();
-    if roots.is_empty() {
-        return results;
-    }
-
-    let entries = windows_process_entries();
-    let exe_by_pid: std::collections::HashMap<u32, String> = entries
-        .iter()
-        .map(|entry| (entry.pid, entry.exe.clone()))
-        .collect();
-    let listen_ports = windows_listen_ports_by_pid();
-
-    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for &(key, root_pid) in roots {
-        if root_pid == 0 {
-            continue;
-        }
-        let pids = bfs_descendants_windows(root_pid, &entries, &mut visited);
-        let comms: Vec<String> = if agent_binaries.is_empty() {
-            Vec::new()
-        } else {
-            pids.iter()
-                .filter_map(|pid| exe_by_pid.get(pid))
-                .map(|exe| normalize_process_basename(exe).to_string())
-                .collect()
-        };
-        let agents = agents_in_bfs_order(comms.iter().map(String::as_str), agent_binaries);
-
-        let mut ports = Vec::new();
-        for pid in pids {
-            let Some(pid_ports) = listen_ports.get(&pid) else {
-                continue;
-            };
-            let argv = argv_of_windows(pid);
-            let frontend = classify_frontend_argv(argv.iter().map(String::as_str)).or_else(|| {
-                exe_by_pid.get(&pid).and_then(|exe| {
-                    classify_frontend_argv([normalize_process_basename(exe)].into_iter())
-                })
-            });
-            ports.extend(
-                pid_ports
-                    .iter()
-                    .copied()
-                    .map(|port| PortEntry { port, frontend }),
-            );
-        }
-        ports.sort_by_key(|e| (e.port, e.frontend.is_none()));
-        ports.dedup_by_key(|e| e.port);
-        results.insert(
-            key,
-            PaneScan {
-                ports,
-                agents,
-                foreground_command: windows_representative_command(root_pid, &entries, &exe_by_pid),
-            },
-        );
-    }
-
-    results
-}
-
-// ---------------------------------------------------------------------------
 // Stub (BSDs / other targets)
 // ---------------------------------------------------------------------------
 
 /// Stub for unsupported platforms. An empty map means every tab renders without
 /// badges or pills and workspace aggregates stay empty - degradation without
 /// error.
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn scan_panes(
     _roots: &[(u64, u32)],
     _agent_binaries: &[&str],
@@ -1359,25 +924,7 @@ mod tests {
         assert_eq!(normalize_process_basename("script.ps1"), "script");
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn windows_port_from_network_order_decodes_low_word() {
-        assert_eq!(windows_port_from_network_order(0x901F), 8080);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_command_line_argv_classifies_node_frontend() {
-        let args = windows_command_line_to_argv(
-            r#""C:\Program Files\nodejs\node.exe" "C:\repo\node_modules\.bin\vite" --host"#,
-        );
-        assert_eq!(
-            classify_frontend_argv(args.iter().map(String::as_str)),
-            Some("Vite")
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn scan_panes_detects_current_process_listener() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1395,7 +942,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn scan_panes_ignores_pid_zero_roots() {
         let scan = scan_panes(&[(1, 0)], &[]);

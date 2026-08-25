@@ -27,9 +27,9 @@ pub(crate) const PANE_CONTENT_INSET: f32 = 3.;
 /// Windows Mica and macOS Sidebar material already supply theme-aware tints.
 /// The card remains fully transparent there so the material stays perceptible;
 /// its border still defines the inset surface.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 const SIDEBAR_CARD_MATERIAL_OPACITY: f32 = 0.;
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 const SIDEBAR_CARD_MATERIAL_OPACITY: f32 = 0.84;
 
 /// Selected rows carry a stronger lift than hover rows so current navigation
@@ -70,13 +70,6 @@ pub(crate) fn window_backdrop_preference(config_value: Option<&str>) -> WindowBa
 }
 
 fn config_window_backdrop_preference(config_value: Option<&str>) -> WindowBackdropPreference {
-    #[cfg(target_os = "windows")]
-    if let Some(value) = config_value.map(str::trim)
-        && (value.eq_ignore_ascii_case("blurred") || value.eq_ignore_ascii_case("acrylic"))
-    {
-        return WindowBackdropPreference::Auto;
-    }
-
     config_value
         .map(parse_window_backdrop_preference)
         .unwrap_or(WindowBackdropPreference::Auto)
@@ -106,22 +99,6 @@ pub(crate) fn window_background_appearance(
 fn window_background_appearance_for_preference(
     preference: WindowBackdropPreference,
 ) -> WindowBackgroundAppearance {
-    #[cfg(target_os = "windows")]
-    {
-        match preference {
-            WindowBackdropPreference::Auto | WindowBackdropPreference::Mica => {
-                if windows_supports_system_backdrop() {
-                    WindowBackgroundAppearance::MicaBackdrop
-                } else {
-                    WindowBackgroundAppearance::Opaque
-                }
-            }
-            WindowBackdropPreference::Blurred => WindowBackgroundAppearance::Blurred,
-            WindowBackdropPreference::Transparent => WindowBackgroundAppearance::Transparent,
-            WindowBackdropPreference::Opaque => WindowBackgroundAppearance::Opaque,
-        }
-    }
-
     #[cfg(target_os = "macos")]
     {
         match preference {
@@ -137,19 +114,11 @@ fn window_background_appearance_for_preference(
         WindowBackgroundAppearance::Opaque
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = preference;
         WindowBackgroundAppearance::Opaque
     }
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn window_backdrop_uses_mica(config_value: Option<&str>) -> bool {
-    matches!(
-        window_background_appearance(config_value),
-        WindowBackgroundAppearance::MicaBackdrop
-    )
 }
 
 #[cfg(target_os = "macos")]
@@ -158,36 +127,6 @@ pub(crate) fn macos_sidebar_material_enabled(config_value: Option<&str>) -> bool
         window_backdrop_preference(config_value),
         WindowBackdropPreference::Opaque | WindowBackdropPreference::Transparent
     )
-}
-
-#[cfg(target_os = "windows")]
-fn windows_supports_system_backdrop() -> bool {
-    #[repr(C)]
-    struct RtlOsVersionInfo {
-        size: u32,
-        major: u32,
-        minor: u32,
-        build: u32,
-        platform_id: u32,
-        service_pack: [u16; 128],
-    }
-
-    #[link(name = "ntdll")]
-    unsafe extern "system" {
-        fn RtlGetVersion(version: *mut RtlOsVersionInfo) -> i32;
-    }
-
-    let mut version = RtlOsVersionInfo {
-        size: std::mem::size_of::<RtlOsVersionInfo>() as u32,
-        major: 0,
-        minor: 0,
-        build: 0,
-        platform_id: 0,
-        service_pack: [0; 128],
-    };
-
-    // NTSTATUS values greater than or equal to zero indicate success.
-    unsafe { RtlGetVersion(&mut version) >= 0 && version.build >= 22_621 }
 }
 
 /// Fill used by chrome children inside the window shell.
@@ -202,24 +141,8 @@ pub(crate) fn cockpit_chrome_background(
     is_window_active: bool,
     material_active: bool,
 ) -> Hsla {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = is_window_active;
-        if material_active {
-            gpui::transparent_black()
-        } else {
-            Hsla {
-                a: 1.0,
-                ..background
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (background, is_window_active, material_active);
-        gpui::transparent_black()
-    }
+    let _ = (background, is_window_active, material_active);
+    gpui::transparent_black()
 }
 
 /// Fill for the inset primary navigation card.
@@ -353,24 +276,6 @@ mod tests {
 mod material_tests {
     use super::*;
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn legacy_blurred_config_falls_back_to_auto_after_mica_subsetting_removal() {
-        assert_eq!(
-            config_window_backdrop_preference(Some("blurred")),
-            WindowBackdropPreference::Auto
-        );
-        assert_eq!(
-            config_window_backdrop_preference(Some("acrylic")),
-            WindowBackdropPreference::Auto
-        );
-        assert_eq!(
-            parse_window_backdrop_preference("blurred"),
-            WindowBackdropPreference::Blurred
-        );
-    }
-
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn cockpit_children_stay_transparent_over_an_opaque_shell() {
         let background = Hsla::from(gpui::rgb(0x141414));
@@ -385,29 +290,7 @@ mod material_tests {
         );
     }
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn disabled_chrome_material_keeps_title_bar_opaque() {
-        let background = Hsla::from(gpui::rgb(0x141414));
-
-        assert_eq!(
-            cockpit_chrome_background(background, true, false),
-            Hsla {
-                a: 1.0,
-                ..background
-            }
-        );
-        assert_eq!(
-            cockpit_chrome_background(background, true, true),
-            gpui::transparent_black()
-        );
-        assert_eq!(
-            cockpit_backdrop_background(background, true, false),
-            background
-        );
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn native_sidebar_card_exposes_raw_material() {
         let surface = Hsla::from(gpui::rgb(0x212122));

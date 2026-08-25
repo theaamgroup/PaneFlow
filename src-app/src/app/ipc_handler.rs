@@ -4773,19 +4773,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn workspace_create_returns_cmd_safe_windows_cwd() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let resolved = super::canonicalize_workspace_cwd(tmp.path().to_str().expect("utf-8 path"))
-            .expect("real dir must canonicalize");
-        assert!(
-            !resolved.to_string_lossy().starts_with(r"\\?\"),
-            "workspace cwd must be safe for cmd.exe spawn, got: {resolved:?}"
-        );
-        assert!(resolved.is_dir());
-    }
-
     #[test]
     fn promote_response_promotes_legacy_application_error_strings() {
         let id = serde_json::json!(null);
@@ -5178,9 +5165,6 @@ mod tests {
         // OS: `Path::is_absolute()` requires a drive/UNC root on Windows, where
         // a leading-slash `/abs/...` is relative and would (correctly) be
         // rejected by the production guard.
-        #[cfg(windows)]
-        let (abs_a, abs_b) = (r"C:\abs\a.jsonl", r"C:\abs\b.jsonl");
-        #[cfg(not(windows))]
         let (abs_a, abs_b) = ("/abs/a.jsonl", "/abs/b.jsonl");
         // Top-level and hook-payload, absolute -> Some.
         let p = serde_json::json!({ "transcript_path": abs_a });
@@ -5207,9 +5191,6 @@ mod tests {
 
     #[test]
     fn read_stop_summary_uses_inline_before_transcript_path() {
-        #[cfg(windows)]
-        let abs = r"C:\abs\session.jsonl";
-        #[cfg(not(windows))]
         let abs = "/abs/session.jsonl";
 
         let p = serde_json::json!({"hook_payload": {"summary": "done", "transcript_path": abs}});

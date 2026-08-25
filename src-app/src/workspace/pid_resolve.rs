@@ -73,47 +73,7 @@ fn parent_of(pid: u32) -> Option<u32> {
         .map(|info| info.pbi_ppid)
 }
 
-#[cfg(windows)]
-fn parent_of(pid: u32) -> Option<u32> {
-    use std::mem;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-        TH32CS_SNAPPROCESS,
-    };
-
-    if pid == 0 {
-        return None;
-    }
-
-    // SAFETY: Win32 call. A successful snapshot handle is closed below.
-    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snap == INVALID_HANDLE_VALUE {
-        return None;
-    }
-
-    let mut parent = None;
-    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
-    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
-    // SAFETY: `snap` is valid, and `entry` has the documented size.
-    if unsafe { Process32FirstW(snap, &mut entry) } != 0 {
-        loop {
-            if entry.th32ProcessID == pid {
-                parent = Some(entry.th32ParentProcessID);
-                break;
-            }
-            // SAFETY: same invariants as Process32FirstW.
-            if unsafe { Process32NextW(snap, &mut entry) } == 0 {
-                break;
-            }
-        }
-    }
-    // SAFETY: `snap` is a valid handle returned above.
-    unsafe { CloseHandle(snap) };
-    parent.filter(|p| *p > 0)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn parent_of(_pid: u32) -> Option<u32> {
     None
 }

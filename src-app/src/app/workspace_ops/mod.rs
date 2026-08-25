@@ -962,29 +962,10 @@ pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), Strin
             .map(|_| ())
             .map_err(|err| format!("Could not open Finder: {err}"));
     }
-    #[cfg(target_os = "windows")]
-    {
-        // `/select,<path>` highlights the file in its parent folder.
-        // The comma is part of the flag spelling Microsoft documents,
-        // and the flag + path MUST form a SINGLE argv token - passing
-        // `/select,` and `<path>` as two separate `.arg(...)` calls
-        // makes Explorer ignore the selection hint and silently open
-        // the user's Documents folder instead (US-007 / v0.2.0 US-011
-        // SHOULD_FIX review note). Concatenate via `OsString` so
-        // non-UTF-8 path bytes (e.g., NTFS filenames that don't
-        // round-trip through `&str`) survive; `as_os_str()` keeps the
-        // raw wide-char representation intact.
-        let mut flag = std::ffi::OsString::from("/select,");
-        flag.push(path.as_os_str());
-        let result = std::process::Command::new("explorer").arg(flag).spawn();
-        return result
-            .map(|_| ())
-            .map_err(|err| format!("Could not open Explorer: {err}"));
-    }
     // Fallback for target_os values we don't explicitly handle
     // (freebsd, netbsd, etc.). Best-effort via xdg-open which is widely
     // available on BSD but not guaranteed.
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         std::process::Command::new("xdg-open")
             .arg(path)
@@ -1018,14 +999,7 @@ pub(crate) fn open_folder_in_file_manager(path: &std::path::Path) -> Result<(), 
             .map(|_| ())
             .map_err(|err| format!("Could not open Finder: {err}"));
     }
-    #[cfg(target_os = "windows")]
-    {
-        let result = std::process::Command::new("explorer").arg(path).spawn();
-        return result
-            .map(|_| ())
-            .map_err(|err| format!("Could not open Explorer: {err}"));
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         std::process::Command::new("xdg-open")
             .arg(path)
@@ -1074,30 +1048,6 @@ fn resolve_editor_binary_in(
     std::path::PathBuf::from(command)
 }
 
-#[cfg(target_os = "windows")]
-fn normalize_editor_candidate(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
-    const NATIVE_EXTENSIONS: [&str; 4] = ["exe", "cmd", "bat", "com"];
-    if path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            NATIVE_EXTENSIONS
-                .iter()
-                .any(|native_ext| ext.eq_ignore_ascii_case(native_ext))
-        })
-    {
-        return Some(path);
-    }
-    for extension in NATIVE_EXTENSIONS {
-        let candidate = path.with_extension(extension);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "windows"))]
 fn normalize_editor_candidate(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
     Some(path)
 }
@@ -1126,60 +1076,7 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
     {
         paths.push(PathBuf::from("/opt/homebrew/bin"));
     }
-    #[cfg(target_os = "windows")]
-    {
-        push_windows_editor_search_paths(&mut paths);
-    }
     paths
-}
-
-#[cfg(target_os = "windows")]
-fn push_windows_editor_search_paths(paths: &mut Vec<std::path::PathBuf>) {
-    use std::path::{Path, PathBuf};
-
-    fn push_program_dirs(paths: &mut Vec<PathBuf>, programs: &Path) {
-        paths.push(programs.join("Zed").join("bin"));
-        paths.push(programs.join("Zed"));
-        paths.push(
-            programs
-                .join("Cursor")
-                .join("resources")
-                .join("app")
-                .join("bin"),
-        );
-        paths.push(
-            programs
-                .join("cursor")
-                .join("resources")
-                .join("app")
-                .join("bin"),
-        );
-        paths.push(programs.join("Microsoft VS Code").join("bin"));
-        paths.push(programs.join("Microsoft VS Code Insiders").join("bin"));
-        paths.push(
-            programs
-                .join("Windsurf")
-                .join("resources")
-                .join("app")
-                .join("bin"),
-        );
-        paths.push(
-            programs
-                .join("windsurf")
-                .join("resources")
-                .join("app")
-                .join("bin"),
-        );
-    }
-
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        push_program_dirs(paths, &PathBuf::from(local_app_data).join("Programs"));
-    }
-    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(program_files) = std::env::var_os(var) {
-            push_program_dirs(paths, &PathBuf::from(program_files));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1295,27 +1192,6 @@ mod tests {
             canon_resolved,
             canon_expected,
             "resolver returned {} instead of fallback {}",
-            resolved.display(),
-            expected.display()
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn resolver_windows_prefers_native_sibling_over_extensionless_shim() {
-        let stub = "paneflow_windows_editor_stub_pflw_42";
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join(stub), b"#!/usr/bin/env sh\n").unwrap();
-        let expected = make_stub_binary(dir.path(), stub);
-
-        let resolved = normalize_editor_candidate(dir.path().join(stub)).unwrap();
-
-        let canon_resolved = std::fs::canonicalize(&resolved).ok();
-        let canon_expected = std::fs::canonicalize(&expected).ok();
-        assert_eq!(
-            canon_resolved,
-            canon_expected,
-            "resolver returned {} instead of native sibling {}",
             resolved.display(),
             expected.display()
         );
@@ -1473,63 +1349,6 @@ mod tests {
         assert!(
             paths.contains(&std::path::PathBuf::from("/opt/homebrew/bin")),
             "missing /opt/homebrew/bin (Apple Silicon Homebrew prefix)"
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn search_paths_windows_covers_user_bin() {
-        let paths = editor_search_paths();
-        let home = dirs::home_dir().expect("test host has %USERPROFILE%");
-        let local_app_data = std::path::PathBuf::from(
-            std::env::var_os("LOCALAPPDATA").expect("test host has %LOCALAPPDATA%"),
-        );
-        // dirs::home_dir on Windows == %USERPROFILE% (e.g. C:\Users\Arthur).
-        // ~/.cargo/bin is the canonical install spot for Cargo-installed CLI
-        // shims; ~/.local/bin and ~/bin are picked up by cross-platform
-        // installers (mise-en-place, asdf-vm) for editor entry points.
-        // GUI-launched apps do not reliably inherit user PATH, so cover the
-        // common per-user editor install roots as explicit fallbacks.
-        let programs = local_app_data.join("Programs");
-        assert!(
-            paths.contains(&home.join(".local").join("bin")),
-            "missing %USERPROFILE%\\.local\\bin"
-        );
-        assert!(
-            paths.contains(&home.join(".cargo").join("bin")),
-            "missing %USERPROFILE%\\.cargo\\bin"
-        );
-        assert!(
-            paths.contains(&home.join("bin")),
-            "missing %USERPROFILE%\\bin"
-        );
-        assert!(
-            paths.contains(&programs.join("Zed").join("bin")),
-            "missing %LOCALAPPDATA%\\Programs\\Zed\\bin"
-        );
-        assert!(
-            paths.contains(
-                &programs
-                    .join("Cursor")
-                    .join("resources")
-                    .join("app")
-                    .join("bin")
-            ),
-            "missing %LOCALAPPDATA%\\Programs\\Cursor\\resources\\app\\bin"
-        );
-        assert!(
-            paths.contains(&programs.join("Microsoft VS Code").join("bin")),
-            "missing %LOCALAPPDATA%\\Programs\\Microsoft VS Code\\bin"
-        );
-        assert!(
-            paths.contains(
-                &programs
-                    .join("Windsurf")
-                    .join("resources")
-                    .join("app")
-                    .join("bin")
-            ),
-            "missing %LOCALAPPDATA%\\Programs\\Windsurf\\resources\\app\\bin"
         );
     }
 }

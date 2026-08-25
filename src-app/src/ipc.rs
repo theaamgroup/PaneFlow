@@ -111,10 +111,6 @@ use interprocess::local_socket::{GenericFilePath, Listener, ListenerOptions, Str
 // detection accept loop; gating the import keeps the Windows build warning-free.
 #[cfg(unix)]
 use interprocess::local_socket::ListenerNonblockingMode;
-#[cfg(windows)]
-use interprocess::os::windows::{
-    local_socket::ListenerOptionsExt, security_descriptor::SecurityDescriptor,
-};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -514,21 +510,6 @@ fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
         }
     };
 
-    #[cfg(windows)]
-    let listener_result = match windows_named_pipe_security_descriptor() {
-        Ok(sd) => ListenerOptions::new()
-            .name(name)
-            .security_descriptor(sd)
-            .create_sync(),
-        Err(e) => {
-            log::error!(
-                "Failed to build IPC named-pipe security descriptor for {}: {e}",
-                socket_path.display()
-            );
-            return None;
-        }
-    };
-    #[cfg(not(windows))]
     let listener_result = ListenerOptions::new().name(name).create_sync();
 
     let listener = match listener_result {
@@ -563,13 +544,6 @@ fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
     }
     log::info!("IPC server listening on {}", socket_path.display());
     Some(listener)
-}
-
-#[cfg(windows)]
-fn windows_named_pipe_security_descriptor() -> std::io::Result<SecurityDescriptor> {
-    let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)")
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    SecurityDescriptor::deserialize(sddl.as_ucstr())
 }
 
 #[cfg(unix)]
@@ -776,7 +750,6 @@ enum LineRead {
 /// a line that hits the cap without a terminating newline is reported as
 /// [`LineRead::TooLong`] rather than allocated unboundedly (the DoS the cap
 /// exists to stop). Pure framing logic, unit-tested below.
-#[cfg(any(test, not(windows)))]
 fn read_capped_line(reader: &mut impl BufRead, line: &mut String) -> std::io::Result<LineRead> {
     line.clear();
     // `by_ref()` reborrows so `Take` owns a `&mut reader`, not `reader` itself
@@ -791,59 +764,8 @@ fn read_capped_line(reader: &mut impl BufRead, line: &mut String) -> std::io::Re
     Ok(LineRead::Got)
 }
 
-#[cfg(not(windows))]
 fn read_request_line(reader: &mut impl BufRead, line: &mut String) -> std::io::Result<LineRead> {
     read_capped_line(reader, line)
-}
-
-/// Windows named-pipe read path that avoids interprocess's `ReadFileEx`
-/// `CannotUnwind` guard. A peer can connect and close before sending a frame;
-/// interprocess then aborts the process instead of returning `BrokenPipe`.
-#[cfg(windows)]
-fn read_request_line(stream: &mut Stream, line: &mut String) -> std::io::Result<LineRead> {
-    let mut bytes = Vec::new();
-    let mut scratch = [0u8; 4096];
-
-    loop {
-        let remaining = MAX_REQUEST_LEN as usize - bytes.len();
-        if remaining == 0 {
-            break;
-        }
-
-        let read_len = remaining.min(scratch.len());
-        let n = match pipe_read_some(stream, &mut scratch[..read_len]) {
-            Ok(n) => n,
-            Err(e) if closed_pipe_error(&e) => return Ok(LineRead::Eof),
-            Err(e) => return Err(e),
-        };
-        if n == 0 {
-            if bytes.is_empty() {
-                return Ok(LineRead::Eof);
-            }
-            break;
-        }
-
-        let chunk = &scratch[..n];
-        if let Some(newline) = chunk.iter().position(|b| *b == b'\n') {
-            bytes.extend_from_slice(&chunk[..=newline]);
-            break;
-        }
-        bytes.extend_from_slice(chunk);
-    }
-
-    line.clear();
-    line.push_str(
-        std::str::from_utf8(&bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
-    );
-
-    if line.is_empty() {
-        Ok(LineRead::Eof)
-    } else if bytes.len() as u64 >= MAX_REQUEST_LEN && !line.ends_with('\n') {
-        Ok(LineRead::TooLong)
-    } else {
-        Ok(LineRead::Got)
-    }
 }
 
 struct ActiveCountGuard {
@@ -987,9 +909,6 @@ fn handle_connection(
     // `pipe_read_some` because `set_recv_timeout` is unsupported there.
     let _ = stream.set_recv_timeout(Some(IPC_IDLE_TIMEOUT));
 
-    #[cfg(windows)]
-    let mut reader = stream;
-    #[cfg(not(windows))]
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
@@ -1118,18 +1037,6 @@ fn handle_connection(
         if !suppress_reply && !write_envelope(&mut writer, &response) {
             break;
         }
-
-        // Windows: serve exactly ONE request per connection. Every paneflow
-        // client closes after a single exchange - `paneflow-ai-hook` is
-        // fire-and-forget (writes one frame, closes immediately without reading
-        // the reply), and `paneflow-ipc-client` does one request/response then
-        // drops the stream. Looping back to a SECOND read on a now peer-closed
-        // Windows named pipe also aborts the ENTIRE process inside `interprocess`
-        // (STATUS_STACK_BUFFER_OVERRUN 0xC0000409 - the read `__fastfail`s
-        // instead of returning EOF; confirmed with a live debugger). Unix has no
-        // such abort (EOF is returned cleanly), so it keeps the multi-request loop.
-        #[cfg(windows)]
-        break;
     }
 }
 
@@ -1241,288 +1148,19 @@ fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
 /// failure a returned `io::Error`. Unix writes to a closed socket return
 /// `BrokenPipe` cleanly, so the normal `Write` path is already safe there.
 fn push_bytes(writer: &mut Stream, buf: &[u8]) -> bool {
-    #[cfg(windows)]
+    if let Err(e) = writer.set_send_timeout(Some(IPC_WRITE_TIMEOUT))
+        && e.kind() != std::io::ErrorKind::Unsupported
     {
-        pipe_write_all(writer, buf, IPC_WRITE_TIMEOUT).is_ok()
+        return false;
     }
-    #[cfg(not(windows))]
-    {
-        if let Err(e) = writer.set_send_timeout(Some(IPC_WRITE_TIMEOUT))
-            && e.kind() != std::io::ErrorKind::Unsupported
-        {
-            return false;
-        }
-        writer.write_all(buf).is_ok() && writer.flush().is_ok()
-    }
-}
-
-/// EP-006 follow-up (CP-4): write `buf` to the named pipe with our OWN overlapped
-/// `WriteFile`, bypassing interprocess's abort-on-closed-pipe `Write` impl.
-///
-/// interprocess opens the server pipe with `FILE_FLAG_OVERLAPPED`
-/// (`listener/create_instance.rs`) and sends via an alertable `WriteFileEx` +
-/// completion routine; once the peer has closed, that FFI completion path panics
-/// and interprocess's `CannotUnwind` guard aborts the whole process. We issue a
-/// plain overlapped `WriteFile` (NO completion routine, so no Rust runs in an
-/// APC) and reap it with `GetOverlappedResult`; a dead pipe then surfaces as
-/// `ERROR_NO_DATA` / `ERROR_BROKEN_PIPE`, a normal `io::Error`. A NULL
-/// `lpOverlapped` is not an option - MSDN documents it as potentially corrupting
-/// on an overlapped handle - hence the per-call manual-reset event.
-#[cfg(windows)]
-fn pipe_write_all(writer: &Stream, buf: &[u8], timeout: Duration) -> std::io::Result<()> {
-    use std::os::windows::io::{AsHandle, AsRawHandle};
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_IO_PENDING, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    };
-    use windows_sys::Win32::Storage::FileSystem::WriteFile;
-    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-
-    let Stream::NamedPipe(np) = writer;
-    let handle: HANDLE = np.as_handle().as_raw_handle() as _;
-
-    // Manual-reset, initially-unsignaled event backing the OVERLAPPED.
-    // SAFETY: default attributes/name; the returned handle is checked below.
-    let event: HANDLE = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-    if event.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    // Close the event on every return path.
-    struct EventGuard(HANDLE);
-    impl Drop for EventGuard {
-        fn drop(&mut self) {
-            // SAFETY: a live event handle we created and have not yet closed.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-    let _event_guard = EventGuard(event);
-
-    let mut remaining = buf;
-    while !remaining.is_empty() {
-        // SAFETY: a zeroed OVERLAPPED is valid; we attach the event we created.
-        let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
-        ov.hEvent = event;
-        let want = remaining.len().min(u32::MAX as usize) as u32;
-        // SAFETY: `handle` is a valid overlapped pipe handle borrowed from `np`
-        // for this call; `ov` carries the event; ptr/len describe `remaining`.
-        // No completion routine, so no Rust runs in an FFI callback.
-        let started = unsafe {
-            WriteFile(
-                handle,
-                remaining.as_ptr(),
-                want,
-                std::ptr::null_mut(),
-                &mut ov,
-            )
-        };
-        if started == 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                return Err(err);
-            }
-            let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-            let reap_pending_write = |ov: &OVERLAPPED| {
-                let _ = unsafe { CancelIoEx(handle, ov) };
-                let mut cancelled_transferred: u32 = 0;
-                let _ = unsafe { GetOverlappedResult(handle, ov, &mut cancelled_transferred, 1) };
-            };
-            match unsafe { WaitForSingleObject(event, timeout_ms) } {
-                WAIT_OBJECT_0 => {}
-                WAIT_TIMEOUT => {
-                    reap_pending_write(&ov);
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "named-pipe write timed out",
-                    ));
-                }
-                WAIT_FAILED => {
-                    let err = std::io::Error::last_os_error();
-                    reap_pending_write(&ov);
-                    return Err(err);
-                }
-                other => {
-                    reap_pending_write(&ov);
-                    return Err(std::io::Error::other(format!(
-                        "unexpected WaitForSingleObject result {other}"
-                    )));
-                }
-            }
-        }
-        let mut transferred: u32 = 0;
-        // SAFETY: same handle + overlapped as the WriteFile above; `transferred`
-        // is a valid out-pointer; bWait = TRUE blocks until the write settles.
-        let reaped = unsafe { GetOverlappedResult(handle, &ov, &mut transferred, 1) };
-        if reaped == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if transferred == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "named-pipe write transferred 0 bytes",
-            ));
-        }
-        remaining = &remaining[transferred as usize..];
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn pipe_read_some(reader: &Stream, buf: &mut [u8]) -> std::io::Result<usize> {
-    pipe_read_some_with_timeout(reader, buf, IPC_IDLE_TIMEOUT)
-}
-
-#[cfg(windows)]
-fn pipe_read_some_with_timeout(
-    reader: &Stream,
-    buf: &mut [u8],
-    timeout: Duration,
-) -> std::io::Result<usize> {
-    use std::os::windows::io::{AsHandle, AsRawHandle};
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_IO_PENDING, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    };
-    use windows_sys::Win32::Storage::FileSystem::ReadFile;
-    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-
-    let Stream::NamedPipe(np) = reader;
-    let handle: HANDLE = np.as_handle().as_raw_handle() as _;
-
-    let event: HANDLE = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-    if event.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    struct EventGuard(HANDLE);
-    impl Drop for EventGuard {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-    let _event_guard = EventGuard(event);
-
-    let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
-    ov.hEvent = event;
-    let want = buf.len().min(u32::MAX as usize) as u32;
-    let started = unsafe {
-        ReadFile(
-            handle,
-            buf.as_mut_ptr(),
-            want,
-            std::ptr::null_mut(),
-            &mut ov,
-        )
-    };
-    let pending = if started == 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-            return Err(err);
-        }
-        true
-    } else {
-        false
-    };
-
-    if pending {
-        let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-        let reap_pending_read = |ov: &OVERLAPPED| {
-            let _ = unsafe { CancelIoEx(handle, ov) };
-            let mut cancelled_transferred: u32 = 0;
-            let _ = unsafe { GetOverlappedResult(handle, ov, &mut cancelled_transferred, 1) };
-        };
-        match unsafe { WaitForSingleObject(event, timeout_ms) } {
-            WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => {
-                // The OVERLAPPED lives on this stack frame, so after marking
-                // the read for cancellation we still reap completion before
-                // returning. Named-pipe cancellation completes as an ordinary
-                // overlapped result (often ERROR_OPERATION_ABORTED).
-                reap_pending_read(&ov);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "named-pipe read timed out",
-                ));
-            }
-            WAIT_FAILED => {
-                let err = std::io::Error::last_os_error();
-                reap_pending_read(&ov);
-                return Err(err);
-            }
-            other => {
-                reap_pending_read(&ov);
-                return Err(std::io::Error::other(format!(
-                    "unexpected WaitForSingleObject result {other}"
-                )));
-            }
-        }
-    }
-
-    let mut transferred: u32 = 0;
-    let reaped = unsafe { GetOverlappedResult(handle, &ov, &mut transferred, 1) };
-    if reaped == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(transferred as usize)
-}
-
-#[cfg(windows)]
-fn closed_pipe_error(err: &std::io::Error) -> bool {
-    use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED};
-
-    matches!(
-        err.raw_os_error(),
-        Some(code) if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
-    )
+    writer.write_all(buf).is_ok() && writer.flush().is_ok()
 }
 
 /// EP-006 US-013: Unix path - a no-op `true`. A write to a closed Unix socket
 /// returns `Err(BrokenPipe)` cleanly (Rust ignores SIGPIPE), which the caller
 /// already handles, so no pre-probe is needed.
-#[cfg(not(windows))]
 fn subscriber_connected(_writer: &Stream) -> bool {
     true
-}
-
-/// EP-006 US-013: Windows path - probe the named pipe's liveness BEFORE a push so
-/// a disconnected subscriber is dropped cleanly instead of aborting the process.
-///
-/// `PeekNamedPipe` with a zero-length buffer and all-null out-params is the
-/// documented "just check the pipe" call: it consumes no data and issues no
-/// overlapped I/O, so it can never trip interprocess's `CannotUnwind` abort
-/// (unlike the overlapped `WriteFileEx` a write would issue). A broken/closed
-/// pipe returns 0 (e.g. `ERROR_BROKEN_PIPE`); any failure is treated as "gone".
-///
-/// A vanishingly small race remains - the peer can close between this probe and
-/// the subsequent write - which is the residual the Windows runtime smoke
-/// (US-014) validates; in practice a `watch` client's events are seconds apart
-/// and the 30 s heartbeat is the dominant write, so the window is negligible.
-#[cfg(windows)]
-fn subscriber_connected(writer: &Stream) -> bool {
-    use std::os::windows::io::{AsHandle, AsRawHandle};
-    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
-
-    // interprocess 2.4's generic local_socket `Stream` forwards `Read`/`Write`
-    // but NOT `AsHandle`; on Windows its sole (public, non-`#[non_exhaustive]`)
-    // variant wraps the platform named-pipe stream that DOES expose the OS
-    // handle, so match the variant to reach it. The match is exhaustive on
-    // Windows (one variant); a future interprocess variant would fail to compile
-    // here, forcing a review rather than silently mis-probing.
-    let Stream::NamedPipe(np) = writer;
-    let handle = np.as_handle().as_raw_handle();
-    // SAFETY: `handle` is a valid, open named-pipe handle borrowed from `np` for
-    // the duration of this call. Every optional out-param is null and the buffer
-    // length is 0 - the documented connection-status-only form of PeekNamedPipe,
-    // which consumes nothing and issues no overlapped I/O.
-    let connected = unsafe {
-        PeekNamedPipe(
-            handle as _,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    connected != 0
 }
 
 fn dispatch_to_gpui(
@@ -2008,226 +1646,5 @@ mod dispatch_tests {
         );
         assert_eq!(resp["result"]["status"], "ok");
         assert_eq!(resp["id"], 3);
-    }
-}
-
-/// EP-006 US-013 / US-014 (runbook scenario CP-4): the headline Windows
-/// invariant, as an automated regression test instead of a manual-only smoke.
-///
-/// A subscriber that disconnects (a `paneflow watch` Ctrl-C) MUST be evicted by
-/// the `PeekNamedPipe` liveness probe BEFORE the next push, so the server never
-/// issues an overlapped write to a closed named pipe - interprocess converts
-/// that into a `CannotUnwind` -> `process::abort` (STATUS_STACK_BUFFER_OVERRUN
-/// 0xC0000409) that no `catch_unwind` can stop. These tests drive the real
-/// named-pipe push path (`push_frame` / `push_line` / `subscriber_connected`)
-/// that the Linux build host can only compile-check, so the eviction has a
-/// deterministic guard, not just the `docs/WINDOWS-SMOKE-TEST.md` checklist.
-///
-/// Windows-only: on Unix `subscriber_connected` is a no-op `true` (a write to a
-/// closed socket returns `BrokenPipe` cleanly, no probe needed).
-#[cfg(all(test, windows))]
-mod windows_pipe_tests {
-    use super::{
-        LineRead, pipe_read_some_with_timeout, pipe_write_all, push_frame, push_line,
-        read_request_line, subscriber_connected,
-    };
-    use interprocess::local_socket::{
-        GenericFilePath, Listener, ListenerOptions, Stream, prelude::*,
-    };
-    use serde_json::json;
-    use std::io::Read;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
-
-    /// A process-unique pipe path so parallel test threads never collide and a
-    /// stray prior instance can't shadow this one. Distinct `paneflow-test-`
-    /// prefix keeps it clear of a live `\\.\pipe\paneflow{,-dev}` server.
-    fn unique_pipe_path() -> std::path::PathBuf {
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::path::PathBuf::from(format!(
-            r"\\.\pipe\paneflow-test-{}-{}",
-            std::process::id(),
-            seq
-        ))
-    }
-
-    #[test]
-    fn named_pipe_security_descriptor_deserializes() {
-        super::windows_named_pipe_security_descriptor().expect("IPC named-pipe SDDL must be valid");
-    }
-
-    /// Bind a listener and return a live (server, client) named-pipe pair plus
-    /// the listener (kept alive by the caller). Mirrors `bind_socket`'s name +
-    /// `ListenerOptions` setup so the test drives the same construction
-    /// production does. The client connects on its own thread to dodge the
-    /// single-thread connect/accept deadlock.
-    fn connected_pair() -> (Stream, Stream, Listener) {
-        let path = unique_pipe_path();
-        let listener = {
-            // `to_fs_name` consumes its receiver, so call it on a borrowed
-            // `&Path` (like `bind_socket` does) to leave `path` owned and
-            // movable into the client thread below.
-            let name = path
-                .as_path()
-                .to_fs_name::<GenericFilePath>()
-                .expect("build pipe name");
-            ListenerOptions::new()
-                .name(name)
-                .create_sync()
-                .expect("bind test listener")
-        };
-        let client_thread = std::thread::spawn(move || {
-            let name = path
-                .as_path()
-                .to_fs_name::<GenericFilePath>()
-                .expect("build client pipe name");
-            Stream::connect(name).expect("client connect")
-        });
-        let server = listener.accept().expect("accept client");
-        let client = client_thread.join().expect("join client thread");
-        (server, client, listener)
-    }
-
-    /// Poll the liveness probe until it reports the peer gone, bounded by
-    /// `timeout`. A closed named pipe surfaces as `ERROR_BROKEN_PIPE` from
-    /// `PeekNamedPipe` (probe returns 0), but the OS can take a beat to settle
-    /// after the peer's handle closes, so we poll rather than assume instant.
-    fn wait_until_disconnected(server: &Stream, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if !subscriber_connected(server) {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    #[test]
-    fn live_subscriber_reads_as_connected_and_receives_push() {
-        let (mut server, client, _listener) = connected_pair();
-        assert!(
-            subscriber_connected(&server),
-            "a live named-pipe peer must probe as connected"
-        );
-        assert!(
-            push_frame(&mut server, &json!({"type": "subscribed", "id": 1})),
-            "push to a live subscriber succeeds"
-        );
-
-        // End-to-end: the pushed line actually reaches the client. Read on a
-        // worker thread with a channel deadline - Windows named pipes reject
-        // `set_recv_timeout` (see the `handle_connection` note), so a channel
-        // recv timeout is the only hang-proof bound on a blocking read.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut client = client;
-            let mut buf = [0u8; 256];
-            let n = client.read(&mut buf).unwrap_or(0);
-            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
-        });
-        let line = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("client receives the pushed frame within 2s");
-        assert!(
-            line.contains("subscribed"),
-            "client received the frame verbatim, got: {line:?}"
-        );
-    }
-
-    #[test]
-    fn disconnected_subscriber_is_evicted_without_process_abort() {
-        let (mut server, client, _listener) = connected_pair();
-        assert!(subscriber_connected(&server), "connected before drop");
-
-        // Simulate `paneflow watch` Ctrl-C: the subscriber closes its end.
-        drop(client);
-
-        assert!(
-            wait_until_disconnected(&server, Duration::from_secs(2)),
-            "PeekNamedPipe must report the closed peer (the CP-4 eviction gate)"
-        );
-
-        // The EP-006 headline invariant: a push to the now-dead subscriber is
-        // refused by the guard and returns false - it must NOT reach an
-        // overlapped write to the closed pipe, which aborts the whole process.
-        // Reaching these asserts at all proves no abort happened; `false` proves
-        // the guard short-circuited the dangerous write. (Safe by construction:
-        // both helpers re-probe internally, and we only get here after the probe
-        // already read `false`, so neither ever attempts the write.)
-        assert!(
-            !push_frame(&mut server, &json!({"type": "heartbeat"})),
-            "push_frame evicts a disconnected subscriber instead of writing"
-        );
-        assert!(
-            !push_line(&mut server, b"{\"type\":\"ai.stop\"}\n"),
-            "push_line evicts a disconnected subscriber instead of writing"
-        );
-    }
-
-    #[test]
-    fn raw_write_to_closed_pipe_returns_err_without_process_abort() {
-        let (server, client, _listener) = connected_pair();
-        // Peer closes (a `paneflow watch` Ctrl-C) and the close settles.
-        drop(client);
-        assert!(
-            wait_until_disconnected(&server, Duration::from_secs(2)),
-            "peer close must settle before the write"
-        );
-
-        // Hit the raw overlapped write DIRECTLY, bypassing the
-        // `subscriber_connected` fast-path the eviction test relies on. This is
-        // the residual-race write (probe passed, peer then vanished): before
-        // CP-4's managed WriteFile it aborted the whole process
-        // (STATUS_STACK_BUFFER_OVERRUN 0xC0000409); now it must return a plain
-        // `Err`. Reaching the assert at all proves the process did not abort.
-        let r = pipe_write_all(
-            &server,
-            b"{\"type\":\"heartbeat\"}\n",
-            Duration::from_secs(1),
-        );
-        assert!(
-            r.is_err(),
-            "overlapped write to a closed pipe returns Err, never aborts"
-        );
-    }
-
-    #[test]
-    fn raw_read_from_closed_pipe_returns_eof_without_process_abort() {
-        let (mut server, client, _listener) = connected_pair();
-        // A peer can connect and close before sending a JSON-RPC frame. Before
-        // the managed ReadFile path, interprocess's ReadFileEx guard could
-        // abort the whole process on that immediate ERROR_BROKEN_PIPE.
-        drop(client);
-        assert!(
-            wait_until_disconnected(&server, Duration::from_secs(2)),
-            "peer close must settle before the read"
-        );
-
-        let mut line = String::new();
-        assert_eq!(
-            read_request_line(&mut server, &mut line).expect("closed pipe maps to EOF"),
-            LineRead::Eof
-        );
-        assert!(line.is_empty());
-    }
-
-    #[test]
-    fn muted_named_pipe_read_times_out_without_pinning_handler() {
-        let (server, _client, _listener) = connected_pair();
-        let mut buf = [0u8; 16];
-        let started = Instant::now();
-
-        let err = pipe_read_some_with_timeout(&server, &mut buf, Duration::from_millis(50))
-            .expect_err("mute peer should hit the explicit read timeout");
-
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "timeout path must release promptly instead of pinning the handler slot"
-        );
     }
 }
