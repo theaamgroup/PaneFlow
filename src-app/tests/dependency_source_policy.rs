@@ -4,7 +4,6 @@
 )]
 
 use std::path::Path;
-use std::process::Command;
 
 const MERMAN_SOURCE: &str = "source = \"git+https://github.com/zed-industries/merman?tag=v0.6.2-with-patches#9acc3960f04a7deeb08079d60fa8183f15e8bde1\"";
 

@@ -14,16 +14,6 @@ use gpui::{
     Window,
 };
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-use paneflow_terminal_ghostty as ghostty;
 
 use crate::keys::TerminalKeySequence;
 use crate::mouse;
@@ -33,16 +23,6 @@ use crate::terminal::types::{
 
 #[cfg(debug_assertions)]
 use super::probe_enabled;
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-use super::pty_session::BackendInputResult;
 use super::{TerminalEvent, TerminalView};
 
 /// Returns true when the platform-appropriate "open link" modifier is held:
@@ -72,21 +52,6 @@ fn key_escape_sequence(
     Some(sequence)
 }
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-fn legacy_key_bytes(sequence: Cow<'static, str>) -> Cow<'static, [u8]> {
-    match sequence {
-        Cow::Borrowed(value) => Cow::Borrowed(value.as_bytes()),
-        Cow::Owned(value) => Cow::Owned(value.as_bytes().to_vec()),
-    }
-}
 
 /// Sanitize and wrap `text` for a single bracketed-paste PTY write
 /// (`ESC[200~` … `ESC[201~`). ESC and C1 control bytes (U+0080..=U+009F) are
@@ -109,156 +74,10 @@ pub(super) fn wrap_bracketed_paste(text: &str) -> String {
     format!("\x1b[200~{}\x1b[201~", sanitize_bracketed_paste(text))
 }
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-fn ghostty_modifiers(modifiers: gpui::Modifiers) -> ghostty::Modifiers {
-    let mut result = ghostty::Modifiers::empty();
-    if modifiers.shift {
-        result = result | ghostty::Modifiers::SHIFT;
-    }
-    if modifiers.control {
-        result = result | ghostty::Modifiers::CONTROL;
-    }
-    if modifiers.alt {
-        result = result | ghostty::Modifiers::ALT;
-    }
-    if modifiers.platform {
-        result = result | ghostty::Modifiers::SUPER;
-    }
-    result
-}
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-fn ghostty_key(key: &str, key_char: Option<&str>) -> Option<ghostty::Key> {
-    let named = match key {
-        "enter" => Some(ghostty::Key::Enter),
-        "tab" => Some(ghostty::Key::Tab),
-        "backspace" => Some(ghostty::Key::Backspace),
-        "delete" => Some(ghostty::Key::Delete),
-        "escape" => Some(ghostty::Key::Escape),
-        "up" => Some(ghostty::Key::Up),
-        "down" => Some(ghostty::Key::Down),
-        "left" => Some(ghostty::Key::Left),
-        "right" => Some(ghostty::Key::Right),
-        "home" => Some(ghostty::Key::Home),
-        "end" => Some(ghostty::Key::End),
-        "pageup" => Some(ghostty::Key::PageUp),
-        "pagedown" => Some(ghostty::Key::PageDown),
-        "insert" => Some(ghostty::Key::Insert),
-        "space" => Some(ghostty::Key::Character(' ')),
-        _ => None,
-    };
-    if named.is_some() {
-        return named;
-    }
-    if let Some(number) = key.strip_prefix('f').and_then(|value| value.parse().ok())
-        && (1..=25).contains(&number)
-    {
-        return Some(ghostty::Key::Function(number));
-    }
-    key.chars()
-        .next()
-        .filter(|_| key.chars().count() == 1)
-        .or_else(|| {
-            let value = key_char?;
-            value.chars().next().filter(|_| value.chars().count() == 1)
-        })
-        .map(ghostty::Key::Character)
-}
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-fn ghostty_key_input(
-    keystroke: &gpui::Keystroke,
-    action: ghostty::KeyAction,
-) -> Option<ghostty::KeyInput> {
-    let key = ghostty_key(&keystroke.key, keystroke.key_char.as_deref())?;
-    let unshifted_codepoint = keystroke
-        .key
-        .chars()
-        .next()
-        .filter(|_| keystroke.key.chars().count() == 1);
-    Some(ghostty::KeyInput {
-        key,
-        action,
-        modifiers: ghostty_modifiers(keystroke.modifiers),
-        consumed_modifiers: ghostty::Modifiers::empty(),
-        text: String::new(),
-        unshifted_codepoint,
-        composing: false,
-    })
-}
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-pub(super) fn ghostty_text_key_input(
-    keystroke: &gpui::Keystroke,
-    action: ghostty::KeyAction,
-    prefer_character_input: bool,
-    text: &str,
-) -> ghostty::KeyInput {
-    let mut input = ghostty_key_input(keystroke, action).unwrap_or(ghostty::KeyInput {
-        key: ghostty::Key::Unidentified,
-        action,
-        modifiers: ghostty_modifiers(keystroke.modifiers),
-        consumed_modifiers: ghostty::Modifiers::empty(),
-        text: String::new(),
-        unshifted_codepoint: None,
-        composing: false,
-    });
-    let mut consumed = ghostty::Modifiers::empty();
-    if keystroke.modifiers.shift {
-        consumed = consumed | ghostty::Modifiers::SHIFT;
-    }
-    if prefer_character_input && keystroke.modifiers.control && keystroke.modifiers.alt {
-        consumed = consumed | ghostty::Modifiers::CONTROL | ghostty::Modifiers::ALT;
-    }
-    input.consumed_modifiers = consumed;
-    input.text = text.to_owned();
-    input
-}
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-fn ghostty_release_id(keystroke: &gpui::Keystroke) -> String {
-    keystroke.key.clone()
-}
 
 #[derive(Clone, Copy)]
 enum ReportedMouseAction {
@@ -477,18 +296,6 @@ impl TerminalView {
         // Get current TermMode for key mapping (APP_CURSOR, etc.)
         let mode = self.terminal.session_backend().modes();
 
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        {
-            self.ghostty_pending_text_key = None;
-        }
 
         // Special keys / modifiers → write the escape sequence directly.
         // Printable characters are NOT handled here: GPUI's InputHandler
@@ -516,79 +323,13 @@ impl TerminalView {
                     self.scroll_remainder = 0.0;
                 }
             }
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            let ghostty_encoded = _encode_with_backend
-                && ghostty_key_input(
-                    keystroke,
-                    if event.is_held {
-                        ghostty::KeyAction::Repeat
-                    } else {
-                        ghostty::KeyAction::Press
-                    },
-                )
-                .map(|input| {
-                    let mut release = input.clone();
-                    release.action = ghostty::KeyAction::Release;
-                    release.text.clear();
-                    release.composing = false;
-                    let result = self
-                        .terminal
-                        .write_ghostty_key(input, Some(legacy_key_bytes(seq.clone())));
-                    if result == BackendInputResult::Accepted {
-                        self.ghostty_pressed_keys
-                            .insert(ghostty_release_id(keystroke), release);
-                    }
-                    result.is_handled()
-                })
-                .unwrap_or(false);
-            #[cfg(not(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            )))]
-            let ghostty_encoded = false;
-            if !ghostty_encoded {
-                match seq {
-                    Cow::Borrowed(s) => {
-                        self.terminal.write_to_pty(Cow::Borrowed(s.as_bytes()));
-                    }
-                    Cow::Owned(s) => {
-                        self.terminal.write_to_pty(s.into_bytes());
-                    }
+            match seq {
+                Cow::Borrowed(s) => {
+                    self.terminal.write_to_pty(Cow::Borrowed(s.as_bytes()));
                 }
-            }
-        } else {
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            if ghostty_key(&keystroke.key, keystroke.key_char.as_deref()).is_some() {
-                self.ghostty_pending_text_key = Some((
-                    keystroke.clone(),
-                    if event.is_held {
-                        ghostty::KeyAction::Repeat
-                    } else {
-                        ghostty::KeyAction::Press
-                    },
-                    event.prefer_character_input,
-                ));
+                Cow::Owned(s) => {
+                    self.terminal.write_to_pty(s.into_bytes());
+                }
             }
         }
 
@@ -615,59 +356,9 @@ impl TerminalView {
         if self.search_active || self.copy_mode_active {
             return;
         }
-        #[cfg(not(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        )))]
         let _ = event;
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        {
-            let release_id = ghostty_release_id(&event.keystroke);
-            if let Some(input) = self.ghostty_pressed_keys.remove(&release_id) {
-                let result = self.terminal.write_ghostty_key(input, None);
-                if result == BackendInputResult::Rejected {
-                    log::warn!(
-                        target: "paneflow::terminal::ghostty",
-                        "Ghostty rejected a key release"
-                    );
-                }
-            }
-        }
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn release_ghostty_pressed_keys(&mut self) {
-        self.ghostty_pending_text_key = None;
-        for (_, input) in std::mem::take(&mut self.ghostty_pressed_keys) {
-            if self.terminal.write_ghostty_key(input, None) == BackendInputResult::Rejected {
-                log::warn!(
-                    target: "paneflow::terminal::ghostty",
-                    "Ghostty rejected a key release during focus loss"
-                );
-            }
-        }
-    }
 
     // --- Pixel → grid coordinate conversion ---
 
@@ -744,15 +435,6 @@ impl TerminalView {
                 mouse::normal_mouse_report(point, btn, utf8)
             }
         };
-        #[cfg(not(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        )))]
         let _ = (
             position,
             action,
@@ -760,59 +442,6 @@ impl TerminalView {
             modifiers,
             any_button_pressed,
         );
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        {
-            let origin = *self
-                .element_origin
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let metrics = self.terminal.session_backend().grid_metrics();
-            let screen_width = (metrics.columns as f32 * self.cell_width.as_f32())
-                .max(1.0)
-                .min(u32::MAX as f32) as u32;
-            let screen_height = (metrics.screen_lines as f32 * self.line_height.as_f32())
-                .max(1.0)
-                .min(u32::MAX as f32) as u32;
-            let input = ghostty::MouseInput {
-                action: match action {
-                    ReportedMouseAction::Press => ghostty::MouseAction::Press,
-                    ReportedMouseAction::Release => ghostty::MouseAction::Release,
-                    ReportedMouseAction::Motion => ghostty::MouseAction::Motion,
-                },
-                button: reported_button.map(|button| match button {
-                    ReportedMouseButton::Left => ghostty::MouseButton::Left,
-                    ReportedMouseButton::Middle => ghostty::MouseButton::Middle,
-                    ReportedMouseButton::Right => ghostty::MouseButton::Right,
-                    ReportedMouseButton::WheelUp => ghostty::MouseButton::Four,
-                    ReportedMouseButton::WheelDown => ghostty::MouseButton::Five,
-                }),
-                modifiers: ghostty_modifiers(modifiers),
-                x: (position.x - origin.x).max(gpui::px(0.0)).as_f32(),
-                y: (position.y - origin.y).max(gpui::px(0.0)).as_f32(),
-                screen_width,
-                screen_height,
-                padding_top: 0,
-                padding_bottom: 0,
-                padding_left: 0,
-                padding_right: 0,
-                any_button_pressed,
-            };
-            if self
-                .terminal
-                .write_ghostty_mouse(input, repeat, legacy.clone())
-                .is_handled()
-            {
-                return;
-            }
-        }
         let Some(bytes) = legacy else {
             return;
         };
@@ -1355,31 +984,6 @@ impl TerminalView {
             let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
             (normalized.clone(), normalized)
         };
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if self
-            .terminal
-            .write_ghostty_paste(paste_payload, mode.contains(Modes::BRACKETED_PASTE))
-            .is_handled()
-        {
-            return;
-        }
-        #[cfg(not(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        )))]
         let _ = paste_payload;
         self.terminal.write_to_pty(paste_text.into_bytes());
     }
@@ -1598,36 +1202,6 @@ mod tests {
     use crate::terminal::types::{Modes, ShellQuoting};
     use std::path::PathBuf;
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    #[test]
-    fn printable_altgr_commit_preserves_key_metadata_and_consumes_ctrl_alt() {
-        let keystroke = gpui::Keystroke::parse("ctrl-alt-0").unwrap();
-        let input = super::ghostty_text_key_input(
-            &keystroke,
-            paneflow_terminal_ghostty::KeyAction::Press,
-            true,
-            "@",
-        );
-
-        assert_eq!(input.key, paneflow_terminal_ghostty::Key::Character('0'));
-        assert!(input.modifiers.contains(
-            paneflow_terminal_ghostty::Modifiers::CONTROL
-                | paneflow_terminal_ghostty::Modifiers::ALT
-        ));
-        assert!(input.consumed_modifiers.contains(
-            paneflow_terminal_ghostty::Modifiers::CONTROL
-                | paneflow_terminal_ghostty::Modifiers::ALT
-        ));
-        assert_eq!(input.text, "@");
-    }
 
     #[test]
     fn character_preferred_altgr_bypasses_control_escape_routing() {

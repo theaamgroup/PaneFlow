@@ -41,18 +41,6 @@ use super::types::{
 use crate::limits::{MAX_CHARS, MAX_OSC52_BYTES};
 use paneflow_config::schema::{TerminalBackendConfig, TerminalConfig, TerminalSurfaceProfile};
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-use super::ghostty_session::{
-    GhosttyInputSendResult, GhosttySession, GhosttyUiEvent, SpawnedGhostty,
-};
 
 /// Default scrollback history length, in lines. Paneflow keeps this standard
 /// for predictable terminal memory use. `TermConfig::default()` is `0`, which
@@ -244,64 +232,24 @@ impl PtyNotifier {
 pub(crate) struct TerminalSessionBackend {
     term: SharedTerm,
     notifier: PtyNotifier,
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    ghostty: Option<GhosttySession>,
 }
 
 /// Opaque event emitted by the concrete backend. The view can coalesce wakeups
 /// without importing or pattern-matching Alacritty's event enum.
 pub(crate) enum TerminalBackendEvent {
     Alacritty(AlacEvent),
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    Ghostty(GhosttyUiEvent),
 }
 
 impl TerminalBackendEvent {
     pub(crate) fn is_wakeup(&self) -> bool {
         match self {
             Self::Alacritty(event) => matches!(event, AlacEvent::Wakeup),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Ghostty(event) => event.is_wakeup(),
         }
     }
 }
 
 pub(crate) struct TerminalBackendEvents {
     alacritty: Option<UnboundedReceiver<AlacEvent>>,
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    ghostty: Option<UnboundedReceiver<GhosttyUiEvent>>,
 }
 
 impl futures::Stream for TerminalBackendEvents {
@@ -311,24 +259,6 @@ impl futures::Stream for TerminalBackendEvents {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(receiver) = self.ghostty.as_mut() {
-            match futures::Stream::poll_next(std::pin::Pin::new(receiver), cx) {
-                std::task::Poll::Ready(Some(event)) => {
-                    return std::task::Poll::Ready(Some(TerminalBackendEvent::Ghostty(event)));
-                }
-                std::task::Poll::Ready(None) => self.ghostty = None,
-                std::task::Poll::Pending => {}
-            }
-        }
         if let Some(receiver) = self.alacritty.as_mut() {
             match futures::Stream::poll_next(std::pin::Pin::new(receiver), cx) {
                 std::task::Poll::Ready(Some(event)) => {
@@ -349,27 +279,6 @@ impl futures::Stream for TerminalBackendEvents {
 impl futures::stream::FusedStream for TerminalBackendEvents {
     fn is_terminated(&self) -> bool {
         self.alacritty.is_none() && {
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            {
-                self.ghostty.is_none()
-            }
-            #[cfg(not(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            )))]
             {
                 true
             }
@@ -415,35 +324,9 @@ impl TerminalSessionBackend {
         Self {
             term,
             notifier,
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            ghostty: None,
         }
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn ghostty(term: SharedTerm, notifier: PtyNotifier, ghostty: GhosttySession) -> Self {
-        Self {
-            term,
-            notifier,
-            ghostty: Some(ghostty),
-        }
-    }
 
     /// Resize and snapshot under one terminal lock, then return owned neutral
     /// content. No Alacritty handle or borrowed grid data crosses this call.
@@ -454,23 +337,6 @@ impl TerminalSessionBackend {
         last_visible_row: i32,
         clear_on_resize: bool,
     ) -> (Content, bool) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.render_content(
-                window_size,
-                first_visible_row,
-                last_visible_row,
-                clear_on_resize,
-            );
-        }
         #[cfg(test)]
         let measure_lock_duration =
             RENDER_CONTENT_TIMING_ENABLED.load(std::sync::atomic::Ordering::Acquire);
@@ -495,51 +361,14 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn notify_window_size(&self, size: TerminalWindowSize) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            ghostty.resize(size);
-            return;
-        }
         self.notifier.notify_window_size(size);
     }
 
     pub(crate) fn modes(&self) -> Modes {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.modes();
-        }
         Modes::from(*self.term.lock_unfair().mode())
     }
 
     pub(crate) fn grid_metrics(&self) -> GridMetrics {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.grid_metrics();
-        }
         let term = self.term.lock_unfair();
         GridMetrics {
             columns: term.columns(),
@@ -557,18 +386,6 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn clear_history(&self) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if self.ghostty.is_some() {
-            return;
-        }
         self.term.lock().grid_mut().clear_history();
     }
 
@@ -589,36 +406,6 @@ impl TerminalSessionBackend {
     }
 
     fn scroll(&self, scroll: AlacScroll) -> bool {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            let metrics = ghostty.grid_metrics();
-            let scroll = match scroll {
-                AlacScroll::Top => paneflow_terminal_ghostty::Scroll::Top,
-                AlacScroll::Bottom => paneflow_terminal_ghostty::Scroll::Bottom,
-                AlacScroll::Delta(delta) => paneflow_terminal_ghostty::Scroll::Delta(delta),
-                AlacScroll::PageUp => paneflow_terminal_ghostty::Scroll::Delta(
-                    i32::try_from(metrics.screen_lines).unwrap_or(i32::MAX),
-                ),
-                AlacScroll::PageDown => paneflow_terminal_ghostty::Scroll::Delta(
-                    -i32::try_from(metrics.screen_lines).unwrap_or(i32::MAX),
-                ),
-            };
-            // Shared metrics can lag commands already accepted by the worker.
-            // Queue every non-zero gesture and let Ghostty's live viewport
-            // perform the authoritative boundary clamp in FIFO order.
-            if matches!(scroll, paneflow_terminal_ghostty::Scroll::Delta(0)) {
-                return false;
-            }
-            return ghostty.scroll(scroll);
-        }
         let mut term = self.term.lock();
         let before = term.grid().display_offset();
         term.scroll_display(scroll);
@@ -626,39 +413,12 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn restore_display_offset(&self, target: usize) -> bool {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            let metrics = ghostty.grid_metrics();
-            let history_size = usize::try_from(-i64::from(metrics.topmost_line.0)).unwrap_or(0);
-            let row = history_size.saturating_sub(target.min(history_size));
-            return ghostty.scroll_to_viewport_row(row);
-        }
         let current = self.grid_metrics().display_offset;
         let delta = target as i64 - current as i64;
         delta != 0 && self.scroll_delta(delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
     }
 
     pub(crate) fn scroll_to_viewport_row(&self, row: usize) -> bool {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.scroll_to_viewport_row(row);
-        }
         let mut term = self.term.lock();
         let history_size = usize::try_from(-i64::from(term.topmost_line().0)).unwrap_or(0);
         let target = history_size.saturating_sub(row.min(history_size));
@@ -674,20 +434,6 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn start_selection(&self, kind: SelectionKind, point: Point, side: SelectionSide) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            let _ = side;
-            ghostty.start_selection(kind, point);
-            return;
-        }
         let kind = match kind {
             SelectionKind::Simple => SelectionType::Simple,
             SelectionKind::Semantic => SelectionType::Semantic,
@@ -701,18 +447,6 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn update_selection(&self, point: Point, side: SelectionSide) -> Option<String> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.update_selection(point, side);
-        }
         let mut term = self.term.lock();
         let side = match side {
             SelectionSide::Left => AlacSide::Left,
@@ -725,37 +459,10 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn selection_text(&self) -> Option<String> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.selection_text();
-        }
         self.term.lock_unfair().selection_to_string()
     }
 
     pub(crate) fn finish_selection(&self) -> (bool, Option<String>) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            let copied = ghostty.selection_text();
-            let is_empty = copied.as_ref().is_none_or(String::is_empty);
-            ghostty.clear_selection();
-            return (is_empty, copied);
-        }
         let mut term = self.term.lock();
         let is_empty = term.selection.as_ref().is_none_or(Selection::is_empty);
         let copied = (!is_empty).then(|| term.selection_to_string()).flatten();
@@ -764,35 +471,10 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn clear_selection(&self) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            ghostty.clear_selection();
-            return;
-        }
         self.term.lock().selection = None;
     }
 
     pub(crate) fn osc8_hyperlink_at(&self, point: Point) -> Option<HyperlinkZone> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.hyperlink_at(point);
-        }
         let term = self.term.lock_unfair();
         let metrics = GridMetrics {
             columns: term.columns(),
@@ -822,18 +504,6 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn line_text_at(&self, point: Point) -> Option<GridLineText> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.line_text_at(point);
-        }
         use alacritty_terminal::term::cell::Flags;
 
         let term = self.term.lock_unfair();
@@ -859,33 +529,6 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn move_copy_cursor(&self, current: Point, dx: i32, dy: i32, extend: bool) -> Point {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            let metrics = ghostty.grid_metrics();
-            let column = (current.column.0 as i32 + dx)
-                .clamp(0, metrics.columns.saturating_sub(1) as i32)
-                as usize;
-            let line =
-                (current.line.0 + dy).clamp(metrics.topmost_line.0, metrics.bottommost_line.0);
-            let next = Point::new(line, column);
-            if extend {
-                if ghostty.selection_range().is_none() {
-                    ghostty.start_selection(SelectionKind::Simple, current);
-                }
-                ghostty.update_selection(next, SelectionSide::Right);
-            } else {
-                ghostty.clear_selection();
-            }
-            return next;
-        }
         let mut term = self.term.lock();
         if extend && term.selection.is_none() {
             term.selection = Some(Selection::new(
@@ -907,18 +550,6 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn selection_range(&self) -> Option<SelectionRange> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.selection_range();
-        }
         let term = self.term.lock_unfair();
         term.selection
             .as_ref()
@@ -927,53 +558,14 @@ impl TerminalSessionBackend {
     }
 
     pub(crate) fn bottommost_line(&self) -> Line {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.grid_metrics().bottommost_line;
-        }
         Line(self.term.lock_unfair().bottommost_line().0)
     }
 
     pub(crate) fn search(&self, query: &str, regex: bool) -> crate::search::SearchResult {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.search(query, regex);
-        }
         crate::search::search_term(&self.term, query, regex)
     }
 
     pub(crate) fn scroll_to_match(&self, search_match: &crate::search::SearchMatch) -> usize {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            let metrics = ghostty.grid_metrics();
-            let target = (metrics.bottommost_line.0 - search_match.start.line.0).max(0) as usize;
-            let _ = self.restore_display_offset(target);
-            return target;
-        }
         crate::search::scroll_to_match(&self.term, search_match)
     }
 }
@@ -1134,325 +726,31 @@ pub(super) fn raw_os_error_from_anyhow(error: &anyhow::Error) -> Option<i32> {
 #[derive(Clone)]
 enum PendingTerminalInput {
     Raw(Cow<'static, [u8]>),
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    Key {
-        input: paneflow_terminal_ghostty::KeyInput,
-        legacy: Option<Cow<'static, [u8]>>,
-    },
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    Mouse {
-        input: paneflow_terminal_ghostty::MouseInput,
-        repeat: usize,
-        legacy: Option<Vec<u8>>,
-    },
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    Focus(paneflow_terminal_ghostty::FocusEvent),
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    Paste {
-        text: String,
-        allow_unsafe: bool,
-        legacy_bracketed: bool,
-    },
 }
 
 impl PendingTerminalInput {
     fn queued_bytes(&self) -> usize {
         match self {
             Self::Raw(bytes) => bytes.len(),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Key { input, legacy } => {
-                std::mem::size_of::<paneflow_terminal_ghostty::KeyInput>()
-                    .saturating_add(input.text.len())
-                    .saturating_add(legacy.as_ref().map_or(0, |bytes| bytes.len()))
-            }
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Mouse { repeat, legacy, .. } => {
-                std::mem::size_of::<paneflow_terminal_ghostty::MouseInput>()
-                    .saturating_add(*repeat)
-                    .saturating_add(legacy.as_ref().map_or(0, Vec::len))
-            }
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Focus(_) => std::mem::size_of::<paneflow_terminal_ghostty::FocusEvent>(),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Paste { text, .. } => text.len(),
         }
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn queue_limit(&self) -> usize {
-        match self {
-            Self::Raw(_) => MAX_PENDING_INPUT_BYTES - INPUT_CONTROL_RESERVE_BYTES,
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Paste { .. } => MAX_PENDING_INPUT_BYTES - INPUT_CONTROL_RESERVE_BYTES,
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Key { input, .. }
-                if input.action == paneflow_terminal_ghostty::KeyAction::Release =>
-            {
-                MAX_PENDING_INPUT_BYTES
-            }
-            Self::Mouse { input, .. }
-                if input.action == paneflow_terminal_ghostty::MouseAction::Release =>
-            {
-                MAX_PENDING_INPUT_BYTES
-            }
-            Self::Focus(_) => MAX_PENDING_INPUT_BYTES,
-            Self::Key { .. } | Self::Mouse { .. } => {
-                MAX_PENDING_INPUT_BYTES - INPUT_CONTROL_RESERVE_BYTES
-            }
-        }
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn fits_after(&self, queued_bytes: usize) -> bool {
-        queued_bytes.saturating_add(self.queued_bytes()) <= self.queue_limit()
-    }
 
     fn into_legacy_bytes(self) -> Option<Cow<'static, [u8]>> {
         match self {
             Self::Raw(bytes) => Some(bytes),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Key { input, legacy } => legacy
-                .or_else(|| (!input.text.is_empty()).then(|| Cow::Owned(input.text.into_bytes()))),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Mouse { repeat, legacy, .. } => legacy.map(|bytes| {
-                if repeat == 1 {
-                    return Cow::Owned(bytes);
-                }
-                let mut repeated = Vec::with_capacity(bytes.len().saturating_mul(repeat));
-                for _ in 0..repeat {
-                    repeated.extend_from_slice(&bytes);
-                }
-                Cow::Owned(repeated)
-            }),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Focus(event) => Some(Cow::Borrowed(match event {
-                paneflow_terminal_ghostty::FocusEvent::Gained => b"\x1b[I",
-                paneflow_terminal_ghostty::FocusEvent::Lost => b"\x1b[O",
-            })),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            Self::Paste {
-                text,
-                legacy_bracketed,
-                ..
-            } => {
-                if legacy_bracketed {
-                    let mut bytes = Vec::with_capacity(text.len().saturating_add(12));
-                    bytes.extend_from_slice(b"\x1b[200~");
-                    bytes.extend_from_slice(text.as_bytes());
-                    bytes.extend_from_slice(b"\x1b[201~");
-                    Some(Cow::Owned(bytes))
-                } else {
-                    Some(Cow::Owned(text.into_bytes()))
-                }
-            }
         }
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn try_send(&self, ghostty: &GhosttySession) -> GhosttyInputSendResult {
-        match self {
-            Self::Raw(bytes) => ghostty.write(bytes.clone().into_owned()),
-            Self::Key { input, .. } => ghostty.write_key(input.clone()),
-            Self::Mouse { input, repeat, .. } => ghostty.write_mouse(*input, *repeat),
-            Self::Focus(event) => ghostty.write_focus(*event),
-            Self::Paste {
-                text, allow_unsafe, ..
-            } => ghostty.write_paste(text.clone(), *allow_unsafe),
-        }
-    }
 }
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BackendInputResult {
-    NotHandled,
-    Accepted,
-    Rejected,
-}
 
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-impl BackendInputResult {
-    pub(super) fn is_handled(self) -> bool {
-        self != Self::NotHandled
-    }
-}
 
 pub struct TerminalState {
     term: Arc<FairMutex<Term<ZedListener>>>,
     notifier: PtyNotifier,
     events_rx: Option<UnboundedReceiver<AlacEvent>>,
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    ghostty: Option<GhosttySession>,
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    ghostty_events_rx: Option<UnboundedReceiver<GhosttyUiEvent>>,
     requested_backend: TerminalBackendConfig,
     effective_backend: &'static str,
     backend_failure: Option<TerminalBackendFailureDiagnostics>,
@@ -1605,16 +903,6 @@ pub struct TerminalState {
 /// never promotes (spawn failure - `promote` is never called) cannot
 /// accumulate input without bound.
 const MAX_PENDING_INPUT_BYTES: usize = 1024 * 1024;
-#[cfg(any(
-    all(target_os = "linux", feature = "libghostty-linux"),
-    all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc",
-        feature = "libghostty-windows"
-    )
-))]
-const INPUT_CONTROL_RESERVE_BYTES: usize = 64 * 1024;
 
 /// The cheap, render-thread-safe half of a spawn: resolved shell, assembled
 /// child env, cwd, and grid size. Produced by
@@ -2097,222 +1385,35 @@ pub(super) fn restore_thread_signal_mask(saved: Option<libc::sigset_t>) {
 
 impl TerminalState {
     pub(crate) fn session_backend(&self) -> TerminalSessionBackend {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return TerminalSessionBackend::ghostty(
-                self.term.clone(),
-                PtyNotifier(self.notifier.0.clone()),
-                ghostty.clone(),
-            );
-        }
         TerminalSessionBackend::alacritty(self.term.clone(), PtyNotifier(self.notifier.0.clone()))
     }
 
     pub(crate) fn take_backend_events(&mut self) -> TerminalBackendEvents {
         let alacritty = self.events_rx.take();
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        let ghostty = self.ghostty_events_rx.take();
         TerminalBackendEvents {
             alacritty,
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            ghostty,
         }
     }
 
     pub(crate) fn process_backend_event(&mut self, event: TerminalBackendEvent) {
         match event {
             TerminalBackendEvent::Alacritty(event) => self.process_event(event),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            TerminalBackendEvent::Ghostty(event) => self.process_ghostty_event(event),
         }
     }
 
     pub(crate) fn process_backend_wakeup(&mut self) {
         self.dirty = true;
         self.output_generation = self.output_generation.saturating_add(1);
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        {
-            self.flush_ghostty_pending_input();
-            if let Some(ghostty) = &self.ghostty {
-                ghostty.retry_backpressured_commands();
-            }
-        }
     }
 
     pub(crate) fn notify_window_size(&self, size: TerminalWindowSize) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            ghostty.resize(size);
-            return;
-        }
         self.notifier.notify_window_size(size);
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn attach_ghostty(
-        &mut self,
-        ghostty: GhosttySession,
-        events_rx: UnboundedReceiver<GhosttyUiEvent>,
-    ) {
-        self.effective_backend = "ghostty";
-        self.marks = ghostty.marks();
-        self.ghostty = Some(ghostty);
-        self.ghostty_events_rx = Some(events_rx);
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn promote_ghostty(&mut self, spawned: SpawnedGhostty) {
-        let Some(ghostty) = self.ghostty.as_ref() else {
-            return;
-        };
-        ghostty.promote();
-        self.child_pid = spawned.child_pid;
-        self.current_cwd = Some(spawned.cwd.to_string_lossy().into_owned());
-        #[cfg(all(unix, not(test)))]
-        {
-            self.pty_guard = crate::agents::parent_guard::spawn_pty_guard(spawned.child_pid);
-        }
-        self.set_osc52_mode(Osc52Mode::CopyOnly);
-        self.cursor_blinking = true;
-        self.dirty = true;
-        self.flush_ghostty_pending_input();
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn flush_ghostty_pending_input(&self) {
-        let Some(ghostty) = self
-            .ghostty
-            .as_ref()
-            .filter(|session| session.is_promoted())
-        else {
-            return;
-        };
-        let Ok(mut pending) = self.pending_input.lock() else {
-            return;
-        };
-        while let Some(input) = pending.front().cloned() {
-            match input.try_send(ghostty) {
-                GhosttyInputSendResult::Sent => {
-                    pending.pop_front();
-                }
-                GhosttyInputSendResult::Full => break,
-                GhosttyInputSendResult::Closed => {
-                    let discarded = pending.len();
-                    pending.clear();
-                    log::warn!(
-                        target: "paneflow::terminal::ghostty",
-                        "Ghostty input closed with {discarded} deferred events"
-                    );
-                    break;
-                }
-            }
-        }
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn fallback_from_ghostty(&mut self, failure: TerminalBackendFailureDiagnostics) {
-        if let Some(ghostty) = self.ghostty.take() {
-            ghostty.shutdown();
-        }
-        self.effective_backend = "alacritty";
-        self.backend_failure = Some(failure);
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn fail_ghostty_after_spawn(&mut self, failure: TerminalBackendFailureDiagnostics) {
-        if let Some(ghostty) = self.ghostty.take() {
-            ghostty.shutdown();
-        }
-        self.backend_failure = Some(failure);
-    }
 
     pub(super) fn set_backend_request(&mut self, requested: TerminalBackendConfig) {
         self.requested_backend = requested;
@@ -2326,35 +1427,6 @@ impl TerminalState {
     }
 
     pub fn backend_diagnostics(&self) -> TerminalBackendDiagnostics {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        let ghostty = {
-            let identity = paneflow_terminal_ghostty::build_identity();
-            Some(GhosttyBuildDiagnostics {
-                version: paneflow_terminal_ghostty::GHOSTTY_APP_VERSION,
-                source_sha: identity.source_sha,
-                api_version: identity.api_version,
-                zig_version: identity.zig_version,
-                optimization: identity.optimization,
-                simd: identity.simd,
-            })
-        };
-        #[cfg(not(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        )))]
         let ghostty = None;
 
         TerminalBackendDiagnostics {
@@ -2810,26 +1882,6 @@ impl TerminalState {
             // `promote()` installs a `Pty` sender.
             notifier: PtyNotifier(notifier_sender),
             events_rx: Some(events_rx),
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            ghostty: None,
-            #[cfg(any(
-                all(target_os = "linux", feature = "libghostty-linux"),
-                all(
-                    target_os = "windows",
-                    target_arch = "x86_64",
-                    target_env = "msvc",
-                    feature = "libghostty-windows"
-                )
-            ))]
-            ghostty_events_rx: None,
             requested_backend: TerminalBackendConfig::Auto,
             effective_backend: "alacritty",
             backend_failure: None,
@@ -2911,21 +1963,6 @@ impl TerminalState {
             }
             self.events_rx = Some(rx);
         }
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(mut rx) = self.ghostty_events_rx.take() {
-            while let Ok(event) = rx.try_recv() {
-                self.process_ghostty_event(event);
-            }
-            self.ghostty_events_rx = Some(rx);
-        }
     }
 
     /// Refresh the shell CWD from the process table (EP-002 US-007).
@@ -2982,18 +2019,6 @@ impl TerminalState {
     /// Called on child exit before marking the terminal as exited.
     /// Only resets modes that are actually active (clean exits won't trigger).
     fn reset_active_modes(&mut self) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if self.ghostty.is_some() {
-            return;
-        }
         // Guard against double-reset: if we've already recorded the exit
         // status, the PTY writer is already closed and the next notify()
         // would log a swallowed EPIPE.
@@ -3148,74 +2173,6 @@ impl TerminalState {
         }
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn process_ghostty_event(&mut self, event: GhosttyUiEvent) {
-        match event {
-            GhosttyUiEvent::Wakeup(events) => {
-                events.acknowledge_wakeup();
-                self.dirty = true;
-                self.output_generation = self.output_generation.saturating_add(1);
-            }
-            GhosttyUiEvent::Title(events) => {
-                if let Some(title) = events.take_title()
-                    && !is_executable_path_title(&title)
-                {
-                    self.title = title;
-                }
-            }
-            GhosttyUiEvent::WorkingDirectory(events) => {
-                if let Some(cwd) = events.take_working_directory() {
-                    self.current_cwd = Some(cwd);
-                }
-            }
-            GhosttyUiEvent::Clipboard(events) => {
-                for text in events.take_clipboard() {
-                    if self.terminal_focused
-                        && self.osc52_mode != Osc52Mode::Disabled
-                        && text.len() <= MAX_OSC52_BYTES
-                    {
-                        self.queue_clipboard_op(ClipboardOp::Store(text));
-                    }
-                }
-            }
-            GhosttyUiEvent::ServiceOutputReady(events) => {
-                events.acknowledge_service_output();
-                self.last_activity_burst = None;
-                self.dirty = true;
-            }
-            GhosttyUiEvent::ChildExited { code, signal } => {
-                if self.exited.is_none() {
-                    self.exited = Some(code);
-                    self.exit_signal = signal;
-                }
-                self.dirty = true;
-                self.cached_foreground_command = None;
-                self.reported_ports.clear();
-                #[cfg(all(unix, not(test)))]
-                {
-                    self.pty_guard = None;
-                }
-            }
-            GhosttyUiEvent::InputRejected(error) => {
-                log::warn!(target: "paneflow::terminal::ghostty", "{error}");
-            }
-            GhosttyUiEvent::RuntimeFailed(error) => {
-                log::error!(target: "paneflow::terminal::ghostty", "{error}");
-                if self.exited.is_none() {
-                    self.exited = Some(-1);
-                }
-                self.dirty = true;
-            }
-        }
-    }
 
     fn queue_clipboard_op(&mut self, op: ClipboardOp) {
         if self.pending_clipboard_ops.len() >= MAX_PENDING_CLIPBOARD_OPS {
@@ -3325,19 +2282,6 @@ impl TerminalState {
     /// Returns newly detected services (deduped against previously reported ports).
     /// Lock on `self.term` is held only for text extraction, then released before parsing.
     pub fn scan_output(&mut self) -> Vec<ServiceInfo> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            let lines = ghostty.recent_output_lines();
-            return self.detect_services_in_lines(&lines);
-        }
         let lines: Vec<String> = {
             // Read-only grid scan; unfair lock avoids queueing behind the
             // PTY reader thread on the periodic service-detection sweep.
@@ -3412,156 +2356,11 @@ impl TerminalState {
             .set_policy(mode != Osc52Mode::Disabled, mode == Osc52Mode::CopyPaste);
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn clipboard_gate(&self) -> Arc<ClipboardGate> {
-        self.clipboard_gate.clone()
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn dispatch_ghostty_input(
-        &self,
-        input: PendingTerminalInput,
-        user_initiated: bool,
-    ) -> BackendInputResult {
-        let Some(ghostty) = self.ghostty.as_ref() else {
-            return BackendInputResult::NotHandled;
-        };
-        let Ok(mut pending) = self.pending_input.lock() else {
-            return BackendInputResult::Rejected;
-        };
-        let pending_bytes = pending.iter().fold(0usize, |total, item| {
-            total.saturating_add(item.queued_bytes())
-        });
-        let total = pending_bytes.saturating_add(ghostty.queued_input_bytes());
-        let queue_limit = input.queue_limit();
-        if !input.fits_after(total) {
-            log::warn!(
-                target: "paneflow::terminal::ghostty",
-                "Ghostty input rejected at the {} byte queue limit",
-                queue_limit
-            );
-            return BackendInputResult::Rejected;
-        }
 
-        if ghostty.is_promoted() && pending.is_empty() {
-            match input.try_send(ghostty) {
-                GhosttyInputSendResult::Sent => {
-                    if user_initiated {
-                        self.keyboard_input_sent
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    return BackendInputResult::Accepted;
-                }
-                GhosttyInputSendResult::Full => {}
-                GhosttyInputSendResult::Closed => return BackendInputResult::Rejected,
-            }
-        }
 
-        pending.push_back(input);
-        if user_initiated {
-            self.keyboard_input_sent
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        BackendInputResult::Accepted
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn write_ghostty_key(
-        &self,
-        input: paneflow_terminal_ghostty::KeyInput,
-        legacy: Option<Cow<'static, [u8]>>,
-    ) -> BackendInputResult {
-        self.dispatch_ghostty_input(PendingTerminalInput::Key { input, legacy }, true)
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn write_ghostty_mouse(
-        &self,
-        input: paneflow_terminal_ghostty::MouseInput,
-        repeat: usize,
-        legacy: Option<Vec<u8>>,
-    ) -> BackendInputResult {
-        self.dispatch_ghostty_input(
-            PendingTerminalInput::Mouse {
-                input,
-                repeat,
-                legacy,
-            },
-            true,
-        )
-    }
-
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn write_ghostty_focus(
-        &self,
-        event: paneflow_terminal_ghostty::FocusEvent,
-    ) -> BackendInputResult {
-        self.dispatch_ghostty_input(PendingTerminalInput::Focus(event), false)
-    }
-
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    pub(super) fn write_ghostty_paste(
-        &self,
-        text: String,
-        legacy_bracketed: bool,
-    ) -> BackendInputResult {
-        self.dispatch_ghostty_input(
-            PendingTerminalInput::Paste {
-                text,
-                allow_unsafe: true,
-                legacy_bracketed,
-            },
-            true,
-        )
-    }
 
     /// Send input to the live PTY, or queue it when the terminal is still
     /// display-only (US-012 pre-promotion window). The display-only notifier
@@ -3571,22 +2370,6 @@ impl TerminalState {
     /// [`MAX_PENDING_INPUT_BYTES`] so a never-promoted terminal can't grow it
     /// without bound.
     fn notify_or_buffer(&self, input: Cow<'static, [u8]>) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            if !input.is_empty() {
-                let _ = ghostty;
-                self.dispatch_ghostty_input(PendingTerminalInput::Raw(input), false);
-            }
-            return;
-        }
         if self.notifier.0.is_pty() {
             self.notifier.notify(input);
             return;
@@ -3626,18 +2409,6 @@ impl TerminalState {
     /// replay the previous visible frame ahead of fresh shell output.
     /// Caps at 4000 lines and 400,000 characters. Returns None if history is empty.
     pub fn extract_scrollback(&self) -> Option<String> {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.extract_scrollback();
-        }
         Self::extract_scrollback_from(&self.term)
     }
 
@@ -3726,18 +2497,6 @@ impl TerminalState {
         if pattern.is_empty() || max_matches == 0 {
             return (Vec::new(), false);
         }
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            return ghostty.search_scrollback(pattern, max_matches);
-        }
         let result = crate::search::search_term(&self.term, pattern, false);
 
         // Collect unique line numbers in order of first appearance.
@@ -3824,19 +2583,6 @@ impl TerminalState {
     /// Prepends `\x1b[0m` (SGR reset) to clear any dangling style state from
     /// a prior truncated scrollback - ANSI-safe defense-in-depth (US-012).
     pub fn restore_scrollback(&self, text: &str) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = &self.ghostty {
-            ghostty.restore_scrollback(text);
-            return;
-        }
         let mut term = self.term.lock();
         let mut processor = alacritty_terminal::vte::ansi::Processor::<
             alacritty_terminal::vte::ansi::StdSyncHandler,
@@ -4342,19 +3088,6 @@ fn format_signal(sig: i32) -> String {
 
 impl Drop for TerminalState {
     fn drop(&mut self) {
-        #[cfg(any(
-            all(target_os = "linux", feature = "libghostty-linux"),
-            all(
-                target_os = "windows",
-                target_arch = "x86_64",
-                target_env = "msvc",
-                feature = "libghostty-windows"
-            )
-        ))]
-        if let Some(ghostty) = self.ghostty.take() {
-            ghostty.shutdown();
-            self.child_pid = 0;
-        }
         self.notifier.0.shutdown();
 
         // US-034: close the dup'd PTY master fd we own (macOS). Done exactly
@@ -4890,39 +3623,6 @@ mod tests {
         assert_eq!(state.child_pid, 0);
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    #[test]
-    fn ghostty_fallback_preserves_the_auto_request_in_structured_diagnostics() {
-        let mut state = TerminalState::new_display_only(24, 80);
-        state.set_backend_request(TerminalBackendConfig::Auto);
-        state.effective_backend = "ghostty";
-
-        state.fallback_from_ghostty(TerminalBackendFailureDiagnostics::new(
-            TerminalBackendFailurePhase::Initialization,
-            TerminalBackendFailureDiagnostics::GHOSTTY_INITIALIZATION_FAILED,
-            Some(5),
-        ));
-
-        let diagnostics = state.backend_diagnostics();
-        assert_eq!(diagnostics.requested, TerminalBackendConfig::Auto);
-        assert_eq!(diagnostics.effective, "alacritty");
-        assert_eq!(
-            diagnostics.failure,
-            Some(TerminalBackendFailureDiagnostics::new(
-                TerminalBackendFailurePhase::Initialization,
-                TerminalBackendFailureDiagnostics::GHOSTTY_INITIALIZATION_FAILED,
-                Some(5),
-            ))
-        );
-    }
 
     #[test]
     fn backend_diagnostics_extract_os_codes_without_sensitive_error_text() {
@@ -4983,30 +3683,6 @@ mod tests {
         assert_eq!(diagnostics.target_triple, "x86_64-pc-windows-msvc");
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    #[test]
-    fn backend_diagnostics_expose_pinned_ghostty_build_identity() {
-        let diagnostics = TerminalState::new_display_only(24, 80).backend_diagnostics();
-        let ghostty = diagnostics.ghostty.expect("Ghostty build identity");
-        let identity = paneflow_terminal_ghostty::build_identity();
-        assert_eq!(
-            ghostty.version,
-            paneflow_terminal_ghostty::GHOSTTY_APP_VERSION
-        );
-        assert_eq!(ghostty.source_sha, identity.source_sha);
-        assert_eq!(ghostty.api_version, identity.api_version);
-        assert_eq!(ghostty.zig_version, identity.zig_version);
-        assert_eq!(ghostty.optimization, identity.optimization);
-        assert_eq!(ghostty.simd, identity.simd);
-    }
 
     #[test]
     fn write_to_pty_buffers_input_while_display_only() {
@@ -5047,150 +3723,9 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn test_key_input(
-        action: paneflow_terminal_ghostty::KeyAction,
-    ) -> paneflow_terminal_ghostty::KeyInput {
-        paneflow_terminal_ghostty::KeyInput {
-            key: paneflow_terminal_ghostty::Key::Function(5),
-            action,
-            modifiers: paneflow_terminal_ghostty::Modifiers::CONTROL,
-            consumed_modifiers: paneflow_terminal_ghostty::Modifiers::empty(),
-            text: String::new(),
-            unshifted_codepoint: None,
-            composing: false,
-        }
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    fn test_mouse_input(
-        action: paneflow_terminal_ghostty::MouseAction,
-    ) -> paneflow_terminal_ghostty::MouseInput {
-        paneflow_terminal_ghostty::MouseInput {
-            action,
-            button: Some(paneflow_terminal_ghostty::MouseButton::Left),
-            modifiers: paneflow_terminal_ghostty::Modifiers::empty(),
-            x: 8.0,
-            y: 16.0,
-            screen_width: 640,
-            screen_height: 384,
-            padding_top: 0,
-            padding_bottom: 0,
-            padding_left: 0,
-            padding_right: 0,
-            any_button_pressed: action != paneflow_terminal_ghostty::MouseAction::Release,
-        }
-    }
 
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    #[test]
-    fn control_releases_fit_after_general_input_saturates() {
-        let general_limit = MAX_PENDING_INPUT_BYTES - INPUT_CONTROL_RESERVE_BYTES;
-        let press = PendingTerminalInput::Key {
-            input: test_key_input(paneflow_terminal_ghostty::KeyAction::Press),
-            legacy: None,
-        };
-        let key_release = PendingTerminalInput::Key {
-            input: test_key_input(paneflow_terminal_ghostty::KeyAction::Release),
-            legacy: None,
-        };
-        let mouse_release = PendingTerminalInput::Mouse {
-            input: test_mouse_input(paneflow_terminal_ghostty::MouseAction::Release),
-            repeat: 1,
-            legacy: Some(b"mouse-up".to_vec()),
-        };
-        let focus = PendingTerminalInput::Focus(paneflow_terminal_ghostty::FocusEvent::Lost);
 
-        assert!(!press.fits_after(general_limit));
-        assert!(key_release.fits_after(general_limit));
-        assert!(mouse_release.fits_after(general_limit));
-        assert!(focus.fits_after(general_limit));
-    }
-
-    #[cfg(any(
-        all(target_os = "linux", feature = "libghostty-linux"),
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc",
-            feature = "libghostty-windows"
-        )
-    ))]
-    #[test]
-    fn ghostty_startup_fallback_preserves_structured_input_in_order() {
-        let (mut state, _alacritty_pending) = TerminalState::new_pending(80, 24);
-        let (ghostty, _runtime_pending, events_rx) =
-            GhosttySession::pending(TerminalWindowSize::new(80, 24, 0, 0));
-        state.attach_ghostty(ghostty, events_rx);
-
-        assert_eq!(
-            state.write_ghostty_key(
-                test_key_input(paneflow_terminal_ghostty::KeyAction::Press),
-                Some(Cow::Borrowed(b"\x1b[15~")),
-            ),
-            BackendInputResult::Accepted
-        );
-        assert_eq!(
-            state.write_ghostty_mouse(
-                test_mouse_input(paneflow_terminal_ghostty::MouseAction::Press),
-                2,
-                Some(b"M".to_vec()),
-            ),
-            BackendInputResult::Accepted
-        );
-        assert_eq!(
-            state.write_ghostty_focus(paneflow_terminal_ghostty::FocusEvent::Gained),
-            BackendInputResult::Accepted
-        );
-        assert_eq!(
-            state.write_ghostty_paste("paste".to_string(), true),
-            BackendInputResult::Accepted
-        );
-
-        state.fallback_from_ghostty(TerminalBackendFailureDiagnostics::new(
-            TerminalBackendFailurePhase::Initialization,
-            TerminalBackendFailureDiagnostics::GHOSTTY_INITIALIZATION_FAILED,
-            None,
-        ));
-        let legacy: Vec<Vec<u8>> = state
-            .drain_pending_legacy_input()
-            .into_iter()
-            .map(Cow::into_owned)
-            .collect();
-        assert_eq!(
-            legacy,
-            vec![
-                b"\x1b[15~".to_vec(),
-                b"MM".to_vec(),
-                b"\x1b[I".to_vec(),
-                b"\x1b[200~paste\x1b[201~".to_vec(),
-            ]
-        );
-    }
 
     #[cfg(unix)]
     #[test]
