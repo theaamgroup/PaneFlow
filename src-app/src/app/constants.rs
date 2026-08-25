@@ -24,17 +24,14 @@ pub(crate) const SIDEBAR_CARD_CORNER_RADIUS: Pixels = WINDOW_CORNER_RADIUS;
 /// Inner CLI content inset. Combined with the pane's reserved 1px border,
 /// this places tabs and terminal cells 4px from the main panel edge.
 pub(crate) const PANE_CONTENT_INSET: f32 = 3.;
-/// Windows Mica and macOS Sidebar material already supply theme-aware tints.
+/// macOS Sidebar material already supplies theme-aware tints.
 /// The card remains fully transparent there so the material stays perceptible;
 /// its border still defines the inset surface.
 #[cfg(target_os = "macos")]
 const SIDEBAR_CARD_MATERIAL_OPACITY: f32 = 0.;
-#[cfg(not(target_os = "macos"))]
-const SIDEBAR_CARD_MATERIAL_OPACITY: f32 = 0.84;
 
 /// Selected rows carry a stronger lift than hover rows so current navigation
-/// remains legible without a separate indicator. Linux precomposes these tints
-/// over the opaque chrome color; macOS and Windows keep their native material.
+/// remains legible without a separate indicator. macOS keeps its native material.
 const DARK_SIDEBAR_TAB_TINT: u32 = 0xffffff;
 const LIGHT_SIDEBAR_TAB_TINT: u32 = 0x25262b;
 const DARK_SIDEBAR_TAB_ACTIVE_OPACITY: f32 = 0.11;
@@ -99,25 +96,10 @@ pub(crate) fn window_background_appearance(
 fn window_background_appearance_for_preference(
     preference: WindowBackdropPreference,
 ) -> WindowBackgroundAppearance {
-    #[cfg(target_os = "macos")]
-    {
-        match preference {
-            WindowBackdropPreference::Opaque => WindowBackgroundAppearance::Opaque,
-            WindowBackdropPreference::Blurred => WindowBackgroundAppearance::Blurred,
-            _ => WindowBackgroundAppearance::Transparent,
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let _ = preference;
-        WindowBackgroundAppearance::Opaque
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = preference;
-        WindowBackgroundAppearance::Opaque
+    match preference {
+        WindowBackdropPreference::Opaque => WindowBackgroundAppearance::Opaque,
+        WindowBackdropPreference::Blurred => WindowBackgroundAppearance::Blurred,
+        _ => WindowBackgroundAppearance::Transparent,
     }
 }
 
@@ -131,11 +113,8 @@ pub(crate) fn macos_sidebar_material_enabled(config_value: Option<&str>) -> bool
 
 /// Fill used by chrome children inside the window shell.
 ///
-/// Windows must paint an opaque title bar when its dedicated chrome material is
-/// disabled. The terminal can still activate the host-window backdrop, so a
-/// transparent title bar would otherwise expose that terminal-only material.
-/// Other platforms keep the child transparent and let the rounded shell own the
-/// tint, avoiding rectangular paint outside GPUI's corner mask.
+/// The child stays transparent and the rounded shell owns the tint, avoiding
+/// rectangular paint outside GPUI's corner mask.
 pub(crate) fn cockpit_chrome_background(
     background: Hsla,
     is_window_active: bool,
@@ -147,11 +126,11 @@ pub(crate) fn cockpit_chrome_background(
 
 /// Fill for the inset primary navigation card.
 ///
-/// Linux uses a fully opaque surface. Windows and macOS expose their raw native
-/// materials, with the same opaque fallback when the material is off.
+/// macOS exposes its raw native material, with the same opaque fallback when
+/// the material is off.
 pub(crate) fn primary_sidebar_card_background(surface: Hsla, material_active: bool) -> Hsla {
     let opaque_surface = Hsla { a: 1.0, ..surface };
-    if cfg!(target_os = "linux") || !material_active {
+    if !material_active {
         opaque_surface
     } else {
         opaque_surface.opacity(SIDEBAR_CARD_MATERIAL_OPACITY)
@@ -163,30 +142,17 @@ pub(crate) fn primary_sidebar_card_background(surface: Hsla, material_active: bo
 /// This is what the rounded panel corners reveal in their clip notch, so it MUST
 /// show through the transparent rail ([`cockpit_chrome_background`]) - otherwise
 /// the corner exposes a different surface and the radius reads as a square patch.
-/// Native semantic materials remain raw on macOS and Windows. Linux always
-/// resolves to the opaque theme color: wallpaper never participates in the UI.
+/// Native semantic materials remain raw on macOS.
 pub(crate) fn cockpit_backdrop_background(
     background: Hsla,
     is_window_active: bool,
     material_active: bool,
 ) -> Hsla {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = (is_window_active, material_active);
-        Hsla {
-            a: 1.0,
-            ..background
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = is_window_active;
-        if material_active {
-            gpui::transparent_black()
-        } else {
-            background
-        }
+    let _ = is_window_active;
+    if material_active {
+        gpui::transparent_black()
+    } else {
+        background
     }
 }
 
@@ -214,19 +180,7 @@ fn sidebar_tab_background(light_opacity: f32, dark_opacity: f32) -> Hsla {
     } else {
         (DARK_SIDEBAR_TAB_TINT, dark_opacity)
     };
-    let tint = Hsla::from(gpui::rgb(tint)).opacity(opacity);
-
-    #[cfg(target_os = "linux")]
-    {
-        Hsla {
-            a: 1.0,
-            ..theme.title_bar_background
-        }
-        .blend(tint)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    tint
+    Hsla::from(gpui::rgb(tint)).opacity(opacity)
 }
 
 /// Toast animation durations (ms). The `hold_ms` carried on each `Toast`
@@ -248,27 +202,6 @@ pub(crate) const RESIZE_BORDER: Pixels = px(10.0);
 pub(crate) const WINDOW_CORNER_RADIUS: Pixels = px(10.0);
 /// Hairline separating the themed shell from its native compositor shadow.
 pub(crate) const WINDOW_BORDER_SIZE: Pixels = px(1.0);
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn linux_window_starts_opaque_until_the_display_backend_is_known() {
-        for preference in [
-            WindowBackdropPreference::Auto,
-            WindowBackdropPreference::Mica,
-            WindowBackdropPreference::Blurred,
-            WindowBackdropPreference::Transparent,
-            WindowBackdropPreference::Opaque,
-        ] {
-            assert_eq!(
-                window_background_appearance_for_preference(preference),
-                WindowBackgroundAppearance::Opaque
-            );
-        }
-    }
-}
 
 #[cfg(test)]
 mod material_tests {
@@ -295,22 +228,5 @@ mod material_tests {
         let card = primary_sidebar_card_background(surface, true);
 
         assert_eq!(card.a, 0., "the sidebar must not veil native material");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_chrome_stays_opaque_when_material_is_requested() {
-        let dark = gpui::hsla(0.71, 0.62, 0.32, 0.42);
-        let light = gpui::hsla(0.09, 0.54, 0.78, 0.58);
-
-        assert_eq!(
-            cockpit_backdrop_background(dark, true, true),
-            Hsla { a: 1.0, ..dark }
-        );
-        assert_eq!(
-            cockpit_backdrop_background(light, true, true),
-            Hsla { a: 1.0, ..light }
-        );
-        assert_eq!(primary_sidebar_card_background(dark, true).a, 1.0);
     }
 }

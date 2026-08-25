@@ -257,17 +257,6 @@ notify-rust = "4"
 # targets. The matching signing side runs in CI (US-002, `minisign`/`rsign2`).
 minisign-verify = "0.2.5"
 
-# Linux: enable Wayland + X11 display backends for gpui_platform
-[target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db", features = ["wayland", "x11"] }
-# Native compositor blur for PaneFlow's sidebar + title bar. Wayland prefers
-# ext-background-effect-v1 and falls back to GPUI's KDE protocol; X11 uses
-# KWin's _KDE_NET_WM_BLUR_BEHIND_REGION hint when the effect is advertised.
-raw-window-handle = "0.6"
-wayland-client = { version = "0.31.14", features = ["dlopen", "system"] }
-wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
-x11rb = { version = "0.13.2", features = ["allow-unsafe-code"] }
-
 # macOS: libproc powers detect_ports() (US-006) - walks per-PID socket FDs
 # via proc_pidinfo/proc_pidfdinfo wrappers. The macOS-only gate keeps it
 # out of the Linux dep closure entirely.
@@ -299,11 +288,6 @@ gpui = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9
 # negatives) without baking a private key into the repo.
 minisign = "0.9.1"
 tracing-test = "0.2"
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-# The EP-001 transport probe also runs when Linux tests explicitly disable the
-# default Ghostty feature.
-portable-pty = "0.9.0"
 
 # Clippy lint policy (US-007). Mirrors `[workspace.lints.clippy]` in the
 # root Cargo.toml EXCEPT the unwrap/expect family is demoted from "warn"

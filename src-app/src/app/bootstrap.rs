@@ -671,15 +671,7 @@ impl PaneFlowApp {
         )
         .detach();
 
-        // US-008 - classify the install source once, then hand off to the
-        // install-method hygiene migrations. Migrations are Linux-only and
-        // the module itself is gated behind `#[cfg(target_os = "linux")]`,
-        // so the call site needs the matching gate. On macOS / Windows the
-        // tar.gz → rpm/deb crossover doesn't exist, so the helper isn't
-        // compiled in at all.
         let install_method = update::install_method::detect();
-        #[cfg(target_os = "linux")]
-        update::migrations::run_startup_migrations(&install_method);
 
         // Compile-time env vars: the PostHog project key is injected by the
         // release pipeline; the host defaults to EU Cloud so a build that
@@ -729,66 +721,6 @@ impl PaneFlowApp {
         // posts when the size or age threshold is met. Re-spawned when the
         // telemetry client is swapped by config reconciliation.
         Self::spawn_telemetry_flusher(std::sync::Arc::clone(&telemetry), cx);
-
-        // US-009 - coexistence detection + one-time advisory toast. Runs
-        // strictly after the US-008 icon migration so a same-session
-        // upgrade→cleanup→toast chain stays in order. Detection is always
-        // logged (AC: "helper is still called for logging") so duplicate
-        // installs remain visible in debug transcripts even after the
-        // marker has muted the toast.
-        #[cfg(target_os = "linux")]
-        if let Some(report) = update::migrations::detect_coexistent_install(&install_method) {
-            log::info!(
-                "paneflow: coexistent install detected - running from {} (this install); other install at {} (installed via {})",
-                report.running_path.display(),
-                report.other_path.display(),
-                report.other_method_label,
-            );
-            if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-                let marker_path = update::migrations::coexistence_marker_path(&home);
-                if !marker_path.exists() {
-                    // Build the toast payload up front so the spawn closure
-                    // captures owned strings, not borrowed locals.
-                    let message = format!(
-                        "Two PaneFlow installs detected. Running from {} (this install); other install at {} (installed via {}). Remove the unused install to avoid version drift.",
-                        report.running_path.display(),
-                        report.other_path.display(),
-                        report.other_method_label,
-                    );
-                    let actions = vec![crate::ToastAction::OpenReleasesPage(
-                        "https://paneflow.dev/download#multiple-installs".to_string(),
-                    )];
-                    let hold_ms = crate::TOAST_HOLD_MS * 4;
-                    // `push_toast` needs `&mut Self` + `&mut Context<Self>`,
-                    // but `Self` doesn't exist yet at this point in `new()`.
-                    // Defer via `cx.spawn` - the first `Timer::after` yield
-                    // lets the ctor finish and hands control back with a
-                    // resolvable `WeakEntity<Self>`. Matches the established
-                    // spawn pattern in this file (see git-watcher, port-scan,
-                    // stale-PID sweep above).
-                    cx.spawn(
-                        async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                            smol::Timer::after(std::time::Duration::from_millis(1)).await;
-                            let pushed = cx
-                                .update(|cx| {
-                                    this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
-                                        app.push_toast(message, actions, hold_ms, cx);
-                                    })
-                                })
-                                .is_ok();
-                            // Only persist the marker if the toast actually
-                            // went out - a failed update means the app window
-                            // is tearing down, in which case letting the toast
-                            // recur next session is the right behaviour.
-                            if pushed {
-                                update::migrations::write_coexistence_marker(&marker_path);
-                            }
-                        },
-                    )
-                    .detach();
-                }
-            }
-        }
 
         // US-008: the diff panel's persistent file filter. Observe it so each
         // keystroke re-renders the app (the TextInput only notifies itself).

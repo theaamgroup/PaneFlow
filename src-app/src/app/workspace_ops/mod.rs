@@ -923,101 +923,40 @@ impl PaneFlowApp {
     }
 }
 
-/// Spawn the native file manager with `path` in focus, per-OS (US-011).
+/// Spawn Finder with `path` in focus (US-011).
 ///
-/// - **Linux** → `xdg-open <path>`. `xdg-utils` opens the directory in
-///   the default handler; "reveal the file in its folder" semantics
-///   don't translate cleanly to X11/Wayland file managers, so we
-///   approximate by opening the parent directory when `path` is a file.
-/// - **macOS** → `open <path>` (Finder dispatches). `open -R <path>`
-///   would "reveal" with the file highlighted, but the PRD explicitly
-///   mandates `open <path>` for parity with the Linux "open this
-///   directory" behavior - callers that want reveal-with-highlight
-///   pass the parent directory.
-/// - **Windows** → `explorer /select,<path>`. The `/select,` flag opens
-///   the parent folder with `<path>` highlighted - the canonical
-///   "reveal in Explorer" idiom documented by Microsoft.
+/// Uses `open <path>` (Finder dispatches). `open -R <path>` would "reveal"
+/// with the file highlighted, but the PRD explicitly mandates `open <path>`;
+/// callers that want reveal-with-highlight pass the parent directory.
 ///
 /// Returns `Err(message)` on spawn failure where `message` is already
-/// phrased for a user-visible toast (US-011 AC7, AC9). Notable error
-/// shape: Linux `ErrorKind::NotFound` surfaces the "install xdg-utils"
-/// hint per the unhappy-path AC.
-#[allow(clippy::needless_return)]
+/// phrased for a user-visible toast (US-011 AC7, AC9).
 pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    {
-        let result = std::process::Command::new("xdg-open").arg(path).spawn();
-        return result.map(|_| ()).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                "xdg-open not found - install xdg-utils to use this feature".to_string()
-            } else {
-                format!("Could not open file manager: {err}")
-            }
-        });
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let result = std::process::Command::new("open").arg(path).spawn();
-        return result
-            .map(|_| ())
-            .map_err(|err| format!("Could not open Finder: {err}"));
-    }
-    // Fallback for target_os values we don't explicitly handle
-    // (freebsd, netbsd, etc.). Best-effort via xdg-open which is widely
-    // available on BSD but not guaranteed.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| format!("Could not open file manager: {err}"))
-    }
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Could not open Finder: {err}"))
 }
 
-/// Open a directory in the platform file manager without going through the
-/// `open` crate's generic shell dispatch. Used for "System default" folder
-/// actions where Windows packaged launches can reject `cmd /C start`-style
-/// dispatch with `ERROR_NOT_SUPPORTED`.
-#[allow(clippy::needless_return)]
+/// Open a directory in Finder without going through the `open` crate's
+/// generic shell dispatch. Used for "System default" folder actions.
 pub(crate) fn open_folder_in_file_manager(path: &std::path::Path) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    {
-        let result = std::process::Command::new("xdg-open").arg(path).spawn();
-        return result.map(|_| ()).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                "xdg-open not found - install xdg-utils to use this feature".to_string()
-            } else {
-                format!("Could not open file manager: {err}")
-            }
-        });
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let result = std::process::Command::new("open").arg(path).spawn();
-        return result
-            .map(|_| ())
-            .map_err(|err| format!("Could not open Finder: {err}"));
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| format!("Could not open file manager: {err}"))
-    }
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Could not open Finder: {err}"))
 }
 
 /// Resolve an editor command (e.g. `"zed"`, `"code"`) to a concrete path.
 ///
 /// `Command::new(command).spawn()` only consults the spawning process's PATH,
-/// which on Linux desktop launches (`.desktop`), macOS Finder, and Windows
-/// shell launches frequently lacks the user-bin directories where editors
-/// like Zed, Cursor, or Code Insiders install their CLI shim. We extend the
-/// search with a small set of well-known per-OS fallbacks, then fall back to
-/// the bare command so `spawn()` still produces a clean `NotFound` error
-/// (now surfaced via toast in `open_workspace_in_editor`).
+/// which on macOS Finder launches frequently lacks the user-bin directories
+/// where editors like Zed, Cursor, or Code Insiders install their CLI shim.
+/// We extend the search with a small set of well-known fallbacks, then fall
+/// back to the bare command so `spawn()` still produces a clean `NotFound`
+/// error (now surfaced via toast in `open_workspace_in_editor`).
 pub(crate) fn resolve_editor_binary(command: &str) -> std::path::PathBuf {
     resolve_editor_binary_in(command, &editor_search_paths())
 }
@@ -1052,13 +991,11 @@ fn normalize_editor_candidate(path: std::path::PathBuf) -> Option<std::path::Pat
     Some(path)
 }
 
-/// Per-OS list of directories to consult when an editor isn't on PATH.
+/// Directories to consult when an editor isn't on PATH.
 ///
-/// Linux distributions and BSDs share the same user-bin layout (`~/.local/bin`,
-/// `~/.cargo/bin`, `/usr/local/bin`), so a single Linux branch covers Fedora,
-/// Ubuntu/Debian, Arch, openSUSE, etc. Snap (`/snap/bin`) and Flatpak are
-/// handled by the system PATH on every distro that ships them, so they don't
-/// need explicit entries here.
+/// GUI launches inherit a narrowed PATH, so we also search well-known user
+/// and Homebrew bin directories (`~/.local/bin`, `~/.cargo/bin`, `/usr/local/bin`,
+/// `/opt/homebrew/bin`).
 fn editor_search_paths() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
 
@@ -1068,12 +1005,9 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
         paths.push(home.join(".cargo").join("bin"));
         paths.push(home.join("bin"));
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        paths.push(PathBuf::from("/usr/local/bin"));
-    }
     #[cfg(target_os = "macos")]
     {
+        paths.push(PathBuf::from("/usr/local/bin"));
         paths.push(PathBuf::from("/opt/homebrew/bin"));
     }
     paths
@@ -1084,31 +1018,8 @@ mod tests {
     use super::*;
 
     // Pure-Rust tests only - spawning actual binaries is brittle in CI
-    // (Linux runners may not have xdg-utils, macOS runners may not have
-    // `open` on PATH under non-GUI session, etc.). We exercise the
-    // error-message shape so the toast copy can't drift silently.
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn reveal_linux_missing_xdg_open_surfaces_install_hint() {
-        // Craft a bogus PATH so xdg-open is genuinely absent. `std::process::Command`
-        // inherits env by default; temporarily clearing $PATH via
-        // `Command::env` is fine because this test runs in its own
-        // process image.
-        //
-        // We can't mutate the helper's internal Command, so exercise the
-        // same branch directly: fabricate a NotFound io::Error and run
-        // it through the classifier shape the helper uses.
-        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
-        // Mirrors the helper's error-mapping branch; a refactor that
-        // changes the toast copy in one place will fail this assertion.
-        let msg = if err.kind() == std::io::ErrorKind::NotFound {
-            "xdg-open not found - install xdg-utils to use this feature".to_string()
-        } else {
-            format!("Could not open file manager: {err}")
-        };
-        assert!(msg.contains("xdg-utils"), "unhappy-path AC text: {msg}");
-    }
+    // (macOS runners may not have `open` on PATH under a non-GUI session).
+    // We exercise the error-message shape so the toast copy can't drift silently.
 
     #[test]
     fn reveal_accepts_regular_path() {
@@ -1135,17 +1046,13 @@ mod tests {
     // Editor-binary resolver - regression coverage for the "Open in
     // <Editor>" silent-failure bug.
     //
-    // Bug: GUI launchers (Linux .desktop, macOS Finder, Windows Start menu)
-    // inherit a narrowed PATH that omits user-bin dirs (~/.local/bin etc.),
-    // so editors installed there can't be spawned by `Command::new` alone.
-    // Cursor at /usr/bin worked; Zed at ~/.local/bin failed silently.
+    // Bug: GUI launchers (macOS Finder) inherit a narrowed PATH that omits
+    // user-bin dirs (~/.local/bin etc.), so editors installed there can't be
+    // spawned by `Command::new` alone. Cursor at /usr/bin worked; Zed at
+    // ~/.local/bin failed silently.
     //
-    // The fixture-based tests below run on every platform - they don't
-    // require a real editor to be installed. Each per-OS shape test runs
-    // only on its target so CI on each platform self-validates its own
-    // fallback list. Linux distros (Fedora, Ubuntu/Debian, Arch, openSUSE,
-    // Alpine, …) share the same user-bin layout, so a single Linux test
-    // covers the distro fleet.
+    // The fixture-based tests below run without a real editor installed. The
+    // macOS shape test self-validates the fallback list.
     // ════════════════════════════════════════════════════════════════════
 
     /// Create a stub binary named `<command>` inside `dir` and flip the
@@ -1300,28 +1207,6 @@ mod tests {
     // test runs only on its target. Assertions are positive (must contain),
     // so adding entries doesn't break old tests; removing an entry trips
     // a clear failure with the missing path named.
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn search_paths_linux_covers_user_and_system_bin() {
-        let paths = editor_search_paths();
-        let home = dirs::home_dir().expect("test host has $HOME");
-        // Same layout across Fedora, Ubuntu/Debian, Arch, openSUSE, Alpine,
-        // RHEL/CentOS, NixOS (single-user), Void, etc.
-        assert!(
-            paths.contains(&home.join(".local").join("bin")),
-            "missing ~/.local/bin"
-        );
-        assert!(
-            paths.contains(&home.join(".cargo").join("bin")),
-            "missing ~/.cargo/bin"
-        );
-        assert!(paths.contains(&home.join("bin")), "missing ~/bin");
-        assert!(
-            paths.contains(&std::path::PathBuf::from("/usr/local/bin")),
-            "missing /usr/local/bin"
-        );
-    }
 
     #[cfg(target_os = "macos")]
     #[test]

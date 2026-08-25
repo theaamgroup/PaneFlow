@@ -2932,18 +2932,6 @@ fn main() {
                 Ok(_) => cx.activate(true),
                 Err(e) => {
                     log::error!("Failed to open PaneFlow window: {e}");
-                    #[cfg(target_os = "linux")]
-                    eprintln!(
-                        "Error: PaneFlow requires a GPU with Vulkan support.\n\n\
-                         Install mesa-vulkan-drivers (AMD/Intel) or your GPU's proprietary driver.\n\n\
-                         Install commands:\n\
-                         \x20 Debian/Ubuntu:  sudo apt install mesa-vulkan-drivers\n\
-                         \x20 Fedora/RHEL:    sudo dnf install mesa-vulkan-drivers\n\
-                         \x20 Arch:           sudo pacman -S vulkan-radeon vulkan-intel or nvidia-utils\n\n\
-                         Run `vulkaninfo` to verify Vulkan support.\n\
-                         If drivers are already installed, run with RUST_LOG=error for details.\n\n\
-                         Underlying error: {e}"
-                    );
                     #[cfg(target_os = "macos")]
                     eprintln!(
                         "Error: PaneFlow could not create its GPU-backed window on macOS.\n\n\
