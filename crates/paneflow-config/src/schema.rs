@@ -1836,9 +1836,14 @@ mod tests {
             doc.contains("| `line_height` | number or null | `1.2` |"),
             "configuration docs must publish the runtime line_height default"
         );
+        // Was an assertion that the docs describe the Windows shell fallback
+        // chain. This is a macOS-only fork, so that guard demanded documenting
+        // a platform the tree no longer supports. Replaced with the real chain
+        // for this platform, per `terminal/shell.rs:255`, so the test keeps
+        // guarding something rather than just losing coverage.
         assert!(
-            doc.contains("Windows: configured -> `pwsh.exe` -> `powershell.exe`"),
-            "configuration docs must describe the Windows shell fallback chain"
+            doc.contains("Chain: configured -> `$SHELL` -> `/bin/sh`"),
+            "configuration docs must describe the macOS shell fallback chain"
         );
     }
 

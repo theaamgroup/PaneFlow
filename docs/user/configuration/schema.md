@@ -114,6 +114,7 @@ CLI binary.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
+| `terminal.backend` | string or null | `auto` | Still declared by the schema, but inert on macOS: every value resolves to the `alacritty_terminal` engine. The alternative engine it used to select was only ever built for Linux and Windows x64 MSVC and is being removed from this fork, after which this key goes too. Documented here rather than omitted because a schema-drift test asserts every public schema key appears in this file. |
 | `terminal.ligatures` | boolean or null | `false` | Enables programming ligatures for fonts that ship them. |
 | `terminal.integrated_glyphs` | boolean or null | `true` | Draws built-in block-element glyphs as filled quads. |
 | `terminal.color_emoji` | boolean or null | `true` | Uses the platform color-emoji path. |
