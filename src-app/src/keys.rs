@@ -64,20 +64,17 @@ fn shift_enter_sequence(
 /// Returns `Some(Cow::Borrowed(...))` for static keys (zero-alloc),
 /// `Some(Cow::Owned(...))` for modifier combos (one alloc),
 /// or `None` if the keystroke should be handled as printable character input.
-/// Platform default for `option_as_meta` when the user has not set it in
+/// Default for `option_as_meta` when the user has not set it in
 /// `paneflow.json`.
 ///
-/// - **macOS** → `false`: the Option key composes Unicode (é, ©, …); treating
-///   it as Meta (ESC-prefix) corrupts that input. This mirrors Zed, whose
-///   `option_as_meta` defaults off on macOS.
-/// - **Every other platform** → `true`: Alt-as-Meta (ESC-prefix) is the
-///   conventional terminal behavior.
-///
-/// A user can always override per-platform via `paneflow.json#option_as_meta`;
-/// `to_esc_str` then gates the ESC-prefix paths on the resolved flag while
-/// `alt_phys` keeps Alt+Arrow working regardless.
+/// Always `false`: the Option key composes Unicode (é, ©, …); treating it as
+/// Meta (ESC-prefix) corrupts that input. This mirrors Zed, whose
+/// `option_as_meta` defaults off on macOS. Set `option_as_meta` to `true` in
+/// `paneflow.json` to opt into the ESC prefix; `to_esc_str` then gates the
+/// ESC-prefix paths on the resolved flag while `alt_phys` keeps Alt+Arrow
+/// working either way.
 pub fn default_option_as_meta() -> bool {
-    !cfg!(target_os = "macos")
+    false
 }
 
 pub fn to_esc_str(
@@ -89,11 +86,11 @@ pub fn to_esc_str(
     let ctrl = keystroke.modifiers.control;
     let shift = keystroke.modifiers.shift;
     let alt = keystroke.modifiers.alt && option_as_meta;
-    // Physical Alt, independent of the macOS Option-as-Meta toggle. `alt` (above)
+    // Physical Alt, independent of the Option-as-Meta toggle. `alt` (above)
     // gates the ESC-prefix paths for printable keys; `alt_phys` is what a CSI 1;N
     // cursor/function-key sequence must report, so Alt+Arrow works regardless of
-    // `option_as_meta`. The config key is not macOS-only, so a Linux/Windows user
-    // with `option_as_meta: false` would otherwise lose Alt+Arrow entirely.
+    // `option_as_meta`. Without this split, a user with `option_as_meta: false`
+    // would otherwise lose Alt+Arrow entirely.
     let alt_phys = keystroke.modifiers.alt;
 
     // Preserve the physical chord when both the child and PTY transport support
@@ -327,15 +324,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn option_as_meta_default_is_platform_specific() {
-        // macOS composes Unicode on the Option key, so Alt-as-Meta (ESC-prefix)
-        // must default OFF there and ON everywhere else. Regression guard for
-        // the macOS "Option+e corrupts accents" bug.
-        assert_eq!(default_option_as_meta(), !cfg!(target_os = "macos"));
-        #[cfg(target_os = "macos")]
+    fn option_as_meta_defaults_off_on_macos() {
+        // macOS composes Unicode on the Option key, so Alt-as-Meta (the ESC
+        // prefix) defaults OFF, and a user opts in through paneflow.json.
+        // Regression guard for the macOS "Option+e corrupts accents" bug.
         assert!(!default_option_as_meta());
-        #[cfg(not(target_os = "macos"))]
-        assert!(default_option_as_meta());
     }
 
     #[test]

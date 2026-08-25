@@ -43,7 +43,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `mica`, `blurred`, `acrylic`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material in the primary navigation card. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
-| `option_as_meta` | boolean or null | `false` on macOS | Sends Alt/Option as an ESC prefix. The default is computed as `!cfg!(target_os = "macos")` in `src-app/src/keys.rs`, so on macOS it is off and Option produces Unicode input. Set it to `true` to get the ESC prefix. The JSON Schema still declares `"default": true`, which is wrong on macOS. |
+| `option_as_meta` | boolean or null | `false` | Option produces Unicode input by default. Set to `true` to send Option/Alt as an ESC prefix. |
 | `shell_integration` | boolean or null | enabled | Master switch for shell rc injection: OSC 7 CWD reporting and OSC 133 command marks. |
 | `agent_stall_detection` | boolean or null | `true` | Enables stalled-agent detection. |
 | `agent_stall_threshold_secs` | integer or null | `60` | Silence threshold before a Thinking agent is marked Stalled. Clamped to `30` to `86400`. |

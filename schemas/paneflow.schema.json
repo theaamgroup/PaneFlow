@@ -97,8 +97,8 @@
     },
     "option_as_meta": {
       "type": ["boolean", "null"],
-      "description": "Treat Alt/Option as Meta and send an ESC prefix. Default true on Linux and Windows. On macOS, set to false if you rely on Option to produce Unicode characters.",
-      "default": true
+      "description": "When true, Option/Alt sends an ESC prefix (Meta). Defaults to false so Option produces Unicode characters. Set to true to opt into the ESC prefix.",
+      "default": false
     },
     "shell_integration": {
       "type": ["boolean", "null"],

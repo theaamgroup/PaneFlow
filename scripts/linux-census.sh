@@ -46,6 +46,11 @@ MACRO=$(scan | grep    'cfg!(' | content_match "$P_ALL" | nocomment)
 COMMENTS=$(scan | content_match "$P_ALL" | onlycomment)
 TOML=$(grep -rn -E "target\.'cfg\((unix|target_os = \"linux\")\)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
 
+# Operator-negated cfg! macros naming a target_os (`!cfg!(target_os = "...")`).
+# Invisible to P_NOTMAC, which only matches the `not(...)` predicate form.
+# Requires `target_os` so `!cfg!(debug_assertions)` is not counted.
+BANGCFG=$(scan | grep 'cfg!(' | content_match '!\s*cfg!\s*\(\s*target_os\s*=' | nocomment)
+
 # Per-family breakdown (code lines only)
 F_LINUX=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | content_match "$P_LINUX")
 F_NOTUNIX=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | content_match "$P_NOTUNIX")
@@ -133,6 +138,7 @@ echo "runtime cfg!() expressions ... $(n "$MACRO")"
 echo "Cargo target tables .......... $(n "$TOML")"
 echo "target-triple string checks .. $(n "$STRCHK")"
 echo "multi-line cfg expressions ... $(n "$MULTILINE")"
+echo "negated cfg!(target_os) ....... $(n "$BANGCFG")"
 echo
 echo "  by family (attr+macro):"
 echo "    target_os=linux .......... $(n "$F_LINUX")"
@@ -146,13 +152,14 @@ echo "different-term-space hits .... $(n "$TERMS")"
 echo "orphaned .rs files ........... $(n "$ORPHANS")"
 echo "files touched ................ $(printf '%s\n' "$ATTR" "$MACRO" | grep . | cut -d: -f1 | sort -u | wc -l | tr -d ' ')"
 echo "---"
-TOTAL=$(( $(n "$ATTR") + $(n "$MACRO") + $(n "$TOML") + $(n "$STRCHK") + $(n "$MULTILINE") ))
+TOTAL=$(( $(n "$ATTR") + $(n "$MACRO") + $(n "$TOML") + $(n "$STRCHK") + $(n "$MULTILINE") + $(n "$BANGCFG") ))
 echo "STAGE 2c ZERO-CONDITION: $TOTAL   (must reach 0)"
 fi
 
 if [ "${1:-}" = "--list" ]; then
   echo; echo "=== attribute gates ==="; printf '%s\n' "$ATTR"
   echo; echo "=== runtime cfg!() ===";  printf '%s\n' "$MACRO"
+  echo; echo "=== negated cfg!(target_os) ==="; printf '%s\n' "$BANGCFG"
   echo; echo "=== Cargo tables ===";    printf '%s\n' "$TOML"
   echo; echo "=== triple string checks ==="; printf '%s\n' "$STRCHK"
   echo; echo "=== multi-line cfg ==="; printf '%s\n' "$MULTILINE"
