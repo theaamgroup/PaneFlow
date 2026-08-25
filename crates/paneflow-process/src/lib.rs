@@ -31,18 +31,6 @@ const STDERR_CAP: u64 = 64 * 1024;
 /// does not spin the CPU.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Windows `CREATE_NO_WINDOW` process-creation flag (`winbase.h`, `0x0800_0000`).
-/// Paneflow runs as a GUI-subsystem process with no console of its own, so every
-/// console subprocess it spawns (the `git diff --shortstat` poller, agent CLIs,
-/// MCP probes) would otherwise get a freshly-allocated, *visible* console window
-/// that flashes open and shut for the child's lifetime. Suppressing it is always
-/// correct for `run_with_timeout` callers: they pipe stdout/stderr and null
-/// stdin, so the child is non-interactive by construction and never needs a
-/// console. Kept as a raw literal so this crate stays `std`-only / zero-dep (it
-/// is embedded in `paneflow-shim`).
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 /// Output from a bounded process run.
 ///
 /// `stdout` and `stderr` are always bounded. The truncation flags tell callers
@@ -128,17 +116,6 @@ pub fn run_with_timeout(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    // GUI-subsystem callers have no console of their own, so a console child
-    // spawned without this flag pops a visible window that flashes open and shut
-    // for the child's lifetime. The crate-level note on CREATE_NO_WINDOW explains
-    // why suppression is always correct here (piped stdio + null stdin → the child
-    // is non-interactive by construction and never needs a console).
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
 
     configure_process_tree(&mut cmd);
     let mut child = cmd.spawn().map_err(ProcError::Spawn)?;
@@ -245,8 +222,6 @@ fn terminate_and_detach_cleanup(
 struct ProcessTree {
     #[cfg(unix)]
     pid: u32,
-    #[cfg(windows)]
-    job: Option<windows_job::Job>,
 }
 
 impl ProcessTree {
@@ -254,18 +229,12 @@ impl ProcessTree {
         Self {
             #[cfg(unix)]
             pid: child.id(),
-            #[cfg(windows)]
-            job: windows_job::Job::for_child(child).ok(),
         }
     }
 
     fn terminate(&self, child: &mut Child) {
         #[cfg(unix)]
         kill_process_group(self.pid);
-        #[cfg(windows)]
-        if let Some(job) = &self.job {
-            job.terminate();
-        }
         let _ = child.kill();
     }
 }
@@ -280,112 +249,6 @@ fn kill_process_group(pid: u32) {
 
     if let Ok(pid) = i32::try_from(pid) {
         let _ = unsafe { kill(-pid, SIGKILL) };
-    }
-}
-
-#[cfg(windows)]
-mod windows_job {
-    use std::ffi::c_void;
-    use std::io;
-    use std::mem::{size_of, zeroed};
-    use std::os::windows::io::AsRawHandle;
-    use std::process::Child;
-    use std::ptr::null_mut;
-
-    type Handle = *mut c_void;
-
-    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: u32 = 9;
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
-
-    #[repr(C)]
-    struct IoCounters {
-        read_operation_count: u64,
-        write_operation_count: u64,
-        other_operation_count: u64,
-        read_transfer_count: u64,
-        write_transfer_count: u64,
-        other_transfer_count: u64,
-    }
-
-    #[repr(C)]
-    struct JobObjectBasicLimitInformation {
-        per_process_user_time_limit: i64,
-        per_job_user_time_limit: i64,
-        limit_flags: u32,
-        minimum_working_set_size: usize,
-        maximum_working_set_size: usize,
-        active_process_limit: u32,
-        affinity: usize,
-        priority_class: u32,
-        scheduling_class: u32,
-    }
-
-    #[repr(C)]
-    struct JobObjectExtendedLimitInformation {
-        basic_limit_information: JobObjectBasicLimitInformation,
-        io_info: IoCounters,
-        process_memory_limit: usize,
-        job_memory_limit: usize,
-        peak_process_memory_used: usize,
-        peak_job_memory_used: usize,
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
-        fn SetInformationJobObject(
-            job: Handle,
-            info_class: u32,
-            info: *const c_void,
-            info_len: u32,
-        ) -> i32;
-        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
-        fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-    }
-
-    pub(super) struct Job(Handle);
-
-    impl Job {
-        pub(super) fn for_child(child: &Child) -> io::Result<Self> {
-            let handle = unsafe { CreateJobObjectW(null_mut(), std::ptr::null()) };
-            if handle.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-
-            let job = Self(handle);
-            let mut limits: JobObjectExtendedLimitInformation = unsafe { zeroed() };
-            limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-            let configured = unsafe {
-                SetInformationJobObject(
-                    job.0,
-                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
-                    (&limits as *const JobObjectExtendedLimitInformation).cast(),
-                    size_of::<JobObjectExtendedLimitInformation>() as u32,
-                )
-            };
-            if configured == 0 {
-                return Err(io::Error::last_os_error());
-            }
-
-            let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle().cast()) };
-            if assigned == 0 {
-                return Err(io::Error::last_os_error());
-            }
-
-            Ok(job)
-        }
-
-        pub(super) fn terminate(&self) {
-            let _ = unsafe { TerminateJobObject(self.0, 1) };
-        }
-    }
-
-    impl Drop for Job {
-        fn drop(&mut self) {
-            let _ = unsafe { CloseHandle(self.0) };
-        }
     }
 }
 
@@ -476,39 +339,15 @@ mod tests {
         c.arg("-c").arg(script);
         c
     }
-    #[cfg(windows)]
-    fn sh(script: &str) -> Command {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(script);
-        c
-    }
 
     #[cfg(unix)]
     fn stdout_command() -> Command {
         sh("printf hello")
     }
 
-    #[cfg(windows)]
-    fn stdout_command() -> Command {
-        sh("echo hello")
-    }
-
     #[cfg(unix)]
     fn sleep_command() -> Command {
         sh("sleep 30")
-    }
-
-    #[cfg(windows)]
-    fn sleep_command() -> Command {
-        let mut c = Command::new("powershell.exe");
-        c.args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Start-Sleep -Seconds 30",
-        ]);
-        c
     }
 
     #[test]

@@ -27,11 +27,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
-#[cfg(windows)]
-use std::time::Instant;
 
-#[cfg(windows)]
-use interprocess::local_socket::ConnectOptions;
 use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
 
 /// U-027: write deadline for the one-shot hook frame. The hook is invoked
@@ -141,7 +137,6 @@ pub fn send_frame(socket_path: &Path, frame: &serde_json::Value) -> std::io::Res
     //
     // Windows named pipes reject set_send_timeout in interprocess, so Windows
     // uses a nonblocking stream and an explicit deadline below.
-    #[cfg(not(windows))]
     {
         if let Err(e) = stream.set_send_timeout(Some(HOOK_IPC_TIMEOUT)) {
             if e.kind() != std::io::ErrorKind::Unsupported {
@@ -150,14 +145,6 @@ pub fn send_frame(socket_path: &Path, frame: &serde_json::Value) -> std::io::Res
         }
     }
 
-    #[cfg(windows)]
-    {
-        write_all_with_deadline(&mut stream, &payload, HOOK_IPC_TIMEOUT)?;
-        stream.flush()?;
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
     {
         stream.write_all(&payload)?;
         stream.flush()?;
@@ -167,54 +154,9 @@ pub fn send_frame(socket_path: &Path, frame: &serde_json::Value) -> std::io::Res
 
 fn connect_frame_stream(socket_path: &Path) -> std::io::Result<Stream> {
     let name = socket_path.to_fs_name::<GenericFilePath>()?;
-    #[cfg(windows)]
-    {
-        ConnectOptions::new()
-            .name(name)
-            .nonblocking_stream(true)
-            .connect_sync()
-    }
-    #[cfg(not(windows))]
     {
         Stream::connect(name)
     }
-}
-
-#[cfg(windows)]
-fn wait_for_io(deadline: Instant) -> std::io::Result<()> {
-    let now = Instant::now();
-    if now >= deadline {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "paneflow hook IPC write timed out",
-        ));
-    }
-    std::thread::sleep((deadline - now).min(Duration::from_millis(5)));
-    Ok(())
-}
-
-#[cfg(windows)]
-fn write_all_with_deadline(
-    stream: &mut Stream,
-    mut payload: &[u8],
-    timeout: Duration,
-) -> std::io::Result<()> {
-    let deadline = Instant::now() + timeout;
-    while !payload.is_empty() {
-        match stream.write(payload) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "paneflow hook IPC write made no progress",
-                ));
-            }
-            Ok(n) => payload = &payload[n..],
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => wait_for_io(deadline)?,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,10 +1245,7 @@ mod tests {
             "method": "ai.notification",
             "params": { "message": "x".repeat(MAX_HOOK_FRAME_BYTES) },
         });
-        #[cfg(not(windows))]
         let path = Path::new("/tmp/paneflow-oversized-hook-test.sock");
-        #[cfg(windows)]
-        let path = Path::new(r"\\.\pipe\paneflow-oversized-hook-test");
         let err = send_frame(path, &frame).expect_err("oversized frame");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -1336,22 +1275,5 @@ mod tests {
         assert!(contents.contains("paneflow-ai-hook: first line"));
         assert!(contents.contains("paneflow-ai-hook: second line"));
         assert_eq!(contents.matches('\n').count(), 2);
-    }
-
-    /// Locks in that the Windows named-pipe path produced by
-    /// `src-app/src/runtime_paths.rs:82` (`\\.\pipe\paneflow`) is recognised
-    /// as absolute by `Path::is_absolute`. If this ever regresses, the hook
-    /// binary's `read_socket_path` guard would silently reject every frame
-    /// on Windows - a HIGH-severity regression the Phase 7 audit flagged.
-    #[test]
-    #[cfg(windows)]
-    fn windows_named_pipe_path_is_absolute() {
-        use std::path::PathBuf;
-        let p = PathBuf::from(r"\\.\pipe\paneflow");
-        assert!(
-            p.is_absolute(),
-            "Rust stdlib must treat device-namespace paths as absolute; \
-             if this fails, read_socket_path() would silently no-op on Windows"
-        );
     }
 }

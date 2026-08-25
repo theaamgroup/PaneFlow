@@ -26,8 +26,6 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-#[cfg(windows)]
-use std::time::Instant;
 
 use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
 use serde_json::{json, Value};
@@ -135,7 +133,6 @@ fn jsonrpc_error_message_from_value(value: &Value) -> Option<String> {
 /// Collapse an `ErrorKind::Unsupported` result to `Ok(())` - used only for
 /// optional Unix socket-deadline setters. Any other error is forwarded
 /// unchanged.
-#[cfg(any(not(windows), test))]
 fn tolerate_unsupported(r: io::Result<()>) -> io::Result<()> {
     match r {
         Err(e) if e.kind() == io::ErrorKind::Unsupported => Ok(()),
@@ -147,7 +144,6 @@ fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
     let mut stream = connect_request_stream(socket)?;
     // Bound both directions on the same deadline: a peer that never drains our
     // write could otherwise wedge `write_all`.
-    #[cfg(not(windows))]
     {
         tolerate_unsupported(stream.set_recv_timeout(Some(IPC_TIMEOUT)))?;
         tolerate_unsupported(stream.set_send_timeout(Some(IPC_TIMEOUT)))?;
@@ -157,13 +153,6 @@ fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
         serde_json::to_vec(request).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     payload.push(b'\n');
 
-    #[cfg(windows)]
-    {
-        write_all_with_deadline(&mut stream, &payload, IPC_TIMEOUT)?;
-        read_line_with_deadline(&mut stream, IPC_TIMEOUT)
-    }
-
-    #[cfg(not(windows))]
     {
         stream.write_all(&payload)?;
         stream.flush()?;
@@ -201,274 +190,6 @@ fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
 fn connect_request_stream(socket: &Path) -> io::Result<Stream> {
     let name = socket.to_fs_name::<GenericFilePath>()?;
     Stream::connect(name)
-}
-
-#[cfg(windows)]
-mod windows_pipe {
-    use super::{io, Duration, Stream};
-    use std::os::windows::io::{AsHandle, AsRawHandle};
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_NOT_CONNECTED, HANDLE,
-        WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-
-    struct Event(HANDLE);
-
-    impl Event {
-        fn new() -> io::Result<Self> {
-            // SAFETY: default attributes and no name; the returned handle is
-            // checked before it is wrapped.
-            let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-            if handle.is_null() {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(Self(handle))
-            }
-        }
-    }
-
-    impl Drop for Event {
-        fn drop(&mut self) {
-            // SAFETY: this is the live event handle created by Event::new.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-
-    fn pipe_handle(stream: &Stream) -> HANDLE {
-        let Stream::NamedPipe(pipe) = stream;
-        pipe.as_handle().as_raw_handle() as HANDLE
-    }
-
-    fn closed_pipe(error: &io::Error) -> bool {
-        matches!(
-            error.raw_os_error(),
-            Some(code)
-                if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
-        )
-    }
-
-    fn cancel_and_reap(handle: HANDLE, overlapped: &OVERLAPPED) {
-        // SAFETY: handle and overlapped belong to the pending operation in the
-        // caller. Reaping before return keeps the stack-backed OVERLAPPED live.
-        let _ = unsafe { CancelIoEx(handle, overlapped) };
-        let mut transferred = 0;
-        let _ = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, 1) };
-    }
-
-    fn wait_for_completion(
-        handle: HANDLE,
-        overlapped: &OVERLAPPED,
-        timeout: Duration,
-    ) -> io::Result<()> {
-        let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-        // SAFETY: the event is owned by the live OVERLAPPED operation.
-        match unsafe { WaitForSingleObject(overlapped.hEvent, timeout_ms) } {
-            WAIT_OBJECT_0 => Ok(()),
-            WAIT_TIMEOUT => {
-                cancel_and_reap(handle, overlapped);
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "paneflow named-pipe I/O timed out",
-                ))
-            }
-            WAIT_FAILED => {
-                let error = io::Error::last_os_error();
-                cancel_and_reap(handle, overlapped);
-                Err(error)
-            }
-            other => {
-                cancel_and_reap(handle, overlapped);
-                Err(io::Error::other(format!(
-                    "unexpected WaitForSingleObject result {other}"
-                )))
-            }
-        }
-    }
-
-    pub(super) fn write_all(
-        stream: &Stream,
-        mut payload: &[u8],
-        timeout: Duration,
-    ) -> io::Result<()> {
-        let deadline = std::time::Instant::now() + timeout;
-        let handle = pipe_handle(stream);
-
-        while !payload.is_empty() {
-            let event = Event::new()?;
-            // SAFETY: a zeroed OVERLAPPED is valid after attaching the event.
-            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-            overlapped.hEvent = event.0;
-            let wanted = payload.len().min(u32::MAX as usize) as u32;
-            // SAFETY: the pipe handle is valid for this borrowed stream and the
-            // payload and OVERLAPPED remain live until completion is reaped.
-            let started = unsafe {
-                WriteFile(
-                    handle,
-                    payload.as_ptr(),
-                    wanted,
-                    std::ptr::null_mut(),
-                    &mut overlapped,
-                )
-            };
-            if started == 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                    return Err(error);
-                }
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                wait_for_completion(handle, &overlapped, remaining)?;
-            }
-
-            let mut transferred = 0;
-            // SAFETY: same live handle and OVERLAPPED as the WriteFile call.
-            if unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, 1) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if transferred == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "paneflow IPC write made no progress",
-                ));
-            }
-            payload = &payload[transferred as usize..];
-        }
-        Ok(())
-    }
-
-    pub(super) fn read_some(
-        stream: &Stream,
-        buffer: &mut [u8],
-        timeout: Duration,
-    ) -> io::Result<usize> {
-        if timeout.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "paneflow named-pipe I/O timed out",
-            ));
-        }
-
-        let handle = pipe_handle(stream);
-        let event = Event::new()?;
-        // SAFETY: a zeroed OVERLAPPED is valid after attaching the event.
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.hEvent = event.0;
-        let wanted = buffer.len().min(u32::MAX as usize) as u32;
-        // SAFETY: the pipe handle is valid for this borrowed stream and the
-        // buffer and OVERLAPPED remain live until completion is reaped.
-        let started = unsafe {
-            ReadFile(
-                handle,
-                buffer.as_mut_ptr(),
-                wanted,
-                std::ptr::null_mut(),
-                &mut overlapped,
-            )
-        };
-        if started == 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                return if closed_pipe(&error) {
-                    Ok(0)
-                } else {
-                    Err(error)
-                };
-            }
-            wait_for_completion(handle, &overlapped, timeout)?;
-        }
-
-        let mut transferred = 0;
-        // SAFETY: same live handle and OVERLAPPED as the ReadFile call.
-        if unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, 1) } == 0 {
-            let error = io::Error::last_os_error();
-            return if closed_pipe(&error) {
-                Ok(0)
-            } else {
-                Err(error)
-            };
-        }
-        Ok(transferred as usize)
-    }
-}
-
-#[cfg(windows)]
-fn write_all_with_deadline(
-    stream: &mut Stream,
-    payload: &[u8],
-    timeout: Duration,
-) -> io::Result<()> {
-    windows_pipe::write_all(stream, payload, timeout)
-}
-
-#[cfg(windows)]
-fn read_line_with_deadline(stream: &mut Stream, timeout: Duration) -> io::Result<String> {
-    let deadline = Instant::now() + timeout;
-    let mut out = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let capacity = (MAX_RESPONSE_LEN as usize).saturating_sub(out.len());
-        if capacity == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "paneflow response exceeded the size cap",
-            ));
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let read_buffer_len = capacity.min(chunk.len());
-        match windows_pipe::read_some(stream, &mut chunk[..read_buffer_len], remaining) {
-            Ok(0) if out.is_empty() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "paneflow closed the IPC connection without a response",
-                ));
-            }
-            Ok(0) => break,
-            Ok(n) => {
-                if let Some(line) = append_capped_response_chunk(&mut out, &chunk[..n])? {
-                    return Ok(line);
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "paneflow did not respond within 10s",
-                ));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    String::from_utf8(out).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-#[cfg(windows)]
-fn append_capped_response_chunk(out: &mut Vec<u8>, chunk: &[u8]) -> io::Result<Option<String>> {
-    let frame_len = chunk
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .map_or(chunk.len(), |position| position + 1);
-    if out.len().saturating_add(frame_len) > MAX_RESPONSE_LEN as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "paneflow response exceeded the size cap",
-        ));
-    }
-
-    out.extend_from_slice(&chunk[..frame_len]);
-    if chunk.get(frame_len.saturating_sub(1)) == Some(&b'\n') {
-        return String::from_utf8(out.clone())
-            .map(Some)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
-    }
-    if out.len() as u64 >= MAX_RESPONSE_LEN {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "paneflow response exceeded the size cap",
-        ));
-    }
-    Ok(None)
 }
 
 /// EP-002 (agent-control-plane): open a persistent `events.subscribe` stream.
@@ -733,17 +454,6 @@ fn cache_run_dir() -> Option<PathBuf> {
     }
 }
 
-/// Windows default: the named-pipe path for the current build profile. Mirrors
-/// `runtime_paths::socket_path` on Windows.
-#[cfg(windows)]
-fn default_socket_path() -> Option<PathBuf> {
-    Some(PathBuf::from(if cfg!(debug_assertions) {
-        r"\\.\pipe\paneflow-dev"
-    } else {
-        r"\\.\pipe\paneflow"
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,10 +547,7 @@ mod tests {
         // `\\.\pipe\…`). The previous Unix-only literal made this test fail on
         // Windows, where `/run/...` is NOT absolute (no drive) and
         // `socket_path_from_env` correctly returned None.
-        #[cfg(not(windows))]
         let absolute = "/run/user/1000/paneflow/paneflow.sock";
-        #[cfg(windows)]
-        let absolute = r"\\.\pipe\paneflow";
         assert_eq!(
             socket_path_from_env(Some(absolute)),
             Some(PathBuf::from(absolute))
@@ -848,78 +555,6 @@ mod tests {
         assert_eq!(socket_path_from_env(Some("relative/path.sock")), None);
         assert_eq!(socket_path_from_env(Some("")), None);
         assert_eq!(socket_path_from_env(None), None);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_default_socket_path_matches_build_profile() {
-        let expected = if cfg!(debug_assertions) {
-            r"\\.\pipe\paneflow-dev"
-        } else {
-            r"\\.\pipe\paneflow"
-        };
-        assert_eq!(default_socket_path(), Some(PathBuf::from(expected)));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_ipc_client_round_trips_when_response_is_delayed() {
-        use interprocess::local_socket::{Listener, ListenerOptions};
-        use interprocess::TryClone;
-
-        static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from(format!(
-            r"\\.\pipe\paneflow-ipc-client-test-{}-{}",
-            std::process::id(),
-            NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let name = path.as_path().to_fs_name::<GenericFilePath>().unwrap();
-        let listener: Listener = ListenerOptions::new().name(name).create_sync().unwrap();
-
-        let server = std::thread::spawn(move || {
-            let stream = listener.accept().expect("accept");
-            let mut writer = stream.try_clone().expect("clone");
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).expect("read request");
-            let request: Value = serde_json::from_str(line.trim()).expect("parse request");
-            std::thread::sleep(Duration::from_millis(75));
-            let response = json!({
-                "jsonrpc": "2.0",
-                "id": request["id"].clone(),
-                "result": {"surfaces": [{"surface_id": 1u64, "name": "windows"}]},
-            });
-            let mut serialized = serde_json::to_string(&response).unwrap();
-            serialized.push('\n');
-            writer
-                .write_all(serialized.as_bytes())
-                .expect("write response");
-            writer.flush().expect("flush");
-        });
-
-        let client = IpcClient::new(path);
-        let result = client.call("surface.list", json!({})).expect("call ok");
-        assert_eq!(result["surfaces"][0]["name"], "windows");
-        server.join().expect("server thread");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_response_cap_accepts_exactly_capped_line() {
-        let mut out = vec![b'x'; MAX_RESPONSE_LEN as usize - 1];
-        let line = append_capped_response_chunk(&mut out, b"\n")
-            .expect("exact cap is valid")
-            .expect("newline completes the frame");
-        assert_eq!(line.len(), MAX_RESPONSE_LEN as usize);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_response_cap_rejects_newline_beyond_limit() {
-        let mut out = vec![b'x'; MAX_RESPONSE_LEN as usize - 1];
-        let error = append_capped_response_chunk(&mut out, b"y\n")
-            .expect_err("newline beyond the cap must be rejected");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     /// US-005 AC: a full request/response round-trip over a real local socket

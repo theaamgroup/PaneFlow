@@ -41,13 +41,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-// Windows pipe-name nonce needs RandomState + OnceLock; gated here so
-// the Unix build does not emit unused-import warnings.
-#[cfg(windows)]
-use std::hash::{BuildHasher, Hasher, RandomState};
-#[cfg(windows)]
-use std::sync::OnceLock;
-
 use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
 use serde_json::{json, Value};
 
@@ -90,10 +83,6 @@ enum PathKeepalive {
     /// removes both the socket file and the directory.
     #[allow(dead_code)]
     Unix(tempfile::TempDir),
-    /// Windows: named pipes are refcount-managed by the kernel; when
-    /// the listener drops, the pipe vanishes. No filesystem keepalive.
-    #[allow(dead_code)]
-    Windows,
 }
 
 /// Running mock server. Holds the receive channel for the first frame
@@ -228,51 +217,6 @@ fn unique_ipc_path() -> (PathBuf, PathKeepalive) {
     let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
     let path = dir.path().join(format!("paneflow-test-{n}.sock"));
     (path, PathKeepalive::Unix(dir))
-}
-
-#[cfg(windows)]
-fn unique_ipc_path() -> (PathBuf, PathKeepalive) {
-    // Named-pipe namespace is global (kernel-wide). Compose a name that
-    // is unguessable by a same-UID adversary: the pid + counter + nanos
-    // prefix alone is guessable within ~20 bits of nanos entropy at
-    // millisecond timing resolution. The 64-bit `process_nonce()` is
-    // seeded once per test process from `RandomState`, which uses OS
-    // entropy, so the full name carries >=64 bits of attacker-
-    // unpredictable randomness - well above the brute-force threshold
-    // for a pipe-squatting false-positive.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let nonce = process_nonce();
-    let path = PathBuf::from(format!(
-        r"\\.\pipe\paneflow-test-{pid}-{n}-{nanos}-{nonce:016x}"
-    ));
-    (path, PathKeepalive::Windows)
-}
-
-/// Process-lifetime random u64 sourced from OS entropy via `RandomState`.
-/// Used as the high-entropy component of the Windows named-pipe name so
-/// a same-UID attacker cannot guess the path from observable values
-/// (pid + clock). Cached via `OnceLock` so every test in a run sees the
-/// same nonce but different runs see different ones.
-#[cfg(windows)]
-fn process_nonce() -> u64 {
-    static NONCE: OnceLock<u64> = OnceLock::new();
-    *NONCE.get_or_init(|| {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(std::process::id() as u64);
-        h.write_u128(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        );
-        h.finish()
-    })
 }
 
 // ---------------------------------------------------------------------------

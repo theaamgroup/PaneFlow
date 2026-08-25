@@ -83,17 +83,6 @@ fn opencode_configs_from(
         return out;
     }
 
-    #[cfg(windows)]
-    {
-        if let Some(home) = home.clone() {
-            push_opencode_names(&mut out, home.join(".config"));
-        }
-        if let Some(dir) = _platform_config_dir {
-            push_opencode_names(&mut out, dir);
-        }
-    }
-
-    #[cfg(not(windows))]
     {
         if let Some(dir) = _xdg_config_home
             .map(PathBuf::from)
@@ -142,11 +131,6 @@ pub(crate) fn shell_out(program: &str, args: &[&str]) -> Result<()> {
     // path first; Rust std ≥1.77 wraps `.cmd`/`.bat` through `cmd.exe`
     // automatically. On Unix `execvp` honors PATH for a bare name, so the
     // original behavior is kept there.
-    #[cfg(windows)]
-    let resolved = which::which(program).unwrap_or_else(|_| PathBuf::from(program));
-    #[cfg(windows)]
-    let mut command = Command::new(resolved);
-    #[cfg(not(windows))]
     let mut command = Command::new(program);
     command.args(args);
 
