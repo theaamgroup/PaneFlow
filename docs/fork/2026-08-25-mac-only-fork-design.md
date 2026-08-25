@@ -48,7 +48,7 @@ never published publicly.
 
 Verified load-bearing. Each of these looks like cruft and is not.
 
-- `schemas/panescli.schema.json`: two tests in `crates/paneflow-config/src/schema.rs` (lines 1685, 1778) read it off disk. Drift fails the suite.
+- `schemas/paneflow.schema.json` (still the on-disk name until the rename pass): two tests in `crates/paneflow-config/src/schema.rs` (lines 1685, 1778) read it off disk. Drift fails the suite.
 - `examples/review-pipeline.flow.toml`: `include_str!` target at `src-app/src/cli/flow_spec.rs:749`. Deleting it breaks the build. `examples/TASK.md` is its fixture.
 - `clippy.toml`: the `allow-unwrap-in-tests` escape hatch for the workspace lint policy in `Cargo.toml`. Without it, test code starts warning.
 - `rust-toolchain.toml`: the 1.96.1 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
@@ -138,26 +138,34 @@ rather than living only in chat.
    just its implementation. The skill is kept and renamed rather than deleted
    precisely so it can be fixed here.
 
-2. **Two macOS keybinding defects, and the `--help` text is wrong.**
-   An earlier draft of this spec claimed the keybinding scheme was never ported
-   to macOS. That was wrong: 53 bindings in
+2. **Two narrow keybinding issues. Earlier drafts of this entry overstated the
+   problem twice, so the evidence is spelled out here.**
+   The scheme IS ported to macOS: 53 bindings in
    `src-app/src/keybindings/defaults.rs` use GPUI's `secondary` shorthand, which
-   resolves to Cmd on macOS and Ctrl elsewhere (`keybindings/apply.rs:21,146`),
-   so splits and most globals are correctly Cmd-based here.
-   `MACOS_ONLY_DEFAULTS` holding just `cmd-q` is therefore expected, not a gap.
-   What IS wrong:
-   - `next_workspace` is bound to `secondary-tab`, which resolves to **Cmd+Tab
-     on macOS and collides with the system application switcher**. It is
-     effectively unusable and needs rebinding.
-   - Pane focus navigation is hard-coded `alt-left` / `alt-right` and friends
-     rather than `secondary`, so it lands on Option. Option is how terminals
-     type special characters, which is the tension the `option_as_meta` setting
-     at `src-app/src/keys.rs:99` exists to negotiate. Worth revisiting now that
-     only macOS matters.
-   - The `--help` output at `src-app/src/main.rs:2728` hard-codes the Linux
-     wording (`Ctrl+Shift+D/E`, `Alt+Arrow`, `Ctrl+Tab`), so it misreports the
-     real macOS bindings to the user. Fix the text, and prefer rendering it from
-     the binding table rather than duplicating it as a literal.
+   resolves to Cmd on macOS and Ctrl elsewhere (`keybindings/apply.rs:21,146`).
+   `MACOS_ONLY_DEFAULTS` holding only `cmd-q` is therefore expected.
+   Alt+Arrow pane focus is also NOT a defect: `option_as_meta` defaults to false
+   on macOS (`src-app/src/keys.rs:83`, literally `!cfg!(target_os = "macos")`),
+   but `alt_phys` is read directly off the keystroke modifiers at `keys.rs:101`
+   and feeds the CSI modifier code at `:113`, so Alt+Arrow emits a correct
+   sequence regardless of that flag. The code comment at `keys.rs:82` says so
+   explicitly. Do not "fix" this.
+   What is actually left:
+   - `next_workspace` is bound to `secondary-tab` (`defaults.rs:72`), which
+     resolves to Cmd+Tab on macOS, a keystroke the OS reserves for the
+     application switcher, and `MACOS_ONLY_DEFAULTS` does not override it.
+     **Unverified whether the keystroke reaches GPUI at all**, so this needs a
+     real test before it is called broken. If it is broken, rebind.
+   - The `--help` output at `src-app/src/main.rs:2728` hard-codes Linux wording
+     (`Ctrl+Shift+D/E`, `Alt+Arrow`, `Ctrl+Tab`) and so misreports the real
+     macOS bindings. Cosmetic but user-visible. Prefer rendering it from the
+     binding table rather than duplicating it as a literal string.
+
+3. **2,357 `US-NNN` comments across 192 `.rs` files reference PRDs that do not
+   exist.** They lived under `tasks/`, were gitignored upstream, and were never
+   committed. They are pure noise for anyone reading this code and should not be
+   extended. The commit-message convention that minted them has been removed
+   from `CLAUDE.md`.
 
 ## Leak register
 
