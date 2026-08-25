@@ -402,16 +402,7 @@ fn trim_leading_table_metadata(mut summary: &str) -> &str {
 }
 
 fn line_mentions_cwd(line: &str, cwd: &str) -> bool {
-    #[cfg(windows)]
-    {
-        line.replace('/', "\\")
-            .to_ascii_lowercase()
-            .contains(&cwd.replace('/', "\\").to_ascii_lowercase())
-    }
-    #[cfg(not(windows))]
-    {
-        line.contains(cwd)
-    }
+    line.contains(cwd)
 }
 
 fn sanitized_stderr(stderr: &[u8]) -> String {

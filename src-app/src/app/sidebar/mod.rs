@@ -1326,7 +1326,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn collapses_nested_path_under_home() {
         assert_eq!(
@@ -1335,13 +1334,11 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn exact_home_collapses_to_tilde() {
         assert_eq!(collapse_home("/home/arthur", "/home/arthur"), "~");
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn partial_component_is_not_a_prefix() {
         // US-040 regression: `/home/arth` must NOT match `/home/arthur` - the
@@ -1593,7 +1590,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn cwd_outside_home_is_unchanged() {
         assert_eq!(collapse_home("/etc/hosts", "/home/arthur"), "/etc/hosts");

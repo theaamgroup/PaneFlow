@@ -924,9 +924,6 @@ enum ReadOutcome {
 /// component is a symlink - the check and the read are the same syscall, so an
 /// attacker cannot swap a regular file for a symlink in between. We read from
 /// the resulting fd, never re-resolving the name.
-///
-/// Windows: open with `FILE_FLAG_OPEN_REPARSE_POINT`, inspect the handle's
-/// attributes, and refuse reparse points before reading from that same handle.
 fn read_no_follow(path: &std::path::Path) -> ReadOutcome {
     #[cfg(unix)]
     {
@@ -951,39 +948,7 @@ fn read_no_follow(path: &std::path::Path) -> ReadOutcome {
             Err(e) => ReadOutcome::Other(e),
         }
     }
-    #[cfg(windows)]
-    {
-        use std::io::Read;
-        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-        };
-
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-        {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ReadOutcome::NotFound,
-            Err(e) => return ReadOutcome::Other(e),
-        };
-        match file.metadata() {
-            Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
-                return ReadOutcome::Symlink;
-            }
-            Ok(_) => {}
-            Err(e) => return ReadOutcome::Other(e),
-        }
-        let mut bytes = Vec::with_capacity(MAX_INPUT_BYTES.min(64 * 1024));
-        let mut limited = file.take((MAX_INPUT_BYTES + 1) as u64);
-        match limited.read_to_end(&mut bytes) {
-            Ok(_) if bytes.len() > MAX_INPUT_BYTES => ReadOutcome::TooLarge(bytes.len()),
-            Ok(_) => ReadOutcome::Bytes(bytes),
-            Err(e) => ReadOutcome::Other(e),
-        }
-    }
-    #[cfg(all(not(unix), not(windows)))]
+    #[cfg(not(unix))]
     {
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => return ReadOutcome::Symlink,

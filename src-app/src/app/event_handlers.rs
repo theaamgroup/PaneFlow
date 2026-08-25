@@ -18,12 +18,8 @@ use crate::terminal::{self, TerminalView};
 use crate::window_chrome::title_bar;
 use crate::{PaneFlowApp, ai_types};
 
-/// Cross-platform "is this PID still running?" probe used by the AI agent
-/// stale-PID sweep. Unix path preserves the pre-US-034 `kill(pid, 0)` +
-/// `ESRCH` semantics (EPERM ⇒ alive). Windows path mirrors the pattern in
-/// `terminal::pty_session::Drop`: `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`
-/// returns NULL for a dead/inaccessible PID. US-034 - keeps `libc::` calls
-/// off the Windows compile path.
+/// "Is this PID still running?" probe used by the AI agent stale-PID sweep.
+/// Uses `kill(pid, 0)` + `ESRCH` semantics (EPERM ⇒ alive).
 fn pid_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -43,31 +39,7 @@ fn pid_is_alive(pid: u32) -> bool {
         true
     }
 
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::OpenProcess;
-        // PROCESS_QUERY_LIMITED_INFORMATION (winnt.h: 0x1000) - minimum
-        // access right that lets OpenProcess succeed for any visible PID.
-        // Declared locally so we don't require an extra windows-sys feature.
-        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-        if pid == 0 {
-            return false;
-        }
-        // SAFETY: `OpenProcess` either returns a valid handle that we close,
-        // or NULL. No memory aliasing. `CloseHandle` on a valid handle is
-        // always sound.
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle.is_null() {
-                return false;
-            }
-            let _ = CloseHandle(handle);
-            true
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     {
         // Conservative fallback for exotic targets: never sweep. Better to
         // keep a stale entry than to drop a live one and confuse the AI
@@ -130,37 +102,7 @@ pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
     )
 }
 
-#[cfg(windows)]
-pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess};
-    // Same minimal access right as `pid_is_alive` above.
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    if pid == 0 {
-        return None;
-    }
-    // SAFETY: `OpenProcess` returns a valid handle (closed below) or NULL;
-    // `GetProcessTimes` writes only into the four provided FILETIMEs, which
-    // are plain-old-data and fully initialized by `zeroed`.
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return None;
-        }
-        let mut creation: FILETIME = std::mem::zeroed();
-        let mut exit: FILETIME = std::mem::zeroed();
-        let mut kernel: FILETIME = std::mem::zeroed();
-        let mut user: FILETIME = std::mem::zeroed();
-        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
-        let _ = CloseHandle(handle);
-        if ok == 0 {
-            return None;
-        }
-        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn pid_start_time(_pid: u32) -> Option<u64> {
     None
 }

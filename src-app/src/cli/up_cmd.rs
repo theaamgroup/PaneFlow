@@ -424,12 +424,6 @@ pub(super) fn execute_worktree_plan(plan: &WorktreePlan) -> Result<(), CliError>
             c.arg("-c").arg(setup);
             c
         };
-        #[cfg(windows)]
-        let mut cmd = {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/C").arg(setup);
-            c
-        };
         cmd.current_dir(&plan.path);
         match paneflow_process::run_with_timeout(cmd, plan.setup_timeout, 256 * 1024) {
             Ok(out) if out.status.success() => {}

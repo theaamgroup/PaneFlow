@@ -171,17 +171,6 @@ fn is_hidden_name(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(windows)]
-fn has_windows_hidden_attribute(entry: &std::fs::DirEntry) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-    entry
-        .metadata()
-        .map(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(windows))]
 fn has_windows_hidden_attribute(_entry: &std::fs::DirEntry) -> bool {
     false
 }

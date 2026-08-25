@@ -75,18 +75,6 @@ impl PaneFlowApp {
         // Order mirrors `terminal::shell`'s resolver preference. Any other value
         // still works via config; the trigger shows the raw value when it does
         // not match a preset, or "System default" when unset.
-        #[cfg(target_os = "windows")]
-        let shells: Vec<(&str, String)> = vec![
-            ("PowerShell", "pwsh.exe".to_string()),
-            ("Windows PowerShell", "powershell.exe".to_string()),
-            ("Command Prompt", "cmd.exe".to_string()),
-            (
-                "Git Bash",
-                crate::terminal::shell::find_windows_git_bash()
-                    .unwrap_or_else(|| "bash.exe".to_string()),
-            ),
-        ];
-        #[cfg(not(target_os = "windows"))]
         let shells: Vec<(&str, String)> = vec![
             ("zsh", "/bin/zsh".to_string()),
             ("bash", "/bin/bash".to_string()),

@@ -1694,14 +1694,7 @@ fn workspace_cwd_matches(cwd: &str, project: &std::path::Path) -> bool {
 }
 
 fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
-    #[cfg(windows)]
-    {
-        left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
+    left == right
 }
 
 fn switch_blue() -> Hsla {

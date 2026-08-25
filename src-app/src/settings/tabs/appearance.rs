@@ -130,49 +130,6 @@ impl PaneFlowApp {
             .child(section_header(ui, "Presets"))
             .child(presets_grid);
 
-        #[cfg(target_os = "windows")]
-        let content = {
-            let chrome_material = self.cached_config.cockpit_chrome_material_enabled();
-            let chrome_material_row = div()
-                .id("row-windows-chrome-material")
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(16.))
-                .px(px(12.))
-                .py(px(10.))
-                .child(setting_text(
-                    ui,
-                    "Chrome material",
-                    "Let Mica show through the navigation card.",
-                ))
-                .child(
-                    div()
-                        .id("windows-chrome-material-toggle")
-                        .flex_shrink_0()
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.persist_setting(
-                                false,
-                                "windows_chrome_material",
-                                serde_json::Value::Bool(!chrome_material),
-                                cx,
-                            );
-                        }))
-                        .child(crate::settings::components::toggle_pill(
-                            chrome_material,
-                            ui,
-                        )),
-                );
-
-            let windows_card = setting_card(ui).child(chrome_material_row);
-
-            content
-                .child(div().h(px(18.)).flex_none())
-                .child(crate::settings::components::section_header(ui, "Windows"))
-                .child(windows_card)
-        };
-
         #[cfg(target_os = "macos")]
         let content = {
             let sidebar_material = self.cached_config.macos_chrome_material_enabled();

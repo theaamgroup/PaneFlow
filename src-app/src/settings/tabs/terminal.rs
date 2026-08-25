@@ -1,7 +1,6 @@
 //! "Terminal" settings tab (US-016) - the small set of terminal preferences
 //! worth keeping in the primary Settings UI: cursor shape, font
-//! family, font size, font weight, line height, cell width, and Windows terminal
-//! material.
+//! family, font size, font weight, line height, and cell width.
 //!
 //! Controls map to config like so:
 //! - **cursor_shape** -> enum/preset dropdown persisted into the `terminal`
@@ -19,8 +18,6 @@
 //!   [`config_writer::save_terminal_field`].
 //! - **color_emoji** -> toggle persisted into the `terminal` block via
 //!   [`config_writer::save_terminal_field`].
-//! - **windows_terminal_material** -> Windows-only top-level toggle persisted
-//!   via [`config_writer::save_config_value`].
 //!
 //! Other advanced terminal knobs remain supported in `paneflow.json`, but are
 //! intentionally not mirrored here to keep Settings focused.
@@ -274,34 +271,14 @@ impl PaneFlowApp {
                 cx,
             ));
 
-        let content = div()
+        div()
             .flex()
             .flex_col()
             .gap(px(20.))
             .child(section_header(ui, "Cursor"))
             .child(cursor_card)
             .child(section_header(ui, "Display"))
-            .child(display_card);
-
-        #[cfg(target_os = "windows")]
-        let content = {
-            let material_card = setting_card(ui).child(self.terminal_toggle_row(
-                "term-windows-terminal-material",
-                "Enable acrylic material",
-                "Applies a translucent texture behind the terminal window.",
-                config.windows_terminal_material_enabled(),
-                "windows_terminal_material",
-                false,
-                ui,
-                cx,
-            ));
-
-            content
-                .child(section_header(ui, "Window"))
-                .child(material_card)
-        };
-
-        content
+            .child(display_card)
     }
 
     fn terminal_font_family_row(
