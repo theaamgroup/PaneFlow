@@ -40,7 +40,7 @@ never published publicly.
 | Requirement | State |
 |---|---|
 | rustup + rustc 1.96.1 (pinned by `rust-toolchain.toml`) | installed 2026-08-25 |
-| Full Xcode, for the Metal shader compiler that GPUI needs at build time | downloading. Command Line Tools alone are NOT enough: `xcrun -f metal` fails under CLT. |
+| Full Xcode, for the Metal shader compiler that GPUI needs at build time | Xcode 26.6 installed 2026-08-25. **Two separate steps, and the second is easy to miss.** Command Line Tools alone are not enough (`xcrun -f metal` fails outright under CLT), and installing Xcode alone is also not enough: Xcode 26 ships the Metal toolchain as a downloadable component, so `xcrun metal` still fails with `cannot execute tool 'metal' due to missing Metal Toolchain` until you run `xcodebuild -downloadComponent MetalToolchain`. Verify with an actual compile, not with `xcrun -f metal`, which resolves the path successfully even when the toolchain is absent. |
 | cmake | already present via Homebrew |
 | zig | not needed once the Ghostty backend is gone |
 
