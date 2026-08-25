@@ -269,6 +269,30 @@ four-platform pipeline, with live references to `GPG_*`,
 the secrets do not exist in this org. Never create them here. See the leak
 register in the design doc for what each one fed upstream.
 
+**`run_tests.yml` is the same problem and it is not inert - it runs on every
+PR.** An adversarial audit at the end of 2c enumerated it (the cfg census
+cannot see YAML, which is exactly why that audit exists):
+
+- Linux legs: `check_style` (`:243`, ubuntu-22.04, installs `libwayland-dev` /
+  `libx11-dev`, then `cargo clippy --workspace`), `run_tests_linux` (`:286`),
+  `release_build_linux` (`:325`) whose size budget at `:405` stats an ELF at
+  `target/embed-build/x86_64-unknown-linux-gnu/release-min`, and
+  `linux_aarch64_check` (`:1158`).
+- Windows legs: `windows_check` (`:835`), `windows_render_smoke` (`:1044`,
+  downloads `paneflow.exe`), `windows_aarch64_check` (`:1267`).
+- The `tests_pass` aggregator (`:1357-1371`) still `needs:` all six. Prune jobs
+  without editing `needs:` and the workflow never completes; leave them and it
+  goes red.
+
+Two of those legs cannot pass any more, independently of anything 2c did:
+`windows_check:956` passes `--features paneflow-app/libghostty-windows`, and no
+`[features]` table or that feature exists anywhere in the workspace; and a Linux
+build now fails to compile because `workspace/pid_resolve.rs` defines
+`parent_of` only under `#[cfg(target_os = "macos")]` while
+`resolve_surface_for_pid` calls it with no other arm. Stage 3 owns the fix; the
+point of recording it here is that the CI signal is already meaningless, so a
+green tree locally is currently the only real gate.
+
 ## Parallel work
 
 Do not use the `paneflow-conductor` skill for fan-out. It is a feature of this
