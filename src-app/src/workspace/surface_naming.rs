@@ -12,7 +12,7 @@
 //!
 //! The base name comes from the best available signal, in priority order:
 //! foreground command → OSC-set title → `shell`. The foreground-command lookup
-//! itself (OS-specific, `/proc` on Linux) lives on `TerminalState`; this module
+//! itself (OS-specific, libproc on macOS) lives on `TerminalState`; this module
 //! only shapes strings, so it stays platform-agnostic and trivially testable.
 
 use std::collections::HashMap;
@@ -116,10 +116,10 @@ fn name_from_title(title: &str) -> Option<String> {
     (!slug.is_empty()).then_some(slug)
 }
 
-/// Last path component, splitting on both `/` and `\` so Windows paths work.
+/// Last path component, splitting on `/`.
 fn basename(path: &str) -> &str {
     let p = path.trim();
-    p.rsplit(['/', '\\']).next().unwrap_or(p)
+    p.rsplit('/').next().unwrap_or(p)
 }
 
 /// Lowercase, keep `[a-z0-9._]`, collapse every other run into a single `-`,
@@ -237,17 +237,6 @@ mod tests {
         assert_eq!(
             derive_surface_base_name(Some("/usr/bin/node server.js"), None),
             "node-server.js"
-        );
-    }
-
-    #[test]
-    fn command_quoted_windows_path_argv0() {
-        assert_eq!(
-            derive_surface_base_name(
-                Some(r#""C:\Program Files\nodejs\node.exe" "C:\repo\dev server.js""#),
-                None
-            ),
-            "node.exe-dev-server.js"
         );
     }
 

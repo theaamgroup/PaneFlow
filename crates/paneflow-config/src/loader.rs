@@ -36,19 +36,15 @@ pub enum ConfigError {
     ParseError(#[from] serde_json::Error),
 }
 
-/// Returns the platform-appropriate config file path.
-///
-/// - Linux: `$XDG_CONFIG_HOME/paneflow/paneflow.json`
-/// - macOS: `~/Library/Application Support/paneflow/paneflow.json`
-/// - Windows: `%APPDATA%\paneflow\paneflow.json`
+/// Returns the macOS config file path:
+/// `~/Library/Application Support/paneflow/paneflow.json`.
+/// Debug builds use the `paneflow-dev` subdir instead.
 pub fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join(APP_SUBDIR).join("paneflow.json"))
 }
 
-/// Returns the platform-appropriate session file path.
-///
-/// - Linux: `$XDG_CACHE_HOME/paneflow/session.json`
-/// - macOS: `~/Library/Caches/paneflow/session.json`
+/// Returns the macOS session file path:
+/// `~/Library/Caches/paneflow/session.json`.
 ///
 /// The filename is namespaced per build profile (`session-dev.json` in
 /// debug builds) so a `cargo run` instance and an installed release
@@ -574,9 +570,8 @@ mod tests {
         assert!(path.is_some());
         let p = path.unwrap();
         let suffix_unix = format!("{APP_SUBDIR}/paneflow.json");
-        let suffix_win = format!("{APP_SUBDIR}\\paneflow.json");
         assert!(
-            p.ends_with(&suffix_unix) || p.ends_with(&suffix_win),
+            p.ends_with(&suffix_unix),
             "config path {p:?} does not end with {suffix_unix}"
         );
     }

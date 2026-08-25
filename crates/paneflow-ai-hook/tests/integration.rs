@@ -14,25 +14,16 @@
 
 //! US-011 - end-to-end integration tests for `paneflow-ai-hook`.
 //!
-//! Each test spins up a mock IPC listener (Unix socket under a `TempDir`
-//! on Linux/macOS, randomly-named Windows named pipe under
-//! `\\.\pipe\paneflow-test-...`), invokes the `paneflow-ai-hook` binary
-//! as a subprocess via `std::process::Command` with the expected env and
-//! stdin, and asserts that exactly one correctly-shaped JSON-RPC frame
-//! arrives on the listener.
-//!
-//! Cross-platform by design: the same test body runs on Linux, macOS,
-//! and Windows (the only platform-specific piece is how the unique IPC
-//! path is computed). CI matrix coverage is declared in US-012; the
-//! tests themselves must compile and pass on all three OSes.
+//! Each test spins up a mock IPC listener (Unix socket under a `TempDir`),
+//! invokes the `paneflow-ai-hook` binary as a subprocess via
+//! `std::process::Command` with the expected env and stdin, and asserts
+//! that exactly one correctly-shaped JSON-RPC frame arrives on the
+//! listener.
 //!
 //! Panic-safe cleanup: `TempDir` is dropped on unwind, which removes
 //! the Unix socket file. The `MockServer` owns its `Listener` and
 //! detached accept-thread `JoinHandle`; dropping `MockServer` closes the
-//! listener, which on Windows releases the named pipe (kernel refcount)
-//! and on Unix unlinks the path (via `TempDir`). This prevents leaked
-//! pipe handles from accumulating on Windows CI runners, per the
-//! explicit US-011 acceptance criterion.
+//! listener, which unlinks the path (via `TempDir`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -89,18 +80,16 @@ enum PathKeepalive {
 /// delivered on the endpoint, plus the keepalive needed to keep the
 /// endpoint reachable for the lifetime of the test.
 struct MockServer {
-    /// Path the client must `to_fs_name::<GenericFilePath>()`. On Unix
-    /// this is a filesystem socket path; on Windows this is
-    /// `\\.\pipe\paneflow-test-<uniq>`.
+    /// Path the client must `to_fs_name::<GenericFilePath>()`. A
+    /// filesystem Unix-socket path.
     socket_path: PathBuf,
     /// Channel that delivers the first newline-terminated line the
     /// listener accepts, or an error string if the accept itself
     /// failed. Only one result is captured; further frames (if any)
     /// are silently dropped after the accept thread exits. Carrying
-    /// the accept-level error (as opposed to silent exit) is crucial
-    /// on Windows CI, where a `create_sync`-succeeded-but-accept-
-    /// failed case would otherwise only surface as a 5 s timeout
-    /// with no useful diagnostic.
+    /// the accept-level error (as opposed to silent exit) keeps a
+    /// listener-succeeded-but-accept-failed case from surfacing only
+    /// as a 5 s timeout with no useful diagnostic.
     rx: mpsc::Receiver<Result<Vec<u8>, String>>,
     _keepalive: PathKeepalive,
 }
@@ -296,48 +285,25 @@ fn run_hook(event: &str, env: &HookEnv<'_>, stdin_bytes: &[u8]) -> std::process:
     }
 }
 
-/// The minimum env needed for the hook to link and execute on each
-/// OS. `env_clear()` otherwise strips loader-search-path vars the
+/// The minimum env needed for the hook to link and execute.
+/// `env_clear()` otherwise strips loader-search-path vars the
 /// dynamic linker needs.
 ///
-/// - Linux: dynamic glibc build; `PATH` is sufficient for the test
-///   binary (there is no LD_LIBRARY_PATH requirement for a cargo-built
-///   target in the standard layout).
-/// - macOS: `DYLD_*` vars are SIP-dropped when spawning from a
-///   system-integrity-protected parent shell. These forwards work in
-///   unprotected terminals and dev-signed builds; in SIP-stripped
-///   environments they are simply absent and the dynamic loader falls
-///   back to the rpath baked into the Mach-O binary.
-/// - Windows: `SystemRoot` + `PATH` are the minimum for `CreateProcess`
-///   to resolve the dynamic `api-ms-win-*` forwarders; `ComSpec`,
-///   `USERPROFILE`, `LOCALAPPDATA`, `windir`, and `ProgramData` are
-///   additionally useful for CRT/NTDLL bootstrap and are safe to
-///   forward (they carry no secret material).
+/// macOS: `DYLD_*` vars are SIP-dropped when spawning from a
+/// system-integrity-protected parent shell. These forwards work in
+/// unprotected terminals and dev-signed builds; in SIP-stripped
+/// environments they are simply absent and the dynamic loader falls
+/// back to the rpath baked into the Mach-O binary.
 fn minimal_os_env() -> Vec<(String, String)> {
     let mut kept = Vec::new();
     for key in [
-        // Unix
         "PATH",
         "HOME",
         "TMPDIR",
-        "LD_LIBRARY_PATH",
         "DYLD_LIBRARY_PATH",
         "DYLD_FALLBACK_LIBRARY_PATH",
-        // Windows core + CRT bootstrap
         "TMP",
         "TEMP",
-        "SystemRoot",
-        "SYSTEMROOT",
-        "windir",
-        "WINDIR",
-        "ComSpec",
-        "COMSPEC",
-        "USERPROFILE",
-        "LOCALAPPDATA",
-        "ProgramData",
-        "PROGRAMDATA",
-        "NUMBER_OF_PROCESSORS",
-        "PROCESSOR_ARCHITECTURE",
     ] {
         if let Ok(v) = std::env::var(key) {
             kept.push((key.to_string(), v));

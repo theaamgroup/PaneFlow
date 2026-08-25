@@ -3,8 +3,8 @@
 //! Hosts two top-level preferences, each rendered with the shared Codex-style
 //! select primitives (`components::select_*`):
 //! - **Default editor** (`external_editor`) - the app used to open files and
-//!   folders (Auto-detect / Zed / Cursor / Windsurf / VS Code / Visual Studio /
-//!   System), each with its brand logo.
+//!   folders (Auto-detect / Zed / Cursor / Windsurf / VS Code / System), each
+//!   with its brand logo.
 //! - **Shell in the integrated terminal** (`default_shell`) - a curated set of
 //!   platform shells. Empty = fall back to `$SHELL` / the platform default.
 //!
@@ -236,16 +236,15 @@ impl PaneFlowApp {
 }
 
 /// Per-editor leading logo for the Default-editor select. Brand-color logos
-/// (Zed / VS Code / Visual Studio) are PNGs rendered in full color; Cursor and
-/// Windsurf ship as monochrome `currentColor` SVGs that follow the theme.
-/// `auto` / `system` have no logo.
+/// (Zed / VS Code) are PNGs rendered in full color; Cursor and Windsurf ship
+/// as monochrome `currentColor` SVGs that follow the theme. `auto` / `system`
+/// have no logo.
 pub(crate) const EDITOR_PRESETS: &[(&str, &str)] = &[
     ("Auto-detect", "auto"),
     ("Zed", "zed"),
     ("Cursor", "cursor"),
     ("Windsurf", "windsurf"),
     ("VS Code", "code"),
-    ("Visual Studio", "visual_studio"),
     ("System default", "system"),
 ];
 
@@ -253,7 +252,6 @@ pub(crate) fn editor_icon(value: &str) -> Option<Logo> {
     match value {
         "zed" => Some(("icons/editor-zed.png", true)),
         "code" => Some(("icons/editor-vscode.png", true)),
-        "visual_studio" => Some(("icons/editor-visual-studio.png", true)),
         "cursor" => Some(("icons/editor-cursor.svg", false)),
         "windsurf" => Some(("icons/editor-windsurf.svg", false)),
         _ => None,
@@ -261,31 +259,21 @@ pub(crate) fn editor_icon(value: &str) -> Option<Logo> {
 }
 
 /// Case-insensitive comparison for shell presets. Bare configured names match
-/// by basename (`bash.exe` should still select Git Bash), while two explicit
-/// paths must point at the same executable (`C:\Windows\System32\bash.exe`
-/// should not be presented as Git Bash).
+/// by basename (`zsh` still selects the `/bin/zsh` chip), while two explicit
+/// paths must point at the same executable.
 fn shell_preset_eq(stored: &str, chip: &str) -> bool {
     fn has_separator(s: &str) -> bool {
-        s.contains(['/', '\\'])
-    }
-
-    fn path_key(s: &str) -> String {
-        s.replace('/', "\\").to_ascii_lowercase()
+        s.contains('/')
     }
 
     fn stem(s: &str) -> String {
-        let base = s
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(s)
-            .to_ascii_lowercase();
-        base.trim_end_matches(".exe").to_string()
+        s.rsplit('/').next().unwrap_or(s).to_ascii_lowercase()
     }
 
     if stored.is_empty() {
         false
     } else if has_separator(stored) && has_separator(chip) {
-        path_key(stored) == path_key(chip)
+        stored.eq_ignore_ascii_case(chip)
     } else {
         stem(stored) == stem(chip)
     }
@@ -295,21 +283,10 @@ fn shell_preset_eq(stored: &str, chip: &str) -> bool {
 mod tests {
     #[test]
     fn shell_preset_matches_bare_names_by_basename() {
-        assert!(super::shell_preset_eq(
-            "bash.exe",
-            r"C:\Program Files\Git\bin\bash.exe"
-        ));
-        assert!(super::shell_preset_eq(
-            r"C:\Program Files\Git\bin\bash.exe",
-            "bash.exe"
-        ));
-    }
-
-    #[test]
-    fn shell_preset_does_not_label_explicit_wsl_bash_as_git_bash() {
-        assert!(!super::shell_preset_eq(
-            r"C:\Windows\System32\bash.exe",
-            r"C:\Program Files\Git\bin\bash.exe"
-        ));
+        assert!(super::shell_preset_eq("zsh", "/bin/zsh"));
+        assert!(super::shell_preset_eq("/bin/zsh", "zsh"));
+        assert!(super::shell_preset_eq("bash", "/bin/bash"));
+        assert!(super::shell_preset_eq("sh", "/bin/sh"));
+        assert!(super::shell_preset_eq("fish", "/usr/bin/fish"));
     }
 }

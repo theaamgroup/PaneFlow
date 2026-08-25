@@ -79,8 +79,8 @@ pub struct PaneFlowConfig {
     pub font_size: Option<f32>,
     /// Terminal font weight (default: "normal").
     pub font_weight: Option<String>,
-    /// Treat Alt key as Meta (send ESC prefix). Default: true on Linux.
-    /// Set to false for future macOS where Option produces Unicode characters.
+    /// Treat Option/Alt as Meta (send ESC prefix). Default: false on macOS -
+    /// Option composes Unicode. Set true to send the ESC prefix.
     pub option_as_meta: Option<bool>,
     /// EP-003 US-007 (cli-cockpit): master switch for the per-shell rc
     /// injection (OSC 7 CWD reporting + OSC 133 command marks). `None`/`true`
@@ -105,11 +105,10 @@ pub struct PaneFlowConfig {
     /// (tmux send-keys style). `None` resolves to 2000 ms; values are clamped to
     /// `[250, 10000]`.
     ///
-    /// The fixed delay exists because there is no reliable cross-platform
+    /// The fixed delay exists because there is no reliable
     /// "readline is ready" signal: firing too early (on the shell's echo of the
     /// launch command, before the CLI's prompt exists) sends the prefill into a
-    /// not-ready buffer and LOSES it - a regression impossible to verify on
-    /// Windows ConPTY cold-start from here. The prompt is therefore ALWAYS copied
+    /// not-ready buffer and LOSES it. The prompt is therefore ALWAYS copied
     /// to the clipboard as a synchronous safety net (surfaced in the review
     /// terminal header), so a missed window degrades to a one-keystroke paste
     /// rather than silent failure. This setting lets a user on a slow cold-start
@@ -330,7 +329,6 @@ impl PaneFlowConfig {
     }
 
     /// Resolve the desktop chrome material switch for the current platform.
-    /// Linux keeps its existing platform policy and has no settings toggle.
     pub fn cockpit_chrome_material_enabled(&self) -> bool {
         if self.window_backdrop_disables_chrome_material() {
             return false;
@@ -738,9 +736,7 @@ pub struct TerminalConfig {
     /// protected and cannot be overridden. `LD_*` and `DYLD_*` keys are dropped
     /// before PTY spawn. A custom `PATH` is allowed, but Paneflow re-prepends
     /// `PANEFLOW_BIN_DIR` afterward so agent commands still route through the
-    /// shim. On Windows, env names are case-insensitive, so user keys are
-    /// normalised to uppercase before merging to avoid a `Path`/`PATH` clash.
-    /// `None` (block absent) and `Some({})` both inject nothing.
+    /// shim. `None` (block absent) and `Some({})` both inject nothing.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

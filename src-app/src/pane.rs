@@ -182,8 +182,7 @@ pub enum PaneEvent {
     /// handled in the `Pane`) so the new terminal spawns at the owning
     /// workspace's cwd - the `Pane` knows only its `workspace_id`, not the
     /// directory - and gets the app-level CWD/port/service subscription wired,
-    /// exactly like `DropSplit` / `DuplicateTabInto`. Without this, a new tab on
-    /// Windows opened in the process `current_dir()` (`C:\Program Files\PaneFlow`).
+    /// exactly like `DropSplit` / `DuplicateTabInto`.
     NewTerminalTab,
     /// Toggle the docked agent-sessions sidebar for the active terminal's cwd
     /// (PRD `prd-agent-sessions-sidebar-2026-Q3`). The parent resolves the cwd,
@@ -222,9 +221,9 @@ pub enum PaneEvent {
         edge: DropEdge,
         source_pane: Entity<Pane>,
         source_tab_id: gpui::EntityId,
-        /// `true` when the duplicate modifier was held (Ctrl on Linux/Windows,
-        /// Alt on macOS) - spawn a fresh terminal at the dragged tab's CWD
-        /// instead of moving the original (US-010).
+        /// `true` when the duplicate modifier was held (Alt on macOS) - spawn a
+        /// fresh terminal at the dragged tab's CWD instead of moving the original
+        /// (US-010).
         duplicate: bool,
     },
     /// A tab was dropped on this pane's tab strip (or content center) with the

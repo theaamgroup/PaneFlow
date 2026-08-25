@@ -78,10 +78,8 @@ impl AgentState {
     }
 }
 
-const STATUS_CONTROL_C_EXIT: i32 = 0xC000_013Au32 as i32;
-
 pub fn is_human_interruption_exit(exit_code: i32) -> bool {
-    matches!(exit_code, 129 | 130 | 137 | 143 | STATUS_CONTROL_C_EXIT)
+    matches!(exit_code, 129 | 130 | 137 | 143)
 }
 
 /// EP-004 US-010: classify the agent binary's raw exit code into the
@@ -96,8 +94,6 @@ pub fn is_human_interruption_exit(exit_code: i32) -> bool {
 ///   this exclusion every pane close with a live agent would flash a
 ///   false `Errored`.
 /// - 143 (`128+SIGTERM`) / 137 (`128+SIGKILL`) - external kill.
-/// - `STATUS_CONTROL_C_EXIT` (0xC000013A) - the Windows Ctrl+C exit code
-///   (`code()` is always `Some` on Windows; there are no signals).
 ///
 /// Genuine crash signals (SIGSEGV → 139, SIGABRT → 134, …) and every
 /// other non-zero code classify as `Errored`.
@@ -142,9 +138,8 @@ pub struct AgentSession {
     /// reason as `waiting_since`.
     pub last_activity: std::time::Instant,
     /// OS start time of the session's process, pinned at session creation
-    /// (Linux `/proc/{pid}/stat` field 22, macOS `pbi_start_tvsec`, Windows
-    /// `GetProcessTimes` creation FILETIME - opaque, only compared for
-    /// equality). Guards the sweep's `pid_is_alive` probe against PID reuse:
+    /// (macOS `pbi_start_tvsec` - opaque, only compared for equality).
+    /// Guards the sweep's `pid_is_alive` probe against PID reuse:
     /// a live PID whose start time changed belongs to a DIFFERENT process,
     /// so the session is dead. `None` (synthetic PID, probe failure) keeps
     /// the conservative liveness-only check.
@@ -498,11 +493,6 @@ mod tests {
         assert_eq!(state_for_exit(129), Finished, "128+SIGHUP (pane closed)");
         assert_eq!(state_for_exit(143), Finished, "128+SIGTERM");
         assert_eq!(state_for_exit(137), Finished, "128+SIGKILL");
-        assert_eq!(
-            state_for_exit(0xC000_013Au32 as i32),
-            Finished,
-            "Windows STATUS_CONTROL_C_EXIT"
-        );
         // Genuine failures.
         assert_eq!(state_for_exit(1), Errored);
         assert_eq!(state_for_exit(2), Errored);
@@ -516,7 +506,6 @@ mod tests {
     fn human_interruption_exit_excludes_clean_exit_and_crashes() {
         assert!(!is_human_interruption_exit(0));
         assert!(is_human_interruption_exit(130));
-        assert!(is_human_interruption_exit(0xC000_013Au32 as i32));
         assert!(!is_human_interruption_exit(1));
         assert!(!is_human_interruption_exit(139));
     }

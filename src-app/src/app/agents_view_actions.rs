@@ -2294,7 +2294,7 @@ fn open_agents_cwd_with_editor(cwd: &str, editor_value: &str) -> Result<String, 
     match editor_value {
         "system" => open_agents_cwd_with_system_handler(path),
         "auto" => open_agents_cwd_auto(path),
-        "zed" | "cursor" | "windsurf" | "code" | "visual_studio" => {
+        "zed" | "cursor" | "windsurf" | "code" => {
             let (label, command) = agents_editor_command(editor_value);
             spawn_agents_editor(path, command, label).map(|_| label.to_string())
         }
@@ -2339,7 +2339,6 @@ fn agents_editor_command(value: &str) -> (&'static str, &str) {
         "cursor" => ("Cursor", "cursor"),
         "windsurf" => ("Windsurf", "windsurf"),
         "code" => ("VS Code", "code"),
-        "visual_studio" => ("Visual Studio", "devenv"),
         _ => ("System default", value),
     }
 }

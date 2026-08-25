@@ -5,15 +5,14 @@
 //!
 //! ```text
 //! <dirs::cache_dir()>/paneflow/bin/<version>/
-//!     ├── claude[.exe]            ← copy of paneflow-shim
-//!     ├── codex[.exe]             ← copy of paneflow-shim
+//!     ├── claude                  ← copy of paneflow-shim
+//!     ├── codex                   ← copy of paneflow-shim
 //!     ├── …one per TerminalAgent binary (gemini, cursor-agent, …)
-//!     └── paneflow-ai-hook[.exe]  ← copy of paneflow-ai-hook
+//!     └── paneflow-ai-hook        ← copy of paneflow-ai-hook
 //! ```
 //!
 //! Why two shim copies instead of a hardlink: `std::fs::hard_link` is
-//! cross-filesystem-fragile on macOS (APFS ↔ tmpfs) and has surprising
-//! semantics on Windows (NTFS only, blocked on ReFS/network shares).
+//! cross-filesystem-fragile on macOS (APFS ↔ tmpfs).
 //! Writing the bytes twice is a few-hundred-kilobyte cost on first
 //! extraction and zero cost thereafter (SHA256 match → skip).
 //!
@@ -81,8 +80,8 @@ fn extract_plan() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Pull the raw bytes of `name` out of the `Bins` rust-embed archive.
-/// `name` is the `<binary>[.exe]` basename staged by build.rs under
-/// `target/embed/bin/<triple>/`.
+/// `name` is the unsuffixed basename staged by build.rs; the embed key
+/// is `bin/{triple}/{name}`.
 fn embedded_bytes(name: &str) -> Result<std::borrow::Cow<'static, [u8]>> {
     let key = format!("bin/{TARGET_TRIPLE}/{name}");
     Bins::get(&key)
@@ -202,8 +201,7 @@ pub fn ensure_bridge_extracted() -> Result<PathBuf> {
         .to_string_lossy()
         .into_owned();
 
-    // Embed source basename matches the bridge filename on every OS
-    // (`paneflow-mcp` / `paneflow-mcp.exe`).
+    // Embed source basename matches the bridge filename (`paneflow-mcp`).
     let bytes = embedded_bytes(&filename)?;
     let entry = Entry {
         filename,
@@ -252,8 +250,7 @@ pub fn ensure_ai_hook_extracted() -> Result<PathBuf> {
         .to_string_lossy()
         .into_owned();
 
-    // Embed source basename matches the ai-hook filename on every OS
-    // (`paneflow-ai-hook` / `paneflow-ai-hook.exe`).
+    // Embed source basename matches the ai-hook filename (`paneflow-ai-hook`).
     let bytes = embedded_bytes(&filename)?;
     let entry = Entry {
         filename,
@@ -396,31 +393,20 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<()> {
     persist_atomic(tmp, final_path)
 }
 
-/// Persist `tmp` over `final_path`, atomically.
+/// Persist `tmp` over `final_path` atomically.
 ///
-/// On Windows a just-written executable (and the existing one being replaced)
-/// is briefly locked by the AV / Defender on-access scanner, so the
-/// `MoveFileEx`-with-`REPLACE_EXISTING` inside `persist` can transiently fail
-/// with `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32). That makes
-/// an idempotent re-extraction over an existing wrapper (e.g. after the shim is
-/// rebuilt, so the SHA256 no longer matches and the bytes must be rewritten)
-/// spuriously fail. Retry a few times with a short backoff - the standard
-/// Windows pattern rustup/cargo use - so the lock window is ridden out.
-///
-/// Unix `rename(2)` is a single atomic syscall with no such scanner window, so
-/// it gets exactly one attempt and any error surfaces immediately (no masking).
+/// Unix `rename(2)` is a single atomic syscall, so this is exactly one
+/// attempt and any error surfaces immediately (no masking).
 fn persist_atomic(tmp: tempfile::NamedTempFile, final_path: &Path) -> Result<()> {
-    {
-        tmp.persist(final_path).map_err(|e| {
-            anyhow!(
-                "US-008: atomic rename {} -> {} failed: {}",
-                e.file.path().display(),
-                final_path.display(),
-                e.error
-            )
-        })?;
-        Ok(())
-    }
+    tmp.persist(final_path).map_err(|e| {
+        anyhow!(
+            "US-008: atomic rename {} -> {} failed: {}",
+            e.file.path().display(),
+            final_path.display(),
+            e.error
+        )
+    })?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -719,7 +705,7 @@ mod tests {
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
             "paneflow-mcp".to_string(),
-            "EP-001 US-003: bridge filename must be paneflow-mcp[.exe]"
+            "EP-001 US-003: bridge filename must be paneflow-mcp"
         );
     }
 
