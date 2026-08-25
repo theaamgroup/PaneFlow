@@ -4,6 +4,41 @@ Native Rust terminal workspace for running coding agents in parallel. Built with
 
 Fork context, decisions, the upstream leak register, and a 12-item traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code, the updater, or anything under `src-app/src/update/`.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
 
+**Start here for work in progress:** `docs/fork/STATE.md` records what is done,
+what is next with real counts, the four verification commands and their expected
+output, and the method rules this project has already paid for. Read it before
+planning a pass so you do not redo finished work or repeat a falsified finding.
+
+## Verify before claiming
+
+Run all four, before and after any pass, and quote the actual output:
+
+```bash
+cargo build                                # exit 0
+cargo test --workspace                     # 1806 passed, 0 failed
+cargo clippy --workspace --all-targets     # exit 0, one pre-existing block v0.1.6 notice
+./target/debug/paneflow --version
+```
+
+A green `cargo build` is **not** a green tree: this repo has already had a change
+that built clean and failed `cargo test`, because a `#[cfg(test)]` block did
+`include_str!` on a deleted file. Never pipe a command whose exit status matters
+(`cargo test | tail` reports `tail`'s status), and redirect as `cmd > file 2>&1`,
+never `cmd 2>&1 > file`.
+
+## Delegating parallel work
+
+Do **not** use the `paneflow-conductor` skill. It is a feature of this app, it
+does not work reliably, and fixing it is a tracked defect. Use the
+`grok-subagents` skill or headless agent processes as background jobs, one git
+worktree per task.
+
+Fan out only genuinely disjoint work, such as per-file documentation passes. The
+remaining Rust platform passes do not fan out: enum and feature removals are
+whole-workspace edits, single files carry Windows and Linux and test concerns at
+once, and each worker would need its own multi-gigabyte `target/` to verify
+anything.
+
 ## Build prerequisites (macOS)
 
 Verified on 2026-08-25. Two of these are non-obvious and each one fails the build in a confusing way.
