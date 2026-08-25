@@ -3,6 +3,11 @@
 Living handoff record. Updated 2026-08-25, after stage 2c landed.
 
 Companion documents:
+- `docs/fork/2026-08-25-post-2c-plan.md` is the **plan of record for what
+  happens next** - the locked decisions, the ordering and its two real
+  dependencies, the delegation machinery that worked in 2c, and the verification
+  contract. The live task list (ten tasks) is in the harness; that file holds
+  what a task description cannot carry.
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
   **leak register**, and a **16-item traps register**. Read it before touching
   platform code, the updater, or the config schema.
