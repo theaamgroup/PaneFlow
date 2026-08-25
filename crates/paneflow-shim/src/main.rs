@@ -345,8 +345,6 @@ pub(crate) fn locate_sibling_hook_binary() -> Option<PathBuf> {
     let dir = exe.parent()?;
     #[cfg(unix)]
     let name = "paneflow-ai-hook";
-    #[cfg(windows)]
-    let name = "paneflow-ai-hook.exe";
     let candidate = dir.join(name);
     candidate.is_file().then_some(candidate)
 }
@@ -392,16 +390,6 @@ mod tests {
     fn candidate_names_unix_returns_bare_tool() {
         assert_eq!(candidate_names("claude"), vec!["claude".to_owned()]);
         assert_eq!(candidate_names("codex"), vec!["codex".to_owned()]);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn candidate_names_windows_tries_exe_then_cmd() {
-        assert_eq!(
-            candidate_names("claude"),
-            vec!["claude.exe".to_owned(), "claude.cmd".to_owned()],
-            ".exe must be tried before .cmd so native builds win over wrappers"
-        );
     }
 
     /// US-037: a real binary on `$PATH` carries the executable bit; the walk
@@ -450,31 +438,6 @@ mod tests {
             found.as_deref(),
             Some(real.as_path()),
             "non-executable homonym must be skipped for the executable one"
-        );
-    }
-
-    /// Windows counterpart: Claude Code ships as `claude.cmd` (a Node.js
-    /// wrapper) on Windows today. The walk must find that file when no
-    /// `.exe` exists alongside. When a `.exe` exists, it must win.
-    #[cfg(windows)]
-    #[test]
-    fn find_real_binary_in_locates_cmd_then_exe_on_windows() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let cmd_path = dir.path().join("claude.cmd");
-        std::fs::File::create(&cmd_path).unwrap();
-
-        // With only .cmd present, the walk falls through to it.
-        let found = find_real_binary_in("claude", vec![dir.path().to_owned()], None, None);
-        assert_eq!(found.as_deref(), Some(cmd_path.as_path()));
-
-        // With both .exe and .cmd present, .exe wins per candidate ordering.
-        let exe_path = dir.path().join("claude.exe");
-        std::fs::File::create(&exe_path).unwrap();
-        let found = find_real_binary_in("claude", vec![dir.path().to_owned()], None, None);
-        assert_eq!(
-            found.as_deref(),
-            Some(exe_path.as_path()),
-            "native .exe must take precedence over the .cmd wrapper"
         );
     }
 

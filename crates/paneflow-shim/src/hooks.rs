@@ -267,13 +267,8 @@ fn reachable_from_socket_env(raw: Option<&OsStr>) -> bool {
     // Unix: passive `stat(2)`. Windows: presence of the PaneFlow-set env var
     // is authoritative (a `Path::exists()` probe would connect-as-client and
     // race the accept loop - see the caller's doc comment).
-    #[cfg(not(windows))]
     {
         Path::new(raw).exists()
-    }
-    #[cfg(windows)]
-    {
-        true
     }
 }
 
@@ -734,12 +729,6 @@ impl Drop for HookConfigGuard {
 /// where the test binary lives in `target/debug/deps/`, exotic filesystems);
 /// the bare form is still recognized by `is_paneflow_hook_command` for
 /// detection and cleanup.
-#[cfg(windows)]
-pub(crate) fn resolve_hook_command(event: &str) -> String {
-    resolve_windows_hook_command(event)
-}
-
-#[cfg(not(windows))]
 pub(crate) fn resolve_hook_command(event: &str) -> String {
     match locate_sibling_hook_binary() {
         Some(path) => format!("{} {}", shell_program_path(&path), event),
@@ -747,45 +736,11 @@ pub(crate) fn resolve_hook_command(event: &str) -> String {
     }
 }
 
-#[cfg(windows)]
-pub(crate) fn resolve_hook_command_windows(event: &str) -> String {
-    resolve_windows_hook_command(event)
-}
-
-#[cfg(windows)]
-fn resolve_windows_hook_command(event: &str) -> String {
-    match locate_sibling_hook_binary() {
-        Some(path) => windows_powershell_hook_command(&path, event),
-        None => format!(
-            "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& '{}' {event}\"",
-            HOOK_COMMAND_PREFIX.trim_end()
-        ),
-    }
-}
-
-#[cfg(windows)]
-fn windows_powershell_hook_command(path: &Path, event: &str) -> String {
-    format!(
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& {} {event}\"",
-        powershell_single_quoted(&display_hook_program(path))
-    )
-}
-
-#[cfg(windows)]
-fn powershell_single_quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 /// Render a single `command` field for agents that do not document a
 /// Windows-specific override. On Windows, make the command self-contained:
 /// several hook runners execute the field through PowerShell, where a quoted
 /// executable path requires the `&` call operator.
 fn resolve_plain_hook_command(event: &str) -> String {
-    #[cfg(windows)]
-    {
-        resolve_windows_hook_command(event)
-    }
-    #[cfg(not(windows))]
     {
         resolve_hook_command(event)
     }
@@ -807,11 +762,6 @@ fn resolve_plain_hook_command(event: &str) -> String {
 ///
 fn display_hook_program(path: &Path) -> String {
     let rendered = path.display().to_string();
-    #[cfg(windows)]
-    {
-        rendered.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
     {
         rendered
     }
@@ -821,7 +771,6 @@ fn display_hook_program(path: &Path) -> String {
 /// writer in `paneflow-mcp-install`: macOS stable paths can live under
 /// `Application Support`, Windows users can have spaces in their profile path,
 /// and stale-hook detection already parses the single-quote escape form.
-#[cfg(not(windows))]
 fn shell_program_path(path: &Path) -> String {
     let rendered = display_hook_program(path);
     if rendered
@@ -994,19 +943,6 @@ fn path_program_exists(program: &str) -> bool {
         if candidate.is_file() {
             return true;
         }
-        #[cfg(windows)]
-        {
-            if Path::new(program).extension().is_none() {
-                let pathext = env::var_os("PATHEXT")
-                    .and_then(|v| v.into_string().ok())
-                    .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-                for ext in pathext.split(';').filter(|e| !e.is_empty()) {
-                    if dir.join(format!("{program}{ext}")).is_file() {
-                        return true;
-                    }
-                }
-            }
-        }
     }
     false
 }
@@ -1119,13 +1055,6 @@ fn hook_handler(event: &str) -> serde_json::Value {
         serde_json::Value::String(resolve_hook_command(event)),
     );
     handler.insert("timeout".into(), serde_json::json!(5));
-    #[cfg(windows)]
-    {
-        handler.insert(
-            "commandWindows".into(),
-            serde_json::Value::String(resolve_hook_command_windows(event)),
-        );
-    }
     serde_json::Value::Object(handler)
 }
 
@@ -2162,11 +2091,6 @@ pub(crate) fn remove_codex_hooks_win(root: &mut serde_json::Value) {
     remove_matcher_hooks_for_events(root, CODEX_HOOK_EVENTS);
 }
 
-#[cfg(windows)]
-fn codex_windows_hook_handler(event: &str) -> serde_json::Value {
-    hook_handler(event)
-}
-
 /// Marker for the TOML comment placed above `hooks = true` in
 /// `~/.codex/config.toml`. Cleanup scans for this literal line.
 #[cfg(unix)]
@@ -2772,111 +2696,16 @@ pub(crate) fn run_codex_with_jsonl_tee(path: &Path, args: &[OsString]) -> (ExitC
 
 #[cfg(test)]
 mod hooks_tests {
-    #[cfg(not(windows))]
+    use super::reachable_from_socket_env;
+    use super::settings_has_managed_hook;
     use super::shell_program_path;
     use super::{
         command_program_token, display_hook_program, settings_managed_hook_state,
         PersistentHookState,
     };
-    // Only the `#[cfg(windows)]` round-trip test below references this; gating
-    // the import keeps the non-Windows test build warning-free under `-D warnings`.
-    #[cfg(windows)]
-    use super::is_paneflow_hook_command;
-    use super::reachable_from_socket_env;
-    use super::settings_has_managed_hook;
     use serde_json::json;
     use std::ffi::OsStr;
     use std::path::Path;
-
-    /// Regression (prd-windows-port): the hook `command` string is executed by
-    /// the agent through a shell. On Windows Claude Code uses bash, which
-    /// de-escapes `\` and mangled `C:\Users\…\paneflow-ai-hook.exe` into
-    /// `C:Users…` → "command not found", so the hook never fired and the
-    /// sidebar stayed dead. Forward slashes survive bash AND stay detectable.
-    #[cfg(windows)]
-    #[test]
-    fn windows_hook_program_uses_forward_slashes_and_stays_detectable() {
-        let p =
-            Path::new(r"C:\Users\Arthur\AppData\Local\paneflow-dev\bin\0.4.4\paneflow-ai-hook.exe");
-        let rendered = display_hook_program(p);
-        assert!(
-            !rendered.contains('\\'),
-            "no backslashes (bash mangles them): {rendered}"
-        );
-        assert!(
-            rendered.contains('/'),
-            "forward slashes expected: {rendered}"
-        );
-        // The full command must remain recognized for idempotent merge + cleanup.
-        let cmd = format!("{rendered} Stop");
-        assert!(
-            is_paneflow_hook_command(&cmd),
-            "forward-slash command must stay detectable: {cmd}"
-        );
-        // The legacy backslash form (left by an older shim) must ALSO still be
-        // detected so cleanup removes it.
-        assert!(is_paneflow_hook_command(
-            r"C:\Users\Arthur\AppData\Local\paneflow-dev\bin\0.4.4\paneflow-ai-hook.exe Stop"
-        ));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_powershell_hook_command_is_shell_safe_for_program_files() {
-        let p = Path::new(r"C:\Program Files\PaneFlow\bin\paneflow-ai-hook.exe");
-        let cmd = super::windows_powershell_hook_command(p, "PreToolUse");
-        assert_eq!(
-            cmd,
-            "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& 'C:/Program Files/PaneFlow/bin/paneflow-ai-hook.exe' PreToolUse\""
-        );
-        assert!(
-            !cmd.contains('\\'),
-            "forward slashes keep the hook path stable across Windows shells: {cmd}"
-        );
-        assert!(
-            is_paneflow_hook_command(&cmd),
-            "PowerShell-wrapped hook command must stay detectable: {cmd}"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_strict_hook_configs_use_shell_safe_command() {
-        use super::{is_paneflow_matcher_group, merge_codebuddy_hooks, CLAUDE_HOOK_EVENTS};
-
-        let mut root = json!({});
-        merge_codebuddy_hooks(&mut root);
-        for event in CLAUDE_HOOK_EVENTS {
-            let arr = root["hooks"][*event]
-                .as_array()
-                .unwrap_or_else(|| panic!("missing event {event}"));
-            assert_eq!(arr.len(), 1, "{event}: exactly one paneflow entry");
-            assert!(is_paneflow_matcher_group(&arr[0]), "{event}: detectable");
-            let handler = &arr[0]["hooks"][0];
-            let cmd = handler["command"].as_str().unwrap();
-            assert!(
-                cmd.starts_with("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& '"),
-                "{event}: strict command must run through PowerShell explicitly, got {cmd}"
-            );
-            assert!(
-                cmd.ends_with(&format!(" {event}\"")),
-                "{event}: command must preserve the event arg, got {cmd}"
-            );
-            assert!(
-                handler.get("commandWindows").is_none(),
-                "{event}: strict clone schema must not grow commandWindows"
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn powershell_single_quote_escaping_doubles_apostrophes() {
-        assert_eq!(
-            super::powershell_single_quoted("C:/Users/O'Neil/paneflow-ai-hook.exe"),
-            "'C:/Users/O''Neil/paneflow-ai-hook.exe'"
-        );
-    }
 
     /// Unix path rendering is unchanged (no separator rewrite).
     #[cfg(unix)]
@@ -2956,24 +2785,6 @@ mod hooks_tests {
         // sweep any orphan hook config).
         assert!(!reachable_from_socket_env(None));
         assert!(!reachable_from_socket_env(Some(OsStr::new(""))));
-    }
-
-    /// Regression (prd-windows-port): on Windows `$PANEFLOW_SOCKET_PATH` is a
-    /// named pipe. The former `Path::exists()` probe opened a client
-    /// connection that consumed the server's pending pipe instance and lost
-    /// the `ERROR_PIPE_BUSY` race ~87% of the time against the live accept
-    /// loop, so the shim skipped hook-config install and the sidebar agent
-    /// status never updated. Presence of the PaneFlow-set env var is now
-    /// authoritative on Windows - no destructive probe.
-    #[cfg(windows)]
-    #[test]
-    fn windows_named_pipe_env_is_reachable_without_probing() {
-        assert!(reachable_from_socket_env(Some(OsStr::new(
-            r"\\.\pipe\paneflow"
-        ))));
-        assert!(reachable_from_socket_env(Some(OsStr::new(
-            r"\\.\pipe\paneflow-dev"
-        ))));
     }
 
     /// On Unix the probe stays a passive `stat(2)`: a non-existent path is
@@ -3069,7 +2880,6 @@ mod hooks_tests {
         );
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn shell_program_path_quotes_paths_that_shell_would_split() {
         let path = Path::new("/tmp/Application Support/paneflow-ai-hook");

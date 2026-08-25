@@ -61,11 +61,6 @@ pub(crate) fn candidate_names(tool: &str) -> Vec<String> {
     vec![tool.to_owned()]
 }
 
-#[cfg(windows)]
-pub(crate) fn candidate_names(tool: &str) -> Vec<String> {
-    vec![format!("{tool}.exe"), format!("{tool}.cmd")]
-}
-
 /// Walk `$PATH` and return the first entry that contains a matching
 /// executable, skipping the shim's own directory AND any candidate
 /// that is the shim binary itself by inode (US-017 hardlink defense).

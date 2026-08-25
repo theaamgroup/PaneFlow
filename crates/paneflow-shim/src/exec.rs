@@ -8,11 +8,11 @@ use std::process::ExitCode;
 // on Windows, and the shared `send_interrupt_stop`) consumes these. Gate them to
 // unix+windows so a hypothetical bare target without either doesn't flag them
 // unused; the shim only ships on unix + windows.
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use crate::{
     locate_sibling_hook_binary, PANEFLOW_AI_EVENT_SOURCE_ENV, PANEFLOW_AI_EVENT_SOURCE_INTERRUPT,
 };
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -163,11 +163,6 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
     ignore_terminal_signals();
     #[cfg(unix)]
     install_sigint_watcher(tool);
-    // EP-005 US-017: Windows Ctrl+C -> `ai.stop` (claude/codex interrupt their
-    // turn without exiting or firing a Stop hook). Installed before spawn so an
-    // immediate Ctrl+C is already covered.
-    #[cfg(windows)]
-    install_ctrl_c_handler(tool);
 
     // EP-005 US-017: capture Paneflow's PID before spawn for the macOS orphan
     // guard's reparent detection. SAFETY: `getppid` is a trivial syscall.
@@ -332,11 +327,11 @@ pub(crate) fn install_sigint_watcher(tool: &str) {
 /// child per keypress with no bound. Past this many in-flight reapers we drop
 /// the stop (this one Ctrl+C just doesn't clear the loader) rather than grow
 /// threads unboundedly. 8 covers any realistic burst of legitimate, fast hooks.
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 const MAX_INFLIGHT_REAPERS: usize = 8;
 
 /// Live count of detached reaper threads spawned by [`send_interrupt_stop`].
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 static INFLIGHT_REAPERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Spawn `paneflow-ai-hook Stop` with `{}` piped to stdin. Best-effort;
@@ -356,7 +351,7 @@ static INFLIGHT_REAPERS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// the `{}`-on-stdin contract (so the hook reads a valid empty payload) and do
 /// NOT kill the hook on a deadline: a slow-but-progressing socket write is a
 /// legitimate stop we don't want to interrupt.
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
     use std::sync::atomic::Ordering;
 
@@ -390,33 +385,6 @@ pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
     std::thread::spawn(move || {
         let _ = child.wait();
         INFLIGHT_REAPERS.fetch_sub(1, Ordering::AcqRel);
-    });
-}
-
-/// EP-005 US-017 (agent-control-plane): Windows parity for the Unix `sigwait`
-/// watcher. claude/codex interrupt their current TURN on Ctrl+C without exiting
-/// and without firing a Stop hook, so the sidebar loader would stick forever. A
-/// console-control handler emits one `ai.stop` per Ctrl+C; the agent still
-/// receives `CTRL_C_EVENT` directly from the OS (every process in the console
-/// group does), so its turn is interrupted as usual and the shim survives to
-/// keep waiting on it. `ctrlc` wraps `SetConsoleCtrlHandler` and runs the
-/// closure on a dedicated thread, so the same bounded-reaper `send_interrupt_stop`
-/// the Unix path uses is reused verbatim.
-///
-/// Not built into the host (Linux) binary; Linux and macOS take the `sigwait` /
-/// parent-death paths. Compile-verified by `cargo check --target
-/// x86_64-pc-windows-msvc`, but a Windows RUNTIME smoke test (Ctrl+C an agent
-/// mid-turn, confirm the loader clears) is still required before it is trusted.
-#[cfg(windows)]
-pub(crate) fn install_ctrl_c_handler(tool: &str) {
-    let tool = tool.to_owned();
-    let Some(hook_path) = locate_sibling_hook_binary() else {
-        return;
-    };
-    // `set_handler` installs once per process; the shim calls this once per run
-    // before the agent spawns. The closure runs on every subsequent Ctrl+C.
-    let _ = ctrlc::set_handler(move || {
-        send_interrupt_stop(&hook_path, &tool);
     });
 }
 
