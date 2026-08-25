@@ -42,7 +42,6 @@ impl PaneFlowApp {
             UpdatePillKind::InApp(state) => match state {
                 SelfUpdatePillState::Idle => (format!("v{} available", info.version), false, false),
                 SelfUpdatePillState::Downloading => ("Downloading update…".into(), true, false),
-                SelfUpdatePillState::Installing => ("Installing update…".into(), true, false),
                 SelfUpdatePillState::ReadyToRestart => ("Restart Paneflow".into(), false, false),
                 SelfUpdatePillState::Errored => ("Update failed".into(), false, false),
             },

@@ -277,7 +277,7 @@ impl futures::Stream for TerminalBackendEvents {
 
 impl futures::stream::FusedStream for TerminalBackendEvents {
     fn is_terminated(&self) -> bool {
-        self.alacritty.is_none() && { { true } }
+        self.alacritty.is_none()
     }
 }
 

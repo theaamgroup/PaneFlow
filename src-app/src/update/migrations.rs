@@ -354,7 +354,7 @@ pub struct CoexistenceReport {
 /// - `SystemPackage { Dnf | Apt | Zypper }` running + `$HOME/.local/paneflow.app/bin/paneflow` present
 /// - `TarGz` running + `/usr/bin/paneflow` present
 ///
-/// All other variants - AppImage, AppBundle, WindowsMsi, Unknown, and the
+/// All other variants - AppImage, AppBundle, Unknown, and the
 /// non-apt/dnf system-package managers (RpmOstree, Other) - return `None`,
 /// because those install layouts never coexist with the tar.gz flavor.
 /// Missing `$HOME` also returns `None` (conservative: sandboxed / container
@@ -802,9 +802,6 @@ mod tests {
             },
             InstallMethod::AppBundle {
                 bundle_path: PathBuf::from("/Applications/PaneFlow.app"),
-            },
-            InstallMethod::WindowsMsi {
-                install_path: PathBuf::from("C:/Program Files/PaneFlow"),
             },
             InstallMethod::SystemPackage {
                 manager: PackageManager::RpmOstree,

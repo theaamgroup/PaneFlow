@@ -13,7 +13,7 @@ use crate::{
     system_package_update_command, update,
 };
 
-/// App-level backstop for a wedged `Downloading`/`Installing` state (EP-002,
+/// App-level backstop for a wedged `Downloading` state (EP-002,
 /// U-002/U-015). Every installer worker is spawned + detached and the only
 /// transitions out of `Downloading` live inside those workers' match arms, so
 /// a worker whose future never resolves would pin the pill busy forever. The
@@ -31,7 +31,6 @@ fn install_method_label(method: &update::install_method::InstallMethod) -> &'sta
         update::install_method::InstallMethod::AppImage { .. } => "appimage",
         update::install_method::InstallMethod::TarGz { .. } => "targz",
         update::install_method::InstallMethod::AppBundle { .. } => "app-bundle",
-        update::install_method::InstallMethod::WindowsMsi { .. } => "windows-msi",
         update::install_method::InstallMethod::SystemPackage { .. } => "system-package",
         update::install_method::InstallMethod::ExternallyManaged { .. } => "externally-managed",
         update::install_method::InstallMethod::Unknown => "unknown",
@@ -95,7 +94,6 @@ impl PaneFlowApp {
         let in_app_state = match &self.self_update.self_update_status {
             update::SelfUpdateStatus::Idle => title_bar::SelfUpdatePillState::Idle,
             update::SelfUpdateStatus::Downloading => title_bar::SelfUpdatePillState::Downloading,
-            update::SelfUpdateStatus::Installing => title_bar::SelfUpdatePillState::Installing,
             update::SelfUpdateStatus::ReadyToRestart => {
                 title_bar::SelfUpdatePillState::ReadyToRestart
             }
@@ -658,53 +656,6 @@ impl PaneFlowApp {
             return;
         }
 
-        // US-010: Windows MSI install. Unlike AppImage/TarGz/DMG, the MSI
-        // cannot be fully pre-installed while Paneflow is still running:
-        // Windows Installer would detect the live `paneflow.exe`, show its
-        // native FilesInUse dialog, and may close the very process that owns
-        // the restart state. The GUI therefore only downloads + verifies the
-        // MSI, then spawns a breakaway relay, saves state, and exits. The relay
-        // runs msiexec after this PID is gone and relaunches the detected
-        // install path on success.
-        if let update::install_method::InstallMethod::WindowsMsi { install_path } = &method {
-            let url = asset_url.clone();
-            let install_path = install_path.clone();
-            self.enter_downloading("msi", cx);
-
-            cx.spawn(async move |this, cx| {
-                let result =
-                    smol::unblock(move || update::windows::msi::stage(&url, &install_path)).await;
-                match result {
-                    Ok(staged) => {
-                        let _ = this.update(cx, |app, cx| {
-                            app.save_session_blocking(cx);
-                            match update::windows::msi::spawn_relay(staged) {
-                                Ok(()) => {
-                                    log::info!(
-                                        "self-update/msi: relay spawned - quitting so msiexec can replace paneflow.exe"
-                                    );
-                                    app.self_update.self_update_status =
-                                        update::SelfUpdateStatus::Installing;
-                                    cx.notify();
-                                    cx.quit();
-                                }
-                                Err(err) => {
-                                    app.record_update_failure("msi-relay", &err, cx);
-                                }
-                            }
-                        });
-                    }
-                    Err(err) => {
-                        let _ = this.update(cx, |app, cx| {
-                            app.record_update_failure("msi", &err, cx);
-                        });
-                    }
-                }
-            })
-            .detach();
-            return;
-        }
-
         // US-009: macOS `.app` bundle - mount the DMG, swap the bundle
         // atomically, then restart through the promoted `.app` path.
         // Dispatch is an `if let` (not a cfg guard) so the code remains
@@ -780,9 +731,8 @@ impl PaneFlowApp {
     ///   breaker so a flaky mirror doesn't burn user bandwidth every
     ///   poll cycle.
     /// - `install_method` is auto-installable without exiting the app
-    ///   (AppImage / TarGz / AppBundle / Linux Unknown). WindowsMsi deliberately
-    ///   waits for an explicit click because it must quit Paneflow before
-    ///   invoking Windows Installer. macOS Unknown is a non-bundle launch and
+    ///   (AppImage / TarGz / AppBundle / Linux Unknown). macOS Unknown is a
+    ///   non-bundle launch and
     ///   is intentionally not auto-kicked. SystemPackage needs pkexec
     ///   (interactive auth - never auto), ExternallyManaged defers to the host
     ///   package manager.

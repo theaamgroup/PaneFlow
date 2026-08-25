@@ -13,11 +13,6 @@
         clippy::panic
     )
 )]
-// Windows deliberately stays a console-subsystem binary. PowerShell/cmd do not
-// wait for GUI-subsystem executables, so `paneflow ls` would otherwise return
-// immediately with no stdout/stderr and a misleading success code. GUI launches
-// still shed the auto-created one-process console at startup; see
-// `detach_lonely_windows_console_for_gui_launch`.
 //! PaneFlow - native terminal workspace for coding agents.
 //!
 //! App shell with sidebar workspace list, terminal panes, agent surfaces, and
@@ -331,15 +326,13 @@ fn native_backdrop_material_active(
 }
 
 fn should_load_login_shell_env_for_startup(
-    is_msi_relay: bool,
     is_mcp_subcommand: bool,
     is_cli_subcommand: bool,
     is_hooks_subcommand: bool,
     is_update_and_exit: bool,
     is_unknown_verb: bool,
 ) -> bool {
-    !(is_msi_relay
-        || is_mcp_subcommand
+    !(is_mcp_subcommand
         || is_cli_subcommand
         || is_hooks_subcommand
         || is_update_and_exit
@@ -409,22 +402,22 @@ mod native_material_tests {
     #[test]
     fn login_shell_env_capture_only_runs_for_gui_launches() {
         assert!(should_load_login_shell_env_for_startup(
-            false, false, false, false, false, false
+            false, false, false, false, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, true, false, false, false, false
+            true, false, false, false, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, false, true, false, false, false
+            false, true, false, false, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, false, false, true, false, false
+            false, false, true, false, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, false, false, false, true, false
+            false, false, false, true, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, false, false, false, false, true
+            false, false, false, false, true
         ));
     }
 
@@ -1238,9 +1231,6 @@ struct PaneFlowApp {
     toast_queue: std::collections::VecDeque<Toast>,
     /// Dismiss timer for the active toast - dropped on new toast to cancel the old timer.
     _toast_task: Option<gpui::Task<()>>,
-    /// Last light/dark value applied to the Windows native backdrop.
-    #[cfg(target_os = "windows")]
-    windows_backdrop_light: Option<bool>,
     /// US-019 (orchestration-v2): the surface last visited by
     /// `JumpNextWaiting`, so repeated presses cycle through the waiting
     /// agents instead of bouncing on the first one.
@@ -1575,14 +1565,6 @@ impl Render for PaneFlowApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = crate::theme::ui_colors();
         let theme = crate::theme::active_theme();
-        #[cfg(target_os = "windows")]
-        {
-            let is_light = theme.background.l > 0.5;
-            if self.windows_backdrop_light != Some(is_light) {
-                crate::window_chrome::backdrop::sync_wallpaper_mica_theme(window, is_light);
-                self.windows_backdrop_light = Some(is_light);
-            }
-        }
         #[cfg(target_os = "macos")]
         crate::window_chrome::macos_backdrop::sync_subtle_sidebar_material(
             theme.background.l > 0.5,
@@ -2506,8 +2488,7 @@ fn run_update_and_exit() -> i32 {
         // SystemPackage (.deb/.rpm/dnf/apt) updates need pkexec + a
         // running polkit agent - neither belongs in `--update-and-exit`,
         // which is designed to be deterministic and non-interactive.
-        // AppBundle/WindowsMsi: the e2e harness is Linux-only (US-014
-        // covers Windows e2e separately).
+        // AppBundle: the e2e harness covers the bundle path separately.
         other => {
             eprintln!(
                 "paneflow-update: --update-and-exit does not support install method {other:?}"
@@ -2520,59 +2501,6 @@ fn run_update_and_exit() -> i32 {
 // ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
-
-/// Whether a Windows startup console belongs only to PaneFlow and can be shed.
-///
-/// Console-subsystem executables launched from Explorer / Start Menu get a new
-/// console before Rust code runs. When that console contains only PaneFlow, the
-/// launch is a GUI launch and the console is visual noise. When it contains the
-/// parent shell too, the user is running a CLI/scriptable path and stdout,
-/// stderr, waiting, and exit codes must remain intact.
-#[cfg(windows)]
-fn should_detach_windows_console(
-    is_scriptable_invocation: bool,
-    console_process_count: u32,
-) -> bool {
-    !is_scriptable_invocation && console_process_count == 1
-}
-
-/// Detach the one-process console Windows creates for Explorer/Start launches.
-#[cfg(windows)]
-fn detach_lonely_windows_console_for_gui_launch(is_scriptable_invocation: bool) {
-    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
-
-    let mut processes = [0_u32; 2];
-    // SAFETY: GetConsoleProcessList writes at most the buffer length we pass
-    // and returns the number of attached console processes. A return larger
-    // than the buffer means "there are multiple processes", which is exactly
-    // the keep-attached case for terminal-launched CLI paths.
-    let count = unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
-    if should_detach_windows_console(is_scriptable_invocation, count) {
-        // SAFETY: FreeConsole only detaches this process from its console. It
-        // has no Rust aliasing or lifetime implications; failure is harmless
-        // and simply leaves the console visible.
-        unsafe {
-            let _ = FreeConsole();
-        }
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_startup_console_tests {
-    use super::should_detach_windows_console;
-
-    #[test]
-    fn gui_launch_detaches_only_a_lonely_console() {
-        assert!(should_detach_windows_console(false, 1));
-        assert!(!should_detach_windows_console(false, 0));
-        assert!(!should_detach_windows_console(false, 2));
-    }
-
-    #[test]
-    fn scriptable_invocation_keeps_console_even_when_lonely() {
-        assert!(!should_detach_windows_console(true, 1));
-    }
-}
 
 fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> {
     let view = window.replace_root(cx, |_, cx| PaneFlowApp::new(cx));
@@ -2646,14 +2574,6 @@ fn main() {
     if args.get(1).map(String::as_str) == Some(agents::parent_guard::PTY_GUARD_SUBCOMMAND) {
         std::process::exit(agents::parent_guard::run_pty_guard_from_args(&args));
     }
-    #[cfg(target_os = "windows")]
-    if external_open::is_open_url_helper_invocation(&args) {
-        std::process::exit(external_open::run_open_url_helper_from_args(&args));
-    }
-    #[cfg(windows)]
-    let is_msi_relay = update::windows::msi::is_relay_invocation(&args);
-    #[cfg(not(windows))]
-    let is_msi_relay = false;
     // US-038: detect the `mcp` subcommand BEFORE the global flag scans. Those
     // scans look at *every* arg, so `paneflow mcp install --help` would
     // otherwise match the global `--help` and print the top-level help instead
@@ -2671,41 +2591,21 @@ fn main() {
     // before clap (like `mcp`) and mutates agent config files offline - so the
     // global flag scans must not eat its `--help`.
     let is_hooks_subcommand = args.get(1).map(String::as_str) == Some("hooks");
-    let is_global_help = !is_msi_relay
-        && !is_mcp_subcommand
+    let is_global_help = !is_mcp_subcommand
         && !is_cli_subcommand
         && !is_hooks_subcommand
         && args.iter().any(|a| a == "--help" || a == "-h");
-    let is_global_version = !is_msi_relay
-        && !is_mcp_subcommand
+    let is_global_version = !is_mcp_subcommand
         && !is_cli_subcommand
         && !is_hooks_subcommand
         && args.iter().any(|a| a == "--version" || a == "-v");
-    let is_update_and_exit = !is_msi_relay
-        && !is_mcp_subcommand
+    let is_update_and_exit = !is_mcp_subcommand
         && !is_cli_subcommand
         && !is_hooks_subcommand
         && args.iter().any(|a| a == "--update-and-exit");
     let is_unknown_verb = args
         .get(1)
         .is_some_and(|verb| cli::looks_like_unknown_verb(Some(verb.as_str())));
-
-    #[cfg(windows)]
-    detach_lonely_windows_console_for_gui_launch(
-        is_msi_relay
-            || is_mcp_subcommand
-            || is_cli_subcommand
-            || is_hooks_subcommand
-            || is_global_help
-            || is_global_version
-            || is_update_and_exit
-            || is_unknown_verb,
-    );
-
-    #[cfg(windows)]
-    if is_msi_relay {
-        std::process::exit(update::windows::msi::run_relay_from_args(&args));
-    }
 
     if is_global_help {
         println!(
@@ -2788,7 +2688,6 @@ fn main() {
     // below so per-user bin dirs stay first. Must run before any other thread
     // spawns - it mutates the process environment (see the module's safety note).
     if should_load_login_shell_env_for_startup(
-        is_msi_relay,
         is_mcp_subcommand,
         is_cli_subcommand,
         is_hooks_subcommand,
@@ -3077,15 +2976,6 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    #[cfg(target_os = "windows")]
-                    if crate::app::constants::window_backdrop_uses_mica(
-                        config.window_backdrop.as_deref(),
-                    ) {
-                        crate::window_chrome::backdrop::apply_wallpaper_mica(
-                            window,
-                            crate::theme::active_theme().background.l > 0.5,
-                        );
-                    }
                     #[cfg(target_os = "macos")]
                     if crate::app::constants::macos_sidebar_material_enabled(
                         config.window_backdrop.as_deref(),
@@ -3117,14 +3007,6 @@ fn main() {
                          \x20 Arch:           sudo pacman -S vulkan-radeon vulkan-intel or nvidia-utils\n\n\
                          Run `vulkaninfo` to verify Vulkan support.\n\
                          If drivers are already installed, run with RUST_LOG=error for details.\n\n\
-                         Underlying error: {e}"
-                    );
-                    #[cfg(target_os = "windows")]
-                    eprintln!(
-                        "Error: PaneFlow could not create its GPU-backed window on Windows.\n\n\
-                         Update your GPU driver from NVIDIA, AMD, Intel, or your PC vendor, then restart Paneflow.\n\
-                         If this started after enabling a native backdrop, launch once with:\n\
-                         \x20 PANEFLOW_WINDOW_BACKDROP=off\n\n\
                          Underlying error: {e}"
                     );
                     #[cfg(target_os = "macos")]

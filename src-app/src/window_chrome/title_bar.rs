@@ -86,7 +86,6 @@ pub enum UpdatePillKind {
 pub enum SelfUpdatePillState {
     Idle,
     Downloading,
-    Installing,
     /// Background install completed; the next click only invokes
     /// `cx.restart()`. Mirrors Zed's "Restart to Update" CTA - the heavy
     /// work happened while the user was busy doing something else, so the
@@ -556,9 +555,6 @@ impl Render for TitleBar {
                         }
                         SelfUpdatePillState::Downloading => {
                             ("Downloading update…".to_string(), PillStyle::Busy)
-                        }
-                        SelfUpdatePillState::Installing => {
-                            ("Installing update…".to_string(), PillStyle::Busy)
                         }
                         SelfUpdatePillState::ReadyToRestart => {
                             ("Restart Paneflow".to_string(), PillStyle::Clickable)

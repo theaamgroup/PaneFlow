@@ -31,7 +31,6 @@
 //! - [`install_method`] - install source detection (AppImage / TarGz / SystemPackage / Unknown)
 //! - [`linux`] - platform-specific update runners (AppImage zsync, tar.gz atomic swap)
 //! - [`macos`] - DMG update runner
-//! - [`windows`] - MSI update runner
 
 pub mod checker;
 pub mod error;
@@ -42,7 +41,6 @@ pub mod macos;
 // the independent root of trust shared by every installer path.
 pub mod signature;
 pub(crate) mod verified_download;
-pub mod windows;
 
 // US-008 - install-method hygiene migrations. Linux-only by construction
 // (the only crossover this cleans up is tar.gz → rpm/deb, which has no
@@ -58,7 +56,7 @@ pub use error::UpdateError;
 
 use std::path::PathBuf;
 
-#[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+#[cfg(all(unix, not(target_os = "macos")))]
 use anyhow::Context;
 use anyhow::Result;
 
@@ -69,9 +67,6 @@ pub enum SelfUpdateStatus {
     #[default]
     Idle,
     Downloading,
-    /// Intermediate "installer is running" state for native package-manager
-    /// or MSI relay handoff paths.
-    Installing,
     /// The new binary has been downloaded, verified and swapped into place;
     /// `cx.set_restart_path()` has already been called. The pill switches
     /// to a "Restart for vX" affordance whose click handler only invokes
@@ -88,10 +83,7 @@ pub enum SelfUpdateStatus {
 
 impl SelfUpdateStatus {
     pub fn is_busy(&self) -> bool {
-        matches!(
-            self,
-            SelfUpdateStatus::Downloading | SelfUpdateStatus::Installing
-        )
+        matches!(self, SelfUpdateStatus::Downloading)
     }
 }
 
@@ -107,11 +99,6 @@ impl SelfUpdateStatus {
 ///   `InstallMethod::AppBundle { bundle_path }` directly to the macOS install
 ///   flow, which returns the promoted `.app` bundle path for GPUI's `open`
 ///   based restart.
-/// - **Windows** (US-010 AC3): `%ProgramFiles%\PaneFlow\paneflow.exe`.
-///   Extension comes from `std::env::consts::EXE_EXTENSION` rather than
-///   a literal `"exe"` so the helper is cross-target clean; the MSI
-///   installer targets `%ProgramFiles%\PaneFlow\`; the shipping WiX package is
-///   machine-wide.
 #[allow(dead_code)]
 pub fn installed_binary_path() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
@@ -119,20 +106,6 @@ pub fn installed_binary_path() -> Result<PathBuf> {
         Ok(PathBuf::from(
             "/Applications/PaneFlow.app/Contents/MacOS/paneflow",
         ))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let program_files = std::env::var_os("ProgramFiles")
-            .context("ProgramFiles environment variable is not set")?;
-        let mut exe = PathBuf::from(program_files)
-            .join("PaneFlow")
-            .join("paneflow");
-        // `EXE_EXTENSION` = "exe" on windows, "" elsewhere - keeps this
-        // cross-target clean and avoids hardcoding the literal suffix.
-        if !std::env::consts::EXE_EXTENSION.is_empty() {
-            exe.set_extension(std::env::consts::EXE_EXTENSION);
-        }
-        Ok(exe)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {

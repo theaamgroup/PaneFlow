@@ -37,7 +37,6 @@ pub fn install_method_tag(method: &InstallMethod) -> &'static str {
         InstallMethod::AppImage { .. } => "appimage",
         InstallMethod::TarGz { .. } => "tar.gz",
         InstallMethod::AppBundle { .. } => "dmg",
-        InstallMethod::WindowsMsi { .. } => "msi",
         // Sandboxed runtimes (Flatpak / Snap) and packager-baked
         // `PANEFLOW_UPDATE_EXPLANATION` builds report a coarse tag
         // - the in-app updater is disabled for these so finer-grained
@@ -125,12 +124,6 @@ mod tests {
                 "dmg",
                 InstallMethod::AppBundle {
                     bundle_path: PathBuf::new(),
-                },
-            ),
-            (
-                "msi",
-                InstallMethod::WindowsMsi {
-                    install_path: PathBuf::new(),
                 },
             ),
             ("unknown", InstallMethod::Unknown),

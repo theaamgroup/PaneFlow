@@ -69,15 +69,6 @@ pub enum InstallMethod {
     /// (US-008) to download a matching `.dmg`.
     AppBundle { bundle_path: PathBuf },
 
-    /// Windows MSI install (US-010 - prd-windows-port.md). The shipping WiX
-    /// installer is machine-wide, so the running `paneflow.exe` must live under
-    /// `%ProgramFiles%\PaneFlow\paneflow.exe`.
-    ///
-    /// `install_path` is the containing PaneFlow directory (not the exe).
-    /// The updater pairs this with `AssetFormat::Msi` (US-011) to match
-    /// the correct `.msi` release asset for x86_64 Windows.
-    WindowsMsi { install_path: PathBuf },
-
     /// In-app updates are disabled by the host environment. Set when the
     /// process is sandboxed (Flatpak / Snap) or when the build / runtime
     /// environment carries `PANEFLOW_UPDATE_EXPLANATION`. The pill renders
@@ -162,28 +153,12 @@ pub fn detect() -> InstallMethod {
     // `Prefix(Disk)`) never matches - so every MSI install would fall through
     // to `Unknown` and the updater would wrongly take the Linux `$HOME` tar.gz
     // path. Strip the verbatim prefix so the comparison lines up.
-    let canonical = strip_verbatim_prefix(std::fs::canonicalize(&exe).unwrap_or(exe));
-
-    // US-039 - Windows MSI install detection. `ProgramFiles` is the only
-    // supported root because the shipping WiX package is machine-wide.
-    //
-    // B.2 - type-gate the WindowsMsi arm to the Windows target: on non-Windows
-    // we feed `None` regardless of any leaked `ProgramFiles`
-    // (Wine, cross-build, CI), so a Linux binary can never be misclassified as
-    // WindowsMsi. The pure `classify` keeps its logic so its tests still run on
-    // Linux CI.
-    #[cfg(target_os = "windows")]
-    let (program_files, local_app_data): (Option<OsString>, Option<OsString>) =
-        (std::env::var_os("ProgramFiles"), None);
-    #[cfg(not(target_os = "windows"))]
-    let (program_files, local_app_data): (Option<OsString>, Option<OsString>) = (None, None);
+    let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
 
     let result = classify(
         &canonical,
         std::env::var_os("HOME"),
         std::env::var_os("APPIMAGE"),
-        program_files,
-        local_app_data,
     );
 
     // US-007 AC3 - on macOS, a binary that is NOT inside a .app bundle means
@@ -272,31 +247,13 @@ fn detect_externally_managed(
 /// Pure classifier - no I/O beyond the `/etc/*-release` probe for package
 /// manager inference, which is only reached on the SystemPackage arm. All
 /// other inputs are parameters so callers (and tests) control them.
-fn classify(
-    canonical: &Path,
-    home: Option<OsString>,
-    appimage: Option<OsString>,
-    program_files: Option<OsString>,
-    local_app_data: Option<OsString>,
-) -> InstallMethod {
+fn classify(canonical: &Path, home: Option<OsString>, appimage: Option<OsString>) -> InstallMethod {
     // 0. macOS `.app` bundle (US-007). Structural check on the path
     //    components: `<bundle>/Contents/MacOS/<binary>`. Placed first
     //    because it's the cheapest and cannot false-positive on a Linux
     //    path (no Linux layout has `Contents/MacOS/` in the tail).
     if let Some(bundle_path) = app_bundle_path(canonical) {
         return InstallMethod::AppBundle { bundle_path };
-    }
-
-    // 0.5. Windows MSI install (US-010). Same no-false-positive reasoning
-    //      as AppBundle: Linux/macOS never set `ProgramFiles`, so the helper
-    //      returns None and this branch
-    //      short-circuits on non-Windows. Cheap to keep ungated.
-    if let Some(install_path) = windows_msi_install_path(
-        canonical,
-        program_files.as_deref(),
-        local_app_data.as_deref(),
-    ) {
-        return InstallMethod::WindowsMsi { install_path };
     }
 
     // 1. System package (apt/dnf).
@@ -340,47 +297,6 @@ fn classify(
     }
 
     InstallMethod::Unknown
-}
-
-/// Return the PaneFlow MSI install directory if `canonical` points at a binary
-/// under the standard machine-wide Windows location:
-/// `%ProgramFiles%\PaneFlow\` (US-010 - prd-windows-port.md).
-///
-/// Pure path manipulation - no FS access, no env-var reads. `ProgramFiles`
-/// comes in as a parameter so tests can mock it on any host.
-fn windows_msi_install_path(
-    canonical: &Path,
-    program_files: Option<&std::ffi::OsStr>,
-    _local_app_data: Option<&std::ffi::OsStr>,
-) -> Option<PathBuf> {
-    program_files
-        .map(|p| PathBuf::from(p).join("PaneFlow"))
-        .filter(|candidate| canonical.starts_with(candidate))
-}
-
-/// Drop the Windows extended-length (`\\?\` or `\\?\UNC\`) prefix that
-/// `std::fs::canonicalize` prepends (rust-lang/rust#42869). Without this, a
-/// canonicalized `current_exe()` carries a `Prefix(VerbatimDisk)` component
-/// that never compares equal to the `Prefix(Disk)` of the non-verbatim
-/// `%ProgramFiles%` value in [`windows_msi_install_path`], so every MSI
-/// install is misdetected as `Unknown` (and the updater wrongly tries the
-/// Linux `$HOME` tar.gz path).
-///
-/// No-op for any path not in verbatim form - every Unix path, and any Windows
-/// path that was never canonicalized - so it is safe to call on all targets.
-/// Pure string logic, so the regression test runs on Linux CI.
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
-    // Decide on a borrowed view, then move `path` only in the fall-through:
-    // returning `path` from inside a `match path.to_str() { … }` arm would
-    // conflict with the `to_str()` borrow.
-    let stripped = path.to_str().and_then(|s| {
-        s.strip_prefix(r"\\?\UNC\")
-            // `\\?\UNC\server\share\…` → `\\server\share\…`
-            .map(|rest| PathBuf::from(format!(r"\\{rest}")))
-            // `\\?\C:\…` → `C:\…`
-            .or_else(|| s.strip_prefix(r"\\?\").map(PathBuf::from))
-    });
-    stripped.unwrap_or(path)
 }
 
 /// Infer the system package manager from distro-identifier files.
@@ -513,13 +429,13 @@ mod tests {
 
     #[test]
     fn system_package_usr_bin() {
-        let r = classify(Path::new("/usr/bin/paneflow"), None, None, None, None);
+        let r = classify(Path::new("/usr/bin/paneflow"), None, None);
         assert!(matches!(r, InstallMethod::SystemPackage { .. }));
     }
 
     #[test]
     fn system_package_usr_local_bin() {
-        let r = classify(Path::new("/usr/local/bin/paneflow"), None, None, None, None);
+        let r = classify(Path::new("/usr/local/bin/paneflow"), None, None);
         assert!(matches!(r, InstallMethod::SystemPackage { .. }));
     }
 
@@ -529,8 +445,6 @@ mod tests {
             Path::new("/tmp/.mount_abc123/usr/bin/paneflow"),
             None,
             Some(OsString::from("/home/u/Downloads/paneflow.AppImage")),
-            None,
-            None,
         );
         match r {
             InstallMethod::AppImage {
@@ -549,13 +463,7 @@ mod tests {
 
     #[test]
     fn appimage_without_env_still_detected() {
-        let r = classify(
-            Path::new("/tmp/.mount_abc123/usr/bin/paneflow"),
-            None,
-            None,
-            None,
-            None,
-        );
+        let r = classify(Path::new("/tmp/.mount_abc123/usr/bin/paneflow"), None, None);
         match r {
             InstallMethod::AppImage {
                 mount_point,
@@ -574,8 +482,6 @@ mod tests {
             Path::new("/home/u/.local/paneflow.app/bin/paneflow"),
             Some(OsString::from("/home/u")),
             None,
-            None,
-            None,
         );
         match r {
             InstallMethod::TarGz { app_dir } => {
@@ -591,8 +497,6 @@ mod tests {
             Path::new("/home/u/.local/bin/paneflow"),
             Some(OsString::from("/home/u")),
             None,
-            None,
-            None,
         );
         assert_eq!(r, InstallMethod::Unknown);
     }
@@ -602,8 +506,6 @@ mod tests {
         let r = classify(
             Path::new("/opt/random/paneflow"),
             Some(OsString::from("/home/u")),
-            None,
-            None,
             None,
         );
         assert_eq!(r, InstallMethod::Unknown);
@@ -616,8 +518,6 @@ mod tests {
         let r = classify(
             Path::new("/Applications/PaneFlow.app/Contents/MacOS/paneflow"),
             Some(OsString::from("/Users/alice")),
-            None,
-            None,
             None,
         );
         match r {
@@ -633,8 +533,6 @@ mod tests {
         let r = classify(
             Path::new("/Users/alice/Applications/PaneFlow.app/Contents/MacOS/paneflow"),
             Some(OsString::from("/Users/alice")),
-            None,
-            None,
             None,
         );
         match r {
@@ -655,8 +553,6 @@ mod tests {
             Path::new("/opt/third-party/PaneFlow.app/Contents/MacOS/paneflow"),
             None,
             None,
-            None,
-            None,
         );
         assert!(matches!(r, InstallMethod::AppBundle { .. }));
     }
@@ -667,8 +563,6 @@ mod tests {
         let r = classify(
             Path::new("/Users/alice/bin/paneflow"),
             Some(OsString::from("/Users/alice")),
-            None,
-            None,
             None,
         );
         assert_eq!(r, InstallMethod::Unknown);
@@ -718,16 +612,6 @@ mod tests {
     /// tar.gz install layout. Detection in `detect()` relies on this so the
     /// symlink at `~/.local/bin/paneflow` doesn't get misclassified.
     ///
-    /// US-007 (prd-windows-port.md) - Unix-only. `TarGz` is a Linux/macOS
-    /// install method; Windows uses `WindowsMsi` from US-010 which installs
-    /// `paneflow.exe` directly to `%ProgramFiles%\PaneFlow\` with no
-    /// symlink indirection. Creating symlinks on Windows also requires
-    /// `SeCreateSymbolicLinkPrivilege`, which non-admin users lack by
-    /// default. AC-6 of US-007 explicitly permits "self-update skips
-    /// symlink creation on Windows entirely" - this codebase has no
-    /// runtime symlink creators anywhere, so there is no `make_symlink`
-    /// helper to document; the cfg-gate here IS the design choice.
-    ///
     /// Linux-only: on macOS the `.local/paneflow.app` suffix collides with
     /// the `.app` bundle detector and the classifier returns `AppBundle`
     /// instead of `TarGz`. The tar.gz install layout is a Linux convention
@@ -748,142 +632,13 @@ mod tests {
         std::os::unix::fs::symlink(&real_bin, &sym).unwrap();
 
         let canonical = std::fs::canonicalize(&sym).unwrap();
-        let r = classify(
-            &canonical,
-            Some(OsString::from(tmp.path())),
-            None,
-            None,
-            None,
-        );
+        let r = classify(&canonical, Some(OsString::from(tmp.path())), None);
         match r {
             InstallMethod::TarGz { app_dir } => {
                 assert_eq!(app_dir, tmp.path().join(".local/paneflow.app"));
             }
             other => panic!("expected TarGz, got {other:?}"),
         }
-    }
-
-    // ---- US-010 tests - Windows MSI install detection. ----
-    //
-    // Pure string/path manipulation; mocked env-var values fed directly to
-    // `classify`. No Windows-only types, so
-    // these run on Linux CI and prove the detection logic without having
-    // to stand up a Windows runner for a unit test.
-    //
-    // Path literals intentionally use forward slashes. On Windows, `Path`
-    // treats both `/` and `\` as separators, so the production code path
-    // (which sees backslashes from `current_exe()` and `ProgramFiles`)
-    // and the test path both resolve into the same component sequence.
-    // On Linux, `Path::starts_with` is component-based and only honors
-    // `/` as a separator - using backslashes here would collapse the
-    // whole Windows path into a single component and break `starts_with`.
-
-    #[test]
-    fn windows_msi_machine_wide_program_files() {
-        let r = classify(
-            Path::new("C:/Program Files/PaneFlow/paneflow.exe"),
-            None,
-            None,
-            Some(OsString::from("C:/Program Files")),
-            Some(OsString::from("C:/Users/alice/AppData/Local")),
-        );
-        match r {
-            InstallMethod::WindowsMsi { install_path } => {
-                assert_eq!(install_path, PathBuf::from("C:/Program Files/PaneFlow"));
-            }
-            other => panic!("expected WindowsMsi, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn windows_local_app_data_is_unknown_until_per_user_msi_ships() {
-        let r = classify(
-            Path::new("C:/Users/alice/AppData/Local/Programs/PaneFlow/paneflow.exe"),
-            None,
-            None,
-            Some(OsString::from("C:/Program Files")),
-            Some(OsString::from("C:/Users/alice/AppData/Local")),
-        );
-        assert_eq!(r, InstallMethod::Unknown);
-    }
-
-    #[test]
-    fn windows_binary_outside_standard_paths_is_unknown() {
-        // A dev build running from `target/release/paneflow.exe` - not
-        // inside %ProgramFiles%\PaneFlow\.
-        let r = classify(
-            Path::new("C:/dev/paneflow/target/release/paneflow.exe"),
-            None,
-            None,
-            Some(OsString::from("C:/Program Files")),
-            Some(OsString::from("C:/Users/alice/AppData/Local")),
-        );
-        assert_eq!(r, InstallMethod::Unknown);
-    }
-
-    #[test]
-    fn strip_verbatim_prefix_disk_unc_and_passthrough() {
-        // `\\?\C:\…` (the form `std::fs::canonicalize` returns on Windows) → `C:\…`
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Program Files\PaneFlow\paneflow.exe")),
-            PathBuf::from(r"C:\Program Files\PaneFlow\paneflow.exe")
-        );
-        // `\\?\UNC\server\share\…` → `\\server\share\…`
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\paneflow.exe")),
-            PathBuf::from(r"\\server\share\paneflow.exe")
-        );
-        // Non-verbatim Windows path is left untouched.
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"C:\Program Files\PaneFlow\paneflow.exe")),
-            PathBuf::from(r"C:\Program Files\PaneFlow\paneflow.exe")
-        );
-        // Unix path is left untouched.
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from("/usr/bin/paneflow")),
-            PathBuf::from("/usr/bin/paneflow")
-        );
-    }
-
-    #[test]
-    fn windows_msi_detected_after_stripping_verbatim_canonical_prefix() {
-        // Regression (US-039 follow-up): `std::fs::canonicalize` on Windows
-        // yields the `\\?\` extended-length form, whose leading
-        // `Prefix(VerbatimDisk)` component never matched the non-verbatim
-        // `%ProgramFiles%` in `windows_msi_install_path` - so a real MSI
-        // install fell through to `Unknown` and the updater tried the Linux
-        // `$HOME` tar.gz path. `detect()` now strips the prefix first; this
-        // proves the strip → classify pipeline lands on `WindowsMsi`.
-        //
-        // Forward slashes in the tail (after the backslash `\\?\` prefix) so
-        // `Path::starts_with` is component-based on Linux CI too - same
-        // dual-representation trick the other Windows tests use.
-        let canonical =
-            strip_verbatim_prefix(PathBuf::from(r"\\?\C:/Program Files/PaneFlow/paneflow.exe"));
-        let r = classify(
-            &canonical,
-            None,
-            None,
-            Some(OsString::from("C:/Program Files")),
-            Some(OsString::from("C:/Users/alice/AppData/Local")),
-        );
-        assert!(matches!(r, InstallMethod::WindowsMsi { .. }), "got {r:?}");
-    }
-
-    #[test]
-    fn windows_msi_detection_ignored_when_env_vars_missing() {
-        // Linux / macOS call site - `ProgramFiles` is None. Even if someone
-        // crafts a path that looks like a Windows
-        // install, the detection short-circuits (no candidate dirs to
-        // test against).
-        let r = classify(
-            Path::new("C:/Program Files/PaneFlow/paneflow.exe"),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert_eq!(r, InstallMethod::Unknown);
     }
 
     // ─── US-004: rpm-ostree (Silverblue / Kinoite) detection precedence ───

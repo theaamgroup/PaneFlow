@@ -152,11 +152,7 @@ fn host_arch() -> &'static str {
         }
         std::env::consts::ARCH
     }
-    #[cfg(target_os = "windows")]
-    {
-        windows_native_arch().unwrap_or(std::env::consts::ARCH)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(target_os = "macos"))]
     {
         std::env::consts::ARCH
     }
@@ -185,46 +181,12 @@ fn macos_is_translated() -> bool {
     rc == 0 && ret == 1
 }
 
-/// Native machine architecture via `IsWow64Process2`, seeing past WOW64
-/// emulation (e.g. an x86_64 PaneFlow on an ARM64 Windows host). Returns
-/// `None` if the probe fails so the caller falls back to `consts::ARCH`.
-#[cfg(target_os = "windows")]
-fn windows_native_arch() -> Option<&'static str> {
-    use windows_sys::Win32::System::SystemInformation::{
-        IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
-    };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
-
-    let mut process_machine: u16 = 0;
-    let mut native_machine: u16 = 0;
-    // SAFETY: `IsWow64Process2` with the current-process pseudo-handle and two
-    // valid out-params. Returns nonzero on success.
-    let ok = unsafe {
-        IsWow64Process2(
-            GetCurrentProcess(),
-            &mut process_machine,
-            &mut native_machine,
-        )
-    };
-    if ok == 0 {
-        return None;
-    }
-    match native_machine {
-        IMAGE_FILE_MACHINE_ARM64 => Some("aarch64"),
-        IMAGE_FILE_MACHINE_AMD64 => Some("x86_64"),
-        IMAGE_FILE_MACHINE_I386 => Some("x86"),
-        _ => None,
-    }
-}
-
 /// Release-asset format the update checker advertises to the UI.
 ///
 /// Filename convention: `paneflow-<version>-<arch>[<target-qualifier>].<format-suffix>`.
 /// Linux formats carry no qualifier (e.g. `paneflow-v0.2.0-x86_64.deb`),
 /// while macOS `Dmg` uses the Rust target-triple tail `-apple-darwin`
-/// (e.g. `paneflow-0.2.0-aarch64-apple-darwin.dmg`) and Windows `Msi`
-/// uses the `-pc-windows-msvc` tail (e.g.
-/// `paneflow-0.2.0-x86_64-pc-windows-msvc.msi`). See
+/// (e.g. `paneflow-0.2.0-aarch64-apple-darwin.dmg`). See
 /// [`AssetFormat::filename_suffix`] and [`AssetFormat::target_qualifier`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AssetFormat {
@@ -233,10 +195,6 @@ pub enum AssetFormat {
     AppImage,
     TarGz,
     Dmg,
-    /// Windows MSI installer (US-011 - prd-windows-port.md). Produced by
-    /// `cargo-wix` (see US-013), signed via Azure Trusted Signing in
-    /// `release.yml` (US-016). Paired with [`InstallMethod::WindowsMsi`].
-    Msi,
 }
 
 impl AssetFormat {
@@ -250,7 +208,6 @@ impl AssetFormat {
             AssetFormat::AppImage => "appimage",
             AssetFormat::TarGz => "targz",
             AssetFormat::Dmg => "dmg",
-            AssetFormat::Msi => "msi",
         }
     }
 
@@ -263,7 +220,6 @@ impl AssetFormat {
             AssetFormat::AppImage => ".AppImage",
             AssetFormat::TarGz => ".tar.gz",
             AssetFormat::Dmg => ".dmg",
-            AssetFormat::Msi => ".msi",
         }
     }
 
@@ -271,14 +227,11 @@ impl AssetFormat {
     ///
     /// Linux formats emit bare `<arch><suffix>` (historical convention,
     /// preserved for regression safety). macOS `.dmg` files carry the
-    /// `-apple-darwin` tail and Windows `.msi` files carry the
-    /// `-pc-windows-msvc` tail because GitHub Releases host artifacts for
-    /// all platforms side by side - a bare `-x86_64.msi` would collide
-    /// visually with `-x86_64.deb` in the releases listing.
+    /// `-apple-darwin` tail because GitHub Releases host artifacts for
+    /// all platforms side by side.
     fn target_qualifier(&self) -> &'static str {
         match self {
             AssetFormat::Dmg => "-apple-darwin",
-            AssetFormat::Msi => "-pc-windows-msvc",
             _ => "",
         }
     }
@@ -316,11 +269,6 @@ impl AssetFormat {
             InstallMethod::AppImage { .. } => AssetFormat::AppImage,
             InstallMethod::TarGz { .. } => AssetFormat::TarGz,
             InstallMethod::AppBundle { .. } => AssetFormat::Dmg,
-            // US-011 - Windows MSI installs take the signed `.msi` asset
-            // for `x86_64-pc-windows-msvc`. Paired with `InstallMethod::WindowsMsi`
-            // detected in US-010; the MSI is produced + signed by the
-            // release pipeline in US-013/US-015/US-016.
-            InstallMethod::WindowsMsi { .. } => AssetFormat::Msi,
             // ExternallyManaged short-circuits the click handler before
             // reaching the asset picker - the in-app updater is disabled
             // for Flatpak / Snap / packager-baked installs. The neutral
@@ -428,7 +376,6 @@ pub(crate) struct GitHubAsset {
 ///   * Linux v0.3.0+: `paneflow-0.3.0-x86_64.deb` (no `v` prefix, no qualifier).
 ///   * Linux v0.2.x:  `paneflow-v0.2.0-x86_64.deb` (legacy `v` prefix, no qualifier).
 ///   * macOS:         `paneflow-0.3.0-aarch64-apple-darwin.dmg` (target-triple qualifier).
-///   * Windows:       `paneflow-0.3.0-x86_64-pc-windows-msvc.msi`.
 ///
 /// The match is suffix-only (`ends_with`), so the `v` prefix on the
 /// version segment is invisible to the matcher: a v0.2.x client polling
@@ -657,15 +604,6 @@ mod tests {
             bundle_path: PathBuf::from("/Applications/PaneFlow.app"),
         }
     }
-    fn windows_msi() -> InstallMethod {
-        // Forward-slash install path intentional - see US-010's test
-        // header for why `Path::starts_with` needs forward slashes in
-        // Linux CI. Not consumed by `pick_asset` anyway (only the variant
-        // discriminant matters here).
-        InstallMethod::WindowsMsi {
-            install_path: PathBuf::from("C:/Program Files/PaneFlow"),
-        }
-    }
 
     // ─── US-007: feed override + asset URL validation ─────────────────────
 
@@ -746,7 +684,7 @@ mod tests {
         // US-009: on Linux (no desktop emulation layer) host_arch must equal
         // the compile-time arch. The macOS/Windows translation probes are
         // exercised on their own CI legs.
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(host_arch(), std::env::consts::ARCH);
         // On all targets it must at least return a non-empty, known arch.
         assert!(!host_arch().is_empty());
@@ -1078,63 +1016,6 @@ mod tests {
         let assets = vec![make_asset("paneflow-0.2.0-aarch64-apple-darwin.dmg")];
         let r = pick_asset(&assets, "x86_64", app_bundle());
         assert!(r.is_none());
-    }
-
-    // -- US-011 - Windows MSI asset matching. -----------------------------
-
-    #[test]
-    fn windows_msi_picks_msi_x86_64() {
-        // AC2: x86_64 Windows host picks the x86_64-pc-windows-msvc.msi.
-        let assets = vec![
-            make_asset("paneflow-0.2.0-x86_64-pc-windows-msvc.msi"),
-            make_asset("paneflow-0.2.0-x86_64.deb"),
-            make_asset("paneflow-0.2.0-x86_64-apple-darwin.dmg"),
-        ];
-        let r = pick_asset(&assets, "x86_64", windows_msi());
-        assert_eq!(
-            r.map(|a| a.name.as_str()),
-            Some("paneflow-0.2.0-x86_64-pc-windows-msvc.msi")
-        );
-    }
-
-    #[test]
-    fn windows_msi_returns_none_when_release_has_no_msi() {
-        // AC3: Linux-only hotfix - Windows user gets None, update prompt
-        // silently defers, no Linux asset is ever handed to the MSI flow.
-        let assets = vec![
-            make_asset("paneflow-0.2.0-x86_64.deb"),
-            make_asset("paneflow-0.2.0-x86_64.tar.gz"),
-            make_asset("paneflow-0.2.0-x86_64.AppImage"),
-        ];
-        let r = pick_asset(&assets, "x86_64", windows_msi());
-        assert!(
-            r.is_none(),
-            "WindowsMsi user must NOT be handed a Linux/macOS asset"
-        );
-    }
-
-    #[test]
-    fn linux_never_picks_msi() {
-        // AC5 regression: an apt user on x86_64 must not accidentally match
-        // a `.msi` just because its filename starts with `-x86_64`.
-        let assets = vec![
-            make_asset("paneflow-0.2.0-x86_64-pc-windows-msvc.msi"),
-            make_asset("paneflow-0.2.0-x86_64.deb"),
-        ];
-        let r = pick_asset(&assets, "x86_64", apt());
-        assert_eq!(
-            r.map(|a| a.name.as_str()),
-            Some("paneflow-0.2.0-x86_64.deb")
-        );
-    }
-
-    #[test]
-    fn msi_match_is_case_insensitive() {
-        // Mirrors `dmg_match_is_case_insensitive`: filename matching stays
-        // case-insensitive for Msi.
-        let assets = vec![make_asset("PaneFlow-0.2.0-X86_64-PC-Windows-Msvc.MSI")];
-        let r = pick_asset(&assets, "x86_64", windows_msi());
-        assert!(r.is_some(), "case-insensitive .msi match failed");
     }
 
     // ─── US-007: telemetry events ──────────────────────────────────────
