@@ -30,7 +30,7 @@ never published publicly.
 | Product name | PaneFlow | PanesCLI |
 | Bundle identifier | `io.github.arthurdev44.paneflow` | `com.theaamgroup.panescli` |
 | Binary and CLI | `paneflow` | `panescli` |
-| Config dir | `paneflow` | `panescli` |
+| Config dir | `~/Library/Application Support/paneflow/paneflow.json` | `~/Library/Application Support/panescli/panescli.json`. Driven by `APP_SUBDIR` in `crates/paneflow-config/src/loader.rs:45` via `dirs::config_dir()`. NOT `~/.config`: that is the Linux path and an earlier draft of this spec had it wrong. |
 | MCP server | `paneflow` | `panescli` (needs re-registering locally) |
 | Conductor skill | `paneflow-conductor` | `panescli-conductor` (references the binary name) |
 | Env var prefix | `PANEFLOW_*` | `PANESCLI_*` |
@@ -137,6 +137,27 @@ rather than living only in chat.
    shared-state conflicts. Treat the pane-driving model itself as suspect, not
    just its implementation. The skill is kept and renamed rather than deleted
    precisely so it can be fixed here.
+
+2. **Two macOS keybinding defects, and the `--help` text is wrong.**
+   An earlier draft of this spec claimed the keybinding scheme was never ported
+   to macOS. That was wrong: 53 bindings in
+   `src-app/src/keybindings/defaults.rs` use GPUI's `secondary` shorthand, which
+   resolves to Cmd on macOS and Ctrl elsewhere (`keybindings/apply.rs:21,146`),
+   so splits and most globals are correctly Cmd-based here.
+   `MACOS_ONLY_DEFAULTS` holding just `cmd-q` is therefore expected, not a gap.
+   What IS wrong:
+   - `next_workspace` is bound to `secondary-tab`, which resolves to **Cmd+Tab
+     on macOS and collides with the system application switcher**. It is
+     effectively unusable and needs rebinding.
+   - Pane focus navigation is hard-coded `alt-left` / `alt-right` and friends
+     rather than `secondary`, so it lands on Option. Option is how terminals
+     type special characters, which is the tension the `option_as_meta` setting
+     at `src-app/src/keys.rs:99` exists to negotiate. Worth revisiting now that
+     only macOS matters.
+   - The `--help` output at `src-app/src/main.rs:2728` hard-codes the Linux
+     wording (`Ctrl+Shift+D/E`, `Alt+Arrow`, `Ctrl+Tab`), so it misreports the
+     real macOS bindings to the user. Fix the text, and prefer rendering it from
+     the binding table rather than duplicating it as a literal.
 
 ## Leak register
 
