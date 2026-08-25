@@ -123,6 +123,21 @@ macOS-only `release.yml`. Wire `APPLE_DEVELOPER_CERT_P12`,
 `APPLE_DEVELOPER_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
 `APPLE_TEAM_ID`, `MINISIGN_SECRET_KEY`. Signed, notarized, stapled DMG.
 
+## Known defects to fix in this fork
+
+This is the reason the fork exists, so defects get recorded here as they surface
+rather than living only in chat.
+
+1. **The conductor does not work reliably.** `skills/paneflow-conductor/SKILL.md`
+   ships a skill that drives a fleet of CLI coding agents living in Paneflow
+   panes over the `paneflow` CLI. In practice it is janky and does not work,
+   confirmed across more than one attempt. The working pattern it fails to
+   replace is one headless agent process per task, launched as a background job,
+   each in its own git worktree, which needs no TUI to stay alive and has no
+   shared-state conflicts. Treat the pane-driving model itself as suspect, not
+   just its implementation. The skill is kept and renamed rather than deleted
+   precisely so it can be fixed here.
+
 ## Leak register
 
 Everything below points at upstream and must be cut or repointed.
