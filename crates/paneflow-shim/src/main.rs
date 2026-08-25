@@ -246,8 +246,7 @@ fn install_hook_guard(tool: &str) -> Option<ToolHookGuard> {
 /// rides in `PANEFLOW_AI_EXIT_CODE` since the hook's stdin is null on
 /// shim-synthesized events.
 fn is_interrupt_exit_code(exit_code: i32) -> bool {
-    const STATUS_CONTROL_C_EXIT: i32 = 0xC000_013Au32 as i32;
-    matches!(exit_code, 129 | 130 | 137 | 143 | STATUS_CONTROL_C_EXIT)
+    matches!(exit_code, 129 | 130 | 137 | 143)
 }
 
 fn notify_exit(tool: &str, exit_code: i32, interrupted: bool) {

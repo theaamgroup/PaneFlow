@@ -172,8 +172,8 @@ pub(crate) fn exit_code_from_status(status: &std::process::ExitStatus) -> ExitCo
 
 /// EP-004 US-010: the same mapping, kept as a full-width `i32` for the
 /// `ai.exit` IPC frame. Unlike [`exit_code_from_status`] there is no `u8`
-/// clamp: the server's classifier needs the verbatim value (e.g. Windows
-/// `STATUS_CONTROL_C_EXIT` = `-1073741510`, which a `u8` clamp would fold
+/// clamp: the server's classifier needs the verbatim value (e.g. 137 =
+/// `128+SIGKILL`, or any negative code, which a `u8` clamp would fold
 /// into an indistinguishable `1`). Unix signal deaths use the same shell
 /// `128 + signum` convention (130 = SIGINT, 139 = SIGSEGV, …).
 pub(crate) fn raw_exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
@@ -337,6 +337,9 @@ pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
 /// `parent_pid` is captured BEFORE the spawn. On a detected reparent the agent
 /// is `SIGKILL`ed; the loop also exits once the agent is already gone, so the
 /// thread never outlives the work.
+/// A macOS runtime smoke test (`kill -9` Paneflow, confirm no orphaned agent
+/// survives) is still required before this guard is trusted; it has only ever
+/// been compile-verified.
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_parent_death_guard(
     child_pid: u32,

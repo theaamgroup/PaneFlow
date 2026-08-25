@@ -480,8 +480,7 @@ fn read_ai_pid_from(raw: Option<&str>) -> Option<u32> {
 /// EP-004 US-010: read the wrapped agent binary's raw exit code from
 /// `$PANEFLOW_AI_EXIT_CODE` (set by the shim's `notify_exit`). `None` if
 /// unset or non-numeric - the caller bails rather than send a degraded
-/// frame. Negative values are legitimate (Windows NTSTATUS codes, e.g.
-/// `STATUS_CONTROL_C_EXIT` = -1073741510).
+/// frame. Negative values are legitimate and must not be rejected.
 fn read_exit_code() -> Option<i32> {
     read_exit_code_from(env::var("PANEFLOW_AI_EXIT_CODE").ok().as_deref())
 }
@@ -919,8 +918,8 @@ mod tests {
     }
 
     #[test]
-    fn exit_preserves_negative_windows_ntstatus_codes() {
-        // STATUS_CONTROL_C_EXIT (0xC000013A) survives the i64 round-trip.
+    fn exit_preserves_negative_exit_codes() {
+        // A negative exit_code survives the i64 JSON round-trip.
         let payload = json!({ "exit_code": -1_073_741_510_i64 });
         let frame = build_frame("Exit", 9, "codex", payload, None, None).unwrap();
         let params = assert_envelope(&frame, "ai.exit");

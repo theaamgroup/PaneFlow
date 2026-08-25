@@ -1486,10 +1486,6 @@ impl TerminalState {
     ) -> SpawnParams {
         // Fallback chain handled by `resolve_default_shell` (US-006):
         // Unix:    config → $SHELL → /bin/sh
-        // Windows: config → pwsh.exe → powershell.exe → %ComSpec% →
-        //          C:\Windows\System32\cmd.exe → bare "cmd.exe"
-        //          (PowerShell preferred so we don't default to the legacy
-        //          cmd.exe console - mirrors Zed's get_windows_system_shell)
         let config = paneflow_config::loader::load_config();
         let shell = {
             let configured = config
@@ -1524,12 +1520,9 @@ impl TerminalState {
         // prepend, user-env merge with protected keys). Pure function so the env
         // contract stays unit-testable (the mockable `PtyBackend::spawn` seam is
         // gone - EP-002 US-004).
-        let mut env = assemble_pty_env(env, workspace_id, surface_id, merged_env);
+        let env = assemble_pty_env(env, workspace_id, surface_id, merged_env);
         // Keep terminal.env and identity propagation independent from shell
         // integration: opting out disables rc hooks, not the terminal env contract.
-        if is_wsl_shell(&shell) {
-            augment_wslenv(&mut env);
-        }
         // U-026 + issue #11: when no cwd is explicit, avoid inheriting a GUI
         // launch cwd that is the filesystem root. Explicit root cwd requests
         // still arrive through `working_directory` and are preserved.
@@ -2021,18 +2014,9 @@ impl TerminalState {
                     self.pty_guard = None;
                 }
             }
-            AlacEvent::Title(t) if !is_executable_path_title(&t) => {
+            AlacEvent::Title(t) => {
                 self.title = t;
             }
-            // Windows consoles (pwsh/powershell/cmd) set their initial window
-            // title to their own executable path before the user's profile runs
-            // - e.g. `C:\Program Files\PowerShell\7\pwsh.exe`. Adopted verbatim
-            // that leaks the shell install dir as the surface label (tab title,
-            // Agents thread title, persisted session `name`) and is never a
-            // meaningful name, so a title that is just an absolute path to an
-            // `.exe` is dropped - keep the previous/default name. Real titles
-            // (Claude Code, prompt-driven labels) take the guarded arm above.
-            AlacEvent::Title(_) => {}
             AlacEvent::ResetTitle => {
                 self.title = String::from("Terminal");
             }
@@ -2708,93 +2692,6 @@ fn is_forbidden_child_env_key(key: &str) -> bool {
 /// keys.
 fn is_valid_env_name(key: &str) -> bool {
     !key.is_empty() && !key.contains('=') && !key.contains('\0')
-}
-
-fn is_wsl_shell(shell: &str) -> bool {
-    let executable = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
-    executable.eq_ignore_ascii_case("wsl.exe") || executable.eq_ignore_ascii_case("wsl")
-}
-
-fn is_wslenv_identifier(key: &str) -> bool {
-    let mut bytes = key.bytes();
-    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-fn wslenv_entry_covers(entry: &str, key: &str, requires_path_translation: bool) -> bool {
-    let (name, flags) = entry.split_once('/').unwrap_or((entry, ""));
-    name == key
-        && (!flags.contains('w') || flags.contains('u'))
-        && (!requires_path_translation || flags.contains('p'))
-}
-
-fn merge_wslenv<'a>(
-    initial: Option<&str>,
-    env_keys: impl IntoIterator<Item = &'a str>,
-) -> Option<String> {
-    let existing_entries = initial
-        .map(|value| value.split(':').collect::<Vec<_>>())
-        .unwrap_or_default();
-    let mut keys = env_keys
-        .into_iter()
-        .filter(|key| {
-            is_wslenv_identifier(key) && !matches!(*key, "PATH" | "WSLENV" | "SHLVL" | "LANG")
-        })
-        .collect::<Vec<_>>();
-    keys.sort_unstable();
-    keys.dedup();
-
-    let additions = keys
-        .into_iter()
-        .filter_map(|key| {
-            let requires_path_translation = matches!(key, "PANEFLOW_BIN_DIR" | "PANEFLOW_HOOK_LOG");
-            if existing_entries
-                .iter()
-                .any(|entry| wslenv_entry_covers(entry, key, requires_path_translation))
-            {
-                None
-            } else if requires_path_translation {
-                Some(format!("{key}/up"))
-            } else {
-                Some(format!("{key}/u"))
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if additions.is_empty() {
-        return initial.map(str::to_owned);
-    }
-
-    let additions = additions.join(":");
-    Some(match initial.filter(|value| !value.is_empty()) {
-        Some(initial) => format!("{initial}:{additions}"),
-        None => additions,
-    })
-}
-
-fn augment_wslenv(env: &mut std::collections::HashMap<String, String>) {
-    let initial = env
-        .get("WSLENV")
-        .cloned()
-        .or_else(|| std::env::var("WSLENV").ok());
-    if let Some(merged) = merge_wslenv(initial.as_deref(), env.keys().map(String::as_str)) {
-        env.insert("WSLENV".into(), merged);
-    }
-}
-
-/// True for an OSC 0/2 title that is merely an absolute path to an `.exe` - the
-/// self-title Windows shells (`pwsh.exe`, `powershell.exe`, `cmd.exe`) emit at
-/// startup before the user's profile runs. Such a title is never a human-facing
-/// surface label, so callers drop it and keep the previous (or default) name.
-/// Matches nothing on a Unix title (a backslash path is not absolute there, and
-/// a `/usr/bin/pwsh` title has no `.exe` extension), so it is a Windows-targeted
-/// filter with no false positives on real labels (e.g. `Claude Code`) or on a
-/// prompt that sets the title to a bare cwd (no `.exe`).
-fn is_executable_path_title(title: &str) -> bool {
-    let p = std::path::Path::new(title);
-    p.is_absolute()
-        && p.extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
 }
 
 /// Assemble the child PTY environment: PaneFlow identity vars, explicit TERM /
@@ -3556,75 +3453,6 @@ mod tests {
     // `tty::new`), so the env that the child inherits is asserted directly
     // against the pure `assemble_pty_env`.
     // -----------------------------------------------------------------
-
-    #[test]
-    fn wslenv_merge_preserves_existing_entries_and_deduplicates() {
-        let merged = merge_wslenv(
-            Some("EXISTING/p:ALREADY/u:CUSTOM/uw"),
-            ["ZED", "ALREADY", "EXISTING", "ZED", "PANEFLOW_BIN_DIR"],
-        );
-
-        assert_eq!(
-            merged.as_deref(),
-            Some("EXISTING/p:ALREADY/u:CUSTOM/uw:PANEFLOW_BIN_DIR/up:ZED/u")
-        );
-    }
-
-    #[test]
-    fn wslenv_merge_adds_u_when_w_is_one_way() {
-        let merged = merge_wslenv(
-            Some("FORWARD_ONLY/w:UNCHANGED/l"),
-            ["FORWARD_ONLY", "UNCHANGED"],
-        );
-
-        assert_eq!(
-            merged.as_deref(),
-            Some("FORWARD_ONLY/w:UNCHANGED/l:FORWARD_ONLY/u")
-        );
-    }
-
-    #[test]
-    fn wslenv_merge_adds_up_when_paneflow_paths_lack_path_flag() {
-        let merged = merge_wslenv(
-            Some("PANEFLOW_HOOK_LOG/u:PANEFLOW_BIN_DIR/u"),
-            ["PANEFLOW_HOOK_LOG", "PANEFLOW_BIN_DIR"],
-        );
-
-        assert_eq!(
-            merged.as_deref(),
-            Some("PANEFLOW_HOOK_LOG/u:PANEFLOW_BIN_DIR/u:PANEFLOW_BIN_DIR/up:PANEFLOW_HOOK_LOG/up")
-        );
-    }
-
-    #[test]
-    fn wslenv_merge_skips_excluded_and_invalid_names() {
-        let merged = merge_wslenv(
-            None,
-            [
-                "PATH",
-                "WSLENV",
-                "SHLVL",
-                "LANG",
-                "9INVALID",
-                "HAS-DASH",
-                "NON_ASCII_é",
-                "",
-                "_ALSO_2",
-                "GOOD_VAR",
-            ],
-        );
-
-        assert_eq!(merged.as_deref(), Some("GOOD_VAR/u:_ALSO_2/u"));
-    }
-
-    #[test]
-    fn wslenv_shell_detection_is_exact() {
-        assert!(is_wsl_shell("wsl"));
-        assert!(is_wsl_shell("WSL.EXE"));
-        assert!(is_wsl_shell(r"C:\Windows\System32\wsl.exe"));
-        assert!(!is_wsl_shell("pwsh.exe"));
-        assert!(!is_wsl_shell("my-wsl.exe"));
-    }
 
     #[test]
     fn pty_spawn_injects_paneflow_bin_dir_and_prepends_path() {
