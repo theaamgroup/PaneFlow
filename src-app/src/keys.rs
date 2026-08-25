@@ -48,11 +48,9 @@ fn shift_enter_sequence(
     if mode.contains(Modes::KITTY_KEYBOARD) {
         Some(TerminalKeySequence::Protocol(Cow::Borrowed("\x1b[13;2u")))
     } else {
-        // ConPTY translates LF to Ctrl+Enter rather than Ctrl+J, which does not
-        // match multiline bindings in Crossterm applications such as Codex.
-        // ESC CR survives as Alt+Enter, the portable multiline alias those
-        // applications already expose. Windows ConPTY also drops CSI-u input,
-        // so this fallback remains necessary after Kitty mode negotiation.
+        // Legacy Shift+Enter is a literal LF so multiline editors (Codex and
+        // other Crossterm apps) receive a newline. The CSI-u form above is
+        // used only after Kitty keyboard mode is negotiated.
         Some(TerminalKeySequence::Literal(Cow::Borrowed(
             LEGACY_SHIFT_ENTER_SEQUENCE,
         )))

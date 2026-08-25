@@ -58,8 +58,8 @@ pub struct PaneFlowConfig {
     /// Windows-only: when enabled, the primary sidebar card reveals the active
     /// native backdrop.
     pub windows_chrome_material: Option<bool>,
-    /// macOS-only: when enabled (default), the primary sidebar card reveals
-    /// AppKit's native Sidebar material. Other platforms ignore this field.
+    /// When enabled (default), the primary sidebar card reveals AppKit's
+    /// native Sidebar material.
     pub macos_chrome_material: Option<bool>,
     /// Terminal line height multiplier (default: 1.2, valid range: 1.0-2.5).
     pub line_height: Option<f32>,

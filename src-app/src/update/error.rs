@@ -278,7 +278,7 @@ mod tests {
         // outermost layer.
         let err = anyhow::Error::new(UpdateError::Network("ureq hit EOF".into()))
             .context("fetch release asset")
-            .context("self-update/targz");
+            .context("self-update/dmg");
         assert!(matches!(
             UpdateError::classify(&err),
             UpdateError::Network(_)
@@ -293,7 +293,7 @@ mod tests {
         };
         let err = anyhow::Error::new(mm)
             .context("download asset")
-            .context("self-update/targz");
+            .context("self-update/dmg");
         match UpdateError::classify(&err) {
             UpdateError::IntegrityMismatch { expected, got } => {
                 assert_eq!(expected, "a".repeat(64));
@@ -329,7 +329,7 @@ mod tests {
     fn classify_disk_full_via_substring_fallback() {
         // When the io::Error is already stringified (e.g., came out of a
         // subprocess stderr), we fall back to text matching.
-        let err = anyhow::anyhow!("extract tar.gz into scratch dir: No space left on device");
+        let err = anyhow::anyhow!("extract dmg into scratch dir: No space left on device");
         assert!(matches!(
             UpdateError::classify(&err),
             UpdateError::DiskFull { .. }
@@ -398,7 +398,7 @@ mod tests {
         // it as io::Error, so the typed downcast above misses it), the
         // "timed out" / "timeout" substring fallback must still route it
         // to `Network` instead of `Other`.
-        let err = anyhow::anyhow!("stream tarball to disk: request timed out");
+        let err = anyhow::anyhow!("stream dmg to disk: request timed out");
         assert!(matches!(
             UpdateError::classify(&err),
             UpdateError::Network(_)
@@ -448,11 +448,11 @@ mod tests {
     #[test]
     fn user_message_disk_full_includes_path_when_set() {
         let err = UpdateError::DiskFull {
-            path: PathBuf::from("/home/u/.cache/paneflow"),
+            path: PathBuf::from("/Users/u/Library/Caches/paneflow"),
         };
         let msg = err.user_message();
         assert!(msg.contains("disk full"));
-        assert!(msg.contains("/home/u/.cache/paneflow"));
+        assert!(msg.contains("/Users/u/Library/Caches/paneflow"));
         assert!(msg.contains("Free space and retry"));
     }
 

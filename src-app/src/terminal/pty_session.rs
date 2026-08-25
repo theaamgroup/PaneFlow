@@ -1519,10 +1519,10 @@ impl TerminalState {
         // Assemble the child environment (identity vars, TERM, AI-hook PATH
         // prepend, user-env merge with protected keys). Pure function so the env
         // contract stays unit-testable (the mockable `PtyBackend::spawn` seam is
-        // gone - EP-002 US-004).
+        // gone - EP-002 US-004). Keep terminal.env and identity propagation
+        // independent from shell integration: opting out disables rc hooks,
+        // not the terminal env contract.
         let env = assemble_pty_env(env, workspace_id, surface_id, merged_env);
-        // Keep terminal.env and identity propagation independent from shell
-        // integration: opting out disables rc hooks, not the terminal env contract.
         // U-026 + issue #11: when no cwd is explicit, avoid inheriting a GUI
         // launch cwd that is the filesystem root. Explicit root cwd requests
         // still arrive through `working_directory` and are preserved.

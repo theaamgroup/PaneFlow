@@ -938,10 +938,7 @@ mod tests {
     fn read_exit_code_from_parses_i32_including_negative() {
         assert_eq!(read_exit_code_from(Some("0")), Some(0));
         assert_eq!(read_exit_code_from(Some("130")), Some(130));
-        assert_eq!(
-            read_exit_code_from(Some("-1073741510")),
-            Some(-1_073_741_510)
-        );
+        assert_eq!(read_exit_code_from(Some("-137")), Some(-137));
         assert_eq!(read_exit_code_from(Some("abc")), None);
         assert_eq!(read_exit_code_from(Some("")), None);
         assert_eq!(read_exit_code_from(None), None);

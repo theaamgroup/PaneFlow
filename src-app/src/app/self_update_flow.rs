@@ -124,7 +124,7 @@ impl PaneFlowApp {
     /// after [`DOWNLOAD_WATCHDOG`], the failure is routed through
     /// [`PaneFlowApp::record_update_failure`] (which leaves the busy state,
     /// bumps the 3-strikes counter, and surfaces the timeout toast), making the
-    /// retry / circuit-breaker / `EnvironmentBroken` paths reachable again.
+    /// retry / circuit-breaker paths reachable again.
     fn enter_downloading(&mut self, label: &'static str, cx: &mut Context<Self>) {
         let generation = self.self_update.download_generation.wrapping_add(1);
         self.self_update.download_generation = generation;

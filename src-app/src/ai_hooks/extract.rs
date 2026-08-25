@@ -290,8 +290,8 @@ pub(crate) fn extract_into(entries: &[Entry<'_>], target_dir: &Path) -> Result<(
 
         // Idempotency fast-path: existing file with matching digest is
         // kept as-is - avoids rewriting the file on every launch and
-        // therefore avoids bumping its mtime, which some extraction-path
-        // auditors (AV / code-signing verifiers on Windows) flag.
+        // therefore avoids bumping its mtime, which can trip
+        // code-signing / notarization verifiers.
         if file_matches_digest(&final_path, entry.bytes)? {
             continue;
         }

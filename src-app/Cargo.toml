@@ -128,12 +128,7 @@ regex = "1"
 ctrlc.workspace = true
 open = "5"
 # Native file picker (markdown "open file" button in the pane tab strip).
-# Default features = ["xdg-portal", "wayland"] on Linux: uses the FreeDesktop
-# file-chooser portal (no GTK3 runtime dep) and adds Wayland integration so
-# the dialog parents to our window. macOS uses NSOpenPanel, Windows uses the
-# native COM file-open dialog. `pollster` is pulled in by xdg-portal as the
-# tiny block-on executor - keeps the picker runtime-agnostic so we can drive
-# `AsyncFileDialog` from `cx.spawn` without a tokio/async-std dep.
+# On macOS this is NSOpenPanel, driven via `AsyncFileDialog` from `cx.spawn`.
 rfd = "0.17"
 # Markdown viewer pane (US-020 - prd-cmux-port-2026-q2.md). CommonMark + tables
 # + strikethrough + footnotes via the event API (we walk events directly into
@@ -199,14 +194,11 @@ sha2 = "0.10"
 
 # US-008 - atomic rename for extracted AI-hook binaries
 # (`src-app/src/ai_hooks/extract.rs`). `NamedTempFile::persist` wraps
-# `rename(2)` on Unix and `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` on
-# Windows so the cache-dir publish step is atomic on all three OSes.
+# `rename(2)` so the cache-dir publish step is atomic.
 tempfile.workspace = true
 
-# Cross-platform local IPC (US-009 - prd-windows-port.md). Dispatches to Unix
-# domain sockets on Linux/macOS and Windows named pipes (`\\.\pipe\...`)
-# transparently, so the JSON-RPC newline-delimited protocol is byte-identical
-# across platforms.
+# Local IPC (US-009). Unix domain sockets; the JSON-RPC newline-delimited
+# protocol talks to a local socket path.
 interprocess.workspace = true
 
 # Grapheme-cluster boundaries for the cursor-aware TextInput widget
@@ -228,17 +220,9 @@ unicode-segmentation = "1"
 ignore = "0.4"
 base64 = "0.22"
 
-# Cross-platform desktop notifications fired by the agents runtime when a
-# turn ends, needs input, stalls, or exits unexpectedly while the user is not
-# already looking at the Agents panel. `notify-rust` 4.x default features use
-# freedesktop DBus on Linux, NSUserNotificationCenter on macOS, and WinRT
-# toasts on Windows. Release Windows attribution depends on the Start Menu
-# shortcut's AppUserModelID in `packaging/wix/main.wxs` matching the runtime
-# app_id. Unpackaged/dev builds make a best-effort HKCU AppUserModelID
-# registration immediately before sending the toast, but Windows may still
-# require a Start Menu shortcut for visible banners.
-# Keeping the default features avoids the `libdbus-1-dev` system build dep
-# that the legacy `d` feature pulls in.
+# Desktop notifications fired by the agents runtime when a turn ends, needs
+# input, stalls, or exits unexpectedly while the user is not already looking
+# at the Agents panel. `notify-rust` 4.x uses NSUserNotificationCenter.
 notify-rust = "4"
 
 # US-001 (prd-audit-remediation): detached minisign (Ed25519) signature

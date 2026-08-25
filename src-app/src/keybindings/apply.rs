@@ -18,11 +18,10 @@ pub(super) fn normalize_keystroke(keystrokes: &str) -> String {
 /// Canonical form of a keystroke string for *physical chord* comparison.
 ///
 /// US-021: parsing through GPUI resolves `+`/`-` separators, modifier order,
-/// and the `secondary` platform shorthand (→ `cmd` on macOS, `ctrl`
-/// elsewhere) into the same `Keystroke` value, so `"ctrl+shift+d"`,
-/// `"shift-ctrl-d"`, and `"secondary-shift-d"` all compare equal on Linux.
-/// Returns `None` for unparseable input (which then only matches by raw
-/// equality at the call site).
+/// and the `secondary` shorthand (→ `cmd`) into the same `Keystroke` value,
+/// so `"cmd+shift+d"`, `"shift-cmd-d"`, and `"secondary-shift-d"` all
+/// compare equal. Returns `None` for unparseable input (which then only
+/// matches by raw equality at the call site).
 pub(super) fn canonical_keystroke(keystrokes: &str) -> Option<Keystroke> {
     Keystroke::parse(&normalize_keystroke(keystrokes)).ok()
 }

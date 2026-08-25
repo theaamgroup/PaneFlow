@@ -27,13 +27,6 @@
 //!      inner `Contents/MacOS/paneflow`. Mirrors Zed returning `Ok(None)`,
 //!      which falls back to the `NSBundle.bundlePath` (the `.app`).
 //!
-//! **Cross-platform compile.** This module is built on every target so
-//! the enclosing crate is a single compile-closure (no cfg churn in
-//! `self_update_flow.rs`). `hdiutil` obviously only exists on macOS; the
-//! dispatcher only routes `InstallMethod::AppBundle` here, and that
-//! variant is produced solely by macOS path detection - so on Linux /
-//! Windows the function compiles but is runtime-unreachable.
-//!
 //! **Error mapping.** `cp -R` hitting a read-only `/Applications/` or
 //! SIP-protected target surfaces as an OS-level `Permission denied`;
 //! that is mapped to [`UpdateError::InstallDeclined`] with a "reinstall
@@ -107,7 +100,7 @@ pub fn install(asset_url: &str, bundle_path: &Path) -> Result<PathBuf> {
 
 /// True when `bundle_path` sits directly under `/Applications` or
 /// `$HOME/Applications` - the two locations the DMG updater is allowed to
-/// replace in place (US-004). Pure path logic, unit-tested on Linux CI.
+/// replace in place (US-004). Pure path logic, unit-tested.
 fn is_expected_bundle_location(bundle_path: &Path, home: &Path) -> bool {
     let Some(parent) = bundle_path.parent() else {
         return false;
@@ -123,7 +116,7 @@ fn is_expected_bundle_location(bundle_path: &Path, home: &Path) -> bool {
 /// `NSBundle.bundlePath`, which the OS de-translocates), so the updater cannot
 /// find - let alone replace - the real bundle. Detecting it lets `install`
 /// surface "move the app to /Applications" instead of a generic error. Pure
-/// string logic, unit-tested on every platform.
+/// string logic, unit-tested.
 fn is_translocated_path(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.contains("/AppTranslocation/") || s.contains("/var/folders/")
@@ -157,13 +150,11 @@ const APPLE_TEAM_ID: &str = "228F9H5P95";
 /// inline requirement text as a file and aborts ("No such file or directory /
 /// invalid requirement specification"), so the Team-ID pin silently failed on
 /// every run - which froze the DMG self-update at the 3-strikes "Update keeps
-/// failing" toast (in-app updates worked on Linux/Windows, which have no such
-/// codesign gate). The attached form is parsed as inline requirement source on
+/// failing" toast. The attached form is parsed as inline requirement source on
 /// every supported macOS.
 ///
 /// Pure string builder - gated `#[cfg(any(target_os = "macos", test))]` so the
-/// regression test runs on Linux CI without a signed fixture, while non-macOS
-/// release builds don't carry it as dead code.
+/// regression test compiles without a signed fixture.
 #[cfg(any(target_os = "macos", test))]
 fn team_id_requirement_arg(team_id: &str) -> String {
     format!("-R=anchor apple generic and certificate leaf[subject.OU] = \"{team_id}\"")
@@ -176,9 +167,8 @@ fn team_id_requirement_arg(team_id: &str) -> String {
 /// the bundle is notarised / accepted by the system policy. Any tool exiting
 /// nonzero rejects the update with a tagged `IntegrityMismatch`.
 ///
-/// macOS-only; untestable on the Linux CI leg (no `codesign`/`spctl`, no
-/// notarised fixture) - exercised by the macOS release leg against the real
-/// signed bundle.
+/// macOS-only (`codesign` / `spctl`); exercised against the real signed
+/// bundle, not a fixture.
 #[cfg(target_os = "macos")]
 fn verify_macos_bundle(bundle: &Path) -> Result<()> {
     run_gatekeeper_tool(

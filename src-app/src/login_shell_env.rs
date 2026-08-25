@@ -44,7 +44,7 @@ pub fn load_login_shell_env() {
 
     // A terminal launch already inherited the login PATH from its parent shell
     // - skip the (~50-200 ms) re-capture. Only GUI launches (Finder / Dock /
-    // `.desktop`) lack a controlling TTY on stdin.
+    // launchd) lack a controlling TTY on stdin.
     // SAFETY: `isatty` is a side-effect-free query on a file descriptor.
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
         return;

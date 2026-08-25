@@ -794,9 +794,10 @@ fn write_overloaded_error(writer: &mut Stream, message: &str) {
 /// Writes one JSON-RPC error envelope and drops the stream (closing it) so the
 /// peer gets a structured rejection rather than a silent hang.
 fn reject_overloaded(mut stream: Stream) {
-    // Abort-safe write (CP-4): on Windows a peer that already closed must not
-    // trip interprocess's overlapped-write abort; `write_envelope` routes
-    // through our managed WriteFile. `stream` is dropped right after either way.
+    // Abort-safe write (CP-4): one structured rejection then drop the stream
+    // so a busy server does not hang the peer. `write_envelope` keeps a
+    // closed-socket write a returned error. `stream` is dropped right after
+    // either way.
     write_overloaded_error(&mut stream, "server busy: too many concurrent connections");
 }
 
@@ -834,8 +835,8 @@ fn handle_connection(
     // method needs the bare stream - once wrapped in BufReader, the
     // method is no longer reachable through `get_ref()` (BufReader
     // only re-exports `Read`-shaped methods). The check is
-    // `#[cfg(unix)]`-only; Windows pipe ACLs cover the same surface
-    // (see module doc) and SDDL hardening is deferred per PRD §10.
+    // `#[cfg(unix)]`: compare the peer UID to the server UID and
+    // reject mismatches.
     // On a peer-cred query failure we fall back to perms-0600 only
     // with a warn log (AC6) - the kernel filesystem check still
     // gates non-owner connects, so the residual exposure is bounded.

@@ -10,9 +10,7 @@ pub(super) struct DefaultBinding {
 /// All default keybindings. Order matches the original registration order.
 pub(super) const DEFAULTS: &[DefaultBinding] = &[
     // US-009: app-global split/workspace bindings use the `secondary`
-    // modifier so GPUI resolves to `cmd` on macOS and `ctrl` on Linux/Windows.
-    // `secondary` keeps Linux on Ctrl+Shift+… (no user-visible regression)
-    // while giving macOS users the expected Cmd+Shift+… shortcuts.
+    // modifier so GPUI resolves to `cmd` (Cmd+Shift+… shortcuts).
     DefaultBinding {
         key: "secondary-shift-d",
         action_name: "split_horizontally",
@@ -266,7 +264,7 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
     // EP-006 US-019 - per-pane font zoom. These DO shadow readline's
     // C-- (undo) / C-0 (digit-argument) in the focused terminal: the
     // PRD's documented, remappable exception (Hard Constraint clavier),
-    // matching the zoom convention of gnome-terminal/Ghostty on Linux.
+    // matching the usual Cmd+= / Cmd+- / Cmd+0 zoom chords.
     DefaultBinding {
         key: "secondary-=",
         action_name: "font_size_increase",
@@ -319,17 +317,15 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "markdown_find_dismiss",
         context: Some("MarkdownSearch"),
     },
-    // US-005 (prd-agents-view.md): `secondary-shift-a` is Ctrl+Shift+A
-    // on Linux/Windows and Cmd+Shift+A on macOS. US-008 will reuse the
-    // same binding when it lands the full AppMode toggle.
+    // US-005 (prd-agents-view.md): `secondary-shift-a` is Cmd+Shift+A.
+    // US-008 will reuse the same binding when it lands the full AppMode toggle.
     DefaultBinding {
         key: "secondary-shift-a",
         action_name: "open_agents_view",
         context: None,
     },
     // US-003 (prd-git-diff-mode-2026-Q3.md): `secondary-shift-g` is
-    // Ctrl+Shift+G on Linux/Windows and Cmd+Shift+G on macOS. Toggles
-    // the dedicated Git Diff mode (AppMode::Diff).
+    // Cmd+Shift+G. Toggles the dedicated Git Diff mode (AppMode::Diff).
     DefaultBinding {
         key: "secondary-shift-g",
         action_name: "open_diff_view",
@@ -337,7 +333,7 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
     },
     // Files right-sidebar toggle. Uses `secondary-alt-f` instead of
     // `secondary-shift-f` so it never shadows the terminal search chord
-    // (`ctrl-shift-f` on Linux/Windows).
+    // (`ctrl-shift-f`).
     DefaultBinding {
         key: "secondary-alt-f",
         action_name: "toggle_files_sidebar",
