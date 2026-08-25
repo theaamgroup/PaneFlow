@@ -139,11 +139,74 @@ files. Classification schema must separate, as its own categories:
 `UNIX_KEEP` (loudly), `RUNTIME_CFG_MACRO` (report only, never edit),
 `ENUM_CASCADE` (report only). Require file:line and the exact cfg expression.
 
-**Phase 2 — 2-3 delegated batches**, disjoint file sets, each in a `git
+This phase is **not optional and must run on grok**, not on Claude's own Agent
+tool. It is the part of 2b that worked best: 9 agents returned 302 occurrences
+with exactly one medium-confidence item and no file-scope violations, and the
+agents independently found four things the orchestrator's census had missed
+(a target-triple string check, an `any(not(windows), debug_assertions)`
+polarity, a `not(any(macos, windows))` polarity, and the `all(test, windows)`
+vs `any(test, windows)` distinction). Launch all shards concurrently as
+background jobs in a single message.
+
+**Phase 2 — 2-3 delegated grok batches**, disjoint file sets, each in a `git
 worktree` seeded by `cp -c -R target` (APFS clone: 6.7s, ~0 bytes, verified in
 2b — a cold GPUI build is 15-25 min, the clone rebuild is 30s). Delegate only
 files with no `cfg(unix)` neighbours and no enum references. Candidates:
 `keybindings/{display,defaults,apply}.rs`, `widgets/`, `terminal/backend_corpus.rs`.
+
+"Mostly orchestrator" means the *hard* sites stay with you — it does not mean
+skipping delegation. Run the batches on grok.
+
+## Grok mechanics (verified working in 2b)
+
+Use the `grok-subagents` skill. Call the real binary — bare `grok` resolves to
+Paneflow's own PATH shim, which churns telemetry hooks on every invocation.
+
+Inventory shard (read-only, structured output — this shape worked):
+
+```bash
+GROK="$HOME/.grok/bin/grok"
+"$GROK" --prompt-file "$OUT/S1-ports.md" \
+  --cwd /Users/dayers/Github/paneflow \
+  --max-turns 60 \
+  --disallowed-tools "Edit,Write,write,edit" \
+  --json-schema "$(cat $OUT/schema.json)" \
+  > "$OUT/out-S1.json" 2>"$OUT/err-S1.txt"
+```
+
+Read results with `jq '.structuredOutput'`. Never parse prose.
+
+Execution batch (mutating — `--worktree` is IGNORED under `-p`, so make it
+yourself):
+
+```bash
+git worktree add /Users/dayers/Github/pf-B1 -b linux/b1-keybindings
+cp -c -R target /Users/dayers/Github/pf-B1/target      # APFS clone, ~0 bytes
+"$GROK" --prompt-file "$OUT/exec-B1.md" \
+  --cwd /Users/dayers/Github/pf-B1 \
+  --max-turns 80 \
+  --json-schema "$(cat $OUT/schema-exec.json)" \
+  > "$OUT/exec-out-B1.json" 2>"$OUT/exec-err-B1.txt"
+```
+
+Launch every job with `run_in_background: true`, one Bash call per unit, all in
+a single message so they run concurrently. The harness re-invokes you as each
+exits — do not poll.
+
+Rules learned the hard way:
+
+- Grok inherits **none** of this session's context. Every brief must be
+  self-contained: absolute paths, the exact rule to apply, the output contract.
+- `permission_mode = "always-approve"` is global, so headless grok runs tools
+  without prompting. Restrict read-only phases with `--disallowed-tools`.
+- **Tell execution agents to run `cargo fmt` BEFORE `cargo clippy`.** 2b's brief
+  said fmt last, so rustfmt collapsed a surviving block onto one line and
+  `unused_braces` fired where no agent could see it.
+- **`--json-schema` suppresses the tool loop on open-ended tasks.** It is right
+  for inventory ("read these listed files, classify each site") because the work
+  is bounded. It failed three times for an adversarial audit ("go find what I
+  missed"): grok returned `num_turns: 1` with a fabricated verdict and zero
+  searches. Run exploratory audits yourself, or without the schema.
 
 **Phase 3 — orchestrator, sequential.** The enum collapse, every file where
 Linux and unix gates interleave (`ports.rs`, `pty_session.rs`, `ipc.rs`,
