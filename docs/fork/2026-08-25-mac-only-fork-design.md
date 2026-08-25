@@ -252,6 +252,27 @@ Found during the inventory. Each one would have cost a debugging session.
     flag a legitimate key as invalid. The schema-drift test does not catch it
     because `path` is `skip_serializing_if`.
 
+16. **Do not add `cargo:rerun-if-env-changed` for a variable read via
+    `env!` or `option_env!`.** It looks missing and it is not. rustc emits
+    `# env-dep:NAME` lines into the crate's dep-info file for those macros and
+    Cargo honours them, so invalidation already works. Proven here: with zero
+    directives registered, changing `PANEFLOW_MINISIGN_PUBKEY` from a fully warm
+    cache still recompiled `paneflow-app`, and `target/debug/paneflow.d`
+    contained the matching `env-dep` entry. This was investigated because the
+    absence of directives for the two minisign pubkeys, next to the ones that do
+    exist for PostHog, looks exactly like a bug where a rotated key would leave
+    a stale embedded trust anchor. It is not. The corollary is that the existing
+    `POSTHOG_API_KEY` and `POSTHOG_HOST` directives at `src-app/build.rs:81-82`
+    are themselves redundant, along with the long doc comment above them
+    justifying their existence.
+
+    Method note, since it generalises: the first attempt to verify this
+    "confirmed" the bug, because backing the fix out edited `build.rs` in the
+    middle of the sequence and thereby changed two variables at once. Any
+    build-cache experiment has to warm the cache to a steady state first, then
+    change exactly one thing. A control that reproduces the positive result is
+    telling you the experiment is broken, not that the finding is doubly true.
+
 ## Verification: Ghostty is unreachable on macOS
 
 Proven, not assumed. `src-app/src/terminal/view.rs:70` `auto_selects_ghostty_for_target()`
