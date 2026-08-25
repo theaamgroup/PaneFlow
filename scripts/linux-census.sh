@@ -15,34 +15,51 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# A grep over `path:line:content` also matches the PATH. Files under
+# `src-app/src/update/linux/` therefore matched /\blinux\b/ on their
+# directory name, counting every `#[cfg(unix)]` and `#[cfg(test)]` inside them
+# as a Linux site -- the precise error this whole pass exists to avoid.
+# Match the CONTENT only; keep the prefix for reporting.
+content_match() {
+  python3 -W ignore -c '
+import sys, re, warnings
+warnings.filterwarnings("ignore")
+pat = re.compile(sys.argv[1], re.I)
+for line in sys.stdin:
+    m = re.match(r"^(.*?:\d+:)(.*)$", line.rstrip("\n"))
+    if m and pat.search(m.group(2)):
+        print(line, end="")
+' "$1"
+}
+
 scan() { grep -rn --include='*.rs' -E 'cfg!?\(|cfg_attr' . 2>/dev/null | grep -v '^\./target/'; }
 nocomment() { grep -vE ':[0-9]+:[[:space:]]*(//|/\*|\*)'; }
 onlycomment() { grep -E ':[0-9]+:[[:space:]]*(//|/\*|\*)'; }
 
 P_LINUX='\blinux\b|"musl"|unknown-linux'
-P_NOTUNIX='not[[:space:]]*\([[:space:]]*unix[[:space:]]*\)'
-P_NOTMAC='not[[:space:]]*\([[:space:]]*target_os[[:space:]]*=[[:space:]]*"macos"[[:space:]]*\)'
+P_NOTUNIX='not\s*\(\s*unix\s*\)'
+P_NOTMAC='not\s*\(\s*target_os\s*=\s*"macos"\s*\)'
 P_ALL="$P_LINUX|$P_NOTUNIX|$P_NOTMAC"
 
-ATTR=$(scan | grep -v 'cfg!(' | grep -Ei "$P_ALL" | nocomment)
-MACRO=$(scan | grep    'cfg!(' | grep -Ei "$P_ALL" | nocomment)
-COMMENTS=$(scan | grep -Ei "$P_ALL" | onlycomment)
+ATTR=$(scan | grep -v 'cfg!(' | content_match "$P_ALL" | nocomment)
+MACRO=$(scan | grep    'cfg!(' | content_match "$P_ALL" | nocomment)
+COMMENTS=$(scan | content_match "$P_ALL" | onlycomment)
 TOML=$(grep -rn -E "target\.'cfg\((unix|target_os = \"linux\")\)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
 
 # Per-family breakdown (code lines only)
-F_LINUX=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | grep -Ei "$P_LINUX")
-F_NOTUNIX=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | grep -Ei "$P_NOTUNIX")
-F_NOTMAC=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | grep -Ei "$P_NOTMAC")
+F_LINUX=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | content_match "$P_LINUX")
+F_NOTUNIX=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | content_match "$P_NOTUNIX")
+F_NOTMAC=$(printf '%s\n' "$ATTR" "$MACRO" | grep . | content_match "$P_NOTMAC")
 
 # The 5 sites 2b left standing: all(unix, not(macos)) are now PURE LINUX.
-UNIXMAC=$(scan | grep -E '\bunix\b' | grep -E "$P_NOTMAC" | nocomment)
+UNIXMAC=$(scan | content_match '\bunix\b' | content_match "$P_NOTMAC" | nocomment)
 
 # NEGATIVE CONTROL: cfg(unix) must stay huge. If this reads 0 the regex is broken.
-CTL_UNIX=$(scan | grep -Ei 'cfg!?[[:space:]]*\([[:space:]]*unix[[:space:]]*\)|cfg_attr[[:space:]]*\([[:space:]]*unix' | nocomment)
-CTL_MAC=$(scan | grep -E 'target_os[[:space:]]*=[[:space:]]*"macos"' | grep -vE "$P_NOTMAC" | nocomment)
+CTL_UNIX=$(scan | content_match 'cfg!?\s*\(\s*unix\s*\)|cfg_attr\s*\(\s*unix' | nocomment)
+CTL_MAC=$(scan | content_match 'target_os\s*=\s*"macos"' | grep -vE 'not[[:space:]]*\([[:space:]]*target_os' | nocomment)
 
 # Target-triple STRING checks -- not cfg constructs, invisible to any cfg regex.
-STRCHK=$(grep -rn --include='*.rs' -E '"[^"]*(linux|musl|gnueabi)[^"]*"' . 2>/dev/null | grep -v '^\./target/' \
+STRCHK=$(grep -rn --include='*.rs' -E '"[^"]*(linux|musl|gnueabi)[^"]*"' . 2>/dev/null | grep -v '^\./target/' | content_match '"[^"]*(linux|musl|gnueabi)[^"]*"' \
          | grep -E '\.contains\(|\.starts_with\(|\.ends_with\(|==|!=' | grep -v 'cfg!')
 
 n() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l | tr -d ' '; }
