@@ -140,9 +140,6 @@ fn normalize_path_selector(raw: &str) -> String {
     while normalized.len() > 1 && normalized.ends_with('/') {
         normalized.pop();
     }
-    if cfg!(windows) {
-        normalized.make_ascii_lowercase();
-    }
     normalized
 }
 

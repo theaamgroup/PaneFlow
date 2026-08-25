@@ -1070,13 +1070,7 @@ mod tests {
         }
         let elapsed = started.elapsed();
         assert!(total >= 10, "expected at least 10 hits, got {}", total);
-        let budget_ms: u128 = if cfg!(debug_assertions) {
-            25
-        } else if cfg!(target_os = "windows") {
-            15
-        } else {
-            5
-        };
+        let budget_ms: u128 = if cfg!(debug_assertions) { 25 } else { 5 };
         assert!(
             elapsed.as_millis() < budget_ms,
             "200×80 scan took {:?}, exceeds {} ms budget",

@@ -167,11 +167,7 @@ impl PaneFlowApp {
 fn norm_path(p: &std::path::Path) -> String {
     let resolved = normalize_lexically(p);
     let s = resolved.to_string_lossy().into_owned();
-    if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
-        s.to_lowercase()
-    } else {
-        s
-    }
+    s.to_lowercase()
 }
 
 fn normalize_lexically(path: &std::path::Path) -> std::path::PathBuf {

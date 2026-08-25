@@ -613,9 +613,5 @@ impl PaneFlowApp {
 fn norm_path(p: &std::path::Path) -> String {
     let resolved = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let s = resolved.to_string_lossy().into_owned();
-    if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
-        s.to_lowercase()
-    } else {
-        s
-    }
+    s.to_lowercase()
 }

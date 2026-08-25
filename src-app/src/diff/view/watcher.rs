@@ -48,11 +48,7 @@ pub(super) fn event_relevant(res: &notify::Result<Event>) -> bool {
 }
 
 fn component_eq(component: &OsStr, expected: &str) -> bool {
-    if cfg!(target_os = "windows") {
-        component.to_string_lossy().eq_ignore_ascii_case(expected)
-    } else {
-        component == OsStr::new(expected)
-    }
+    component == OsStr::new(expected)
 }
 
 fn has_component(components: &[&OsStr], expected: &str) -> bool {

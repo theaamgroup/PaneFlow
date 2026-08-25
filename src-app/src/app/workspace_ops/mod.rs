@@ -1148,16 +1148,11 @@ mod tests {
     // covers the distro fleet.
     // ════════════════════════════════════════════════════════════════════
 
-    /// Filename suffix `which_in` will recognize on the current target.
-    /// Windows resolves names against PATHEXT - `.exe` is the canonical
-    /// entry; Unix matches the bare name plus the executable bit.
-    const EXE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
-
-    /// Create a stub binary named `<command><EXE_SUFFIX>` inside `dir` and,
-    /// on Unix, flip the executable bit so `which` will accept it. Returns
-    /// the absolute path to the stub for canonical comparison.
+    /// Create a stub binary named `<command>` inside `dir` and flip the
+    /// executable bit so `which` will accept it. Returns the absolute path
+    /// to the stub for canonical comparison.
     fn make_stub_binary(dir: &std::path::Path, command: &str) -> std::path::PathBuf {
-        let path = dir.join(format!("{command}{EXE_SUFFIX}"));
+        let path = dir.join(command);
         std::fs::write(&path, b"").expect("write stub binary");
         #[cfg(unix)]
         {

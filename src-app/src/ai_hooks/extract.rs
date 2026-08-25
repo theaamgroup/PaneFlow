@@ -80,14 +80,6 @@ fn extract_plan() -> Vec<(&'static str, &'static str)> {
     plan
 }
 
-/// Platform-appropriate executable extension. Empty on Unix, `.exe` on
-/// Windows. Used for both the embed-side filename and the extracted
-/// filename.
-#[inline]
-fn exe_suffix() -> &'static str {
-    if cfg!(windows) { ".exe" } else { "" }
-}
-
 /// Pull the raw bytes of `name` out of the `Bins` rust-embed archive.
 /// `name` is the `<binary>[.exe]` basename staged by build.rs under
 /// `target/embed/bin/<triple>/`.
@@ -149,13 +141,12 @@ fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
             .join("bin")
             .join(VERSION);
 
-        let suffix = exe_suffix();
         let plan = extract_plan();
         let mut buffers: Vec<(String, std::borrow::Cow<'static, [u8]>)> =
             Vec::with_capacity(plan.len());
         for (out_name, src_name) in plan {
-            let src_full = format!("{src_name}{suffix}");
-            let out_full = format!("{out_name}{suffix}");
+            let src_full = src_name.to_string();
+            let out_full = out_name.to_string();
             buffers.push((out_full, embedded_bytes(&src_full)?));
         }
         let entries: Vec<Entry<'_>> = buffers
@@ -448,18 +439,17 @@ mod tests {
     const FAKE_HOOK: &[u8] = b"paneflow-ai-hook synthetic bytes v0";
 
     fn synthetic_entries() -> Vec<Entry<'static>> {
-        let suffix = exe_suffix();
         vec![
             Entry {
-                filename: format!("claude{suffix}"),
+                filename: "claude".to_string(),
                 bytes: FAKE_SHIM,
             },
             Entry {
-                filename: format!("codex{suffix}"),
+                filename: "codex".to_string(),
                 bytes: FAKE_SHIM,
             },
             Entry {
-                filename: format!("paneflow-ai-hook{suffix}"),
+                filename: "paneflow-ai-hook".to_string(),
                 bytes: FAKE_HOOK,
             },
         ]
@@ -471,11 +461,10 @@ mod tests {
         let entries = synthetic_entries();
         extract_into(&entries, dir.path()).unwrap();
 
-        let suffix = exe_suffix();
         for expected in [
-            format!("claude{suffix}"),
-            format!("codex{suffix}"),
-            format!("paneflow-ai-hook{suffix}"),
+            "claude".to_string(),
+            "codex".to_string(),
+            "paneflow-ai-hook".to_string(),
         ] {
             let p = dir.path().join(&expected);
             assert!(
@@ -510,9 +499,8 @@ mod tests {
         let entries = synthetic_entries();
         extract_into(&entries, dir.path()).unwrap();
 
-        let suffix = exe_suffix();
-        let claude = std::fs::read(dir.path().join(format!("claude{suffix}"))).unwrap();
-        let codex = std::fs::read(dir.path().join(format!("codex{suffix}"))).unwrap();
+        let claude = std::fs::read(dir.path().join("claude")).unwrap();
+        let codex = std::fs::read(dir.path().join("codex")).unwrap();
         assert_eq!(
             claude, codex,
             "US-008 AC: claude and codex are both copies of paneflow-shim"
@@ -636,9 +624,8 @@ mod tests {
         // a `None` here means either build.rs did not run or the
         // nested cargo build silently skipped one of the binaries.
         // `paneflow-mcp` is included by EP-001 US-001.
-        let suffix = exe_suffix();
         for src in ["paneflow-shim", "paneflow-ai-hook", "paneflow-mcp"] {
-            let name = format!("{src}{suffix}");
+            let name = src.to_string();
             let bytes = embedded_bytes(&name).unwrap_or_else(|e| {
                 panic!("US-008/EP-001: Bins must contain `bin/{TARGET_TRIPLE}/{name}`: {e}")
             });
@@ -664,12 +651,11 @@ mod tests {
             return;
         }
         let dir = ensure_binaries_extracted().unwrap();
-        let suffix = exe_suffix();
         let mut expected: Vec<String> = crate::agent_launcher::TerminalAgent::ALL
             .iter()
-            .map(|a| format!("{}{suffix}", a.binary()))
+            .map(|a| a.binary().to_string())
             .collect();
-        expected.push(format!("paneflow-ai-hook{suffix}"));
+        expected.push("paneflow-ai-hook".to_string());
         for name in expected {
             let p = dir.join(&name);
             assert!(
@@ -730,10 +716,9 @@ mod tests {
             "EP-001 US-003: ensure_bridge_extracted must produce {}",
             path.display()
         );
-        let suffix = exe_suffix();
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
-            format!("paneflow-mcp{suffix}"),
+            "paneflow-mcp".to_string(),
             "EP-001 US-003: bridge filename must be paneflow-mcp[.exe]"
         );
     }

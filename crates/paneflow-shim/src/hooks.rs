@@ -2849,12 +2849,7 @@ mod hooks_tests {
         ));
 
         let dir = tempfile::TempDir::new().unwrap();
-        let hook_name = if cfg!(windows) {
-            "paneflow-ai-hook.exe"
-        } else {
-            "paneflow-ai-hook"
-        };
-        let hook_path = dir.path().join(hook_name);
+        let hook_path = dir.path().join("paneflow-ai-hook");
         std::fs::File::create(&hook_path).unwrap();
         let alive = json!({
             "hooks": { "Stop": [ {

@@ -4729,11 +4729,7 @@ mod tests {
 
     #[test]
     fn workspace_cwd_expands_home_prefix_before_canonicalize() {
-        let home = PathBuf::from(if cfg!(windows) {
-            r"C:\Users\Arthur"
-        } else {
-            "/home/arthur"
-        });
+        let home = PathBuf::from("/home/arthur");
 
         assert_eq!(
             super::expand_tilde_with_home("~", Some(&home)),

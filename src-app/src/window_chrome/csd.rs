@@ -270,7 +270,6 @@ pub(crate) fn render_button_group(
     side: &'static str,
     buttons: &[Option<WindowButton>; 3],
     is_maximized: bool,
-    bar_height: Pixels,
     supported: &WindowControls,
     on_close: impl Fn(&mut Window, &mut App) + Clone + 'static,
 ) -> Option<AnyElement> {
@@ -282,9 +281,7 @@ pub(crate) fn render_button_group(
             WindowButton::Maximize => supported.maximize,
             WindowButton::Close => true,
         })
-        .map(|button| {
-            render_window_button(side, button, is_maximized, bar_height, on_close.clone())
-        })
+        .map(|button| render_window_button(side, button, is_maximized, on_close.clone()))
         .collect();
 
     if children.is_empty() {
@@ -296,14 +293,10 @@ pub(crate) fn render_button_group(
             .flex()
             .flex_row()
             .items_center()
-            // Windows: full-height, flush, zero-gap cluster (native Win11
-            // caption strip). Linux mirrors Zed's GPUI title-bar geometry:
-            // compact 20px controls on a 12px internal rhythm, with 8px group
-            // edges aligned to the sidebar rows on either DE layout side.
-            .when(cfg!(target_os = "windows"), |d| d.h(bar_height))
-            .when(!cfg!(target_os = "windows"), |d| {
-                d.gap(TITLE_BAR_CONTROL_SPACING).px(TITLE_BAR_EDGE_INSET)
-            })
+            // Zed's GPUI title-bar geometry: compact 20px controls on a 12px
+            // internal rhythm, with 8px group edges aligned to the sidebar rows.
+            .gap(TITLE_BAR_CONTROL_SPACING)
+            .px(TITLE_BAR_EDGE_INSET)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children(children)
             .into_any_element(),
@@ -320,7 +313,6 @@ pub(crate) fn render_window_button(
     side: &'static str,
     button: WindowButton,
     is_maximized: bool,
-    bar_height: Pixels,
     on_close: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let id = match button {
@@ -329,15 +321,11 @@ pub(crate) fn render_window_button(
         WindowButton::Close => "wc-close",
     };
 
-    let icon_path = match (cfg!(target_os = "windows"), button, is_maximized) {
-        (true, WindowButton::Minimize, _) => "icons/windows_minimize.svg",
-        (true, WindowButton::Maximize, true) => "icons/windows_restore.svg",
-        (true, WindowButton::Maximize, false) => "icons/windows_maximize.svg",
-        (true, WindowButton::Close, _) => "icons/windows_close.svg",
-        (false, WindowButton::Minimize, _) => "icons/generic_minimize.svg",
-        (false, WindowButton::Maximize, true) => "icons/generic_restore.svg",
-        (false, WindowButton::Maximize, false) => "icons/generic_maximize.svg",
-        (false, WindowButton::Close, _) => "icons/generic_close.svg",
+    let icon_path = match (button, is_maximized) {
+        (WindowButton::Minimize, _) => "icons/generic_minimize.svg",
+        (WindowButton::Maximize, true) => "icons/generic_restore.svg",
+        (WindowButton::Maximize, false) => "icons/generic_maximize.svg",
+        (WindowButton::Close, _) => "icons/generic_close.svg",
     };
 
     let control_area = match button {
@@ -347,21 +335,7 @@ pub(crate) fn render_window_button(
     };
 
     let element_id = SharedString::from(format!("{id}-{side}"));
-    // Windows: native Win11 caption buttons - 46px wide, full title-bar
-    // height, square + flush, with the system hover palette (subtle white
-    // overlay for min/max, #c42b1c red on close, #c84c3f when pressed). The
-    // OS already hit-tests these regions as HT{MIN,MAX,CLOSE}, so snap
-    // layouts and the actual minimize/maximize/close are system-handled
-    // (gpui_windows events.rs) - only the pixels are ours, making them
-    // indistinguishable from the OS-drawn ones. Linux/macOS keep the compact
-    // chrome-themed pills.
-    let is_windows = cfg!(target_os = "windows");
-    let is_close = matches!(button, WindowButton::Close);
-    let (button_width, button_height) = if is_windows {
-        (px(46.), bar_height)
-    } else {
-        (TITLE_BAR_CONTROL_SIZE, TITLE_BAR_CONTROL_SIZE)
-    };
+    let (button_width, button_height) = (TITLE_BAR_CONTROL_SIZE, TITLE_BAR_CONTROL_SIZE);
 
     let btn = div()
         .id(element_id)
@@ -382,24 +356,10 @@ pub(crate) fn render_window_button(
         });
 
     let ui = crate::theme::ui_colors();
-    let (hover_bg, pressed_bg, hover_text) = if is_windows && is_close {
-        (
-            Hsla::from(gpui::rgb(0xc42b1c)),
-            Hsla::from(gpui::rgb(0xc84c3f)),
-            Hsla::from(gpui::rgb(0xffffff)),
-        )
-    } else if is_windows {
-        (
-            crate::app::constants::sidebar_tab_hover_background(),
-            crate::app::constants::sidebar_tab_active_background(),
-            ui.text,
-        )
-    } else {
-        (ui.subtle, ui.subtle, ui.text)
-    };
+    let (hover_bg, pressed_bg, hover_text) = (ui.subtle, ui.subtle, ui.text);
 
-    let icon_size = if is_windows { px(12.) } else { px(16.) };
-    btn.when(!is_windows, |btn| btn.rounded_full())
+    let icon_size = px(16.);
+    btn.rounded_full()
         .text_color(ui.text)
         .animated_hover_element(move |button_element, delta| {
             button_element

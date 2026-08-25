@@ -45,7 +45,7 @@ fn shift_enter_sequence(
         return None;
     }
 
-    if mode.contains(Modes::KITTY_KEYBOARD) && cfg!(not(target_os = "windows")) {
+    if mode.contains(Modes::KITTY_KEYBOARD) {
         Some(TerminalKeySequence::Protocol(Cow::Borrowed("\x1b[13;2u")))
     } else {
         // ConPTY translates LF to Ctrl+Enter rather than Ctrl+J, which does not

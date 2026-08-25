@@ -1215,12 +1215,7 @@ mod tests {
         else {
             panic!("Shift+Enter must bypass backend key encoding");
         };
-        let expected = if cfg!(target_os = "windows") {
-            "\x1b\r"
-        } else {
-            "\n"
-        };
-        assert_eq!(sequence.as_ref(), expected);
+        assert_eq!(sequence.as_ref(), "\n");
     }
 
     // EP-001 US-001 (agent-control-plane-hardening): the wrap is the burst that

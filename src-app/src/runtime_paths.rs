@@ -280,12 +280,7 @@ pub fn data_dir() -> Option<PathBuf> {
 /// materialization + SHA-compared atomic rewrite is
 /// `ai_hooks::extract::ensure_bridge_extracted`.
 pub fn bridge_binary_path() -> Option<PathBuf> {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Some(
-        data_dir()?
-            .join("bin")
-            .join(format!("paneflow-mcp{suffix}")),
-    )
+    Some(data_dir()?.join("bin").join("paneflow-mcp"))
 }
 
 /// Stable, non-versioned path of the `paneflow-ai-hook` callback binary
@@ -303,12 +298,7 @@ pub fn bridge_binary_path() -> Option<PathBuf> {
 /// Returns `None` when `data_dir()` is unresolvable. Computes the path only;
 /// the byte materialization is `ai_hooks::extract::ensure_ai_hook_extracted`.
 pub fn ai_hook_binary_path() -> Option<PathBuf> {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Some(
-        data_dir()?
-            .join("bin")
-            .join(format!("paneflow-ai-hook{suffix}")),
-    )
+    Some(data_dir()?.join("bin").join("paneflow-ai-hook"))
 }
 
 #[cfg(unix)]
@@ -337,11 +327,7 @@ mod socket_env_tests {
 
     #[test]
     fn socket_path_env_helper_requires_absolute_path() {
-        let absolute = if cfg!(windows) {
-            r"\\.\pipe\paneflow-test"
-        } else {
-            "/tmp/paneflow-test.sock"
-        };
+        let absolute = "/tmp/paneflow-test.sock";
         assert_eq!(
             socket_path_from_env(Some(std::ffi::OsString::from(absolute))),
             Some(PathBuf::from(absolute))

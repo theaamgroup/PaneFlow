@@ -136,7 +136,7 @@ impl TitleBar {
             agents_overflow: false,
             is_agents: false,
             cockpit: false,
-            cockpit_material_active: !cfg!(target_os = "windows"),
+            cockpit_material_active: true,
             button_layout_observer: None,
         }
     }
@@ -213,14 +213,13 @@ impl Render for TitleBar {
         // the minimize/maximize/close buttons vanish entirely on Windows.
         // macOS keeps its native traffic lights, so it stays gated on `is_csd`
         // (false there). Mirrors the settings title bar (settings/window.rs).
-        let render_controls = !window.is_fullscreen() && (is_csd || cfg!(target_os = "windows"));
+        let render_controls = !window.is_fullscreen() && is_csd;
 
         let left_controls = if render_controls {
             super::csd::render_button_group(
                 "l",
                 &layout.left,
                 is_maximized,
-                height,
                 &supported,
                 on_close.clone(),
             )
@@ -229,14 +228,7 @@ impl Render for TitleBar {
         };
 
         let right_controls = if render_controls {
-            super::csd::render_button_group(
-                "r",
-                &layout.right,
-                is_maximized,
-                height,
-                &supported,
-                on_close,
-            )
+            super::csd::render_button_group("r", &layout.right, is_maximized, &supported, on_close)
         } else {
             None
         };
@@ -776,10 +768,7 @@ impl Render for TitleBar {
             // Windows remains flush for native caption hit targets. Linux
             // right-side controls already own their 8px edge inset; macOS
             // and layouts without right controls keep the bar-level inset.
-            .when(
-                !cfg!(target_os = "windows") && !right_controls_present,
-                |d| d.pr(TITLE_BAR_EDGE_INSET),
-            );
+            .when(!right_controls_present, |d| d.pr(TITLE_BAR_EDGE_INSET));
 
         bar
             // Drag-to-move state machine

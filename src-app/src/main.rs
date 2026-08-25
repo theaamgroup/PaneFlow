@@ -1671,8 +1671,7 @@ impl Render for PaneFlowApp {
             ui.surface,
             chrome_material_active,
         );
-        let isolate_primary_sidebar_material =
-            cfg!(any(target_os = "windows", target_os = "macos")) && chrome_material_active;
+        let isolate_primary_sidebar_material = chrome_material_active;
         // Native sidebar material is isolated by an opaque shell mask. Reuse
         // that shell color for the main panel's corner wedges: transparent
         // paint cannot cover rectangular child backgrounds on Windows/macOS.

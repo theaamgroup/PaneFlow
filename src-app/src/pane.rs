@@ -79,11 +79,8 @@ fn tab_colors() -> crate::theme::UiColors {
 }
 
 fn tab_bar_background(theme: &crate::theme::TerminalTheme, terminal_material_active: bool) -> Hsla {
-    if terminal_material_active && cfg!(target_os = "windows") {
-        gpui::transparent_black()
-    } else {
-        theme.background
-    }
+    let _ = terminal_material_active;
+    theme.background
 }
 
 fn pane_content_background(
@@ -2916,11 +2913,7 @@ mod tests {
         let theme = crate::theme::one_dark();
 
         assert_eq!(tab_bar_background(&theme, false), theme.background);
-        if cfg!(target_os = "windows") {
-            assert_eq!(tab_bar_background(&theme, true).a, 0.0);
-        } else {
-            assert_eq!(tab_bar_background(&theme, true), theme.background);
-        }
+        assert_eq!(tab_bar_background(&theme, true), theme.background);
     }
 
     #[test]

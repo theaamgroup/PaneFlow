@@ -3091,7 +3091,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn platform_sep() -> char {
-        if cfg!(windows) { ';' } else { ':' }
+        ':'
     }
 
     #[test]

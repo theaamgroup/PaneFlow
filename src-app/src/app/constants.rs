@@ -182,9 +182,7 @@ pub(crate) fn cockpit_backdrop_background(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = is_window_active;
-        if !material_active {
-            background
-        } else if cfg!(any(target_os = "windows", target_os = "macos")) {
+        if material_active {
             gpui::transparent_black()
         } else {
             background

@@ -304,10 +304,11 @@ impl PaneFlowConfig {
         self.agent_stall_detection.unwrap_or(true)
     }
 
-    /// Resolve the Windows terminal material switch. Other platforms always
-    /// stay opaque even if the field exists in a shared config file.
+    /// Resolve the Windows terminal material switch. This fork is macOS only,
+    /// so the answer is always `false`; the field itself is still accepted in
+    /// the public schema so an existing config file does not fail to load.
     pub fn windows_terminal_material_enabled(&self) -> bool {
-        cfg!(target_os = "windows") && self.windows_terminal_material.unwrap_or(false)
+        false
     }
 
     fn window_backdrop_disables_chrome_material(&self) -> bool {
@@ -335,13 +336,7 @@ impl PaneFlowConfig {
             return false;
         }
 
-        if cfg!(target_os = "windows") {
-            self.windows_chrome_material.unwrap_or(false)
-        } else if cfg!(target_os = "macos") {
-            self.macos_chrome_material_enabled()
-        } else {
-            true
-        }
+        self.macos_chrome_material_enabled()
     }
 
     /// Resolve `agent_stall_threshold_secs`: default 60, clamped to
@@ -1930,10 +1925,7 @@ mod tests {
     #[test]
     fn cockpit_chrome_material_respects_current_platform_switch() {
         let cfg = PaneFlowConfig::default();
-        assert_eq!(
-            cfg.cockpit_chrome_material_enabled(),
-            !cfg!(target_os = "windows")
-        );
+        assert!(cfg.cockpit_chrome_material_enabled());
 
         let cfg = PaneFlowConfig {
             windows_chrome_material: Some(true),
@@ -1945,10 +1937,7 @@ mod tests {
             windows_chrome_material: Some(false),
             ..Default::default()
         };
-        assert_eq!(
-            cfg.cockpit_chrome_material_enabled(),
-            !cfg!(target_os = "windows")
-        );
+        assert!(cfg.cockpit_chrome_material_enabled());
 
         let cfg = PaneFlowConfig {
             window_backdrop: Some("opaque".to_string()),
