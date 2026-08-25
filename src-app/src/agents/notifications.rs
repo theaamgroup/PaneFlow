@@ -10,15 +10,8 @@ use gpui::BackgroundExecutor;
 use paneflow_config::schema::{AgentPanelConfig, NotifyWhenAgentWaiting, PaneFlowConfig};
 
 use crate::agent_launcher::TerminalAgent;
-#[cfg(target_os = "windows")]
-use crate::windows_app_identity::PANEFLOW_WINDOWS_AUMID;
 
 const NOTIFICATION_DETAIL_CAP_CHARS: usize = 512;
-
-#[cfg(target_os = "windows")]
-const PANEFLOW_WINDOWS_NOTIFICATION_ICON_ASSET: &str = "icons/paneflow.png";
-#[cfg(target_os = "windows")]
-const PANEFLOW_WINDOWS_NOTIFICATION_ICON_FILE: &str = "paneflow-notification.png";
 
 /// Window-active gate updated by `cx.observe_window_activation`.
 /// `true` while the OS reports the Paneflow window as the focused one.
@@ -177,87 +170,21 @@ fn show_desktop_notification(notification: DesktopNotification) -> Result<(), St
         .icon("paneflow")
         .timeout(std::time::Duration::from_secs(8));
 
-    #[cfg(any(all(unix, not(target_os = "macos")), target_os = "windows"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     builder.urgency(notification_urgency_for_platform(notification.urgency));
 
     #[cfg(all(unix, not(target_os = "macos")))]
     builder.hint(notify_rust::Hint::DesktopEntry("paneflow".to_string()));
 
-    #[cfg(target_os = "windows")]
-    {
-        let _ = crate::windows_app_identity::ensure_process_app_user_model_id();
-        let _ = ensure_windows_app_user_model_id_registered();
-        builder.app_id(PANEFLOW_WINDOWS_AUMID);
-    }
-
     builder.show().map(|_| ()).map_err(|err| err.to_string())
 }
 
-#[cfg(any(all(unix, not(target_os = "macos")), target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn notification_urgency_for_platform(urgency: DesktopNotificationUrgency) -> notify_rust::Urgency {
-    #[cfg(target_os = "windows")]
-    {
-        match urgency {
-            DesktopNotificationUrgency::Normal => notify_rust::Urgency::Normal,
-            DesktopNotificationUrgency::Critical => notify_rust::Urgency::Critical,
-        }
+    match urgency {
+        DesktopNotificationUrgency::Normal => notify_rust::Urgency::Normal,
+        DesktopNotificationUrgency::Critical => notify_rust::Urgency::Critical,
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        match urgency {
-            DesktopNotificationUrgency::Normal => notify_rust::Urgency::Normal,
-            DesktopNotificationUrgency::Critical => notify_rust::Urgency::Critical,
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn ensure_windows_app_user_model_id_registered() -> Result<(), String> {
-    let key_path = format!(r"SOFTWARE\Classes\AppUserModelId\{PANEFLOW_WINDOWS_AUMID}");
-    let key = windows_registry::CURRENT_USER
-        .create(&key_path)
-        .map_err(|err| format!("create HKCU\\{key_path}: {err}"))?;
-    key.set_string("DisplayName", "Paneflow")
-        .map_err(|err| format!("set DisplayName: {err}"))?;
-    key.set_string("IconBackgroundColor", "0")
-        .map_err(|err| format!("set IconBackgroundColor: {err}"))?;
-    let icon_path = ensure_windows_notification_icon()?;
-    key.set_hstring("IconUri", &icon_path.as_path().into())
-        .map_err(|err| format!("set IconUri: {err}"))?;
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn ensure_windows_notification_icon() -> Result<std::path::PathBuf, String> {
-    let data = crate::assets::Assets::get(PANEFLOW_WINDOWS_NOTIFICATION_ICON_ASSET)
-        .ok_or_else(|| {
-            format!(
-                "embedded notification icon {PANEFLOW_WINDOWS_NOTIFICATION_ICON_ASSET} not found"
-            )
-        })?
-        .data;
-    let icon_dir = crate::runtime_paths::data_dir()
-        .ok_or_else(|| "Paneflow data dir is unavailable for notification icon".to_string())?
-        .join("icons");
-    std::fs::create_dir_all(&icon_dir)
-        .map_err(|err| format!("create notification icon dir {}: {err}", icon_dir.display()))?;
-
-    let icon_path = icon_dir.join(PANEFLOW_WINDOWS_NOTIFICATION_ICON_FILE);
-    let needs_write = match std::fs::read(&icon_path) {
-        Ok(existing) => existing != data.as_ref(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
-        Err(err) => {
-            return Err(format!(
-                "read notification icon {}: {err}",
-                icon_path.display()
-            ));
-        }
-    };
-    if needs_write {
-        std::fs::write(&icon_path, data.as_ref())
-            .map_err(|err| format!("write notification icon {}: {err}", icon_path.display()))?;
-    }
-    Ok(icon_path)
 }
 
 #[cfg(test)]

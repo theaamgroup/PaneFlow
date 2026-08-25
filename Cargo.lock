@@ -6077,11 +6077,6 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "which 8.0.2",
- "widestring",
- "win32job",
- "windows-registry",
- "windows-sys 0.59.0",
- "winresource",
  "x11rb",
 ]
 
@@ -6105,7 +6100,6 @@ dependencies = [
  "interprocess",
  "serde_json",
  "tempfile",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6139,7 +6133,6 @@ version = "0.8.2"
 name = "paneflow-shim"
 version = "0.8.2"
 dependencies = [
- "ctrlc",
  "libc",
  "same-file",
  "serde_json",
@@ -9145,21 +9138,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml"
-version = "1.1.2+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
-dependencies = [
- "indexmap",
- "serde_core",
- "serde_spanned 1.1.1",
- "toml_datetime 1.1.1+spec-1.1.0",
- "toml_parser",
- "toml_writer",
- "winnow 1.0.1",
-]
-
-[[package]]
 name = "toml_datetime"
 version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10712,16 +10690,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
-name = "win32job"
-version = "2.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c6a6724ccfbf34154a8691bd868b0fcd2be2ca3f7b47b32614654f1a01b191c"
-dependencies = [
- "thiserror 1.0.69",
- "windows 0.61.3",
-]
-
-[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11301,16 +11269,6 @@ checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
 dependencies = [
  "cfg-if",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "winresource"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
-dependencies = [
- "toml 1.1.2+spec-1.1.0",
- "version_check",
 ]
 
 [[package]]
