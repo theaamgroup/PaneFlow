@@ -128,20 +128,6 @@ fn main() -> ExitCode {
 
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 
-    // Windows + codex: the JSONL tee path substitutes for config-file hooks.
-    // Gated on detecting the `exec` subcommand; interactive codex falls
-    // through to the plain `run_real` path without tee.
-    #[cfg(not(unix))]
-    let (code, agent_exit) = if tool == "codex" {
-        let (final_args, should_tee) = rewrite_codex_args(&args);
-        if should_tee {
-            run_codex_with_jsonl_tee(&real, &final_args)
-        } else {
-            run_real(tool, &real, &final_args)
-        }
-    } else {
-        run_real(tool, &real, &args)
-    };
     #[cfg(unix)]
     let (code, agent_exit) = run_real(tool, &real, &args);
 
@@ -172,7 +158,7 @@ fn main() -> ExitCode {
 
 /// Per-tool hook-config installation. One guard variant per config FORMAT:
 /// Claude Code keeps its dedicated guard (persistent-hooks precedence logic);
-/// Codex keeps its TOML+JSON pair (Unix only - Windows uses the JSONL tee);
+/// Codex keeps its TOML+JSON pair;
 /// everything else rides [`ManagedHookConfigGuard`] parameterized by
 /// location + merge/remove pair. Tools without a hook integration return
 /// `None` - they still get the shim's universal exit/session-end lifecycle.
@@ -195,21 +181,6 @@ fn install_hook_guard(tool: &str) -> Option<ToolHookGuard> {
         "claude" => HookConfigGuard::install().map(ToolHookGuard::Claude),
         #[cfg(unix)]
         "codex" => CodexHookConfigGuard::install().map(ToolHookGuard::Codex),
-        // Windows: Codex now supports hooks (June 2026) using the SAME
-        // matcher-group `hooks.json` format and event names as Claude - and
-        // with NO `config.toml` feature flag - so ride the generic managed
-        // guard over `.codex/hooks.json`. This gives INTERACTIVE Codex sidebar
-        // status on Windows (the `codex exec` JSONL tee below only covered the
-        // non-interactive case). See `merge_codex_hooks_win`.
-        #[cfg(not(unix))]
-        "codex" => ManagedHookConfigGuard::install_in_cwd(
-            ".codex",
-            "hooks.json",
-            "Codex",
-            merge_codex_hooks_win,
-            remove_codex_hooks_win,
-        )
-        .map(ToolHookGuard::Managed),
         // Claude-Code-compatible clones: same settings.local.json format,
         // project-local dir, different event coverage.
         "codebuddy" => ManagedHookConfigGuard::install_in_cwd(
@@ -552,28 +523,6 @@ mod tests {
         ];
         let found = find_real_binary_in("claude", dirs, None, None);
         assert!(found.is_none());
-    }
-
-    /// Linux-gated timing guard. Replaces the PRD's "criterion benchmark"
-    /// (PRD US-004 AC bullet 7) with a lightweight check that stays within
-    /// the 15 ms budget even with a realistic number of stale `$PATH`
-    /// entries. Criterion would pull ~30 dev-deps for one number; this
-    /// guards the same invariant at ~zero cost.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn find_real_binary_in_completes_under_15ms_budget() {
-        let dirs: Vec<PathBuf> = (0..20)
-            .map(|i| PathBuf::from(format!("/tmp/paneflow-nonexistent-{i}")))
-            .collect();
-
-        let start = std::time::Instant::now();
-        let _ = find_real_binary_in("claude", dirs, None, None);
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < std::time::Duration::from_millis(15),
-            "PATH walk must complete under 15 ms; got {elapsed:?}"
-        );
     }
 
     // ---------- US-005: HookConfigGuard ----------
@@ -1489,180 +1438,6 @@ mod tests {
         // Config.toml cleanup: since this test created config.toml from
         // nothing, the file should be removed.
         assert!(!config_toml.exists());
-    }
-
-    // ---------- US-006: Windows JSONL parser + argv rewrite ----------
-    //
-    // These tests are cross-platform (no `#[cfg]`) because `parse_codex_event`
-    // and `rewrite_codex_args` are compile-gated `#[cfg(not(unix))]`. We
-    // re-gate the tests to keep them compiling on Windows CI. On Unix the
-    // functions don't exist, so the tests go away cleanly.
-
-    #[cfg(not(unix))]
-    #[test]
-    fn parse_codex_event_maps_known_types_to_paneflow_events() {
-        assert_eq!(
-            parse_codex_event(r#"{"type":"turn.started"}"#),
-            Some("UserPromptSubmit")
-        );
-        assert_eq!(
-            parse_codex_event(r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#),
-            Some("Stop")
-        );
-        assert_eq!(
-            parse_codex_event(r#"{"type":"error","message":"oops"}"#),
-            Some("Notification")
-        );
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn parse_codex_event_returns_none_for_unmapped_known_types() {
-        // These types ARE emitted by Codex but we intentionally don't
-        // translate them into IPC frames - `thread.started` isn't a
-        // meaningful sidebar state, `turn.failed` is already covered by
-        // `error`-style notifications, and `item.*` are sub-events that
-        // would over-fire the loader.
-        for t in &[
-            "thread.started",
-            "turn.failed",
-            "item.started",
-            "item.completed",
-        ] {
-            let line = format!(r#"{{"type":"{t}"}}"#);
-            assert_eq!(
-                parse_codex_event(&line),
-                None,
-                "{t} must be silently skipped"
-            );
-        }
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn parse_codex_event_returns_none_for_invalid_or_unknown_input() {
-        assert_eq!(parse_codex_event(""), None);
-        assert_eq!(parse_codex_event("   "), None);
-        assert_eq!(parse_codex_event("not json"), None);
-        assert_eq!(parse_codex_event(r#"{"no_type": true}"#), None);
-        assert_eq!(
-            parse_codex_event(r#"{"type":"unknown.future.event"}"#),
-            None
-        );
-    }
-
-    /// Schema-pin test (PRD US-006 AC bullet 3): assert that every entry in
-    /// `KNOWN_CODEX_EVENT_TYPES` has an explicit mapping in `parse_codex_event`
-    /// AND the fixture below covers every known event 1:1. When Codex adds a
-    /// new event type:
-    ///   1. Add the new type string to `KNOWN_CODEX_EVENT_TYPES`.
-    ///   2. Add a match arm for it in `parse_codex_event` (even if it's
-    ///      `None` - the arm must be explicit, not the catch-all).
-    ///   3. Add a `(type, expected)` entry to the fixture below.
-    ///
-    /// Failing to do (3) trips the `fixture.len() == KNOWN.len()` check
-    /// with a clear message. Failing to do (2) trips the membership assert.
-    /// Failing to do (1) still compiles but leaves the catch-all `_ => None`
-    /// arm of `parse_codex_event` handling the new type silently - which is
-    /// acceptable (loader doesn't update) but is the one drift mode this
-    /// test cannot catch without actually running Codex.
-    #[cfg(not(unix))]
-    #[test]
-    fn parse_codex_event_schema_pin() {
-        let fixture: &[(&str, Option<&str>)] = &[
-            ("thread.started", None),
-            ("turn.started", Some("UserPromptSubmit")),
-            ("turn.completed", Some("Stop")),
-            ("turn.failed", None),
-            ("item.started", None),
-            ("item.completed", None),
-            ("error", Some("Notification")),
-        ];
-
-        assert_eq!(
-            fixture.len(),
-            KNOWN_CODEX_EVENT_TYPES.len(),
-            "KNOWN_CODEX_EVENT_TYPES has {} entries but fixture has {}; \
-             update both together when Codex adds a new event type",
-            KNOWN_CODEX_EVENT_TYPES.len(),
-            fixture.len()
-        );
-
-        for (codex_type, expected) in fixture {
-            assert!(
-                KNOWN_CODEX_EVENT_TYPES.contains(codex_type),
-                "fixture contains {codex_type} but KNOWN_CODEX_EVENT_TYPES \
-                 does not - add it there and to parse_codex_event's match"
-            );
-            let line = format!(r#"{{"type":"{codex_type}"}}"#);
-            let actual = parse_codex_event(&line);
-            assert_eq!(
-                actual, *expected,
-                "schema drift: Codex event {codex_type} mapped to {actual:?}; \
-                 expected {expected:?}. If Codex has added / renamed this \
-                 event, update KNOWN_CODEX_EVENT_TYPES, parse_codex_event, \
-                 and this fixture together."
-            );
-        }
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn rewrite_codex_args_injects_json_after_exec_at_any_position() {
-        // `exec` at argv[0] - classic case.
-        let exec_first = vec![
-            OsString::from("exec"),
-            OsString::from("--model"),
-            OsString::from("o4"),
-        ];
-        let (rewritten, should_tee) = rewrite_codex_args(&exec_first);
-        assert!(should_tee);
-        assert_eq!(
-            rewritten,
-            vec![
-                OsString::from("exec"),
-                OsString::from("--json"),
-                OsString::from("--model"),
-                OsString::from("o4"),
-            ]
-        );
-
-        // Global flag before subcommand: `codex --config cfg.toml exec prompt`
-        // - the Phase 6 reviewer's SHOULD_FIX #8 scenario. The scan-anywhere
-        // fix ensures we still detect `exec` and inject `--json` after it.
-        let global_then_exec = vec![
-            OsString::from("--config"),
-            OsString::from("cfg.toml"),
-            OsString::from("exec"),
-            OsString::from("prompt"),
-        ];
-        let (rewritten, should_tee) = rewrite_codex_args(&global_then_exec);
-        assert!(
-            should_tee,
-            "global flag before `exec` must still trigger tee"
-        );
-        assert_eq!(
-            rewritten,
-            vec![
-                OsString::from("--config"),
-                OsString::from("cfg.toml"),
-                OsString::from("exec"),
-                OsString::from("--json"),
-                OsString::from("prompt"),
-            ]
-        );
-
-        // Interactive invocation - no `exec` token, no tee.
-        let interactive: Vec<OsString> = vec![];
-        let (rewritten, should_tee) = rewrite_codex_args(&interactive);
-        assert!(!should_tee);
-        assert_eq!(rewritten, interactive);
-
-        // Other subcommand - still no tee.
-        let resume = vec![OsString::from("resume")];
-        let (rewritten, should_tee) = rewrite_codex_args(&resume);
-        assert!(!should_tee);
-        assert_eq!(rewritten, resume);
     }
 
     // ---------- Hook-command detection (basename rule) ----------

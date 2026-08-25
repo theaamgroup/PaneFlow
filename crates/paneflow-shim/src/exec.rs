@@ -74,7 +74,7 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
     //
     // Without this `pre_exec` reset+unblock, the child would inherit both
     // and Ctrl+C would do absolutely nothing (the AI would never see it,
-    // since `SIG_BLOCK`'d signals on a Linux process stay blocked across
+    // since `SIG_BLOCK`'d signals on a process stay blocked across
     // `execve`).
     //
     // `pre_exec` runs in the forked child between fork() and execve(). All
@@ -82,13 +82,7 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
-        // US-037: capture the shim's own PID in the parent, before fork. Inside
-        // `pre_exec` (post-fork, in the child) `std::process::id()` would return
-        // the child's PID, so the parent PID must be captured here and moved into
-        // the closure to detect reparenting below.
-        #[cfg(target_os = "linux")]
-        let shim_pid = std::process::id();
-        cmd.pre_exec(move || {
+        cmd.pre_exec(|| {
             libc::signal(libc::SIGINT, libc::SIG_DFL);
             libc::signal(libc::SIGHUP, libc::SIG_DFL);
             libc::signal(libc::SIGTERM, libc::SIG_DFL);
@@ -99,58 +93,6 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
             libc::sigaddset(&mut set, libc::SIGTERM);
             libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
 
-            // US-016 (cli-hardening-followup-2026-Q3): on Linux,
-            // install PR_SET_PDEATHSIG so the spawned agent CLI
-            // (claude/codex/opencode) is killed by the kernel as
-            // soon as the shim's parent process (Paneflow) dies --
-            // even on a hard `kill -9` of Paneflow that bypasses
-            // any graceful Drop discipline. Without this, the agent
-            // is reparented to PID 1 and keeps streaming, burning
-            // the user's API tokens until its natural timeout.
-            //
-            // `parent_guard.rs` documents this gap on Linux/macOS
-            // because the GPUI app spawns through
-            // `portable-pty::CommandBuilder` which does not expose
-            // `pre_exec`. The shim wraps ~80% of those spawns
-            // (claude/codex/opencode all go through it) so this
-            // covers the realistic Linux path. macOS uses a stub
-            // pending kqueue NOTE_EXIT (out of US-016 scope).
-            //
-            // SAFETY: prctl is async-signal-safe; the call happens
-            // in the forked child between fork() and execve().
-            // A non-zero return is rare (only on a stripped kernel
-            // without prctl PR_SET_PDEATHSIG support) and is best-
-            // effort: we emit nothing on stderr because writing
-            // from pre_exec is not async-signal-safe in general,
-            // and we explicitly do NOT abort the exec -- letting
-            // the child run without PDEATHSIG is strictly better
-            // than failing the spawn entirely.
-            #[cfg(target_os = "linux")]
-            {
-                let _ = libc::prctl(
-                    libc::PR_SET_PDEATHSIG,
-                    libc::SIGKILL as libc::c_ulong,
-                    0,
-                    0,
-                    0,
-                );
-                // US-037: close the fork↔prctl race. PDEATHSIG only fires on
-                // a parent death that happens AFTER it's armed; if the shim
-                // (our parent) already died in the window between fork() and
-                // this prctl, the kernel never delivers the signal. A getppid()
-                // that no longer matches the shim's captured PID means we were
-                // already reparented - to init (PID 1) OR, on a host where
-                // Paneflow runs under `systemd --user` (a PR_SET_CHILD_SUBREAPER
-                // reaper), to the user manager whose PID is not 1. Comparing to
-                // the captured `shim_pid` rather than the literal 1 catches the
-                // subreaper case that `== 1` silently misses on modern Linux
-                // desktops, so an orphaned agent self-terminates instead of
-                // streaming on and burning the user's API tokens. Both calls are
-                // async-signal-safe.
-                if libc::getppid() as u32 != shim_pid {
-                    libc::raise(libc::SIGKILL);
-                }
-            }
             Ok(())
         });
     }
@@ -183,9 +125,8 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
         }
     };
 
-    // EP-005 US-017: macOS parity for the Linux `PR_SET_PDEATHSIG` guard - kill
-    // the agent if Paneflow dies, so a `kill -9` of Paneflow leaves no orphan.
-    // Spawned after we hold the child PID.
+    // EP-005 US-017: kill the agent if Paneflow dies, so a `kill -9` of
+    // Paneflow leaves no orphan. Spawned after we hold the child PID.
     #[cfg(target_os = "macos")]
     spawn_parent_death_guard(child.id(), parent_pid, std::sync::Arc::clone(&child_reaped));
 
@@ -388,22 +329,14 @@ pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
     });
 }
 
-/// EP-005 US-017 (agent-control-plane): macOS parity for the Linux
-/// `PR_SET_PDEATHSIG` guard (the `exec.rs` stub). When Paneflow is hard-killed
+/// EP-005 US-017 (agent-control-plane): when Paneflow is hard-killed
 /// (`kill -9`, bypassing every graceful Drop), the shim is reparented to
 /// `launchd` and the agent it spawned would otherwise keep streaming and burn
-/// the user's API tokens. kqueue `NOTE_EXIT` is the textbook idiom, but the AC
-/// allows "ou équivalent": a tiny thread that polls `getppid()` is the same
-/// reparent-detection the Linux US-037 race-close already uses (`getppid() !=
-/// captured parent`), with no fragile `kevent` struct FFI. `parent_pid` is
-/// captured BEFORE the spawn. On a detected reparent the agent is `SIGKILL`ed;
-/// the loop also exits once the agent is already gone, so the thread never
-/// outlives the work.
-///
-/// Not built into the host (Linux) binary. Compile-verified by `cargo check
-/// --target x86_64-apple-darwin`, but a macOS RUNTIME smoke test (`kill -9`
-/// Paneflow, confirm no orphaned agent survives) is still required before it is
-/// trusted.
+/// the user's API tokens. A tiny thread polls `getppid()` for reparenting
+/// (`getppid() != captured parent`), with no fragile `kevent` struct FFI.
+/// `parent_pid` is captured BEFORE the spawn. On a detected reparent the agent
+/// is `SIGKILL`ed; the loop also exits once the agent is already gone, so the
+/// thread never outlives the work.
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_parent_death_guard(
     child_pid: u32,

@@ -1,5 +1,4 @@
-//! Claude Code hook-config injection + Codex hook config + Windows JSONL tee
-//! (US-052 split).
+//! Claude Code hook-config injection + Codex hook config (US-052 split).
 
 use crate::locate_sibling_hook_binary;
 use std::env;
@@ -11,16 +10,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-// US-052: the Windows JSONL-tee path (`run_codex_with_jsonl_tee`, cfg'd out on
-// Unix) reuses the exec module's exit-status mapping and needs the process /
-// OS-string types. All cfg-gated so they aren't flagged unused on the Unix
-// build where the tee code is absent.
-#[cfg(not(unix))]
-use crate::exec::{exit_code_from_status, raw_exit_code_from_status};
-#[cfg(not(unix))]
-use std::ffi::OsString;
-#[cfg(not(unix))]
-use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // Hook config injection (US-005) - idempotent `.claude/settings.local.json`
@@ -2058,17 +2047,11 @@ pub(crate) fn write_atomic(path: &Path, value: &serde_json::Value) -> std::io::R
 /// Codex hook events (per Codex docs as of April 2026). Notably `Notification`
 /// is NOT a Codex hook event - Claude Code has one but Codex does not. The
 /// `paneflow-ai-hook` binary (US-003) accepts `Notification` as a valid event
-/// name, but it's only fired from Windows JSONL `error` events (see
-/// `parse_codex_event`), never from this hooks.json registration.
+/// name, but it is never registered in this hooks.json.
 ///
-/// Cross-platform as of June 2026: Codex now supports hooks on **Windows**
-/// too (a `commandWindows` override field, and no `[features] hooks = true`
-/// flag is required - hooks are on by default). Codex's `hooks.json` uses the
-/// SAME matcher-group shape and the SAME event names as Claude Code, so the
-/// Windows build registers these via [`merge_codex_hooks_win`] (a plain
-/// `ManagedHookConfigGuard` over `.codex/hooks.json`), while Unix keeps
-/// `CodexHookConfigGuard` (which additionally toggles the `config.toml`
-/// feature flag still required there).
+/// Codex's `hooks.json` uses the same matcher-group shape and the same event
+/// names as Claude Code. Registration goes through `CodexHookConfigGuard`,
+/// which also toggles the `config.toml` feature flag still required on Unix.
 pub(crate) const CODEX_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -2077,19 +2060,6 @@ pub(crate) const CODEX_HOOK_EVENTS: &[&str] = &[
     "PermissionRequest",
     "Stop",
 ];
-
-/// Windows Codex hook merge/remove. Reuses the shared Claude-format
-/// matcher-group helpers (Codex's `hooks.json` is byte-compatible) with the
-/// Codex event set. Unlike `CodexHookConfigGuard`, no `config.toml` feature
-/// flag is toggled - Codex enables hooks by default on Windows.
-#[cfg(not(unix))]
-pub(crate) fn merge_codex_hooks_win(root: &mut serde_json::Value) {
-    merge_matcher_hooks_for_events_with(root, CODEX_HOOK_EVENTS, codex_windows_hook_handler);
-}
-#[cfg(not(unix))]
-pub(crate) fn remove_codex_hooks_win(root: &mut serde_json::Value) {
-    remove_matcher_hooks_for_events(root, CODEX_HOOK_EVENTS);
-}
 
 /// Marker for the TOML comment placed above `hooks = true` in
 /// `~/.codex/config.toml`. Cleanup scans for this literal line.
@@ -2501,199 +2471,6 @@ pub(crate) fn strip_codex_feature_block(content: &str) -> Option<String> {
     Some(out)
 }
 
-// ---------------------------------------------------------------------------
-// Codex Windows JSONL fallback (US-006, non-Unix)
-// ---------------------------------------------------------------------------
-//
-// Codex hook machinery is disabled on Windows as of April 2026. Instead, the
-// shim spawns `codex exec --json`, tees the child's stdout (so the user sees
-// every byte unchanged), and dispatches `paneflow-ai-hook <Event>` subprocesses
-// on recognized NDJSON events. Only the `exec` subcommand supports `--json`;
-// interactive `codex` invocations on Windows pass through without tee - they
-// simply won't produce sidebar state updates (documented regression).
-
-#[cfg(not(unix))]
-/// Decide whether to tee + inject `--json`. The `exec` subcommand is the only
-/// Codex mode that emits NDJSON; other invocations (`codex`, `codex resume`,
-/// `codex --help`) must pass through unmodified.
-///
-/// Scans for `"exec"` anywhere in argv rather than only at position 0, so
-/// that global flags preceding the subcommand (e.g.,
-/// `codex --config cfg.toml exec prompt`) are still detected. Known false-
-/// positive edge: a user who passes `exec` as the VALUE of a preceding
-/// value-taking flag (e.g., `codex --profile exec`) would get `--json`
-/// injected; Codex then errors clearly and the user can bypass the shim
-/// by invoking the real binary directly. Accepting this trade because
-/// missing the tee on `codex --config X exec` is a silent regression,
-/// while the false-positive is loud and bypassable.
-pub(crate) fn rewrite_codex_args(args: &[OsString]) -> (Vec<OsString>, bool) {
-    let Some(exec_idx) = args.iter().position(|a| a == "exec") else {
-        return (args.to_vec(), false);
-    };
-    let mut rewritten = Vec::with_capacity(args.len() + 1);
-    rewritten.extend_from_slice(&args[..=exec_idx]);
-    rewritten.push(OsString::from("--json"));
-    rewritten.extend(args[exec_idx + 1..].iter().cloned());
-    (rewritten, true)
-}
-
-/// The full catalog of Codex NDJSON `"type"` discriminators documented at
-/// <https://developers.openai.com/codex/noninteractive> as of April 2026.
-/// `parse_codex_event`'s match arms MUST exhaustively cover every string in
-/// this list so the schema-pin test can detect drift. When Codex adds a new
-/// event type, add it to BOTH this const AND to a `match` arm in
-/// `parse_codex_event` (even if the arm is just `None`).
-///
-/// Test-only: the runtime `parse_codex_event` enumerates the strings inline
-/// rather than referencing this const, so without `cfg(test)` the const is
-/// dead code under `-D warnings` on Windows non-test builds.
-#[cfg(all(test, not(unix)))]
-pub(crate) const KNOWN_CODEX_EVENT_TYPES: &[&str] = &[
-    "thread.started",
-    "turn.started",
-    "turn.completed",
-    "turn.failed",
-    "item.started",
-    "item.completed",
-    "error",
-];
-
-/// Map a Codex NDJSON line to a `paneflow-ai-hook` event name. Returns
-/// `None` for unrecognized / sub-event / malformed lines so the caller can
-/// log-and-skip without breaking the tee loop.
-#[cfg(not(unix))]
-pub(crate) fn parse_codex_event(line: &str) -> Option<&'static str> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let event_type = value.get("type")?.as_str()?;
-    match event_type {
-        "turn.started" => Some("UserPromptSubmit"),
-        "turn.completed" => Some("Stop"),
-        "error" => Some("Notification"),
-        // Known-but-unmapped events: explicit arms (not a catch-all) so
-        // adding a new Codex event type without touching this match arm
-        // requires a code change, which the schema-pin test will then
-        // either accept (if the fixture is updated) or fail loudly.
-        "thread.started" | "turn.failed" | "item.started" | "item.completed" => None,
-        // Truly unknown (new Codex event type we don't recognize yet):
-        // silently skip. The schema-pin test cross-checks this against
-        // KNOWN_CODEX_EVENT_TYPES so drift is surfaced at dev time.
-        _ => None,
-    }
-}
-
-// EP-004 US-010: returns the raw agent exit code alongside, mirroring
-// `run_real` - `main` emits `ai.exit` from it. `None` on spawn/wait failure.
-#[cfg(not(unix))]
-pub(crate) fn run_codex_with_jsonl_tee(path: &Path, args: &[OsString]) -> (ExitCode, Option<i32>) {
-    use std::io::{BufRead, BufReader};
-    use std::process::Stdio;
-
-    let mut child = match std::process::Command::new(path)
-        .args(args)
-        .envs(env::vars_os())
-        .env("PANEFLOW_AI_TOOL", "codex")
-        .env("PANEFLOW_AI_PID", std::process::id().to_string())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "paneflow-shim: spawn '{}' failed: {e}",
-                safe_path_display(path)
-            );
-            return (ExitCode::from(127), None);
-        }
-    };
-
-    // Resolve the sibling hook binary ONCE before the tee loop. Bare-name
-    // `Command::new("paneflow-ai-hook")` works on Windows only when the
-    // shim cache dir is already on `%PATH%`, which is a per-PTY contract
-    // not guaranteed at the moment this function spawns its first hook.
-    // Resolving by absolute path matches every other call site in this
-    // crate (`send_interrupt_stop`, `notify_session_end`).
-    let hook_path = locate_sibling_hook_binary();
-
-    // Take stdout so we can tee it. If the child was spawned without piped
-    // stdout somehow, skip the tee entirely and fall through to wait().
-    if let Some(stdout) = child.stdout.take() {
-        // Reader thread: keeps the child's stdout drained (prevents pipe
-        // fills) and dispatches hook events as they arrive.
-        let tee_handle = std::thread::spawn(move || {
-            let mut out = std::io::stdout().lock();
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                // Echo the line verbatim, preserving Codex's NDJSON so any
-                // downstream tooling (jq, log-tailers) still works.
-                let _ = std::io::Write::write_all(&mut out, line.as_bytes());
-                let _ = std::io::Write::write_all(&mut out, b"\n");
-                let _ = std::io::Write::flush(&mut out);
-
-                if let Some(event) = parse_codex_event(&line) {
-                    // Fire-and-forget: we don't wait on the hook binary so
-                    // the tee loop keeps pace with Codex's output. This
-                    // function is compiled only on non-Unix (`#[cfg(not
-                    // (unix))]`) - on Windows, dropping the `Child` handle
-                    // releases the OS handle and the subprocess runs to
-                    // completion independently, with the OS reaping it
-                    // when it exits. No zombies, no cleanup required.
-                    //
-                    // Known limitation (Phase 7 audit, MEDIUM #8): there is
-                    // no rate limit. If Codex ever emits thousands of events
-                    // per second, the shim would spawn thousands of
-                    // subprocesses per second. Typical Codex output is a
-                    // few events/sec, so this is tolerated without state.
-                    if let Some(ref hp) = hook_path {
-                        let _ = std::process::Command::new(hp)
-                            .arg(event)
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .spawn();
-                    }
-                }
-            }
-        });
-        // Join the reader thread AFTER wait() so all buffered output makes
-        // it to the user before we exit.
-        let status = child.wait();
-        let _ = tee_handle.join();
-        match status {
-            Ok(s) => (
-                exit_code_from_status(&s),
-                Some(raw_exit_code_from_status(&s)),
-            ),
-            Err(e) => {
-                eprintln!(
-                    "paneflow-shim: wait on '{}' failed: {e}",
-                    safe_path_display(path)
-                );
-                (ExitCode::from(127), None)
-            }
-        }
-    } else {
-        match child.wait() {
-            Ok(s) => (
-                exit_code_from_status(&s),
-                Some(raw_exit_code_from_status(&s)),
-            ),
-            Err(e) => {
-                eprintln!(
-                    "paneflow-shim: wait on '{}' failed: {e}",
-                    safe_path_display(path)
-                );
-                (ExitCode::from(127), None)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod hooks_tests {
     use super::reachable_from_socket_env;
@@ -2716,67 +2493,6 @@ mod hooks_tests {
             display_hook_program(p),
             "/home/u/.cache/paneflow/bin/0.4.4/paneflow-ai-hook"
         );
-    }
-
-    /// Windows Codex hooks (June 2026): `.codex/hooks.json` must carry one
-    /// paneflow matcher-group per Codex event, with a PowerShell-safe generic
-    /// command and Windows override - and must NOT register `Notification`
-    /// (not a Codex event). Round-trips to empty on removal.
-    #[cfg(not(unix))]
-    #[test]
-    fn codex_win_merge_writes_shell_safe_matcher_groups() {
-        use super::{
-            is_paneflow_matcher_group, merge_codex_hooks_win, remove_codex_hooks_win,
-            CODEX_HOOK_EVENTS,
-        };
-        let mut root = json!({});
-        merge_codex_hooks_win(&mut root);
-        for event in CODEX_HOOK_EVENTS {
-            let arr = root["hooks"][*event]
-                .as_array()
-                .unwrap_or_else(|| panic!("missing event {event}"));
-            assert_eq!(arr.len(), 1, "{event}: exactly one paneflow entry");
-            assert!(is_paneflow_matcher_group(&arr[0]), "{event}: detectable");
-            let handler = &arr[0]["hooks"][0];
-            let cmd = handler["command"].as_str().unwrap();
-            assert!(
-                cmd.starts_with("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& '"),
-                "{event}: command must run through PowerShell explicitly, got {cmd}"
-            );
-            assert!(
-                cmd.ends_with(&format!(" {event}\"")),
-                "{event}: command must preserve the event arg, got {cmd}"
-            );
-            assert!(
-                cmd.contains("paneflow-ai-hook"),
-                "{event}: command must invoke the ai-hook binary, got {cmd}"
-            );
-            let mut marker_stripped = arr[0].clone();
-            marker_stripped
-                .as_object_mut()
-                .unwrap()
-                .remove("_paneflow_managed");
-            assert!(
-                is_paneflow_matcher_group(&marker_stripped),
-                "{event}: command fallback must remain detectable if the marker is stripped"
-            );
-            let win_cmd = handler["commandWindows"].as_str().unwrap();
-            assert_eq!(
-                win_cmd, cmd,
-                "{event}: commandWindows must stay as shell-safe as command"
-            );
-        }
-        assert!(
-            root["hooks"].get("Notification").is_none(),
-            "Notification is not a Codex hook event"
-        );
-        // Idempotent + clean removal.
-        merge_codex_hooks_win(&mut root);
-        for event in CODEX_HOOK_EVENTS {
-            assert_eq!(root["hooks"][*event].as_array().unwrap().len(), 1);
-        }
-        remove_codex_hooks_win(&mut root);
-        assert_eq!(root, json!({}));
     }
 
     #[test]
