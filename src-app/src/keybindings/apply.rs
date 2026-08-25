@@ -204,15 +204,6 @@ mod tests {
         assert!(!keystrokes_conflict("ctrl-shift-f", "ctrl-shift-g"));
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn keystrokes_conflict_resolves_secondary_on_linux() {
-        // `secondary` resolves to ctrl on Linux, so a default written with the
-        // shorthand collides with a concrete ctrl chord.
-        assert!(keystrokes_conflict("secondary-shift-d", "ctrl-shift-d"));
-        assert!(!keystrokes_conflict("secondary-shift-d", "alt-shift-d"));
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn keystrokes_conflict_resolves_secondary_on_macos() {

@@ -418,10 +418,8 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
 /// Platform-specific default bindings layered on top of [`DEFAULTS`].
 ///
 /// US-010 binds `cmd-c` / `cmd-v` to terminal copy/paste on macOS so muscle
-/// memory from iTerm2 / Terminal.app / WezTerm works. Kept empty on Linux
-/// (AC5) because Linux keyboards don't have a `cmd` key by default. The
-/// existing `ctrl-shift-c/v` Terminal bindings stay intact on both platforms -
-/// these are purely additive.
+/// memory from iTerm2 / Terminal.app / WezTerm works. The existing
+/// `ctrl-shift-c/v` Terminal bindings stay intact - these are purely additive.
 #[cfg(target_os = "macos")]
 pub(super) const MACOS_ONLY_DEFAULTS: &[DefaultBinding] = &[
     DefaultBinding {
@@ -443,9 +441,6 @@ pub(super) const MACOS_ONLY_DEFAULTS: &[DefaultBinding] = &[
         context: None,
     },
 ];
-
-#[cfg(not(target_os = "macos"))]
-pub(super) const MACOS_ONLY_DEFAULTS: &[DefaultBinding] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -567,16 +562,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn us010_no_cmd_bindings_on_linux() {
-        assert!(
-            MACOS_ONLY_DEFAULTS.is_empty(),
-            "Linux build should carry zero macOS-only defaults, got {} entries",
-            MACOS_ONLY_DEFAULTS.len()
-        );
-    }
-
     #[test]
     fn us010_ctrl_c_never_bound_to_terminal_copy() {
         // AC4: plain `ctrl-c` (without shift) must never reach terminal_copy
@@ -605,11 +590,5 @@ mod tests {
             .expect("cmd-q must be a macOS default");
         assert_eq!(quit.action_name, "quit");
         assert_eq!(quit.context, None);
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn us012_no_cmd_q_on_linux() {
-        assert!(MACOS_ONLY_DEFAULTS.iter().all(|d| d.key != "cmd-q"));
     }
 }

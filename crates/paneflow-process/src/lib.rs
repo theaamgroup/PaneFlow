@@ -184,9 +184,6 @@ fn configure_process_tree(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
-#[cfg(not(unix))]
-fn configure_process_tree(_cmd: &mut Command) {}
-
 fn poll_sleep_duration(start: Instant, deadline: Duration) -> Option<Duration> {
     let elapsed = start.elapsed();
     if elapsed >= deadline {

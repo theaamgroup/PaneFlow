@@ -31,7 +31,7 @@
 /// **Failure mode** (US-012 AC7): if Core Text returns no descriptors
 /// (sandbox restriction, framework not loaded, OS bug) we return
 /// `Vec::new()` and log a warning - the picker shows empty rather than
-/// panicking. Mirrors the Linux `fc-list` branch's fallback semantics.
+/// panicking.
 ///
 /// **Performance**: Core Text caches the font collection internally, so
 /// subsequent calls return in well under the PRD's 200 ms warm-cache
@@ -115,43 +115,6 @@ mod lenient_font_attributes {
                 .map(|s| s.to_string())
         }
     }
-}
-
-/// Linux / FreeBSD / OpenBSD / NetBSD / other unixes.
-///
-/// Keeps the `fc-list` path that was shared with macOS pre-US-012. Any
-/// unix target that isn't macOS lands here; if fontconfig isn't present
-/// the spawn fails cleanly and the picker renders empty (same
-/// fallback-on-failure invariant as the macOS and Windows branches).
-#[cfg(not(target_os = "macos"))]
-pub fn load_mono_fonts() -> Vec<String> {
-    use std::collections::BTreeSet;
-
-    let output = match std::process::Command::new("fc-list")
-        .args([":spacing=mono", "family"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!("fonts: fc-list failed: {e}");
-            return Vec::new();
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut families = BTreeSet::new();
-
-    for line in stdout.lines() {
-        // fc-list may output "Family1,Family2" on a single line
-        for part in line.split(',') {
-            let name = part.trim();
-            if !name.is_empty() {
-                families.insert(name.to_string());
-            }
-        }
-    }
-
-    families.into_iter().collect()
 }
 
 #[cfg(all(test, target_os = "macos"))]

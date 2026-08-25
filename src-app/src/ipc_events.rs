@@ -13,19 +13,6 @@
 //! counter conveys the loss; the broadcaster (the render thread) is never
 //! blocked.
 
-// EP-006 US-013: `events.subscribe` now streams on Windows too - the named-pipe
-// push path (`ipc.rs::serve_subscription`) is no longer Unix-only, and its write
-// side is guarded by a PeekNamedPipe liveness probe so a disconnected subscriber
-// evicts cleanly instead of aborting the process. So the subscribe-side items
-// here (filter parser, `Subscription` RAII handle, `EventBus::subscribe`) have a
-// caller on every platform now. The `allow` is kept as a defensive belt only:
-// the full paneflow-app cannot be cross-checked for Windows on the Linux build
-// host (an unrelated dep, `psm`, fails to assemble), so it guards against a
-// surprise `-D warnings` dead-code failure on the Windows CI leg should any one
-// subscribe-side helper go unexercised there. Drop it once a Windows build
-// confirms every item is live. The broadcast side stays live on every platform.
-#![cfg_attr(not(unix), allow(dead_code))]
-
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};

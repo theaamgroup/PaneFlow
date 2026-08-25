@@ -344,23 +344,9 @@ pub fn start_server() -> (
             let mut last_health_check = std::time::Instant::now();
             #[cfg(unix)]
             let mut listener = listener;
-            #[cfg(not(unix))]
-            let listener = listener;
 
-            // Non-blocking accept is UNIX-ONLY: it lets the loop periodically
-            // re-verify the socket inode (clobber detection) without starving
-            // connections. On Windows there is no inode/clobber check, and
-            // `interprocess`'s non-blocking named-pipe accept mismanages pipe
-            // instances - the accepted `Stream` does not correspond to the
-            // client that actually wrote, so the handler's read blocks forever
-            // (the frame is "sent OK" by the hook but never delivered to the
-            // server read), and that blocked read aborts the whole process at
-            // shutdown (STATUS_STACK_BUFFER_OVERRUN, observed in the field).
-            // BLOCKING accept on Windows matches the reliable MockServer used
-            // by the ai-hook integration suite: accept() waits in the kernel on
-            // a single pending instance, so every client's data is delivered to
-            // exactly the handler that accepted it. Stream I/O is blocking on
-            // both platforms so `handle_connection` can use plain `BufRead`.
+            // Non-blocking accept lets the loop periodically re-verify the
+            // socket inode (clobber detection) without starving connections.
             #[cfg(unix)]
             listener
                 .set_nonblocking(ListenerNonblockingMode::Accept)
@@ -828,21 +814,12 @@ fn peer_pid(stream: &Stream) -> Option<i64> {
         .map(|p| p as i64)
 }
 
-#[cfg(not(unix))]
-fn peer_pid(_stream: &Stream) -> Option<i64> {
-    None
-}
-
 fn handle_connection(
     stream: Stream,
     request_tx: mpsc::SyncSender<IpcRequest>,
     event_bus: Arc<crate::ipc_events::EventBus>,
     active_subscriptions: Arc<AtomicUsize>,
 ) {
-    // EP-006 US-013: `event_bus` now feeds `serve_subscription` on BOTH
-    // platforms (the Windows event stream is no longer stubbed), so the former
-    // `#[cfg(not(unix))] let _ = &event_bus;` unused-variable shim is gone.
-
     // `Stream::try_clone` is provided by `interprocess::TryClone` and
     // works on both Unix domain sockets and Windows named pipes. One
     // handle reads, the other writes, so request/response flow does not

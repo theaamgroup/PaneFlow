@@ -170,21 +170,7 @@ fn show_desktop_notification(notification: DesktopNotification) -> Result<(), St
         .icon("paneflow")
         .timeout(std::time::Duration::from_secs(8));
 
-    #[cfg(all(unix, not(target_os = "macos")))]
-    builder.urgency(notification_urgency_for_platform(notification.urgency));
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    builder.hint(notify_rust::Hint::DesktopEntry("paneflow".to_string()));
-
     builder.show().map(|_| ()).map_err(|err| err.to_string())
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn notification_urgency_for_platform(urgency: DesktopNotificationUrgency) -> notify_rust::Urgency {
-    match urgency {
-        DesktopNotificationUrgency::Normal => notify_rust::Urgency::Normal,
-        DesktopNotificationUrgency::Critical => notify_rust::Urgency::Critical,
-    }
 }
 
 #[cfg(test)]

@@ -140,23 +140,6 @@ pub fn register_keybindings(cx: &mut App) {
             Some("PaneflowTextArea"),
         ),
     ]);
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([
-        KeyBinding::new("ctrl-a", TaSelectAll, Some("PaneflowTextArea")),
-        KeyBinding::new("ctrl-c", TaCopy, Some("PaneflowTextArea")),
-        KeyBinding::new("ctrl-v", TaPaste, Some("PaneflowTextArea")),
-        // Linux/Windows convention: terminal apps swallow Ctrl+V so
-        // `Ctrl+Shift+V` is the second-nature paste binding. We bind
-        // both so it works regardless of muscle memory.
-        KeyBinding::new("ctrl-shift-v", TaPaste, Some("PaneflowTextArea")),
-        KeyBinding::new("ctrl-x", TaCut, Some("PaneflowTextArea")),
-        // US-106: bypass the queue and send immediately.
-        KeyBinding::new(
-            "ctrl-shift-enter",
-            TaSubmitImmediate,
-            Some("PaneflowTextArea"),
-        ),
-    ]);
 }
 
 /// Callback fired when the user hits Enter (no shift). Receives the

@@ -435,23 +435,10 @@ fn default_socket_path() -> Option<PathBuf> {
 
 /// Compute `<cache_dir>/run` from raw env, mirroring the server's last-resort
 /// fallback without taking a `dirs` dependency (the whole point of this crate's
-/// minimal tree). Linux: `$XDG_CACHE_HOME` or `$HOME/.cache`; macOS:
-/// `$HOME/Library/Caches`.
+/// minimal tree). macOS: `$HOME/Library/Caches`.
 #[cfg(unix)]
 fn cache_run_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Library").join("Caches").join("run"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .map(|c| c.join("run"))
-    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library").join("Caches").join("run"))
 }
 
 #[cfg(test)]

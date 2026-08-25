@@ -100,21 +100,13 @@ impl Render for TabDragPreview {
     }
 }
 
-/// True when the per-OS duplicate-on-drop modifier is held (EP-003 US-010):
-/// Alt on macOS, Ctrl on Linux/Windows. Shift is deliberately never used - it
-/// collides with terminal text selection (FR-10). Single home for the `#[cfg]`
-/// so every drop site (strip, trailing, content edge, content center) reads the
-/// modifier identically.
+/// True when the duplicate-on-drop modifier is held (EP-003 US-010): Alt.
+/// Shift is deliberately never used - it collides with terminal text
+/// selection (FR-10). Single home so every drop site (strip, trailing,
+/// content edge, content center) reads the modifier identically.
 pub fn duplicate_modifier_held(window: &Window) -> bool {
     let modifiers = window.modifiers();
-    #[cfg(target_os = "macos")]
-    {
-        modifiers.alt
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        modifiers.control
-    }
+    modifiers.alt
 }
 
 /// Side of a hovered target tab on which to paint the 2px insertion indicator.

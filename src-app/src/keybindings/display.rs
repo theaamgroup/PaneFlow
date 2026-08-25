@@ -212,22 +212,6 @@ mod tests {
         assert!(descriptions.contains(&"Focus left"), "Missing focus left");
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn effective_shortcuts_user_override_replaces_key() {
-        let mut overrides = HashMap::new();
-        overrides.insert("ctrl-alt-h".to_string(), "split_horizontally".to_string());
-        let entries = effective_shortcuts(&overrides);
-        let split_h = entries
-            .iter()
-            .find(|e| e.description == "Split horizontal")
-            .expect("Split horizontal should be in effective list");
-        assert_eq!(
-            split_h.key, "Ctrl+Alt+H",
-            "User override should replace the default key"
-        );
-    }
-
     #[test]
     fn effective_shortcuts_carry_matching_action_name() {
         // US-021: every row knows the action it rebinds. The editor keys off
@@ -276,19 +260,6 @@ mod tests {
         assert_eq!(split_h.key, "Unassigned");
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn effective_shortcuts_none_unbinds_canonical_equivalent_key() {
-        let mut overrides = HashMap::new();
-        overrides.insert("ctrl+shift+d".to_string(), "none".to_string());
-        let entries = effective_shortcuts(&overrides);
-        let split_h = entries
-            .iter()
-            .find(|e| e.action_name == "split_horizontally")
-            .expect("unbound actions remain visible for rebinding");
-        assert_eq!(split_h.key, "Unassigned");
-    }
-
     #[test]
     fn effective_shortcuts_lists_registry_actions_without_defaults() {
         let entries = effective_shortcuts(&HashMap::new());
@@ -309,44 +280,6 @@ mod tests {
             .iter()
             .any(|e| e.description == "Unknown" && e.key == "Ctrl+X");
         assert!(!has_bogus, "Invalid action should not be in effective list");
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn effective_shortcuts_preserves_unoverridden_defaults() {
-        let mut overrides = HashMap::new();
-        overrides.insert("ctrl+alt+h".to_string(), "split_horizontally".to_string());
-        let entries = effective_shortcuts(&overrides);
-        // close_pane should still be at its default key. US-009: default is
-        // `secondary-shift-w`, which renders as "Ctrl+Shift+W" on Linux.
-        let close = entries
-            .iter()
-            .find(|e| e.description == "Close pane")
-            .expect("Close pane should be in effective list");
-        assert_eq!(
-            close.key, "Ctrl+Shift+W",
-            "Unoverridden action should keep default key"
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn format_keystroke_produces_readable_output() {
-        assert_eq!(format_keystroke("ctrl-shift-d"), "Ctrl+Shift+D");
-        assert_eq!(format_keystroke("alt-left"), "Alt+Left");
-        assert_eq!(format_keystroke("ctrl-1"), "Ctrl+1");
-        assert_eq!(format_keystroke("shift-pageup"), "Shift+PageUp");
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn secondary_renders_as_ctrl_on_linux() {
-        // AC2: secondary resolves to Ctrl on Linux; format_keystroke mirrors
-        // that so the menu bar / shortcut list shows the key the user will
-        // actually press.
-        assert_eq!(format_keystroke("secondary-shift-d"), "Ctrl+Shift+D");
-        assert_eq!(format_keystroke("secondary-tab"), "Ctrl+Tab");
-        assert_eq!(format_keystroke("secondary-1"), "Ctrl+1");
     }
 
     #[cfg(target_os = "macos")]

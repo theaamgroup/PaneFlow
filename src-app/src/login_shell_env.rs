@@ -22,8 +22,8 @@
 //! Properties:
 //! - **skipped on a terminal launch** (stdin is a TTY) - PATH was already
 //!   inherited correctly;
-//! - **portable** - uses POSIX `env` (not GNU `env -0`) so it works on
-//!   BusyBox / Alpine, and falls back to `/bin/sh` for shells whose `-l -i -c`
+//! - **portable** - uses POSIX `env` (not GNU `env -0`)
+//!   and falls back to `/bin/sh` for shells whose `-l -i -c`
 //!   can't run the POSIX capture script (nushell, tcsh, xonsh, …); `/bin/sh`
 //!   still sources `/etc/profile` + `/etc/profile.d` + `~/.profile`, i.e. the
 //!   system PATH;
@@ -37,9 +37,6 @@
 //! one helper thread it spawns to read stdout is always joined before the
 //! `set_var`. On timeout the capture process group is killed and the reader
 //! may be detached instead of wedging startup behind an inherited stdout FD.
-
-#[cfg(not(unix))]
-pub fn load_login_shell_env() {}
 
 #[cfg(unix)]
 pub fn load_login_shell_env() {

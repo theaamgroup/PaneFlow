@@ -56,8 +56,8 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("end", End, Some("TextInput")),
     ]);
 
-    // Primary-modifier clipboard bindings. macOS uses Cmd, Linux/Windows use
-    // Ctrl - matching the platform convention (and OS text-input expectations).
+    // Primary-modifier clipboard bindings. Cmd, matching the macOS convention
+    // (and OS text-input expectations).
     #[cfg(target_os = "macos")]
     cx.bind_keys([
         KeyBinding::new("cmd-a", SelectAll, Some("TextInput")),
@@ -65,13 +65,6 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-v", TextInputPaste, Some("TextInput")),
         KeyBinding::new("cmd-x", TextInputCut, Some("TextInput")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextInput")),
-    ]);
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([
-        KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
-        KeyBinding::new("ctrl-c", TextInputCopy, Some("TextInput")),
-        KeyBinding::new("ctrl-v", TextInputPaste, Some("TextInput")),
-        KeyBinding::new("ctrl-x", TextInputCut, Some("TextInput")),
     ]);
 }
 

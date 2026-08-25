@@ -47,11 +47,8 @@ pub fn resolve_surface_for_pid(pid: u32, candidates: &HashMap<u32, u64>) -> Opti
     resolve_with(pid, candidates, parent_of)
 }
 
-/// Extract the ppid (field 4) from `/proc/<pid>/stat`. The comm field
-/// (field 2) is parenthesized and may itself contain spaces, parens or
-/// newlines, so fields are taken AFTER the LAST `)` - the kernel-documented
-/// safe parse (proc(5)).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Return the parent PID of `pid` via libproc (`pidinfo::<BSDInfo>`).
+/// Best-effort: `None` if the process is gone or libproc fails.
 #[cfg(target_os = "macos")]
 fn parent_of(pid: u32) -> Option<u32> {
     use libproc::libproc::bsd_info::BSDInfo;
