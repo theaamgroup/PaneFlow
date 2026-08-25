@@ -15,7 +15,7 @@ Run all four, before and after any pass, and quote the actual output:
 
 ```bash
 cargo build                                # exit 0
-cargo test --workspace                     # 1739 passed, 0 failed
+cargo test --workspace                     # 1725 passed, 0 failed
 cargo clippy --workspace --all-targets     # exit 0, one pre-existing block v0.1.6 notice
 ./target/debug/paneflow --version
 ```

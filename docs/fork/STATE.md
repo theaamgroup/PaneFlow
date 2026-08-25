@@ -51,7 +51,7 @@ the only workflow here, so this is the most likely source of confusion.
 | Docs correctness pass | **Done.** 36 files, +2124/-2355. Turned out to be more a correctness fix than a platform strip. |
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
-| 2c. Linux unwind | **Done.** 13 commits, 63 files, +468/-8814. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session) then **eight delegated grok batches** covering all 85 remaining sites. Also took the last Windows residue: the WSL launcher, `cmd.exe` support and `.exe`/backslash path mechanics, which were UNGATED and compiling into the macOS binary. |
+| 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
 | Config-schema pass | **Not started. Next.** `TerminalBackendConfig::Ghostty` (`schema.rs:568`), `windows_terminal_material` (`:57`), `windows_chrome_material` (`:60`), `windows_terminal_material_enabled` (`:310`), the `pane.rs` material call sites and their two `terminal_material_scopes_*` tests, and the loader's `set_field!` material keys. 2c deliberately left all 15 of these standing. schema.rs + schemas/paneflow.schema.json + docs/user/configuration/schema.md move together (drift test). |
 | 2d. Rename to PanesCLI | **Not started.** 273 files mention `paneflow` (202 `.rs`, 40 `.md`, 13 `.toml`). Must be one atomic pass across prose and code together. |
 | 3. Signed release | **Not started.** Needs a fresh minisign keypair, a macOS-only `release.yml`, and the six `APPLE_*` secrets. |
@@ -60,7 +60,7 @@ the only workflow here, so this is the most likely source of confusion.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1739 passed, 0 failed, 2 ignored
+cargo test --workspace                       # 1725 passed, 0 failed, 2 ignored
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.8.2
@@ -75,15 +75,44 @@ the work is done, and that has already happened twice in this project (once
 when the regex matched the `update/linux/` PATH, once when it could not see
 `!cfg!`).
 
+**A census at 0 is not a finished platform removal, and 2c proved it.** After
+the zero-condition was reached, an adversarial grok audit (run WITHOUT
+`--json-schema`, because that flag suppresses the tool loop on open-ended
+tasks) found five more classes the cfg scan structurally cannot see, four of
+which were fixed in this stage:
+
+1. **Ungated identifiers.** `pty_session.rs` carried the whole `WSLENV`
+   environment bridge - `is_wsl_shell`, `merge_wslenv`, `augment_wslenv` and
+   five tests - with no `#[cfg]` on any of it, so it compiled into the macOS
+   binary and ran in the macOS suite.
+2. **An enum the collapse missed.** `InstallMethod` and `AssetFormat` were
+   reduced to the DMG set; `UpdateError` was not. `classify` still
+   substring-matched `libfuse.so.2` and `appimage-extract-and-run` on any
+   updater error, so a macOS user could be shown a toast telling them to run
+   `./paneflow-*.AppImage --appimage-extract-and-run`.
+3. **User-visible copy.** `paneflow --help` printed `Ctrl+Shift+D/E` and
+   `Ctrl+Tab`; a sidebar toast said "install xdg-utils (Linux)"; the published
+   JSON Schema told editors the config lives at `~/.config/paneflow/` on Linux
+   and `%APPDATA%\paneflow\` on Windows.
+4. **Dependency-graph residue.** `tar` and `flate2` were direct deps of the
+   deleted tar.gz updater with zero code references; `widestring` sat in
+   `[workspace.dependencies]` unused by any member.
+5. **YAML.** `run_tests.yml` - see the liability section below.
+
+The generalisable rule: **a detector only measures the shape it was written
+for.** The cfg census measures cfg predicates. Ungated code, enum variants,
+`Cargo.toml` tables, embedded assets, workflow files and user-facing strings
+each need their own sweep, and the audit is what supplies them.
+
 **`cargo fmt --check` is now in the list and was not before.** It had been
 failing since c925ece (stage 2a) with 27 hunks across four terminal files, and
 nothing local caught it because the four-command block above did not include
 it. The release pipeline runs it inside every build-matrix leg, so a tag push
 would have burned a ~25 min run before failing. Fixed in 1b1af25.
 
-1806 -> 1790 -> 1739. The 2b step removed 16 Windows/MSI tests; 2c removed 51
-more (45 in the four orchestrator increments, 6 in the delegated batches) and
-renamed 2. Every single one was accounted for BY NAME. Verify a test-count
+1806 -> 1790 -> 1725. The 2b step removed 16 Windows/MSI tests; 2c removed 65
+more and renamed 4. Every single one was accounted for BY NAME, at every
+integration, by diffing the sorted name list against the previous commit's. Verify a test-count
 change by DIFFING TEST NAMES, never by trusting the count:
 
 ```bash
