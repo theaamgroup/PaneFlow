@@ -51,8 +51,9 @@ the only workflow here, so this is the most likely source of confusion.
 | Docs correctness pass | **Done.** 36 files, +2124/-2355. Turned out to be more a correctness fix than a platform strip. |
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
-| 2c. Linux unwind | **Not started.** 78 `target_os = "linux"` occurrences, plus 24 `not(target_os = "macos")` branches that become dead. |
-| 2d. Rename to PanesCLI | **Not started.** 271 files mention `paneflow`. Must be one atomic pass across prose and code together. |
+| 2c. Linux unwind | **Not started. Planned:** `docs/fork/2026-08-25-stage-2c-linux-unwind-plan.md`. 78 `target_os = "linux"` sites / 20 files, plus 26 `not(macos)` and 31 `not(unix)`, all folded in. Includes the full updater collapse to DMG-only. |
+| Config-schema pass | **Not started.** Between 2c and 2d. `TerminalBackendConfig::Ghostty` and the `windows_*_material` no-op fields. schema.rs + schemas/paneflow.schema.json + docs/user/configuration/schema.md move together (drift test). |
+| 2d. Rename to PanesCLI | **Not started.** 273 files mention `paneflow` (202 `.rs`, 40 `.md`, 13 `.toml`). Must be one atomic pass across prose and code together. |
 | 3. Signed release | **Not started.** Needs a fresh minisign keypair, a macOS-only `release.yml`, and the six `APPLE_*` secrets. |
 
 ## Verified green, and how to reproduce it
