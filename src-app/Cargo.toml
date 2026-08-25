@@ -188,20 +188,14 @@ semver = "1"
 # on-disk session file and can adopt the LLM `ai-title` for its sidebar
 # row. `v4` only - already in the build graph via `paneflow-telemetry`.
 uuid.workspace = true
-# Resolve `appimageupdatetool` on $PATH before falling back to download (US-010).
+# Resolve the default shell and agent CLIs on $PATH (`terminal/shell.rs`).
 which.workspace = true
-# tar.gz self-update: SHA-256 verification + in-process extraction (US-011).
-# The sync `tar` crate guards against absolute paths and `..` traversal by
-# default, so we avoid shelling out to /bin/tar.
-#
 # Pinned to the 0.10 stable line (US-006). 0.11 is a pre-release series and
 # a direct 0.11 requirement pulls a second copy of `sha2` into the binary
 # when any transitive dep resolves 0.10. We only touch the `Sha256` core API
 # (`new`/`update`/`finalize`) which is byte-stable across 0.10 ↔ 0.11, so
 # the downgrade is compile-clean.
 sha2 = "0.10"
-tar = "0.4"
-flate2 = "1"
 
 # US-008 - atomic rename for extracted AI-hook binaries
 # (`src-app/src/ai_hooks/extract.rs`). `NamedTempFile::persist` wraps

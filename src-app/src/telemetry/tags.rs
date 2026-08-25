@@ -51,10 +51,8 @@ pub fn error_category_tag(err: &UpdateError) -> &'static str {
         UpdateError::Timeout => "network",
         UpdateError::IntegrityMismatch { .. } => "signature",
         UpdateError::DiskFull { .. } => "disk",
-        UpdateError::Fuse2Missing
-        | UpdateError::InstallDeclined { .. }
+        UpdateError::InstallDeclined { .. }
         | UpdateError::InstallFailed { .. }
-        | UpdateError::EnvironmentBroken { .. }
         | UpdateError::Other(_) => "unknown",
     }
 }
@@ -110,7 +108,6 @@ mod tests {
             }),
             "disk"
         );
-        assert_eq!(error_category_tag(&UpdateError::Fuse2Missing), "unknown");
         assert_eq!(
             error_category_tag(&UpdateError::InstallDeclined { message: "".into() }),
             "unknown"
@@ -119,10 +116,6 @@ mod tests {
             error_category_tag(&UpdateError::InstallFailed {
                 log_path: PathBuf::new()
             }),
-            "unknown"
-        );
-        assert_eq!(
-            error_category_tag(&UpdateError::EnvironmentBroken { message: "".into() }),
             "unknown"
         );
         assert_eq!(
@@ -140,15 +133,9 @@ mod tests {
         // PostHog breakdown filter Arthur has already configured on
         // `install_method` or `error_category`.
         let all = [
-            "deb",
-            "rpm",
-            "rpm-ostree",
-            "other",
-            "appimage",
-            "tar.gz",
             "dmg",
-            "msi",
             "externally-managed",
+            "other",
             "unknown",
             "network",
             "signature",

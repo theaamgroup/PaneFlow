@@ -1,12 +1,11 @@
 //! Structured classification of update failures (US-013) plus the `is_disk_full`
 //! predicate. The main thread calls [`UpdateError::classify`] at the boundary to
 //! bucket `anyhow::Error`s into renderable variants; the toast renderer picks
-//! its copy per variant (`Network`, `IntegrityMismatch`, `Fuse2Missing`,
-//! `DiskFull`, `Other`).
+//! its copy per variant (`Network`, `IntegrityMismatch`, `DiskFull`, `Other`).
 //!
 //! Extracted from `self_update/mod.rs` per US-031. The `libc::ENOSPC` arm of
-//! `is_disk_full` is gated `#[cfg(unix)]` per US-034 - on Windows the
-//! `std::io::ErrorKind::StorageFull` branch alone is sufficient.
+//! `is_disk_full` is gated `#[cfg(unix)]` per US-034, alongside the typed
+//! `std::io::ErrorKind::StorageFull` branch.
 
 use std::path::PathBuf;
 
@@ -24,55 +23,38 @@ pub enum UpdateError {
     Network(#[allow(dead_code)] String),
     /// SHA-256 of the downloaded asset did not match its `.sha256` sibling.
     IntegrityMismatch { expected: String, got: String },
-    /// AppImage runtime needs libfuse2 and it's not installed. The toast
-    /// suggests `--appimage-extract-and-run` as an immediate workaround.
-    Fuse2Missing,
     /// ENOSPC on a write inside the update flow. `path` is best-effort - we
     /// don't always know which write failed, in which case this is an empty
     /// `PathBuf` and the toast renders without the "at {path}" clause.
     DiskFull { path: PathBuf },
-    /// Install step was declined by the OS or user (US-009 / US-010 /
-    /// US-002-pkexec). Distinct from `DiskFull` / `Other`: the update
-    /// was downloaded and verified cleanly, but the actual installation
-    /// couldn't proceed - typical causes are `/Applications/` being
-    /// non-writable, SIP blocking the replace, Windows UAC cancel
-    /// (msiexec 1602), polkit auth cancel on Linux (pkexec exit 126),
-    /// or the running process holding a lock on the install path. The
-    /// wrapped `message` is user-visible verbatim so the toast can be
-    /// specific about the reason ("reinstall manually",
-    /// "administrator required", "Authentication cancelled").
+    /// Install step was declined by the OS or user. Distinct from
+    /// `DiskFull` / `Other`: the update was downloaded and verified
+    /// cleanly, but the actual installation could not proceed. Typical
+    /// causes on the DMG path are `/Applications/` (or
+    /// `$HOME/Applications`) being non-writable, SIP blocking the
+    /// replace, the user dismissing the macOS authorization prompt,
+    /// App Translocation of a quarantined bundle, or the running
+    /// process holding a lock on the install path. The wrapped
+    /// `message` is user-visible verbatim so the toast can be specific
+    /// ("reinstall manually", "move PaneFlow.app into /Applications").
     InstallDeclined { message: String },
-    /// A privileged installer returned a fatal error after the user
-    /// consented and the OS attempted the install. Covers msiexec
-    /// (US-010, typically 1603) and pkexec-wrapped `dnf`/`apt-get`
-    /// (US-002-pkexec, any non-zero exit that isn't 126/127). Distinct
-    /// from `InstallDeclined`: the transaction was started, not
-    /// cancelled. Causes include disk corruption, a conflicting
-    /// component, an orphaned prior install, a 404 mirror, or a
-    /// conflicting package lock. `log_path` points at the `/l*v`
-    /// verbose log for msiexec; for pkexec/dnf/apt there is no log
-    /// file (stderr is dumped at `log::debug!` inside the runner), so
-    /// the path is `PathBuf::new()` and `user_message` falls back to
-    /// the "check the PaneFlow log" variant.
+    /// The install step failed after the update was downloaded and
+    /// verified. Distinct from `InstallDeclined`: the replace was
+    /// attempted, not cancelled. On the DMG path this is the
+    /// catastrophic case where promoting the new bundle into place
+    /// failed and rolling the old bundle back also failed, so no live
+    /// install remains. `log_path` is empty there (the DMG installer
+    /// does not write a verbose log); `user_message` then points the
+    /// user at a manual reinstall from the DMG.
     InstallFailed { log_path: PathBuf },
-    /// A critical OS tool the updater depends on was not found on
-    /// PATH, or a required subsystem is missing. On Windows this
-    /// means `msiexec.exe` is missing from `%SystemRoot%\System32\`
-    /// (US-010); on Linux this means `pkexec` is not installed, or
-    /// pkexec returned 127 because no polkit agent is running in the
-    /// current session (US-002-pkexec). Either way the user's install
-    /// is broken in a way PaneFlow can't self-fix. The wrapped
-    /// `message` is user-visible verbatim so the toast can name the
-    /// missing tool and suggest a reinstall / polkit-agent path.
-    #[allow(dead_code)]
-    EnvironmentBroken { message: String },
-    /// A bounded external subprocess in the update flow (the AppImage
-    /// `appimageupdatetool` zsync download, or any other installer tool)
-    /// exceeded its wall-clock deadline and was killed (EP-002, U-002/U-015),
-    /// or the whole `Downloading` state was reset by the worker watchdog.
-    /// Distinct from `Network`: the transport may be fine but the tool hung
-    /// (half-open TCP, a mirror that accepts then stalls, a wedged future).
-    /// The download/install never completed; the user can retry.
+    /// A bounded external subprocess in the update flow (`hdiutil`, or
+    /// any other installer tool) exceeded its wall-clock deadline and
+    /// was killed (EP-002, U-002/U-015), or the whole `Downloading`
+    /// state was reset by the worker watchdog. Distinct from
+    /// `Network`: the transport may be fine but the tool hung
+    /// (half-open TCP, a mirror that accepts then stalls, a wedged
+    /// future). The download/install never completed; the user can
+    /// retry.
     Timeout,
     /// Classifier couldn't bucket the error. The wrapped message is shown
     /// verbatim so the user sees *something* actionable instead of a
@@ -93,10 +75,6 @@ impl UpdateError {
                 "Update failed: downloaded file is corrupt or tampered. Retry or download manually."
                     .to_string()
             }
-            UpdateError::Fuse2Missing => {
-                "Update requires FUSE 2. Run: `./paneflow-*.AppImage --appimage-extract-and-run` - or install libfuse2."
-                    .to_string()
-            }
             UpdateError::DiskFull { path } => {
                 if path.as_os_str().is_empty() {
                     "Update failed: disk full. Free space and retry.".to_string()
@@ -109,15 +87,11 @@ impl UpdateError {
             }
             UpdateError::InstallDeclined { message } => message.clone(),
             UpdateError::InstallFailed { log_path } => {
-                // Empty path = pkexec/dnf/apt branch (US-002-pkexec) -
-                // the CLI package managers don't write a self-contained
-                // log file; their stderr is captured at `log::debug!`
-                // by the runner instead. "PaneFlow log" would be
-                // misleading here because ordinary users don't run
-                // with `RUST_LOG=debug`. msiexec (US-010) always sets
-                // a concrete `/l*v` path and hits the other branch.
+                // Empty path is the DMG installer: it does not write a
+                // standalone verbose log. A non-empty path is shown so
+                // the user can attach it to a bug report.
                 if log_path.as_os_str().is_empty() {
-                    "Update install failed. Retry later, or update via your package manager directly.".to_string()
+                    "Update install failed. Retry later, or reinstall PaneFlow from the DMG.".to_string()
                 } else {
                     format!(
                         "Update install failed. Verbose log saved to `{}` - attach it to a bug report.",
@@ -125,7 +99,6 @@ impl UpdateError {
                     )
                 }
             }
-            UpdateError::EnvironmentBroken { message } => message.clone(),
             UpdateError::Timeout => {
                 "Update timed out. The download or install stalled - retry when your connection is stable."
                     .to_string()
@@ -141,7 +114,7 @@ impl UpdateError {
     ///      pre-classified error for free.
     ///   2. Downcast to [`IntegrityMismatch`] - carries `expected`/`got`.
     ///   3. Walk the chain looking for `std::io::Error` with ENOSPC.
-    ///   4. Substring-match on the formatted error chain for FUSE /
+    ///   4. Substring-match on the formatted error chain for
     ///      network / integrity / disk-full keywords.
     ///   5. Fall back to `Other` with the raw formatted message.
     pub fn classify(err: &anyhow::Error) -> Self {
@@ -177,13 +150,6 @@ impl UpdateError {
         }
         let full = format!("{err:#}");
         let lower = full.to_ascii_lowercase();
-        if lower.contains("libfuse.so.2")
-            || lower.contains("libfuse2")
-            || lower.contains("appimage-extract-and-run")
-            || lower.contains("failed to exec fusermount")
-        {
-            return UpdateError::Fuse2Missing;
-        }
         if lower.contains("no space left") || lower.contains("disk full") {
             return UpdateError::DiskFull {
                 path: PathBuf::new(),
@@ -260,12 +226,9 @@ impl std::fmt::Display for IntegrityMismatch {
 impl std::error::Error for IntegrityMismatch {}
 
 /// True if `err` represents ENOSPC. Covers both the typed `StorageFull`
-/// variant (platform-independent, stable since Rust 1.83) and - on Unix -
-/// the raw-errno fallback for older syscalls that surface `28` via
-/// `raw_os_error()` without setting the typed kind.
-///
-/// US-034: the `libc::ENOSPC` arm is gated `#[cfg(unix)]` so Windows builds
-/// can rely on `ErrorKind::StorageFull` alone.
+/// variant (stable since Rust 1.83) and the raw-errno fallback for
+/// syscalls that surface `28` via `raw_os_error()` without setting the
+/// typed kind. The `libc::ENOSPC` arm is gated `#[cfg(unix)]` per US-034.
 pub fn is_disk_full(err: &std::io::Error) -> bool {
     if matches!(err.kind(), std::io::ErrorKind::StorageFull) {
         return true;
@@ -289,9 +252,11 @@ mod tests {
 
     #[test]
     fn classify_direct_update_error_roundtrips() {
-        let tagged = UpdateError::Fuse2Missing;
-        let err = anyhow::Error::new(tagged);
-        assert_eq!(UpdateError::classify(&err), UpdateError::Fuse2Missing);
+        let tagged = UpdateError::InstallDeclined {
+            message: "Unable to replace PaneFlow.app".into(),
+        };
+        let err = anyhow::Error::new(tagged.clone());
+        assert_eq!(UpdateError::classify(&err), tagged);
     }
 
     #[test]
@@ -390,23 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_fuse2_missing_variants() {
-        for msg in [
-            "error while loading shared libraries: libfuse.so.2",
-            "failed to exec fusermount: No such file or directory",
-            "try running with --appimage-extract-and-run",
-            "libfuse2 is not installed",
-        ] {
-            let err = anyhow::Error::msg(msg.to_string());
-            assert!(
-                matches!(UpdateError::classify(&err), UpdateError::Fuse2Missing),
-                "msg {msg:?} → {:?}",
-                UpdateError::classify(&err)
-            );
-        }
-    }
-
-    #[test]
     fn classify_integrity_via_keyword_fallback() {
         // No downcast available (e.g., message came from an external tool).
         let err = anyhow::anyhow!("zsync2: checksum verification failed");
@@ -498,14 +446,6 @@ mod tests {
     }
 
     #[test]
-    fn user_message_matches_prd_copy_fuse2() {
-        let got = UpdateError::Fuse2Missing.user_message();
-        assert!(got.contains("FUSE 2"));
-        assert!(got.contains("--appimage-extract-and-run"));
-        assert!(got.contains("libfuse2"));
-    }
-
-    #[test]
     fn user_message_disk_full_includes_path_when_set() {
         let err = UpdateError::DiskFull {
             path: PathBuf::from("/home/u/.cache/paneflow"),
@@ -557,88 +497,32 @@ mod tests {
 
     #[test]
     fn classify_install_failed_roundtrips() {
-        // US-010 AC7: InstallFailed carries its verbose log path through
-        // the cause chain so the toast can name it verbatim for bug
-        // reports - flattening to Other would lose the path.
+        // InstallFailed carries its log path through the cause chain so
+        // the toast can name it - flattening to Other would lose the
+        // path. The DMG installer currently passes an empty path.
         let tagged = UpdateError::InstallFailed {
-            log_path: PathBuf::from("C:\\Users\\u\\AppData\\Local\\Temp\\paneflow-msi-1234.log"),
+            log_path: PathBuf::new(),
         };
-        let err = anyhow::Error::new(tagged.clone()).context("self-update/msi");
+        let err = anyhow::Error::new(tagged.clone()).context("self-update/dmg");
         assert_eq!(UpdateError::classify(&err), tagged);
     }
 
     #[test]
     fn user_message_install_failed_includes_log_path() {
         let err = UpdateError::InstallFailed {
-            log_path: PathBuf::from("C:\\Temp\\paneflow-msi-9.log"),
+            log_path: PathBuf::from("/tmp/paneflow-update.log"),
         };
         let msg = err.user_message();
-        assert!(msg.contains("C:\\Temp\\paneflow-msi-9.log"), "got: {msg}");
+        assert!(msg.contains("/tmp/paneflow-update.log"), "got: {msg}");
         assert!(msg.contains("Update install failed"), "got: {msg}");
     }
 
     #[test]
-    fn classify_environment_broken_roundtrips() {
-        // US-010 AC9: EnvironmentBroken survives the cause chain so the
-        // "msiexec not found" toast is specific rather than generic.
-        let tagged = UpdateError::EnvironmentBroken {
-            message: "msiexec.exe not found on PATH - Windows system install appears broken".into(),
-        };
-        let err = anyhow::Error::new(tagged.clone()).context("self-update/msi");
-        assert_eq!(UpdateError::classify(&err), tagged);
-    }
-
-    #[test]
-    fn user_message_environment_broken_passes_through() {
-        let err = UpdateError::EnvironmentBroken {
-            message: "msiexec.exe not found on PATH".into(),
-        };
-        assert_eq!(err.user_message(), "msiexec.exe not found on PATH");
-    }
-
-    // ─── US-003 (pkexec): verify classify() walks the anyhow chain that
-    // `linux/system_package::run_update` actually produces. The runner
-    // returns `Err(anyhow::Error::new(UpdateError::X).context("pkexec
-    // exited with code N"))` - the outer layer is the plain context
-    // string, NOT an `UpdateError`. Without chain-walking, the
-    // classifier would collapse every pkexec failure into `Other` and
-    // the toast would render the raw context string instead of the
-    // variant-specific copy.
-
-    #[test]
-    fn classify_recovers_install_declined_through_pkexec_context() {
-        let tagged = UpdateError::InstallDeclined {
-            message: "Authentication cancelled".into(),
-        };
-        let err = anyhow::Error::new(tagged.clone()).context("pkexec exited with code 126");
-        assert_eq!(UpdateError::classify(&err), tagged);
-    }
-
-    #[test]
-    fn classify_recovers_environment_broken_through_pkexec_context() {
-        let tagged = UpdateError::EnvironmentBroken {
-            message: "pkexec returned 127 (no polkit agent or command missing)".into(),
-        };
-        let err = anyhow::Error::new(tagged.clone()).context("pkexec exited with code 127");
-        assert_eq!(UpdateError::classify(&err), tagged);
-    }
-
-    #[test]
-    fn classify_recovers_install_failed_through_pkexec_context() {
-        // The pkexec/dnf/apt branch passes `PathBuf::new()` because
-        // CLI package managers don't emit a standalone log file.
-        let tagged = UpdateError::InstallFailed {
-            log_path: PathBuf::new(),
-        };
-        let err = anyhow::Error::new(tagged.clone()).context("pkexec exited with code 1");
-        assert_eq!(UpdateError::classify(&err), tagged);
-    }
-
-    #[test]
     fn user_message_install_failed_handles_empty_path() {
-        // US-002-pkexec: dnf/apt return no standalone log file; the
-        // runner passes `PathBuf::new()`. The renderer must not emit
-        // the raw "`{}`" (empty-backticks) form it uses for msiexec.
+        // The DMG installer passes `PathBuf::new()` because it does not
+        // write a standalone verbose log. The renderer must not emit
+        // empty backticks, and must point the user at a manual DMG
+        // reinstall rather than a package manager.
         let err = UpdateError::InstallFailed {
             log_path: PathBuf::new(),
         };
@@ -649,28 +533,25 @@ mod tests {
             "empty-backticks leaked into user-visible copy: {msg}"
         );
         assert!(
-            !msg.contains("`` -"),
-            "empty-path placeholder leaked into user-visible copy: {msg}"
-        );
-        assert!(
-            msg.to_ascii_lowercase().contains("package manager"),
-            "empty-path branch should point the user at their package manager: {msg}"
+            msg.to_ascii_lowercase().contains("dmg"),
+            "empty-path branch should point the user at a DMG reinstall: {msg}"
         );
         assert!(
             !msg.contains("Verbose log saved"),
             "empty-path branch must not advertise a log file that does not exist: {msg}"
         );
+        assert!(
+            !msg.to_ascii_lowercase().contains("package manager"),
+            "empty-path branch must not mention a package manager: {msg}"
+        );
     }
 
     #[test]
-    fn classify_recovers_other_through_pkexec_signal_context() {
-        // US-001 signal-kill path: `classify_exit` produces
-        // `UpdateError::Other(format!("package manager killed by signal {sig}"))`
-        // and `run_update` wraps it with `.context("pkexec killed by signal {sig}")`.
-        // The chain walk must recover the inner `Other` variant so the
-        // toast shows the signal message rather than the context wrapper.
-        let tagged = UpdateError::Other("package manager killed by signal 9".into());
-        let err = anyhow::Error::new(tagged.clone()).context("pkexec killed by signal 9");
+    fn classify_recovers_other_through_context_wrapping() {
+        // Chain walk must recover an inner `Other` so the toast shows
+        // the wrapped message rather than the context string.
+        let tagged = UpdateError::Other("hdiutil attach failed".into());
+        let err = anyhow::Error::new(tagged.clone()).context("self-update/dmg");
         assert_eq!(UpdateError::classify(&err), tagged);
     }
 }

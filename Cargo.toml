@@ -51,7 +51,6 @@ tracing = "0.1"
 ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 which = "8"
-widestring = "1"
 
 # Internal crates
 paneflow-config = { path = "crates/paneflow-config" }
