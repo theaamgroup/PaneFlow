@@ -60,12 +60,6 @@ impl ShellQuoting {
         }
     }
 
-    #[cfg(windows)]
-    pub const fn default_for_platform() -> Self {
-        Self::PowerShell
-    }
-
-    #[cfg(not(windows))]
     pub const fn default_for_platform() -> Self {
         Self::Posix
     }

@@ -283,34 +283,15 @@ fn configured_shell_if_usable(path: &str) -> Option<String> {
     let candidate: std::path::PathBuf = if has_separator {
         std::path::PathBuf::from(path)
     } else {
-        #[cfg(windows)]
-        if is_bare_bash_name(path)
-            && let Some(git_bash) = find_windows_git_bash_path()
-        {
-            git_bash
-        } else {
-            // PATH search first; on Unix, fall back to well-known install dirs so a
-            // bare `"pwsh"` configured shell still resolves under a GUI launch whose
-            // inherited PATH omits `/opt/homebrew/bin` (the macOS parallel to the
-            // Windows `find_windows_powershell` well-known-location probe). Without
-            // this, the entry was silently rejected and the shell fell back to
-            // `/bin/sh`.
-            which::which(path)
-                .ok()
-                .or_else(|| well_known_shell_dir_lookup(path))?
-        }
-        #[cfg(not(windows))]
-        {
-            // PATH search first; on Unix, fall back to well-known install dirs so a
-            // bare `"pwsh"` configured shell still resolves under a GUI launch whose
-            // inherited PATH omits `/opt/homebrew/bin` (the macOS parallel to the
-            // Windows `find_windows_powershell` well-known-location probe). Without
-            // this, the entry was silently rejected and the shell fell back to
-            // `/bin/sh`.
-            which::which(path)
-                .ok()
-                .or_else(|| well_known_shell_dir_lookup(path))?
-        }
+        // PATH search first; on Unix, fall back to well-known install dirs so a
+        // bare `"pwsh"` configured shell still resolves under a GUI launch whose
+        // inherited PATH omits `/opt/homebrew/bin` (the macOS parallel to the
+        // Windows `find_windows_powershell` well-known-location probe). Without
+        // this, the entry was silently rejected and the shell fell back to
+        // `/bin/sh`.
+        which::which(path)
+            .ok()
+            .or_else(|| well_known_shell_dir_lookup(path))?
     };
     let is_executable = candidate.is_file() && {
         #[cfg(unix)]
@@ -320,81 +301,12 @@ fn configured_shell_if_usable(path: &str) -> Option<String> {
                 .map(|m| m.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
         }
-        #[cfg(windows)]
-        {
-            std::fs::metadata(&candidate).is_ok()
-        }
     };
     if is_executable {
         Some(candidate.to_string_lossy().into_owned())
     } else {
         None
     }
-}
-
-#[cfg(windows)]
-fn is_bare_bash_name(name: &str) -> bool {
-    !name.contains(['/', '\\'])
-        && name
-            .to_ascii_lowercase()
-            .trim_end_matches(".exe")
-            .eq("bash")
-}
-
-#[cfg(windows)]
-pub(crate) fn find_windows_git_bash() -> Option<String> {
-    find_windows_git_bash_path().map(|path| path.to_string_lossy().trim().to_owned())
-}
-
-#[cfg(windows)]
-fn find_windows_git_bash_path() -> Option<std::path::PathBuf> {
-    windows_git_bash_candidates()
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-}
-
-#[cfg(windows)]
-fn windows_git_bash_candidates() -> Vec<std::path::PathBuf> {
-    let mut candidates = Vec::new();
-
-    for env_var in ["ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(base) = std::env::var_os(env_var) {
-            push_git_bash_candidates(&mut candidates, std::path::Path::new(&base).join("Git"));
-        }
-    }
-
-    if let Ok(git) = which::which("git.exe") {
-        candidates.extend(git_bash_candidates_from_git_exe(&git));
-    }
-
-    candidates
-}
-
-#[cfg(windows)]
-fn push_git_bash_candidates(candidates: &mut Vec<std::path::PathBuf>, root: std::path::PathBuf) {
-    for candidate in [root.join("bin\\bash.exe"), root.join("usr\\bin\\bash.exe")] {
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn git_bash_candidates_from_git_exe(git: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut candidates = Vec::new();
-    let mut dir = git.parent();
-    let mut depth = 0;
-
-    while let Some(current) = dir {
-        if depth > 4 {
-            break;
-        }
-        push_git_bash_candidates(&mut candidates, current.to_path_buf());
-        dir = current.parent();
-        depth += 1;
-    }
-
-    candidates
 }
 
 /// Probe a small set of well-known Unix install directories for a bare shell
@@ -411,11 +323,6 @@ fn well_known_shell_dir_lookup(name: &str) -> Option<std::path::PathBuf> {
         DIRS.iter()
             .map(|dir| std::path::Path::new(dir).join(name))
             .find(|candidate| candidate.is_file())
-    }
-    #[cfg(windows)]
-    {
-        let _ = name;
-        None
     }
 }
 
@@ -440,109 +347,6 @@ fn resolve_unix_default_shell_fallback(shell_env: Option<&str>) -> String {
         );
     }
     configured_shell_if_usable("/bin/sh").unwrap_or_else(|| "/bin/sh".to_string())
-}
-
-#[cfg(windows)]
-fn resolve_default_shell_fallback() -> String {
-    // Prefer PowerShell over cmd.exe. A bare cmd.exe default gives the legacy
-    // "BIOS console" experience - no `clear` (it's `cls`), a 16-color `C:\>`
-    // prompt, no PSReadLine - which is jarring next to a standalone PowerShell.
-    // Mirrors Zed's `get_windows_system_shell` (crates/util/src/shell.rs):
-    // pwsh 7 → Windows PowerShell 5.1 → cmd.exe only as a last resort.
-    if let Some(powershell) = find_windows_powershell() {
-        return powershell;
-    }
-    // No PowerShell found - fall back to cmd.exe. %ComSpec% is the Windows
-    // convention for "the command interpreter", respected by every console app.
-    if let Ok(com_spec) = std::env::var("ComSpec")
-        && std::path::Path::new(&com_spec).is_file()
-    {
-        return com_spec;
-    }
-    // Canonical cmd.exe location (works on every supported Windows since
-    // 10 1809; we pin the 64-bit System32 path - WOW64 users still see
-    // cmd.exe there via redirection).
-    const CMD_FALLBACK: &str = r"C:\Windows\System32\cmd.exe";
-    if std::path::Path::new(CMD_FALLBACK).is_file() {
-        return CMD_FALLBACK.to_string();
-    }
-    // Last-ditch: return bare "cmd.exe" and let the spawner search PATH.
-    log::error!(
-        "Windows shell fallback chain exhausted: no pwsh.exe/powershell.exe found, \
-         and %ComSpec% / C:\\Windows\\System32\\cmd.exe both unavailable. Falling \
-         back to bare 'cmd.exe'; PTY spawn will surface a clear error if even this \
-         is missing."
-    );
-    "cmd.exe".to_string()
-}
-
-/// Locate a PowerShell executable, preferring PowerShell 7+ (`pwsh.exe`) over
-/// the bundled Windows PowerShell 5.1 (`powershell.exe`). Mirrors the search
-/// order of Zed's `get_windows_system_shell` so PaneFlow lands on the same
-/// modern shell users expect (rich prompt, ANSI colors, working `clear`)
-/// rather than cmd.exe. `pwsh.exe` is frequently NOT on `PATH`, so the
-/// well-known install locations are probed before the `PATH` search.
-///
-/// Order (short-circuits on the first hit):
-/// 1. `pwsh.exe` under `%ProgramFiles%\PowerShell\<n>` (highest major version)
-/// 2. `pwsh.exe` under `%ProgramFiles(x86)%\PowerShell\<n>`
-/// 3. `pwsh.exe` from the MSIX/Store install (`%LOCALAPPDATA%\…\WindowsApps`)
-/// 4. `pwsh.exe` from a scoop shim
-/// 5. `pwsh.exe` anywhere on `PATH`
-/// 6. `powershell.exe` (Windows PowerShell 5.1) on `PATH`
-#[cfg(windows)]
-fn find_windows_powershell() -> Option<String> {
-    use std::path::PathBuf;
-
-    // Newest `pwsh.exe` under a `<ProgramFiles>\PowerShell` install. The
-    // directory names are the major version (`7`, `6`, …); the highest wins.
-    fn find_pwsh_in_program_files(env_var: &str) -> Option<PathBuf> {
-        let base = PathBuf::from(std::env::var_os(env_var)?).join("PowerShell");
-        base.read_dir()
-            .ok()?
-            .filter_map(Result::ok)
-            .filter(|entry| matches!(entry.file_type(), Ok(ft) if ft.is_dir()))
-            .filter_map(|entry| {
-                let version: u32 = entry.file_name().to_string_lossy().parse().ok()?;
-                let exe = entry.path().join("pwsh.exe");
-                exe.exists().then_some((version, exe))
-            })
-            .max_by_key(|(version, _)| *version)
-            .map(|(_, exe)| exe)
-    }
-
-    // Store/MSIX install drops `pwsh.exe` under a versioned package dir.
-    fn find_pwsh_in_msix() -> Option<PathBuf> {
-        let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Microsoft\\WindowsApps");
-        dir.read_dir()
-            .ok()?
-            .filter_map(Result::ok)
-            .filter(|entry| matches!(entry.file_type(), Ok(ft) if ft.is_dir()))
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("Microsoft.PowerShell_")
-            })
-            .find_map(|entry| {
-                let exe = entry.path().join("pwsh.exe");
-                exe.exists().then_some(exe)
-            })
-    }
-
-    // scoop shim.
-    fn find_pwsh_in_scoop() -> Option<PathBuf> {
-        let exe = PathBuf::from(std::env::var_os("USERPROFILE")?).join("scoop\\shims\\pwsh.exe");
-        exe.exists().then_some(exe)
-    }
-
-    find_pwsh_in_program_files("ProgramFiles")
-        .or_else(|| find_pwsh_in_program_files("ProgramFiles(x86)"))
-        .or_else(find_pwsh_in_msix)
-        .or_else(find_pwsh_in_scoop)
-        .or_else(|| which::which("pwsh.exe").ok())
-        .or_else(|| which::which("powershell.exe").ok())
-        .map(|path| path.to_string_lossy().trim().to_owned())
 }
 
 /// Build a command that clears the terminal before launching an interactive
@@ -584,15 +388,7 @@ fn clear_then_for_shell(command: &str, shell: &str) -> String {
 /// filesystem reports `\`. Converting here keeps `--rcfile` / `source` from
 /// receiving an unparseable backslash path. No-op on Unix.
 fn to_shell_path(p: &std::path::Path) -> String {
-    let s = p.display().to_string();
-    #[cfg(windows)]
-    {
-        s.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
-    {
-        s
-    }
+    p.display().to_string()
 }
 
 /// Write OSC 7 shell integration scripts and return the extra shell args
@@ -999,94 +795,6 @@ mod tests {
         assert_eq!(
             powershell_startup_args(TerminalSurfaceProfile::Normal, "init".into()),
             vec!["-NoExit", "-Command", "init"]
-        );
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_shell_tests {
-    use super::*;
-
-    /// The fallback must always yield a non-empty program for `portable-pty`,
-    /// even on a machine with no PowerShell at all (it lands on cmd.exe).
-    #[test]
-    fn fallback_returns_nonempty_shell() {
-        assert!(
-            !resolve_default_shell_fallback().is_empty(),
-            "Windows shell fallback must never return an empty string"
-        );
-    }
-
-    /// The regression guard for the "BIOS terminal" bug: whenever a PowerShell
-    /// is discoverable (GitHub's `windows-latest` runners ship pwsh 7; any real
-    /// Windows box has at least Windows PowerShell 5.1), the default must NOT
-    /// degrade to cmd.exe.
-    #[test]
-    fn fallback_prefers_powershell_over_cmd_when_present() {
-        if find_windows_powershell().is_some() {
-            let shell = resolve_default_shell_fallback().to_ascii_lowercase();
-            assert!(
-                shell.ends_with("pwsh.exe") || shell.ends_with("powershell.exe"),
-                "expected the default to be a PowerShell, got {shell:?}"
-            );
-        }
-    }
-
-    /// Whatever `find_windows_powershell` returns must actually be a PowerShell
-    /// binary (`pwsh` or `powershell`), never something else mis-classified.
-    #[test]
-    fn discovered_powershell_is_pwsh_or_powershell() {
-        if let Some(found) = find_windows_powershell() {
-            let stem = std::path::Path::new(&found)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_ascii_lowercase);
-            assert!(
-                matches!(stem.as_deref(), Some("pwsh") | Some("powershell")),
-                "unexpected PowerShell binary stem: {found:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn bare_bash_names_are_detected_without_catching_explicit_paths() {
-        assert!(is_bare_bash_name("bash"));
-        assert!(is_bare_bash_name("bash.exe"));
-        assert!(!is_bare_bash_name(r"C:\Windows\System32\bash.exe"));
-        assert!(!is_bare_bash_name("zsh"));
-    }
-
-    #[test]
-    fn git_bash_candidates_are_derived_from_git_cmd_shim() {
-        let candidates = git_bash_candidates_from_git_exe(std::path::Path::new(
-            r"C:\Program Files\Git\cmd\git.exe",
-        ));
-
-        assert!(
-            candidates.contains(&std::path::PathBuf::from(
-                r"C:\Program Files\Git\bin\bash.exe"
-            )),
-            "Git for Windows cmd shim should lead to the interactive Git Bash binary"
-        );
-        assert!(
-            candidates.contains(&std::path::PathBuf::from(
-                r"C:\Program Files\Git\usr\bin\bash.exe"
-            )),
-            "Git for Windows cmd shim should also probe the usr/bin bash fallback"
-        );
-    }
-
-    #[test]
-    fn configured_bare_bash_prefers_git_bash_when_installed() {
-        let Some(git_bash) = find_windows_git_bash() else {
-            eprintln!("skip: Git for Windows bash.exe not found");
-            return;
-        };
-
-        assert_eq!(
-            configured_shell_if_usable("bash.exe").map(|s| s.to_ascii_lowercase()),
-            Some(git_bash.to_ascii_lowercase()),
-            "bare bash.exe must resolve to Git Bash before Windows' WSL bash launcher"
         );
     }
 }

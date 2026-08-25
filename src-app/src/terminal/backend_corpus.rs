@@ -484,31 +484,7 @@ pub(crate) fn resident_set_bytes() -> u64 {
     resident_pages.saturating_mul(page_size)
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn resident_set_bytes() -> u64 {
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-    };
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-    // SAFETY: zeroed C POD with its byte size set before the current-process query.
-    let mut memory: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
-    memory.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    // SAFETY: the current-process pseudo handle and writable counter buffer are valid.
-    let result = unsafe {
-        GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            &mut memory,
-            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        )
-    };
-    if result == 0 {
-        return 0;
-    }
-    u64::try_from(memory.WorkingSetSize).unwrap_or(u64::MAX)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn resident_set_bytes() -> u64 {
     0
 }
@@ -533,39 +509,7 @@ pub(crate) fn process_cpu_time() -> Duration {
     Duration::from_secs_f64((user_ticks + system_ticks) as f64 / ticks_per_second as f64)
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn process_cpu_time() -> Duration {
-    use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-
-    // SAFETY: FILETIME is a C POD and all four buffers are initialized before use.
-    let mut creation: FILETIME = unsafe { std::mem::zeroed() };
-    let mut exit: FILETIME = unsafe { std::mem::zeroed() };
-    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
-    let mut user: FILETIME = unsafe { std::mem::zeroed() };
-    // SAFETY: the current-process pseudo handle and writable FILETIME buffers are valid.
-    let result = unsafe {
-        GetProcessTimes(
-            GetCurrentProcess(),
-            &mut creation,
-            &mut exit,
-            &mut kernel,
-            &mut user,
-        )
-    };
-    if result == 0 {
-        return Duration::ZERO;
-    }
-    let ticks =
-        |value: FILETIME| (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime);
-    Duration::from_nanos(
-        ticks(kernel)
-            .saturating_add(ticks(user))
-            .saturating_mul(100),
-    )
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn process_cpu_time() -> Duration {
     Duration::ZERO
 }

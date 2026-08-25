@@ -2,9 +2,8 @@
 //! processing, OSC channel drains, CWD resolution, scrollback I/O, and the
 //! drop-time force-kill path.
 //!
-//! Cross-platform: POSIX syscalls (`libc::kill`, `proc_pidinfo`) are behind
-//! `#[cfg(unix)]` / `#[cfg(target_os = "macos")]`; Windows paths use
-//! `windows-sys` (`TerminateProcess`, `WaitForSingleObject`).
+//! POSIX syscalls (`libc::kill`, `proc_pidinfo`) are behind
+//! `#[cfg(unix)]` / `#[cfg(target_os = "macos")]`.
 //!
 //! Extracted from `terminal.rs` per US-012 of the src-app refactor PRD.
 
@@ -1236,38 +1235,7 @@ fn cwd_from_osc7_payload(payload: &str) -> Option<String> {
         Cow::Owned(format!("/{path}"))
     };
     let decoded = percent_decode_uri_path(&path)?;
-    #[cfg(windows)]
-    if let Some(msys_path) = msys_path_to_windows_path(&decoded) {
-        return Some(msys_path);
-    }
-    #[cfg(windows)]
-    if decoded.len() >= 3
-        && decoded.as_bytes()[0] == b'/'
-        && decoded.as_bytes()[1].is_ascii_alphabetic()
-        && decoded.as_bytes()[2] == b':'
-    {
-        return Some(decoded[1..].replace('/', "\\"));
-    }
     Some(decoded)
-}
-
-#[cfg(windows)]
-fn msys_path_to_windows_path(path: &str) -> Option<String> {
-    let bytes = path.as_bytes();
-    if bytes.len() < 2
-        || bytes[0] != b'/'
-        || !bytes[1].is_ascii_alphabetic()
-        || (bytes.len() > 2 && bytes[2] != b'/')
-    {
-        return None;
-    }
-
-    let drive = (bytes[1] as char).to_ascii_uppercase();
-    if bytes.len() == 2 {
-        Some(format!("{drive}:\\"))
-    } else {
-        Some(format!("{drive}:\\{}", path[3..].replace('/', "\\")))
-    }
 }
 
 fn percent_decode_uri_path(path: &str) -> Option<String> {
@@ -1661,8 +1629,6 @@ impl TerminalState {
             // path and must match the EventLoop flag below.
             drain_on_exit: PTY_DRAIN_ON_EXIT,
             env: params.env,
-            #[cfg(windows)]
-            escape_args: true,
         };
 
         // EP-002 US-004: open the PTY via alacritty's own cross-platform `tty`
@@ -1693,8 +1659,6 @@ impl TerminalState {
         // `ProcessIdGetter::from(&AlacrittyPty)`.
         #[cfg(unix)]
         let child_pid = pty.child().id();
-        #[cfg(windows)]
-        let child_pid = pty.child_watcher().pid().map(u32::from).unwrap_or(0);
         #[cfg(all(unix, not(test)))]
         let pty_guard = crate::agents::parent_guard::spawn_pty_guard(child_pid);
         #[cfg(target_os = "macos")]
@@ -2871,27 +2835,6 @@ fn is_executable_path_title(title: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
 }
 
-#[cfg(all(test, windows))]
-mod title_filter_tests {
-    use super::is_executable_path_title;
-
-    #[test]
-    fn drops_shell_self_path_title_but_keeps_human_labels() {
-        // The exact pwsh self-title that leaked into the sidebar / tabs.
-        assert!(is_executable_path_title(
-            r"C:\Program Files\PowerShell\7\pwsh.exe"
-        ));
-        assert!(is_executable_path_title(r"C:\Windows\System32\cmd.exe"));
-        // Real labels and cwd-as-title prompts must survive.
-        assert!(!is_executable_path_title("Claude Code"));
-        assert!(!is_executable_path_title(r"C:\dev\paneflow"));
-        assert!(!is_executable_path_title(""));
-        // A bare relative name is not an absolute path → kept (only the
-        // absolute self-path is the offender).
-        assert!(!is_executable_path_title("pwsh.exe"));
-    }
-}
-
 /// Assemble the child PTY environment: PaneFlow identity vars, explicit TERM /
 /// locale / terminal-program identification, the AI-hook PATH prepend, and the
 /// user-env merge (a user var wins on collision EXCEPT the protected keys
@@ -2974,11 +2917,6 @@ fn assemble_pty_env(
             "PANEFLOW_BIN_DIR",
         ];
         for (k, v) in user_vars {
-            // Windows env names are case-insensitive; normalise so a user
-            // `Path` cannot shadow inherited `PATH` and the protected-key check
-            // is not bypassed by casing.
-            #[cfg(windows)]
-            let k = k.to_uppercase();
             // Reject malformed env names (empty / `=` / NUL) and drop
             // dynamic-loader-influencing keys (LD_* / DYLD_*) outright: an
             // imported `session.json` surface env or the global `terminal.env`
@@ -3143,409 +3081,7 @@ impl Drop for TerminalState {
                 }
             }
         }
-
-        #[cfg(windows)]
-        {
-            let pid = self.child_pid;
-            // US-034 (mirrors the Unix path above): skip the kill ladder entirely
-            // once the child has exited. Without this guard a normal exit (the
-            // user typed `exit`) still ran the deferred `TerminateProcess`, which
-            // fails with `ERROR_ACCESS_DENIED` on an already-dead process and
-            // logged a spurious warning every time a shell closed.
-            if pid != 0 && self.exited.is_none() {
-                // US-001 asymmetry: Windows console processes have no
-                // SIGTERM-equivalent graceful signal. TerminateProcess is a
-                // hard kill and serves as the escalation; there is no Windows
-                // mirror of the Unix synchronous-SIGTERM grace step above.
-                let terminate = move || {
-                    let started_at = std::time::Instant::now();
-                    let deadline = started_at
-                        .checked_add(WINDOWS_PROCESS_TREE_TERMINATION_BUDGET)
-                        .unwrap_or(started_at);
-                    let _ = terminate_windows_process_tree(pid, deadline);
-                };
-                match executor {
-                    Some(bg) => {
-                        bg.spawn(async move {
-                            smol::Timer::after(std::time::Duration::from_millis(100)).await;
-                            terminate();
-                        })
-                        .detach();
-                    }
-                    None => {
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            terminate();
-                        });
-                    }
-                }
-            }
-        }
     }
-}
-
-#[cfg(windows)]
-pub(super) const WINDOWS_PROCESS_TREE_TERMINATION_BUDGET: std::time::Duration =
-    std::time::Duration::from_secs(5);
-
-/// Metadata-only outcome of one pane-scoped Windows process-tree cleanup.
-/// Counts describe Win32 operations, never process command lines or arguments.
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct WindowsProcessTreeTerminationResult {
-    pub(super) targeted: usize,
-    pub(super) terminate_requested: usize,
-    pub(super) already_exited: usize,
-    pub(super) failures: usize,
-    pub(super) timed_out: usize,
-    pub(super) deadline_exhausted: bool,
-}
-
-#[cfg(windows)]
-fn windows_process_entries() -> io::Result<Vec<(u32, u32)>> {
-    use std::mem;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-        TH32CS_SNAPPROCESS,
-    };
-
-    // SAFETY: Win32 call; the returned snapshot handle is closed below.
-    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snap == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-
-    // Collect (pid, parent_pid) for every process in the snapshot.
-    let mut entries: Vec<(u32, u32)> = Vec::with_capacity(256);
-    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
-    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
-    // SAFETY: `snap` is valid; `entry` is correctly sized and zeroed.
-    if unsafe { Process32FirstW(snap, &mut entry) } == 0 {
-        let error = io::Error::last_os_error();
-        // SAFETY: `snap` is a valid handle obtained above.
-        unsafe { CloseHandle(snap) };
-        return Err(error);
-    }
-    loop {
-        entries.push((entry.th32ProcessID, entry.th32ParentProcessID));
-        // SAFETY: same invariants; iterates until the snapshot is exhausted.
-        if unsafe { Process32NextW(snap, &mut entry) } == 0 {
-            break;
-        }
-    }
-    // SAFETY: `snap` is a valid handle obtained above.
-    unsafe { CloseHandle(snap) };
-    Ok(entries)
-}
-
-#[cfg(windows)]
-fn windows_descendants_postorder(root_pid: u32, entries: &[(u32, u32)]) -> Vec<u32> {
-    fn visit(
-        pid: u32,
-        entries: &[(u32, u32)],
-        seen: &mut std::collections::HashSet<u32>,
-        out: &mut Vec<u32>,
-    ) -> bool {
-        if !seen.insert(pid) {
-            return false;
-        }
-        let mut children: Vec<u32> = entries
-            .iter()
-            .filter_map(|(child, parent)| (*parent == pid).then_some(*child))
-            .collect();
-        children.sort_unstable();
-        for child in children {
-            if visit(child, entries, seen, out) {
-                out.push(child);
-            }
-        }
-        true
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    let _ = visit(root_pid, entries, &mut seen, &mut out);
-    out
-}
-
-#[cfg(windows)]
-fn windows_process_tree_targets(
-    root_pid: u32,
-    entries: &[(u32, u32)],
-    include_root: bool,
-) -> Vec<u32> {
-    let mut targets = windows_descendants_postorder(root_pid, entries);
-    if include_root && root_pid != 0 {
-        targets.push(root_pid);
-    }
-    targets
-}
-
-/// Convert an absolute-deadline remainder to the largest Win32 millisecond
-/// wait that cannot exceed it. A sub-millisecond remainder is intentionally
-/// unusable: rounding up would break the single global budget.
-#[cfg(windows)]
-fn windows_wait_timeout_ms(remaining: std::time::Duration) -> Option<u32> {
-    // `u32::MAX` is Win32's INFINITE sentinel, so the largest finite wait is
-    // one millisecond below it.
-    const MAX_FINITE_WAIT_MS: u32 = u32::MAX - 1;
-    let milliseconds = remaining.as_millis().min(u128::from(MAX_FINITE_WAIT_MS)) as u32;
-    (milliseconds != 0).then_some(milliseconds)
-}
-
-#[cfg(windows)]
-struct WindowsTerminationHandle {
-    pid: u32,
-    handle: windows_sys::Win32::Foundation::HANDLE,
-}
-
-#[cfg(windows)]
-impl Drop for WindowsTerminationHandle {
-    fn drop(&mut self) {
-        // SAFETY: this guard owns one non-null OpenProcess handle.
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.handle);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn request_windows_pid_termination(
-    pid: u32,
-    result: &mut WindowsProcessTreeTerminationResult,
-) -> Option<WindowsTerminationHandle> {
-    use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
-    };
-    // SYNCHRONIZE access right is required for WaitForSingleObject on the
-    // returned handle; PROCESS_TERMINATE alone makes WaitForSingleObject
-    // return WAIT_FAILED. Value mirrors winnt.h (0x0010_0000). Declared
-    // locally to avoid pulling the Win32_Storage_FileSystem feature flag.
-    const SYNCHRONIZE: u32 = 0x0010_0000;
-
-    // SAFETY: the returned handle is immediately wrapped in an owning guard.
-    let handle = unsafe { OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, pid) };
-    if handle.is_null() {
-        let os_error = io::Error::last_os_error().raw_os_error();
-        result.failures = result.failures.saturating_add(1);
-        log::debug!(
-            "paneflow: Windows pane cleanup could not open pid={pid} (os_error={os_error:?})"
-        );
-        return None;
-    }
-    let process = WindowsTerminationHandle { pid, handle };
-
-    // The process can still exit during the 100ms grace window. Confirm that
-    // state before requesting a hard kill so an ordinary exit is not a failure.
-    // SAFETY: `process` owns a valid synchronizable process handle.
-    match unsafe { WaitForSingleObject(process.handle, 0) } {
-        WAIT_OBJECT_0 => {
-            result.already_exited = result.already_exited.saturating_add(1);
-            return None;
-        }
-        WAIT_TIMEOUT => {}
-        WAIT_FAILED => {
-            let os_error = io::Error::last_os_error().raw_os_error();
-            result.failures = result.failures.saturating_add(1);
-            log::warn!(
-                "paneflow: Windows pane cleanup precheck failed for pid={pid} (os_error={os_error:?})"
-            );
-        }
-        status => {
-            result.failures = result.failures.saturating_add(1);
-            log::warn!(
-                "paneflow: Windows pane cleanup precheck returned status={status:#x} for pid={pid}"
-            );
-        }
-    }
-
-    // SAFETY: `process.handle` carries PROCESS_TERMINATE access for this PID.
-    if unsafe { TerminateProcess(process.handle, 1) } == 0 {
-        let terminate_error = io::Error::last_os_error().raw_os_error();
-        // A process may exit between the zero-timeout precheck and this call.
-        // Treat that confirmed race as an ordinary already-exited outcome.
-        // SAFETY: `process` still owns the same valid synchronizable handle.
-        let exited = unsafe { WaitForSingleObject(process.handle, 0) } == WAIT_OBJECT_0;
-        if exited {
-            result.already_exited = result.already_exited.saturating_add(1);
-        } else {
-            result.failures = result.failures.saturating_add(1);
-            log::debug!(
-                "paneflow: Windows pane cleanup could not terminate pid={pid} (os_error={terminate_error:?})"
-            );
-        }
-        return None;
-    }
-
-    result.terminate_requested = result.terminate_requested.saturating_add(1);
-    Some(process)
-}
-
-#[cfg(windows)]
-fn wait_for_windows_terminations(
-    handles: Vec<WindowsTerminationHandle>,
-    deadline: std::time::Instant,
-    result: &mut WindowsProcessTreeTerminationResult,
-) {
-    use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
-
-    if handles.is_empty() {
-        return;
-    }
-
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    if windows_wait_timeout_ms(remaining).is_none() {
-        result.deadline_exhausted = true;
-        result.timed_out = result.timed_out.saturating_add(handles.len());
-        return;
-    }
-
-    // Observe every process once without blocking before allowing one slow PID
-    // to consume the shared deadline. All TerminateProcess requests have
-    // already been issued, so this pass only improves result accuracy.
-    let mut pending = Vec::with_capacity(handles.len());
-    for process in handles {
-        // SAFETY: every guard owns a valid synchronizable process handle.
-        match unsafe { WaitForSingleObject(process.handle, 0) } {
-            WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => pending.push(process),
-            WAIT_FAILED => {
-                let os_error = io::Error::last_os_error().raw_os_error();
-                result.failures = result.failures.saturating_add(1);
-                log::warn!(
-                    "paneflow: Windows pane cleanup wait failed for pid={} (os_error={os_error:?})",
-                    process.pid
-                );
-            }
-            status => {
-                result.failures = result.failures.saturating_add(1);
-                log::warn!(
-                    "paneflow: Windows pane cleanup wait returned status={status:#x} for pid={}",
-                    process.pid
-                );
-            }
-        }
-    }
-
-    let pending_count = pending.len();
-    for (index, process) in pending.into_iter().enumerate() {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let Some(timeout_ms) = windows_wait_timeout_ms(remaining) else {
-            result.deadline_exhausted = true;
-            result.timed_out = result
-                .timed_out
-                .saturating_add(pending_count.saturating_sub(index));
-            break;
-        };
-
-        // SAFETY: `process` owns a valid synchronizable process handle, and
-        // `timeout_ms` is finite and no larger than the deadline remainder.
-        match unsafe { WaitForSingleObject(process.handle, timeout_ms) } {
-            WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => {
-                // This PID consumed every usable whole millisecond. The rest
-                // have already received TerminateProcess, but cannot be waited
-                // independently without exceeding the one shared deadline.
-                result.deadline_exhausted = true;
-                result.timed_out = result
-                    .timed_out
-                    .saturating_add(pending_count.saturating_sub(index));
-                break;
-            }
-            WAIT_FAILED => {
-                let os_error = io::Error::last_os_error().raw_os_error();
-                result.failures = result.failures.saturating_add(1);
-                log::warn!(
-                    "paneflow: Windows pane cleanup wait failed for pid={} (os_error={os_error:?})",
-                    process.pid
-                );
-            }
-            status => {
-                result.failures = result.failures.saturating_add(1);
-                log::warn!(
-                    "paneflow: Windows pane cleanup wait returned status={status:#x} for pid={}",
-                    process.pid
-                );
-            }
-        }
-    }
-}
-
-/// Best-effort hard cleanup for one Windows pane process tree.
-///
-/// Descendants discovered from each pane-rooted snapshot are targeted in
-/// postorder, and the root is targeted exactly once after the first snapshot.
-/// Every blocking wait shares the caller-supplied absolute `deadline`; later
-/// PIDs never receive a fresh per-process timeout. Snapshot, OpenProcess, and
-/// wait failures are recorded while cleanup continues where possible.
-#[cfg(windows)]
-pub(super) fn terminate_windows_process_tree(
-    root_pid: u32,
-    deadline: std::time::Instant,
-) -> WindowsProcessTreeTerminationResult {
-    let mut result = WindowsProcessTreeTerminationResult::default();
-    if root_pid == 0 {
-        return result;
-    }
-
-    const KILL_PASSES: usize = 3;
-    let mut targeted = std::collections::HashSet::new();
-    let mut handles = Vec::new();
-    for pass in 0..KILL_PASSES {
-        // Always run the first pass so an expired deadline still issues the
-        // root hard-kill request. The deadline bounds every blocking wait and
-        // prevents optional race-catching snapshots from extending cleanup.
-        if pass > 0 && std::time::Instant::now() >= deadline {
-            result.deadline_exhausted = true;
-            break;
-        }
-
-        let (entries, snapshot_failed) = match windows_process_entries() {
-            Ok(entries) => (entries, false),
-            Err(error) => {
-                result.failures = result.failures.saturating_add(1);
-                log::warn!(
-                    "paneflow: Windows pane cleanup snapshot failed for root_pid={root_pid} (os_error={:?})",
-                    error.raw_os_error()
-                );
-                (Vec::new(), true)
-            }
-        };
-        let targets = windows_process_tree_targets(root_pid, &entries, pass == 0);
-        let had_descendants = targets.iter().any(|pid| *pid != root_pid);
-        for pid in targets {
-            if !targeted.insert(pid) {
-                continue;
-            }
-            result.targeted = result.targeted.saturating_add(1);
-            if let Some(handle) = request_windows_pid_termination(pid, &mut result) {
-                handles.push(handle);
-            }
-        }
-
-        // A successful follow-up snapshot with no descendants proves there is
-        // nothing left to discover. A failed snapshot gets one final retry.
-        if pass > 0 && !snapshot_failed && !had_descendants {
-            break;
-        }
-    }
-
-    wait_for_windows_terminations(handles, deadline, &mut result);
-    if result.failures != 0 || result.timed_out != 0 {
-        log::warn!(
-            "paneflow: Windows pane cleanup incomplete (root_pid={root_pid}, targeted={}, terminate_requested={}, already_exited={}, failures={}, timed_out={}, deadline_exhausted={})",
-            result.targeted,
-            result.terminate_requested,
-            result.already_exited,
-            result.failures,
-            result.timed_out,
-            result.deadline_exhausted
-        );
-    }
-    result
 }
 
 #[cfg(test)]
@@ -3650,8 +3186,6 @@ mod tests {
     fn backend_diagnostics_expose_target_triple() {
         let diagnostics = TerminalState::new_display_only(24, 80).backend_diagnostics();
         assert_eq!(diagnostics.target_triple, env!("PANEFLOW_TARGET_TRIPLE"));
-        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-        assert_eq!(diagnostics.target_triple, "x86_64-pc-windows-msvc");
     }
 
     #[test]
@@ -3868,11 +3402,8 @@ mod tests {
         #[cfg(unix)]
         let status: std::process::ExitStatus =
             std::os::unix::process::ExitStatusExt::from_raw(42 << 8);
-        #[cfg(windows)]
-        let status: std::process::ExitStatus =
-            std::os::windows::process::ExitStatusExt::from_raw(42u32);
 
-        #[cfg(any(unix, windows))]
+        #[cfg(unix)]
         {
             state.process_event(AlacEvent::ChildExit(status));
             assert_eq!(
@@ -3892,11 +3423,8 @@ mod tests {
         #[cfg(unix)]
         let status: std::process::ExitStatus =
             std::os::unix::process::ExitStatusExt::from_raw(1 << 8);
-        #[cfg(windows)]
-        let status: std::process::ExitStatus =
-            std::os::windows::process::ExitStatusExt::from_raw(1u32);
 
-        #[cfg(any(unix, windows))]
+        #[cfg(unix)]
         {
             state.process_event(AlacEvent::ChildExit(status));
             state.process_event(AlacEvent::Exit);
@@ -4596,38 +4124,11 @@ mod tests {
         assert_eq!(seen, ["/tmp/recovered"]);
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn osc7_payload_preserves_drive_like_posix_path() {
         assert_eq!(
             cwd_from_osc7_payload("7;file:///C:/dev/path%20with%20space"),
             Some("/C:/dev/path with space".to_string())
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn osc7_payload_decodes_windows_file_uri() {
-        assert_eq!(
-            cwd_from_osc7_payload("7;file:///C:/dev/path%20with%20space"),
-            Some(r"C:\dev\path with space".to_string())
-        );
-        assert_eq!(
-            cwd_from_osc7_payload("7;file://DESKTOP-123/C:/dev/paneflow"),
-            Some(r"C:\dev\paneflow".to_string())
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn osc7_payload_decodes_git_bash_msys_file_uri() {
-        assert_eq!(
-            cwd_from_osc7_payload("7;file://DESKTOP-123/c/dev/path%20with%20space"),
-            Some(r"C:\dev\path with space".to_string())
-        );
-        assert_eq!(
-            cwd_from_osc7_payload("7;file:///c"),
-            Some("C:\\".to_string())
         );
     }
 
@@ -4869,57 +4370,6 @@ mod tests {
         assert!(
             found,
             "final PTY output must survive a fast shell exit before the overlay lands"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_descendants_postorder_places_children_before_parent() {
-        let entries = vec![(10, 1), (11, 10), (12, 10), (13, 12), (20, 1)];
-
-        assert_eq!(
-            windows_descendants_postorder(10, &entries),
-            vec![11, 13, 12]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_process_tree_targets_stay_scoped_and_put_root_last() {
-        let entries = vec![(10, 1), (11, 10), (12, 10), (13, 12), (20, 1)];
-
-        assert_eq!(
-            windows_process_tree_targets(10, &entries, true),
-            vec![11, 13, 12, 10]
-        );
-        assert_eq!(
-            windows_process_tree_targets(10, &entries, false),
-            vec![11, 13, 12]
-        );
-
-        let cyclic_entries = vec![(10, 11), (11, 10), (20, 1)];
-        assert_eq!(
-            windows_process_tree_targets(10, &cyclic_entries, true),
-            vec![11, 10],
-            "a malformed cycle must still target the pane root exactly once"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_wait_timeout_never_rounds_past_global_budget() {
-        use std::time::Duration;
-
-        assert_eq!(windows_wait_timeout_ms(Duration::ZERO), None);
-        assert_eq!(windows_wait_timeout_ms(Duration::from_micros(999)), None);
-        assert_eq!(windows_wait_timeout_ms(Duration::from_millis(1)), Some(1));
-        assert_eq!(
-            windows_wait_timeout_ms(Duration::from_micros(1_999)),
-            Some(1)
-        );
-        assert_eq!(
-            windows_wait_timeout_ms(Duration::from_millis(u64::from(u32::MAX) + 1)),
-            Some(u32::MAX - 1)
         );
     }
 
