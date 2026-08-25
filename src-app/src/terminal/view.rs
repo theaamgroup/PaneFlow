@@ -48,14 +48,7 @@ fn policy_requests_ghostty(requested: TerminalBackendConfig, auto_selects: bool)
 }
 
 fn auto_selects_ghostty_for_target() -> bool {
-    cfg!(any(
-        target_os = "linux",
-        all(
-            target_os = "windows",
-            target_arch = "x86_64",
-            target_env = "msvc"
-        )
-    ))
+    cfg!(target_os = "linux")
 }
 
 #[cfg(test)]
