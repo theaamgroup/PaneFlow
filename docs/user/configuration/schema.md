@@ -49,7 +49,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `agent_stall_threshold_secs` | integer or null | `60` | Silence threshold before a Thinking agent is marked Stalled. Clamped to `30` to `86400`. |
 | `review_prefill_delay_ms` | integer or null | `2000` | Delay before Review pre-fills a freshly launched CLI. Clamped to `250` to `10000`. |
 | `submit_paste_delay_ms` | integer or null | `70` | Minimum delay between bracketed paste and submit carriage return. Clamped to `10` to `5000`. |
-| `external_editor` | string or null | `auto` | `auto`, `system`, `zed`, `cursor`, `windsurf`, `code`. The code also accepts `visual_studio` (launches `devenv`) and the Settings UI can write it, but the JSON Schema `enum` omits it, so editors flag it as invalid. |
+| `external_editor` | string or null | `auto` | `auto`, `system`, `zed`, `cursor`, `windsurf`, `code`. |
 | `shortcuts` | object | `{}` | Custom keybindings: `{ "ctrl+shift+t": "new_tab" }`. |
 | `terminal` | object or null | defaults below | Terminal renderer and PTY settings. |
 | `commands` | array | `[]` | Command palette entries and workspace templates. |

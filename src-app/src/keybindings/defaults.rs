@@ -512,8 +512,9 @@ mod tests {
 
     #[test]
     fn us009_terminal_copy_paste_untouched() {
-        // AC4: terminal copy/paste must keep `ctrl-shift-c/v` so Linux users
-        // retain the terminal-standard bindings and Ctrl+C stays SIGINT-safe.
+        // AC4: terminal copy/paste keeps `ctrl-shift-c/v` as the
+        // terminal-standard chord (Ctrl+C stays SIGINT-safe). Cmd+C/V
+        // are additive macOS bindings, not a replacement.
         let copy = DEFAULTS
             .iter()
             .find(|d| d.action_name == "terminal_copy")

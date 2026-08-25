@@ -13,7 +13,7 @@ pub(crate) const SIDEBAR_WIDTH: f32 = 240.;
 pub(crate) const TITLE_BAR_EDGE_INSET: Pixels = px(8.);
 /// Inter-button rhythm for compact title-bar controls.
 pub(crate) const TITLE_BAR_CONTROL_SPACING: Pixels = px(12.);
-/// Compact custom control size used by Linux CSD title bars.
+/// Compact custom control size used by this fork's client-side decorations.
 pub(crate) const TITLE_BAR_CONTROL_SIZE: Pixels = px(20.);
 /// Minimum title-bar height preserving an 8px inset around compact controls.
 pub(crate) const TITLE_BAR_MIN_HEIGHT: Pixels = px(36.);
@@ -44,11 +44,13 @@ pub(crate) const SIDEBAR_TAB_CORNER_RADIUS: Pixels = px(8.);
 
 /// Native material used behind the main application window.
 ///
-/// Windows delegates to GPUI's system backdrop support. On macOS PaneFlow
-/// installs a semantic AppKit sidebar material after the native window opens.
-/// Linux starts opaque. Once the native handle exists, the Linux window layer
-/// enables explicit alpha only for X11 CSD; Wayland CSD is alpha-capable by
-/// construction and can keep opaque text rendering semantics.
+/// Config values map onto these variants: `auto` (and empty) → Auto,
+/// `mica` → Mica, `blurred`/`acrylic` → Blurred, `transparent` →
+/// Transparent, `opaque`/`off` → Opaque. Unknown values warn and fall
+/// back to Auto. GPUI appearance is Opaque for Opaque, Blurred for
+/// Blurred, Transparent otherwise. After the native window opens,
+/// PaneFlow installs a semantic AppKit sidebar material unless the
+/// preference is Opaque or Transparent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WindowBackdropPreference {
     Auto,

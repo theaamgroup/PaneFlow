@@ -226,8 +226,8 @@ mod tests {
     #[test]
     fn cmd_override_parses_on_any_platform() {
         // AC5: a user writing `"split_horizontally": "cmd-shift-d"` in
-        // paneflow.json must produce a valid binding on Linux as well as
-        // macOS (GPUI accepts `cmd` as a synonym for the platform modifier).
+        // paneflow.json must produce a valid binding (GPUI accepts `cmd`
+        // as a synonym for the platform modifier).
         let binding = make_binding("cmd-shift-d", Box::new(SplitHorizontally), None);
         assert!(
             binding.is_some(),

@@ -262,9 +262,8 @@ fn configured_shell_if_usable(path: &str) -> Option<String> {
 /// name that the PATH search (`which`) missed. Covers the Homebrew prefixes
 /// (`/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel) plus the
 /// system dirs, so a configured `"pwsh"` / `"fish"` / etc. resolves even when a
-/// GUI-launched process inherited a minimal PATH. Returns `None` on Windows,
-/// where the configured-bare-name case is already served by `which` +
-/// `find_windows_powershell`. The executable-bit check is left to the caller.
+/// GUI-launched process inherited a minimal PATH. The executable-bit check
+/// is left to the caller.
 fn well_known_shell_dir_lookup(name: &str) -> Option<std::path::PathBuf> {
     #[cfg(unix)]
     {
@@ -513,7 +512,6 @@ mod tests {
 
     #[test]
     fn clear_then_uses_powershell_51_compatible_syntax() {
-        assert_eq!(clear_then_for_shell("claude", "pwsh"), "Clear-Host; claude");
         assert_eq!(clear_then_for_shell("claude", "pwsh"), "Clear-Host; claude");
         assert_eq!(
             clear_then_for_shell("kiro-cli chat", "pwsh"),

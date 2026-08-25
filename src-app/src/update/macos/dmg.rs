@@ -270,8 +270,8 @@ fn install_in(
     // US-004: OS-native gatekeeper check on the bundle inside the (read-only,
     // signature-verified) mounted DMG before we copy it into place -
     // fail-closed, a second layer over the minisign verification of the DMG
-    // bytes. cfg(macos) so the Linux/Windows compile-closure and the
-    // platform-neutral copy/swap unit tests stay free of `codesign`/`spctl`.
+    // bytes. cfg(macos) so the copy/swap unit tests stay free of
+    // `codesign`/`spctl`.
     #[cfg(target_os = "macos")]
     {
         let bundle_name = bundle_file_name(install_dir)?;

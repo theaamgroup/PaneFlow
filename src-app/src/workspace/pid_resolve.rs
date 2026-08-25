@@ -4,12 +4,11 @@
 //! direct PTY child (`terminal.child_pid`). When the agent was launched from
 //! an interactive shell the agent is a grand-child (or deeper), so the link
 //! is materialized by walking the parent-PID chain from the agent up until a
-//! known `child_pid` is hit. Per-OS parent lookup mirrors `ports.rs`:
-//! Linux reads `/proc/<pid>/stat`, macOS asks `libproc`, Windows uses a
-//! ToolHelp process snapshot. An unresolved PID degrades gracefully to the
+//! known `child_pid` is hit. Parent lookup asks libproc
+//! (`pidinfo::<BSDInfo>`). An unresolved PID degrades gracefully to the
 //! workspace-level badge, never to a wrong pane.
 //!
-//! The walk does I/O (`/proc` reads) - callers run it OFF the render thread
+//! The walk does I/O (libproc) - callers run it OFF the render thread
 //! (`smol::unblock`) and deposit the result back on the main thread.
 
 use std::collections::HashMap;

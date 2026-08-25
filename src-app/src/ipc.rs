@@ -801,10 +801,10 @@ fn reject_overloaded(mut stream: Stream) {
 }
 
 /// EP-003 US-010 (agent-control-plane): the connected peer's PID, for tracing
-/// writes granted by AI free-access mode. `SO_PEERCRED` exposes it on Linux;
-/// macOS `LOCAL_PEERCRED` and Windows named pipes do not, so this returns None
-/// there. Best-effort and advisory only - never an authorization input (the
-/// peer-UID check in `auth::check_peer` is the security boundary).
+/// writes granted by AI free-access mode. On macOS `LOCAL_PEERCRED` carries
+/// no pid, so this returns `None` here. Best-effort and advisory only -
+/// never an authorization input (the peer-UID check in `auth::check_peer`
+/// is the security boundary).
 #[cfg(unix)]
 fn peer_pid(stream: &Stream) -> Option<i64> {
     stream
@@ -820,8 +820,7 @@ fn handle_connection(
     event_bus: Arc<crate::ipc_events::EventBus>,
     active_subscriptions: Arc<AtomicUsize>,
 ) {
-    // `Stream::try_clone` is provided by `interprocess::TryClone` and
-    // works on both Unix domain sockets and Windows named pipes. One
+    // `Stream::try_clone` is provided by `interprocess::TryClone`. One
     // handle reads, the other writes, so request/response flow does not
     // fight over a single mutable cursor.
     let Ok(writer_stream) = stream.try_clone() else {

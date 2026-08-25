@@ -46,10 +46,10 @@ const HOOK_BIN: &str = env!("CARGO_BIN_EXE_paneflow-ai-hook");
 
 /// Wall-clock timeout for a single frame to arrive on the mock listener.
 /// The hook binary is ~360 KB stripped (US-008 measurement); local
-/// fork+exec + connect + writeln is well under 50 ms on a Linux laptop,
-/// but CI runners with cold caches and virtualization overhead can
-/// stretch to ~1 s. 5 s is the generous ceiling that keeps slow-CI
-/// flakes out without masking real regressions.
+/// fork+exec + connect + writeln is well under 50 ms, but CI runners
+/// with cold caches and virtualization overhead can stretch to ~1 s.
+/// 5 s is the generous ceiling that keeps slow-CI flakes out without
+/// masking real regressions.
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Wall-clock timeout for the subprocess itself to exit. The hook always
@@ -61,14 +61,12 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(7);
 // Mock IPC server
 // ---------------------------------------------------------------------------
 
-/// Cross-platform keepalive for the IPC endpoint's *path*. The `Listener`
-/// itself holds the kernel resource; this enum keeps the filesystem
-/// backing alive on platforms that need one.
+/// Keepalive for the IPC endpoint's *path*. The `Listener` itself holds
+/// the kernel resource; this type keeps the filesystem backing (the
+/// parent directory of the Unix socket) alive for the test.
 ///
-/// Each variant is constructed on exactly one OS; the other variant is
-/// `dead_code` there. Per-variant allow-listing keeps the suppression
-/// precise - if the whole enum were ever unused, the compiler should
-/// still warn.
+/// The `Unix` variant's `TempDir` owns that parent directory; dropping
+/// it removes both the socket file and the directory.
 enum PathKeepalive {
     /// Unix: the `TempDir` owns the parent directory; dropping it
     /// removes both the socket file and the directory.

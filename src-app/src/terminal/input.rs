@@ -871,13 +871,13 @@ impl TerminalView {
             return;
         };
 
-        // US-021: file(s) copied in the OS file manager (Nautilus/Finder/
-        // Explorer/Thunar) arrive as `ExternalPaths`. Insert the shell-quoted
-        // path(s). Checked BEFORE `clipboard.text()`, which falls back to
-        // unquoted path display strings - those would break on spaces. Iterate
-        // all entries (some backends emit a String entry alongside the paths)
-        // and fall through to text() when no `ExternalPaths` is present (e.g.
-        // Wayland compositors that copy a `file://` URI as text instead).
+        // US-021: file(s) copied in Finder arrive as `ExternalPaths`.
+        // Insert the shell-quoted path(s). Checked BEFORE
+        // `clipboard.text()`, which falls back to unquoted path display
+        // strings - those would break on spaces. Iterate all entries
+        // (some backends emit a String entry alongside the paths) and
+        // fall through to text() when no `ExternalPaths` is present
+        // (e.g. a `file://` URI copied as text instead).
         for entry in clipboard.entries() {
             if let ClipboardEntry::ExternalPaths(ext_paths) = entry
                 && let Some(text) =

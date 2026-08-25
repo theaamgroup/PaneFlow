@@ -1,23 +1,19 @@
 //! Adopt the login shell's **PATH** at startup (GUI-launch PATH fix).
 //!
-//! When PaneFlow is launched from a `.desktop` entry / Dock / Finder, it
-//! inherits the minimal systemd-user / launchd environment - the PATH is
-//! missing Homebrew (`/opt/homebrew/bin`, `/usr/local/bin`), a Nix profile,
-//! distro `/etc/profile.d` additions, and anything the user appended in their
-//! login profile. Terminals opened inside that process then cannot find the
-//! user's tools, and agent-CLI detection (`which::which("bunx")`) comes up
-//! empty.
+//! When PaneFlow is launched from Finder, Dock, or launchd, it inherits
+//! launchd's minimal environment - the PATH is missing Homebrew
+//! (`/opt/homebrew/bin`, `/usr/local/bin`), a Nix profile, and anything
+//! the user appended in their login profile. Terminals opened inside that
+//! process then cannot find the user's tools, and agent-CLI detection
+//! (`which::which("bunx")`) comes up empty.
 //!
 //! We run the user's login shell once and adopt **only its `PATH`**. We
 //! deliberately do NOT import the rest of the captured environment: a login
-//! profile that re-exports session variables (`DISPLAY`, `WAYLAND_DISPLAY`,
-//! `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `XAUTHORITY`, …) would
-//! otherwise clobber the live values **before GPUI picks its X11/Wayland
-//! backend and composes the IPC socket**, breaking the compositor / D-Bus /
-//! clipboard connection. (Zed keeps the captured env in a side `HashMap`
-//! applied only to PTYs/tasks; importing just PATH is the same idea with a
-//! smaller surface, sufficient for the discovery problem this module exists to
-//! solve.)
+//! profile that re-exports session variables would otherwise clobber the
+//! live values before the IPC socket is composed. (Zed keeps the captured
+//! env in a side `HashMap` applied only to PTYs/tasks; importing just PATH
+//! is the same idea with a smaller surface, sufficient for the discovery
+//! problem this module exists to solve.)
 //!
 //! Properties:
 //! - **skipped on a terminal launch** (stdin is a TTY) - PATH was already

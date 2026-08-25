@@ -74,11 +74,10 @@ impl Assets {
 /// `paneflow-shim` (mapped at extraction time to `claude` + `codex`) and
 /// `paneflow-ai-hook` are staged into `src-app/target/embed/bin/<target>/`
 /// by `build.rs` before rust-embed's proc-macro expands. Entries look like
-/// `bin/<target-triple>/paneflow-shim[.exe]` and
-/// `bin/<target-triple>/paneflow-ai-hook[.exe]`.
+/// `bin/<target-triple>/paneflow-shim` and
+/// `bin/<target-triple>/paneflow-ai-hook`.
 ///
-/// Not cfg-gated on target_os: PaneFlow only builds for Linux, macOS, and
-/// Windows per `CLAUDE.md` mandate. A compile failure on any other OS is
+/// Not cfg-gated on target_os: a compile failure on an unsupported OS is
 /// the correct outcome - there is no build path that would populate the
 /// embed folder anyway. Gating here would only move the failure from
 /// rust-embed (empty folder ⇒ panic) to `ai_hooks::extract` (missing

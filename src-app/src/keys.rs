@@ -59,11 +59,6 @@ fn shift_enter_sequence(
     }
 }
 
-/// Map a GPUI keystroke to a terminal escape sequence.
-///
-/// Returns `Some(Cow::Borrowed(...))` for static keys (zero-alloc),
-/// `Some(Cow::Owned(...))` for modifier combos (one alloc),
-/// or `None` if the keystroke should be handled as printable character input.
 /// Default for `option_as_meta` when the user has not set it in
 /// `paneflow.json`.
 ///
@@ -77,6 +72,11 @@ pub fn default_option_as_meta() -> bool {
     false
 }
 
+/// Map a GPUI keystroke to a terminal escape sequence.
+///
+/// Returns `Some(Cow::Borrowed(...))` for static keys (zero-alloc),
+/// `Some(Cow::Owned(...))` for modifier combos (one alloc),
+/// or `None` if the keystroke should be handled as printable character input.
 pub fn to_esc_str(
     keystroke: &Keystroke,
     mode: &Modes,

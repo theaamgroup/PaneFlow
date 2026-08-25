@@ -70,7 +70,7 @@ pub struct PaneFlowConfig {
     /// Ordered fallback font families, consulted in order for glyphs the
     /// primary `font_family` does not cover - e.g. a Nerd Font for the
     /// Powerline / icon glyphs used by Starship, oh-my-posh or Terminal-Icons,
-    /// which no system font provides on Windows. `None` (or an empty list)
+    /// which no system font ships. `None` (or an empty list)
     /// keeps GPUI's built-in fallback stack only. Mirrors Zed's
     /// `terminal.font_fallbacks`. Hot-reloaded via the 500 ms font cache, so a
     /// config edit takes effect on the next new terminal without a restart.

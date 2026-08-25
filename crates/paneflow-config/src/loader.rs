@@ -11,7 +11,7 @@ use tracing::warn;
 /// Application directory namespace. Switches to `paneflow-dev` in debug
 /// builds so a `cargo run` instance (typical dev workflow) never reads
 /// or writes the same config / session file as the user's installed
-/// `/usr/bin/paneflow`. Mirrors `paneflow_app::runtime_paths::APP_SUBDIR`
+/// `.app` bundle. Mirrors `paneflow_app::runtime_paths::APP_SUBDIR`
 /// so per-build isolation is consistent across every persistence
 /// surface (config, session, threads, sockets, caches).
 pub const APP_SUBDIR: &str = if cfg!(debug_assertions) {

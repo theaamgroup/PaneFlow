@@ -1,23 +1,15 @@
 //! Monospace font family enumeration.
 //!
-//! Per-OS strategy:
+//! macOS (US-012) uses Core Text via the `core-text = "21"` crate. A
+//! shared `fc-list` branch would work only when Homebrew's fontconfig is
+//! installed - a fresh macOS lacks it entirely, leaving the settings font
+//! picker empty. Core Text is macOS-native, has no install requirement,
+//! and returns the same family strings the OS already knows about (SF
+//! Mono, Menlo, Monaco, Courier, etc.).
 //!
-//! - **Linux / BSDs** → `fc-list :spacing=mono family` (fontconfig). Widely
-//!   available, fast, and returns the deduplicated family list we need.
-//! - **macOS** (US-012) → Core Text via the `core-text = "21"` crate. The
-//!   previous shared `fc-list` branch worked only when Homebrew's
-//!   fontconfig was installed - a fresh macOS lacks it entirely, leaving
-//!   the settings font picker empty. Core Text is macOS-native, has no
-//!   install requirement, and returns the same family strings the OS
-//!   already knows about (SF Mono, Menlo, Monaco, Courier, etc.).
-//! - **Windows** → GDI `EnumFontFamiliesExW`, filtering the callback's
-//!   `TEXTMETRICW` to fixed-pitch families. GDI is used only for discovery;
-//!   GPUI/DirectWrite still owns rendering.
-//!
-//! All three branches share the contract: `Ok`-shaped return even on
-//! failure. An empty list + `log::warn!` keeps the settings picker
-//! renderable; panicking here would cascade into the whole settings
-//! window failing to open.
+//! Contract: `Ok`-shaped return even on failure. An empty list +
+//! `log::warn!` keeps the settings picker renderable; panicking here
+//! would cascade into the whole settings window failing to open.
 
 /// macOS implementation (US-012).
 ///

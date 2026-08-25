@@ -272,10 +272,9 @@ pub(crate) fn extract_into(entries: &[Entry<'_>], target_dir: &Path) -> Result<(
         // Defense in depth: `EXTRACT_PLAN` contains only constant ASCII
         // basenames, but the crate-private `Entry` constructor is
         // reachable from anywhere in the crate. Reject any non-basename
-        // filename - both `/` and `\` regardless of host - so a future
-        // caller cannot produce a write outside `target_dir`, and a
-        // `..\\` injected on a Linux build-host still fires on a
-        // Windows target.
+        // filename - both `/` and `\` - so a future caller cannot
+        // produce a write outside `target_dir`. Checking both separators
+        // is defence in depth against attacker-controlled embedded names.
         if entry.filename.contains('/')
             || entry.filename.contains('\\')
             || entry.filename == ".."
