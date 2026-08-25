@@ -41,20 +41,17 @@ pub type SharedTerm = Arc<FairMutex<Term<ZedListener>>>;
 pub enum ShellQuoting {
     Posix,
     PowerShell,
-    Cmd,
 }
 
 impl ShellQuoting {
     pub fn for_shell(shell: &str) -> Self {
         let basename = shell
-            .rsplit(['/', '\\'])
+            .rsplit('/')
             .next()
             .unwrap_or(shell)
             .to_ascii_lowercase();
-        let key = basename.trim_end_matches(".exe");
-        match key {
-            "cmd" => Self::Cmd,
-            "pwsh" | "powershell" => Self::PowerShell,
+        match basename.as_str() {
+            "pwsh" => Self::PowerShell,
             "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "ash" | "mksh" => Self::Posix,
             _ => Self::default_for_platform(),
         }

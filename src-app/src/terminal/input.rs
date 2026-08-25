@@ -111,10 +111,9 @@ impl ReportedMouseButton {
 /// `\r` verbatim, which the shell treats as Enter.
 ///
 /// Only a conservative ASCII path subset is left unquoted; metacharacters like
-/// `;`, `&`, `$`, spaces, and quotes are always quoted. Windows uses the
-/// PowerShell-compatible single-quote form because Paneflow's default Windows
-/// shell resolver prefers PowerShell over cmd.exe. Shared by `handle_file_drop`
-/// and `handle_paste`.
+/// `;`, `&`, `$`, spaces, and quotes are always quoted. pwsh panes (Homebrew)
+/// get the PowerShell single-quote form; POSIX shells get POSIX quoting.
+/// Shared by `handle_file_drop` and `handle_paste`.
 fn paths_to_pty_text(paths: &[std::path::PathBuf], shell_quoting: ShellQuoting) -> Option<String> {
     let quoted: Vec<String> = paths
         .iter()
@@ -140,7 +139,6 @@ fn quote_path_for_shell(path: &str, shell_quoting: ShellQuoting) -> String {
     match shell_quoting {
         ShellQuoting::Posix => quote_posix_path(path),
         ShellQuoting::PowerShell => quote_powershell_path(path),
-        ShellQuoting::Cmd => quote_cmd_path(path),
     }
 }
 
@@ -166,19 +164,6 @@ fn quote_powershell_path(path: &str) -> String {
 
 fn windows_unquoted_path_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | ':')
-}
-
-fn quote_cmd_path(path: &str) -> String {
-    if path.chars().all(windows_unquoted_path_char) {
-        path.to_string()
-    } else {
-        let escaped = path
-            .replace('^', "^^")
-            .replace('%', "^%")
-            .replace('!', "^!")
-            .replace('"', "\"\"");
-        format!("\"{escaped}\"")
-    }
 }
 
 impl TerminalView {
@@ -1232,11 +1217,7 @@ mod tests {
     fn shell_quoting_detects_common_shells() {
         assert_eq!(ShellQuoting::for_shell("/bin/zsh"), ShellQuoting::Posix);
         assert_eq!(
-            ShellQuoting::for_shell(r"C:\Windows\System32\cmd.exe"),
-            ShellQuoting::Cmd
-        );
-        assert_eq!(
-            ShellQuoting::for_shell(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            ShellQuoting::for_shell("/opt/homebrew/bin/pwsh"),
             ShellQuoting::PowerShell
         );
     }
@@ -1333,17 +1314,6 @@ mod tests {
                 ShellQuoting::PowerShell
             ),
             Some("'C:\\dev\\my file.txt'".to_string())
-        );
-    }
-
-    #[test]
-    fn cmd_path_with_spaces_uses_cmd_quotes_and_escapes_expansion() {
-        assert_eq!(
-            paths_to_pty_text(
-                &[PathBuf::from(r"C:\dev\100% done\bang!")],
-                ShellQuoting::Cmd
-            ),
-            Some("\"C:\\dev\\100^% done\\bang^!\"".to_string())
         );
     }
 }

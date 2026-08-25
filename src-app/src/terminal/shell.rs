@@ -116,48 +116,6 @@ if status is-interactive
 end
 "#;
 
-/// WSL bootstrap for the configured default distribution. `wsl.exe` only
-/// identifies the Windows launcher, so the Linux login shell is resolved
-/// inside the distribution. Integration paths stay positional arguments:
-/// no user-controlled path is interpolated into this script.
-///
-/// The integrated shell is deliberately interactive and non-login, matching
-/// PaneFlow's native Bash/Zsh/Fish launch contract. This preserves `.bashrc`,
-/// `.zshrc`, and `config.fish`; login-only profile files are not evaluated.
-const WSL_SHELL_BOOTSTRAP: &str = r#"uid="$(id -u 2>/dev/null)" || uid=
-shell=
-if [ -n "$uid" ] && command -v getent >/dev/null 2>&1; then
-    shell="$(getent passwd "$uid" 2>/dev/null | cut -d: -f7)"
-fi
-[ -n "$shell" ] || shell="${SHELL:-/bin/sh}"
-[ -x "$shell" ] || shell=/bin/sh
-
-case "${shell##*/}" in
-    bash)
-        rcfile="$(wslpath -u -- "$1" 2>/dev/null)" || exec "$shell"
-        exec "$shell" --rcfile "$rcfile"
-        ;;
-    zsh)
-        zdotdir="$(wslpath -u -- "$2" 2>/dev/null)" || exec "$shell"
-        if [ "${ZDOTDIR+x}" = x ]; then
-            export PANEFLOW_ORIG_ZDOTDIR="$ZDOTDIR"
-        else
-            unset PANEFLOW_ORIG_ZDOTDIR
-        fi
-        export ZDOTDIR="$zdotdir"
-        exec "$shell"
-        ;;
-    fish)
-        initfile="$(wslpath -u -- "$3" 2>/dev/null)" || exec "$shell"
-        export PANEFLOW_WSL_FISH_INIT="$initfile"
-        exec "$shell" --init-command 'source "$PANEFLOW_WSL_FISH_INIT"'
-        ;;
-    *)
-        exec "$shell"
-        ;;
-esac
-"#;
-
 /// PowerShell 5.1 / 7 (pwsh): dot-sourced via `-NoExit -Command ". <path>"`,
 /// which runs AFTER the user's `$PROFILE`, so any `prompt` function they
 /// defined is already in place. We capture it as a ScriptBlock and wrap it
@@ -253,13 +211,6 @@ __paneflow_path_prepend
 /// `portable-pty`'s `CommandBuilder::new`.
 ///
 /// Unix chain: configured (if executable) → `$SHELL` → `/bin/sh`.
-/// Windows chain: configured (if present, resolved via PATH when it has no
-/// separators) → PowerShell 7 (`pwsh.exe`) → Windows PowerShell 5.1
-/// (`powershell.exe`) → `%ComSpec%` → `C:\Windows\System32\cmd.exe` → bare
-/// `"cmd.exe"` (last-ditch). PowerShell is preferred over `cmd.exe` so a fresh
-/// Windows install lands on a modern shell (rich prompt, ANSI colors, working
-/// `clear`) instead of the legacy console - mirrors Zed's
-/// `get_windows_system_shell` (`crates/util/src/shell.rs`).
 pub(super) fn resolve_default_shell(configured: Option<&str>) -> String {
     if let Some(path) = configured {
         if let Some(resolved) = configured_shell_if_usable(path) {
@@ -276,19 +227,17 @@ pub(super) fn resolve_default_shell(configured: Option<&str>) -> String {
 
 /// Validate that a user-configured shell entry resolves to an executable file.
 /// Bare names (no path separators) are searched on PATH via `which` - this is
-/// what lets `"default_shell": "pwsh.exe"` work on Windows without the user
-/// having to hard-code `C:\Program Files\PowerShell\7\pwsh.exe`.
+/// what lets `"default_shell": "pwsh"` work without the user having to
+/// hard-code `/opt/homebrew/bin/pwsh`.
 fn configured_shell_if_usable(path: &str) -> Option<String> {
-    let has_separator = path.contains('/') || path.contains('\\');
+    let has_separator = path.contains('/');
     let candidate: std::path::PathBuf = if has_separator {
         std::path::PathBuf::from(path)
     } else {
-        // PATH search first; on Unix, fall back to well-known install dirs so a
+        // PATH search first; fall back to well-known install dirs so a
         // bare `"pwsh"` configured shell still resolves under a GUI launch whose
-        // inherited PATH omits `/opt/homebrew/bin` (the macOS parallel to the
-        // Windows `find_windows_powershell` well-known-location probe). Without
-        // this, the entry was silently rejected and the shell fell back to
-        // `/bin/sh`.
+        // inherited PATH omits `/opt/homebrew/bin`. Without this, the entry was
+        // silently rejected and the shell fell back to `/bin/sh`.
         which::which(path)
             .ok()
             .or_else(|| well_known_shell_dir_lookup(path))?
@@ -352,23 +301,21 @@ fn resolve_unix_default_shell_fallback(shell_env: Option<&str>) -> String {
 /// Build a command that clears the terminal before launching an interactive
 /// program, using syntax supported by the shell that will own the PTY.
 ///
-/// In particular, Windows PowerShell 5.1 does not support `&&`, and `cmd.exe`
-/// spells the clear command `cls`. When no shell is configured, the platform
-/// fallback is resolved before selecting syntax.
+/// In particular, `pwsh` does not support `&&` and uses `Clear-Host;`. When no
+/// shell is configured, the platform fallback is resolved before selecting
+/// syntax.
 pub(crate) fn clear_then(command: &str, configured_shell: Option<&str>) -> String {
     clear_then_for_shell(command, &resolve_default_shell(configured_shell))
 }
 
 fn clear_then_for_shell(command: &str, shell: &str) -> String {
     let basename = shell
-        .rsplit(['/', '\\'])
+        .rsplit('/')
         .next()
         .unwrap_or(shell)
         .to_ascii_lowercase();
-    let key = basename.trim_end_matches(".exe");
-    match key {
-        "cmd" => format!("cls && {command}"),
-        "pwsh" | "powershell" => format!("Clear-Host; {command}"),
+    match basename.as_str() {
+        "pwsh" => format!("Clear-Host; {command}"),
         // Known POSIX shells: `clear` + `&&` sequencing is universally
         // supported (fish ≥3.0 included).
         "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "ash" | "mksh" => {
@@ -382,11 +329,6 @@ fn clear_then_for_shell(command: &str, shell: &str) -> String {
 }
 
 /// Render a filesystem path for a POSIX shell's rcfile/init argument.
-///
-/// US-042: on Windows, bash and fish run under an MSYS / Git-Bash / WSL
-/// environment that expects forward-slash paths, even though the host
-/// filesystem reports `\`. Converting here keeps `--rcfile` / `source` from
-/// receiving an unparseable backslash path. No-op on Unix.
 fn to_shell_path(p: &std::path::Path) -> String {
     p.display().to_string()
 }
@@ -397,13 +339,8 @@ fn to_shell_path(p: &std::path::Path) -> String {
 ///
 /// Supported shells:
 /// - **zsh, bash, fish** - BEL-terminated OSC 7 via per-prompt hooks.
-/// - **WSL** - resolves the distribution's Bash/Zsh/Fish login shell and
-///   activates the matching integration without modifying Linux dotfiles.
-/// - **PowerShell 5.1 / pwsh 7** (US-012) - `prompt` function wrapper,
+/// - **pwsh** (PowerShell 7) (US-012) - `prompt` function wrapper,
 ///   dot-sourced so the user's `$PROFILE`-defined prompt still renders.
-/// - **cmd.exe** - `info!` log only; cmd has no per-prompt scripting hook,
-///   so split-pane CWD inheritance from a cmd.exe pane is v1-unsupported
-///   (documented in `docs/WINDOWS.md` per US-022).
 /// - **Shells without injection** (nushell, elvish, xonsh): rely on
 ///   `cwd_now()` fallback. On macOS this requires `proc_pidinfo()`.
 pub(super) fn setup_shell_integration(
@@ -415,20 +352,12 @@ pub(super) fn setup_shell_integration(
         return vec![];
     };
 
-    // US-006 - `Path::file_name()` is path-separator-agnostic:
-    //   /bin/zsh  → "zsh"      (Unix)
-    //   C:\Windows\System32\cmd.exe → "cmd.exe"  (Windows)
-    //   zsh (bare) → "zsh"     (either platform)
     let basename = std::path::Path::new(shell)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(shell);
-    // US-012 - normalize for case-insensitive match + optional `.exe`
-    // suffix. Windows allows `pwsh` and `pwsh.exe` interchangeably on
-    // PATH; Unix shell names (lowercase, no suffix) are unaffected.
-    let normalized = basename.to_ascii_lowercase();
-    let key = normalized.trim_end_matches(".exe");
-    match key {
+    let key = basename.to_ascii_lowercase();
+    match key.as_str() {
         "zsh" => {
             let dir = base.join("zsh");
             if std::fs::create_dir_all(&dir).is_err() {
@@ -477,14 +406,12 @@ pub(super) fn setup_shell_integration(
                 format!("source {}", quote_fish_arg(&to_shell_path(&initfile))),
             ]
         }
-        "wsl" => setup_wsl_shell_integration(&base),
-        // US-012 - PowerShell 7 (pwsh) and Windows PowerShell 5.1 share
-        // the same `function prompt { ... }` hook mechanism, so one
-        // script serves both. `-NoExit` keeps the shell interactive after
-        // the init command; `-Command ". 'path'"` dot-sources our script
-        // AFTER the user's `$PROFILE` has loaded any `prompt` they
-        // defined (so we can wrap rather than replace it).
-        "pwsh" | "powershell" => {
+        // US-012 - PowerShell 7 (`pwsh`) uses `function prompt { ... }` as the
+        // hook. `-NoExit` keeps the shell interactive after the init command;
+        // `-Command ". 'path'"` dot-sources our script AFTER the user's
+        // `$PROFILE` has loaded any `prompt` they defined (so we can wrap
+        // rather than replace it).
+        "pwsh" => {
             let dir = base.join("pwsh");
             if std::fs::create_dir_all(&dir).is_err() {
                 return vec![];
@@ -502,65 +429,8 @@ pub(super) fn setup_shell_integration(
             let escaped = initfile.display().to_string().replace('\'', "''");
             powershell_startup_args(profile, format!(". '{escaped}'"))
         }
-        // US-012 AC-5 - cmd.exe has no scripting hook for per-prompt
-        // actions (its `$PROMPT` env var controls only the displayed
-        // text, not arbitrary execution). Split-pane CWD inheritance
-        // from cmd.exe panes is v1-unsupported; users can `cd` manually
-        // or switch to PowerShell for the integrated experience.
-        "cmd" => {
-            log::info!(
-                "paneflow: cmd.exe has no OSC 7 scripting hook; split-pane CWD \
-                 inheritance from cmd.exe panes is v1-unsupported (docs/WINDOWS.md)"
-            );
-            vec![]
-        }
         _ => vec![],
     }
-}
-
-fn setup_wsl_shell_integration(base: &std::path::Path) -> Vec<String> {
-    let bashrc = base.join("bash").join("bashrc");
-    let zshenv = base.join("zsh").join(".zshenv");
-    let fish_init = base.join("fish").join("osc7.fish");
-
-    for (path, contents) in [
-        (&bashrc, BASH_OSC7),
-        (&zshenv, ZSH_OSC7),
-        (&fish_init, FISH_OSC7),
-    ] {
-        let Some(parent) = path.parent() else {
-            return vec![];
-        };
-        if std::fs::create_dir_all(parent).is_err() || std::fs::write(path, contents).is_err() {
-            log::warn!(
-                "paneflow: could not materialize WSL shell integration at {}",
-                path.display()
-            );
-            return vec![];
-        }
-    }
-
-    wsl_startup_args(
-        bashrc.display().to_string(),
-        zshenv
-            .parent()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default(),
-        fish_init.display().to_string(),
-    )
-}
-
-fn wsl_startup_args(bashrc: String, zdotdir: String, fish_init: String) -> Vec<String> {
-    vec![
-        "--exec".into(),
-        "/bin/sh".into(),
-        "-c".into(),
-        WSL_SHELL_BOOTSTRAP.into(),
-        "paneflow-wsl-bootstrap".into(),
-        bashrc,
-        zdotdir,
-        fish_init,
-    ]
 }
 
 fn powershell_startup_args(profile: TerminalSurfaceProfile, init_command: String) -> Vec<String> {
@@ -590,7 +460,7 @@ fn quote_fish_arg(arg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_then_for_shell, powershell_startup_args, wsl_startup_args};
+    use super::{clear_then_for_shell, powershell_startup_args};
     use paneflow_config::schema::TerminalSurfaceProfile;
 
     // (B) Unix well-known-dir shell lookup: a bare name not on PATH still
@@ -642,54 +512,8 @@ mod tests {
     }
 
     #[test]
-    fn wsl_bootstrap_passes_integration_paths_positionally() {
-        let bashrc = r"C:\Users\O'Brien\App Data\$(touch nope)\bashrc";
-        let zdotdir = r"C:\Users\O'Brien\App Data\zsh";
-        let fish_init = r"C:\Users\O'Brien\App Data\fish\osc7.fish";
-        let args = wsl_startup_args(bashrc.into(), zdotdir.into(), fish_init.into());
-
-        assert_eq!(&args[..3], ["--exec", "/bin/sh", "-c"]);
-        assert_eq!(args[4], "paneflow-wsl-bootstrap");
-        assert_eq!(&args[5..], [bashrc, zdotdir, fish_init]);
-        assert!(!args[3].contains(bashrc));
-        assert!(!args[3].contains(zdotdir));
-        assert!(!args[3].contains(fish_init));
-    }
-
-    #[test]
-    fn wsl_bootstrap_integrates_known_shells_and_falls_back_safely() {
-        let script = super::WSL_SHELL_BOOTSTRAP;
-        for shell in ["bash)", "zsh)", "fish)"] {
-            assert!(
-                script.contains(shell),
-                "missing WSL integration for {shell}"
-            );
-        }
-        assert!(script.contains("*)\n        exec \"$shell\""));
-        assert!(!script.contains("eval "));
-        assert!(script.contains("wslpath -u -- \"$1\""));
-        assert!(script.contains("wslpath -u -- \"$2\""));
-        assert!(script.contains("wslpath -u -- \"$3\""));
-    }
-
-    #[test]
-    fn clear_then_uses_cmd_syntax() {
-        assert_eq!(
-            clear_then_for_shell("codex", r"C:\Windows\System32\cmd.exe"),
-            "cls && codex"
-        );
-        assert_eq!(
-            clear_then_for_shell("openclaw tui", r"C:\Windows\System32\cmd.exe"),
-            "cls && openclaw tui"
-        );
-    }
-
-    #[test]
     fn clear_then_uses_powershell_51_compatible_syntax() {
-        assert_eq!(
-            clear_then_for_shell("claude", "powershell.exe"),
-            "Clear-Host; claude"
-        );
+        assert_eq!(clear_then_for_shell("claude", "pwsh"), "Clear-Host; claude");
         assert_eq!(clear_then_for_shell("claude", "pwsh"), "Clear-Host; claude");
         assert_eq!(
             clear_then_for_shell("kiro-cli chat", "pwsh"),
