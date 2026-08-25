@@ -1276,18 +1276,13 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 /// Foreground (main-thread) signal mask, captured so an off-thread PTY spawn
 /// (US-012) doesn't hand the child the background executor's mask (which blocks
-/// SIGINT/SIGTSTP and would break Ctrl-C / Ctrl-Z). Unix-only - a ZST on
-/// Windows.
-#[cfg(unix)]
+/// SIGINT/SIGTSTP and would break Ctrl-C / Ctrl-Z).
 pub type ForegroundSignalMask = libc::sigset_t;
-#[cfg(not(unix))]
-pub type ForegroundSignalMask = ();
 
 /// Capture the calling thread's signal mask. Call on the main thread before
 /// scheduling an off-thread spawn; thread the result through to
 /// [`TerminalState::open_pty_and_eventloop`].
 pub(super) fn capture_foreground_signal_mask() -> Option<ForegroundSignalMask> {
-    #[cfg(unix)]
     {
         // SAFETY: `pthread_sigmask` with a null `set` only reads the current
         // mask into `oldset`; nothing is changed.
@@ -1299,10 +1294,6 @@ pub(super) fn capture_foreground_signal_mask() -> Option<ForegroundSignalMask> {
                 None
             }
         }
-    }
-    #[cfg(not(unix))]
-    {
-        None
     }
 }
 
@@ -1638,15 +1629,11 @@ impl TerminalState {
         // US-012: bracket the fork with the captured foreground signal mask so
         // an off-thread spawn doesn't hand the child the background executor's
         // signal-blocking mask. No-op on the synchronous path (`signal_mask` is
-        // `None`) and on Windows.
-        #[cfg(unix)]
+        // `None`).
         let restore_mask = apply_thread_signal_mask(signal_mask);
-        #[cfg(not(unix))]
-        let _ = signal_mask;
 
         let pty = tty::new(&options, window_size, params.surface_id);
 
-        #[cfg(unix)]
         restore_thread_signal_mask(restore_mask);
 
         let pty = pty.map_err(|e| anyhow::anyhow!("failed to open pty: {e}"))?;
@@ -2123,25 +2110,6 @@ impl TerminalState {
         self.pending_clipboard_ops.push(op);
     }
 
-    /// Read the shell's CWD from the OS on demand.
-    /// Fallback for shells that don't emit OSC 7 - used at split time.
-    #[cfg(target_os = "linux")]
-    pub fn cwd_now(&self) -> Option<std::path::PathBuf> {
-        // US-034: once the child has exited, `child_pid` is stale and the OS
-        // may have reused it for an unrelated process - reading
-        // `/proc/<pid>/cwd` would silently return a third party's CWD. Bail.
-        if self.exited.is_some() {
-            return None;
-        }
-        // Display-only terminal (no real PTY): `child_pid` is 0 → `/proc/0/cwd`
-        // doesn't exist. Bail explicitly to match the macOS/Windows guards.
-        if self.child_pid == 0 {
-            return None;
-        }
-        let proc_path = format!("/proc/{}/cwd", self.child_pid);
-        std::fs::read_link(&proc_path).ok()
-    }
-
     /// macOS implementation of `cwd_now`: read the PTY child shell's current
     /// working directory from the kernel via
     /// `proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &buf, size)`.
@@ -2212,12 +2180,6 @@ impl TerminalState {
             Ok(s) if !s.is_empty() => Some(std::path::PathBuf::from(s)),
             _ => None,
         }
-    }
-
-    /// Stub for other non-Linux platforms (Windows, BSDs).
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub fn cwd_now(&self) -> Option<std::path::PathBuf> {
-        None
     }
 
     /// Scan the last 100 lines of terminal output for server/service patterns.
