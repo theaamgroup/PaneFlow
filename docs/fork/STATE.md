@@ -21,8 +21,8 @@ session learned the hard way.
 | | |
 |---|---|
 | Local clone | `~/Github/paneflow` (directory still carries the upstream name) |
-| Branch | `mac-only-fork`, 51 commits ahead of the fork point |
-| `origin` | `github.com/theaamgroup/panescli` (private) |
+| Branch | **`main`**. Reconciled 2026-08-25: the fork point is tagged `upstream-fork-point`, `main` was fast-forwarded to the fork work (strict ancestor, no rewrite), and `mac-only-fork` remains at the same commit - delete it after the first release tag. |
+| `origin` | `github.com/theaamgroup/paneflow` (private). Renamed from `panescli` on 2026-08-25 when the PanesCLI rebrand was dropped; GitHub keeps redirects. |
 | `upstream` | `github.com/arthjean/paneflow` (read-only, kept for cherry-picks) |
 | Fork point | v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a` |
 | gpui backup | `github.com/theaamgroup/zed`, holds pinned rev `3aaba57b`. `Cargo.toml` still points at `arthjean/zed` deliberately. |
