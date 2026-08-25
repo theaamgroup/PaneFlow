@@ -6031,7 +6031,6 @@ dependencies = [
  "paneflow-mcp-install",
  "paneflow-process",
  "paneflow-telemetry",
- "paneflow-terminal-ghostty",
  "parking_lot",
  "polling",
  "portable-pty",
@@ -6100,16 +6099,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paneflow-ghostty-smoke"
-version = "0.8.2"
-dependencies = [
- "anyhow",
- "libc",
- "paneflow-terminal-ghostty",
- "portable-pty",
-]
-
-[[package]]
 name = "paneflow-ipc-client"
 version = "0.8.2"
 dependencies = [
@@ -6117,13 +6106,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "paneflow-libghostty-sys"
-version = "0.8.2"
-dependencies = [
- "sha2",
 ]
 
 [[package]]
@@ -6174,17 +6156,6 @@ dependencies = [
  "tempfile",
  "ureq",
  "uuid",
-]
-
-[[package]]
-name = "paneflow-terminal-ghostty"
-version = "0.8.2"
-dependencies = [
- "base64",
- "paneflow-libghostty-sys",
- "regex",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]

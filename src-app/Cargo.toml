@@ -12,28 +12,6 @@ keywords.workspace = true
 categories.workspace = true
 readme = "../README.md"
 
-[features]
-default = ["libghostty-linux", "libghostty-windows"]
-# Linux-only backend backed by the pinned libghostty-vt archive. It is the
-# standard backend for cargo run, development builds, and official releases.
-# The target-specific dependencies keep it inert on macOS/Windows.
-# Enabling it never clones or downloads from build.rs.
-libghostty-linux = [
-    "dep:paneflow-terminal-ghostty",
-    "dep:portable-pty",
-    "paneflow-terminal-ghostty/native",
-]
-# Windows backend backed by the pinned static wrapper and the ConPTY host. It is
-# enabled in standard builds so `terminal.backend = "auto"` can select Ghostty
-# on supported x64 MSVC Windows targets. Target-specific dependencies keep it
-# inert on Linux/macOS, and `--no-default-features` preserves an Alacritty-only
-# recovery build.
-libghostty-windows = [
-    "dep:paneflow-terminal-ghostty",
-    "dep:portable-pty",
-    "paneflow-terminal-ghostty/native",
-]
-
 [[bin]]
 name = "paneflow"
 path = "src/main.rs"
@@ -289,10 +267,6 @@ raw-window-handle = "0.6"
 wayland-client = { version = "0.31.14", features = ["dlopen", "system"] }
 wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
 x11rb = { version = "0.13.2", features = ["allow-unsafe-code"] }
-# Native host for the standard Linux Ghostty session backend. It remains absent
-# from macOS, Windows, and explicit Linux builds using --no-default-features.
-portable-pty = { version = "0.9.0", optional = true }
-paneflow-terminal-ghostty = { path = "../crates/paneflow-terminal-ghostty", optional = true }
 
 # macOS: libproc powers detect_ports() (US-006) - walks per-PID socket FDs
 # via proc_pidinfo/proc_pidfdinfo wrappers. The macOS-only gate keeps it
@@ -317,21 +291,6 @@ raw-window-handle = "0.6"
 cocoa = "0.26"
 objc = "0.2"
 
-# The verified Windows Ghostty archive exists only for x64 MSVC. Keeping these
-# optional dependencies on that exact target lets the default feature remain
-# enabled while Windows ARM64 and GNU builds compile with the Alacritty path.
-[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
-paneflow-terminal-ghostty = { path = "../crates/paneflow-terminal-ghostty", optional = true }
-portable-pty = { version = "0.9.0", optional = true }
-
-# Windows: windows-sys powers the TerminateProcess path in TerminalState::drop
-# (US-004 - prd-windows-port.md). Feature set kept minimal on purpose: adding
-# a new Win32 API elsewhere in the app should require an explicit feature
-# append here, not a silent surface expansion. alacritty_terminal 0.26 pulls
-# in the same crate at the same version on Windows for its ConPTY path - the
-# Cargo resolver deduplicates.
-#   - Win32_System_Diagnostics{,_ToolHelp}: US-019 foreground-process naming
-#     walks the process tree via CreateToolhelp32Snapshot / Process32{First,Next}W.
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows-sys = { version = "0.59", features = [
@@ -474,147 +433,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-cli
 #     (it's keyed off the GUID, not the name).
 # Both values are also mirrored in packaging/wix/main.wxs - edit in pairs
 # if they ever must change (only with a v2.0 product-line cut).
-[package.metadata.wix]
-wxs = "../packaging/wix/main.wxs"
-upgrade-guid = "177D8F43-1642-4212-9CB0-FD14B299058D"
-path-guid = "49700ADE-7E1B-466E-A25E-A138A2FC96F3"
-# MSI filename root: `paneflow-<version>-<arch>.msi`. Matches the
-# `AssetFormat::Msi` matcher suffix from US-011
-# (`-x86_64-pc-windows-msvc.msi`).
-name = "paneflow"
-
-# Debian packaging (US-003) - explicit deps, never `$auto` (cargo-deb issue #170).
-# Build: cargo deb -p paneflow-app --target x86_64-unknown-linux-gnu
-[package.metadata.deb]
-name = "paneflow"
-maintainer = "Arthur Jean <arthur.jean@strivex.fr>"
-copyright = "2025 Arthur Jean"
-license-file = ["../LICENSE", "0"]
-changelog = "../debian/changelog"
-section = "utils"
-priority = "optional"
-revision = "1"
-# Debian maintainer scripts: `packaging/debian/` contains `postinst` (wires
-# the pkg.paneflow.dev apt source on first install; US-016). The directory
-# path is resolved relative to THIS Cargo.toml (cargo-deb convention -
-# differs from cargo-generate-rpm below, which resolves relative to the
-# workspace root). cargo-deb auto-sets 755 on all control scripts.
-maintainer-scripts = "../packaging/debian"
-# `fontconfig` (not just `libfontconfig1`) provides the `fc-list` BINARY the
-# settings font picker shells out to (`fonts.rs`); without it the picker is
-# empty on slim images.
-depends = "libc6, libwayland-client0, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libvulkan1, libfontconfig1, libfreetype6, fontconfig, ca-certificates"
-extended-description = """\
-PaneFlow is a native Rust terminal workspace for running coding agents in
-parallel. Launch Claude Code, Codex, opencode, Pi, and other CLI agents in real
-panes; keep each session visible; and see when one needs input.
-
-Features horizontal and vertical split panes with drag-to-resize (up to 32
-panes), branch-aware workspaces with session restore, in-app Git diffs and
-agent review prompts, an MCP bridge for pane reading, configurable keybindings,
-and JSON-RPC 2.0 IPC for local automation. The Linux package supports both
-Wayland and X11."""
-assets = [
-    ["target/release/paneflow", "usr/bin/", "755"],
-    ["../native/libghostty/THIRD_PARTY_NOTICES.md", "usr/share/doc/paneflow/THIRD_PARTY_NOTICES.md", "644"],
-    ["../assets/paneflow.desktop", "usr/share/applications/paneflow.desktop", "644"],
-    ["../assets/icons/paneflow-16.png",  "usr/share/icons/hicolor/16x16/apps/paneflow.png",     "644"],
-    ["../assets/icons/paneflow-32.png",  "usr/share/icons/hicolor/32x32/apps/paneflow.png",     "644"],
-    ["../assets/icons/paneflow-48.png",  "usr/share/icons/hicolor/48x48/apps/paneflow.png",     "644"],
-    ["../assets/icons/paneflow-128.png", "usr/share/icons/hicolor/128x128/apps/paneflow.png",   "644"],
-    ["../assets/icons/paneflow-256.png", "usr/share/icons/hicolor/256x256/apps/paneflow.png",   "644"],
-    ["../assets/icons/paneflow-512.png", "usr/share/icons/hicolor/512x512/apps/paneflow.png",   "644"],
-    ["../assets/io.github.arthurdev44.paneflow.metainfo.xml", "usr/share/metainfo/io.github.arthurdev44.paneflow.metainfo.xml", "644"],
-    ["../packaging/paneflow-release.asc", "usr/share/keyrings/paneflow-archive.asc", "644"],
-]
-
-# RPM packaging (US-014) - mirrors the Debian asset list plus an explicit
-# LICENSE entry (on the deb side LICENSE comes in via `license-file`, not
-# the `assets` array). Built by cargo-generate-rpm 0.20.0:
-# `cargo generate-rpm -p src-app --target x86_64-unknown-linux-gnu`.
-# (Note: `-p src-app` is the DIRECTORY path - cargo-generate-rpm 0.20.0
-# resolves `-p` strictly as a path, not the crate name `paneflow-app`.)
-#
-# - Asset `source` paths are resolved relative to the workspace root by
-#   cargo-generate-rpm 0.20.0, NOT to this Cargo.toml's directory - hence
-#   `assets/` rather than `../assets/`. The special `target/release/*`
-#   prefix is auto-rewritten to the `--target` output directory.
-# - `auto-req = "no"` mirrors the reason we avoid `$auto` in cargo-deb
-#   (over-collection; issue #170 in cargo-deb). The explicit `requires`
-#   table below is the single source of truth for runtime deps on Fedora/
-#   RHEL/Rocky/openSUSE.
-# - `%license` is NOT a supported asset tag in cargo-generate-rpm 0.20.0
-#   (the crate exposes `doc` but not `license`). The LICENSE file is
-#   therefore installed with `%doc` instead - functionally equivalent for
-#   `rpm -qlp` inspection, but upstream RPM purists note the distinction.
-#   If we ever move to `rpmbuild`, restore the `%license` tag.
-# - THIRD_PARTY_NOTICES.md deliberately is not tagged `%doc`: minimal Fedora
-#   and openSUSE images exclude optional docs, but this compliance notice must
-#   remain installed with the application payload.
-[package.metadata.generate-rpm]
-# Override the RPM NAME to `paneflow` (dropping the `-app` suffix of the
-# crate itself). Keeps the artifact filename in sync with both cargo-deb
-# (which also renames to `paneflow`) and the `update_checker` asset
-# picker, which matches on the literal `paneflow-<version>-<arch>.rpm`.
-name = "paneflow"
-release = "1"
-auto-req = "no"
-# RPM `%post` scriptlet: wires /etc/yum.repos.d/paneflow.repo on first
-# install (US-016). Path is resolved relative to the workspace root
-# (cargo-generate-rpm's path-resolution convention - differs from the
-# crate-relative `maintainer-scripts` above).
-post_install_script = "packaging/rpm/postinst.sh"
-# RPM `%preun` scriptlet: removes /etc/yum.repos.d/paneflow.repo on full
-# uninstall only ($1 == 0). On upgrades ($1 >= 1) the file must stay so
-# `dnf check-update` keeps seeing pkg.paneflow.dev.
-pre_uninstall_script = "packaging/rpm/preun.sh"
-# RPM `%postun` scriptlet: refreshes the freedesktop icon + desktop
-# caches after the package payload is removed, so stale
-# /usr/share/icons/hicolor/*/apps/paneflow.png cache entries and the
-# removed paneflow.desktop stop being surfaced by GNOME Shell / KDE
-# Plasma. Idempotent on upgrades; load-bearing on final uninstall.
-post_uninstall_script = "packaging/rpm/postun.sh"
-assets = [
-    { source = "target/release/paneflow",                                       dest = "/usr/bin/paneflow",                                                         mode = "755" },
-    { source = "native/libghostty/THIRD_PARTY_NOTICES.md",                      dest = "/usr/share/doc/paneflow/THIRD_PARTY_NOTICES.md",                              mode = "644" },
-    { source = "assets/paneflow.desktop",                                       dest = "/usr/share/applications/paneflow.desktop",                                  mode = "644" },
-    { source = "assets/icons/paneflow-16.png",                                  dest = "/usr/share/icons/hicolor/16x16/apps/paneflow.png",                          mode = "644" },
-    { source = "assets/icons/paneflow-32.png",                                  dest = "/usr/share/icons/hicolor/32x32/apps/paneflow.png",                          mode = "644" },
-    { source = "assets/icons/paneflow-48.png",                                  dest = "/usr/share/icons/hicolor/48x48/apps/paneflow.png",                          mode = "644" },
-    { source = "assets/icons/paneflow-128.png",                                 dest = "/usr/share/icons/hicolor/128x128/apps/paneflow.png",                        mode = "644" },
-    { source = "assets/icons/paneflow-256.png",                                 dest = "/usr/share/icons/hicolor/256x256/apps/paneflow.png",                        mode = "644" },
-    { source = "assets/icons/paneflow-512.png",                                 dest = "/usr/share/icons/hicolor/512x512/apps/paneflow.png",                        mode = "644" },
-    { source = "assets/io.github.arthurdev44.paneflow.metainfo.xml",            dest = "/usr/share/metainfo/io.github.arthurdev44.paneflow.metainfo.xml",           mode = "644" },
-    { source = "LICENSE",                                                       dest = "/usr/share/doc/paneflow/LICENSE",                                           mode = "644", doc = true },
-]
-
-# Cross-distro RPM runtime deps. All entries use SONAME virtual provides
-# instead of package names, because package nomenclature differs between
-# Fedora/RHEL/Rocky and openSUSE:
-#
-#   Fedora/RHEL          openSUSE Tumbleweed
-#   ───────────────────  ─────────────────────
-#   vulkan-loader        libvulkan1
-#   libxkbcommon         libxkbcommon0
-#   libxkbcommon-x11     libxkbcommon-x11-0
-#   fontconfig           fontconfig (same)
-#   freetype             libfreetype6
-#
-# Every package above exports the same SONAME virtual provide regardless
-# of its package name, so listing the SONAMEs gives us one cross-distro
-# requires-set that resolves on Fedora 30+, RHEL 8+, Rocky, Mageia,
-# openSUSE Leap 15+, and openSUSE Tumbleweed without per-distro fan-out.
-# The `(64bit)` ABI tag is correct for both x86_64 and aarch64 RPM
-# builds - it indicates the 64-bit ABI, not CPU arch (i686 would use
-# `(32bit)`). Verified against pkgs.org SONAME lookup for each library.
-[package.metadata.generate-rpm.requires]
-"libvulkan.so.1()(64bit)" = "*"
-"libwayland-client.so.0()(64bit)" = "*"
-"libxkbcommon.so.0()(64bit)" = "*"
-"libxkbcommon-x11.so.0()(64bit)" = "*"
-"libfontconfig.so.1()(64bit)" = "*"
-"libfreetype.so.6()(64bit)" = "*"
-# The `fc-list` BINARY (in the `fontconfig` package) the settings font picker
-# shells out to. A file dependency resolves the right package on every rpm
-# distro without per-distro package-name fan-out.
-"/usr/bin/fc-list" = "*"
