@@ -14,7 +14,6 @@ use gpui::{
     Window,
 };
 
-
 use crate::keys::TerminalKeySequence;
 use crate::mouse;
 use crate::terminal::types::{
@@ -52,7 +51,6 @@ fn key_escape_sequence(
     Some(sequence)
 }
 
-
 /// Sanitize and wrap `text` for a single bracketed-paste PTY write
 /// (`ESC[200~` … `ESC[201~`). ESC and C1 control bytes (U+0080..=U+009F) are
 /// stripped so the payload cannot close the paste early or smuggle a CSI
@@ -73,11 +71,6 @@ pub(super) fn sanitize_bracketed_paste(text: &str) -> String {
 pub(super) fn wrap_bracketed_paste(text: &str) -> String {
     format!("\x1b[200~{}\x1b[201~", sanitize_bracketed_paste(text))
 }
-
-
-
-
-
 
 #[derive(Clone, Copy)]
 enum ReportedMouseAction {
@@ -296,7 +289,6 @@ impl TerminalView {
         // Get current TermMode for key mapping (APP_CURSOR, etc.)
         let mode = self.terminal.session_backend().modes();
 
-
         // Special keys / modifiers → write the escape sequence directly.
         // Printable characters are NOT handled here: GPUI's InputHandler
         // (replace_text_in_range) is the single source of truth for them on
@@ -358,7 +350,6 @@ impl TerminalView {
         }
         let _ = event;
     }
-
 
     // --- Pixel → grid coordinate conversion ---
 
@@ -1201,7 +1192,6 @@ mod tests {
     use super::{paths_to_pty_text, wrap_bracketed_paste};
     use crate::terminal::types::{Modes, ShellQuoting};
     use std::path::PathBuf;
-
 
     #[test]
     fn character_preferred_altgr_bypasses_control_escape_routing() {

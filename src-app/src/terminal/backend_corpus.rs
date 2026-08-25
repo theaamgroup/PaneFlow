@@ -27,7 +27,6 @@ struct CorpusCase {
     search_after_feed: Option<&'static str>,
 }
 
-
 struct Harness {
     term: Arc<FairMutex<Term<ZedListener>>>,
     events: UnboundedReceiver<AlacEvent>,
@@ -243,11 +242,6 @@ fn normalize_alacritty_search(result: crate::search::SearchResult) -> SearchObse
     }
 }
 
-
-
-
-
-
 fn normalize_content(content: Content) -> String {
     let mut cells = String::new();
     for cell in content.cells.iter() {
@@ -381,8 +375,6 @@ fn alacritty_corpus_is_chunk_invariant() {
     }
 }
 
-
-
 #[test]
 fn malformed_and_oversized_streams_are_deterministic() {
     let mut hostile = vec![b'A'; 1024 * 1024];
@@ -471,17 +463,10 @@ fn alacritty_eight_pane_baseline() {
     );
 }
 
-
-
-
-
-
-
 pub(crate) fn percentile_duration(values: &[Duration], percentile: usize) -> Duration {
     let index = values.len().saturating_sub(1).saturating_mul(percentile) / 100;
     values.get(index).copied().unwrap_or_default()
 }
-
 
 pub(crate) fn percentile_us(values: &[Duration], percentile: usize) -> u128 {
     percentile_duration(values, percentile).as_micros()

@@ -30,7 +30,6 @@ use super::types::{
 use crate::limits::MAX_OSC52_BYTES;
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 
-
 #[cfg(test)]
 fn should_start_ghostty_for_policy(
     requested: TerminalBackendConfig,
@@ -63,7 +62,7 @@ fn auto_selects_ghostty_for_target() -> bool {
 fn should_start_ghostty(requested: TerminalBackendConfig) -> bool {
     should_start_ghostty_for_policy(
         requested,
-        false /* libghostty backend removed from this fork */,
+        false, /* libghostty backend removed from this fork */
         auto_selects_ghostty_for_target(),
     )
 }
@@ -71,7 +70,6 @@ fn should_start_ghostty(requested: TerminalBackendConfig) -> bool {
 enum BackgroundSpawnOutcome {
     Alacritty(anyhow::Result<super::pty_session::SpawnedPty>),
 }
-
 
 fn should_render_ghostty_wakeup_immediately(_event: &TerminalBackendEvent) -> bool {
     false
@@ -469,7 +467,6 @@ impl TerminalView {
             .unwrap_or_default()
             .backend;
         terminal.set_backend_request(requested_backend);
-
 
         if policy_requests_ghostty(requested_backend, auto_selects_ghostty_for_target()) {
             warn_ghostty_unavailable_once();

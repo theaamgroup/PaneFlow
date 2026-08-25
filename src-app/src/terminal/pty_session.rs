@@ -41,7 +41,6 @@ use super::types::{
 use crate::limits::{MAX_CHARS, MAX_OSC52_BYTES};
 use paneflow_config::schema::{TerminalBackendConfig, TerminalConfig, TerminalSurfaceProfile};
 
-
 /// Default scrollback history length, in lines. Paneflow keeps this standard
 /// for predictable terminal memory use. `TermConfig::default()` is `0`, which
 /// disables scrollback entirely. Overridable via
@@ -278,11 +277,7 @@ impl futures::Stream for TerminalBackendEvents {
 
 impl futures::stream::FusedStream for TerminalBackendEvents {
     fn is_terminated(&self) -> bool {
-        self.alacritty.is_none() && {
-            {
-                true
-            }
-        }
+        self.alacritty.is_none() && { { true } }
     }
 }
 
@@ -321,12 +316,8 @@ pub(crate) fn take_render_content_lock_durations() -> Vec<std::time::Duration> {
 
 impl TerminalSessionBackend {
     fn alacritty(term: SharedTerm, notifier: PtyNotifier) -> Self {
-        Self {
-            term,
-            notifier,
-        }
+        Self { term, notifier }
     }
-
 
     /// Resize and snapshot under one terminal lock, then return owned neutral
     /// content. No Alacritty handle or borrowed grid data crosses this call.
@@ -735,17 +726,12 @@ impl PendingTerminalInput {
         }
     }
 
-
-
     fn into_legacy_bytes(self) -> Option<Cow<'static, [u8]>> {
         match self {
             Self::Raw(bytes) => Some(bytes),
         }
     }
-
 }
-
-
 
 pub struct TerminalState {
     term: Arc<FairMutex<Term<ZedListener>>>,
@@ -1390,9 +1376,7 @@ impl TerminalState {
 
     pub(crate) fn take_backend_events(&mut self) -> TerminalBackendEvents {
         let alacritty = self.events_rx.take();
-        TerminalBackendEvents {
-            alacritty,
-        }
+        TerminalBackendEvents { alacritty }
     }
 
     pub(crate) fn process_backend_event(&mut self, event: TerminalBackendEvent) {
@@ -1409,11 +1393,6 @@ impl TerminalState {
     pub(crate) fn notify_window_size(&self, size: TerminalWindowSize) {
         self.notifier.notify_window_size(size);
     }
-
-
-
-
-
 
     pub(super) fn set_backend_request(&mut self, requested: TerminalBackendConfig) {
         self.requested_backend = requested;
@@ -2173,7 +2152,6 @@ impl TerminalState {
         }
     }
 
-
     fn queue_clipboard_op(&mut self, op: ClipboardOp) {
         if self.pending_clipboard_ops.len() >= MAX_PENDING_CLIPBOARD_OPS {
             self.pending_clipboard_ops.remove(0);
@@ -2355,12 +2333,6 @@ impl TerminalState {
         self.clipboard_gate
             .set_policy(mode != Osc52Mode::Disabled, mode == Osc52Mode::CopyPaste);
     }
-
-
-
-
-
-
 
     /// Send input to the live PTY, or queue it when the terminal is still
     /// display-only (US-012 pre-promotion window). The display-only notifier
@@ -3623,7 +3595,6 @@ mod tests {
         assert_eq!(state.child_pid, 0);
     }
 
-
     #[test]
     fn backend_diagnostics_extract_os_codes_without_sensitive_error_text() {
         const CANARY: &str =
@@ -3683,7 +3654,6 @@ mod tests {
         assert_eq!(diagnostics.target_triple, "x86_64-pc-windows-msvc");
     }
 
-
     #[test]
     fn write_to_pty_buffers_input_while_display_only() {
         // US-012 regression: the Agents-view "New thread" picker writes the
@@ -3722,10 +3692,6 @@ mod tests {
             "buffered {queued} bytes exceeds the {MAX_PENDING_INPUT_BYTES} cap"
         );
     }
-
-
-
-
 
     #[cfg(unix)]
     #[test]
