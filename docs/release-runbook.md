@@ -24,38 +24,88 @@ Related runbooks:
 Prerequisites (one-time, not part of the per-release cadence):
 
 - `gh` CLI authenticated with `repo` scope (`gh auth status`).
-- GitHub **secrets** populated: `APPLE_DEVELOPER_CERT_P12`,
-  `APPLE_DEVELOPER_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
-  `APPLE_TEAM_ID`, and `MINISIGN_SECRET_KEY` (on the `release` environment).
-- GitHub **variables** populated: `PANEFLOW_MINISIGN_PUBKEY` (and
-  `PANEFLOW_MINISIGN_PUBKEY_NEXT` only during a rotation).
+- GitHub **secrets** and **variables** populated as in
+  [Required secrets and variables](#required-secrets-and-variables) below.
+  The user adds these; the workflow does not create them.
 - A local macOS build environment: full Xcode plus the separately downloadable
   Metal toolchain. See the build prerequisites in `CLAUDE.md`.
 
-> **Known gap.** `.github/workflows/release.yml` is still upstream's
-> multi-platform workflow: it carries Linux and Windows build legs, deb/rpm/MSI
-> smoke tests, and references to `GPG_*` and `AZURE_*`.
-> Cutting it down to the single macOS leg is a separate, still-pending change.
-> Until that lands, Step 3 will show failing or skipped legs that are not about
-> your release, and the timings below assume the trimmed workflow.
+The release workflow is a single signed `aarch64-apple-darwin` lane:
+
+| Job id | Runner | What it does |
+|---|---|---|
+| `build` | `macos-15` | `cargo fmt --check`, clippy, release binary, `.app`, Developer ID sign, notarize, staple, DMG, `.sha256` sibling |
+| `release` | `macos-15` | minisign-sign the DMG, create the GitHub Release. Runs only on a `v*` tag push. Uses the `release` environment. |
+
+There is no Intel (`x86_64-apple-darwin`) leg. Dry-run is `workflow_dispatch` on
+the same `build` job; it skips `release`.
+
+Never create `GPG_*`, `AZURE_*`, or `POSTHOG_API_KEY` in this org. Those names
+fed upstream's Linux packages, Windows Authenticode, and product analytics.
+
+---
+
+## Required secrets and variables
+
+Populate these before the first tag. The first real tag is the end-to-end
+test of this path; a dry-run without secrets will build an unsigned `.app` and
+stop there.
+
+### Secrets the workflow reads
+
+| Secret | Where | Used by | What it is |
+|---|---|---|---|
+| `APPLE_DEVELOPER_CERT_P12` | repo Actions secrets | `scripts/sign-macos.sh` | Base64 of the exported Developer ID Application certificate + private key (`.p12`). The `P12` suffix is PKCS#12, not a truncated name — see below. |
+| `APPLE_DEVELOPER_CERT_PASSWORD` | repo Actions secrets | `scripts/sign-macos.sh` | Password set when exporting that `.p12`. Independent of the cert blob. |
+| `APPLE_ID` | repo Actions secrets | `scripts/notarize-macos.sh` | Apple Developer account email |
+| `APPLE_APP_SPECIFIC_PASSWORD` | repo Actions secrets | `scripts/notarize-macos.sh` | App-specific password from appleid.apple.com, **not** the Apple ID login password |
+| `APPLE_TEAM_ID` | repo Actions secrets | both Apple scripts | 10-character Team ID. `sign-macos.sh` hard-fails if the identity's common name does not contain `(TEAMID)`. |
+| `MINISIGN_SECRET_KEY` | **`release` environment** secret, not repo-scope | `release` job | Entire contents of the unencrypted minisign `.key` (`minisign -G -W`). Keep it on the environment so a required reviewer can gate publish. |
+| `GITHUB_TOKEN` | injected by Actions | `gh release view` / `gh release edit` | Do **not** create this. The workflow requests `permissions: contents: write` so the default token can attach assets and undraft the release. |
+
+### Variables (public, not secrets)
+
+| Variable | What it is |
+|---|---|
+| `PANEFLOW_MINISIGN_PUBKEY` | Base64 second line of the minisign `.pub`, baked into the binary at build time via `option_env!` |
+| `PANEFLOW_MINISIGN_PUBKEY_NEXT` | Empty except during a key rotation |
+
+### `APPLE_DEVELOPER_CERT_P` diagnosis: split, not a typo
+
+A grep for `APPLE_DEVELOPER_CERT_P` hits `APPLE_DEVELOPER_CERT_P12` because
+`P12` starts with `P`. That is **not** a truncated secret name and **not** a
+third value that got split across a line wrap.
+
+The signing script has always taken two independent inputs:
+
+1. `APPLE_DEVELOPER_CERT_P12` — the PKCS#12 file, base64-encoded. `P12` is the
+   format (`.p12`).
+2. `APPLE_DEVELOPER_CERT_PASSWORD` — the passphrase that decrypts that file.
+
+Do not create `APPLE_DEVELOPER_CERT_P`. Creating only the password, or only a
+name that stops at `_P`, will pass a presence check you wrote yourself and then
+fail at `security import` twenty minutes into a tagged run.
+
+Onboarding steps for the Apple half: [`docs/release/macos-signing.md`](./release/macos-signing.md) §6.
+Minisign keygen: [`docs/self-update-signing.md`](./self-update-signing.md).
 
 ---
 
 ## Supported release targets
 
 Authoritative status of every target this fork ships. Cross-reference
-`.github/workflows/release.yml`'s matrix.
+`.github/workflows/release.yml` (`build` + `release` jobs).
 
 | Target | Status | Ships | Gate level | Restore requires |
 |---|---|---|---|---|
 | `aarch64-apple-darwin` | **Active** | `.dmg` | Hard-required (gates the whole release) | - |
-| `x86_64-apple-darwin` | **Closed** | - | Not in the matrix | Reopen only when Intel DMG signing is provisioned and someone actually needs an Intel build |
+| `x86_64-apple-darwin` | **Closed** | - | Not in the workflow | Reopen only when Intel DMG signing is provisioned and someone actually needs an Intel build |
 
 **Interpretation:**
 
-- *Hard-required*: a failure blocks the release. The `Publish GitHub Release`
-  job's `needs:` waits for a green result.
-- *Closed*: deliberately not in the matrix. Do not silently re-add a closed
+- *Hard-required*: a failure blocks the release. The `release` job's `needs:
+  [build]` waits for a green result.
+- *Closed*: deliberately not in the workflow. Do not silently re-add a closed
   target. Adding one back requires a committed artifact path, a signing path, a
   docs update, and a release-gate decision in the same change.
 
@@ -67,10 +117,10 @@ have been deleted rather than disabled.
 
 ## Step 1 - Pre-flight (about 3 min, manual judgement required)
 
-Work on `mac-only-fork`. All changes for this release must already be merged.
+Work on `main`. All changes for this release must already be merged.
 
 ```bash
-git switch mac-only-fork
+git switch main
 git pull --ff-only
 git status                       # working tree clean? if not, stop.
 cargo fmt --check
@@ -110,7 +160,7 @@ cargo check --workspace
 # Commit the bump
 git add Cargo.toml Cargo.lock
 git commit -m "chore: bump version to v$VERSION"
-git push origin mac-only-fork
+git push origin main
 ```
 
 Pass signal: the commit lands via a green push (pre-commit hooks or required
@@ -144,7 +194,7 @@ After validation, retag as `vX.Y.Z` to cut the final release.
 | Symptom | Top 3 recoveries |
 |---|---|
 | Tag already exists on the remote | 1. Do NOT `git push --force`: that overwrites an immutable release marker and breaks anyone's `git fetch`. 2. Decide if the existing tag should be consumed as-is (rare) or if you need a new version number (usual). 3. If a broken tag was pushed and the release workflow produced bad artifacts, bump to the next patch and re-tag. The dud release stays on GitHub as a historical record. |
-| Push rejected because the branch moved after you committed | 1. `git pull --rebase origin mac-only-fork`, then re-inspect `git log` to confirm your bump commit is still the tip. 2. Re-run `cargo test` locally: a racing merge may have introduced conflicts that Git resolved cleanly but the test suite does not. 3. Only then `git push` and re-`git push origin vX.Y.Z`. |
+| Push rejected because the branch moved after you committed | 1. `git pull --rebase origin main`, then re-inspect `git log` to confirm your bump commit is still the tip. 2. Re-run `cargo test` locally: a racing merge may have introduced conflicts that Git resolved cleanly but the test suite does not. 3. Only then `git push` and re-`git push origin vX.Y.Z`. |
 | Pushed the tag but forgot to commit the version bump | 1. **IRREVERSIBLE for anyone who already fetched.** `git tag -d vX.Y.Z` locally and `git push --delete origin vX.Y.Z` to remove the remote tag. 2. If the release workflow already created a GitHub Release object, delete that separately: `gh release delete vX.Y.Z --cleanup-tag --yes`. 3. Make the version-bump commit, re-tag on the new commit, push. |
 
 ---
@@ -162,28 +212,37 @@ gh run watch --exit-status "$RUN_ID"
 ```
 
 Wall-clock is dominated by notarization, not compilation. The build itself is
-roughly 10 to 15 minutes on a `macos-14` runner. `notarize-macos.sh` then polls
-Apple every 30 seconds with a **hard 90-minute ceiling**, so a busy Apple queue
-can stretch this step well past its budget without anything actually being
-wrong.
+roughly 10 to 15 minutes on a `macos-15` runner with Xcode 16.4
+(`DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer`). The Metal
+preflight proves the compiler with `xcrun metal --version` (never `xcrun -f
+metal` / `xcrun --find metal`, which succeed when the toolchain component is
+absent) and falls back to `xcodebuild -downloadComponent MetalToolchain`.
+`notarize-macos.sh` then polls Apple every 30 seconds with a **hard 90-minute
+ceiling**, so a busy Apple queue can stretch this step well past its budget
+without anything actually being wrong.
 
-The macOS leg runs, in order:
+The `build` job runs, in order:
 
-1. `cargo build --release --target aarch64-apple-darwin`, with
+1. `cargo fmt --check` (hard fail; the cheapest guard against burning a tagged
+   run).
+2. `cargo clippy --workspace --locked --target aarch64-apple-darwin -- -D warnings`.
+3. `cargo build --release --target aarch64-apple-darwin`, with
    `PANEFLOW_MINISIGN_PUBKEY` (and `_NEXT`) in the environment so `option_env!`
    bakes the update-verification keys into the binary.
-2. `Detect macOS signing secrets`. On a tag push, a missing `APPLE_*` secret is
-   a hard failure here, not a downgrade to unsigned.
-3. `scripts/bundle-macos.sh` produces `dist/PaneFlow.app`.
-4. `scripts/sign-macos.sh` codesigns it (nested dylibs, nested executables,
+4. `scripts/bundle-macos.sh` produces `dist/PaneFlow.app`.
+5. `Detect macOS signing secrets`. On a tag push, a missing `APPLE_*` secret is
+   a hard failure here, not a downgrade to unsigned. Dry-run may continue
+   unsigned and uploads `dist/PaneFlow.app` as a workflow artifact.
+6. `scripts/sign-macos.sh` codesigns it (nested dylibs, nested executables,
    parent seal) with the hardened runtime and the release entitlements.
-5. `scripts/notarize-macos.sh` zips it with `ditto`, submits to `notarytool`,
+7. `scripts/notarize-macos.sh` zips it with `ditto`, submits to `notarytool`,
    polls, staples the ticket, and runs `spctl --assess`.
-6. `scripts/create-dmg.sh` builds the DMG and independently re-verifies
+8. `scripts/create-dmg.sh` builds
+   `paneflow-<semver>-aarch64-apple-darwin.dmg` and independently re-verifies
    `codesign`, `stapler validate`, and `spctl` against the bundle mounted from
-   the finished image.
-7. The Publish job signs every primary artifact with minisign and creates the
-   GitHub Release.
+   the finished image. A `.sha256` sibling is staged next to it.
+9. The `release` job (tag-push only, `release` environment) minisign-signs the
+   DMG and creates the GitHub Release.
 
 **Manual judgement:** a green run with a `::warning::` annotation on the signing
 or notarization leg deserves a read before you proceed. A warning there is often
@@ -377,9 +436,8 @@ update path.
 A single failure among the applicable scenarios is a release blocker. Do not tag
 `vX.Y.Z` until the matrix is green.
 
-**There is no CI coverage for this flow.** Upstream's `auto-update-e2e` job
-exercised the Linux tar.gz path, which no longer exists here. Until a macOS e2e
-job exists, this matrix is manual.
+**There is no CI coverage for this flow.** Until a macOS e2e job exists, this
+checklist is manual.
 
 ### Troubleshooting - Self-update
 
