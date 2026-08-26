@@ -134,6 +134,21 @@ fn capture_closed_pane_record(
     })
 }
 
+/// After `workspaces.remove(removed_idx)`, map the previous `active_idx` onto
+/// the remaining `len` slots. Closing a workspace before the active one
+/// decrements; closing at or past the new last index clamps; an empty list is 0.
+fn active_idx_after_workspace_remove(active_idx: usize, removed_idx: usize, len: usize) -> usize {
+    if len == 0 {
+        0
+    } else if active_idx >= len {
+        len - 1
+    } else if active_idx > removed_idx {
+        active_idx - 1
+    } else {
+        active_idx
+    }
+}
+
 fn restore_closed_tab_record(
     tab: ClosedTabRecord,
     ws_id: u64,
@@ -684,8 +699,29 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_workspace_at_inner(idx, Some(window), cx);
+    }
+
+    /// Close workspace `idx` with the same index math and composer/diff
+    /// teardown as the UI closer, but skip Window-only pane focus. IPC uses
+    /// this so it cannot drift from the UI path. Does not refuse the last
+    /// workspace; `workspace.close` checks that itself.
+    pub(crate) fn close_workspace_at_without_window(
+        &mut self,
+        idx: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.close_workspace_at_inner(idx, None, cx)
+    }
+
+    fn close_workspace_at_inner(
+        &mut self,
+        idx: usize,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if idx >= self.workspaces.len() {
-            return;
+            return false;
         }
         self.workspace_menu_open = None;
         if let Some(dir) = self.workspaces[idx].git_dir.clone() {
@@ -696,15 +732,11 @@ impl PaneFlowApp {
         let worktrees = std::mem::take(&mut self.workspaces[idx].managed_worktrees);
         Self::spawn_worktree_teardown(worktrees, cx);
         self.workspaces.remove(idx);
-        if self.workspaces.is_empty() {
-            self.active_idx = 0;
-        } else {
-            // Clamp active_idx
-            if self.active_idx >= self.workspaces.len() {
-                self.active_idx = self.workspaces.len() - 1;
-            } else if self.active_idx > idx {
-                self.active_idx -= 1;
-            }
+        self.active_idx =
+            active_idx_after_workspace_remove(self.active_idx, idx, self.workspaces.len());
+        if let Some(window) = window
+            && !self.workspaces.is_empty()
+        {
             self.workspaces[self.active_idx].focus_first(window, cx);
         }
         self.save_session(cx);
@@ -723,6 +755,7 @@ impl PaneFlowApp {
         // closed workspace must drop). Deferred so the rebuild runs after the
         // close settles, never inside a render/callback.
         self.reconcile_diff_after_workspace_change(cx);
+        true
     }
 
     /// Move a workspace (identified by `from_id`) so it ends up at `to_idx`
@@ -1172,6 +1205,54 @@ mod tests {
             closed_pane_scrollback_bytes(&records),
             MAX_CLOSED_PANE_SCROLLBACK_BYTES
         );
+    }
+
+    #[test]
+    fn active_idx_after_workspace_remove_table() {
+        // (active_idx, removed_idx, remaining_len, expected)
+        // remaining_len is the count *after* remove, matching the closer.
+        let cases = [
+            // Issue #21: three workspaces, stay on 1, close 0 → old 1, not old 2.
+            (1usize, 0usize, 2usize, 0usize),
+            (1, 1, 2, 1), // close the active middle tab; next slides into the slot
+            (1, 2, 2, 1), // close after the active tab
+            (2, 2, 2, 1), // close the last tab while on it → clamp
+            (2, 0, 2, 1), // close before the last-active tab → clamp lands on old last
+            (2, 1, 2, 1), // close the middle tab while on last → clamp
+            (0, 0, 2, 0), // close first while on first; old 1 slides to 0
+            (0, 1, 2, 0), // close after first while on first
+            (0, 1, 1, 0), // two workspaces, close the other
+            (1, 0, 1, 0), // two workspaces, close the one before active
+            (1, 1, 1, 0), // two workspaces, close the active last
+            (0, 0, 0, 0), // close the last remaining workspace
+        ];
+        for (active, removed, remaining, expected) in cases {
+            assert_eq!(
+                active_idx_after_workspace_remove(active, removed, remaining),
+                expected,
+                "active={active} removed={removed} remaining={remaining}"
+            );
+        }
+    }
+
+    #[test]
+    fn close_workspace_shared_closer_runs_composer_and_diff_teardown() {
+        let src = include_str!("mod.rs");
+        let closer = src
+            .split("fn close_workspace_at_inner")
+            .nth(1)
+            .and_then(|rest| rest.split("fn reorder_workspace").next())
+            .expect("shared closer");
+        for helper in [
+            "refresh_composer_slot",
+            "sync_broadcast_stripes",
+            "flush_pending_prefill",
+            "sync_pending_chips",
+            "reconcile_diff_after_workspace_change",
+            "active_idx_after_workspace_remove",
+        ] {
+            assert!(closer.contains(helper), "shared closer must call {helper}");
+        }
     }
 
     #[test]

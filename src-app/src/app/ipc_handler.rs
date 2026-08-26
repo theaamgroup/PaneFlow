@@ -2416,21 +2416,7 @@ impl PaneFlowApp {
                         .and_then(|i| i.as_u64())
                         .map(|i| i as usize)
                         .unwrap_or(self.active_idx);
-                    if idx < self.workspaces.len() {
-                        if let Some(dir) = self.workspaces[idx].git_dir.clone() {
-                            self.unwatch_git_dir(&dir);
-                        }
-                        // US-009 (orchestration-v2): same teardown as the UI
-                        // close path - clean managed worktrees removed in the
-                        // background, dirty ones kept, branch never deleted.
-                        let worktrees = std::mem::take(&mut self.workspaces[idx].managed_worktrees);
-                        Self::spawn_worktree_teardown(worktrees, cx);
-                        self.workspaces.remove(idx);
-                        if self.active_idx >= self.workspaces.len() {
-                            self.active_idx = self.workspaces.len() - 1;
-                        }
-                        self.save_session(cx);
-                        cx.notify();
+                    if self.close_workspace_at_without_window(idx, cx) {
                         serde_json::json!({"closed": idx})
                     } else {
                         serde_json::json!({"error": "Index out of bounds"})
@@ -4019,6 +4005,28 @@ mod tests {
             started: Arc::new(AtomicBool::new(false)),
             caller_pid: None,
         }
+    }
+
+    #[test]
+    fn workspace_close_ipc_uses_shared_ui_closer() {
+        let src = include_str!("ipc_handler.rs");
+        let close_arm = src
+            .split("\"workspace.close\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"surface.list\"").next())
+            .expect("workspace.close arm");
+        assert!(
+            close_arm.contains("close_workspace_at_without_window"),
+            "workspace.close must reuse the UI closer so index math and composer/diff teardown cannot drift"
+        );
+        assert!(
+            close_arm.contains("Cannot close last workspace"),
+            "last-workspace refusal stays on the IPC path"
+        );
+        assert!(
+            !close_arm.contains("workspaces.remove"),
+            "workspace.close must not re-inline a clamp-only remove"
+        );
     }
 
     #[test]
