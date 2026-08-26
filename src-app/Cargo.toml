@@ -291,20 +291,3 @@ unwrap_in_result = "allow"
 # Declaring the value expected here clears the macOS `cargo clippy` gate (objc
 # is macOS-only) while keeping the lint live for our own code.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
-
-# Windows MSI packaging (US-013 - prd-windows-port.md). Source WXS +
-# License.rtf + paneflow.ico live under `packaging/wix/` (kept alongside
-# `packaging/{apt,rpm,homebrew,debian}/` per project convention).
-# Build: cargo wix --package paneflow-app --target x86_64-pc-windows-msvc --include packaging/wix/main.wxs
-#
-# GUIDs below were generated once by `cargo wix init` and MUST remain
-# stable for the lifetime of this product line:
-#   * upgrade-guid - the MSI `UpgradeCode` used by `MajorUpgrade` to
-#     detect and replace previous installs. Changing it makes new MSIs
-#     install alongside the old one instead of upgrading in-place,
-#     breaking every existing user's update flow.
-#   * path-guid    - the `Path` component GUID controlling the PATH
-#     environment-variable entry. Changing it orphans the old entry
-#     (it's keyed off the GUID, not the name).
-# Both values are also mirrored in packaging/wix/main.wxs - edit in pairs
-# if they ever must change (only with a v2.0 product-line cut).

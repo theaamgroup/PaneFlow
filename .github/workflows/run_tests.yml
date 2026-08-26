@@ -112,8 +112,6 @@ jobs:
               - '.github/workflows/run_tests.yml'
             release_packaging:
               - '.github/workflows/release.yml'
-              - '.github/workflows/repo_publish.yml'
-              - '.github/workflows/update_cask.yml'
               - 'packaging/**'
               - 'assets/**'
               - 'scripts/**'
