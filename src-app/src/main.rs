@@ -241,7 +241,7 @@ pub(crate) enum ClosedTabRecord {
 pub(crate) struct ClosedPaneRecord {
     pub(crate) tabs: Vec<ClosedTabRecord>,
     pub(crate) selected_idx: usize,
-    pub(crate) workspace_idx: usize,
+    pub(crate) workspace_id: u64,
 }
 
 /// US-053: in-app self-update flow state, extracted from the `PaneFlowApp`

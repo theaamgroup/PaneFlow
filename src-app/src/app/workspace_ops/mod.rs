@@ -95,7 +95,7 @@ fn closed_pane_scrollback_bytes(records: &[ClosedPaneRecord]) -> usize {
 
 fn capture_closed_pane_record(
     pane: &gpui::Entity<crate::pane::Pane>,
-    workspace_idx: usize,
+    workspace_id: u64,
     cx: &App,
 ) -> Option<ClosedPaneRecord> {
     let pane_ref = pane.read(cx);
@@ -130,8 +130,16 @@ fn capture_closed_pane_record(
     Some(ClosedPaneRecord {
         tabs,
         selected_idx: pane_ref.selected_idx,
-        workspace_idx,
+        workspace_id,
     })
+}
+
+/// Locate the workspace a closed-pane record should restore into.
+///
+/// Indexes shift when workspaces close or reorder; the record stores a
+/// stable `Workspace.id`. `None` means that workspace is gone.
+fn workspace_index_for_undo(ids: &[u64], record_id: u64) -> Option<usize> {
+    ids.iter().position(|&id| id == record_id)
 }
 
 /// After `workspaces.remove(removed_idx)`, map the previous `active_idx` onto
@@ -496,17 +504,17 @@ impl PaneFlowApp {
     ) {
         // Capture state of the pane being closed for undo (US-014).
         // Must happen BEFORE the tree mutation that drops the pane entity.
-        let workspace_idx = self.active_idx;
         if let Some(ws) = self.active_workspace()
             && let Some(root) = &ws.root
         {
+            let workspace_id = ws.id;
             let closing_pane = if ws.is_zoomed() {
                 root.first_leaf()
             } else {
                 root.focused_pane(window, cx)
             };
             if let Some(pane) = closing_pane
-                && let Some(record) = capture_closed_pane_record(&pane, workspace_idx, cx)
+                && let Some(record) = capture_closed_pane_record(&pane, workspace_id, cx)
             {
                 push_closed_pane_record(&mut self.closed_panes, record);
             }
@@ -575,16 +583,15 @@ impl PaneFlowApp {
             return; // No closed panes to restore
         };
 
-        // Switch to the workspace where the pane was closed, if it still exists
-        if record.workspace_idx < self.workspaces.len() {
-            self.active_idx = record.workspace_idx;
-        }
-
-        let Some(ws_id) = self.active_workspace().map(|ws| ws.id) else {
-            self.closed_panes.push(record);
-            self.show_toast("No active workspace to restore pane", cx);
+        // Restore into the workspace the pane was closed in. Indexes shift
+        // on close/reorder; the record stores a stable Workspace.id.
+        let ids: Vec<u64> = self.workspaces.iter().map(|ws| ws.id).collect();
+        let Some(idx) = workspace_index_for_undo(&ids, record.workspace_id) else {
+            self.show_toast("Workspace no longer exists", cx);
             return;
         };
+        self.active_idx = idx;
+        let ws_id = record.workspace_id;
         let selected_idx = record.selected_idx;
         let tabs = record
             .tabs
@@ -1162,8 +1169,22 @@ mod tests {
                 font_size: None,
             }],
             selected_idx: 0,
-            workspace_idx: 0,
+            workspace_id: 0,
         }
+    }
+
+    #[test]
+    fn workspace_index_for_undo_matches_after_lower_workspace_closed() {
+        // Originally [10, 20, 30]; workspace 10 (index 0) closed → [20, 30].
+        // A pane closed in workspace 20 was index 1; it is now index 0.
+        assert_eq!(workspace_index_for_undo(&[20, 30], 20), Some(0));
+        assert_eq!(workspace_index_for_undo(&[20, 30], 30), Some(1));
+    }
+
+    #[test]
+    fn workspace_index_for_undo_missing_id_returns_none() {
+        assert_eq!(workspace_index_for_undo(&[20, 30], 10), None);
+        assert_eq!(workspace_index_for_undo(&[], 1), None);
     }
 
     #[test]
@@ -1268,7 +1289,7 @@ mod tests {
                     font_size: None,
                 }],
                 selected_idx: 0,
-                workspace_idx: 0,
+                workspace_id: 0,
             },
         );
 
