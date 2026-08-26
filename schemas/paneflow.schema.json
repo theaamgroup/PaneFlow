@@ -76,19 +76,9 @@
     },
     "window_backdrop": {
       "type": ["string", "null"],
-      "description": "Native window backdrop. 'auto' uses Mica on supported Windows 11 builds and opaque elsewhere; 'mica' forces Mica when supported; 'blurred'/'acrylic' opts into blur; 'transparent' keeps a transparent surface; 'opaque'/'off' disables native transparency. Read once at startup; PANEFLOW_WINDOW_BACKDROP overrides it for one launch.",
-      "enum": ["auto", "mica", "blurred", "acrylic", "transparent", "opaque", "off", null],
+      "description": "Native window backdrop. 'auto' uses a transparent surface on macOS; 'blurred' opts into blur; 'transparent' keeps a transparent surface; 'opaque'/'off' disables native transparency. Read once at startup; PANEFLOW_WINDOW_BACKDROP overrides it for one launch.",
+      "enum": ["auto", "blurred", "transparent", "opaque", "off", null],
       "default": "auto"
-    },
-    "windows_terminal_material": {
-      "type": ["boolean", "null"],
-      "description": "Windows-only. When true, CLI terminal default backgrounds are transparent so the active native window backdrop (Mica, blur, or transparent) can show through. Other platforms ignore this field.",
-      "default": false
-    },
-    "windows_chrome_material": {
-      "type": ["boolean", "null"],
-      "description": "Windows-only. When true, the primary sidebar card reveals the active native window backdrop (Mica, blur, or transparent). Other platforms ignore this field.",
-      "default": false
     },
     "macos_chrome_material": {
       "type": ["boolean", "null"],
@@ -149,8 +139,8 @@
       "properties": {
         "backend": {
           "type": "string",
-          "description": "Terminal backend for newly-created sessions. auto selects Ghostty in standard Linux builds and supported Windows x64 MSVC builds. macOS and builds without the target's native Ghostty feature use Alacritty. ghostty explicitly requests the native backend; alacritty is the cross-platform rollback. Unknown runtime values fail safe to alacritty. Applies only to new sessions.",
-          "enum": ["auto", "ghostty", "alacritty"],
+          "description": "Terminal backend for newly-created sessions. auto and alacritty both use Alacritty. Unknown runtime values fail safe to alacritty. Applies only to new sessions.",
+          "enum": ["auto", "alacritty"],
           "default": "auto"
         },
         "ligatures": {

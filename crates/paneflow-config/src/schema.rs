@@ -48,16 +48,11 @@ pub struct PaneFlowConfig {
     pub commands: Vec<CommandDefinition>,
     /// Window decoration mode: `"client"` (CSD, default) or `"server"` (SSD).
     pub window_decorations: Option<String>,
-    /// Native window backdrop: `"auto"` (default), `"mica"`, `"blurred"` /
-    /// `"acrylic"`, `"transparent"`, or `"opaque"` / `"off"`. Read at
-    /// startup; `PANEFLOW_WINDOW_BACKDROP` overrides it for one launch.
+    /// Native window backdrop: `"auto"` (default), `"blurred"`,
+    /// `"transparent"`, or `"opaque"` / `"off"`. Read at startup;
+    /// `PANEFLOW_WINDOW_BACKDROP` overrides it for one launch. Legacy
+    /// `"mica"` and `"acrylic"` strings still load.
     pub window_backdrop: Option<String>,
-    /// Windows-only: when enabled, the CLI terminal's default background cells
-    /// are transparent so the active native backdrop can show through.
-    pub windows_terminal_material: Option<bool>,
-    /// Windows-only: when enabled, the primary sidebar card reveals the active
-    /// native backdrop.
-    pub windows_chrome_material: Option<bool>,
     /// When enabled (default), the primary sidebar card reveals AppKit's
     /// native Sidebar material.
     pub macos_chrome_material: Option<bool>,
@@ -287,13 +282,6 @@ impl PaneFlowConfig {
     /// Resolve the Stalled-detection master switch (default ON).
     pub fn agent_stall_detection_enabled(&self) -> bool {
         self.agent_stall_detection.unwrap_or(true)
-    }
-
-    /// Resolve the Windows terminal material switch. This fork is macOS only,
-    /// so the answer is always `false`; the field itself is still accepted in
-    /// the public schema so an existing config file does not fail to load.
-    pub fn windows_terminal_material_enabled(&self) -> bool {
-        false
     }
 
     fn window_backdrop_disables_chrome_material(&self) -> bool {
@@ -550,7 +538,6 @@ pub enum CursorBlinkConfig {
 pub enum TerminalBackendConfig {
     #[default]
     Auto,
-    Ghostty,
     Alacritty,
 }
 
@@ -621,7 +608,6 @@ impl<'de> Deserialize<'de> for TerminalBackendConfig {
         let raw = String::deserialize(deserializer)?;
         Ok(match raw.as_str() {
             "auto" => Self::Auto,
-            "ghostty" => Self::Ghostty,
             "alacritty" => Self::Alacritty,
             other => {
                 tracing::warn!(
@@ -1580,8 +1566,6 @@ mod tests {
             commands: Vec::new(),
             window_decorations: Some("client".to_string()),
             window_backdrop: Some("auto".to_string()),
-            windows_terminal_material: Some(true),
-            windows_chrome_material: Some(true),
             macos_chrome_material: Some(true),
             line_height: Some(1.2),
             cell_width: Some(0.6),
@@ -1889,20 +1873,20 @@ mod tests {
         assert!(cfg.cockpit_chrome_material_enabled());
 
         let cfg = PaneFlowConfig {
-            windows_chrome_material: Some(true),
+            macos_chrome_material: Some(true),
             ..Default::default()
         };
         assert!(cfg.cockpit_chrome_material_enabled());
 
         let cfg = PaneFlowConfig {
-            windows_chrome_material: Some(false),
+            macos_chrome_material: Some(false),
             ..Default::default()
         };
-        assert!(cfg.cockpit_chrome_material_enabled());
+        assert!(!cfg.cockpit_chrome_material_enabled());
 
         let cfg = PaneFlowConfig {
             window_backdrop: Some("opaque".to_string()),
-            windows_chrome_material: Some(true),
+            macos_chrome_material: Some(true),
             ..Default::default()
         };
         assert!(!cfg.cockpit_chrome_material_enabled());
@@ -2129,7 +2113,7 @@ mod tests {
         assert_eq!(automatic.backend, TerminalBackendConfig::Auto);
 
         let ghostty: TerminalConfig = serde_json::from_str(r#"{"backend":"ghostty"}"#).unwrap();
-        assert_eq!(ghostty.backend, TerminalBackendConfig::Ghostty);
+        assert_eq!(ghostty.backend, TerminalBackendConfig::Alacritty);
 
         let alacritty: TerminalConfig = serde_json::from_str(r#"{"backend":"alacritty"}"#).unwrap();
         assert_eq!(alacritty.backend, TerminalBackendConfig::Alacritty);
@@ -2137,10 +2121,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&TerminalBackendConfig::Auto).unwrap(),
             r#""auto""#
-        );
-        assert_eq!(
-            serde_json::to_string(&TerminalBackendConfig::Ghostty).unwrap(),
-            r#""ghostty""#
         );
         assert_eq!(
             serde_json::to_string(&TerminalBackendConfig::Alacritty).unwrap(),

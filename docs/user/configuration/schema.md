@@ -41,7 +41,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `line_height` | number or null | `1.2` | Multiplier, range `1.0` to `2.5`. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `cell_width` | number or null | `0.6` | Multiplier, range `0.3` to `2.0`. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
-| `window_backdrop` | string or null | `auto` | Accepted: `auto`, `mica`, `blurred`, `acrylic`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
+| `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material in the primary navigation card. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
 | `option_as_meta` | boolean or null | `false` | Option produces Unicode input by default. Set to `true` to send Option/Alt as an ESC prefix. |
 | `shell_integration` | boolean or null | enabled | Master switch for shell rc injection: OSC 7 CWD reporting and OSC 133 command marks. |
@@ -59,24 +59,18 @@ That strictness is an editor-side aid only; it never affects loading.
 | `agent_panel` | object or null | defaults below | Agents-view display, profiles, and notification settings. |
 | `tool_permissions` | object | `{}` | Per-tool always-allow and always-deny input patterns. |
 
-`schemas/paneflow.schema.json` also declares `windows_terminal_material`
-and `windows_chrome_material`. They do nothing on macOS and are not
-documented here as usable settings. They have not been removed from the
-schema: the loader is lenient about keys it does not act on, so leaving
-them declared avoids a breaking config change.
-
 ### How `window_backdrop` resolves on macOS
 
-The seven accepted strings collapse into fewer real behaviours, and the
-mapping is platform-specific. Parsing is case-insensitive and trimmed
-(`src-app/src/app/constants.rs`); an unrecognised value warns and falls
-back to `auto`.
+The accepted strings collapse into fewer real behaviours. Parsing is
+case-insensitive and trimmed (`src-app/src/app/constants.rs`); an
+unrecognised value warns and falls back to `auto`. Legacy `mica` and
+`acrylic` values still load (Transparent and Blurred) but are not part of
+the published schema.
 
 | Value | Effective on macOS |
 |---|---|
 | `auto` | Transparent |
-| `mica` | Transparent. Mica is a Windows material and has no macOS equivalent. |
-| `blurred`, `acrylic` | Blurred |
+| `blurred` | Blurred |
 | `transparent` | Transparent |
 | `opaque`, `off` | Opaque |
 
@@ -113,7 +107,7 @@ CLI binary.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `terminal.backend` | string or null | `auto` | Still declared by the schema, but inert on macOS: every value resolves to the `alacritty_terminal` engine. The alternative engine it used to select was only ever built for Linux and Windows x64 MSVC and is being removed from this fork, after which this key goes too. Documented here rather than omitted because a schema-drift test asserts every public schema key appears in this file. |
+| `terminal.backend` | string or null | `auto` | `auto` or `alacritty`. Both use the `alacritty_terminal` engine. Unknown runtime values, including the retired `ghostty`, fail safe to `alacritty`. Applies only to new sessions. |
 | `terminal.ligatures` | boolean or null | `false` | Enables programming ligatures for fonts that ship them. |
 | `terminal.integrated_glyphs` | boolean or null | `true` | Draws built-in block-element glyphs as filled quads. |
 | `terminal.color_emoji` | boolean or null | `true` | Uses the platform color-emoji path. |

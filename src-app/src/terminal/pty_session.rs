@@ -2999,7 +2999,7 @@ mod tests {
         assert_eq!(os_error, Some(5));
 
         let mut state = TerminalState::new_display_only(24, 80);
-        state.set_backend_request(TerminalBackendConfig::Ghostty);
+        state.set_backend_request(TerminalBackendConfig::Alacritty);
         state.record_backend_failure(TerminalBackendFailureDiagnostics::new(
             TerminalBackendFailurePhase::OpenPty,
             TerminalBackendFailureDiagnostics::GHOSTTY_OPEN_PTY_FAILED,

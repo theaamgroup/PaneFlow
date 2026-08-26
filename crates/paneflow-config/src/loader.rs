@@ -254,8 +254,6 @@ pub fn try_parse_and_validate(json: &str) -> Result<PaneFlowConfig, serde_json::
     set_field!(theme_mode);
     set_field!(window_decorations);
     set_field!(window_backdrop);
-    set_field!(windows_terminal_material);
-    set_field!(windows_chrome_material);
     set_field!(macos_chrome_material);
     set_field!(line_height);
     set_field!(cell_width);
@@ -645,6 +643,38 @@ mod tests {
         );
         assert_eq!(config.theme.as_deref(), Some("Vercel"));
         assert_eq!(config.default_shell.as_deref(), Some("/bin/zsh"));
+    }
+
+    #[test]
+    fn test_legacy_windows_material_and_ghostty_backend_still_load() {
+        // Existing paneflow.json files may still carry the retired Windows
+        // material keys and `"backend": "ghostty"`. Those must load, not
+        // error, and ghostty must fail safe to Alacritty.
+        let json = r#"{
+            "theme": "One Dark",
+            "windows_chrome_material": true,
+            "windows_terminal_material": true,
+            "terminal": { "backend": "ghostty" }
+        }"#;
+        let config = try_parse_and_validate(json)
+            .expect("legacy windows material and ghostty backend must not fail to parse");
+        assert_eq!(config.theme.as_deref(), Some("One Dark"));
+        assert_eq!(
+            config
+                .terminal
+                .expect("terminal block must survive")
+                .backend,
+            TerminalBackendConfig::Alacritty
+        );
+
+        let via_serde: PaneFlowConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            via_serde
+                .terminal
+                .expect("terminal block must survive")
+                .backend,
+            TerminalBackendConfig::Alacritty
+        );
     }
 
     #[test]
@@ -1049,8 +1079,6 @@ mod tests {
             }],
             window_decorations: None,
             window_backdrop: None,
-            windows_terminal_material: None,
-            windows_chrome_material: None,
             macos_chrome_material: None,
             line_height: None,
             cell_width: None,

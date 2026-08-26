@@ -42,7 +42,6 @@ fn should_start_ghostty_for_policy(
 fn policy_requests_ghostty(requested: TerminalBackendConfig, auto_selects: bool) -> bool {
     match requested {
         TerminalBackendConfig::Auto => auto_selects,
-        TerminalBackendConfig::Ghostty => true,
         TerminalBackendConfig::Alacritty => false,
     }
 }
@@ -1653,10 +1652,6 @@ mod tests {
             should_start_ghostty(TerminalBackendConfig::Auto),
             ghostty_available && auto_selects_ghostty_for_target()
         );
-        assert_eq!(
-            should_start_ghostty(TerminalBackendConfig::Ghostty),
-            ghostty_available
-        );
         assert!(!should_start_ghostty(TerminalBackendConfig::Alacritty));
     }
 
@@ -1674,11 +1669,6 @@ mod tests {
         ));
         assert!(!should_start_ghostty_for_policy(
             TerminalBackendConfig::Auto,
-            true,
-            false,
-        ));
-        assert!(should_start_ghostty_for_policy(
-            TerminalBackendConfig::Ghostty,
             true,
             false,
         ));

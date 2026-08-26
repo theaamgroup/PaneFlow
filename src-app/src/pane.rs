@@ -801,7 +801,7 @@ impl Pane {
         config: &paneflow_config::schema::PaneFlowConfig,
         cx: &mut Context<Self>,
     ) {
-        let terminal_material_active = config.windows_terminal_material_enabled();
+        let terminal_material_active = false;
         let integrated_glyphs_enabled = config
             .terminal
             .as_ref()
@@ -1635,13 +1635,8 @@ impl Pane {
         let self_entity = cx.entity();
         let accent = ui.accent;
         // Tab strip uses the terminal background so it melts into the terminal
-        // body below it - one clean surface (Arthur). When Windows terminal
-        // material is enabled, the strip goes transparent too so the tab bar
-        // and terminal body share the same native backdrop.
-        let bar_bg = tab_bar_background(
-            &theme,
-            self.cached_config.windows_terminal_material_enabled(),
-        );
+        // body below it - one clean surface (Arthur).
+        let bar_bg = tab_bar_background(&theme, false);
 
         // Outer container: full-width, fixed height, tab_bar background. The
         // chips are shorter than the bar, so center them vertically to float.
@@ -2646,11 +2641,8 @@ impl Render for Pane {
             Some(TabContent::Diff(d)) => d.clone().into_any_element(),
             None => div().size_full().into_any_element(),
         };
-        let content_background = pane_content_background(
-            &crate::theme::active_theme(),
-            self.cached_config.windows_terminal_material_enabled(),
-            terminal_selected,
-        );
+        let content_background =
+            pane_content_background(&crate::theme::active_theme(), false, terminal_selected);
 
         // EP-003 drop-to-split: the content region hosts the drag-move
         // direction probe, the drop commit, and the blue preview overlay.

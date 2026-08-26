@@ -304,8 +304,7 @@ impl StartupSplashView {
         let config = paneflow_config::loader::load_config();
         Self {
             mount_scheduled: false,
-            native_material_active: config.cockpit_chrome_material_enabled()
-                || config.windows_terminal_material_enabled(),
+            native_material_active: config.cockpit_chrome_material_enabled(),
         }
     }
 }
@@ -1572,14 +1571,12 @@ impl Render for PaneFlowApp {
         // (`panel_bg` fill + 16px rail-side top radius + 5px inset), replacing the
         // old Cli/Diff corner-mask trick. GPUI clips the panel's bg fill to the
         // radius, so the window backdrop shows in the corner notch - a clean
-        // radius on every platform (Linux, macOS, Windows Mica), where a solid
-        // mask would read as a square patch. The 5px inset keeps opaque content
-        // (terminal cells, diff rows, settings cards) off the arc, since GPUI
-        // does NOT clip children to the radius. The Cli pane grid normally
-        // keeps the terminal background; on Windows terminal material it lets
-        // the native backdrop show through. Diff / Agents / Settings use the
-        // #181818 surface.
-        let terminal_material_active = self.cached_config.windows_terminal_material_enabled();
+        // radius on macOS, where a solid mask would read as a square patch. The
+        // 5px inset keeps opaque content (terminal cells, diff rows, settings
+        // cards) off the arc, since GPUI does NOT clip children to the radius.
+        // The Cli pane grid keeps the terminal background. Diff / Agents /
+        // Settings use the #181818 surface.
+        let terminal_material_active = false;
         let chrome_material_active = self.cached_config.cockpit_chrome_material_enabled();
         let terminal_surface_mounted = self.active_workspace().is_some_and(|ws| ws.root.is_some());
         let terminal_material_visible = !settings_open
