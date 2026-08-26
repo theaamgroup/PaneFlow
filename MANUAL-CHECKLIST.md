@@ -10,7 +10,7 @@ entry.
 ---
 
 - [ ] **Task 6 — Cmd+Tab next-workspace**
-  - Commit: (pending)
+  - Commit: still advertised in `--help` (`Cmd+Tab`) and `defaults.rs` `secondary-tab`
   - Why a machine cannot do this: Cmd+Tab is the chord macOS intercepts for
     the application switcher. A synthetic System Events keystroke does not
     answer whether the action reaches PaneFlow.
@@ -49,7 +49,10 @@ entry.
   - Failure implicates: the new CFBundleIdentifier / TCC mapping.
 
 - [ ] **Task 11 — no request to api.github.com**
-  - Commit: (pending)
+  - Commit: `7ffedc4`
+  - Agent log (not a packet capture): unsigned 0.1.0 bundle printed
+    `self-update feed disabled; set DEFAULT_FEED_URL or PANEFLOW_UPDATE_FEED_URL to re-enable`
+    and did not print `up to date`.
   - Why a machine cannot fully do this: the agent can grep logs; it cannot
     observe the network (Little Snitch / a proxy).
   - Steps: launch the app with the feed disabled. Watch outbound HTTPS.
@@ -59,12 +62,18 @@ entry.
     check.
 
 - [ ] **Task 20 — unsigned .dmg first open**
-  - Commit: (pending)
+  - Commit: local artifact at `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (30M)
+  - Agent observed: `scripts/bundle-macos.sh --version 0.1.0 --arch aarch64`
+    produced `dist/PaneFlow.app` with `CFBundleIdentifier=com.theaamgroup.paneflow`
+    and `--version` `paneflow 0.1.0`. `create-dmg.sh` wrote the .dmg then exited
+    1 at `codesign --verify --deep --strict` because the enclosed binary is
+    adhoc/linker-signed. That check is for a signed+notarized release; skip it
+    for an unsigned smoke. Gatekeeper will still quarantine a copied .dmg.
   - Steps: open the local unsigned .dmg. Gatekeeper will quarantine it.
     Right-click → Open, or `xattr -d com.apple.quarantine` on the .app,
     then launch from /Applications.
   - Expected: the app launches; `PaneFlow.app/Contents/MacOS/paneflow --version`
-    prints `0.1.0` after task 14; glyphs render (not empty boxes).
+    prints `0.1.0`; glyphs render (not empty boxes).
   - Failure implicates: bundle script, embed staging, or font-kit feature.
 
 ---

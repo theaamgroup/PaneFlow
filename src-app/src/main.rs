@@ -1866,7 +1866,7 @@ impl Render for PaneFlowApp {
             )
             .on_action(cx.listener(|_this: &mut Self, _: &OpenHelp, _window, _cx| {
                 if let Err(e) =
-                    crate::external_open::open_url("https://github.com/arthjean/paneflow#readme")
+                    crate::external_open::open_url("https://github.com/theaamgroup/paneflow#readme")
                 {
                     log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 }
@@ -2545,7 +2545,7 @@ fn main() {
              \x20 Cmd+1-9          Switch to workspace N\n\
              \n\
              Config paths and IPC endpoints are documented in the README.\n\
-             https://github.com/arthjean/paneflow",
+             https://github.com/theaamgroup/paneflow",
             version = env!("CARGO_PKG_VERSION")
         );
         return;

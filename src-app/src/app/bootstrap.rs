@@ -1152,7 +1152,7 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     cx.on_action(|_: &OpenHelp, cx| {
         with_active_paneflow_window(cx, |app, _window, cx| {
             if let Err(e) =
-                crate::external_open::open_url("https://github.com/arthjean/paneflow#readme")
+                crate::external_open::open_url("https://github.com/theaamgroup/paneflow#readme")
             {
                 log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 app.show_toast(format!("Could not open help: {e}"), cx);
