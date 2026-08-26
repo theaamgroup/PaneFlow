@@ -306,7 +306,7 @@ fn check_sun_path_fits(path: &std::path::Path) -> bool {
     // minus one).
     if bytes >= MAX_SOCKET_PATH_BYTES {
         log::warn!(
-            "paneflow: computed IPC socket path does not fit sun_path ({} >= {} bytes, no room for the NUL terminator): {} - IPC will be disabled. Set $XDG_RUNTIME_DIR (Linux) or shorten $TMPDIR (macOS) to enable it.",
+            "paneflow: computed IPC socket path does not fit sun_path ({} >= {} bytes, no room for the NUL terminator): {} - IPC will be disabled. Set $XDG_RUNTIME_DIR or shorten $TMPDIR to enable it.",
             bytes,
             MAX_SOCKET_PATH_BYTES,
             path.display()
@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(
             p,
             PathBuf::from(format!("/run/user/1000/{APP_SUBDIR}/{SOCKET_FILE}")),
-            "AC5: Linux with XDG_RUNTIME_DIR must resolve to the XDG path \
+            "AC5: with XDG_RUNTIME_DIR set, the socket must resolve to the XDG path \
              (subdir + filename vary by build profile via APP_SUBDIR / SOCKET_FILE)"
         );
         assert!(
