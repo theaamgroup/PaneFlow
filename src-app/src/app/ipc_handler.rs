@@ -1270,10 +1270,12 @@ fn drain_ipc_requests_for_tick(
         };
         dequeued += 1;
 
-        // U-053: timed-out requests were already answered by the socket
-        // thread. Dropping them avoids duplicate side effects without spending
-        // the live-work budget for this tick.
-        if req.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        // Timed-out requests were already answered by the socket thread.
+        // Dropping them avoids duplicate side effects without spending the
+        // live-work budget for this tick. The Queued→Started CAS lives in
+        // process_ipc_requests so a cancel that lands after dequeue still
+        // skips handle_ipc.
+        if crate::ipc::dispatch_is_cancelled(&req.dispatch) {
             continue;
         }
 
@@ -1296,11 +1298,12 @@ impl PaneFlowApp {
 
     pub(crate) fn process_ipc_requests(&mut self, cx: &mut Context<Self>) {
         for req in drain_ipc_requests_for_tick(&self.ipc_rx) {
-            if req.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            // Issue #38: CAS Queued→Started. If the socket timeout already
+            // CAS'd Queued→Cancelled and returned -32002, skip so
+            // workspace.create / workspace.up / surface.split cannot still run.
+            if !crate::ipc::try_start_dispatch(&req.dispatch) {
                 continue;
             }
-            req.started
-                .store(true, std::sync::atomic::Ordering::Release);
             let result = self.handle_ipc(&req.method, &req.params, req.caller_pid, cx);
             // EP-002 US-006: mirror a SUCCESSFUL ai.* lifecycle frame to event-
             // bus subscribers. Broadcast after the handler so the looked-up
@@ -4041,18 +4044,22 @@ pub(crate) fn parse_layout_param(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
 
     fn test_ipc_request(method: &str, cancelled: bool) -> crate::ipc::IpcRequest {
         let (response_tx, _response_rx) = mpsc::channel();
+        let state = if cancelled {
+            crate::ipc::IPC_DISPATCH_CANCELLED
+        } else {
+            crate::ipc::IPC_DISPATCH_QUEUED
+        };
         crate::ipc::IpcRequest {
             method: method.to_string(),
             params: serde_json::json!({}),
             _id: serde_json::json!(null),
             response_tx,
-            cancelled: Arc::new(AtomicBool::new(cancelled)),
-            started: Arc::new(AtomicBool::new(false)),
+            dispatch: Arc::new(AtomicU8::new(state)),
             caller_pid: None,
         }
     }

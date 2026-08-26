@@ -100,7 +100,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicU8, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -122,22 +122,66 @@ pub struct IpcRequest {
     pub params: Value,
     pub _id: Value,
     pub response_tx: mpsc::Sender<Value>,
-    /// U-053: set by the socket thread when it gives up waiting (the 5 s
-    /// dispatch timeout fired and the client already got an error). The GPUI
-    /// consumer checks this before running the handler so a slow non-idempotent
-    /// mutation (workspace.create, surface.split) can't execute after the
-    /// client gave up - otherwise a client retry would create duplicate
-    /// workspaces/panes.
-    pub cancelled: Arc<AtomicBool>,
-    /// Set by the GPUI consumer just before `handle_ipc` runs. The socket
-    /// thread cancels only queued work; once a handler starts, it waits for the
-    /// real result so retrying clients do not duplicate mutations.
-    pub started: Arc<AtomicBool>,
+    /// Single CAS lifecycle (issue #38): `IPC_DISPATCH_QUEUED` → `STARTED`
+    /// (GPUI, just before `handle_ipc`) or `CANCELLED` (socket 5 s timeout).
+    /// Exactly one transition wins, so a timed-out `workspace.create` /
+    /// `workspace.up` / `surface.split` cannot still run after `-32002`.
+    pub dispatch: Arc<AtomicU8>,
     /// EP-003 US-010 (agent-control-plane): the socket peer's PID, captured
     /// from `SO_PEERCRED` once per connection (None on macOS/Windows, where
     /// the local-socket peer PID is not exposed). Used only to trace writes
     /// granted by AI free-access mode; never an authorization input.
     pub caller_pid: Option<i64>,
+}
+
+/// Dispatch lifecycle for a GPUI-bound IPC request (issue #38).
+///
+/// One atomic replaces the previous `cancelled` + `started` pair. Both the
+/// socket timeout path and the GPUI consumer CAS out of `QUEUED`.
+pub(crate) const IPC_DISPATCH_QUEUED: u8 = 0;
+pub(crate) const IPC_DISPATCH_STARTED: u8 = 1;
+pub(crate) const IPC_DISPATCH_CANCELLED: u8 = 2;
+
+/// GPUI: Queued → Started. False means the socket thread already cancelled
+/// and returned `-32002`; skip `handle_ipc`.
+///
+/// Strong CAS only: a spurious `compare_exchange_weak` failure would skip a
+/// live request while the socket thread waits forever for a handler that
+/// never starts.
+#[must_use]
+pub(crate) fn try_start_dispatch(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            IPC_DISPATCH_QUEUED,
+            IPC_DISPATCH_STARTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+/// Socket timeout: Queued → Cancelled. False means GPUI already started;
+/// wait for the real response instead of returning `-32002`.
+#[must_use]
+pub(crate) fn try_cancel_dispatch(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            IPC_DISPATCH_QUEUED,
+            IPC_DISPATCH_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+#[must_use]
+pub(crate) fn dispatch_is_started(state: &AtomicU8) -> bool {
+    state.load(Ordering::Acquire) == IPC_DISPATCH_STARTED
+}
+
+#[must_use]
+pub(crate) fn dispatch_is_cancelled(state: &AtomicU8) -> bool {
+    state.load(Ordering::Acquire) == IPC_DISPATCH_CANCELLED
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1158,17 +1202,13 @@ fn dispatch_to_gpui(
     caller_pid: Option<i64>,
 ) -> Value {
     let (resp_tx, resp_rx) = mpsc::channel();
-    // U-053: shared cancel flag - set if we time out below so the GPUI
-    // consumer skips a request the client already gave up on.
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let started = Arc::new(AtomicBool::new(false));
+    let dispatch = Arc::new(AtomicU8::new(IPC_DISPATCH_QUEUED));
     let ipc_req = IpcRequest {
         method: method.clone(),
         params,
         _id: id.clone(),
         response_tx: resp_tx,
-        cancelled: Arc::clone(&cancelled),
-        started: Arc::clone(&started),
+        dispatch: Arc::clone(&dispatch),
         caller_pid,
     };
 
@@ -1182,38 +1222,41 @@ fn dispatch_to_gpui(
         }
     }
 
-    await_or_cancel(&resp_rx, &cancelled, &started, Duration::from_secs(5), id)
+    await_or_cancel(&resp_rx, &dispatch, Duration::from_secs(5), id)
 }
 
 /// Wait for the GPUI handler's response. If the request is still queued after
-/// `timeout`, set `cancelled` so the GPUI consumer skips it. Once the handler
-/// has started, wait for the real response instead of telling the client to
-/// retry a mutation that may still complete.
+/// `timeout`, CAS Queued→Cancelled so the GPUI consumer skips it. Once the
+/// handler has started, wait for the real response instead of telling the
+/// client to retry a mutation that may still complete.
 fn await_or_cancel(
     resp_rx: &mpsc::Receiver<Value>,
-    cancelled: &AtomicBool,
-    started: &AtomicBool,
+    dispatch: &AtomicU8,
     timeout: Duration,
     id: Value,
 ) -> Value {
     let queued_at = Instant::now();
     loop {
-        let wait_for = if started.load(Ordering::Acquire) {
+        let wait_for = if dispatch_is_started(dispatch) {
             Duration::from_millis(50)
         } else {
-            let Some(remaining) = timeout.checked_sub(queued_at.elapsed()) else {
-                cancelled.store(true, Ordering::SeqCst);
-                return json!({"jsonrpc": "2.0", "error": {"code": -32002, "message": "Request dispatch timeout"}, "id": id});
-            };
-            remaining.min(Duration::from_millis(50))
+            match timeout.checked_sub(queued_at.elapsed()) {
+                Some(remaining) => remaining.min(Duration::from_millis(50)),
+                None => {
+                    if try_cancel_dispatch(dispatch) {
+                        return json!({"jsonrpc": "2.0", "error": {"code": -32002, "message": "Request dispatch timeout"}, "id": id});
+                    }
+                    // GPUI already CAS'd Queued→Started; wait for the result.
+                    Duration::from_millis(50)
+                }
+            }
         };
 
         match resp_rx.recv_timeout(wait_for) {
             Ok(result) => return crate::app::ipc_handler::promote_response(result, id),
-            Err(mpsc::RecvTimeoutError::Timeout) if started.load(Ordering::Acquire) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) if dispatch_is_started(dispatch) => continue,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if queued_at.elapsed() >= timeout {
-                    cancelled.store(true, Ordering::SeqCst);
+                if queued_at.elapsed() >= timeout && try_cancel_dispatch(dispatch) {
                     return json!({"jsonrpc": "2.0", "error": {"code": -32002, "message": "Request dispatch timeout"}, "id": id});
                 }
             }
@@ -1506,10 +1549,87 @@ mod framing_tests {
 }
 
 #[cfg(test)]
+mod dispatch_state_tests {
+    use super::{
+        IPC_DISPATCH_CANCELLED, IPC_DISPATCH_QUEUED, IPC_DISPATCH_STARTED, dispatch_is_cancelled,
+        dispatch_is_started, try_cancel_dispatch, try_start_dispatch,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::thread;
+
+    #[test]
+    fn queued_to_started_succeeds_and_blocks_cancel() {
+        let state = AtomicU8::new(IPC_DISPATCH_QUEUED);
+        assert!(try_start_dispatch(&state));
+        assert_eq!(state.load(Ordering::Acquire), IPC_DISPATCH_STARTED);
+        assert!(dispatch_is_started(&state));
+        assert!(!dispatch_is_cancelled(&state));
+        assert!(
+            !try_cancel_dispatch(&state),
+            "started handlers must not be cancelled behind the client"
+        );
+        assert_eq!(state.load(Ordering::Acquire), IPC_DISPATCH_STARTED);
+    }
+
+    #[test]
+    fn queued_to_cancelled_succeeds_and_blocks_start() {
+        let state = AtomicU8::new(IPC_DISPATCH_QUEUED);
+        assert!(try_cancel_dispatch(&state));
+        assert_eq!(state.load(Ordering::Acquire), IPC_DISPATCH_CANCELLED);
+        assert!(dispatch_is_cancelled(&state));
+        assert!(!dispatch_is_started(&state));
+        assert!(
+            !try_start_dispatch(&state),
+            "GPUI must not run handle_ipc after the client got -32002"
+        );
+        assert_eq!(state.load(Ordering::Acquire), IPC_DISPATCH_CANCELLED);
+    }
+
+    #[test]
+    fn start_and_cancel_are_noops_from_their_own_terminal_states() {
+        let started = AtomicU8::new(IPC_DISPATCH_STARTED);
+        assert!(!try_start_dispatch(&started));
+        assert_eq!(started.load(Ordering::Acquire), IPC_DISPATCH_STARTED);
+
+        let cancelled = AtomicU8::new(IPC_DISPATCH_CANCELLED);
+        assert!(!try_cancel_dispatch(&cancelled));
+        assert_eq!(cancelled.load(Ordering::Acquire), IPC_DISPATCH_CANCELLED);
+    }
+
+    #[test]
+    fn concurrent_start_and_cancel_exactly_one_wins() {
+        for _ in 0..128 {
+            let state = Arc::new(AtomicU8::new(IPC_DISPATCH_QUEUED));
+            let for_start = Arc::clone(&state);
+            let for_cancel = Arc::clone(&state);
+            let start_thread = thread::spawn(move || try_start_dispatch(&for_start));
+            let cancel_thread = thread::spawn(move || try_cancel_dispatch(&for_cancel));
+            let started = start_thread.join().expect("start thread");
+            let cancelled = cancel_thread.join().expect("cancel thread");
+            assert_ne!(
+                started, cancelled,
+                "Queued→Started and Queued→Cancelled must be mutually exclusive"
+            );
+            assert_eq!(started, dispatch_is_started(&state));
+            assert_eq!(cancelled, dispatch_is_cancelled(&state));
+            let observed = state.load(Ordering::Acquire);
+            assert!(
+                observed == IPC_DISPATCH_STARTED || observed == IPC_DISPATCH_CANCELLED,
+                "race must leave a terminal state, got {observed}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod dispatch_tests {
-    use super::{IpcRequest, await_or_cancel, dispatch_to_gpui};
+    use super::{
+        IPC_DISPATCH_QUEUED, IPC_DISPATCH_STARTED, IpcRequest, await_or_cancel,
+        dispatch_is_cancelled, dispatch_is_started, dispatch_to_gpui, try_start_dispatch,
+    };
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
@@ -1520,8 +1640,7 @@ mod dispatch_tests {
             params: json!({}),
             _id: json!(1),
             response_tx,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            started: Arc::new(AtomicBool::new(false)),
+            dispatch: Arc::new(AtomicU8::new(IPC_DISPATCH_QUEUED)),
             caller_pid: None,
         }
     }
@@ -1564,26 +1683,23 @@ mod dispatch_tests {
 
     #[test]
     fn await_or_cancel_sets_flag_and_errors_on_timeout() {
-        // U-053: when the GPUI handler is not started within the deadline,
+        // When the GPUI handler is not started within the deadline,
         // await_or_cancel must (a) return a -32002 timeout envelope to the
-        // client AND (b) set the shared cancel flag so the GPUI consumer skips
-        // the not-yet-run handler - preventing a duplicate non-idempotent
-        // mutation on the client's retry. _tx is kept alive so we exercise the
-        // Timeout path (not Disconnected); a short deadline keeps the test fast.
+        // client AND (b) CAS Queued→Cancelled so the GPUI consumer skips the
+        // not-yet-run handler - preventing a duplicate non-idempotent mutation
+        // on the client's retry. _tx is kept alive so we exercise the Timeout
+        // path (not Disconnected); a short deadline keeps the test fast.
         let (_tx, rx) = mpsc::channel::<serde_json::Value>();
-        let cancelled = AtomicBool::new(false);
-        let started = AtomicBool::new(false);
-        let resp = await_or_cancel(
-            &rx,
-            &cancelled,
-            &started,
-            Duration::from_millis(20),
-            json!(7),
-        );
+        let dispatch = AtomicU8::new(IPC_DISPATCH_QUEUED);
+        let resp = await_or_cancel(&rx, &dispatch, Duration::from_millis(20), json!(7));
 
         assert!(
-            cancelled.load(Ordering::Acquire),
-            "timeout must set the cancel flag so the GPUI side skips the request"
+            dispatch_is_cancelled(&dispatch),
+            "timeout must CAS Queued→Cancelled so the GPUI side skips the request"
+        );
+        assert!(
+            !try_start_dispatch(&dispatch),
+            "GPUI must not start a request after the client got -32002"
         );
         assert_eq!(resp["error"]["code"], -32002);
         assert_eq!(resp["id"], 7);
@@ -1592,27 +1708,21 @@ mod dispatch_tests {
     #[test]
     fn await_or_cancel_waits_for_started_handler_instead_of_cancelling() {
         let (tx, rx) = mpsc::channel::<serde_json::Value>();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let started = Arc::new(AtomicBool::new(true));
-        let send_started = Arc::clone(&started);
+        let dispatch = Arc::new(AtomicU8::new(IPC_DISPATCH_STARTED));
+        let send_dispatch = Arc::clone(&dispatch);
         std::thread::spawn(move || {
-            assert!(send_started.load(Ordering::Acquire));
+            assert!(dispatch_is_started(&send_dispatch));
             std::thread::sleep(Duration::from_millis(40));
             tx.send(json!({"status": "ok"})).unwrap();
         });
 
-        let resp = await_or_cancel(
-            &rx,
-            &cancelled,
-            &started,
-            Duration::from_millis(5),
-            json!(9),
-        );
+        let resp = await_or_cancel(&rx, &dispatch, Duration::from_millis(5), json!(9));
 
         assert!(
-            !cancelled.load(Ordering::Acquire),
+            !dispatch_is_cancelled(&dispatch),
             "started handlers must not be cancelled behind the client"
         );
+        assert!(dispatch_is_started(&dispatch));
         assert_eq!(resp["result"]["status"], "ok");
         assert_eq!(resp["id"], 9);
     }
@@ -1623,13 +1733,12 @@ mod dispatch_tests {
         // result promoted under `result` (no `_jsonrpc_error` sentinel here).
         let (tx, rx) = mpsc::channel::<serde_json::Value>();
         tx.send(json!({"status": "ok"})).unwrap();
-        let cancelled = AtomicBool::new(false);
-        let started = AtomicBool::new(false);
-        let resp = await_or_cancel(&rx, &cancelled, &started, Duration::from_secs(5), json!(3));
+        let dispatch = AtomicU8::new(IPC_DISPATCH_QUEUED);
+        let resp = await_or_cancel(&rx, &dispatch, Duration::from_secs(5), json!(3));
 
         assert!(
-            !cancelled.load(Ordering::Acquire),
-            "a timely response must not set the cancel flag"
+            !dispatch_is_cancelled(&dispatch),
+            "a timely response must not set Cancelled"
         );
         assert_eq!(resp["result"]["status"], "ok");
         assert_eq!(resp["id"], 3);
