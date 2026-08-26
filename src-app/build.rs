@@ -49,23 +49,21 @@ use std::process::Command;
 /// Hard cap on the total bytes staged under `target/embed/bin/<target>/`.
 /// Enforced to keep the main PaneFlow binary slim.
 ///
-/// EP-001 US-002 - measured release-min sizes (Linux x86_64, 2026-05-29):
+/// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-08-25):
 ///
 /// ```text
-///   paneflow-shim      455_320 B
-///   paneflow-ai-hook   360_448 B
-///   paneflow-mcp       426_216 B   (added by EP-001 US-001)
+///   paneflow-shim      438_784 B
+///   paneflow-ai-hook   336_432 B
+///   paneflow-mcp       386_208 B
 ///   ----------------------------
-///   total            1_241_984 B  (~1.18 MB)
+///   total            1_161_424 B
 /// ```
 ///
-/// The previous 1 MB cap (shim + ai-hook only ≈ 815 KB) no longer fits once
-/// the MCP bridge is embedded. Raised to 1.75 MiB (1_835_008 B), leaving
-/// ~593 KB / 48% headroom over the Linux total to absorb per-triple variance
-/// (Windows `.exe` and macOS Mach-O binaries run larger than ELF). The guard
-/// stays active: the outer build still fails if the staged total exceeds
-/// this cap, so an unexpectedly bloated dependency cannot ship silently.
-const EMBED_SIZE_LIMIT_BYTES: u64 = 1_835_008;
+/// Cap is that total plus ~20% headroom (1_400_000 B, 20.5%) so a real
+/// bloat regression fails the build, while strip/LTO jitter does not.
+/// Nested staging always uses `--profile release-min`, so a debug outer
+/// build still embeds these Mach-O sizes, not debug binaries.
+const EMBED_SIZE_LIMIT_BYTES: u64 = 1_400_000;
 fn main() {
     println!("cargo:rerun-if-env-changed=PANEFLOW_SKIP_EMBED_BUILD");
 
