@@ -18,8 +18,6 @@ Related runbooks:
   which secrets must never exist in this org.
 - [`docs/release/macos-signing.md`](./release/macos-signing.md) is the deep dive
   on codesign, entitlements, notarization, and the DMG.
-- [`docs/self-update-signing.md`](./self-update-signing.md) covers the minisign
-  keypair and its two-slot rotation.
 
 Prerequisites (one-time, not part of the per-release cadence):
 
@@ -35,7 +33,7 @@ The release workflow is a single signed `aarch64-apple-darwin` lane:
 | Job id | Runner | What it does |
 |---|---|---|
 | `build` | `macos-15` | `cargo fmt --check`, clippy, release binary, `.app`, Developer ID sign, notarize, staple, DMG, `.sha256` sibling |
-| `release` | `macos-15` | minisign-sign the DMG, create the GitHub Release. Runs only on a `v*` tag push. Uses the `release` environment. |
+| `release` | `macos-15` | attach DMG + `.sha256`, publish the GitHub Release. Runs only on a `v*` tag push. |
 
 There is no Intel (`x86_64-apple-darwin`) leg. Dry-run is `workflow_dispatch` on
 the same `build` job; it skips `release`.
@@ -60,15 +58,7 @@ stop there.
 | `APPLE_ID` | repo Actions secrets | `scripts/notarize-macos.sh` | Apple Developer account email |
 | `APPLE_APP_SPECIFIC_PASSWORD` | repo Actions secrets | `scripts/notarize-macos.sh` | App-specific password from appleid.apple.com, **not** the Apple ID login password |
 | `APPLE_TEAM_ID` | repo Actions secrets | both Apple scripts | 10-character Team ID. `sign-macos.sh` hard-fails if the identity's common name does not contain `(TEAMID)`. |
-| `MINISIGN_SECRET_KEY` | **`release` environment** secret, not repo-scope | `release` job | Entire contents of the unencrypted minisign `.key` (`minisign -G -W`). Keep it on the environment so a required reviewer can gate publish. |
 | `GITHUB_TOKEN` | injected by Actions | `gh release view` / `gh release edit` | Do **not** create this. The workflow requests `permissions: contents: write` so the default token can attach assets and undraft the release. |
-
-### Variables (public, not secrets)
-
-| Variable | What it is |
-|---|---|
-| `PANEFLOW_MINISIGN_PUBKEY` | Base64 second line of the minisign `.pub`, baked into the binary at build time via `option_env!` |
-| `PANEFLOW_MINISIGN_PUBKEY_NEXT` | Empty except during a key rotation |
 
 ### `APPLE_DEVELOPER_CERT_P` diagnosis: split, not a typo
 
@@ -87,7 +77,6 @@ name that stops at `_P`, will pass a presence check you wrote yourself and then
 fail at `security import` twenty minutes into a tagged run.
 
 Onboarding steps for the Apple half: [`docs/release/macos-signing.md`](./release/macos-signing.md) §6.
-Minisign keygen: [`docs/self-update-signing.md`](./self-update-signing.md).
 
 ---
 
@@ -226,9 +215,8 @@ The `build` job runs, in order:
 1. `cargo fmt --check` (hard fail; the cheapest guard against burning a tagged
    run).
 2. `cargo clippy --workspace --locked --target aarch64-apple-darwin -- -D warnings`.
-3. `cargo build --release --target aarch64-apple-darwin`, with
-   `PANEFLOW_MINISIGN_PUBKEY` (and `_NEXT`) in the environment so `option_env!`
-   bakes the update-verification keys into the binary.
+3. `cargo build --release --target aarch64-apple-darwin`. There is no
+   minisign pubkey bake; the in-app updater is deleted.
 4. `scripts/bundle-macos.sh` produces `dist/PaneFlow.app`.
 5. `Detect macOS signing secrets`. On a tag push, a missing `APPLE_*` secret is
    a hard failure here, not a downgrade to unsigned. Dry-run may continue
@@ -241,8 +229,8 @@ The `build` job runs, in order:
    `paneflow-<semver>-aarch64-apple-darwin.dmg` and independently re-verifies
    `codesign`, `stapler validate`, and `spctl` against the bundle mounted from
    the finished image. A `.sha256` sibling is staged next to it.
-9. The `release` job (tag-push only, `release` environment) minisign-signs the
-   DMG and creates the GitHub Release.
+9. The `release` job (tag-push only) attaches the DMG + `.sha256` and
+   publishes the GitHub Release.
 
 **Manual judgement:** a green run with a `::warning::` annotation on the signing
 or notarization leg deserves a read before you proceed. A warning there is often
@@ -269,35 +257,15 @@ Expected assets:
 
 ```
 paneflow-X.Y.Z-aarch64-apple-darwin.dmg
-paneflow-X.Y.Z-aarch64-apple-darwin.dmg.minisig
 paneflow-X.Y.Z-aarch64-apple-darwin.dmg.sha256
-```
-
-The `-apple-darwin` suffix is a contract, not cosmetics: the in-app updater's
-asset matcher looks releases up by that suffix
-(`src-app/src/update/checker.rs`). A missing or renamed asset breaks self-update
-for every installed client.
-
-The `.minisig` is not optional. Clients with an embedded public key **refuse**
-an update asset that has no detached signature, so publishing without it ships a
-release nobody can auto-update to.
-
-Verify the signature yourself before announcing:
-
-```bash
-gh release download vX.Y.Z --pattern '*.dmg' --pattern '*.dmg.minisig'
-minisign -V -p pub.txt -m paneflow-X.Y.Z-aarch64-apple-darwin.dmg
-# -> "Signature and comment signature verified"
 ```
 
 ### Troubleshooting - Step 4
 
 | Symptom | Top 3 recoveries |
 |---|---|
-| DMG present but no `.minisig` sibling | 1. `MINISIGN_SECRET_KEY` is missing from the `release` environment, or the signing step was skipped. 2. Do NOT announce: installed clients will fail closed on this release. 3. Re-run the publish job after populating the secret; it re-uploads without re-tagging. |
-| Asset name has the wrong suffix | 1. The staging step in `release.yml` renames to the canonical form; a missing rename is a workflow regression. 2. Do NOT publish: the updater will not find the asset and user upgrades break. 3. Patch the staging step, cut a new patch tag. |
+| Asset name has the wrong suffix | 1. The staging step in `release.yml` renames to the canonical form; a missing rename is a workflow regression. 2. Patch the staging step, cut a new patch tag. |
 | Pre-release ended up on `latest` | 1. The tag contains `rc`/`beta`/`alpha` but the workflow's prerelease boolean is false. Check the `contains(...)` expression in `release.yml`. 2. Manually flip it: `gh release edit vX.Y.Z --prerelease`. 3. Fix the workflow expression in a follow-up commit. |
-| `minisign -V` fails locally | 1. Confirm `pub.txt` is the current public key, not a rotated-out one. 2. Confirm you downloaded the `.minisig` for the same asset (not a stale local copy). 3. If both are right, the artifact and its signature genuinely disagree: do not ship, and treat it as a possible key or pipeline compromise per [`docs/self-update-signing.md`](./self-update-signing.md) §6. |
 
 ---
 
@@ -361,7 +329,6 @@ Requires macOS on Apple Silicon.
 ## Validation
 
 - CI sign + notarize + staple: PASS (link to workflow run)
-- minisign signature verified locally: PASS
 - Clean-Mac install smoke: PASS <date / who>
 
 ## Full changelog
@@ -378,75 +345,8 @@ pure-noise entries.
 | Symptom | Top 3 recoveries |
 |---|---|
 | Auto-generated release notes are empty | 1. No PRs merged since the previous tag, so the generator has nothing to list. Write a manual entry. 2. The previous tag used a different naming scheme and the generator did not find it: supply `--notes-start-tag=<previous-tag>` via `gh release edit`. 3. Fall back to `git log --oneline <prev-tag>..vX.Y.Z`. |
-| Announced, then discovered a critical bug | 1. Flip the release to pre-release: `gh release edit vX.Y.Z --prerelease`. Clients checking `latest` fall back to the previous stable. 2. Pin a known-issue note at the top of the release notes and link a tracking issue. 3. Cut a patch release; the in-app updater carries most users forward without manual intervention. |
+| Announced, then discovered a critical bug | 1. Flip the release to pre-release: `gh release edit vX.Y.Z --prerelease`. 2. Pin a known-issue note at the top of the release notes and link a tracking issue. 3. Cut a patch release. |
 | Forgot to promote an `-rc.N` tag to the final release | 1. Run Steps 1 to 5 with the non-rc tag; the workflow produces a fresh set of artifacts. 2. Do not delete the `-rc.N` release, it stays as a historical pre-release record. 3. Make sure the new final release is marked `latest` (`gh release edit vX.Y.Z --latest`). |
-
----
-
-## Self-update on macOS
-
-Users update by clicking the "Update available" pill in the title bar. The
-runner is `src-app/src/update/macos/dmg.rs`. There is no privilege escalation
-prompt anywhere in this flow: `/Applications` is user-writable, so no `sudo`,
-`pkexec`, or authorization dialog is involved.
-
-### What actually happens
-
-1. Download the `.dmg` to `~/Library/Caches/paneflow` as `update-<pid>.dmg`,
-   with a 30-second per-call HTTP timeout.
-2. **Verify the detached minisign signature before mounting anything.** A
-   missing or invalid `.minisig` deletes the partial download and bails. There is
-   no `.sha256` fallback: a same-host hash is worthless against a mirror that can
-   swap both files.
-3. `hdiutil attach -nobrowse -readonly -mountpoint <tmp>` to a deterministic
-   mount point under `/private/tmp/`, so a detach is trivially scoped and two
-   concurrent updates cannot collide.
-4. `codesign --verify` plus `spctl --assess` on the extracted `.app`, as a
-   belt-and-braces check on top of the signature.
-5. `cp -R <mount>/PaneFlow.app /Applications/PaneFlow.app.new`.
-6. Atomic swap: rename `PaneFlow.app` to `PaneFlow.app.old`, then `.new` to
-   `PaneFlow.app`, then `rm -rf` the old one. If the second rename fails the
-   first is rolled back, so `/Applications/PaneFlow.app` never disappears.
-7. `hdiutil detach` runs unconditionally through an RAII guard, so a mid-flow
-   error still cleans up the mounted volume.
-8. The `.app` bundle path (not the inner Mach-O) is handed to
-   `cx.set_restart_path()`. GPUI's macOS `restart()` runs `open "<path>"`, which
-   relaunches a bundle but not a bare executable.
-9. Workspaces, layouts, and CWDs are restored from `session.json`.
-
-### Pre-release acceptance checklist
-
-Run this whenever the self-update dispatcher or the macOS runner
-(`src-app/src/app/self_update_flow.rs`, `src-app/src/update/macos/dmg.rs`)
-changed since the previous release. Skip it for releases that do not touch the
-update path.
-
-| # | Scenario | Expected |
-|---|---|---|
-| 1 | Happy path: newer signed version available | Click, download, verify, swap, restart with the session intact |
-| 2 | `.minisig` absent from the release | Fails closed with the "corrupt or tampered" class of error. No mount, no swap. |
-| 3 | `.minisig` present but signed by an untrusted key | Same failure. The message distinguishes "not signed by any key trusted by this build" from a content mismatch. |
-| 4 | Artifact bytes tampered after signing | Fails closed with "does not match its signature". |
-| 5 | A running build with no embedded key (a local `cargo build`) | Refuses before spending bandwidth, rather than downloading and then failing. |
-| 6 | `/Applications/PaneFlow.app` running from a non-standard location (`~/Applications`, or wherever the user dragged it) | Detected structurally; the swap targets the bundle actually running. |
-| 7 | Interrupt mid-copy (kill the app during `cp -R`) | `/Applications/PaneFlow.app` still present and launchable. No `.new` or `.old` left behind on the next run. |
-| 8 | Workspace with 6 panes and running shells survives the restart | All 6 panes restored with correct CWDs |
-| 9 | Version string from the release fails `^v?\d+\.\d+\.\d+$` | Dispatcher refuses up front. This is the defence against a compromised GitHub tag. |
-
-A single failure among the applicable scenarios is a release blocker. Do not tag
-`vX.Y.Z` until the matrix is green.
-
-**There is no CI coverage for this flow.** Until a macOS e2e job exists, this
-checklist is manual.
-
-### Troubleshooting - Self-update
-
-| Symptom | Top 3 recoveries |
-|---|---|
-| Update fails closed on a release you know is good | 1. Check the release actually has a `.minisig` sibling (Step 4). 2. Check whether the *installed* build embeds a key at all: a locally built binary has none and correctly refuses everything. 3. If you rotated the minisign key, confirm the installed build carries a slot that trusts the new key. Skipping the dual-key release in the rotation causes exactly this. |
-| Update succeeds but the app never restarts | 1. `session.json` may have failed to write: check `~/Library/Application Support/paneflow`. 2. The restart path must be the `.app` bundle; a bare Mach-O path silently does nothing under `open`. 3. Check `~/Library/Logs/paneflow/` (or the console) for the "restarting into" line. |
-| A `PaneFlow.app.new` or `.old` is left in `/Applications` | The swap was interrupted. The running bundle is intact by design. Delete the leftover by hand; the next update recreates what it needs. |
-| Mount point collision | The runner uses a deterministic path under `/private/tmp/` scoped per update, so a stale `/Volumes/PaneFlow` from a manual DMG inspection does not interfere with self-update. It *does* interfere with the manual verification in Step 5. |
 
 ---
 

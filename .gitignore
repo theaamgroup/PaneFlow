@@ -3,7 +3,7 @@
 **/target/
 **/*.rs.bk
 
-# Packaging output: scripts/bundle-{macos,tarball,appimage}.sh write here.
+# Packaging output: scripts/bundle-macos.sh and scripts/create-dmg.sh write here.
 # Generated artifacts, not source.
 /dist/
 # Occasional rustc `--emit=link` leftovers at the repo root (name chosen by

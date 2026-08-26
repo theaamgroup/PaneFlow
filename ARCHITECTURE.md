@@ -7,7 +7,7 @@ built on a pinned Paneflow branch of
 terminal emulation is provided by upstream
 [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) from
 crates.io. Paneflow owns PTY lifecycle orchestration, rendering, and
-integration with agent tracking, IPC, the MCP bridge, and self-update.
+integration with agent tracking, IPC, and the MCP bridge.
 
 This fork is **macOS only**. Metal, AppKit, Unix-socket IPC, a signed and
 notarized `.app` bundle. Fork decisions, the upstream leak register, and a
@@ -26,7 +26,7 @@ focused library crates:
 
 | Crate | Path | Purpose |
 |---|---|---|
-| `paneflow-app` | `src-app/` | The GPUI application and `paneflow` CLI entrypoint: UI, panes, PTY sessions, IPC server, self-update |
+| `paneflow-app` | `src-app/` | The GPUI application and `paneflow` CLI entrypoint: UI, panes, PTY sessions, IPC server |
 | `paneflow-config` | `crates/paneflow-config/` | Config schema, tolerant JSON loader, file watcher |
 | `paneflow-shim` | `crates/paneflow-shim/` | PATH shim wrapping 16 known agent CLIs so Paneflow can observe their lifecycle |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | The hook binary agent CLIs invoke to report session events back over IPC |
@@ -180,25 +180,6 @@ launch, so there is nothing extra to install.
 Ingress is treated as untrusted: session and config files are validated
 structurally (layout budgets, ratio clamps, id alphabets) before they touch
 app state.
-
-## Self-update
-
-The installed layout drives the update path: a macOS `.app` bundle is replaced
-from a downloaded `.dmg`, a `$HOME/.local` tarball install swaps its app dir.
-Both are driven by one in-app updater. Update artifacts are verified with
-[minisign](https://jedisct1.github.io/minisign/) signatures and the client
-**fails closed**: an unsigned or tampered artifact is rejected, never
-installed. macOS builds add Developer ID / notarization checks with Team ID
-pinning.
-
-The release feed is **disabled**. `DEFAULT_FEED_URL` in
-`src-app/src/update/checker.rs` is `None` (task 11). The previous default
-pointed at upstream `arthjean/paneflow` and would have offered someone else's
-binaries; this fork's GitHub repo is private, so its release assets are not
-anonymously downloadable. Minisign verification, `verified_download`, the DMG
-installer and `UpdateError` stay intact — re-enabling is a one-line feed URL
-once there is a public distribution host. The e2e harness can still override
-via `PANEFLOW_UPDATE_FEED_URL`.
 
 ## Platform surface
 

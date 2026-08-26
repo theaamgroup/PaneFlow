@@ -2,7 +2,7 @@
 
 Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework and upstream `alacritty_terminal` (crates.io) for VT emulation. **This fork is macOS only.**
 
-Fork context, decisions, the upstream leak register, and the traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code, the updater, or anything under `src-app/src/update/`.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
+Fork context, decisions, the upstream leak register, and the traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
 
 **Start here for work in progress:** `docs/fork/STATE.md` records what is done,
 what is next with real counts, the verification commands and their expected
@@ -13,11 +13,10 @@ planning a pass so you do not redo finished work or repeat a falsified finding.
 rename was dropped). Version **0.1.0**. Origin `theaamgroup/paneflow` on
 `main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
 `windows_*_material` schema, and community files (`SECURITY.md`,
-`CONTRIBUTING.md`) are gone. Self-update feed is **disabled**
-(`DEFAULT_FEED_URL = None`). Remaining work is human: Apple signing secrets,
-minisign keypair, first tag, Cmd+Tab, unsigned-DMG Gatekeeper open. Tracked
-as GitHub issues **#7–#19** (assigned to `evilchinesefood`). Later issues
-#20–#62 are product bugs, not leftover grind.
+`CONTRIBUTING.md`) are gone. The in-app updater is **deleted**; Apple DMG
+signing remains. Remaining work is human: Apple signing secrets, first tag,
+Cmd+Tab, unsigned-DMG Gatekeeper open. Tracked as GitHub issues **#7, #9–#11,
+#13–#15**.
 
 ## Verify before claiming
 
@@ -169,7 +168,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
-│   ├── self_update_flow.rs            ← check/download/install orchestration
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
 │   ├── agents_diff/ agents_sidebar/   ← agent panel, diff dock
@@ -232,11 +230,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── ai_hooks/                          ← ai.* hook payload extraction
 ├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
 ├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
-├── update/                            ← self-update
-│   ├── checker.rs / error.rs          ← release checker, structured UpdateError
-│   ├── install_method.rs              ← detect install mode (.app bundle / ExternallyManaged)
-│   ├── signature.rs / verified_download.rs ← minisign verify, fail-closed download
-│   └── macos/dmg.rs                   ← bundle replacement from a .dmg
 ├── widgets/                           ← text_input, text_area, scrollbar, callout
 ├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
 ├── ai_types.rs                        ← AiToolState enum shared by workspace/event_handlers
@@ -418,7 +411,7 @@ Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thre
 | `events.subscribe` | Socket | Streaming event subscription |
 | `ai.session_start` / `prompt_submit` / `tool_use` / `notification` / `stop` / `exit` / `session_end` | GPUI | Agent lifecycle notifications from `paneflow-ai-hook` |
 
-Stateful methods dispatch to the GPUI main thread via a channel drained by `PaneFlowApp::process_automation_tick`, which runs on a **50 ms** poll loop (`app/bootstrap.rs:515-522`, `app/ipc_handler.rs:1261`). That same tick also drains surface-change broadcasts, config reloads, and update-check completion, so its ordering is a contract, not an accident.
+Stateful methods dispatch to the GPUI main thread via a channel drained by `PaneFlowApp::process_automation_tick`, which runs on a **50 ms** poll loop (`app/bootstrap.rs`, `app/ipc_handler.rs`). That same tick drains IPC requests, then surface-change broadcasts, then config reloads, so its ordering is a contract, not an accident. There is no in-app update-check.
 
 ## Styling conventions
 
@@ -439,7 +432,7 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **A GUI-launched app inherits launchd's minimal PATH, not the user's.** `login_shell_env.rs` runs the user's login shell once and adopts **only its `PATH`**, deliberately importing nothing else (a login profile that re-exports session variables would corrupt them). Without this, `/opt/homebrew/bin` is missing, terminals cannot find the user's tools, and agent-CLI detection (`which::which(...)`) comes up empty. Do not "simplify" it into a full env import.
 - **Every `US-NNN` comment in the Rust source is a dangling breadcrumb.** They point at PRD files that lived under `tasks/`, were gitignored upstream, never committed, and `tasks/` is now deleted. Same for every `prd-*.md` and `EP-NNN` reference in a comment. Roughly 2,200 such comments across ~190 files: treat them as historical noise, do not go looking for the document, and do not add new ones.
 - **Tests + CI exist**: run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`. UI changes still need manual verification.
-- **A note that used to live here was wrong, and the correction is worth keeping.** It said `update/macos/dmg.rs`'s two `#[cfg(all(test, not(target_os = "macos")))]` items should be un-gated rather than deleted. They could not be: they were the second half of a complementary pair - `#[cfg(any(not(test), target_os = "macos"))] fn copy_bundle_to_staging` (the real `cp -R`) and `#[cfg(all(test, not(target_os = "macos")))] fn copy_bundle_to_staging` (a test-host shim) - so un-gating the second one is a duplicate definition, `error[E0428]`. Stage 2c deleted the shim and `copy_tree_for_test` and reduced the real one to unconditional (`aff3f7d`). Before acting on a claim like that, check whether the two gates are complementary definitions of ONE item.
+- **A note that used to live here was wrong, and the correction is worth keeping.** It said the in-app updater's `update/macos/dmg.rs` two `#[cfg(all(test, not(target_os = "macos")))]` items should be un-gated rather than deleted. They could not be: they were the second half of a complementary pair — the real `cp -R` vs a test-host shim — so un-gating the second one is a duplicate definition, `error[E0428]`. Stage 2c deleted the shim; leftover-removal then deleted the whole updater (`src-app/src/update/` is gone). Before acting on a claim like that, check whether the two gates are complementary definitions of ONE item.
 - **The binary-size budget is Mach-O now.** `src-app/build.rs` measures the three embedded helpers under `--profile release-min` on `aarch64-apple-darwin`: shim 438_784 + ai-hook 336_432 + mcp 386_208 = **1_161_424 B**. Cap is `EMBED_SIZE_LIMIT_BYTES = 1_400_000` (~20% headroom). Nested staging always uses `release-min`, so a debug outer build still embeds those sizes. Per-binary caps were dropped with the CI matrix (issue #3); do not re-derive a Linux ELF number.
 - **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
 - **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
@@ -477,6 +470,6 @@ This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacr
 - **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:240`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition; it prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. After telemetry was deleted the unix count moved 152 → **151**; macos stays **77**.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.
 - Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
-- **The updater is DMG-only, and the feed is off.** `update/mod.rs` declares `checker`, `error`, `install_method`, `macos`, `signature` and nothing else: `update/linux/`, `update/windows/` and `update/migrations.rs` are deleted, and `InstallMethod` / `AssetFormat` are collapsed to the macOS-reachable set. `TarGz` is gone. `ExternallyManaged` stays - it is driven by `PANEFLOW_UPDATE_EXPLANATION`, not by platform. `DEFAULT_FEED_URL = None`; `spawn_check` returns `UpdateStatus::Disabled` without opening a socket. Re-enable is that one const (or `PANEFLOW_UPDATE_FEED_URL` for the e2e harness). Do not create `GPG_*`, `AZURE_*`, or `POSTHOG_API_KEY`. `APPLE_DEVELOPER_CERT_P` is a **false hit**: the real secret is `APPLE_DEVELOPER_CERT_P12` (PKCS#12), plus `APPLE_DEVELOPER_CERT_PASSWORD`.
+- **The in-app updater is deleted; Apple DMG signing remains.** There is no feed, no minisign client, no title-bar update pill. `scripts/{bundle,sign,notarize}-macos.sh` and `create-dmg.sh` still produce the signed `.app` / `.dmg`. Do not create `GPG_*`, `AZURE_*`, or `POSTHOG_API_KEY`. `APPLE_DEVELOPER_CERT_P` is a **false hit**: the real secret is `APPLE_DEVELOPER_CERT_P12` (PKCS#12), plus `APPLE_DEVELOPER_CERT_PASSWORD`.
 
 The full removal plan, with the paired edits that have to land together, is in `docs/fork/2026-08-25-mac-only-fork-design.md`.

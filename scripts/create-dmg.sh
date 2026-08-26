@@ -8,10 +8,8 @@
 # Output filename convention:
 #   dist/paneflow-<version>-<arch>-apple-darwin.dmg
 #
-# The `-apple-darwin` suffix is required: `update_checker.rs::pick_asset`
-# (US-008) matches `.dmg` assets with `AssetFormat::target_qualifier() ==
-# "-apple-darwin"`, so any other filename shape would silently prevent
-# in-app update prompts from finding the asset.
+# The `-apple-darwin` suffix is a naming contract shared by this script,
+# `release.yml`, and the runbook. There is no in-app updater matching on it.
 #
 # Implementation: follows the Zed bundle-mac pattern
 # (zed-industries/zed `script/bundle-mac:260` upstream) - a single

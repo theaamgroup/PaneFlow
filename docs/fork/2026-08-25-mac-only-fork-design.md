@@ -18,7 +18,7 @@ dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 | Fork model | Keep all 1035 commits, keep `upstream` remote | `git blame` works, upstream fixes are cherry-pickable, `.git` stays 60M (no history rewrite, since `filter-repo` would destroy the merge base) |
 | Cut depth | Deep. Strip non-Mac `cfg` branches from shared source | Readable Mac-only source. Every future upstream merge conflicts across roughly 80 files. Accepted knowingly. |
 | Ghostty backend | Delete entirely | Verified unreachable on macOS. See Verification below. |
-| Self-update | **Disable the feed** (task 11). The fork's GitHub repo is private and there is no other host yet | Keep minisign verification, `verified_download`, the DMG installer and `UpdateError`. Re-enable with a one-line feed URL once assets are anonymously downloadable |
+| Self-update | **Deleted 2026-08-26** (supersedes “disable the feed”) | No feed, no minisign client, no title-bar update pill, no `--update-and-exit`. Apple Developer ID codesign + notarized DMG remains the install path. GitHub issue #8 (minisign keypair) is obsolete. |
 | Telemetry | PostHog stays wired, key stays unset | Inert. Never set `POSTHOG_API_KEY` in the new org. |
 | Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server, conductor skill and `PANEFLOW_*` stay. See `docs/fork/2026-08-25-post-2c-plan.md` |
 | gpui dependency | Keep pointing at `arthjean/zed`, take a cold-backup fork | `Cargo.lock` pins the rev with a checksum, so the risk is availability, not drift. Insurance without a diff. |
@@ -62,7 +62,7 @@ Verified load-bearing. Each of these looks like cruft and is not.
 - `rust-toolchain.toml`: the 1.96.1 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
 - `LICENSE`: GPL-3.0-or-later, mandatory. GPUI is a Zed fork.
 - `CLAUDE.md`: the single most useful file in the repo. Real build and test commands, annotated module tree, thread model, keystroke-to-pixel data flow, and a Gotchas section with hard-won GPUI behaviour.
-- `ARCHITECTURE.md`, `docs/hooks.md`, `docs/mcp-bridge.md`, `docs/debugging-rendering.md`, `docs/memory-smoke-test.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
+- `ARCHITECTURE.md`, `docs/hooks.md`, `docs/mcp-bridge.md`, `docs/debugging-rendering.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
 - `src-app/assets/fonts/`: 23M of TTFs, `rust-embed`ed into the binary.
 - `assets/PaneFlow.icns`, `assets/Info.plist`, `assets/dmg-background.png`: macOS bundle inputs.
 
@@ -130,10 +130,11 @@ Cargo resolves path dependencies for all targets. These must land together:
 
 ## Stage 3: signed release
 
-Generate our own minisign keypair (two-slot rotation, current and next).
 macOS-only `release.yml`. Wire `APPLE_DEVELOPER_CERT_P12`,
 `APPLE_DEVELOPER_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
-`APPLE_TEAM_ID`, `MINISIGN_SECRET_KEY`. Signed, notarized, stapled DMG.
+`APPLE_TEAM_ID`. Signed, notarized, stapled DMG. The in-app updater and
+minisign client were deleted 2026-08-26; do not recreate `MINISIGN_SECRET_KEY`
+or `PANEFLOW_MINISIGN_*`.
 
 ## Known defects to fix in this fork
 
@@ -183,16 +184,14 @@ rather than living only in chat.
 
 Everything below points at upstream and must be cut or repointed.
 
-1. `src-app/src/update/checker.rs:28` hardcodes
-   `https://api.github.com/repos/arthjean/paneflow/releases/latest`, and
-   `src-app/src/app/bootstrap.rs:727` calls it from `App::new()` with no config
-   gate and no consent gate. Every launch polls his repo and would offer his
-   releases as self-updates. Highest-frequency leak, needs no tag to fire.
-2. `.github/workflows/repo_publish.yml` chains automatically off a successful
-   `release` run and `rclone sync`s into Cloudflare R2 at `pkg.paneflow.dev`,
-   then purges his Cloudflare zone.
-3. `.github/workflows/update_cask.yml` chains the same way and git-pushes a
-   version bump into the public `arthjean/homebrew-paneflow` tap.
+1. **Done (2026-08-26).** `src-app/src/update/` and the in-app updater are
+   deleted. There is no `checker.rs` feed, no `spawn_check`, and no poll of
+   `api.github.com/repos/arthjean/paneflow/releases/latest`.
+2. **Done.** `.github/workflows/repo_publish.yml` is deleted. It used to chain
+   off a successful `release` run and `rclone sync` into Cloudflare R2 at
+   `pkg.paneflow.dev`, then purge his Cloudflare zone.
+3. **Done.** `.github/workflows/update_cask.yml` is deleted. It used to
+   git-push a version bump into the public `arthjean/homebrew-paneflow` tap.
 4. Never create these secrets in the new org: `R2_*`, `CLOUDFLARE_*`,
    `HOMEBREW_TAP_DEPLOY_KEY`, `GPG_*`, `POSTHOG_API_KEY`, `AZURE_*`.
 5. Author identity to scrub: `src-app/src/app/about_dialog.rs:117` reads
@@ -208,13 +207,13 @@ Everything below points at upstream and must be cut or repointed.
 
 Found during the inventory. Each one would have cost a debugging session.
 
-1. `src-app/src/update/mod.rs:39` declares `pub mod linux;` unconditionally, so
-   `linux/appimage.rs` and `linux/targz.rs` compile on macOS today. Only
-   `system_package.rs` and `migrations.rs` are gated at declaration.
-2. `src-app/src/update/macos/dmg.rs:489` and `:494` are
-   `#[cfg(all(test, not(target_os = "macos")))]`, so those two test modules run
-   only on non-macOS hosts. Dropping Linux CI silently stops running them.
-   Un-gate, do not delete.
+1. **Historical.** `src-app/src/update/` is deleted (2026-08-26). It used to
+   declare `pub mod linux;` unconditionally, so `linux/appimage.rs` and
+   `linux/targz.rs` compiled on macOS.
+2. **Historical.** `src-app/src/update/macos/dmg.rs` is deleted. Its two
+   `#[cfg(all(test, not(target_os = "macos")))]` test modules used to run
+   only on non-macOS hosts; un-gating them would have been a duplicate
+   definition of `copy_bundle_to_staging`.
 3. `.github/workflows/run_tests.yml:1357` `tests_pass` aggregates every job in
    its `needs:` list. Pruning jobs without editing that list yields a workflow
    that never completes.
@@ -266,16 +265,12 @@ Found during the inventory. Each one would have cost a debugging session.
 16. **Do not add `cargo:rerun-if-env-changed` for a variable read via
     `env!` or `option_env!`.** It looks missing and it is not. rustc emits
     `# env-dep:NAME` lines into the crate's dep-info file for those macros and
-    Cargo honours them, so invalidation already works. Proven here: with zero
-    directives registered, changing `PANEFLOW_MINISIGN_PUBKEY` from a fully warm
-    cache still recompiled `paneflow-app`, and `target/debug/paneflow.d`
-    contained the matching `env-dep` entry. This was investigated because the
-    absence of directives for the two minisign pubkeys, next to the ones that do
-    exist for PostHog, looks exactly like a bug where a rotated key would leave
-    a stale embedded trust anchor. It is not. The corollary is that the existing
-    `POSTHOG_API_KEY` and `POSTHOG_HOST` directives at `src-app/build.rs:81-82`
-    are themselves redundant, along with the long doc comment above them
-    justifying their existence.
+    Cargo honours them, so invalidation already works. Proven here (while the
+    updater still existed): with zero directives registered, changing
+    `PANEFLOW_MINISIGN_PUBKEY` from a fully warm cache still recompiled
+    `paneflow-app`. The PostHog `build.rs` directives (`POSTHOG_API_KEY` /
+    `POSTHOG_HOST`) and the minisign pubkey bake are **gone** with telemetry
+    and the updater; do not resurrect them.
 
     Method note, since it generalises: the first attempt to verify this
     "confirmed" the bug, because backing the fix out edited `build.rs` in the
