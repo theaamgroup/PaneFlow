@@ -222,6 +222,15 @@ impl IpcStatus {
 // Socket server
 // ---------------------------------------------------------------------------
 
+/// Pure truth table for `PANEFLOW_ALLOW_MULTIPLE`. Only the documented
+/// opt-in `=1` skips the singleton guard. Unset, empty, `0`, `false`,
+/// and other truthy strings keep it. Extracted so the rule can be
+/// unit-tested without mutating the process environment (unsafe on
+/// recent Rust, and races with other threads under `cargo test`).
+fn allow_multiple_from(value: Option<&str>) -> bool {
+    matches!(value, Some("1"))
+}
+
 /// Start the IPC server on a dedicated OS thread.
 /// Returns the receiver for IPC requests to be polled by the GPUI thread.
 ///
@@ -279,9 +288,10 @@ pub fn start_server() -> (
     // `Thinking` / `Done` / `session_start` status stays stale forever.
     //
     // Escape hatch: `PANEFLOW_ALLOW_MULTIPLE=1` skips the guard for the
-    // rare case of intentional side-by-side debug instances. Tests do
-    // not call `start_server`, so they are unaffected.
-    if std::env::var_os("PANEFLOW_ALLOW_MULTIPLE").is_none()
+    // rare case of intentional side-by-side debug instances. Any other
+    // value (unset, empty, `0`, `false`, `true`) keeps the singleton.
+    // Tests do not call `start_server`, so they are unaffected.
+    if !allow_multiple_from(std::env::var("PANEFLOW_ALLOW_MULTIPLE").ok().as_deref())
         && let Some(socket_spec) = socket_path_spec()
         && let Some(info) = detect_existing_instance(socket_spec.path())
     {
@@ -1623,5 +1633,38 @@ mod dispatch_tests {
         );
         assert_eq!(resp["result"]["status"], "ok");
         assert_eq!(resp["id"], 3);
+    }
+}
+
+#[cfg(test)]
+mod allow_multiple_tests {
+    /// Issue #53: `PANEFLOW_ALLOW_MULTIPLE` is value-gated (`=1`), not
+    /// presence-gated. Mirror the `PANEFLOW_IPC_SCRIPTING` truth table.
+    #[test]
+    fn allow_multiple_only_literal_one() {
+        assert!(
+            !super::allow_multiple_from(None),
+            "unset env must keep the singleton"
+        );
+        assert!(
+            !super::allow_multiple_from(Some("")),
+            "empty string must keep the singleton"
+        );
+        assert!(
+            !super::allow_multiple_from(Some("0")),
+            "explicit 0 must keep the singleton"
+        );
+        assert!(
+            !super::allow_multiple_from(Some("false")),
+            "false must keep the singleton"
+        );
+        assert!(
+            !super::allow_multiple_from(Some("true")),
+            "truthy strings other than \"1\" must keep the singleton"
+        );
+        assert!(
+            super::allow_multiple_from(Some("1")),
+            "the documented opt-in value must skip the singleton"
+        );
     }
 }
