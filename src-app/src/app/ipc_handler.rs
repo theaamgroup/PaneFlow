@@ -962,6 +962,20 @@ impl SurfaceScope {
     }
 }
 
+fn authorize_surface_workspace(
+    surface_id: u64,
+    expected_workspace_id: Option<u64>,
+    actual_workspace_id: Option<u64>,
+) -> Result<(), JsonRpcError> {
+    match expected_workspace_id {
+        None => Ok(()),
+        Some(expected) if actual_workspace_id == Some(expected) => Ok(()),
+        Some(expected) => Err(JsonRpcError::invalid_params(format!(
+            "surface_id {surface_id} not found in workspace_id {expected}"
+        ))),
+    }
+}
+
 struct SurfaceEntry {
     entity: Entity<TerminalView>,
     custom_name: Option<String>,
@@ -1003,6 +1017,19 @@ fn surface_meta_value(s: SurfaceMeta) -> serde_json::Value {
         "workspace_id": s.workspace_id,
         "scope": s.scope,
     })
+}
+
+fn requested_workspace_id(params: &serde_json::Value) -> Result<Option<u64>, JsonRpcError> {
+    let Some(value) = params.get("workspace_id") else {
+        return Ok(None);
+    };
+    value.as_u64().map(Some).ok_or_else(|| {
+        JsonRpcError::invalid_params("'workspace_id' must be a non-negative integer")
+    })
+}
+
+fn surface_matches_workspace(surface: &SurfaceMeta, workspace_id: Option<u64>) -> bool {
+    workspace_id.is_none_or(|expected| surface.workspace_id == Some(expected))
 }
 
 /// Window a scrollback string by line. `offset` counts lines skipped from the
@@ -1119,12 +1146,51 @@ fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
     )
 }
 
-/// Parse the `new_name` field of a `surface.rename` request (US-013). Trims
-/// whitespace, strips control characters, and caps length; an empty/absent
-/// value yields `None` (clear the custom name, reverting to auto-derived).
-pub(crate) fn parse_rename_name(params: &serde_json::Value) -> Option<String> {
-    let raw = params.get("new_name").and_then(|v| v.as_str())?;
-    sanitize_pane_name(raw)
+fn rename_uses_new_name_alias(params: &serde_json::Value) -> bool {
+    params.get("new_name").is_some()
+}
+
+/// Targeting params for `surface.rename`. When the `new_name` alias is
+/// present, `name` keeps its `resolve_surface` selector role. Otherwise
+/// `name` is the new name and must not also select the target.
+fn rename_target_params(params: &serde_json::Value) -> serde_json::Value {
+    if rename_uses_new_name_alias(params) {
+        return params.clone();
+    }
+    let mut targeting = params.clone();
+    if let Some(obj) = targeting.as_object_mut() {
+        obj.remove("name");
+    }
+    targeting
+}
+
+/// Parse the new-name field of a `surface.rename` request (US-013 / issue #86).
+/// Precedence: `new_name` (alias, wins) → `name` → neither present is an
+/// error. An explicit `null` or empty/whitespace string yields `Ok(None)`
+/// (clear the custom name, reverting to auto-derived). Any other JSON type
+/// is `-32602`.
+pub(crate) fn parse_rename_name(
+    params: &serde_json::Value,
+) -> Result<Option<String>, JsonRpcError> {
+    let value = if rename_uses_new_name_alias(params) {
+        params.get("new_name")
+    } else {
+        params.get("name")
+    };
+    let Some(value) = value else {
+        return Err(JsonRpcError::invalid_params(
+            "surface.rename requires 'name' (or 'new_name'); send null to clear",
+        ));
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(raw) = value.as_str() else {
+        return Err(JsonRpcError::invalid_params(
+            "surface.rename: 'name' must be a string or null",
+        ));
+    };
+    Ok(sanitize_pane_name(raw))
 }
 
 /// EP-004 US-012 (agent-control-plane): sanitize a user-supplied pane
@@ -1548,10 +1614,7 @@ impl PaneFlowApp {
                 cwd: entry.cwd.clone(),
                 cmd: entry.cmd.clone(),
                 workspace: entry.scope.workspace_index(),
-                workspace_id: entry
-                    .scope
-                    .workspace_index()
-                    .and_then(|idx| self.workspaces.get(idx).map(|ws| ws.id)),
+                workspace_id: self.workspace_id_for_scope(entry.scope),
                 scope: entry.scope.as_wire(),
             })
             .collect();
@@ -1688,6 +1751,12 @@ impl PaneFlowApp {
             })
     }
 
+    fn workspace_id_for_scope(&self, scope: SurfaceScope) -> Option<u64> {
+        scope
+            .workspace_index()
+            .and_then(|idx| self.workspaces.get(idx).map(|workspace| workspace.id))
+    }
+
     fn focus_agents_surface(
         &mut self,
         surface_id: u64,
@@ -1780,6 +1849,25 @@ impl PaneFlowApp {
             return Ok(t);
         }
         Err(JsonRpcError::invalid_params("no surface available"))
+    }
+
+    /// Resolve a readable surface and enforce an optional stable workspace
+    /// identity in the same GPUI request. This keeps the MCP scope check in the
+    /// canonical owner of workspace membership instead of doing a racy
+    /// `surface.list` check followed by an unrestricted read in the bridge.
+    fn resolve_readable_surface(
+        &self,
+        params: &serde_json::Value,
+        cx: &App,
+    ) -> Result<gpui::Entity<TerminalView>, JsonRpcError> {
+        let terminal = self.resolve_surface(params, cx)?;
+        let expected_workspace_id = requested_workspace_id(params)?;
+        let surface_id = terminal.entity_id().as_u64();
+        let actual_workspace_id = self
+            .surface_scope_by_id(surface_id, cx)
+            .and_then(|scope| self.workspace_id_for_scope(scope));
+        authorize_surface_workspace(surface_id, expected_workspace_id, actual_workspace_id)?;
+        Ok(terminal)
     }
 
     /// `workspace.up` - materialize a declarative multi-pane agent workspace in
@@ -2614,10 +2702,17 @@ impl PaneFlowApp {
             "surface.list" => {
                 // US-002: additive enrichment - keep the legacy root fields
                 // (`pane_count`, `workspace`) for back-compat and add a
-                // per-surface `surfaces` array with disambiguated names.
+                // per-surface `surfaces` array with disambiguated names. MCP
+                // callers pass the stable PTY workspace_id so filtering is
+                // owned by the same layer that owns workspace membership.
+                let requested_workspace_id = match requested_workspace_id(params) {
+                    Ok(workspace_id) => workspace_id,
+                    Err(error) => return error.into_value(),
+                };
                 let surfaces: Vec<_> = self
                     .collect_surface_meta(cx)
                     .into_iter()
+                    .filter(|surface| surface_matches_workspace(surface, requested_workspace_id))
                     .map(surface_meta_value)
                     .collect();
                 let count = self.active_workspace().map_or(0, |ws| ws.pane_count());
@@ -2630,7 +2725,7 @@ impl PaneFlowApp {
             "surface.read" => {
                 // US-003: read a surface's scrollback as plain text. Read-only;
                 // no scripting gate (the send_* gate guards writes, not reads).
-                let terminal = match self.resolve_surface(params, cx) {
+                let terminal = match self.resolve_readable_surface(params, cx) {
                     Ok(t) => t,
                     Err(e) => return e.into_value(),
                 };
@@ -2753,7 +2848,7 @@ impl PaneFlowApp {
                     ))
                     .into_value();
                 }
-                let terminal = match self.resolve_surface(params, cx) {
+                let terminal = match self.resolve_readable_surface(params, cx) {
                     Ok(t) => t,
                     Err(e) => return e.into_value(),
                 };
@@ -2775,15 +2870,22 @@ impl PaneFlowApp {
                 serde_json::json!({"matches": arr, "truncated": truncated})
             }
             "surface.rename" => {
-                // US-013: assign (or clear) a surface's custom name. `new_name`
-                // is trimmed + capped; empty/absent clears it (back to the
-                // auto-derived name). Targeting reuses `resolve_surface`
-                // (surface_id / current name / active).
-                let terminal = match self.resolve_surface(params, cx) {
+                // US-013 / issue #86: `name` is the documented new-name key;
+                // `new_name` is a backward-compatible alias that wins when
+                // both are sent. Neither key present is an error; explicit
+                // null or empty/whitespace clears. When `new_name` is
+                // absent, `name` is the new name and must not also select
+                // the target — target by `surface_id` (else the active
+                // surface).
+                let new_name = match parse_rename_name(params) {
+                    Ok(name) => name,
+                    Err(e) => return e.into_value(),
+                };
+                let targeting = rename_target_params(params);
+                let terminal = match self.resolve_surface(&targeting, cx) {
                     Ok(t) => t,
                     Err(e) => return e.into_value(),
                 };
-                let new_name = parse_rename_name(params);
                 terminal.update(cx, |view, _cx| {
                     view.terminal.custom_name = new_name.clone();
                 });
@@ -5084,6 +5186,40 @@ mod tests {
     }
 
     #[test]
+    fn workspace_scope_uses_stable_id_not_positional_index() {
+        let surface = super::SurfaceMeta {
+            surface_id: 7,
+            name: "shell".to_string(),
+            title: "zsh".to_string(),
+            cwd: None,
+            cmd: None,
+            workspace: Some(0),
+            workspace_id: Some(42),
+            scope: "workspace",
+        };
+
+        assert!(super::surface_matches_workspace(&surface, Some(42)));
+        assert!(
+            !super::surface_matches_workspace(&surface, Some(0)),
+            "the positional index must never authorize a stable-id scope"
+        );
+        assert!(super::surface_matches_workspace(&surface, None));
+    }
+
+    #[test]
+    fn readable_surface_authorization_rejects_cross_workspace_targets() {
+        assert_eq!(
+            super::authorize_surface_workspace(7, Some(42), Some(42)),
+            Ok(())
+        );
+        let error = super::authorize_surface_workspace(7, Some(42), Some(99))
+            .expect_err("cross-workspace read/search must fail");
+        assert_eq!(error.code, super::JsonRpcError::INVALID_PARAMS);
+        assert_eq!(error.message, "surface_id 7 not found in workspace_id 42");
+        assert!(super::authorize_surface_workspace(7, None, Some(99)).is_ok());
+    }
+
+    #[test]
     fn truncate_ipc_text_marks_oversized_surface_read() {
         let oversized = "x".repeat(crate::limits::MAX_IPC_TEXT_BYTES + 1024);
         let (text, truncated) = super::truncate_ipc_text(oversized);
@@ -5725,31 +5861,117 @@ mod tests {
     #[test]
     fn parse_rename_name_trims_and_accepts() {
         let p = serde_json::json!({"new_name": "  build logs  "});
-        assert_eq!(super::parse_rename_name(&p).as_deref(), Some("build logs"));
+        assert_eq!(
+            super::parse_rename_name(&p),
+            Ok(Some("build logs".to_string()))
+        );
     }
 
     #[test]
-    fn parse_rename_name_empty_or_absent_clears() {
-        assert_eq!(super::parse_rename_name(&serde_json::json!({})), None);
+    fn parse_rename_name_explicit_null_or_empty_clears() {
+        assert_eq!(
+            super::parse_rename_name(&serde_json::json!({"new_name": serde_json::Value::Null})),
+            Ok(None)
+        );
+        assert_eq!(
+            super::parse_rename_name(&serde_json::json!({"name": serde_json::Value::Null})),
+            Ok(None)
+        );
         assert_eq!(
             super::parse_rename_name(&serde_json::json!({"new_name": "   "})),
-            None
+            Ok(None)
         );
         assert_eq!(
             super::parse_rename_name(&serde_json::json!({"new_name": ""})),
-            None
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn parse_rename_name_absent_is_an_error() {
+        let error = super::parse_rename_name(&serde_json::json!({}))
+            .expect_err("absent name/new_name must fail");
+        assert_eq!(error.code, super::JsonRpcError::INVALID_PARAMS);
+        assert_eq!(
+            error.message,
+            "surface.rename requires 'name' (or 'new_name'); send null to clear"
         );
     }
 
     #[test]
     fn parse_rename_name_strips_control_chars_and_caps_length() {
         let p = serde_json::json!({"new_name": "ab\ncd\u{7}ef"});
-        assert_eq!(super::parse_rename_name(&p).as_deref(), Some("abcdef"));
+        assert_eq!(super::parse_rename_name(&p), Ok(Some("abcdef".to_string())));
         let p = serde_json::json!({"new_name": "build\u{202E}codex\u{200D}"});
-        assert_eq!(super::parse_rename_name(&p).as_deref(), Some("buildcodex"));
+        assert_eq!(
+            super::parse_rename_name(&p),
+            Ok(Some("buildcodex".to_string()))
+        );
         let long = "x".repeat(200);
         let p = serde_json::json!({ "new_name": long });
-        assert_eq!(super::parse_rename_name(&p).map(|s| s.len()), Some(64));
+        assert_eq!(
+            super::parse_rename_name(&p).unwrap().map(|s| s.len()),
+            Some(64)
+        );
+    }
+
+    /// The call exactly as `docs/user/scripting/reference.md:221` documents it.
+    /// Before the fix this returns `None` and the handler silently wipes the
+    /// tab's custom name while replying `{"renamed": true}`.
+    #[test]
+    fn parse_rename_name_accepts_the_documented_name_key() {
+        let p = serde_json::json!({"surface_id": 7, "name": "  build logs  "});
+        assert_eq!(
+            super::parse_rename_name(&p),
+            Ok(Some("build logs".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_rename_name_prefers_new_name_over_name() {
+        let p = serde_json::json!({"new_name": "winner", "name": "target-selector"});
+        assert_eq!(super::parse_rename_name(&p), Ok(Some("winner".to_string())));
+    }
+
+    #[test]
+    fn parse_rename_name_rejects_non_string_values() {
+        for value in [
+            serde_json::json!(123),
+            serde_json::json!(true),
+            serde_json::json!({}),
+        ] {
+            let by_name = serde_json::json!({"surface_id": 7, "name": value.clone()});
+            let error = super::parse_rename_name(&by_name).expect_err("non-string name must fail");
+            assert_eq!(error.code, super::JsonRpcError::INVALID_PARAMS);
+            assert_eq!(
+                error.message,
+                "surface.rename: 'name' must be a string or null"
+            );
+            let by_alias = serde_json::json!({"surface_id": 7, "new_name": value});
+            let error =
+                super::parse_rename_name(&by_alias).expect_err("non-string new_name must fail");
+            assert_eq!(error.code, super::JsonRpcError::INVALID_PARAMS);
+            assert_eq!(
+                error.message,
+                "surface.rename: 'name' must be a string or null"
+            );
+        }
+    }
+
+    #[test]
+    fn rename_target_params_strips_name_when_it_is_the_new_name() {
+        let p = serde_json::json!({"surface_id": 7, "name": "backend"});
+        let targeting = super::rename_target_params(&p);
+        assert!(targeting.get("name").is_none());
+        assert_eq!(targeting["surface_id"], 7);
+    }
+
+    #[test]
+    fn rename_target_params_keeps_name_as_target_when_new_name_alias_present() {
+        let p = serde_json::json!({"new_name": "winner", "name": "target-selector"});
+        let targeting = super::rename_target_params(&p);
+        assert_eq!(targeting["name"], "target-selector");
+        assert_eq!(targeting["new_name"], "winner");
     }
 
     #[test]

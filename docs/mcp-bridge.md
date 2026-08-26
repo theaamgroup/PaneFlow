@@ -12,8 +12,10 @@ list, read, and search surfaces, but cannot type into or control them.
 
 By default the bridge inherits `PANEFLOW_WORKSPACE_ID` from the pane that
 launched the agent and filters discovery, tools, and resources to that
-workspace. Set `PANEFLOW_MCP_SCOPE=all` only when instance-wide read access is
-intentional.
+workspace. `surface.list` / `surface.read` / `surface.search` accept an optional
+`workspace_id` and enforce membership server-side; the bridge still applies its
+own client-side filter. Set `PANEFLOW_MCP_SCOPE=all` only when instance-wide
+read access is intentional.
 
 > Source: `crates/paneflow-mcp/`. The protocol is implemented by hand (not via
 > `rmcp`) to keep the dependency tree tiny and the surface fully unit-tested.
@@ -22,7 +24,7 @@ intentional.
 
 | Tool | Arguments | Returns |
 |------|-----------|---------|
-| `list_panes` | - | Scoped surfaces: `surface_id`, `name`, `title`, `cwd`, `cmd`, `workspace`. Call this first to discover what to read. The result is wrapped as untrusted terminal metadata. |
+| `list_panes` | - | Scoped surfaces: `surface_id`, `name`, `title`, `cwd`, `cmd`, `workspace`, `workspace_id`. Call this first to discover what to read. The result is wrapped as untrusted terminal metadata. |
 | `read_pane` | `target` (name or `surface_id`), `lines?` (default 200, max 4000), `offset?` | The surface's scrollback as text, paginated. |
 | `search_pane` | `target`, `pattern`, `max_matches?` (default 50, max 1000) | Matching lines with their line numbers. |
 

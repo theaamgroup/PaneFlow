@@ -215,10 +215,10 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `workspace.close`          | `index?`                                                                                        | Close a workspace                                        |
 | `workspace.up`             | `name`, `layout`, `panes[]`                                                                     | Declarative spawn used by `up` and flow roots            |
 | `workspace.restore_layout` | `layout`                                                                                        | Apply a layout tree                                      |
-| `surface.list`             | -                                                                                               | `{surfaces:[{surface_id,name,title,cwd,cmd,workspace,scope}]}` |
-| `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`                                                    | Scrollback, `output_generation`, `truncated`             |
-| `surface.search`           | `surface_id`, `pattern`, `max_matches?`                                                         | Case-insensitive substring matches                       |
-| `surface.rename`           | `surface_id`, `name`                                                                            | Rename or clear a pane name                              |
+| `surface.list`             | `workspace_id?`                                                                                 | `{surfaces:[{surface_id,name,title,cwd,cmd,workspace,workspace_id,scope}]}`; agents-pane surfaces have no `workspace_id` and are omitted when the filter is set |
+| `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`, `workspace_id?`                                   | Scrollback, `output_generation`, `truncated`             |
+| `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches                       |
+| `surface.rename`           | `surface_id?`, `name` (new name; `new_name` accepted as an alias and wins if both are sent)      | `{renamed, name}`; explicit `null` clears the name; omitting both keys is an error |
 | `surface.focus`            | `surface_id`                                                                                    | Focus a workspace or Agents surface                      |
 | `surface.status`           | `surface_id`                                                                                    | Agent state for one surface                              |
 | `surface.send_text`        | `surface_id`, `text`, `submit?`, `paste?`                                                       | Gated PTY text write                                     |
