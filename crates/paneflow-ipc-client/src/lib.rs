@@ -413,17 +413,16 @@ pub(crate) fn socket_path_from_env(raw: Option<&str>) -> Option<PathBuf> {
 
 /// Best-effort default socket path, mirroring `src-app/src/runtime_paths.rs`.
 /// Uses raw env (no `dirs` dep) to keep the dependency tree minimal.
+///
+/// `$XDG_RUNTIME_DIR` is skipped so a Finder-launched GUI (no XDG) and a
+/// terminal CLI (XDG often set from the login profile) compose the same path.
+/// Chain: `$TMPDIR`, then `$HOME/Library/Caches/run`.
 #[cfg(unix)]
 fn default_socket_path() -> Option<PathBuf> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+    let runtime = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| {
-            std::env::var_os("TMPDIR")
-                .map(PathBuf::from)
-                .filter(|p| !p.as_os_str().is_empty())
-        })
-        // 4th level, mirroring the server's `dirs::cache_dir().join("run")`
+        // Last resort, mirroring the server's `dirs::cache_dir().join("run")`
         // (`runtime_paths::runtime_dir`). Without this, a client whose $TMPDIR
         // is stripped (launchd/cron) returned None - "IPC unreachable" - even
         // though the server had bound under the cache dir.
@@ -664,5 +663,150 @@ mod tests {
         );
         drop(listener);
         drop(held);
+    }
+
+    /// Env vars are process-global; tests that mutate them must be serialised.
+    #[cfg(unix)]
+    static SOCKET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    struct SocketEnvGuard {
+        socket: Option<String>,
+        xdg: Option<String>,
+        tmp: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    #[cfg(unix)]
+    impl SocketEnvGuard {
+        fn take() -> Self {
+            let guard = SOCKET_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                socket: std::env::var("PANEFLOW_SOCKET_PATH").ok(),
+                xdg: std::env::var("XDG_RUNTIME_DIR").ok(),
+                tmp: std::env::var("TMPDIR").ok(),
+                _guard: guard,
+            }
+        }
+
+        fn clear(&self) {
+            // SAFETY: serialised by SOCKET_ENV_LOCK; no other test mutates
+            // these vars during the test window.
+            unsafe {
+                std::env::remove_var("PANEFLOW_SOCKET_PATH");
+                std::env::remove_var("XDG_RUNTIME_DIR");
+                std::env::remove_var("TMPDIR");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SocketEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialised by SOCKET_ENV_LOCK (still held via _guard).
+            unsafe {
+                match &self.socket {
+                    Some(v) => std::env::set_var("PANEFLOW_SOCKET_PATH", v),
+                    None => std::env::remove_var("PANEFLOW_SOCKET_PATH"),
+                }
+                match &self.xdg {
+                    Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                    None => std::env::remove_var("XDG_RUNTIME_DIR"),
+                }
+                match &self.tmp {
+                    Some(v) => std::env::set_var("TMPDIR", v),
+                    None => std::env::remove_var("TMPDIR"),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn expected_socket_under(runtime: &Path) -> PathBuf {
+        let subdir = if cfg!(debug_assertions) {
+            "paneflow-dev"
+        } else {
+            "paneflow"
+        };
+        let socket_file = if cfg!(debug_assertions) {
+            "paneflow-dev.sock"
+        } else {
+            "paneflow.sock"
+        };
+        runtime.join(subdir).join(socket_file)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paneflow_socket_path_env_wins_when_absolute() {
+        let g = SocketEnvGuard::take();
+        g.clear();
+        // SAFETY: SOCKET_ENV_LOCK held.
+        unsafe {
+            std::env::set_var("PANEFLOW_SOCKET_PATH", "/tmp/paneflow-isolated.sock");
+            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+            std::env::set_var("TMPDIR", "/tmp/macos-stub");
+        }
+        assert_eq!(
+            resolve_socket_path(),
+            Some(PathBuf::from("/tmp/paneflow-isolated.sock"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xdg_runtime_dir_is_ignored_when_tmpdir_is_set() {
+        let g = SocketEnvGuard::take();
+        g.clear();
+        let xdg = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: SOCKET_ENV_LOCK held.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", xdg.path());
+            std::env::set_var("TMPDIR", tmp.path());
+        }
+        let p = resolve_socket_path().expect("runtime dir must resolve");
+        assert_eq!(p, expected_socket_under(tmp.path()));
+        assert!(
+            !p.starts_with(xdg.path()),
+            "must not compose the socket under $XDG_RUNTIME_DIR; got {}",
+            p.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xdg_runtime_dir_is_not_used_when_tmpdir_is_unset() {
+        let g = SocketEnvGuard::take();
+        g.clear();
+        let xdg = tempfile::TempDir::new().unwrap();
+        // SAFETY: SOCKET_ENV_LOCK held.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", xdg.path()) };
+        let p = resolve_socket_path().expect("cache dir must resolve");
+        assert!(
+            !p.starts_with(xdg.path()),
+            "must not fall back to $XDG_RUNTIME_DIR; got {}",
+            p.display()
+        );
+        let cache_suffix = expected_socket_under(Path::new("Library/Caches/run"));
+        assert!(
+            p.ends_with(&cache_suffix),
+            "last resort is ~/Library/Caches/run; got {}",
+            p.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tmpdir_used_when_set() {
+        let g = SocketEnvGuard::take();
+        g.clear();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: SOCKET_ENV_LOCK held.
+        unsafe { std::env::set_var("TMPDIR", tmp.path()) };
+        assert_eq!(
+            resolve_socket_path(),
+            Some(expected_socket_under(tmp.path()))
+        );
     }
 }

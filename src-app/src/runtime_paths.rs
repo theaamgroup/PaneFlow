@@ -24,7 +24,7 @@
 //!
 //! US-009 (prd-windows-port.md) - on Windows, `socket_path` falls back to the
 //! named pipe path `\\.\pipe\paneflow` (or `paneflow-dev` in debug). The
-//! XDG/TMPDIR chain and sun_path guard remain Unix-only.
+//! TMPDIR/cache chain and sun_path guard remain Unix-only.
 
 use std::path::{Path, PathBuf};
 
@@ -89,29 +89,24 @@ impl IpcSocketPath {
     }
 }
 
-/// Resolve the PaneFlow runtime directory. Fallback chain:
-/// 1. `$XDG_RUNTIME_DIR` - explicit Linux XDG (usually `/run/user/<uid>`).
-/// 2. `dirs::runtime_dir()` - same on Linux, `None` on macOS.
-/// 3. `$TMPDIR` - populated on macOS (usually `/var/folders/xx/.../T/`).
-/// 4. `dirs::cache_dir().join("run")` - last-resort cross-platform fallback.
+/// Resolve the PaneFlow runtime directory. Fallback chain (macOS):
+/// 1. `$TMPDIR` - populated by launchd and shells (usually `/var/folders/xx/.../T/`).
+/// 2. `dirs::cache_dir().join("run")` - last-resort fallback (`~/Library/Caches/run`).
 ///
-/// Returns `None` only if every layer fails, which in practice means the
-/// caller runs on an environment with neither XDG nor TMPDIR nor a cache
-/// dir (e.g. a broken container). Callers should `log::warn!` and disable
-/// IPC rather than panic.
+/// `$XDG_RUNTIME_DIR` and `dirs::runtime_dir()` are **not** consulted. Finder
+/// and Dock launches inherit only PATH from the login shell, so a GUI process
+/// typically has no XDG while a terminal CLI that sourced a profile does.
+/// Preferring XDG would bind the GUI under `$TMPDIR` and send `paneflow ls`
+/// to a different socket. `PANEFLOW_SOCKET_PATH` is the explicit override.
+///
+/// Returns `None` only if every layer fails (neither TMPDIR nor a cache dir).
+/// Callers should `log::warn!` and disable IPC rather than panic.
 #[cfg(unix)]
 fn runtime_dir() -> Option<PathBuf> {
-    std::env::var("XDG_RUNTIME_DIR")
+    std::env::var("TMPDIR")
         .ok()
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .or_else(dirs::runtime_dir)
-        .or_else(|| {
-            std::env::var("TMPDIR")
-                .ok()
-                .map(PathBuf::from)
-                .filter(|p| !p.as_os_str().is_empty())
-        })
         .or_else(|| dirs::cache_dir().map(|d| d.join("run")))
 }
 
@@ -306,7 +301,7 @@ fn check_sun_path_fits(path: &std::path::Path) -> bool {
     // minus one).
     if bytes >= MAX_SOCKET_PATH_BYTES {
         log::warn!(
-            "paneflow: computed IPC socket path does not fit sun_path ({} >= {} bytes, no room for the NUL terminator): {} - IPC will be disabled. Set $XDG_RUNTIME_DIR or shorten $TMPDIR to enable it.",
+            "paneflow: computed IPC socket path does not fit sun_path ({} >= {} bytes, no room for the NUL terminator): {} - IPC will be disabled. Set $PANEFLOW_SOCKET_PATH to a shorter absolute path, or shorten $TMPDIR to enable it.",
             bytes,
             MAX_SOCKET_PATH_BYTES,
             path.display()
@@ -417,17 +412,24 @@ mod tests {
     }
 
     #[test]
-    fn xdg_runtime_dir_wins_when_set() {
+    fn xdg_runtime_dir_is_ignored_when_tmpdir_is_set() {
         let g = EnvGuard::take();
         g.clear();
         // SAFETY: ENV_LOCK held.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000") };
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+            std::env::set_var("TMPDIR", "/tmp/macos-stub");
+        }
         let p = socket_path().expect("runtime dir must resolve");
         assert_eq!(
             p,
-            PathBuf::from(format!("/run/user/1000/{APP_SUBDIR}/{SOCKET_FILE}")),
-            "AC5: with XDG_RUNTIME_DIR set, the socket must resolve to the XDG path \
-             (subdir + filename vary by build profile via APP_SUBDIR / SOCKET_FILE)"
+            PathBuf::from(format!("/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}")),
+            "GUI/CLI must agree on $TMPDIR even when $XDG_RUNTIME_DIR is set in the CLI"
+        );
+        assert!(
+            !p.starts_with("/run/user/1000"),
+            "must not compose the socket under $XDG_RUNTIME_DIR; got {}",
+            p.display()
         );
         assert!(
             socket_path_spec().expect("socket spec").owned_parent(),
@@ -436,28 +438,45 @@ mod tests {
     }
 
     #[test]
-    fn tmpdir_fallback_when_xdg_and_runtime_dir_missing() {
+    fn xdg_runtime_dir_is_not_used_when_tmpdir_is_unset() {
+        let g = EnvGuard::take();
+        g.clear();
+        // SAFETY: ENV_LOCK held.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000") };
+        let p = socket_path().expect("cache dir must resolve");
+        assert!(
+            !p.starts_with("/run/user/1000"),
+            "must not fall back to $XDG_RUNTIME_DIR; got {}",
+            p.display()
+        );
+        assert!(
+            p.ends_with(format!("Library/Caches/run/{APP_SUBDIR}/{SOCKET_FILE}")),
+            "last resort is ~/Library/Caches/run; got {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn tmpdir_used_when_set() {
         let g = EnvGuard::take();
         g.clear();
         // SAFETY: ENV_LOCK held.
         unsafe { std::env::set_var("TMPDIR", "/tmp/macos-stub") };
-        let p = socket_path();
-        if let Some(p) = p {
-            // On Linux, dirs::runtime_dir() may still return Some before we
-            // reach the TMPDIR branch - accept either but prove the path is
-            // well-formed.
-            assert!(p.ends_with(format!("{APP_SUBDIR}/{SOCKET_FILE}")));
-        }
+        let p = socket_path().expect("TMPDIR must resolve");
+        assert_eq!(
+            p,
+            PathBuf::from(format!("/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}"))
+        );
     }
 
     #[test]
     fn overlong_path_returns_none() {
         let g = EnvGuard::take();
         g.clear();
-        // 120-byte XDG_RUNTIME_DIR → joined path blows past 104.
+        // 120-byte TMPDIR → joined path blows past 104.
         let long = "/".to_string() + &"x".repeat(119);
         // SAFETY: ENV_LOCK held.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &long) };
+        unsafe { std::env::set_var("TMPDIR", &long) };
         assert!(
             socket_path().is_none(),
             "AC6: over-long sun_path must return None rather than a bind-time error"
