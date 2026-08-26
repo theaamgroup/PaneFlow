@@ -146,11 +146,31 @@ impl LayoutTree {
         }
     }
 
+    /// A zero-leaf tree used as a stand-in until [`Self::from_layout_node`]
+    /// spawns every pane from a supplied layout.
+    ///
+    /// `workspace.create` with a layout must not pre-spawn a default terminal:
+    /// this function reuses existing leaves left-to-right, and a dummy leaf 0
+    /// would swallow that pane's cwd/env/tabs/`custom_name`.
+    pub(crate) fn empty() -> Self {
+        LayoutTree::Container {
+            direction: SplitDirection::Vertical,
+            children: Vec::new(),
+            drag: Rc::new(Cell::new(None)),
+            container_size: Rc::new(Cell::new(0.0)),
+        }
+    }
+
     /// Rebuild a `LayoutTree` from a `LayoutNode` (config schema).
     ///
     /// Panes are consumed from `panes` in left-to-right order for each leaf.
     /// When `panes` is exhausted, `spawn` is called with the current `LayoutNode`
     /// so the caller can extract per-surface metadata (e.g. CWD) for new panes.
+    ///
+    /// Reused leaves are returned as-is: `spawn` is not called, so cwd/env/tabs/
+    /// `custom_name` on that node are ignored. Callers that need every leaf to
+    /// honor surface metadata (notably `workspace.create` with a layout) must
+    /// pass an empty deque.
     pub fn from_layout_node(
         node: &LayoutNode,
         panes: &mut VecDeque<Entity<Pane>>,
@@ -192,6 +212,131 @@ impl LayoutTree {
                     container_size: Rc::new(Cell::new(0.0)),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, VecDeque};
+
+    use gpui::{AppContext, Entity, TestAppContext};
+    use paneflow_config::schema::{LayoutNode, SurfaceDefinition};
+
+    use crate::pane::Pane;
+    use crate::terminal::TerminalView;
+
+    use super::*;
+
+    fn test_pane(cx: &mut impl AppContext, workspace_id: u64) -> Entity<Pane> {
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(workspace_id, cx));
+        cx.new(|cx| Pane::new(terminal, workspace_id, cx))
+    }
+
+    fn surface(custom_name: &str, cwd: &str) -> SurfaceDefinition {
+        SurfaceDefinition {
+            custom_name: Some(custom_name.to_string()),
+            cwd: Some(cwd.to_string()),
+            env: Some(HashMap::from([("LEAF".into(), custom_name.into())])),
+            ..Default::default()
+        }
+    }
+
+    fn two_pane_layout_with_first_pane_metadata() -> LayoutNode {
+        LayoutNode::Split {
+            direction: "vertical".to_string(),
+            ratio: None,
+            ratios: Some(vec![0.5, 0.5]),
+            children: vec![
+                LayoutNode::Pane {
+                    surfaces: vec![surface("agent", "/tmp/agent"), surface("logs", "/tmp/logs")],
+                },
+                LayoutNode::Pane {
+                    surfaces: vec![surface("right", "/tmp/right")],
+                },
+            ],
+        }
+    }
+
+    fn leaf_ids(tree: &LayoutTree) -> Vec<gpui::EntityId> {
+        tree.collect_leaves()
+            .into_iter()
+            .map(|pane| pane.entity_id())
+            .collect()
+    }
+
+    #[test]
+    fn empty_tree_has_zero_leaves() {
+        assert_eq!(LayoutTree::empty().leaf_count(), 0);
+        assert!(LayoutTree::empty().collect_leaves().is_empty());
+    }
+
+    #[gpui::test]
+    fn from_layout_node_spawns_first_pane_surfaces_when_deque_is_empty(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let layout = two_pane_layout_with_first_pane_metadata();
+        let mut panes = VecDeque::new();
+        let mut spawned: Vec<LayoutNode> = Vec::new();
+        let tree = LayoutTree::from_layout_node(&layout, &mut panes, &mut |node| {
+            spawned.push(node.clone());
+            test_pane(cx, 1)
+        });
+
+        assert_eq!(tree.leaf_count(), 2);
+        assert_eq!(
+            spawned.len(),
+            2,
+            "both leaves must spawn when nothing is reused"
+        );
+        match &spawned[0] {
+            LayoutNode::Pane { surfaces } => {
+                assert_eq!(surfaces.len(), 2, "leaf 0 keeps both tabs");
+                assert_eq!(surfaces[0].custom_name.as_deref(), Some("agent"));
+                assert_eq!(surfaces[0].cwd.as_deref(), Some("/tmp/agent"));
+                assert_eq!(
+                    surfaces[0]
+                        .env
+                        .as_ref()
+                        .and_then(|env| env.get("LEAF"))
+                        .map(String::as_str),
+                    Some("agent")
+                );
+                assert_eq!(surfaces[1].custom_name.as_deref(), Some("logs"));
+            }
+            LayoutNode::Split { .. } => panic!("leaf 0 spawn must receive the pane node"),
+        }
+        match &spawned[1] {
+            LayoutNode::Pane { surfaces } => {
+                assert_eq!(surfaces[0].custom_name.as_deref(), Some("right"));
+            }
+            LayoutNode::Split { .. } => panic!("leaf 1 spawn must receive the pane node"),
+        }
+    }
+
+    #[gpui::test]
+    fn from_layout_node_reuses_leftmost_leaf_without_spawn(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let existing = test_pane(cx, 1);
+        let layout = two_pane_layout_with_first_pane_metadata();
+        let mut panes = VecDeque::from([existing.clone()]);
+        let mut spawned: Vec<LayoutNode> = Vec::new();
+        let tree = LayoutTree::from_layout_node(&layout, &mut panes, &mut |node| {
+            spawned.push(node.clone());
+            test_pane(cx, 1)
+        });
+
+        assert_eq!(tree.leaf_count(), 2);
+        assert_eq!(
+            leaf_ids(&tree)[0],
+            existing.entity_id(),
+            "a pre-spawned leaf 0 is reused; spawn never sees its surfaces"
+        );
+        assert_eq!(spawned.len(), 1, "only the extra leaf is spawned");
+        match &spawned[0] {
+            LayoutNode::Pane { surfaces } => {
+                assert_eq!(surfaces[0].custom_name.as_deref(), Some("right"));
+            }
+            LayoutNode::Split { .. } => panic!("the leftover spawn is the second pane"),
         }
     }
 }

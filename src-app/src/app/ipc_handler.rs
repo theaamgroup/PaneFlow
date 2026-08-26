@@ -2534,7 +2534,15 @@ impl PaneFlowApp {
                     None => None,
                 };
                 let ws_id = next_workspace_id();
-                let ws = if let Some(dir) = cwd {
+                // Issue #44: do not pre-spawn a default terminal when a layout
+                // is present. `apply_layout_from_json` reuses existing leaves
+                // left-to-right, and `from_layout_node` would pop that pane for
+                // the first `LayoutNode::Pane` without calling `spawn`, dropping
+                // cwd/env/tabs/`custom_name` on leaf 0.
+                let ws = if layout.is_some() {
+                    let dir = cwd.unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+                    Workspace::with_layout_and_id(ws_id, name, dir, LayoutTree::empty())
+                } else if let Some(dir) = cwd {
                     let terminal =
                         cx.new(|cx| TerminalView::with_cwd(ws_id, Some(dir.clone()), None, cx));
                     let pane = self.create_pane(terminal, ws_id, cx);
@@ -4490,6 +4498,39 @@ mod tests {
         });
         let layout = parse_layout_param(&params).expect("ok").expect("some");
         assert_eq!(layout.leaf_count(), 2);
+    }
+
+    #[test]
+    fn workspace_create_with_layout_does_not_pre_spawn_a_pane() {
+        // Issue #44: a default terminal handed to `from_layout_node` is reused
+        // as leaf 0 and never spawned from the node's surfaces.
+        let src = include_str!("ipc_handler.rs");
+        let arm = src
+            .split("\"workspace.create\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"workspace.up\"").next())
+            .expect("workspace.create arm");
+        let layout_branch = arm
+            .split("if layout.is_some()")
+            .nth(1)
+            .and_then(|rest| rest.split("} else if let Some(dir) = cwd {").next())
+            .expect("layout.is_some() branch");
+        assert!(
+            layout_branch.contains("LayoutTree::empty()"),
+            "layout create must start from a zero-leaf tree so spawn runs for leaf 0"
+        );
+        assert!(
+            layout_branch.contains("Workspace::with_layout_and_id"),
+            "layout create must not go through with_id / with_cwd_and_id"
+        );
+        assert!(
+            !layout_branch.contains("TerminalView::"),
+            "layout create must not spawn a default terminal"
+        );
+        assert!(
+            !layout_branch.contains("create_pane"),
+            "layout create must not wrap a default terminal in a pane"
+        );
     }
 
     #[test]

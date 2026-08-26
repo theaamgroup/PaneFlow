@@ -115,7 +115,9 @@ impl PaneFlowApp {
             return Err("No active workspace".into());
         };
 
-        // Collect existing panes and drop the old tree
+        // Collect existing panes and drop the old tree. A zero-leaf placeholder
+        // (`LayoutTree::empty`, used by `workspace.create` with a layout) yields
+        // an empty deque, so `spawn` runs for every layout pane including leaf 0.
         let existing: Vec<Entity<Pane>> = ws
             .root
             .take()
