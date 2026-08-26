@@ -9,7 +9,10 @@
 use std::io;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+use regex::Regex;
 
 use crate::agent_sessions::{SessionAgent, SessionMeta, clean_session_label};
 
@@ -198,9 +201,14 @@ fn parse_session_line(
         return None;
     }
 
-    let session_id = extract_session_id(line, allow_numeric_ids)?;
+    let (session_id, summary) = if agent == SessionAgent::Gemini {
+        parse_gemini_list_line(line)?
+    } else {
+        let session_id = extract_session_id(line, allow_numeric_ids)?;
+        let summary = line_summary(line, &session_id);
+        (session_id, summary)
+    };
     let timestamp = extract_iso8601(line).unwrap_or_default();
-    let summary = line_summary(line, &session_id);
 
     Some(SessionMeta {
         agent,
@@ -212,6 +220,46 @@ fn parse_session_line(
         model: None,
         usage: None,
     })
+}
+
+/// Gemini CLI `packages/cli/src/utils/sessions.ts` prints
+/// `{index}. {title} ({time}[, current]) [{session.id}]`.
+///
+/// Resume accepts `{index|uuid|latest}`. Prefer the bracket id so a relative
+/// time like `(2 days ago)` is never treated as session id `2`.
+fn parse_gemini_list_line(line: &str) -> Option<(String, Option<String>)> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\s*(\d+)\.\s+(.*)\s+\[([^\]]+)\]\s*$")
+            .expect("gemini list-sessions line regex")
+    });
+    let caps = re.captures(line)?;
+    let index = caps.get(1)?.as_str();
+    let middle = caps.get(2)?.as_str();
+    let bracket_id = caps.get(3)?.as_str().trim();
+
+    let session_id = if crate::agent_sessions::is_valid_session_id(bracket_id) {
+        bracket_id.to_string()
+    } else if crate::agent_sessions::is_valid_session_id(index) {
+        index.to_string()
+    } else {
+        return None;
+    };
+
+    Some((session_id, gemini_summary_from_middle(middle)))
+}
+
+fn gemini_summary_from_middle(middle: &str) -> Option<String> {
+    let trimmed = middle.trim();
+    let title = match trimmed.rsplit_once(" (") {
+        Some((head, tail)) if tail.ends_with(')') => head.trim(),
+        _ => trimmed,
+    };
+    if title.is_empty() {
+        None
+    } else {
+        clean_session_label(title, 120)
+    }
 }
 
 fn is_header_or_separator(line: &str) -> bool {
@@ -437,17 +485,105 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_sessions_accepts_gemini_numeric_index() {
-        let out = b"[2] 2026-06-29T09:10:11Z latest working thread\n";
-        let (sessions, _) = parse_command_sessions(
+    fn parse_gemini_published_list_sessions_prefers_bracket_id() {
+        // google-gemini/gemini-cli docs/cli/session-management.md:
+        //   1. Fix bug in auth (2 days ago) [a1b2c3d4]
+        let out = b"\
+Available sessions for this project (3):\n\
+\n\
+1. Fix bug in auth (2 days ago) [a1b2c3d4]\n\
+2. Refactor database schema (5 hours ago) [e5f67890]\n\
+3. Update documentation (Just now) [abcd1234]\n";
+        let (sessions, omitted) = parse_command_sessions(
             out,
             SessionAgent::Gemini,
             "/repo",
             true,
             CommandScope::CurrentDirectory,
         );
+        assert_eq!(omitted, 0);
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a1b2c3d4", "e5f67890", "abcd1234"]
+        );
+        assert!(sessions.iter().all(|s| s.session_id != "2"));
+        assert_eq!(sessions[0].summary.as_deref(), Some("Fix bug in auth"));
+        assert_eq!(
+            sessions[1].summary.as_deref(),
+            Some("Refactor database schema")
+        );
+        assert_eq!(sessions[2].summary.as_deref(), Some("Update documentation"));
+    }
+
+    #[test]
+    fn parse_gemini_relative_time_digit_is_not_session_id() {
+        let line = "1. Fix bug in auth (2 days ago) [a1b2c3d4]";
+        assert_eq!(
+            extract_session_id(line, true).as_deref(),
+            Some("2"),
+            "generic tokenizer still misreads '(2 days ago)' as id 2"
+        );
+        let parsed = parse_gemini_list_line(line).expect("published Gemini line");
+        assert_eq!(parsed.0, "a1b2c3d4");
+        assert_ne!(parsed.0, "2");
+    }
+
+    #[test]
+    fn parse_gemini_uuid_line_ignores_digits_in_title() {
+        let out =
+            b"  1. List 3 functions defined (Just now, current) [875c2ac1-4eec-42dd-a7b0-cccc97bcbd53]\n";
+        let (sessions, omitted) = parse_command_sessions(
+            out,
+            SessionAgent::Gemini,
+            "/repo",
+            true,
+            CommandScope::CurrentDirectory,
+        );
+        assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "2");
+        assert_eq!(
+            sessions[0].session_id,
+            "875c2ac1-4eec-42dd-a7b0-cccc97bcbd53"
+        );
+        assert_ne!(sessions[0].session_id, "3");
+        assert_eq!(
+            sessions[0].summary.as_deref(),
+            Some("List 3 functions defined")
+        );
+    }
+
+    #[test]
+    fn parse_gemini_falls_back_to_list_index_when_bracket_id_invalid() {
+        let out = b"4. Something (Just now) [not a valid id!]\n";
+        let (sessions, omitted) = parse_command_sessions(
+            out,
+            SessionAgent::Gemini,
+            "/repo",
+            true,
+            CommandScope::CurrentDirectory,
+        );
+        assert_eq!(omitted, 0);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "4");
+        assert_eq!(sessions[0].summary.as_deref(), Some("Something"));
+    }
+
+    #[test]
+    fn parse_cursor_does_not_use_gemini_list_parser() {
+        let out = b"1. Fix bug in auth (2 days ago) [a1b2c3d4]\n";
+        let (sessions, _) = parse_command_sessions(
+            out,
+            SessionAgent::Cursor,
+            "/repo",
+            false,
+            CommandScope::CurrentDirectory,
+        );
+        assert!(sessions.iter().all(|s| s.session_id != "2"));
+        assert!(sessions.iter().all(|s| s.session_id != "a1b2c3d4"));
     }
 
     #[test]
