@@ -15,6 +15,7 @@ use gpui::{App, AppContext, Context, Entity};
 use paneflow_config::schema::LayoutNode;
 
 use crate::PaneFlowApp;
+use crate::app::constants::{TOAST_ENTER_MS, TOAST_EXIT_MS, TOAST_HOLD_MS};
 use crate::launch_cwd;
 use crate::layout::{LayoutTree, MAX_PANES};
 use crate::limits::{MAX_PANE_SURFACES, MAX_SESSION_SIZE_BYTES, MAX_WORKSPACE_TERMINALS};
@@ -151,6 +152,7 @@ impl PaneFlowApp {
     pub(crate) fn save_session(&self, cx: &App) {
         let state = self.build_session_state(cx);
         let Some(path) = paneflow_config::loader::session_path_migrated() else {
+            log::warn!("session save skipped: no session path resolved");
             return;
         };
 
@@ -183,7 +185,11 @@ impl PaneFlowApp {
     /// US-011: synchronous session save for the quit / pre-update-install
     /// paths, where a deferred background write would be lost when the process
     /// exits or is replaced.
-    pub(crate) fn save_session_blocking(&self, cx: &App) {
+    ///
+    /// Returns `false` when the session path could not be resolved or the
+    /// atomic write failed. Callers on the quit path must surface that to
+    /// the user rather than exiting as if the layout landed.
+    pub(crate) fn save_session_blocking(&self, cx: &App) -> bool {
         crate::window_state::save();
         // Cancel any in-flight deferred save: bump the coalescing token so a
         // background task still sleeping in its debounce wakes to a stale `seq`
@@ -194,9 +200,41 @@ impl PaneFlowApp {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let state = self.build_session_state(cx);
         let Some(path) = paneflow_config::loader::session_path_migrated() else {
+            log::warn!("session save failed: no session path resolved");
+            return false;
+        };
+        write_session_json(&path, &state)
+    }
+
+    /// Toast a previously-loaded [`SessionCorruptionInfo`] after the first
+    /// frame. No-ops when bootstrap stored `None` (missing file is not
+    /// corruption).
+    pub(crate) fn toast_pending_session_corruption(&mut self, cx: &mut Context<Self>) {
+        let Some(info) = self.session_corruption.take() else {
             return;
         };
-        write_session_json(&path, &state);
+        self.show_toast(session_corruption_toast_message(&info), cx);
+    }
+
+    /// Persist then quit. A failed write is toasted and quit is delayed so
+    /// the message is visible instead of racing the process exit.
+    pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
+        if self.save_session_blocking(cx) {
+            cx.quit();
+            return;
+        }
+        self.push_toast(
+            session_save_failure_toast_message().to_string(),
+            Vec::new(),
+            TOAST_HOLD_MS * 2,
+            cx,
+        );
+        let delay_ms = TOAST_ENTER_MS + TOAST_HOLD_MS * 2 + TOAST_EXIT_MS;
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(delay_ms)).await;
+            let _ = this.update(cx, |_app, cx| cx.quit());
+        })
+        .detach();
     }
 
     /// Restore a saved session from disk, or fall back silently to an
@@ -826,12 +864,13 @@ fn persisted_expanded_paths(cwd: &str, expanded: &[PathBuf]) -> Vec<String> {
 
 /// US-011: serialize a [`SessionState`] to `path` with an atomic
 /// write-temp-then-rename, so a crash mid-write never truncates the live
-/// `session.json`. Best-effort: any error is logged, never propagated. Runs off
-/// the GPUI main thread in the deferred path (`save_session` wraps it in
-/// `smol::unblock`); `save_session_blocking` calls it directly at quit.
-fn write_session_json(path: &Path, state: &paneflow_config::schema::SessionState) {
+/// `session.json`. Returns `false` (and logs) on serialize or filesystem
+/// failure. Runs off the GPUI main thread in the deferred path
+/// (`save_session` wraps it in `smol::unblock`); `save_session_blocking`
+/// calls it directly at quit.
+fn write_session_json(path: &Path, state: &paneflow_config::schema::SessionState) -> bool {
     let _guard = session_write_guard();
-    write_session_json_inner(path, state);
+    write_session_json_inner(path, state)
 }
 
 fn write_session_json_if_current(
@@ -839,17 +878,26 @@ fn write_session_json_if_current(
     state: &paneflow_config::schema::SessionState,
     save_seq: &AtomicU64,
     seq: u64,
-) {
+) -> bool {
     let _guard = session_write_guard();
     if save_seq.load(Ordering::SeqCst) != seq {
-        return;
+        return true;
     }
-    write_session_json_inner(path, state);
+    write_session_json_inner(path, state)
 }
 
-fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::SessionState) {
+fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::SessionState) -> bool {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        match std::fs::create_dir_all(parent) {
+            Ok(()) => {}
+            Err(e) => {
+                log::warn!(
+                    "session save failed: could not create {}: {e}",
+                    parent.display()
+                );
+                return false;
+            }
+        }
     }
     match serde_json::to_string_pretty(state) {
         Ok(json) => {
@@ -859,16 +907,41 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
                     if let Err(e) = std::fs::rename(&tmp_path, path) {
                         log::warn!("session save rename failed: {e}");
                         let _ = std::fs::remove_file(&tmp_path);
+                        false
+                    } else {
+                        true
                     }
                 }
                 Err(e) => {
                     log::warn!("session save failed: {e}");
                     let _ = std::fs::remove_file(&tmp_path);
+                    false
                 }
             }
         }
-        Err(e) => log::warn!("session serialize failed: {e}"),
+        Err(e) => {
+            log::warn!("session serialize failed: {e}");
+            false
+        }
     }
+}
+
+fn session_corruption_toast_message(info: &SessionCorruptionInfo) -> String {
+    match &info.backup_path {
+        Some(path) => format!(
+            "Could not restore session ({}). Backup: {}",
+            info.error_category,
+            path.display()
+        ),
+        None => format!(
+            "Could not restore session ({}). No backup could be written.",
+            info.error_category
+        ),
+    }
+}
+
+fn session_save_failure_toast_message() -> &'static str {
+    "Could not save session. Your layout may be lost on next launch."
 }
 
 fn session_tmp_path(path: &Path) -> PathBuf {
@@ -1535,5 +1608,106 @@ mod tests {
             crate::workspace::worktree::TeardownPolicy::Keep,
             "unknown restored policy must not become auto-remove"
         );
+    }
+
+    fn empty_session_state() -> paneflow_config::schema::SessionState {
+        paneflow_config::schema::SessionState {
+            version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
+            active_workspace: 0,
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            active_project: 0,
+            chats: Vec::new(),
+            agents_target: None,
+            mode: Default::default(),
+            diff_scope: None,
+        }
+    }
+
+    #[test]
+    fn write_session_json_reports_success() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.json");
+        assert!(write_session_json(&path, &empty_session_state()));
+        let loaded: paneflow_config::schema::SessionState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("readable"))
+                .expect("valid session json");
+        assert_eq!(
+            loaded.version,
+            paneflow_config::schema::SESSION_SCHEMA_VERSION
+        );
+        assert!(loaded.workspaces.is_empty());
+    }
+
+    #[test]
+    fn write_session_json_reports_failure_when_parent_is_not_a_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").expect("seed file where a directory is required");
+        let path = blocker.join("session.json");
+        assert!(
+            !write_session_json(&path, &empty_session_state()),
+            "a file standing in for the session parent must fail the write"
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn deferred_write_skip_is_not_a_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.json");
+        std::fs::write(&path, "keep").expect("seed");
+        let save_seq = AtomicU64::new(2);
+        assert!(write_session_json_if_current(
+            &path,
+            &empty_session_state(),
+            &save_seq,
+            1
+        ));
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), "keep");
+    }
+
+    #[test]
+    fn session_corruption_toast_includes_backup_path() {
+        let backup = PathBuf::from("/tmp/session.json.corrupted-1-2-3");
+        let with_backup = SessionCorruptionInfo {
+            error_category: "syntax",
+            file_size: 12,
+            file_age_seconds: Some(4),
+            backup_path: Some(backup.clone()),
+        };
+        let message = session_corruption_toast_message(&with_backup);
+        assert!(
+            message.contains("syntax"),
+            "category must be visible: {message}"
+        );
+        assert!(
+            message.contains(backup.to_str().expect("utf-8 path")),
+            "backup path must be visible: {message}"
+        );
+        assert!(
+            message.to_lowercase().contains("could not restore"),
+            "error-shaped copy so the toast uses the alert icon: {message}"
+        );
+
+        let without_backup = SessionCorruptionInfo {
+            error_category: "oversize",
+            file_size: 99,
+            file_age_seconds: None,
+            backup_path: None,
+        };
+        let message = session_corruption_toast_message(&without_backup);
+        assert!(message.contains("oversize"));
+        assert!(
+            message.contains("No backup could be written"),
+            "missing backup is explicit: {message}"
+        );
+    }
+
+    #[test]
+    fn session_save_failure_toast_is_error_shaped() {
+        let message = session_save_failure_toast_message();
+        assert!(message.to_lowercase().contains("could not save session"));
+        assert!(message.to_lowercase().contains("layout"));
     }
 }

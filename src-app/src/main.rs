@@ -1173,6 +1173,10 @@ struct PaneFlowApp {
     /// been scheduled meanwhile, collapsing a burst (e.g. closing 20
     /// workspaces) into a single write - none of it on the render thread.
     save_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Forensic context from a failed `session.json` load. Bootstrap keeps
+    /// this until after the first frame, then toasts the backup path so a
+    /// corrupt file is not a silent first-launch.
+    session_corruption: Option<app::session::SessionCorruptionInfo>,
     /// Monotonic settings-persist generation. `persist_setting` `fetch_add`s
     /// before spawning the off-thread write, matching [`Self::save_seq`].
     config_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -1938,8 +1942,7 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_ws9))
             .on_action(
                 cx.listener(|this: &mut Self, _: &CloseWindow, _window, cx| {
-                    this.save_session_blocking(cx);
-                    cx.quit();
+                    this.quit_after_session_save(cx);
                 }),
             )
             // US-012: macOS menu-bar actions. `Quit` mirrors `CloseWindow`;
@@ -1949,8 +1952,7 @@ impl Render for PaneFlowApp {
             // when a terminal pane is focused. Widget cmd-a stays on its
             // own action type (TextInput / PaneflowTextArea).
             .on_action(cx.listener(|this: &mut Self, _: &Quit, _window, cx| {
-                this.save_session_blocking(cx);
-                cx.quit();
+                this.quit_after_session_save(cx);
             }))
             .on_action(cx.listener(|this: &mut Self, _: &About, _window, cx| {
                 this.show_about_dialog = true;
@@ -2494,10 +2496,17 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
     window.on_window_should_close(cx, {
         let view = view.clone();
         move |_window, cx| {
-            let app = view.read(cx);
-            app.save_session_blocking(cx);
-            cx.quit();
+            view.update(cx, |app, cx| {
+                app.quit_after_session_save(cx);
+            });
             false
+        }
+    });
+    view.update(cx, |app, cx| {
+        if app.session_corruption.is_some() {
+            cx.on_next_frame(window, |this, _window, cx| {
+                this.toast_pending_session_corruption(cx);
+            });
         }
     });
     // US-116 (prd-agent-ui-refactor-2026-Q3.md): track window-activation state

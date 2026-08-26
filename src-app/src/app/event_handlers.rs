@@ -334,8 +334,7 @@ impl PaneFlowApp {
     ) {
         match event {
             title_bar::TitleBarEvent::CloseRequested => {
-                self.save_session_blocking(cx);
-                cx.quit();
+                self.quit_after_session_save(cx);
             }
             title_bar::TitleBarEvent::ToggleSidebar => {
                 self.toggle_primary_sidebar(cx);

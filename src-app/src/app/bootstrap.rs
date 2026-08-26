@@ -130,7 +130,9 @@ impl PaneFlowApp {
 
         // Restore session or create a single default workspace. The
         // tuple's second component carries forensic context when
-        // `session.json` was unparseable (US-006).
+        // `session.json` was unparseable (US-006). Kept on the app and
+        // toasted after the first frame; the log stays so headless
+        // launches still have a record.
         let (saved_session, session_corruption) = Self::load_session();
         if let Some(info) = &session_corruption {
             log::warn!(
@@ -729,6 +731,7 @@ impl PaneFlowApp {
             rename_text: String::new(),
             pending_config,
             save_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            session_corruption,
             config_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             config_persist_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config_last_persist_gen,
@@ -1119,8 +1122,7 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
 
     cx.on_action(|_: &Quit, cx| {
         with_active_paneflow_window(cx, |app, _window, cx| {
-            app.save_session_blocking(cx);
-            cx.quit();
+            app.quit_after_session_save(cx);
         });
     });
 
