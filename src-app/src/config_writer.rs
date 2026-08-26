@@ -62,12 +62,7 @@ fn load_raw_config(path: &Path) -> Result<serde_json::Value, ()> {
 }
 
 /// Write a JSON value back to the config file, creating parent dirs if needed.
-fn write_config(path: &PathBuf, value: &serde_json::Value) {
-    let _ = write_config_checked(path, value);
-}
-
-/// Result-returning variant of [`write_config`]. Returns `true` on
-/// successful write, `false` otherwise (serialization or I/O error -
+/// Returns `true` on success, `false` otherwise (serialization or I/O error -
 /// logged at WARN in both cases).
 fn write_config_checked(path: &PathBuf, value: &serde_json::Value) -> bool {
     if let Some(parent) = path.parent() {
@@ -214,19 +209,35 @@ pub fn save_shortcut_checked(new_key: &str, action_name: &str) -> bool {
     write_config_checked(&path, &json)
 }
 
-/// Remove all user shortcut overrides from `paneflow.json`, restoring defaults.
-pub fn reset_shortcuts() {
-    let Some(path) = paneflow_config::loader::config_path() else {
-        return;
-    };
-    let _guard = config_write_guard();
-    let Ok(mut json) = load_raw_config(&path) else {
-        return;
-    };
+/// Remove the `shortcuts` object from a raw config value. Extracted from
+/// [`reset_shortcuts_checked`] so the mutation can be unit-tested without
+/// resolving (or touching) the real config path.
+fn apply_reset_shortcuts(json: &mut serde_json::Value) {
     if let Some(root) = json.as_object_mut() {
         root.remove("shortcuts");
     }
-    write_config(&path, &json);
+}
+
+/// Remove all user shortcut overrides from `path`, restoring defaults.
+/// Returns `false` when the file cannot be loaded or the write fails.
+fn reset_shortcuts_at(path: &PathBuf) -> bool {
+    let _guard = config_write_guard();
+    let Ok(mut json) = load_raw_config(path) else {
+        return false;
+    };
+    apply_reset_shortcuts(&mut json);
+    write_config_checked(path, &json)
+}
+
+/// Remove all user shortcut overrides from `paneflow.json`, restoring defaults.
+/// Returns `true` on success and `false` when the config path could not be
+/// resolved, the existing file was unreadable, or the write failed.
+pub fn reset_shortcuts_checked() -> bool {
+    let Some(path) = paneflow_config::loader::config_path() else {
+        log::warn!("config: cannot determine config path, not saving");
+        return false;
+    };
+    reset_shortcuts_at(&path)
 }
 
 /// Pure read-modify-write of the `"terminal"` sub-object. Extracted from
@@ -381,8 +392,8 @@ pub fn save_commands_checked(commands: Vec<paneflow_config::schema::CommandDefin
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_agent_panel_field, apply_terminal_field, load_raw_config, merge_shortcut,
-        write_config_checked,
+        apply_agent_panel_field, apply_reset_shortcuts, apply_terminal_field, load_raw_config,
+        merge_shortcut, reset_shortcuts_at, write_config_checked,
     };
     use serde_json::{Value, json};
 
@@ -415,6 +426,101 @@ mod tests {
         assert!(write_config_checked(&p, &json!({"b": 2})));
         let got: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert!(got.get("a").is_none() && got["b"] == 2);
+    }
+
+    #[test]
+    fn write_config_checked_returns_false_when_parent_is_not_a_directory() {
+        // chmod-a-w on the *file* is not a write failure: tmp+rename replaces
+        // the inode and ignores the destination mode. A non-directory parent
+        // is a real I/O failure on the temp-file create / rename path.
+        let dir = tempfile::TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let p = blocker.join("paneflow.json");
+        assert!(!write_config_checked(&p, &json!({"a": 1})));
+    }
+
+    #[test]
+    fn apply_reset_shortcuts_removes_shortcuts_preserving_siblings() {
+        let mut j = json!({
+            "theme": "One Dark",
+            "shortcuts": {"ctrl-shift-d": "split_horizontally"}
+        });
+        apply_reset_shortcuts(&mut j);
+        assert!(j.get("shortcuts").is_none());
+        assert_eq!(j["theme"], json!("One Dark"));
+    }
+
+    #[test]
+    fn apply_reset_shortcuts_is_noop_without_shortcuts_key() {
+        let mut j = json!({"theme": "One Dark"});
+        apply_reset_shortcuts(&mut j);
+        assert_eq!(j, json!({"theme": "One Dark"}));
+    }
+
+    #[test]
+    fn reset_shortcuts_at_removes_shortcuts_preserving_siblings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("paneflow.json");
+        assert!(write_config_checked(
+            &p,
+            &json!({
+                "theme": "One Dark",
+                "shortcuts": {"ctrl-shift-d": "split_horizontally"}
+            })
+        ));
+        assert!(reset_shortcuts_at(&p));
+        let got: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert!(got.get("shortcuts").is_none());
+        assert_eq!(got["theme"], "One Dark");
+    }
+
+    #[test]
+    fn reset_shortcuts_at_returns_false_on_invalid_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("paneflow.json");
+        std::fs::write(&p, "{").unwrap();
+        assert!(!reset_shortcuts_at(&p));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{");
+    }
+
+    #[test]
+    fn reset_shortcuts_at_returns_false_when_write_fails() {
+        // chmod-a-w on the *file* is ignored by tmp+rename (new inode).
+        // A non-writable parent directory is the real write-failure path.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("paneflow.json");
+        let original = json!({
+            "theme": "One Dark",
+            "shortcuts": {"ctrl-shift-d": "split_horizontally"}
+        });
+        assert!(write_config_checked(&p, &original));
+
+        struct RestorePerms {
+            path: std::path::PathBuf,
+            perms: std::fs::Permissions,
+        }
+        impl Drop for RestorePerms {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.path, self.perms.clone());
+            }
+        }
+
+        let restore = RestorePerms {
+            path: dir.path().to_path_buf(),
+            perms: std::fs::metadata(dir.path()).unwrap().permissions(),
+        };
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let ok = reset_shortcuts_at(&p);
+        drop(restore);
+        assert!(
+            !ok,
+            "tmp+rename must fail when the config directory is not writable"
+        );
+        let got: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(got, original);
     }
 
     #[test]

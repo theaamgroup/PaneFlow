@@ -28,7 +28,11 @@ impl PaneFlowApp {
             "Reset to defaults",
             ui,
             cx.listener(|this, _: &ClickEvent, _w, cx| {
-                config_writer::reset_shortcuts();
+                if !config_writer::reset_shortcuts_checked() {
+                    this.show_toast("Could not reset shortcuts", cx);
+                    cx.notify();
+                    return;
+                }
                 let config = paneflow_config::loader::load_config();
                 keybindings::apply_keybindings(cx, &config.shortcuts);
                 this.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
