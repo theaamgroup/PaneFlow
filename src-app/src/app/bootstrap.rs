@@ -1199,8 +1199,7 @@ pub(crate) fn warn_if_rosetta_translated() {
     if rc == 0 && translated == 1 {
         log::warn!(
             "running under Rosetta 2 translation - GPU rendering will be \
-             degraded. For best performance, download the matching \
-             architecture from https://github.com/arthjean/paneflow/releases"
+             degraded. For best performance, run the native aarch64 build"
         );
     }
 }

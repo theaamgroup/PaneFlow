@@ -21,11 +21,14 @@ use super::install_method::{self, InstallMethod};
 /// a toast well before they give up.
 const UPDATE_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default GitHub API endpoint queried for the latest release. The
-/// effective URL is resolved by [`update_feed_url`] which lets the e2e
-/// harness (US-005) point the checker at a localhost fixture without
-/// patching the binary.
-const DEFAULT_FEED_URL: &str = "https://api.github.com/repos/arthjean/paneflow/releases/latest";
+/// Built-in release feed. `None` until this fork has a public distribution
+/// host — the previous value pointed at upstream `arthjean/paneflow` and
+/// would have offered someone else's binaries. Re-enable by setting this to
+/// `Some("https://api.github.com/repos/theaamgroup/paneflow/releases/latest")`
+/// once that repo's release assets are anonymously downloadable.
+///
+/// The e2e harness still overrides via `PANEFLOW_UPDATE_FEED_URL`.
+const DEFAULT_FEED_URL: Option<&str> = None;
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Hosts the update flow is allowed to talk to (US-007). GitHub serves the
@@ -49,19 +52,19 @@ const ALLOWED_UPDATE_HOSTS: &[&str] = &[
 /// (US-007) - a release binary never trusts a cleartext, off-host feed.
 /// Bad input falls through to the default with a warn so a typo can't
 /// silently break update checks for a user who set the var by accident.
-pub(crate) fn update_feed_url() -> String {
+pub(crate) fn update_feed_url() -> Option<String> {
     match std::env::var("PANEFLOW_UPDATE_FEED_URL") {
         Ok(v) if is_allowed_update_url(&v) => {
             log::warn!("update check: PANEFLOW_UPDATE_FEED_URL active → {v}");
-            v
+            Some(v)
         }
         Ok(v) => {
             log::warn!(
                 "update check: ignoring PANEFLOW_UPDATE_FEED_URL='{v}' (must be https:// to an allow-listed host, or loopback)"
             );
-            DEFAULT_FEED_URL.to_string()
+            DEFAULT_FEED_URL.map(str::to_string)
         }
-        Err(_) => DEFAULT_FEED_URL.to_string(),
+        Err(_) => DEFAULT_FEED_URL.map(str::to_string),
     }
 }
 
@@ -229,13 +232,26 @@ pub enum UpdateStatus {
     },
     UpToDate,
     Failed,
+    /// No built-in feed (this fork has no public distribution host yet).
+    /// Distinct from [`UpToDate`] so the UI does not lie, and from
+    /// [`Failed`] so it is not an error.
+    Disabled,
 }
 
 pub type SharedUpdateSlot = std::sync::Arc<std::sync::Mutex<Option<UpdateStatus>>>;
 
 /// Spawn a detached thread that checks GitHub for a newer release.
 /// The result is deposited into the returned shared slot.
+///
+/// With no feed configured this returns [`UpdateStatus::Disabled`] on the
+/// calling thread and never opens a socket.
 pub fn spawn_check() -> SharedUpdateSlot {
+    if update_feed_url().is_none() && std::env::var("PANEFLOW_DEV_FORCE_UPDATE").is_err() {
+        log::info!(
+            "self-update feed disabled; set DEFAULT_FEED_URL or PANEFLOW_UPDATE_FEED_URL to re-enable"
+        );
+        return std::sync::Arc::new(std::sync::Mutex::new(Some(UpdateStatus::Disabled)));
+    }
     let slot: SharedUpdateSlot =
         std::sync::Arc::new(std::sync::Mutex::new(Some(UpdateStatus::Checking)));
     let writer = std::sync::Arc::clone(&slot);
@@ -348,14 +364,19 @@ pub(crate) fn check_github_release() -> UpdateStatus {
             log::warn!("update check: PANEFLOW_DEV_FORCE_UPDATE active, faking v{version}");
             return UpdateStatus::Available {
                 version,
-                url: "https://github.com/arthjean/paneflow/releases".to_string(),
+                url: String::new(),
                 asset_url: None,
                 asset_format: None,
             };
         }
     }
 
-    let feed_url = update_feed_url();
+    let Some(feed_url) = update_feed_url() else {
+        log::info!(
+            "self-update feed disabled; set DEFAULT_FEED_URL or PANEFLOW_UPDATE_FEED_URL to re-enable"
+        );
+        return UpdateStatus::Disabled;
+    };
     let response = ureq::get(&feed_url)
         .config()
         .timeout_global(Some(UPDATE_HTTP_TIMEOUT))
@@ -703,5 +724,27 @@ mod tests {
         let assets = vec![make_asset("paneflow-0.2.12-x86_64-apple-darwin.dmg.sig")];
         let picked = pick_asset(&assets, "x86_64", app_bundle());
         assert!(picked.is_none(), "no .dmg asset should match");
+    }
+
+    #[test]
+    fn default_feed_is_disabled() {
+        assert!(
+            DEFAULT_FEED_URL.is_none(),
+            "built-in feed must stay None until this fork has a public host"
+        );
+    }
+
+    #[test]
+    fn spawn_check_without_override_is_disabled() {
+        if std::env::var("PANEFLOW_UPDATE_FEED_URL").is_ok()
+            || std::env::var("PANEFLOW_DEV_FORCE_UPDATE").is_ok()
+        {
+            return;
+        }
+        let slot = spawn_check();
+        assert_eq!(
+            slot.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            Some(UpdateStatus::Disabled)
+        );
     }
 }

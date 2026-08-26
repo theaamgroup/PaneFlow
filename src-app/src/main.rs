@@ -2382,6 +2382,10 @@ fn run_update_and_exit() -> i32 {
             eprintln!("paneflow-update: already up to date");
             return 2;
         }
+        UpdateStatus::Disabled => {
+            eprintln!("paneflow-update: self-update feed is disabled (no distribution host)");
+            return 2;
+        }
         UpdateStatus::Failed => {
             // The checker logs whether the failure was DNS/HTTP/parse via
             // `log::warn!`; we can't easily distinguish here without a
@@ -2389,8 +2393,10 @@ fn run_update_and_exit() -> i32 {
             // hint per AC6 - the dominant failure mode the harness
             // exercises (kill miniserve before invocation).
             eprintln!(
-                "paneflow-update: feed unreachable at {} - check PANEFLOW_UPDATE_FEED_URL",
+                "paneflow-update: feed unreachable{} - check PANEFLOW_UPDATE_FEED_URL",
                 crate::update::checker::update_feed_url()
+                    .map(|u| format!(" at {u}"))
+                    .unwrap_or_default()
             );
             return 3;
         }

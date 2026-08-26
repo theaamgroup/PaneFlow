@@ -192,12 +192,18 @@ impl PaneFlowApp {
         // flaky mirror are never the right answer.
         if self.self_update.update_attempt_count >= 3 {
             let releases_url = match &self.self_update.update_status {
-                Some(update::checker::UpdateStatus::Available { url, .. }) => url.clone(),
-                _ => "https://github.com/arthjean/paneflow/releases".to_string(),
+                Some(update::checker::UpdateStatus::Available { url, .. }) if !url.is_empty() => {
+                    Some(url.clone())
+                }
+                _ => None,
+            };
+            let actions = match releases_url {
+                Some(url) => vec![ToastAction::OpenReleasesPage(url)],
+                None => Vec::new(),
             };
             self.push_toast(
-                "Update keeps failing. Download manually from the releases page.".to_string(),
-                vec![ToastAction::OpenReleasesPage(releases_url)],
+                "Update keeps failing. Self-update is not hosted for this build.".to_string(),
+                actions,
                 TOAST_HOLD_MS * 4,
                 cx,
             );
@@ -230,10 +236,9 @@ impl PaneFlowApp {
         // clear message instead of a silently corrupted bundle.
         if !update::signature::has_embedded_key() {
             self.push_toast(
-                "This build can't self-update (unsigned). Download the latest version from the releases page.".to_string(),
-                vec![ToastAction::OpenReleasesPage(
-                    "https://github.com/arthjean/paneflow/releases".to_string(),
-                )],
+                "This build can't self-update (unsigned). There is no hosted releases page yet."
+                    .to_string(),
+                Vec::new(),
                 TOAST_HOLD_MS * 4,
                 cx,
             );
