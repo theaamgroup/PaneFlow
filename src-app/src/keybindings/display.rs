@@ -24,14 +24,12 @@ pub struct ShortcutEntry {
 
 /// Format a GPUI keystroke string for display.
 ///
-/// On Linux: `"secondary-shift-d"` → `"Ctrl+Shift+D"` (readable, plus-separated).
-/// On macOS: `"secondary-shift-d"` → `"⌘⇧D"` (Apple HIG glyphs, no separator -
+/// `"secondary-shift-d"` → `"⌘⇧D"` (Apple HIG glyphs, no separator -
 /// matches the native macOS menu bar convention consumed by US-012).
 ///
-/// `secondary` is GPUI's cross-platform shorthand that resolves to `cmd` on
-/// macOS and `ctrl` elsewhere (see `Keystroke::parse`). Rendering it here
-/// mirrors that resolution so the menu bar always shows the actual key the
-/// user will press.
+/// `secondary` is GPUI's shorthand that resolves to `cmd` on macOS
+/// (see `Keystroke::parse`). Rendering it here mirrors that resolution so
+/// the menu bar always shows the actual key the user will press.
 pub fn format_keystroke(key: &str) -> String {
     let is_macos = cfg!(target_os = "macos");
     let parts = key.split('-').map(|part| match part {
@@ -124,8 +122,7 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
     let mut seen_actions: HashSet<&'static str> = HashSet::new();
 
     // Defaults first, with user overrides applied. US-010: include the
-    // macOS-only defaults so the settings page reflects cmd-c/cmd-v on
-    // macOS (and stays unchanged on Linux where MACOS_ONLY_DEFAULTS is empty).
+    // macOS-only defaults so the settings page reflects cmd-c/cmd-v.
     for d in DEFAULTS.iter().chain(MACOS_ONLY_DEFAULTS.iter()) {
         let Some(meta) = ACTIONS.iter().find(|a| a.name == d.action_name) else {
             continue;

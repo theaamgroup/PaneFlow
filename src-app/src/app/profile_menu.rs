@@ -1,7 +1,6 @@
 //! Profile menu - opened by clicking the user avatar on the right of the
 //! title bar. Mirrors Zed's user menu shape: a user-info header and an app
-//! action list (Settings, Themes…, About). Sign Out will be added once auth
-//! is wired.
+//! action list (Settings, Themes…, About).
 
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, InteractiveElement, IntoElement, MouseButton,

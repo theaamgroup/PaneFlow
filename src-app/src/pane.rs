@@ -1685,7 +1685,7 @@ impl Pane {
         let self_entity = cx.entity();
         let accent = ui.accent;
         // Tab strip uses the terminal background so it melts into the terminal
-        // body below it - one clean surface (Arthur).
+        // body below it - one clean surface.
         let bar_bg = tab_bar_background(&theme, false);
 
         // Outer container: full-width, fixed height, tab_bar background. The
@@ -2899,7 +2899,7 @@ impl Render for Pane {
             .child(body)
             .child(overlay);
 
-        // The blue active-pane focus ring is removed (Arthur): no border tint on
+        // The blue active-pane focus ring is removed: no border tint on
         // focus. The 1px border is still reserved so the US-018 attention glow
         // can paint without reflow.
         //

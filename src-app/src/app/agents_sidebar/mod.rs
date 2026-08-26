@@ -603,8 +603,8 @@ impl PaneFlowApp {
         let timestamp = format_relative_ts(now_ms, created_at_ms);
         // Codex-style activity indicator: while the agent's turn is in
         // flight the relative timestamp gives way to a rotating arc -
-        // the SAME muted `loader-circle.svg` for every agent (Arthur:
-        // no per-agent branding here, match the Codex app's sidebar) -
+        // the SAME muted `loader-circle.svg` for every agent
+        // (no per-agent branding here, match the Codex app's sidebar) -
         // or a static compact dot for attention/error. Idle restores the
         // timestamp. The arc self-animates via the declarative
         // Animation+Transformation API (same pattern as the title-bar update

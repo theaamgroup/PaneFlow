@@ -1,7 +1,5 @@
 //! Resolve the PaneFlow runtime directory with a macOS-aware fallback chain,
-//! and enforce the `sockaddr_un.sun_path` length limit (macOS: 104 bytes,
-//! Linux: 108 - we use the smaller ceiling so a path built here works on both
-//! platforms without a second guard at bind time).
+//! and enforce the `sockaddr_un.sun_path` length limit (macOS: 104 bytes).
 //!
 //! Public helpers:
 //! - `ipc::start_server` consumes `socket_path()` for the main JSON-RPC socket,
@@ -17,21 +15,14 @@
 //! never existed in the embed set, so the helper and its PATH-injection
 //! caller were dead code.
 //!
-//! `PANEFLOW_SOCKET_PATH` overrides the computed path on every platform so
-//! isolated debug/test instances and panes launched from a running instance
-//! agree on the exact IPC endpoint. Without this, clients can point at one pipe
-//! while the server keeps binding the default one.
-//!
-//! US-009 (prd-windows-port.md) - on Windows, `socket_path` falls back to the
-//! named pipe path `\\.\pipe\paneflow` (or `paneflow-dev` in debug). The
-//! TMPDIR/cache chain and sun_path guard remain Unix-only.
+//! `PANEFLOW_SOCKET_PATH` overrides the computed path so isolated debug/test
+//! instances and panes launched from a running instance agree on the exact
+//! IPC endpoint. Without this, clients can point at one socket while the
+//! server keeps binding the default one.
 
 use std::path::{Path, PathBuf};
 
-/// macOS `sockaddr_un.sun_path` is `[c_char; 104]`. Linux allows 108, but
-/// using the smaller ceiling keeps paths portable across both targets.
-/// Unused on Windows (named pipes are limited to 256 chars, well above
-/// anything we compose).
+/// macOS `sockaddr_un.sun_path` is `[c_char; 104]`.
 #[cfg(unix)]
 pub(crate) const MAX_SOCKET_PATH_BYTES: usize = 104;
 
@@ -112,14 +103,10 @@ fn runtime_dir() -> Option<PathBuf> {
 
 /// Full path to the IPC socket.
 ///
-/// Unix: `<runtime_dir>/paneflow/paneflow.sock`, or `None` if the runtime
+/// `<runtime_dir>/paneflow/paneflow.sock`, or `None` if the runtime
 /// dir cannot be resolved or the composed path would exceed the `sun_path`
 /// limit. A `log::warn!` is emitted in the over-length case so the user
 /// can see why IPC is disabled.
-///
-/// Windows (US-009): the named-pipe path `\\.\pipe\paneflow`, unconditionally.
-/// Named pipes live in a global kernel namespace - there is no runtime dir
-/// to resolve, no sun_path limit to enforce, and no XDG fallback chain.
 #[cfg(unix)]
 pub(crate) fn socket_path_spec() -> Option<IpcSocketPath> {
     if let Some(path) = socket_path_from_env(std::env::var_os("PANEFLOW_SOCKET_PATH")) {
@@ -152,9 +139,8 @@ fn socket_path_from_env(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
 /// so PATH-based lookups see binaries installed under the user's home - `~/.bun/bin`,
 /// `~/.cargo/bin`, `~/.local/bin`, plus `/opt/homebrew/bin` on macOS.
 ///
-/// Why: when Paneflow is launched from a `.desktop` file, Finder, or the
-/// Windows Start Menu, it inherits the systemd-user / launchd / Explorer
-/// PATH, which does NOT include `~/.bun/bin`. Agent launch and CLI helper
+/// Why: when Paneflow is launched from Finder or the Dock, it inherits
+/// launchd's PATH, which does NOT include `~/.bun/bin`. Agent launch and CLI helper
 /// paths then fail to find user-installed tools even though they are available
 /// in a normal terminal. Zed, VS Code, and most GUI dev tools all patch their
 /// own PATH at startup for the same reason.
@@ -226,11 +212,9 @@ pub fn augment_path_for_gui_launch() {
     }
 }
 
-/// Resolve the PaneFlow per-user data directory (cross-platform).
+/// Resolve the PaneFlow per-user data directory.
 ///
-/// - Linux: `$XDG_DATA_HOME/paneflow` (typically `~/.local/share/paneflow`)
-/// - macOS: `~/Library/Application Support/paneflow`
-/// - Windows: `%LOCALAPPDATA%\paneflow` - **non-roaming** on purpose.
+/// macOS: `~/Library/Application Support/paneflow` (`paneflow-dev` in debug).
 ///
 /// The directory is created if it does not already exist. Returns `None` if
 /// either the platform helper returns `None` (broken environment) or the
@@ -258,9 +242,7 @@ pub fn data_dir() -> Option<PathBuf> {
 /// Paneflow update, and `cache_dir()` can be purged by the OS. So the bridge
 /// lives under `data_dir()` (durable, non-versioned):
 ///
-/// - Linux:   `~/.local/share/paneflow/bin/paneflow-mcp`
-/// - macOS:   `~/Library/Application Support/paneflow/bin/paneflow-mcp`
-/// - Windows: `%LOCALAPPDATA%\paneflow\bin\paneflow-mcp.exe`
+/// macOS: `~/Library/Application Support/paneflow/bin/paneflow-mcp`
 ///
 /// Returns `None` when `data_dir()` is unresolvable or unwritable. Callers
 /// (`ai_hooks::extract::ensure_bridge_extracted`, and later `paneflow mcp
@@ -282,9 +264,7 @@ pub fn bridge_binary_path() -> Option<PathBuf> {
 /// under `cache_dir()/paneflow/bin/<VERSION>/` that the shim itself resolves at
 /// launch. Lives alongside the bridge under `data_dir()/paneflow/bin/`:
 ///
-/// - Linux:   `~/.local/share/paneflow/bin/paneflow-ai-hook`
-/// - macOS:   `~/Library/Application Support/paneflow/bin/paneflow-ai-hook`
-/// - Windows: `%LOCALAPPDATA%\paneflow\bin\paneflow-ai-hook.exe`
+/// macOS: `~/Library/Application Support/paneflow/bin/paneflow-ai-hook`
 ///
 /// Returns `None` when `data_dir()` is unresolvable. Computes the path only;
 /// the byte materialization is `ai_hooks::extract::ensure_ai_hook_extracted`.

@@ -38,7 +38,7 @@ pub(crate) const CLAUDE_HOOK_EVENTS: &[&str] = &[
 /// string is the only round-trip-stable identifier we can rely on.
 ///
 /// Known namespace-collision limitation: any user-authored hook command whose
-/// program basename is literally `paneflow-ai-hook` (or `.exe` on Windows)
+/// program basename is literally `paneflow-ai-hook`
 /// will be treated as PaneFlow-managed and removed on cleanup. The basename
 /// rule narrows this further than the previous bare-prefix rule did, but the
 /// theoretical collision remains.
@@ -216,36 +216,16 @@ fn safe_log_text(text: &str) -> String {
 /// `paneflow-ai-hook`, which fails silently per PRD constraint C4) and we
 /// instead sweep any orphan entries left by a previous SIGKILL'd session.
 ///
-/// The probe is deliberately NOT a uniform `Path::exists()` - that is correct
-/// on Unix but actively wrong on Windows:
-///
-/// - **Unix**: `$PANEFLOW_SOCKET_PATH` is a domain-socket *filesystem node*,
-///   so `Path::exists()` is a passive, side-effect-free `stat(2)` - a correct
-///   liveness probe that is `true` exactly while the listener is bound.
-/// - **Windows**: the path is a named pipe (`\\.\pipe\paneflow`). There,
-///   `Path::exists()` is NOT passive - Rust's `fs::metadata` calls
-///   `CreateFileW`, which on a pipe path *opens a client connection*. That
-///   consumes the server's single pending pipe instance and returns
-///   `ERROR_PIPE_BUSY` (so `exists() == false`) whenever the next instance
-///   has not been re-created yet. Against the app's non-blocking accept loop
-///   (`src-app/src/ipc.rs`, which sleeps 10 ms between `accept()`s) that race
-///   is lost ~87% of the time, so the probe spuriously reported the *live*
-///   server as unreachable and the shim skipped hook install - leaving the
-///   sidebar agent status permanently dead on Windows while it worked on
-///   Unix. Every connect also polluted the server with a phantom connection.
-///   `$PANEFLOW_SOCKET_PATH` is only ever set by PaneFlow's own PTY
-///   (`pty_session::assemble_pty_env`), so its presence already proves we are
-///   inside a live PaneFlow session; we trust that and let the
-///   fire-and-forget hook delivery fail silently (C4) in the rare case the
-///   pipe is actually gone (app exited but the shell is still open).
+/// `$PANEFLOW_SOCKET_PATH` is a Unix domain-socket *filesystem node*, so
+/// `Path::exists()` is a passive, side-effect-free `stat(2)` - a correct
+/// liveness probe that is `true` exactly while the listener is bound.
 pub(crate) fn paneflow_ipc_reachable() -> bool {
     reachable_from_socket_env(env::var_os("PANEFLOW_SOCKET_PATH").as_deref())
 }
 
 /// Testable inner for [`paneflow_ipc_reachable`] - takes the raw env value so
 /// the policy is unit-testable without mutating the process-global env (the
-/// `detect_tool_from` / `read_ai_pid_from` convention). See the caller's doc
-/// for why the Windows branch skips the destructive `Path::exists()` probe.
+/// `detect_tool_from` / `read_ai_pid_from` convention).
 fn reachable_from_socket_env(raw: Option<&OsStr>) -> bool {
     let Some(raw) = raw else {
         return false;
@@ -253,9 +233,7 @@ fn reachable_from_socket_env(raw: Option<&OsStr>) -> bool {
     if raw.is_empty() {
         return false;
     }
-    // Unix: passive `stat(2)`. Windows: presence of the PaneFlow-set env var
-    // is authoritative (a `Path::exists()` probe would connect-as-client and
-    // race the accept loop - see the caller's doc comment).
+    // Passive `stat(2)` of the Unix domain socket path.
     {
         Path::new(raw).exists()
     }
@@ -271,9 +249,7 @@ fn reachable_from_socket_env(raw: Option<&OsStr>) -> bool {
 /// rename a file through the link, planting Paneflow-owned JSON outside the
 /// project boundary (CWE-59 TOCTOU file-plant). A `NotFound`/IO error means
 /// "not a symlink we need to refuse" - the caller then creates the dir
-/// itself. Cross-platform: `FileType::is_symlink()` is correct on Unix,
-/// macOS, and Windows (where it reports directory/file symlinks and
-/// mount-point reparse points).
+/// itself. `FileType::is_symlink()` is correct on macOS.
 pub(crate) fn config_dir_is_symlink(dir: &Path) -> bool {
     match std::fs::symlink_metadata(dir) {
         Ok(meta) => meta.file_type().is_symlink(),
@@ -681,7 +657,7 @@ impl HookConfigGuard {
                 // `install_at` logs the precise filesystem reason to stderr
                 // (symlinked `.claude`, non-writable cwd, write failure). Mirror
                 // a summary into PANEFLOW_HOOK_LOG so the whole chain lands in
-                // one file (parity with the Windows named-pipe diagnostics).
+                // one file.
                 crate::diagnose(&format!(
                     "claude: hook install_at({}) returned None - filesystem refused \
                      (symlinked .claude, non-writable cwd, or write failure; see shim stderr)",

@@ -300,10 +300,8 @@ impl PaneFlowApp {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            // Same platform-aware rail treatment as the CLI / Review / Agents
-            // sidebars: optional native material on Windows, platform default
-            // on macOS, and a blur veil on Linux when the compositor advertises
-            // it. Keeps the settings rail visually identical to the other rails.
+            // Same rail treatment as the CLI / Review / Agents sidebars.
+            // Keeps the settings rail visually identical to the other rails.
             .bg(crate::app::constants::cockpit_chrome_background(
                 theme.title_bar_background,
                 window.is_window_active(),
