@@ -105,8 +105,11 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use interprocess::ConnectWaitMode;
 use interprocess::TryClone;
-use interprocess::local_socket::{GenericFilePath, Listener, ListenerOptions, Stream, prelude::*};
+use interprocess::local_socket::{
+    ConnectOptions, GenericFilePath, Listener, ListenerOptions, Stream, prelude::*,
+};
 // `ListenerNonblockingMode` is only referenced by the Unix-only clobber-
 // detection accept loop; gating the import keeps the Windows build warning-free.
 #[cfg(unix)]
@@ -686,6 +689,23 @@ fn socket_inode(path: &std::path::Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| m.ino())
 }
 
+/// Same budget as the probe's recv timeout. Applied to `connect` as well:
+/// `Stream::connect` waits unbounded when the listen queue is full, and the
+/// recv timeout never starts until connect returns.
+const SINGLETON_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Connect with a wall-clock deadline. `Stream::connect` is unbounded.
+fn connect_stream_with_timeout(
+    socket_path: &std::path::Path,
+    timeout: Duration,
+) -> std::io::Result<Stream> {
+    let name = socket_path.to_fs_name::<GenericFilePath>()?;
+    ConnectOptions::new()
+        .name(name)
+        .wait_mode(ConnectWaitMode::Timeout(timeout))
+        .connect_sync()
+}
+
 /// Probe `socket_path` to determine whether another live Paneflow instance
 /// is already serving on it.
 ///
@@ -714,8 +734,6 @@ fn detect_existing_instance(socket_path: &std::path::Path) -> Option<String> {
         return None;
     }
 
-    let name = socket_path.to_fs_name::<GenericFilePath>().ok()?;
-
     for attempt in 0..3 {
         if attempt > 0 {
             // Cross the legacy rebind window. The bind_socket recreate
@@ -724,7 +742,8 @@ fn detect_existing_instance(socket_path: &std::path::Path) -> Option<String> {
             std::thread::sleep(Duration::from_millis(70));
         }
 
-        let Ok(mut stream) = Stream::connect(name.clone()) else {
+        let Ok(mut stream) = connect_stream_with_timeout(socket_path, SINGLETON_PROBE_TIMEOUT)
+        else {
             continue;
         };
 
@@ -736,7 +755,7 @@ fn detect_existing_instance(socket_path: &std::path::Path) -> Option<String> {
         // proceed to bind. A hostile squatter on the path can neither stall us
         // (the deadline) nor feed us an unbounded line (the `take` cap).
         if stream
-            .set_recv_timeout(Some(Duration::from_millis(300)))
+            .set_recv_timeout(Some(SINGLETON_PROBE_TIMEOUT))
             .is_err()
         {
             continue;
@@ -1471,6 +1490,7 @@ mod connection_limit_tests {
 mod framing_tests {
     use super::{LineRead, MAX_REQUEST_LEN, read_capped_line};
     use std::io::Cursor;
+    use std::time::Duration;
 
     #[test]
     fn capped_line_rejects_oversized_unterminated() {
@@ -1545,6 +1565,63 @@ mod framing_tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o1777))
             .expect("chmod sticky tempdir");
         assert!(super::unowned_socket_parent_is_safe(dir.path()));
+    }
+
+    /// A listener that never `accept()`s will fill its backlog; the singleton
+    /// probe's connect must not wait unbounded. Darwin AF_UNIX typically
+    /// refuses once the queue is full; other kernels may surface `TimedOut`.
+    #[cfg(unix)]
+    #[test]
+    fn connect_with_timeout_returns_before_deadline_when_listener_never_accepts() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("never-accept.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        let mut held = Vec::new();
+        let mut filled = false;
+        loop {
+            match UnixStream::connect(&path) {
+                Ok(stream) => held.push(stream),
+                Err(_) => {
+                    filled = true;
+                    break;
+                }
+            }
+            if held.len() >= 1024 {
+                break;
+            }
+        }
+        assert!(
+            filled && !held.is_empty(),
+            "listen queue never filled (held {})",
+            held.len()
+        );
+
+        let timeout = Duration::from_millis(150);
+        let path_for_thread = path.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let result = super::connect_stream_with_timeout(&path_for_thread, timeout);
+            let _ = tx.send((result.map(|_| ()).map_err(|e| e.kind()), start.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("connect must return within 2s even if the listener never accept()s");
+        assert!(
+            result.is_err(),
+            "full listen queue must not produce a live stream; got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "connect must not wait unbounded; elapsed {elapsed:?}"
+        );
+        drop(listener);
+        drop(held);
     }
 }
 

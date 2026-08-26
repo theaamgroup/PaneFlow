@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
+use interprocess::local_socket::{prelude::*, ConnectOptions, GenericFilePath, Stream};
+use interprocess::ConnectWaitMode;
 use serde_json::{json, Value};
 
 /// Wire timeout for a single request/response round-trip. The server always
@@ -188,8 +189,17 @@ fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
 }
 
 fn connect_request_stream(socket: &Path) -> io::Result<Stream> {
+    connect_stream_with_timeout(socket, IPC_TIMEOUT)
+}
+
+/// Connect with the same wall-clock deadline later applied to recv/send.
+/// `Stream::connect` waits unbounded when the listen queue is full.
+fn connect_stream_with_timeout(socket: &Path, timeout: Duration) -> io::Result<Stream> {
     let name = socket.to_fs_name::<GenericFilePath>()?;
-    Stream::connect(name)
+    ConnectOptions::new()
+        .name(name)
+        .wait_mode(ConnectWaitMode::Timeout(timeout))
+        .connect_sync()
 }
 
 /// EP-002 (agent-control-plane): open a persistent `events.subscribe` stream.
@@ -203,8 +213,7 @@ pub fn subscribe_stream(
     params: Value,
     mut on_line: impl FnMut(&str) -> bool,
 ) -> io::Result<()> {
-    let name = socket.to_fs_name::<GenericFilePath>()?;
-    let mut stream = Stream::connect(name)?;
+    let mut stream = connect_stream_with_timeout(socket, IPC_TIMEOUT)?;
     let request = build_request(1, "events.subscribe", params);
     let mut payload =
         serde_json::to_vec(&request).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -297,8 +306,7 @@ pub fn subscribe_stream_timed(
     slice: Duration,
     mut on_event: impl FnMut(StreamEvent<'_>) -> bool,
 ) -> io::Result<()> {
-    let name = socket.to_fs_name::<GenericFilePath>()?;
-    let mut stream = Stream::connect(name)?;
+    let mut stream = connect_stream_with_timeout(socket, IPC_TIMEOUT)?;
     // REQUIRED (see the doc note): without a recv deadline the read below would
     // block forever between events, so refuse rather than hang.
     stream.set_recv_timeout(Some(slice)).map_err(|e| {
@@ -598,5 +606,63 @@ mod tests {
             .call("surface.list", json!({}))
             .expect_err("must fail with no listener");
         assert!(err.contains("unreachable"), "got: {err}");
+    }
+
+    /// A listener that never `accept()`s will fill its backlog; the next
+    /// `connect` must not wait unbounded. Darwin AF_UNIX typically returns
+    /// `ConnectionRefused` once the queue is full; other kernels may surface
+    /// `TimedOut` via `ConnectWaitMode::Timeout`. Either is a bounded failure.
+    #[cfg(unix)]
+    #[test]
+    fn connect_stream_with_timeout_returns_before_deadline_when_listener_never_accepts() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Instant;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("never-accept.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut held = Vec::new();
+        let mut filled = false;
+        loop {
+            match UnixStream::connect(&path) {
+                Ok(stream) => held.push(stream),
+                Err(_) => {
+                    filled = true;
+                    break;
+                }
+            }
+            if held.len() >= 1024 {
+                break;
+            }
+        }
+        assert!(
+            filled && !held.is_empty(),
+            "listen queue never filled (held {})",
+            held.len()
+        );
+
+        let timeout = Duration::from_millis(150);
+        let path_for_thread = path.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let result = connect_stream_with_timeout(&path_for_thread, timeout);
+            let _ = tx.send((result.map(|_| ()).map_err(|e| e.kind()), start.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("connect must return within 2s even if the listener never accept()s");
+        assert!(
+            result.is_err(),
+            "full listen queue must not produce a live stream; got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "connect must not wait unbounded; elapsed {elapsed:?}"
+        );
+        drop(listener);
+        drop(held);
     }
 }

@@ -21,6 +21,8 @@ same-file = "1"
 # interrupt) while the shim survives long enough to send `ai.session_end`
 # to PaneFlow's IPC server. Same pattern time(1) / tee(1) / sudo(8) use.
 libc.workspace = true
+# Wall-clock deadline for synthesized hook children (issue #26).
+paneflow-process.workspace = true
 
 [lints]
 workspace = true

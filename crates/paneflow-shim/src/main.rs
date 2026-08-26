@@ -36,6 +36,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 const PANEFLOW_AI_EVENT_SOURCE_ENV: &str = "PANEFLOW_AI_EVENT_SOURCE";
 const PANEFLOW_AI_EVENT_SOURCE_INTERRUPT: &str = "interrupt";
@@ -133,9 +134,9 @@ fn main() -> ExitCode {
 
     // EP-004 US-010: report the agent binary's REAL exit status. The shell's
     // ChildExit only carries the shell's exit; this is the one place that
-    // knows the agent's. Emitted BEFORE `notify_session_end` - both block on
-    // the hook subprocess (`.status()`), so the server is guaranteed to see
-    // `ai.exit` (which may set `Errored`) before `ai.session_end` (which
+    // knows the agent's. Emitted BEFORE `notify_session_end` - both wait on
+    // the hook subprocess under a 2s deadline, so the server is guaranteed to
+    // see `ai.exit` (which may set `Errored`) before `ai.session_end` (which
     // spares an `Errored` session instead of removing it). `None` (spawn or
     // wait failure) emits nothing - the server keeps today's behavior.
     let interrupted_exit = agent_exit.is_some_and(is_interrupt_exit_code);
@@ -242,11 +243,24 @@ fn install_hook_guard(tool: &str) -> Option<ToolHookGuard> {
 
 /// EP-004 US-010: best-effort notify of `ai.exit { exit_code }` after the
 /// real AI binary exits. Same contract as [`notify_session_end`] (sibling
-/// hook binary, blocking `.status()` wait, silent failure); the raw code
-/// rides in `PANEFLOW_AI_EXIT_CODE` since the hook's stdin is null on
+/// hook binary, bounded wait, silent failure); the raw code rides in
+/// `PANEFLOW_AI_EXIT_CODE` since the hook's stdin is null on
 /// shim-synthesized events.
 fn is_interrupt_exit_code(exit_code: i32) -> bool {
     matches!(exit_code, 129 | 130 | 137 | 143)
+}
+
+/// Outer wait+kill for a synthesized hook. The hook's own IPC connect+write
+/// is already bounded at 500 ms; this stops a wedged child from pinning the
+/// PTY after the wrapped agent has exited.
+const HOOK_NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn run_synthesized_hook(cmd: std::process::Command) {
+    run_synthesized_hook_with_deadline(cmd, HOOK_NOTIFY_TIMEOUT);
+}
+
+fn run_synthesized_hook_with_deadline(cmd: std::process::Command, deadline: Duration) {
+    let _ = paneflow_process::run_with_timeout(cmd, deadline, 0);
 }
 
 fn notify_exit(tool: &str, exit_code: i32, interrupted: bool) {
@@ -267,7 +281,7 @@ fn notify_exit(tool: &str, exit_code: i32, interrupted: bool) {
             PANEFLOW_AI_EVENT_SOURCE_INTERRUPT,
         );
     }
-    let _ = cmd.status();
+    run_synthesized_hook(cmd);
 }
 
 /// Best-effort notify of `ai.session_end` after the real AI binary exits.
@@ -280,12 +294,11 @@ fn notify_exit(tool: &str, exit_code: i32, interrupted: bool) {
 /// and `PANEFLOW_WORKSPACE_ID` from the shim's own env (they were set
 /// by `pty_session::inject_ai_hook_env`).
 ///
-/// Blocking wait with no explicit timeout: the hook's only work is a
+/// Bounded wait (`HOOK_NOTIFY_TIMEOUT`): the hook's only work is a
 /// single Unix-socket write of a tiny JSON frame, typically <5 ms. The
 /// PRD's 15 ms latency budget for shim overhead (US-004 AC) is preserved
-/// even adding this - a Unix-socket connect+write is well under that
-/// alone, and we're outside the spawn-to-exec critical path here (the
-/// user's command has already returned its exit code).
+/// on the success path. A wedged hook (unbounded connect, stuck child)
+/// is killed at 2 s so the PTY is not pinned after the agent exits.
 fn notify_session_end(tool: &str, interrupted: bool) {
     let Some(hook_path) = locate_sibling_hook_binary() else {
         return;
@@ -303,7 +316,7 @@ fn notify_session_end(tool: &str, interrupted: bool) {
             PANEFLOW_AI_EVENT_SOURCE_INTERRUPT,
         );
     }
-    let _ = cmd.status();
+    run_synthesized_hook(cmd);
 }
 
 /// Resolve `paneflow-ai-hook` (or `.exe` on Windows) sitting in the same
@@ -533,6 +546,24 @@ mod tests {
     /// Originally Linux-gated at 15 ms. Restored for macOS: a 20-entry
     /// walk of nonexistent dirs measures well under 1 ms locally, but CI
     /// macOS runners add scheduler noise, so the ceiling is 50 ms.
+    #[cfg(unix)]
+    #[test]
+    fn synthesized_hook_wait_returns_when_child_hangs() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let start = std::time::Instant::now();
+        run_synthesized_hook_with_deadline(cmd, Duration::from_millis(150));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "must actually wait for the deadline, not fail to spawn; elapsed {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "hook wait must not block for the child lifetime; elapsed {elapsed:?}"
+        );
+    }
+
     #[test]
     fn find_real_binary_in_completes_under_50ms_budget() {
         let dirs: Vec<PathBuf> = (0..20)

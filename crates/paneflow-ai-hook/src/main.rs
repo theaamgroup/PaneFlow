@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
+use interprocess::local_socket::{prelude::*, ConnectOptions, GenericFilePath, Stream};
+use interprocess::ConnectWaitMode;
 
 /// U-027: write deadline for the one-shot hook frame. The hook is invoked
 /// synchronously by the shim, so a stalled same-UID socket peer must not block
@@ -153,10 +154,17 @@ pub fn send_frame(socket_path: &Path, frame: &serde_json::Value) -> std::io::Res
 }
 
 fn connect_frame_stream(socket_path: &Path) -> std::io::Result<Stream> {
+    connect_stream_with_timeout(socket_path, HOOK_IPC_TIMEOUT)
+}
+
+/// Connect with the same wall-clock deadline later applied to the write.
+/// `Stream::connect` waits unbounded when the listen queue is full.
+fn connect_stream_with_timeout(socket_path: &Path, timeout: Duration) -> std::io::Result<Stream> {
     let name = socket_path.to_fs_name::<GenericFilePath>()?;
-    {
-        Stream::connect(name)
-    }
+    ConnectOptions::new()
+        .name(name)
+        .wait_mode(ConnectWaitMode::Timeout(timeout))
+        .connect_sync()
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +797,62 @@ mod unix_tests {
             result.is_err(),
             "send_frame must return Err when the socket path has no listener"
         );
+    }
+
+    /// A listener that never `accept()`s will fill its backlog; connect must
+    /// not wait unbounded. Darwin AF_UNIX typically refuses once the queue is
+    /// full; other kernels may surface `TimedOut`. Either is a bounded failure.
+    #[test]
+    fn connect_stream_with_timeout_returns_before_deadline_when_listener_never_accepts() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Instant;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("never-accept.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut held = Vec::new();
+        let mut filled = false;
+        loop {
+            match UnixStream::connect(&path) {
+                Ok(stream) => held.push(stream),
+                Err(_) => {
+                    filled = true;
+                    break;
+                }
+            }
+            if held.len() >= 1024 {
+                break;
+            }
+        }
+        assert!(
+            filled && !held.is_empty(),
+            "listen queue never filled (held {})",
+            held.len()
+        );
+
+        let timeout = Duration::from_millis(150);
+        let path_for_thread = path.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let result = connect_stream_with_timeout(&path_for_thread, timeout);
+            let _ = tx.send((result.map(|_| ()).map_err(|e| e.kind()), start.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("connect must return within 2s even if the listener never accept()s");
+        assert!(
+            result.is_err(),
+            "full listen queue must not produce a live stream; got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "connect must not wait unbounded; elapsed {elapsed:?}"
+        );
+        drop(listener);
+        drop(held);
     }
 }
 
