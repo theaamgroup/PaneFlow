@@ -32,10 +32,13 @@ impl PaneFlowApp {
             .mcp_status
             .as_deref()
             .map(paneflow_mcp_install::overall_state);
+        let debug_blocked = !crate::runtime_paths::durable_agent_install_allowed();
 
         // Button label + whether the click is live.
         let (label, enabled): (SharedString, bool) = if self.mcp_busy {
             ("Installing…".into(), false)
+        } else if debug_blocked {
+            ("Unavailable in debug".into(), false)
         } else {
             match state {
                 None => ("Checking…".into(), false),
@@ -100,6 +103,17 @@ impl PaneFlowApp {
                     .text_size(px(12.))
                     .text_color(danger_color())
                     .child(error),
+            );
+        } else if debug_blocked {
+            card = card.child(hairline(ui)).child(
+                div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_size(px(12.))
+                    .text_color(danger_color())
+                    .child(SharedString::from(
+                        crate::runtime_paths::durable_agent_install_refusal_message(),
+                    )),
             );
         }
         for (line, is_error) in recap_lines {
@@ -193,6 +207,13 @@ impl PaneFlowApp {
     /// runs the install + a fresh status probe, and stores both.
     fn start_mcp_install(&mut self, cx: &mut Context<Self>) {
         if self.mcp_busy {
+            return;
+        }
+        if !crate::runtime_paths::durable_agent_install_allowed() {
+            self.mcp_install = Some(Err(
+                crate::runtime_paths::durable_agent_install_refusal_message(),
+            ));
+            cx.notify();
             return;
         }
         self.mcp_busy = true;

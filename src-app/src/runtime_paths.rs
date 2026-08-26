@@ -292,6 +292,41 @@ pub fn ai_hook_binary_path() -> Option<PathBuf> {
     Some(data_dir()?.join("bin").join("paneflow-ai-hook"))
 }
 
+/// Opt-in for writing a debug-build MCP-bridge / ai-hook path into durable
+/// agent configs (`~/.claude.json`, `$CLAUDE_CONFIG_DIR/settings.json`, …).
+/// Value-gated (`=1` only), matching `PANEFLOW_ALLOW_MULTIPLE` (#53): unset,
+/// empty, `0`, and `false` still refuse.
+pub(crate) const ALLOW_DEBUG_MCP_INSTALL_ENV: &str = "PANEFLOW_ALLOW_DEBUG_MCP_INSTALL";
+
+/// Whether this process may register the extracted debug-namespaced
+/// `paneflow-mcp` / `paneflow-ai-hook` path with Claude/Codex/Gemini/opencode.
+///
+/// Release builds always allow. Debug builds extract under `paneflow-dev/`
+/// and must not persist that path unless `PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1`.
+/// Does not bake `PANEFLOW_SOCKET_PATH` into the agent entry (D5).
+pub(crate) fn durable_agent_install_allowed() -> bool {
+    durable_agent_install_allowed_from(
+        cfg!(debug_assertions),
+        std::env::var(ALLOW_DEBUG_MCP_INSTALL_ENV).ok().as_deref(),
+    )
+}
+
+/// Pure truth table so tests do not mutate process env.
+pub(crate) fn durable_agent_install_allowed_from(
+    debug_build: bool,
+    override_value: Option<&str>,
+) -> bool {
+    !debug_build || matches!(override_value, Some("1"))
+}
+
+/// Body of the debug-install refusal. CLI callers prefix `paneflow <cmd>: `.
+pub(crate) fn durable_agent_install_refusal_message() -> String {
+    format!(
+        "refusing to write a debug-build path (`paneflow-dev`) into durable agent configs. \
+         Use a release build or the installed .app, or set {ALLOW_DEBUG_MCP_INSTALL_ENV}=1 to override."
+    )
+}
+
 #[cfg(unix)]
 fn check_sun_path_fits(path: &std::path::Path) -> bool {
     let bytes = path.as_os_str().len();
@@ -309,6 +344,42 @@ fn check_sun_path_fits(path: &std::path::Path) -> bool {
         false
     } else {
         true
+    }
+}
+
+#[cfg(test)]
+mod debug_install_tests {
+    use super::*;
+
+    #[test]
+    fn release_builds_always_allow_durable_install() {
+        assert!(durable_agent_install_allowed_from(false, None));
+        assert!(durable_agent_install_allowed_from(false, Some("")));
+        assert!(durable_agent_install_allowed_from(false, Some("0")));
+        assert!(durable_agent_install_allowed_from(false, Some("1")));
+    }
+
+    #[test]
+    fn debug_builds_require_override_eq_1() {
+        assert!(!durable_agent_install_allowed_from(true, None));
+        assert!(!durable_agent_install_allowed_from(true, Some("")));
+        assert!(!durable_agent_install_allowed_from(true, Some("0")));
+        assert!(!durable_agent_install_allowed_from(true, Some("false")));
+        assert!(!durable_agent_install_allowed_from(true, Some("true")));
+        assert!(durable_agent_install_allowed_from(true, Some("1")));
+    }
+
+    #[test]
+    fn refusal_names_release_app_and_override() {
+        let msg = durable_agent_install_refusal_message();
+        assert!(msg.contains("paneflow-dev"), "{msg}");
+        assert!(msg.contains("release build"), "{msg}");
+        assert!(msg.contains(".app"), "{msg}");
+        assert!(msg.contains("PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1"), "{msg}");
+        assert!(
+            !msg.contains("PANEFLOW_SOCKET_PATH"),
+            "must not tell the operator to bake a debug socket into agent env: {msg}"
+        );
     }
 }
 

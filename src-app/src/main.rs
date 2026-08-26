@@ -341,6 +341,27 @@ fn should_extract_mcp_bridge_for_cli(args: &[String]) -> bool {
         && args.len() == 3
 }
 
+/// `paneflow hooks setup` is the durable write (user-scope `settings.json`).
+/// Status/uninstall stay allowed from debug so a polluted install can be
+/// inspected or removed. Extra argv after `setup` is ignored by the hooks
+/// CLI today, so this matches on the verb only.
+fn should_setup_hooks_for_cli(args: &[String]) -> bool {
+    args.get(1).map(String::as_str) == Some("hooks")
+        && args.get(2).map(String::as_str) == Some("setup")
+}
+
+/// Debug builds must not persist `paneflow-dev` paths in agent configs.
+fn debug_durable_install_refusal(command: &str) -> Option<String> {
+    if runtime_paths::durable_agent_install_allowed() {
+        None
+    } else {
+        Some(format!(
+            "paneflow {command}: {}",
+            runtime_paths::durable_agent_install_refusal_message()
+        ))
+    }
+}
+
 /// Top-level `--help`/`-h` text. Built as a function so tests can assert the
 /// CLI verb list without spawning GPUI. Unknown-verb errors point here.
 fn global_help_text() -> String {
@@ -382,7 +403,7 @@ fn global_help_text() -> String {
 mod native_material_tests {
     use super::{
         native_backdrop_material_active, should_extract_mcp_bridge_for_cli,
-        should_load_login_shell_env_for_startup,
+        should_load_login_shell_env_for_startup, should_setup_hooks_for_cli,
     };
     use paneflow_config::schema::AppMode;
 
@@ -470,6 +491,28 @@ mod native_material_tests {
         assert!(!should_extract_mcp_bridge_for_cli(&args(&[
             "paneflow", "mcp", "install", "--help"
         ])));
+    }
+
+    #[test]
+    fn hooks_setup_is_the_durable_write_command() {
+        assert!(should_setup_hooks_for_cli(&args(&[
+            "paneflow", "hooks", "setup"
+        ])));
+        assert!(should_setup_hooks_for_cli(&args(&[
+            "paneflow", "hooks", "setup", "extra"
+        ])));
+        assert!(!should_setup_hooks_for_cli(&args(&[
+            "paneflow", "hooks", "status"
+        ])));
+        assert!(!should_setup_hooks_for_cli(&args(&[
+            "paneflow",
+            "hooks",
+            "uninstall"
+        ])));
+        assert!(!should_setup_hooks_for_cli(&args(&[
+            "paneflow", "mcp", "install"
+        ])));
+        assert!(!should_setup_hooks_for_cli(&args(&["paneflow", "hooks"])));
     }
 }
 
@@ -2666,6 +2709,12 @@ fn main() {
     // read-only with respect to Paneflow's own data dir.
     // Diagnostics go to stderr (env_logger), the per-agent report to stdout.
     if args.get(1).map(String::as_str) == Some("mcp") {
+        if should_extract_mcp_bridge_for_cli(&args)
+            && let Some(msg) = debug_durable_install_refusal("mcp install")
+        {
+            eprintln!("{msg}");
+            std::process::exit(1);
+        }
         let bridge_path = if should_extract_mcp_bridge_for_cli(&args) {
             match ai_hooks::extract::ensure_bridge_extracted() {
                 Ok(p) => Some(p),
@@ -2690,6 +2739,12 @@ fn main() {
     // configs is guaranteed to exist; fall back to the resolved-but-maybe-
     // missing path so the engine can emit a precise refusal.
     if is_hooks_subcommand {
+        if should_setup_hooks_for_cli(&args)
+            && let Some(msg) = debug_durable_install_refusal("hooks setup")
+        {
+            eprintln!("{msg}");
+            std::process::exit(1);
+        }
         let hook_path = match ai_hooks::extract::ensure_ai_hook_extracted() {
             Ok(p) => Some(p),
             Err(e) => {
