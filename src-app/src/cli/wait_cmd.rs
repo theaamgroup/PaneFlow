@@ -90,10 +90,13 @@ pub fn wait(
 
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let deadline = Instant::now() + timeout;
+    // A baseline `Err` is fatal: swallowing it as `None` would treat the
+    // entire later scrollback as "new text" and match output that was
+    // already on screen. `Ok(None)` (pane gone) stays None.
     let baselines: HashMap<u64, Option<ReadSnapshot>> = ids
         .iter()
-        .map(|&id| (id, read_snapshot(client, id).ok().flatten()))
-        .collect();
+        .map(|&id| read_snapshot(client, id).map(|snap| (id, snap)))
+        .collect::<Result<_, _>>()?;
 
     let mut all_matches: HashMap<u64, Vec<String>> = HashMap::new();
 
@@ -416,7 +419,7 @@ pub fn wait_idle(
         )
     })?;
 
-    let baseline = read_snapshot(client, id).ok().flatten();
+    let baseline = read_snapshot(client, id)?;
 
     // Ctrl-C is a clean stop; dropping the socket frees the server-side
     // subscription on its next write (RAII), so nothing leaks (US-007 AC4).
@@ -646,11 +649,66 @@ mod tests {
 
     #[test]
     fn wait_fails_fast_when_target_pane_gone() {
-        // surface.read errors (not "unreachable") -> the pane is treated as Gone;
+        // surface.read "not found" / -32602 -> the pane is treated as Gone;
         // with the whole watched set gone, wait fails fast instead of spinning.
         let fake = FakeWait::new(vec![None]);
         let err = wait(&fake, "1", "DONE", Some(30), MatchMode::Single).unwrap_err();
         assert!(err.message.contains("closed"), "got: {}", err.message);
+    }
+
+    /// First `surface.read` is a transient non-gone IPC error; later reads
+    /// would return text that already contains the pattern. Baseline failure
+    /// must fail `wait`, not treat a missing baseline as "match the whole
+    /// scrollback".
+    struct FirstReadOverload {
+        reads: std::cell::Cell<u64>,
+    }
+    impl IpcTransport for FirstReadOverload {
+        fn call(&self, method: &str, _params: Value) -> Result<Value, String> {
+            match method {
+                "surface.list" => Ok(json!({
+                    "surfaces": [{ "surface_id": 1u64, "name": "agent", "cmd": "claude", "cwd": "/tmp" }]
+                })),
+                "surface.read" => {
+                    let n = self.reads.get() + 1;
+                    self.reads.set(n);
+                    if n == 1 {
+                        Err("server error -32000: overloaded".to_string())
+                    } else {
+                        Ok(json!({
+                            "text": "Build DONE in 3s\n",
+                            "output_generation": n
+                        }))
+                    }
+                }
+                other => Err(format!("unexpected method {other}")),
+            }
+        }
+    }
+
+    #[test]
+    fn wait_fails_when_baseline_snapshot_errors() {
+        let fake = FirstReadOverload {
+            reads: std::cell::Cell::new(0),
+        };
+        let err = wait(&fake, "1", "DONE", Some(5), MatchMode::Single).unwrap_err();
+        assert!(err.message.contains("overloaded"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn wait_does_not_match_pattern_already_in_successful_baseline() {
+        // Baseline and every later poll return the same DONE line: new-text
+        // since baseline is empty, so wait must time out rather than succeed.
+        let fake = FakeWait::new(vec![Some("Build DONE in 3s\n")]);
+        let code = wait(&fake, "1", "DONE", Some(0), MatchMode::Single).expect("ok");
+        assert_eq!(code, EXIT_TIMEOUT);
+    }
+
+    #[test]
+    fn wait_matches_after_successful_empty_baseline() {
+        let fake = FakeWait::new(vec![Some(""), Some("Build DONE in 3s\n")]);
+        let code = wait(&fake, "1", "DONE", Some(5), MatchMode::Single).expect("ok");
+        assert_eq!(code, EXIT_OK);
     }
 
     struct MultiWait {
