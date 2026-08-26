@@ -96,11 +96,37 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --locked --target "$TARGET" -- -D warnings
 
+      # Tag-push must bake a non-empty minisign public key. An unset
+      # Actions variable interpolates as "", so option_env! is Some("")
+      # and embedded_public_keys() drops the empty slot: cargo still
+      # exits 0. Fail here, before cargo build, so we never produce a
+      # release binary that cannot verify updates. Dry-run may still
+      # build without a key (existing unsigned-dry-run posture).
+      - name: Require minisign public key for tag-push
+        env:
+          PANEFLOW_MINISIGN_PUBKEY: ${{ vars.PANEFLOW_MINISIGN_PUBKEY }}
+        run: |
+          # Same emptiness rule as APPLE_TEAM_ID in Detect: whitespace
+          # is missing. Do not strip for the bake; Build still receives
+          # the raw var and Rust trims the slot at use.
+          pubkey="$(printf '%s' "${PANEFLOW_MINISIGN_PUBKEY:-}" | tr -d '[:space:]')"
+          if [ -n "${pubkey}" ]; then
+              echo "PANEFLOW_MINISIGN_PUBKEY is set - will bake into the binary."
+          else
+              if [ "${RELEASE_MODE}" = "release" ]; then
+                  echo "::error title=minisign public key required::vars.PANEFLOW_MINISIGN_PUBKEY is empty. Tag-push builds must bake a minisign public key so the in-app updater can verify downloads. Set the repository variable (Settings → Secrets and variables → Actions → Variables). See docs/self-update-signing.md."
+                  exit 1
+              fi
+              echo "::warning title=minisign public key missing::vars.PANEFLOW_MINISIGN_PUBKEY is empty - this dry-run binary cannot verify self-updates. See docs/self-update-signing.md."
+          fi
+
       - name: Build release binary
         env:
           # Public minisign keys (repository variables, never secrets).
           # Baked in via option_env! so the in-app updater can verify
-          # downloaded DMGs. An unset var resolves to "" / None.
+          # downloaded DMGs. An unset var interpolates as ""; the
+          # previous step already refused tag-push on empty/whitespace.
+          # Dry-run may still bake empty (has_embedded_key() is false).
           PANEFLOW_MINISIGN_PUBKEY: ${{ vars.PANEFLOW_MINISIGN_PUBKEY }}
           PANEFLOW_MINISIGN_PUBKEY_NEXT: ${{ vars.PANEFLOW_MINISIGN_PUBKEY_NEXT }}
           # Same secret later used to codesign. Baked via option_env! so
