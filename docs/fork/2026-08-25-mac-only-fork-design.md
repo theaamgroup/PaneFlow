@@ -289,6 +289,53 @@ is `Auto | Alacritty` only. The loader still maps leftover
 `"backend": "ghostty"` to Alacritty so old `paneflow.json` files load. No
 env var selects a backend.
 
+### SearchEngine lift (2026-08-26, issues #91 / #97)
+
+Upstream v0.9.0 promoted `paneflow-terminal-ghostty` from an optional,
+target-gated backend to an unconditional core dependency, and `74dcca2`
+made the shared find-in-buffer path import `SearchEngine` from it
+regardless of backend. Rather than restore the crate, the engine was
+**lifted into `src-app/src/search_engine.rs`**: the ~150-line
+pure-`regex` core of upstream's file with no libghostty linkage,
+coupled to the host crate only through
+`GhosttyError`, `Point`, `SearchMatch` and `SearchResult`. `Point` and
+`SearchMatch` already existed here field-identically
+(`terminal/types.rs`, `search.rs`), so upstream's `from_shared_result`
+translation layer was dropped and `GhosttyError` collapsed to the single
+variant the engine can raise.
+
+Three things were deliberately **not** taken:
+
+- `MAX_SEARCH_CELLS` (12M cells) and the `SearchChunk` chunk driver. The
+  budget never fires at our 10 000-line scrollback (~2M cells) and it was
+  the only `cfg(target_os = "linux")` site in the upstream file. Skipping
+  it is what keeps `./scripts/linux-census.sh` at zero. `SearchResult`
+  therefore has no `truncated` field and the match counter never shows
+  `n/m+`.
+- The render-thread-freeze framing of `74dcca2`. That freeze was
+  Ghostty's blocking mailbox round-trip with a 1 s `recv_timeout`; our
+  path was already off-thread.
+- `TerminalView::appearance_theme_generation` /
+  `backend.refresh_appearance()`, which rode along in the same commit and
+  are Ghostty engine calls.
+
+What was taken: the combining-character extraction
+(`Cell::zerowidth()`, verbatim - a real correctness bug that also fixed
+`surface.search` and the MCP bridge's `search_pane`, which share the
+extractor), and cooperative cancellation, extended past upstream to the
+fleet-wide fan-out in `app/fleet_search.rs` - up to 640 sequential
+full-grid scans that upstream left uncancellable.
+
+`search_engine.rs` sits at the crate root, outside `terminal/`, and
+imports no `alacritty_terminal`. It is therefore NOT in the
+`alacritty_confined_to_backend_allowlist` ALLOWLIST
+(`terminal/types.rs:997`) and must never be added: if the engine ever
+needs an alacritty type, the code belongs back in `search.rs`.
+
+Expect this lift again. Upstream is entangling Ghostty deeper into shared
+code each release; the pattern is "lift the pure part, drop the gated
+part", not "restore the crate".
+
 ## Known costs
 
 - Deep cut plus upstream merges means conflicts across roughly 80 files on every

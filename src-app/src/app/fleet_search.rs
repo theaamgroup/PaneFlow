@@ -55,6 +55,60 @@ pub(crate) struct FleetSearchState {
     pub(crate) selected: usize,
 }
 
+#[cfg(test)]
+thread_local! {
+    static PANES_ENTERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_fleet_pane_entered() {
+    PANES_ENTERED.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn fleet_panes_entered() -> usize {
+    PANES_ENTERED.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(super) fn reset_fleet_panes_entered() {
+    PANES_ENTERED.with(|c| c.set(0));
+}
+
+/// Sequential fan-out body, extracted so it is unit-testable and so the
+/// cancel flag is checked between panes. `search_with_cancel` also checks
+/// it per grid row, so an in-flight pane abandons mid-scan.
+pub(crate) fn scan_fleet_targets(
+    targets: Vec<(u64, String, String, crate::terminal::TerminalSessionBackend)>,
+    query: &str,
+    regex: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> FleetScanOutcome {
+    use std::sync::atomic::Ordering;
+    let mut hits: Vec<(u64, String, String, usize)> = Vec::new();
+    let mut total = 0usize;
+    let mut error: Option<String> = None;
+    for (sid, name, ws_title, backend) in targets {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        #[cfg(test)]
+        note_fleet_pane_entered();
+        let result = backend.search_with_cancel(query, regex, cancelled);
+        if let Some(e) = result.regex_error {
+            // Same query, same engine -> the error is identical for
+            // every pane: keep ONE, stop.
+            error = Some(e);
+            break;
+        }
+        if !result.matches.is_empty() {
+            total += result.matches.len();
+            hits.push((sid, name, ws_title, result.matches.len()));
+        }
+    }
+    (hits, total, error)
+}
+
 impl PaneFlowApp {
     /// Entry point - `TerminalEvent::FleetSearchRequested` lands here (no
     /// `Window` in scope: overlay focus is deferred to the next render via
@@ -96,8 +150,11 @@ impl PaneFlowApp {
             }
         }
 
+        self.cancel_fleet_scan();
         self.fleet_search_generation += 1;
         let generation = self.fleet_search_generation;
+        let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.fleet_search_cancellation = Some(cancellation.clone());
         self.fleet_search = Some(FleetSearchState {
             query: query.clone(),
             regex,
@@ -116,23 +173,7 @@ impl PaneFlowApp {
                 // locks each grid internally for the scan only. Counts +
                 // first-error only come back (memory contract above).
                 let scan = smol::unblock(move || {
-                    let mut hits: Vec<(u64, String, String, usize)> = Vec::new();
-                    let mut total = 0usize;
-                    let mut error: Option<String> = None;
-                    for (sid, name, ws_title, backend) in targets {
-                        let result = backend.search(&query, regex);
-                        if let Some(e) = result.regex_error {
-                            // Same query, same engine → the error is
-                            // identical for every pane: keep ONE, stop.
-                            error = Some(e);
-                            break;
-                        }
-                        if !result.matches.is_empty() {
-                            total += result.matches.len();
-                            hits.push((sid, name, ws_title, result.matches.len()));
-                        }
-                    }
-                    (hits, total, error)
+                    scan_fleet_targets(targets, &query, regex, &cancellation)
                 })
                 .await;
                 let _ = cx.update(|cx| {
@@ -157,6 +198,7 @@ impl PaneFlowApp {
         if self.fleet_search_generation != generation {
             return;
         }
+        self.fleet_search_cancellation = None;
         let Some(state) = &mut self.fleet_search else {
             return;
         };
@@ -226,12 +268,19 @@ impl PaneFlowApp {
     }
 
     pub(crate) fn close_fleet_search(&mut self, cx: &mut Context<Self>) {
+        self.cancel_fleet_scan();
         self.fleet_search = None;
         // Closing the search dismisses the badges (US-018 AC) - and bumping
         // the generation cancels any in-flight deposit/timer.
         self.fleet_search_generation += 1;
         self.push_fleet_badges(&std::collections::HashMap::new(), cx);
         cx.notify();
+    }
+
+    fn cancel_fleet_scan(&mut self) {
+        if let Some(cancellation) = self.fleet_search_cancellation.take() {
+            cancellation.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Enter / click on a row: teleport to the pane (Attention Queue
@@ -509,5 +558,47 @@ impl PaneFlowApp {
         )
         .with_priority(6)
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_fleet_targets;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn fleet_scan_stops_at_the_cancel_flag() {
+        super::reset_fleet_panes_entered();
+        let a = crate::terminal::TerminalState::new_display_only(5, 20);
+        a.restore_scrollback("needle");
+        let b = crate::terminal::TerminalState::new_display_only(5, 20);
+        b.restore_scrollback("needle");
+        let targets = vec![
+            (1, "a".into(), "ws".into(), a.session_backend()),
+            (2, "b".into(), "ws".into(), b.session_backend()),
+        ];
+        let (hits, total, error) =
+            scan_fleet_targets(targets, "needle", false, &AtomicBool::new(true));
+        assert!(hits.is_empty());
+        assert_eq!(total, 0);
+        assert!(error.is_none());
+        // Dual-layer cancel: `search_with_cancel` would also return empty
+        // hits, so this count is what pins the between-pane `break`.
+        assert_eq!(super::fleet_panes_entered(), 0);
+    }
+
+    #[test]
+    fn fleet_scan_counts_every_target_when_not_cancelled() {
+        super::reset_fleet_panes_entered();
+        let a = crate::terminal::TerminalState::new_display_only(5, 20);
+        a.restore_scrollback("needle");
+        let b = crate::terminal::TerminalState::new_display_only(5, 20);
+        b.restore_scrollback("needle");
+        let targets = vec![
+            (1, "a".into(), "ws".into(), a.session_backend()),
+            (2, "b".into(), "ws".into(), b.session_backend()),
+        ];
+        let (hits, _, _) = scan_fleet_targets(targets, "needle", false, &AtomicBool::new(false));
+        assert_eq!(hits.len(), 2);
     }
 }

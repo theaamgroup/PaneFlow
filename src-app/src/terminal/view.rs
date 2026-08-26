@@ -169,6 +169,8 @@ pub struct TerminalView {
     pub(super) search_query: String,
     /// Monotonic token used to discard stale async local-search results.
     pub(super) search_generation: u64,
+    /// Cooperative cancellation flag for the scan currently in flight.
+    pub(super) search_cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Cached search matches (grid coordinates)
     pub(super) search_matches: Vec<crate::search::SearchMatch>,
     /// Index of the currently focused match (for navigation)
@@ -709,6 +711,7 @@ impl TerminalView {
             search_input,
             search_query: String::new(),
             search_generation: 0,
+            search_cancellation: None,
             search_matches: Vec::new(),
             search_current: 0,
             search_regex_mode: false,

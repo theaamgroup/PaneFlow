@@ -611,8 +611,18 @@ impl TerminalSessionBackend {
         Line(self.term.lock_unfair().bottommost_line().0)
     }
 
+    #[cfg(test)]
     pub(crate) fn search(&self, query: &str, regex: bool) -> crate::search::SearchResult {
         crate::search::search_term(&self.term, query, regex)
+    }
+
+    pub(crate) fn search_with_cancel(
+        &self,
+        query: &str,
+        regex: bool,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> crate::search::SearchResult {
+        crate::search::search_term_with_cancel(&self.term, query, regex, cancelled)
     }
 
     pub(crate) fn scroll_to_match(&self, search_match: &crate::search::SearchMatch) -> usize {

@@ -53,6 +53,7 @@ mod pricing;
 mod project;
 mod runtime_paths;
 mod search;
+mod search_engine;
 mod settings;
 mod terminal;
 pub mod theme;
@@ -1367,6 +1368,8 @@ struct PaneFlowApp {
     /// match vectors); the fan-out is generation-guarded.
     fleet_search: Option<app::fleet_search::FleetSearchState>,
     fleet_search_generation: u64,
+    /// Cooperative cancellation flag for the fan-out currently in flight.
+    fleet_search_cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     fleet_search_focus: FocusHandle,
     /// Deferred focus for the fleet overlay (opened from an event handler
     /// that has no `Window` - consumed in `render`, like
