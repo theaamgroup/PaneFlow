@@ -131,6 +131,37 @@ pub enum TerminalType {
     DisplayOnly,
 }
 
+/// Failure to land a PTY write. Queuing onto a live EventLoop or the
+/// US-012 pre-promotion pending buffer is success; these are the cases
+/// where `surface.send_text` used to report `sent: true` while dropping
+/// bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PtyWriteError {
+    /// `EventLoop` mpsc is closed (child already exited).
+    ChannelClosed,
+    /// Display-only pending buffer would exceed [`MAX_PENDING_INPUT_BYTES`].
+    Overflow,
+    /// `pending_input` mutex poisoned.
+    Poisoned,
+}
+
+impl std::fmt::Display for PtyWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChannelClosed => {
+                write!(f, "PTY write channel is closed (child has exited)")
+            }
+            Self::Overflow => write!(
+                f,
+                "PTY pending input overflow: write exceeds 1 MiB pre-promotion cap"
+            ),
+            Self::Poisoned => write!(f, "PTY pending input lock poisoned"),
+        }
+    }
+}
+
+impl std::error::Error for PtyWriteError {}
+
 /// The write side of a terminal - routes input / resize / shutdown to the PTY
 /// `EventLoop` (or drops them for a display-only terminal). Mirrors Zed's
 /// `PtySender` (`crates/terminal/src/alacritty.rs:84-108`), which exposes only
@@ -162,33 +193,42 @@ impl PtySender {
         matches!(self.0, TerminalType::Pty(_))
     }
 
-    /// Internal: drop the message for a display-only terminal, otherwise hand it
-    /// to the `EventLoop`. The send error is ignored - a closed channel means
-    /// the child already exited, which the exit path handles.
-    fn send(&self, msg: Msg) {
-        if let TerminalType::Pty(sender) = &self.0 {
-            let _ = sender.send(msg);
+    /// Hand `msg` to the `EventLoop`, or no-op for a display-only terminal
+    /// (callers that need buffering go through [`TerminalState::notify_or_buffer`]).
+    fn send(&self, msg: Msg) -> Result<(), PtyWriteError> {
+        match &self.0 {
+            TerminalType::Pty(sender) => sender.send(msg).map_err(|_| PtyWriteError::ChannelClosed),
+            TerminalType::DisplayOnly => Ok(()),
         }
     }
 
-    /// Forward input bytes to the child (the [`Notify`] path).
+    /// Forward input bytes to the child (the [`Notify`] path). Errors are
+    /// logged here so keyboard / paste callers keep a `()` signature.
     pub fn write(&self, bytes: Cow<'static, [u8]>) {
+        let _ = self.try_write(bytes);
+    }
+
+    fn try_write(&self, bytes: Cow<'static, [u8]>) -> Result<(), PtyWriteError> {
         // alacritty: the terminal hangs if 0 bytes are sent through.
         if bytes.is_empty() {
-            return;
+            return Ok(());
         }
-        self.send(Msg::Input(bytes));
+        let result = self.send(Msg::Input(bytes));
+        if let Err(err) = &result {
+            log::warn!(target: "paneflow::terminal", "PTY input dropped: {err}");
+        }
+        result
     }
 
     /// Resize the PTY grid (drives SIGWINCH to the child).
     pub fn resize(&self, size: AlacWindowSize) {
-        self.send(Msg::Resize(size));
+        let _ = self.send(Msg::Resize(size));
     }
 
     /// Ask the `EventLoop` to shut down (sent from `Drop` before the teardown
     /// ladder).
     pub fn shutdown(&self) {
-        self.send(Msg::Shutdown);
+        let _ = self.send(Msg::Shutdown);
     }
 }
 
@@ -1776,6 +1816,10 @@ impl TerminalState {
 
     fn drain_pending_legacy_input(&self) -> Vec<Cow<'static, [u8]>> {
         let Ok(mut pending) = self.pending_input.lock() else {
+            log::error!(
+                target: "paneflow::terminal",
+                "pending_input lock poisoned; dropping queued launch input"
+            );
             return Vec::new();
         };
         pending
@@ -2271,6 +2315,16 @@ impl TerminalState {
     }
 
     pub fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
+        let _ = self.try_write_to_pty(input);
+    }
+
+    /// Fallible twin of [`Self::write_to_pty`] for IPC. Queuing onto a live
+    /// EventLoop or the US-012 pending buffer is `Ok`; a closed channel,
+    /// pending overflow, or poisoned lock is `Err`.
+    pub(crate) fn try_write_to_pty(
+        &self,
+        input: impl Into<Cow<'static, [u8]>>,
+    ) -> Result<(), PtyWriteError> {
         // US-002: any path through write_to_pty is genuine user input
         // (keystroke, paste, mouse report, IME commit, user scroll). Mark the
         // session user-initiated so a later exit closes the pane. Automated
@@ -2278,8 +2332,7 @@ impl TerminalState {
         // deliberately bypass this by calling `self.notifier.notify` directly.
         self.keyboard_input_sent
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let input = input.into();
-        self.notify_or_buffer(input);
+        self.notify_or_buffer(input.into())
     }
 
     pub(super) fn set_terminal_focused(&mut self, focused: bool) {
@@ -2300,18 +2353,34 @@ impl TerminalState {
     /// lost; [`promote`](Self::promote) flushes the queue in order. Bounded by
     /// [`MAX_PENDING_INPUT_BYTES`] so a never-promoted terminal can't grow it
     /// without bound.
-    fn notify_or_buffer(&self, input: Cow<'static, [u8]>) {
+    fn notify_or_buffer(&self, input: Cow<'static, [u8]>) -> Result<(), PtyWriteError> {
         if self.notifier.0.is_pty() {
-            self.notifier.notify(input);
-            return;
+            return self.notifier.0.try_write(input);
         }
         if input.is_empty() {
-            return;
+            return Ok(());
         }
-        if let Ok(mut pending) = self.pending_input.lock() {
-            let queued: usize = pending.iter().map(PendingTerminalInput::queued_bytes).sum();
-            if queued + input.len() <= MAX_PENDING_INPUT_BYTES {
-                pending.push_back(PendingTerminalInput::Raw(input));
+        match self.pending_input.lock() {
+            Ok(mut pending) => {
+                let queued: usize = pending.iter().map(PendingTerminalInput::queued_bytes).sum();
+                if queued + input.len() <= MAX_PENDING_INPUT_BYTES {
+                    pending.push_back(PendingTerminalInput::Raw(input));
+                    Ok(())
+                } else {
+                    log::warn!(
+                        target: "paneflow::terminal",
+                        "dropping PTY input: pending_input {queued} + {} exceeds {MAX_PENDING_INPUT_BYTES} byte cap",
+                        input.len()
+                    );
+                    Err(PtyWriteError::Overflow)
+                }
+            }
+            Err(_) => {
+                log::error!(
+                    target: "paneflow::terminal",
+                    "pending_input lock poisoned; dropping PTY input"
+                );
+                Err(PtyWriteError::Poisoned)
             }
         }
     }
@@ -2321,7 +2390,7 @@ impl TerminalState {
     /// RIS reset) that must not flip `keyboard_input_sent` - otherwise a
     /// failed-spawn pane that merely gains focus would wrongly close on exit.
     pub fn write_to_pty_silent(&self, input: impl Into<Cow<'static, [u8]>>) {
-        self.notify_or_buffer(input.into());
+        let _ = self.notify_or_buffer(input.into());
     }
 
     /// US-002: whether a child exit should close the pane. A user-initiated
@@ -3103,9 +3172,11 @@ mod tests {
         // US-011: the DisplayOnly variant of TerminalType has no EventLoop, so
         // write/resize/shutdown are dropped (no panic) and `is_pty` is false.
         // This is the spawn-failure fallback's write side - input must never
-        // reach a child that doesn't exist.
+        // reach a child that doesn't exist. `send` itself is still Ok: the
+        // US-012 pending queue lives on TerminalState, not on PtySender.
         let s = PtySender::display_only();
         assert!(!s.is_pty());
+        assert!(s.send(Msg::Input(b"echo hi\n".as_slice().into())).is_ok());
         s.write(b"echo hi\n".as_slice().into());
         s.resize(AlacWindowSize {
             num_cols: 80,
@@ -3285,6 +3356,74 @@ mod tests {
         assert!(
             queued <= MAX_PENDING_INPUT_BYTES,
             "buffered {queued} bytes exceeds the {MAX_PENDING_INPUT_BYTES} cap"
+        );
+    }
+
+    #[test]
+    fn try_write_to_pty_queues_while_display_only() {
+        // Adversarial review of #46: a pane that is still spawning must queue,
+        // not error. `promote` flushes; `sent: true` is honest here.
+        let (state, _events_tx) = TerminalState::new_pending(80, 24);
+        assert!(!state.notifier.0.is_pty());
+        assert_eq!(state.try_write_to_pty(b"claude\r".to_vec()), Ok(()));
+        let queued = state.pending_input.lock().expect("pending_input lock");
+        assert_eq!(queued.len(), 1);
+        assert!(
+            matches!(&queued[0], PendingTerminalInput::Raw(bytes) if bytes.as_ref() == b"claude\r")
+        );
+    }
+
+    #[test]
+    fn try_write_to_pty_errors_on_pending_overflow() {
+        let (state, _events_tx) = TerminalState::new_pending(80, 24);
+        let chunk = vec![b'x'; MAX_PENDING_INPUT_BYTES];
+        assert_eq!(state.try_write_to_pty(chunk), Ok(()));
+        assert_eq!(
+            state.try_write_to_pty(b"y".as_slice()),
+            Err(PtyWriteError::Overflow)
+        );
+        let queued: usize = state
+            .pending_input
+            .lock()
+            .expect("pending_input lock")
+            .iter()
+            .map(PendingTerminalInput::queued_bytes)
+            .sum();
+        assert_eq!(queued, MAX_PENDING_INPUT_BYTES);
+    }
+
+    #[test]
+    fn try_write_to_pty_errors_on_poisoned_pending_lock() {
+        let (state, _events_tx) = TerminalState::new_pending(80, 24);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.pending_input.lock().expect("pending_input lock");
+            panic!("poison pending_input");
+        }));
+        assert_eq!(
+            state.try_write_to_pty(b"x".as_slice()),
+            Err(PtyWriteError::Poisoned)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_sender_send_errors_when_event_loop_channel_is_closed() {
+        let state = TerminalState::new(None, 1, 1, Some((80, 24)), None, None)
+            .expect("spawn a PTY-backed terminal");
+        assert!(state.notifier.0.is_pty());
+        state.notifier.0.shutdown();
+        let mut last = Ok(());
+        for _ in 0..50 {
+            last = state.notifier.0.send(Msg::Input(b"x".to_vec().into()));
+            if last.is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(last, Err(PtyWriteError::ChannelClosed));
+        assert_eq!(
+            state.try_write_to_pty(b"hello".as_slice()),
+            Err(PtyWriteError::ChannelClosed)
         );
     }
 

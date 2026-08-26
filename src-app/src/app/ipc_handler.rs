@@ -700,6 +700,33 @@ fn resolve_send_text_body_mode(
     }
 }
 
+/// Bytes actually written for `surface.send_text`. Matches `inject_text`:
+/// wrap in bracketed-paste only when the paste path is selected *and* the
+/// target has `ESC[?2004h` enabled; otherwise write verbatim.
+fn send_text_pty_payload(text: &str, paste: bool, bracketed_paste: bool) -> Vec<u8> {
+    if paste && bracketed_paste {
+        wrap_send_text_bracketed_paste(text).into_bytes()
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
+fn wrap_send_text_bracketed_paste(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let payload: String = normalized
+        .chars()
+        .filter(|&c| c != '\x1b' && !(('\u{0080}'..='\u{009f}').contains(&c)))
+        .collect();
+    format!("\x1b[200~{payload}\x1b[201~")
+}
+
+/// Map a PTY write Result onto JSON-RPC. Closed channel / overflow / poison
+/// become `-32603` so CLI `paneflow send` / `flow` fail instead of treating
+/// `sent: true` as landed. Queued-pending and live EventLoop writes are `Ok`.
+fn send_text_from_pty_write<E: ToString>(result: Result<(), E>) -> Result<(), JsonRpcError> {
+    result.map_err(|err| JsonRpcError::internal_error(err.to_string()))
+}
+
 fn first_command_token(command: &str) -> Option<&str> {
     let command = command.trim_start();
     let mut chars = command.char_indices();
@@ -2205,7 +2232,12 @@ impl PaneFlowApp {
             // between the last poll and here writes nothing.
             cx.update(|cx| {
                 if let Some(t) = weak.upgrade() {
-                    t.read(cx).send_text("\r");
+                    if let Err(err) = t.read(cx).terminal.try_write_to_pty(b"\r".as_slice()) {
+                        log::warn!(
+                            target: "paneflow::ipc",
+                            "deferred submit CR dropped: {err}"
+                        );
+                    }
                 }
             });
         })
@@ -2895,17 +2927,15 @@ impl PaneFlowApp {
                     Err(message) => return JsonRpcError::invalid_params(message).into_value(),
                 };
                 // Write the payload (skipped for a bare `--submit ""`).
+                // `inject_text` wrapping is inlined via `send_text_pty_payload`
+                // so the PTY Result can fail the RPC: channel closed /
+                // pending overflow / poisoned lock are `-32603`, not `sent: true`.
                 if !text.is_empty() {
-                    if paste {
-                        // `inject_text`, NOT `paste_text`: when the agent has not
-                        // enabled bracketed paste, the latter would rewrite body
-                        // newlines to `\r` and fragment a multi-line prompt into
-                        // N submits. `inject_text` wraps when bracketed paste is
-                        // active and writes verbatim otherwise, leaving the single
-                        // deferred `\r` below as the only submission (US-001).
-                        terminal.read(cx).inject_text(text);
-                    } else {
-                        terminal.read(cx).send_text(text);
+                    let payload = send_text_pty_payload(text, paste, terminal_bracketed_paste);
+                    if let Err(err) = send_text_from_pty_write(
+                        terminal.read(cx).terminal.try_write_to_pty(payload),
+                    ) {
+                        return err.into_value();
                     }
                 }
                 // Submit. The bracketed-paste path defers the `\r` off the render
@@ -2917,8 +2947,13 @@ impl PaneFlowApp {
                             self.cached_config.resolved_submit_paste_delay_ms(),
                         );
                         Self::schedule_deferred_submit(&terminal, floor, cx);
-                    } else {
-                        terminal.read(cx).send_text("\r");
+                    } else if let Err(err) = send_text_from_pty_write(
+                        terminal
+                            .read(cx)
+                            .terminal
+                            .try_write_to_pty(b"\r".as_slice()),
+                    ) {
+                        return err.into_value();
                     }
                 }
                 // EP-003 US-010: trace every write granted by free-access mode
@@ -4650,6 +4685,44 @@ mod tests {
             resolve_send_text_body_mode("line one\nline two", Some(false), false, true).is_err(),
             "explicit paste=false must not bypass the CR/LF guard"
         );
+    }
+
+    #[test]
+    fn send_text_pty_payload_wraps_only_when_paste_and_bracketed() {
+        use super::send_text_pty_payload;
+        assert_eq!(
+            send_text_pty_payload("hello", false, true),
+            b"hello".to_vec()
+        );
+        assert_eq!(
+            send_text_pty_payload("hello", true, false),
+            b"hello".to_vec()
+        );
+        let wrapped = send_text_pty_payload("line one\r\nline two", true, true);
+        let wrapped = String::from_utf8(wrapped).expect("utf8");
+        assert!(wrapped.starts_with("\u{1b}[200~"));
+        assert!(wrapped.ends_with("\u{1b}[201~"));
+        assert!(wrapped.contains("line one\nline two"));
+        assert!(!wrapped.contains('\r'));
+    }
+
+    #[test]
+    fn send_text_from_pty_write_maps_failures_to_jsonrpc_internal_error() {
+        use super::send_text_from_pty_write;
+
+        assert!(send_text_from_pty_write(Ok::<(), &str>(())).is_ok());
+
+        for message in [
+            "PTY write channel is closed (child has exited)",
+            "PTY pending input overflow: write exceeds 1 MiB pre-promotion cap",
+            "PTY pending input lock poisoned",
+        ] {
+            let err = send_text_from_pty_write(Err(message)).expect_err(message);
+            let envelope = promote_response(err.into_value(), serde_json::json!(1));
+            assert_eq!(envelope["error"]["code"], JsonRpcError::INTERNAL_ERROR);
+            assert!(envelope.get("result").is_none());
+            assert_eq!(envelope["error"]["message"], message);
+        }
     }
 
     #[test]
