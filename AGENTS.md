@@ -15,7 +15,7 @@ Run all commands from the repository root.
 - `cargo clippy --workspace -- -D warnings` treats lint warnings as errors.
 - `cargo fmt --check` verifies formatting.
 
-GPUI and the Alacritty VT crate are **not** local path dependencies. GPUI and its five sibling Zed crates (`gpui_platform`, `collections`, `markdown`, `theme`, `ui`) are git dependencies pinned by exact `rev` to `arthjean/zed` (`src-app/Cargo.toml:64-84`, plus a test-support `gpui` in `[dev-dependencies]` at `:417`), and `alacritty_terminal` comes from crates.io (`src-app/Cargo.toml:87`). Cargo fetches both automatically, so no checkout has to be kept on disk. Never swap the Zed git deps for crates.io versions: GPUI is not published there.
+GPUI and the Alacritty VT crate are **not** local path dependencies. GPUI and its five sibling Zed crates (`gpui_platform`, `collections`, `markdown`, `theme`, `ui`) are git dependencies pinned by exact `rev` to `arthjean/zed` (`src-app/Cargo.toml:39-59`, plus a test-support `gpui` in `[dev-dependencies]` at `:255`), and `alacritty_terminal` comes from crates.io (`src-app/Cargo.toml:62`). Cargo fetches both automatically, so no checkout has to be kept on disk. Never swap the Zed git deps for crates.io versions: GPUI is not published there.
 
 Build prerequisites (Rust 1.96.1, full Xcode, and the separately downloaded Metal toolchain) are documented in `CLAUDE.md`. They are non-obvious and a missing one fails the build in a confusing way.
 
@@ -40,4 +40,4 @@ upstream. `panic!`, `unimplemented!`, and `dbg!` are denied by workspace clippy;
 macOS only. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`. There is no Linux or Windows target in this fork: do not add `#[cfg(target_os = "linux")]` or `#[cfg(windows)]` branches back, and do not reintroduce the Ghostty backend. Config lives at `~/Library/Application Support/paneflow/paneflow.json`.
 
 ## Deeper reference
-`CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and a 12-item traps register. Read both before touching platform code. Do not duplicate their content here.
+`CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. `docs/fork/STATE.md` is the living handoff (counts, remaining human work, method rules). `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and the traps register. Read those before touching platform code. Do not duplicate their content here.

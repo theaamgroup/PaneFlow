@@ -124,9 +124,11 @@ nothing local caught it because the four-command block above did not include
 it. The release pipeline runs it inside every build-matrix leg, so a tag push
 would have burned a ~25 min run before failing. Fixed in 1b1af25.
 
-1806 -> 1790 -> 1725. The 2b step removed 16 Windows/MSI tests; 2c removed 65
-more and renamed 4. Every single one was accounted for BY NAME, at every
-integration, by diffing the sorted name list against the previous commit's. Verify a test-count
+1806 -> 1790 -> 1725 -> **1684**. The 2b step removed 16 Windows/MSI tests; 2c removed 65
+more and renamed 4; post-2c (telemetry crate, schema Ghostty, restored
+macOS-shaped coverage) landed at 1684 passed / 0 failed / 2 ignored. Every
+single one was accounted for BY NAME, at every integration, by diffing the
+sorted name list against the previous commit's. Verify a test-count
 change by DIFFING TEST NAMES, never by trusting the count:
 
 ```bash
@@ -235,6 +237,18 @@ is cheap and is how the tool stays honest as new spellings turn up.
    inventory never covered. Re-derive `file:line` from the live tree before
    writing a brief, and have the agent stop and report if a line does not say
    what the brief claims.
+9. **`--json-schema` can suppress the grok tool loop** on an open-ended
+   audit (one turn, empty structured object). Use it for bounded site
+   lists. Run discovery audits without it (the final 37-turn audit that
+   found Help/schema `$id` still pointing at arthjean ran this way).
+10. **`set -e` plus `grep FAILED` is a false fail** when the log is
+    green. `rg … | head` is a false fail via SIGPIPE after the command
+    already succeeded. Two `cargo` processes on one `target/` deadlock
+    on the lock; kill the extra one.
+11. **Kickoff task lists are not file-disjoint.** Schema, checker, and
+    identity tasks all touched overlapping files. Check overlap before
+    launching parallel worktrees. Three concurrent, APFS `cp -c -R
+    target`, agents never git: still the working recipe.
 
 ## Notes from the Windows and Linux passes (2b, 2c - both DONE)
 
@@ -300,15 +314,26 @@ need it:
 
 ## Biggest remaining liability
 
-CI and the updater are rewritten. What still needs a human:
+`main` is pushed to `origin`. CI and the updater are rewritten. What still
+needs a human, filed as GitHub issues assigned to `evilchinesefood`:
 
-- Apple signing secrets and a fresh minisign keypair (see
-  `docs/release-runbook.md`). Never create `GPG_*`, `AZURE_*`, or
-  `POSTHOG_API_KEY`.
-- Cmd+Tab next-workspace (`MANUAL-CHECKLIST.md`).
-- Unsigned `.dmg` Gatekeeper open.
-- Audit follow-ups in `docs/fork/2026-08-25-final-audit.md` (ubuntu
-  cargo-deny cron, `build-icons.sh` WiX path, stale path-filter names).
+- #7 Apple signing secrets (never create `GPG_*`, `AZURE_*`,
+  `POSTHOG_API_KEY`, or a truncated `APPLE_DEVELOPER_CERT_P` —
+  the real name is `APPLE_DEVELOPER_CERT_P12`)
+- #8 minisign keypair
+- #9 first tag / signed GitHub Release
+- #10 Cmd+Tab next-workspace
+- #11 unsigned `.dmg` Gatekeeper open
+  (`dist/paneflow-0.1.0-aarch64-apple-darwin.dmg`)
+- #12 confirm no GitHub Releases request on launch
+- #13 TCC re-grant after the new bundle id
+- #14–#15 keyboard / PATH-shim smoke
+- #16–#19 audit follow-ups (`audit.yml` ubuntu cron, `build-icons.sh`
+  WiX path, stale path-filter names, `font_fallbacks` copy)
+
+Product bugs continue from #20. Some early issues (#1 in particular)
+were filed before `release.yml` was cut to one aarch64 lane; check the
+tree before treating an issue as still open work.
 
 The 2c-era four-platform `run_tests.yml` / `release.yml` are gone. Both
 workflows are macos-15. YAML is still its own sweep: the cfg census cannot
@@ -316,10 +341,10 @@ see it.
 
 ## Parallel work
 
-Do not use the `paneflow-conductor` skill for fan-out. It is a feature of this
-app and it does not work reliably, which is recorded as known defect 1 in the
-design doc. Use the `grok-subagents` skill, or headless agent processes as
-background jobs with one git worktree per task.
+Do not use the `paneflow-conductor` skill to grind this repo. Headless grok
+in git worktrees is what worked. Conducting can drive a live PaneFlow
+window when both IPC env gates are on, but `paneflow read` still returns 0
+lines and that path is for a human-supervised agent, not batch fan-out.
 
 **This section used to say the Rust passes do not fan out. 2c falsified that.**
 All eight of its remaining batches ran on headless grok in isolated worktrees,
@@ -349,4 +374,9 @@ The mechanics that made it cheap:
   edits.
 - Three concurrent batches was the working cap on this machine. Disjoint file
   sets are what make that safe: two batches editing the same file collide at
-  `git apply` time even when their edits are six lines apart.
+  `git apply` time even when their edits are six lines apart. Kickoff task
+  lists are not automatically disjoint (schema + feed + identity shared
+  files); check overlap before launching.
+- `--json-schema` is for bounded site lists. On an open-ended audit it can
+  stop grok after one turn with an empty object. The 37-turn final audit
+  ran without it.

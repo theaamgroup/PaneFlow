@@ -2,42 +2,81 @@
 
 Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework and upstream `alacritty_terminal` (crates.io) for VT emulation. **This fork is macOS only.**
 
-Fork context, decisions, the upstream leak register, and a 12-item traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code, the updater, or anything under `src-app/src/update/`.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
+Fork context, decisions, the upstream leak register, and the traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code, the updater, or anything under `src-app/src/update/`.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
 
 **Start here for work in progress:** `docs/fork/STATE.md` records what is done,
-what is next with real counts, the four verification commands and their expected
+what is next with real counts, the verification commands and their expected
 output, and the method rules this project has already paid for. Read it before
 planning a pass so you do not redo finished work or repeat a falsified finding.
 
+**Where this fork stands (2026-08-25):** product is PaneFlow (the PanesCLI
+rename was dropped). Version **0.1.0**. Origin `theaamgroup/paneflow` on
+`main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
+`windows_*_material` schema, and community files (`SECURITY.md`,
+`CONTRIBUTING.md`) are gone. Self-update feed is **disabled**
+(`DEFAULT_FEED_URL = None`). Remaining work is human: Apple signing secrets,
+minisign keypair, first tag, Cmd+Tab, unsigned-DMG Gatekeeper open. Tracked
+as GitHub issues **#7–#19** (assigned to `evilchinesefood`). Later issues
+#20–#62 are product bugs, not leftover grind.
+
 ## Verify before claiming
 
-Run all four, before and after any pass, and quote the actual output:
+Run all five, before and after any pass, and quote the actual output:
 
 ```bash
 cargo build                                # exit 0
-cargo test --workspace                     # 1725 passed, 0 failed
-cargo clippy --workspace --all-targets     # exit 0, one pre-existing block v0.1.6 notice
-./target/debug/paneflow --version
+cargo test --workspace                     # 1684 passed, 0 failed, 2 ignored (2026-08-25)
+cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
+cargo fmt --check                          # exit 0
+./target/debug/paneflow --version          # paneflow 0.1.0
+```
+
+If the test count moves, **diff test names**, never trust the integer:
+
+```bash
+grep -oE '^test [a-zA-Z0-9_:]+ \.\.\.' <log> | sed 's/^test //; s/ \.\.\.$//' | sort
 ```
 
 A green `cargo build` is **not** a green tree: this repo has already had a change
 that built clean and failed `cargo test`, because a `#[cfg(test)]` block did
 `include_str!` on a deleted file. Never pipe a command whose exit status matters
 (`cargo test | tail` reports `tail`'s status), and redirect as `cmd > file 2>&1`,
-never `cmd 2>&1 > file`.
+never `cmd 2>&1 > file`. Clippy exits 0 with warnings, so compare the warning
+count to the one known `block v0.1.6` notice. `set -e` plus `grep FAILED` on a
+green log is a **false fail** (grep exits 1 when it finds nothing). `rg … | head`
+is a **false fail** via SIGPIPE after a successful command.
 
 ## Delegating parallel work
 
-Do **not** use the `paneflow-conductor` skill. It is a feature of this app, it
-does not work reliably, and fixing it is a tracked defect. Use the
-`grok-subagents` skill or headless agent processes as background jobs, one git
-worktree per task.
+Do **not** use the `paneflow-conductor` skill to grind this repo. Headless
+grok in git worktrees is the mechanism that worked. (Conducting *can* drive
+a live PaneFlow window when `PANEFLOW_IPC_ORCHESTRATION=1` and
+`PANEFLOW_IPC_SCRIPTING=1` are set, but `paneflow read` still returns 0
+lines; that path is for a human-supervised interactive agent, not batch
+fan-out. See `docs/mcp-bridge.md` and the `grok-subagents` skill.)
 
-Fan out only genuinely disjoint work, such as per-file documentation passes. The
-remaining Rust platform passes do not fan out: enum and feature removals are
-whole-workspace edits, single files carry Windows and Linux and test concerns at
-once, and each worker would need its own multi-gigabyte `target/` to verify
-anything.
+Fan-out works when the worker does **not** have to discover anything.
+Give exact `file:line` + the cfg/expression as written + the action.
+Disjoint file allowlists; two batches on the same file collide at
+`git apply` even when the hunks are six lines apart. Kickoff task lists
+are not automatically file-disjoint: check overlap before launching.
+
+Mechanics that made 2c and the post-2c grind cheap:
+
+- One `git worktree` per batch, seeded with `cp -c -R target <wt>/target`
+  (APFS clone: seconds, ~0 extra bytes, warm incremental rebuild).
+- Three concurrent batches was the working cap on this machine.
+- Agents never touch git. Orchestrator collects `git -C <wt> diff`,
+  applies it, re-runs the five gates, and commits. Agent "green" is
+  never the evidence.
+- Call `"$HOME/.grok/bin/grok"`, never bare `grok` (that is this app's
+  PATH shim). `--worktree` is ignored under `-p`; create the worktree
+  yourself and pass `--cwd`.
+- `--json-schema` is for **bounded** site lists. On an open-ended audit
+  it can suppress the tool loop (one-turn empty report). Omit it when
+  the worker has to search.
+- Two `cargo` processes on one `target/` fight the lock; kill the extra
+  one rather than waiting.
 
 ## Build prerequisites (macOS)
 
@@ -54,7 +93,7 @@ Verified on 2026-08-25. Two of these are non-obvious and each one fails the buil
    **Do not check this with `xcrun -f metal`.** That resolves the tool's path successfully even when the toolchain is absent, so it reports success on a machine that cannot build. Verify with an actual compile, or with `xcrun metal --version`.
 4. `cmake` (Homebrew) for native dependencies.
 
-`gpui_platform` **must** carry the `font-kit` feature on macOS (`src-app/Cargo.toml:53`). Without it the build succeeds, the window opens, SVG icons and cursor quads paint, and every single text glyph rasterizes as an empty box. It is declared in the default dependency table, so this only bites if someone edits the feature list.
+`gpui_platform` **must** carry the `font-kit` feature on macOS (`src-app/Cargo.toml:40`). Without it the build succeeds, the window opens, SVG icons and cursor quads paint, and every single text glyph rasterizes as an empty box. It is declared in the default dependency table, so this only bites if someone edits the feature list.
 
 ## Commands
 
@@ -79,11 +118,29 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
 
-Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`), so a `cargo run` instance gets its own config dir, data dir, cache dir, and IPC socket and will not collide with an installed release build on the same machine.
+Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`):
+config, data, cache, and the default IPC socket (`paneflow-dev.sock`). A
+`cargo run` debug instance should not share those with
+`/Applications/PaneFlow.app`. A **release-profile** local binary
+(`cargo run --release`, `./target/release/paneflow`) uses the real
+`paneflow` namespace and **will** collide with the installed app's
+socket. Isolation is also incomplete: debug builds still write
+`window-state.json` into the release config dir (issue #39).
+
+If the singleton guard refuses to start, the installed app is holding
+`paneflow.sock`. Override with both:
+
+```bash
+PANEFLOW_ALLOW_MULTIPLE=1 PANEFLOW_SOCKET_PATH=/tmp/paneflow-head-smoke.sock cargo run -p paneflow-app
+```
+
+`PANEFLOW_ALLOW_MULTIPLE` is **presence-gated** (`var_os` is `Some`), not
+value-gated: `=0` still skips the guard (issue #53). `open -a PaneFlow`
+drops shell env; use `open --env VAR=1`.
 
 ### Fork-pin maintenance (Zed Markdown widget)
 
-The Zed git deps in `src-app/Cargo.toml` pin `arthjean/zed@3aaba57b95c22f4d21bbbf9f4b10b513173209db`, published from `paneflow/gpui-2026-07-14`. That commit is based on `zed-industries/zed@afc13dc8` and carries the Paneflow Markdown streaming optimization (`Markdown::append` accumulates streamed chunks in a private String buffer while preserving Zed's `source() -> &SharedString` contract). Six crates are pinned in `[dependencies]` (`gpui`, `gpui_platform`, `collections`, `markdown`, `theme`, `ui`, lines 64-84) plus a test-support `gpui` in `[dev-dependencies]` (line 417). To bump: choose and freeze a tested upstream revision, create a new dated fork branch from it, reapply the Markdown patch while preserving Zed's current public API, validate and publish the fork commit, update every exact `rev`, run `cargo update`, then run the workspace test, Clippy, and format gates. Once the optimization lands upstream, switch every entry back to `zed-industries/zed` at the exact tested merge revision.
+The Zed git deps in `src-app/Cargo.toml` pin `arthjean/zed@3aaba57b95c22f4d21bbbf9f4b10b513173209db`, published from `paneflow/gpui-2026-07-14`. That commit is based on `zed-industries/zed@afc13dc8` and carries the Paneflow Markdown streaming optimization (`Markdown::append` accumulates streamed chunks in a private String buffer while preserving Zed's `source() -> &SharedString` contract). Six crates are pinned in `[dependencies]` (`gpui`, `gpui_platform`, `collections`, `markdown`, `theme`, `ui`, lines 39-59) plus a test-support `gpui` in `[dev-dependencies]` (line 255). To bump: choose and freeze a tested upstream revision, create a new dated fork branch from it, reapply the Markdown patch while preserving Zed's current public API, validate and publish the fork commit, update every exact `rev`, run `cargo update`, then run the workspace test, Clippy, and format gates. Once the optimization lands upstream, switch every entry back to `zed-industries/zed` at the exact tested merge revision. `theaamgroup/zed` is a cold backup of that same rev; `Cargo.toml` still points at `arthjean/zed` on purpose.
 
 ## Pre-commit checks (mandatory)
 
@@ -97,7 +154,7 @@ If it reports any diff, run `cargo fmt`, re-stage the touched files, then commit
 
 Why this is non-negotiable on this repo:
 
-- The release pipeline (`.github/workflows/release.yml`) runs `cargo fmt --check` as a step inside every Build matrix leg. A single mis-formatted line fails the leg, skips the "Publish GitHub Release" step, and burns a ~25 min CI run before producing anything. (The matrix is being cut down to the single `aarch64-apple-darwin` leg for this fork; the failure mode does not change.)
+- The release pipeline (`.github/workflows/release.yml`) runs `cargo fmt --check` as a step inside the Build job. A single mis-formatted line fails the job, skips the "Publish GitHub Release" step, and burns a ~25 min CI run before producing anything. The matrix is already a single `macos-15` / `aarch64-apple-darwin` lane.
 - It also blocks tag-push releases: if the tag commit is dirty, you have to delete and re-create the tag at the fix commit to retry. The original tagged build cannot be salvaged.
 - rustfmt drifts between Rust point releases. Even code that compiled clean a week ago can need re-formatting after a toolchain bump.
 
@@ -108,7 +165,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 85 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 86 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -177,7 +234,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
 ├── update/                            ← self-update
 │   ├── checker.rs / error.rs          ← release checker, structured UpdateError
-│   ├── install_method.rs              ← detect install mode (.app bundle / .tar.gz)
+│   ├── install_method.rs              ← detect install mode (.app bundle / ExternallyManaged)
 │   ├── signature.rs / verified_download.rs ← minisign verify, fail-closed download
 │   └── macos/dmg.rs                   ← bundle replacement from a .dmg
 ├── widgets/                           ← text_input, text_area, scrollbar, callout
@@ -194,13 +251,13 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
-The Ghostty backend is gone: `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/` were all deleted in stage 2a, and stage 2c reduced `terminal/view.rs`'s `auto_selects_ghostty_for_target()` to a literal `false`. What survives is config-schema surface only - `TerminalBackendConfig::Ghostty` in `crates/paneflow-config/src/schema.rs:568` and its `"ghostty"` string parse - which the config-schema stage owns. Setting `terminal.backend` to `ghostty` today logs the unavailable-backend warning and runs Alacritty.
+The Ghostty backend is gone: `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/` were all deleted in stage 2a, and `auto_selects_ghostty_for_target()` is a literal `false`. `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Comments and identifiers that still say Ghostty (for example in `terminal/view.rs`) are leftover copy, not a live backend.
 
 ### Thread model
 
 - **Main thread**: GPUI event loop, owns all Entity state, rendering, input dispatch. No locks around UI state.
 - **PTY I/O threads**: one per terminal, spawned by `alacritty_terminal::EventLoop::spawn()`.
-- **IPC thread**: Unix socket server. The runtime dir resolves through a fallback chain (`runtime_paths.rs`): `$XDG_RUNTIME_DIR` → `dirs::runtime_dir()` (None on macOS) → `$TMPDIR` (the macOS path, usually `/var/folders/xx/.../T/`) → `dirs::cache_dir()/run`. Socket at `<runtime_dir>/paneflow/paneflow.sock`. The composed path is rejected if it exceeds the `sockaddr_un.sun_path` ceiling (104 bytes on macOS). `PANEFLOW_SOCKET_PATH` overrides the computed path so an isolated debug instance and the panes it launches agree on one endpoint.
+- **IPC thread**: Unix socket server. The runtime dir resolves through a fallback chain (`runtime_paths.rs`): `$XDG_RUNTIME_DIR` → `dirs::runtime_dir()` (None on macOS) → `$TMPDIR` (the macOS path, usually `/var/folders/xx/.../T/`) → `dirs::cache_dir()/run`. Socket at `<runtime_dir>/<APP_SUBDIR>/<socket>`: `paneflow/paneflow.sock` in release, `paneflow-dev/paneflow-dev.sock` under `debug_assertions`. The composed path is rejected if it exceeds the `sockaddr_un.sun_path` ceiling (104 bytes on macOS). `PANEFLOW_SOCKET_PATH` overrides the computed path so an isolated debug instance and the panes it launches agree on one endpoint.
 - **Watcher threads**: config (notify, 300 ms debounce, 500 ms max-wait ceiling), theme, git state.
 - **Shared state**: `Arc<FairMutex<Term<ZedListener>>>` is the only cross-thread data (the terminal grid).
 
@@ -230,6 +287,10 @@ KeyDownEvent → TerminalView::handle_key_down() → keys::to_esc_str()
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
 | `paneflow-acp` | `crates/paneflow-acp/` | Library | Agent identity enum + `CLAUDECODE` env scrub |
 
+There is **no** `paneflow-telemetry` crate. It was deleted in the post-2c
+grind. Zed lockfile crates named `telemetry` / `telemetry_events` belong
+to the markdown pin; leave them.
+
 Everything that runs outside the GUI process must stay GPU-free and never link GPUI.
 
 ## Critical external dependencies
@@ -246,7 +307,7 @@ Cargo fetches GPUI from git automatically. **There is no local checkout and no p
 - `async-task` → `smol-rs/async-task` (specific git commit)
 - `calloop` → `zed-industries/calloop` fork
 
-Terminal emulation uses upstream `alacritty_terminal = "0.26"` from crates.io (`src-app/Cargo.toml:87`, resolved to 0.26.0 in `Cargo.lock`), migrated from Zed's fork. `polling = "3"` is named directly because the `TeePty` byte tap implements `alacritty_terminal`'s public `tty::EventedReadWrite` traits, whose signatures expose `polling` types the crate does not re-export.
+Terminal emulation uses upstream `alacritty_terminal = "0.26"` from crates.io (`src-app/Cargo.toml:62`, resolved to 0.26.0 in `Cargo.lock`), migrated from Zed's fork. `polling = "3"` is named directly because the `TeePty` byte tap implements `alacritty_terminal`'s public `tty::EventedReadWrite` traits, whose signatures expose `polling` types the crate does not re-export.
 
 ## GPUI patterns
 
@@ -279,9 +340,9 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 85 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 86 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
 
-**`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs:424`) adds `Cmd+C`, `Cmd+V` (Terminal) and `Cmd+Q` (quit) on top.
+**`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs:420`) adds `Cmd+C`, `Cmd+V` (Terminal) and `Cmd+Q` (quit) on top.
 
 | Key | Action | Context |
 |-----|--------|---------|
@@ -335,8 +396,8 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 - **Themes**: **5 bundled** (`theme/builtin.rs:7-13`): `One Dark` (default), `PaneFlow Light`, `Vercel`, `Claude`, `Cursor`. Names are matched case-insensitively. Hot-reload is notify-driven with a 500 ms mtime-poll fallback (`theme/watcher.rs:37`).
 - **`window_decorations`**: read at startup only, requires restart. `"client"` = CSD (default), `"server"` = SSD. An invalid value logs a warning and falls back to `"client"`.
 - **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings here.
-- **`option_as_meta`**: **defaults to `false`**. `keys::default_option_as_meta()` returns the literal `false` (`keys.rs:76-78`); it used to compute `!cfg!(target_os = "macos")`, which was a runtime expression that is constant in a macOS-only fork. So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior. The published JSON Schema and `docs/user/configuration/schema.md` both declare `false` too - they moved together in `6a7b14d` and a drift test reads the doc off disk.
-- **`macos_chrome_material`**: opts the sidebar and title bar into a native AppKit material (`window_chrome/macos_backdrop.rs`). `windows_terminal_material` and `windows_chrome_material` still exist in the public schema; the loader accepts them as ignored no-ops rather than breaking existing config files.
+- **`option_as_meta`**: **defaults to `false`**. `keys::default_option_as_meta()` returns the literal `false` (`keys.rs:69`); it used to compute `!cfg!(target_os = "macos")`, which was a runtime expression that is constant in a macOS-only fork. So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior. The published JSON Schema and `docs/user/configuration/schema.md` both declare `false` too - they moved together in `6a7b14d` and a drift test reads the doc off disk.
+- **`macos_chrome_material`**: opts the sidebar and title bar into a native AppKit material (`window_chrome/macos_backdrop.rs`). `windows_terminal_material` and `windows_chrome_material` are **gone from the published schema** and the Rust struct. The loader still accepts those leftover keys (and a leftover `telemetry` block) as ignored no-ops so existing `paneflow.json` files keep loading.
 - **`ConfigWatcher`** (notify crate, 300 ms debounce with a 500 ms max-wait ceiling so a continuous event stream cannot starve the reload): fully wired, a background thread detects changes and deposits new config for the GPUI main thread to apply.
 - `MAX_CONFIG_SIZE_BYTES` is 1 MiB (`limits.rs`); the app's own writer never approaches it.
 - The full schema is published at `schemas/paneflow.schema.json` and **two tests in `crates/paneflow-config/src/schema.rs` read it off disk**, so schema drift fails the suite.
@@ -357,7 +418,7 @@ Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thre
 | `events.subscribe` | Socket | Streaming event subscription |
 | `ai.session_start` / `prompt_submit` / `tool_use` / `notification` / `stop` / `exit` / `session_end` | GPUI | Agent lifecycle notifications from `paneflow-ai-hook` |
 
-Stateful methods dispatch to the GPUI main thread via a channel drained by `PaneFlowApp::process_automation_tick`, which runs on a **50 ms** poll loop (`app/bootstrap.rs:537`, `app/ipc_handler.rs:1274-1282`). That same tick also drains surface-change broadcasts, config reloads, and update-check completion, so its ordering is a contract, not an accident.
+Stateful methods dispatch to the GPUI main thread via a channel drained by `PaneFlowApp::process_automation_tick`, which runs on a **50 ms** poll loop (`app/bootstrap.rs:515-522`, `app/ipc_handler.rs:1261`). That same tick also drains surface-change broadcasts, config reloads, and update-check completion, so its ordering is a contract, not an accident.
 
 ## Styling conventions
 
@@ -371,17 +432,21 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **GPUI is not on crates.io.** It is consumed from the pinned Zed git fork above. Never replace it with a crates.io dependency, and never assume there is a local checkout to edit.
 - **Never recommend iced** for this project. It was evaluated and rejected (unstable, custom WGPU glyph atlas too complex). The decision is final.
 - **`SplitDirection::Horizontal`** means a horizontal divider bar (panes stacked top/bottom), NOT side-by-side. Counterintuitive but consistent.
-- **`alacritty_terminal` is upstream** (crates.io `0.26`), migrated from Zed's fork. It still uses `ZedListener` and `FairMutex` from the GPUI integration layer, and its imports are confined to an allowlist enforced by the `alacritty_confined_to_backend_allowlist` test (`src-app/src/terminal/types.rs:1002`). Separately, `src-app/tests/dependency_source_policy.rs` asserts every git source in `Cargo.lock` is pinned to an immutable revision, so a floating branch cannot sneak in.
-- **`dirs` is a single workspace dependency at version 6** (`Cargo.toml` `[workspace.dependencies]`; both `src-app/Cargo.toml:148` and `crates/paneflow-config/Cargo.toml:14` use `dirs.workspace = true`). An older note about a 5.0/6 split between the two crates is stale.
+- **`alacritty_terminal` is upstream** (crates.io `0.26`), migrated from Zed's fork. It still uses `ZedListener` and `FairMutex` from the GPUI integration layer, and its imports are confined to an allowlist enforced by the `alacritty_confined_to_backend_allowlist` test (`src-app/src/terminal/types.rs:993`). Separately, `src-app/tests/dependency_source_policy.rs` asserts every git source in `Cargo.lock` is pinned to an immutable revision, so a floating branch cannot sneak in.
+- **`dirs` is a single workspace dependency at version 6** (`Cargo.toml` `[workspace.dependencies]`; both `src-app/Cargo.toml:119` and `crates/paneflow-config/Cargo.toml:14` use `dirs.workspace = true`). An older note about a 5.0/6 split between the two crates is stale.
 - **Config `default_shell` is wired**: `resolve_default_shell` (`terminal/shell.rs:214`) validates the configured path is present and executable, warns and falls back if not, then uses the `$SHELL` → `/bin/sh` chain.
-- **The `_io_thread` handle is discarded** (`terminal/pty_session.rs:2677`). PTY I/O threads run detached; shutdown is via `Msg::Shutdown` in `Drop`.
+- **The `_io_thread` handle is discarded** (`terminal/pty_session.rs:1672`). PTY I/O threads run detached; shutdown is via `Msg::Shutdown` in `Drop`.
 - **A GUI-launched app inherits launchd's minimal PATH, not the user's.** `login_shell_env.rs` runs the user's login shell once and adopts **only its `PATH`**, deliberately importing nothing else (a login profile that re-exports session variables would corrupt them). Without this, `/opt/homebrew/bin` is missing, terminals cannot find the user's tools, and agent-CLI detection (`which::which(...)`) comes up empty. Do not "simplify" it into a full env import.
 - **Every `US-NNN` comment in the Rust source is a dangling breadcrumb.** They point at PRD files that lived under `tasks/`, were gitignored upstream, never committed, and `tasks/` is now deleted. Same for every `prd-*.md` and `EP-NNN` reference in a comment. Roughly 2,200 such comments across ~190 files: treat them as historical noise, do not go looking for the document, and do not add new ones.
 - **Tests + CI exist**: run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`. UI changes still need manual verification.
 - **A note that used to live here was wrong, and the correction is worth keeping.** It said `update/macos/dmg.rs`'s two `#[cfg(all(test, not(target_os = "macos")))]` items should be un-gated rather than deleted. They could not be: they were the second half of a complementary pair - `#[cfg(any(not(test), target_os = "macos"))] fn copy_bundle_to_staging` (the real `cp -R`) and `#[cfg(all(test, not(target_os = "macos")))] fn copy_bundle_to_staging` (a test-host shim) - so un-gating the second one is a duplicate definition, `error[E0428]`. Stage 2c deleted the shim and `copy_tree_for_test` and reduced the real one to unconditional (`aff3f7d`). Before acting on a claim like that, check whether the two gates are complementary definitions of ONE item.
-- **The binary-size budget** (`src-app/build.rs`, `run_tests.yml`) is baselined on a Linux ELF. It needs a Mach-O re-baseline, not deletion.
+- **The binary-size budget is Mach-O now.** `src-app/build.rs` measures the three embedded helpers under `--profile release-min` on `aarch64-apple-darwin`: shim 438_784 + ai-hook 336_432 + mcp 386_208 = **1_161_424 B**. Cap is `EMBED_SIZE_LIMIT_BYTES = 1_400_000` (~20% headroom). Nested staging always uses `release-min`, so a debug outer build still embeds those sizes. Per-binary caps were dropped with the CI matrix (issue #3); do not re-derive a Linux ELF number.
 - **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
 - **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
+- **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`terminal/backend_corpus.rs`).
+- **`scripts/create-dmg.sh` is allowed to fail `codesign --verify --deep --strict` on an unsigned smoke.** The script writes the `.dmg` first, then the strict check exits 1 because the enclosed binary is adhoc/linker-signed. That check is for a signed+notarized release. Local artifact: `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (~30M), `CFBundleIdentifier=com.theaamgroup.paneflow`. Gatekeeper will quarantine a copied copy.
+- **Comments still mention Windows and Linux.** `runtime_paths.rs` still documents a named-pipe fallback. That is leftover copy. Do not re-implement from a comment. Same for Ghostty identifiers in `terminal/view.rs` and `pty_session.rs`.
+- **`Cmd+Tab` next-workspace is unverified.** `secondary-tab` still binds it; macOS owns the chord for the app switcher. Record the result on `MANUAL-CHECKLIST.md` (issue #10) before relying on the binding.
 
 ## MCP bridge (`paneflow-mcp`)
 
@@ -409,9 +474,9 @@ This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacr
 
 - Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, no Ghostty backend.
 - **`#[cfg(unix)]` is not Linux-only.** It appears **151 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears 77 times. Both are live arms and both stay.
-- **After stage 2c those two are the ONLY platform predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`, no `[target.'cfg(...)']` table in any `Cargo.toml`. `./scripts/linux-census.sh` enforces this with a zero-condition; it prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done.
+- **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:240`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition; it prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. After telemetry was deleted the unix count moved 152 → **151**; macos stays **77**.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.
 - Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
-- **The updater is DMG-only.** `update/mod.rs` declares `checker`, `error`, `install_method`, `macos`, `signature` and nothing else: `update/linux/`, `update/windows/` and `update/migrations.rs` are deleted, and `InstallMethod` / `AssetFormat` are collapsed to the macOS-reachable set. An older note here claimed `TarGz` was "genuinely reachable on macOS" via `$HOME/.local/paneflow.app/`; that was decided against and TarGz is gone. `ExternallyManaged` stays - it is driven by `PANEFLOW_UPDATE_EXPLANATION`, not by platform.
+- **The updater is DMG-only, and the feed is off.** `update/mod.rs` declares `checker`, `error`, `install_method`, `macos`, `signature` and nothing else: `update/linux/`, `update/windows/` and `update/migrations.rs` are deleted, and `InstallMethod` / `AssetFormat` are collapsed to the macOS-reachable set. `TarGz` is gone. `ExternallyManaged` stays - it is driven by `PANEFLOW_UPDATE_EXPLANATION`, not by platform. `DEFAULT_FEED_URL = None`; `spawn_check` returns `UpdateStatus::Disabled` without opening a socket. Re-enable is that one const (or `PANEFLOW_UPDATE_FEED_URL` for the e2e harness). Do not create `GPG_*`, `AZURE_*`, or `POSTHOG_API_KEY`. `APPLE_DEVELOPER_CERT_P` is a **false hit**: the real secret is `APPLE_DEVELOPER_CERT_P12` (PKCS#12), plus `APPLE_DEVELOPER_CERT_PASSWORD`.
 
 The full removal plan, with the paired edits that have to land together, is in `docs/fork/2026-08-25-mac-only-fork-design.md`.
