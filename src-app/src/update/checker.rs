@@ -350,8 +350,7 @@ fn transient_update_error(e: &ureq::Error) -> bool {
     }
 }
 
-/// Blocking entry point used by both the background `spawn_check` thread
-/// and the synchronous `--update-and-exit` CLI flag (US-005).
+/// Blocking entry point used by the background `spawn_check` thread.
 pub(crate) fn check_github_release() -> UpdateStatus {
     // Dev-only override: lets `cargo run` short-circuit the GitHub check
     // and synthesize an `Available { version }` so the update pill can be

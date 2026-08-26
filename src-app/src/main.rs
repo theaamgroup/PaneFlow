@@ -358,7 +358,6 @@ fn global_help_text() -> String {
          Options:\n\
          \x20 -h, --help       Print this help message\n\
          \x20 -v, --version    Print version\n\
-         \x20 --update-and-exit  Check for an update and exit (CI harness)\n\
          \n\
          Agent workflow:\n\
          \x20 Launch Claude Code, Codex, opencode, Pi, or any CLI agent in panes\n\
@@ -476,7 +475,7 @@ mod native_material_tests {
 
 #[cfg(test)]
 mod help_tests {
-    use super::global_help_text;
+    use super::{global_help_text, update_and_exit_refusal};
 
     #[test]
     fn cli_help_lists_verbs_mcp_and_hooks() {
@@ -495,6 +494,38 @@ mod help_tests {
             "--help must list hooks (real intercept, not in VERBS):\n{help}"
         );
         assert!(help.contains("mcp"), "--help must list mcp:\n{help}");
+    }
+
+    #[test]
+    fn cli_help_does_not_advertise_update_and_exit() {
+        let help = global_help_text();
+        assert!(
+            !help.contains("--update-and-exit"),
+            "--help must not advertise the removed install flag:\n{help}"
+        );
+        assert!(
+            help.contains("-h, --help"),
+            "--help must still list -h/--help:\n{help}"
+        );
+        assert!(
+            help.contains("-v, --version"),
+            "--help must still list -v/--version:\n{help}"
+        );
+    }
+
+    #[test]
+    fn update_and_exit_refuses_without_installing() {
+        let (code, msg) = update_and_exit_refusal();
+        assert_ne!(code, 0, "removed flag must exit non-zero");
+        assert!(
+            msg.contains("removed") && msg.contains("in-app updater"),
+            "refusal must say the flag is gone and point at the in-app updater: {msg}"
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("installing") && !lower.contains("ci harness"),
+            "refusal must not claim to install: {msg}"
+        );
     }
 }
 
@@ -2403,83 +2434,30 @@ impl Render for PaneFlowApp {
 }
 
 // ---------------------------------------------------------------------------
-// `--update-and-exit` (US-005 e2e auto-update harness)
+// `--update-and-exit` (removed; leftover token is refused, not an installer)
 // ---------------------------------------------------------------------------
 
-/// Synchronous self-update entry point invoked by the e2e harness
-/// (`scripts/test-update-e2e.sh`). Mirrors the GUI flow's check + per-format
-/// install steps but never initializes GPUI - so it runs cleanly in headless
-/// CI containers without Xvfb. Honours `PANEFLOW_UPDATE_FEED_URL`
-/// ([`update::checker::update_feed_url`]) so the harness can point the
-/// checker at a localhost fixture.
-///
-/// Returns the process exit code (see `--update-and-exit` doc-comment in
-/// `main` for the full table). The split between exit-3 (feed unreachable)
-/// and exit-1 (other) satisfies AC6 - the harness asserts a specific code,
-/// not a substring of the generic "update failed" toast.
+/// Exit code for a leftover `--update-and-exit` token. Matches clap / unknown
+/// verb (`2`): this is a usage refusal, not a failed install.
+const UPDATE_AND_EXIT_REMOVED_CODE: i32 = 2;
+
+/// Message + exit code for the leftover `--update-and-exit` intercept.
+/// Kept as a function so tests can assert the copy without spawning GPUI.
+fn update_and_exit_refusal() -> (i32, &'static str) {
+    (
+        UPDATE_AND_EXIT_REMOVED_CODE,
+        "paneflow: --update-and-exit was removed; use the in-app updater",
+    )
+}
+
+/// Intercept for leftover `--update-and-exit` tokens. The Linux TarGz/AppImage
+/// runners this flag used to drive are gone, and the macOS `.app` path was
+/// never wired, so a successful feed match used to print "installing" and then
+/// always fail with exit 5. Do not check the feed or install from here.
 fn run_update_and_exit() -> i32 {
-    use crate::update::checker::{UpdateStatus, check_github_release};
-    use crate::update::install_method;
-
-    let method = install_method::detect();
-    log::info!("--update-and-exit: install method = {method:?}");
-
-    let status = check_github_release();
-    let (version, asset_url) = match status {
-        UpdateStatus::Available {
-            version,
-            asset_url: Some(url),
-            ..
-        } => (version, url),
-        UpdateStatus::Available {
-            asset_url: None, ..
-        } => {
-            eprintln!("paneflow-update: no asset matched the install method - nothing to install");
-            return 5;
-        }
-        UpdateStatus::UpToDate => {
-            eprintln!("paneflow-update: already up to date");
-            return 2;
-        }
-        UpdateStatus::Disabled => {
-            eprintln!("paneflow-update: self-update feed is disabled (no distribution host)");
-            return 2;
-        }
-        UpdateStatus::Failed => {
-            // The checker logs whether the failure was DNS/HTTP/parse via
-            // `log::warn!`; we can't easily distinguish here without a
-            // structured error, so print the explicit feed-unreachable
-            // hint per AC6 - the dominant failure mode the harness
-            // exercises (kill miniserve before invocation).
-            eprintln!(
-                "paneflow-update: feed unreachable{} - check PANEFLOW_UPDATE_FEED_URL",
-                crate::update::checker::update_feed_url()
-                    .map(|u| format!(" at {u}"))
-                    .unwrap_or_default()
-            );
-            return 3;
-        }
-        UpdateStatus::Checking => {
-            eprintln!("paneflow-update: checker returned Checking - should never happen");
-            return 1;
-        }
-    };
-
-    log::info!("--update-and-exit: installing v{version} from {asset_url}");
-
-    // `--update-and-exit` has never supported the `.app` bundle path: the
-    // e2e harness covers bundle promotion separately, and an in-place bundle
-    // swap driven from a short-lived CLI invocation would race the GUI
-    // process it is meant to replace. The Linux TarGz and AppImage runners
-    // were the only methods it ever handled, and they are gone, so nothing
-    // is supported here now.
-    //
-    // Behaviour is unchanged for every install this fork can produce: an
-    // `.app` bundle already fell through to this same exit code before
-    // stage 2c. Wiring `AppBundle` to `update::macos::dmg`, or retiring the
-    // flag outright, is a product decision and not part of a platform strip.
-    eprintln!("paneflow-update: --update-and-exit does not support install method {method:?}");
-    5
+    let (code, msg) = update_and_exit_refusal();
+    eprintln!("{msg}");
+    code
 }
 
 // ---------------------------------------------------------------------------
@@ -2654,20 +2632,10 @@ fn main() {
     // `augment_path_for_gui_launch`.
     runtime_paths::augment_path_for_gui_launch();
 
-    // US-005: synchronous update flow for the e2e harness. Runs the same
-    // checker + per-format installer the GUI calls, but without ever
-    // initializing GPUI - exits with status 0 on a successful swap, 2 on
-    // "no update needed", 3 on a feed-unreachable error (AC6's explicit
-    // "feed unreachable" requirement vs the generic "update failed"),
-    // 4 on integrity / hash mismatch, 5 on unsupported install method,
-    // 1 on any other error. Pair with `PANEFLOW_UPDATE_FEED_URL` to
-    // point the checker at a localhost fixture.
-    // Gate the global `--update-and-exit` scan on the SAME three intercepts as
-    // the `--help`/`--version` scans above, not just `mcp`. Otherwise a literal
-    // `--update-and-exit` token appearing as a CLI/hooks *argument* (e.g.
-    // `paneflow send <t> "--update-and-exit"`, `paneflow search x --update-and-exit`)
-    // is captured by this `args.iter().any(...)` scan and hijacks the verb into
-    // the self-updater (US-002: "pas de capture par un scan global").
+    // Leftover `--update-and-exit` is refused (no feed check, no install) so
+    // old CI/docs do not silently launch the GUI. Still gated on the SAME
+    // three intercepts as `--help`/`--version`: a literal token as a CLI/hooks
+    // *argument* (`paneflow send <t> "--update-and-exit"`) must not hijack.
     if is_update_and_exit {
         std::process::exit(run_update_and_exit());
     }

@@ -104,8 +104,9 @@ toml = "0.8"
 anyhow.workspace = true
 # EP-001 (prd-cli-agent-orchestration): argument parser for the `paneflow <verb>`
 # CLI surface. `Option<Commands>` keeps "no subcommand => launch the GUI" as the
-# default; the `mcp`/`--update-and-exit`/`--help`/`--version` intercepts stay
-# manual and run before clap so it never eats their flags.
+# default; the `mcp`/`--help`/`--version` intercepts stay
+# manual and run before clap so it never eats their flags. A leftover
+# `--update-and-exit` token is also intercepted (and refused) before clap.
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
 # Async utilities used by app subsystems that need tokio-compatible futures
