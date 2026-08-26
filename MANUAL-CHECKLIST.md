@@ -1,0 +1,87 @@
+# Manual checklist
+
+Things a machine could not establish. Each item has exact steps and a
+falsifiable expected result. **Do not tick these on the agent's behalf.**
+
+Created by task 16. Add an item the moment a task produces an unverifiable
+claim. If an item turns out to be automatable, automate it and delete the
+entry.
+
+---
+
+- [ ] **Task 6 — Cmd+Tab next-workspace**
+  - Commit: (pending)
+  - Why a machine cannot do this: Cmd+Tab is the chord macOS intercepts for
+    the application switcher. A synthetic System Events keystroke does not
+    answer whether the action reaches PaneFlow.
+  - Steps: focus a PaneFlow window that has at least two workspaces. Press
+    Cmd+Tab on the physical keyboard.
+  - Expected: either the next workspace becomes active, **or** macOS's app
+    switcher appears. Record which. If the switcher appears, the binding
+    does not reach the app.
+  - Failure implicates: `src-app/src/keybindings/defaults.rs` `secondary-tab`
+    and the `--help` copy that advertises it.
+
+- [ ] **Keyboard-driven pane flows**
+  - Commit: (standing)
+  - Steps: with a PaneFlow window focused, press Cmd+Shift+D (split
+    horizontal), Cmd+Shift+E (split vertical), Cmd+Shift+W (close pane),
+    Cmd+Shift+T (undo close).
+  - Expected: a new pane appears below / beside; the focused pane closes;
+    undo restores it.
+  - Failure implicates: keybindings + layout mutations.
+
+- [ ] **PATH-shim agent turn**
+  - Commit: (standing)
+  - Steps: launch a real agent CLI in a pane through the PATH shim. Watch
+    the sidebar through one full turn.
+  - Expected: the sidebar tracks the agent from start through tool use to
+    idle/waiting.
+  - Failure implicates: paneflow-shim + ai-hook + sidebar.
+
+- [ ] **Task 12 — bundle-id permission re-grant**
+  - Commit: (pending)
+  - Steps: after the first signed/notarized build with
+    `com.theaamgroup.paneflow`, launch it. macOS will re-prompt for
+    Accessibility / Automation / Full Disk Access once.
+  - Expected: prompts appear (this is expected, not a regression). After
+    granting, the app still works.
+  - Failure implicates: the new CFBundleIdentifier / TCC mapping.
+
+- [ ] **Task 11 — no request to api.github.com**
+  - Commit: (pending)
+  - Why a machine cannot fully do this: the agent can grep logs; it cannot
+    observe the network (Little Snitch / a proxy).
+  - Steps: launch the app with the feed disabled. Watch outbound HTTPS.
+  - Expected: no request to `api.github.com/repos/arthjean/paneflow` or
+    any other GitHub releases endpoint in normal use.
+  - Failure implicates: `src-app/src/update/checker.rs` still spawning a
+    check.
+
+- [ ] **Task 20 — unsigned .dmg first open**
+  - Commit: (pending)
+  - Steps: open the local unsigned .dmg. Gatekeeper will quarantine it.
+    Right-click → Open, or `xattr -d com.apple.quarantine` on the .app,
+    then launch from /Applications.
+  - Expected: the app launches; `PaneFlow.app/Contents/MacOS/paneflow --version`
+    prints `0.1.0` after task 14; glyphs render (not empty boxes).
+  - Failure implicates: bundle script, embed staging, or font-kit feature.
+
+---
+
+## Automated visual smoke (not a checkbox)
+
+Done at the start of this run, 2026-08-25, against HEAD `35af5bb`:
+
+- Debug binary `./target/debug/paneflow` (paneflow 0.8.2) launched with
+  `PANEFLOW_ALLOW_MULTIPLE=1` and `PANEFLOW_SOCKET_PATH=/tmp/paneflow-head-smoke.sock`.
+- Screenshot: `/tmp/pf-screenshots/head-debug-window.png`.
+- Observed: window opens; sidebar lists workspace `paneflow` on `main`;
+  tab strip shows `paneflow`; terminal prompt
+  `dayers@Davids-MacBook-Pro paneflow %` renders as real glyphs, not
+  empty boxes.
+- Log: `font: resolved family='JetBrainsMono Nerd Font Mono'`;
+  `Terminal backend selected: … effective=alacritty`;
+  `Assets::load_fonts: registered 36 embedded font file(s)`.
+- Also observed (task 11 evidence): `update::checker up to date (v0.8.2)`
+  — the feed still contacts GitHub at HEAD.
