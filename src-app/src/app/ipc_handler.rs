@@ -861,7 +861,10 @@ pub(crate) struct SurfaceMeta {
     pub title: String,
     pub cwd: Option<String>,
     pub cmd: Option<String>,
+    /// 0-based `workspaces` vec index. Kept as `workspace` on the wire.
     pub workspace: Option<usize>,
+    /// `Workspace.id` (the `PANEFLOW_WORKSPACE_ID` value), not the vec index.
+    pub workspace_id: Option<u64>,
     pub scope: &'static str,
 }
 
@@ -927,6 +930,7 @@ fn surface_meta_value(s: SurfaceMeta) -> serde_json::Value {
         "cwd": s.cwd,
         "cmd": s.cmd,
         "workspace": s.workspace,
+        "workspace_id": s.workspace_id,
         "scope": s.scope,
     })
 }
@@ -1463,6 +1467,10 @@ impl PaneFlowApp {
                 cwd: entry.cwd.clone(),
                 cmd: entry.cmd.clone(),
                 workspace: entry.scope.workspace_index(),
+                workspace_id: entry
+                    .scope
+                    .workspace_index()
+                    .and_then(|idx| self.workspaces.get(idx).map(|ws| ws.id)),
                 scope: entry.scope.as_wire(),
             })
             .collect();
@@ -4683,9 +4691,11 @@ mod tests {
             cwd: Some("/repo".to_string()),
             cmd: Some("zsh".to_string()),
             workspace: Some(2),
+            workspace_id: Some(9),
             scope: "workspace",
         });
         assert_eq!(workspace["workspace"], 2);
+        assert_eq!(workspace["workspace_id"], 9);
         assert_eq!(workspace["scope"], "workspace");
 
         let agents = super::surface_meta_value(super::SurfaceMeta {
@@ -4695,9 +4705,11 @@ mod tests {
             cwd: None,
             cmd: Some("codex".to_string()),
             workspace: None,
+            workspace_id: None,
             scope: "agents_thread",
         });
         assert_eq!(agents["workspace"], serde_json::Value::Null);
+        assert_eq!(agents["workspace_id"], serde_json::Value::Null);
         assert_eq!(agents["scope"], "agents_thread");
     }
 

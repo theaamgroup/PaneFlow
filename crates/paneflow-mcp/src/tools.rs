@@ -32,31 +32,39 @@ const WORKSPACE_ENV: &str = "PANEFLOW_WORKSPACE_ID";
 pub enum BridgeScope {
     All,
     Workspace(u64),
+    /// `PANEFLOW_WORKSPACE_ID` was set but not a u64. Match nothing.
+    Invalid,
 }
 
 impl BridgeScope {
     pub fn from_env() -> Self {
-        if std::env::var(MCP_SCOPE_ENV)
-            .ok()
-            .as_deref()
-            .is_some_and(|scope| {
-                scope.eq_ignore_ascii_case("all") || scope.eq_ignore_ascii_case("global")
-            })
-        {
+        Self::from_scope_and_workspace(
+            std::env::var(MCP_SCOPE_ENV).ok().as_deref(),
+            std::env::var(WORKSPACE_ENV).ok().as_deref(),
+        )
+    }
+
+    fn from_scope_and_workspace(scope: Option<&str>, workspace_id: Option<&str>) -> Self {
+        if scope.is_some_and(|scope| {
+            scope.eq_ignore_ascii_case("all") || scope.eq_ignore_ascii_case("global")
+        }) {
             return Self::All;
         }
 
-        std::env::var(WORKSPACE_ENV)
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .map(Self::Workspace)
-            .unwrap_or(Self::All)
+        match workspace_id {
+            None => Self::All,
+            Some(raw) => match raw.parse::<u64>() {
+                Ok(id) => Self::Workspace(id),
+                Err(_) => Self::Invalid,
+            },
+        }
     }
 
     fn as_json(self) -> Value {
         match self {
             Self::All => json!({ "mode": "all" }),
             Self::Workspace(workspace) => json!({ "mode": "workspace", "workspace": workspace }),
+            Self::Invalid => json!({ "mode": "invalid" }),
         }
     }
 
@@ -64,6 +72,7 @@ impl BridgeScope {
         match self {
             Self::All => "scope=\"all\"".to_string(),
             Self::Workspace(workspace) => format!("scope=\"workspace:{workspace}\""),
+            Self::Invalid => "scope=\"invalid\"".to_string(),
         }
     }
 
@@ -72,6 +81,9 @@ impl BridgeScope {
             Self::All => format!("surface_id {surface_id} is not available"),
             Self::Workspace(workspace) => format!(
                 "surface_id {surface_id} is outside MCP scope workspace {workspace}; set {MCP_SCOPE_ENV}=all to allow instance-wide reads"
+            ),
+            Self::Invalid => format!(
+                "surface_id {surface_id} is not available; {WORKSPACE_ENV} is not a valid u64 (set {MCP_SCOPE_ENV}=all for instance-wide reads)"
             ),
         }
     }
@@ -333,9 +345,10 @@ fn surface_in_scope(surface: &Value, scope: BridgeScope) -> bool {
     match scope {
         BridgeScope::All => true,
         BridgeScope::Workspace(workspace) => surface
-            .get("workspace")
+            .get("workspace_id")
             .and_then(Value::as_u64)
             .is_some_and(|surface_workspace| surface_workspace == workspace),
+        BridgeScope::Invalid => false,
     }
 }
 
@@ -640,23 +653,25 @@ mod tests {
 
     #[test]
     fn list_panes_scopes_to_workspace() {
+        // workspace is the vec index; workspace_id is Workspace.id (env value).
         let t = FakeTransport::new().with(
             "surface.list",
             json!({"surfaces": [
-                {"surface_id": 1u64, "name": "cargo-run", "workspace": 0u64},
-                {"surface_id": 2u64, "name": "secret-prod", "workspace": 1u64}
+                {"surface_id": 1u64, "name": "cargo-run", "workspace": 0u64, "workspace_id": 1u64},
+                {"surface_id": 2u64, "name": "secret-prod", "workspace": 1u64, "workspace_id": 2u64}
             ]}),
         );
         let out = dispatch_call(
             &json!({"name": "list_panes", "arguments": {}}),
             &t,
-            BridgeScope::Workspace(0),
+            BridgeScope::Workspace(1),
         );
         assert_eq!(out["isError"], false);
         let text = out["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("cargo-run"));
         assert!(!text.contains("secret-prod"));
         assert!(text.contains("\"workspace\": 0"));
+        assert!(text.contains("\"workspace_id\": 1"));
     }
 
     #[test]
@@ -690,19 +705,19 @@ mod tests {
         let t = FakeTransport::new().with(
             "surface.list",
             json!({"surfaces": [
-                {"surface_id": 1u64, "name": "cargo-run", "workspace": 0u64},
-                {"surface_id": 2u64, "name": "secret-prod", "workspace": 1u64}
+                {"surface_id": 1u64, "name": "cargo-run", "workspace": 0u64, "workspace_id": 1u64},
+                {"surface_id": 2u64, "name": "secret-prod", "workspace": 1u64, "workspace_id": 2u64}
             ]}),
         );
         let out = dispatch_call(
             &json!({"name": "read_pane", "arguments": {"target": 2u64}}),
             &t,
-            BridgeScope::Workspace(0),
+            BridgeScope::Workspace(1),
         );
         assert_eq!(out["isError"], true);
         let text = out["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.contains("outside MCP scope workspace 0"),
+            text.contains("outside MCP scope workspace 1"),
             "got: {text}"
         );
         assert!(t.last_params("surface.read").is_none());
@@ -714,7 +729,7 @@ mod tests {
             .with(
                 "surface.list",
                 json!({"surfaces": [
-                    {"surface_id": 2u64, "name": "cargo-run", "workspace": 0u64}
+                    {"surface_id": 2u64, "name": "cargo-run", "workspace": 0u64, "workspace_id": 1u64}
                 ]}),
             )
             .with(
@@ -724,7 +739,7 @@ mod tests {
         let out = dispatch_call(
             &json!({"name": "read_pane", "arguments": {"target": 2u64}}),
             &t,
-            BridgeScope::Workspace(0),
+            BridgeScope::Workspace(1),
         );
         assert_eq!(out["isError"], false);
         assert_eq!(t.last_params("surface.read").unwrap()["surface_id"], 2);
@@ -1046,11 +1061,11 @@ mod tests {
         let t = FakeTransport::new().with(
             "surface.list",
             json!({"surfaces": [
-                {"surface_id": 1u64, "name": "cargo-run", "workspace": 0u64},
-                {"surface_id": 2u64, "name": "secret-prod", "workspace": 1u64}
+                {"surface_id": 1u64, "name": "cargo-run", "workspace": 0u64, "workspace_id": 1u64},
+                {"surface_id": 2u64, "name": "secret-prod", "workspace": 1u64, "workspace_id": 2u64}
             ]}),
         );
-        let out = list_resources(&t, BridgeScope::Workspace(0));
+        let out = list_resources(&t, BridgeScope::Workspace(1));
         let resources = out["resources"].as_array().unwrap();
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0]["uri"], "pane://surface/1/content");
@@ -1090,12 +1105,12 @@ mod tests {
         let t = FakeTransport::new().with(
             "surface.list",
             json!({"surfaces": [
-                {"surface_id": 3u64, "name": "secret-prod", "workspace": 1u64}
+                {"surface_id": 3u64, "name": "secret-prod", "workspace": 1u64, "workspace_id": 2u64}
             ]}),
         );
-        let err = read_resource("pane://surface/3/content", &t, BridgeScope::Workspace(0))
+        let err = read_resource("pane://surface/3/content", &t, BridgeScope::Workspace(1))
             .expect_err("out of scope");
-        assert!(err.contains("outside MCP scope workspace 0"), "got: {err}");
+        assert!(err.contains("outside MCP scope workspace 1"), "got: {err}");
         assert!(t.last_params("surface.read").is_none());
     }
 
@@ -1104,5 +1119,48 @@ mod tests {
         let t = FakeTransport::new();
         assert!(read_resource("file://nope", &t, BridgeScope::All).is_err());
         assert!(read_resource("pane://vite/content", &t, BridgeScope::All).is_err());
+    }
+
+    #[test]
+    fn surface_in_scope_uses_workspace_id_not_index() {
+        let own = json!({
+            "surface_id": 1u64,
+            "name": "cargo-run",
+            "workspace": 0u64,
+            "workspace_id": 1u64
+        });
+        let other = json!({
+            "surface_id": 2u64,
+            "name": "secret-prod",
+            "workspace": 1u64,
+            "workspace_id": 2u64
+        });
+        let missing = json!({
+            "surface_id": 3u64,
+            "name": "legacy",
+            "workspace": 1u64
+        });
+        let scope = BridgeScope::Workspace(1);
+        assert!(surface_in_scope(&own, scope));
+        assert!(!surface_in_scope(&other, scope));
+        assert!(!surface_in_scope(&missing, scope));
+    }
+
+    #[test]
+    fn unparseable_workspace_id_with_scope_unset_is_not_all() {
+        let scope = BridgeScope::from_scope_and_workspace(None, Some("not-a-u64"));
+        assert_ne!(scope, BridgeScope::All);
+        assert!(!surface_in_scope(
+            &json!({"workspace": 1u64, "workspace_id": 1u64}),
+            scope
+        ));
+    }
+
+    #[test]
+    fn unset_workspace_id_defaults_to_all() {
+        assert_eq!(
+            BridgeScope::from_scope_and_workspace(None, None),
+            BridgeScope::All
+        );
     }
 }
