@@ -67,7 +67,7 @@ the only workflow here, so this is the most likely source of confusion.
 | Identity | **Done.** Bundle id `com.theaamgroup.paneflow`, authors The AAM Group, Help/`--help`/schema `$id` point at `theaamgroup/paneflow`. |
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Needs `APPLE_*` secrets before a real tag. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
-| Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product/build page; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
+| Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
 | Version | **0.1.0.** Local inherited `v*` tags deleted; only `upstream-fork-point` remains. Do not tag until secrets exist. |
 
 ## Verified green, and how to reproduce it

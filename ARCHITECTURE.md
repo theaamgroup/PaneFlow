@@ -211,13 +211,12 @@ and report back through events.
 
 ## Building
 
+From-source setup, the Xcode/Metal traps, and debug vs release paths are in
+[`INSTALL.md`](INSTALL.md). The short version:
+
 ```bash
 cargo build --release    # LTO thin, strip, codegen-units=1
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
-
-Prerequisites (Rust 1.96.1 pinned by `rust-toolchain.toml`, full Xcode, and
-the separately downloaded Metal toolchain) are in
-[`CLAUDE.md`](CLAUDE.md#build-prerequisites-macos).

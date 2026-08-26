@@ -41,7 +41,7 @@ printf '#include <metal_stdlib>\nkernel void k() {}\n' > /tmp/probe.metal
 xcrun metal -c /tmp/probe.metal -o /tmp/probe.air && echo "Metal toolchain OK"
 ```
 
-Full prerequisites are in [installation/macos.md](installation/macos.md).
+Full prerequisites are in [INSTALL.md](../../INSTALL.md).
 
 ### Why does all my text render as boxes?
 

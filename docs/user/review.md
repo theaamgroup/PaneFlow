@@ -62,5 +62,5 @@ directly under the diff, already in the right directory.
 ## See also
 
 * [Features](features.md) - the full tour, including projects, worktrees, and per-thread agents.
-* [index](index.md) - the overview, and [installation](installation.md) to build it.
+* [index](index.md) - the overview, and [INSTALL.md](../../INSTALL.md) to build it.
 * [Keybindings](keybindings.md) - the default keymap and how to remap any action.

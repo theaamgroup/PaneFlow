@@ -10,14 +10,14 @@ port detection, and bundled themes.
 
 This fork drops Windows and Linux support entirely. There is no public
 download, no Homebrew tap, and no public issue tracker. Build it from
-source: see [installation](installation.md).
+source: see [INSTALL.md](../../INSTALL.md).
 
 ## Contents
 
 **Getting it running**
 
-* [installation](installation.md) - build from source and find the config file.
-* [installation/macos](installation/macos.md) - full prerequisites, including the Metal toolchain step that is easy to miss.
+* [INSTALL.md](../../INSTALL.md) - build from source, including the Metal toolchain step that is easy to miss.
+* [installation/macos](installation/macos.md) - `.app` bundle, PATH symlink, Gatekeeper.
 * [troubleshooting](troubleshooting.md) - symptom-first fixes.
 
 **Using it**
@@ -30,6 +30,7 @@ source: see [installation](installation.md).
 
 **Configuring it**
 
+* [installation](installation.md) - where the config file lives for debug vs release.
 * [settings](settings.md) - the Settings panel and what it writes.
 * [configuration](configuration.md) - how `paneflow.json` is read.
 * [configuration/schema](configuration/schema.md) - every recognised key, type, and default.
