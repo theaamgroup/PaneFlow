@@ -114,7 +114,7 @@ impl PaneFlowApp {
                     .mt(px(14.))
                     .text_color(ui.muted)
                     .text_size(px(12.))
-                    .child("© Arthur Jean"),
+                    .child("© The AAM Group"),
             );
 
         let ok_button = div()

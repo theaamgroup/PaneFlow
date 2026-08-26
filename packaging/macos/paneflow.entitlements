@@ -54,7 +54,7 @@
     NOTE: com.apple.security.get-task-allow is INTENTIONALLY ABSENT here.
     A distribution build with get-task-allow=true is rejected by
     notarytool (`The executable requests the com.apple.security.
-    get-task-allow entitlement`). Use packaging/macos/paneflow.dev.entitlements
+    get-task-allow entitlement`). Use packaging/macos/paneflow.debug.entitlements
     for local debug signing where lldb attach is needed.
 -->
 <plist version="1.0">

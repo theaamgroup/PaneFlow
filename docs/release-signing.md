@@ -24,8 +24,8 @@ Neither one substitutes for the other, and neither one is GPG.
 ## The GPG release key is gone. Do not bring it back.
 
 Upstream carried a 4096-bit RSA GPG key whose only job was signing `.deb` and
-`.rpm` packages and the apt/dnf repository metadata published at
-`pkg.paneflow.dev`. This fork builds none of those artifacts and publishes to
+`.rpm` packages and the apt/dnf repository metadata published on upstream's
+public package host. This fork builds none of those artifacts and publishes to
 none of that infrastructure, so the key has been removed along with them:
 
 - `keys/` (deleted)
@@ -86,7 +86,7 @@ them, and treat their presence in a workflow file as a bug to remove:
 
 | Name | What it fed upstream |
 |---|---|
-| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`, `R2_BUCKET` | Cloudflare R2 bucket behind `pkg.paneflow.dev` |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`, `R2_BUCKET` | Cloudflare R2 bucket behind upstream's public package host |
 | `CLOUDFLARE_*` | Cache purges and DNS for that same domain |
 | `HOMEBREW_TAP_DEPLOY_KEY` | Push access to upstream's Homebrew tap |
 | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`, `GPG_KEY_ID` | Signing `.deb`/`.rpm` packages and apt/dnf repo metadata |

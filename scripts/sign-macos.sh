@@ -17,13 +17,13 @@
 # Usage:
 #   scripts/sign-macos.sh                      # signs dist/PaneFlow.app with release entitlements
 #   scripts/sign-macos.sh path/to/MyApp.app
-#   scripts/sign-macos.sh --entitlements packaging/macos/paneflow.dev.entitlements
+#   scripts/sign-macos.sh --entitlements packaging/macos/paneflow.debug.entitlements
 #
 # Arguments:
 #   --entitlements <path>    Entitlements plist to embed at signing time.
 #                            Defaults to packaging/macos/paneflow.entitlements.
 #                            Two variants exist: the release default, and
-#                            paneflow.dev.entitlements which adds get-task-allow
+#                            paneflow.debug.entitlements which adds get-task-allow
 #                            and cs.allow-dyld-environment-variables for lldb
 #                            and is not shippable. A third nightly variant was
 #                            removed: nothing referenced it and no nightly

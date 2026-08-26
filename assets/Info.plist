@@ -31,7 +31,7 @@
     <key>CFBundleIconFile</key>
     <string>PaneFlow</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.arthurdev44.paneflow</string>
+    <string>com.theaamgroup.paneflow</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

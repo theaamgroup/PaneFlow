@@ -195,7 +195,7 @@ notarytool.**
 |---|---|---|
 | `paneflow.entitlements` | Tagged releases. The default in `sign-macos.sh`, and what `release.yml` uses. | 4 keys: `app-sandbox=false`, `automation.apple-events`, `cs.allow-jit`, `cs.allow-unsigned-executable-memory`. |
 | `paneflow.nightly.entitlements` | Nothing, today. | Same 4 keys as release. **No script or workflow ever passes this file**, and there is no nightly bundle ID in the repo. It is a forked placeholder, not a live pipeline. |
-| `paneflow.dev.entitlements` | **Local only.** Attaching `lldb` to a signed build on your own machine. | 6 keys: the release 4, plus `com.apple.security.get-task-allow` **and** `com.apple.security.cs.allow-dyld-environment-variables`. **Notarization rejects any bundle carrying `get-task-allow`** - never use for distribution. (The file's own comment claims get-task-allow is the only addition. It is wrong; there are two.) |
+| `paneflow.debug.entitlements` | **Local only.** Attaching `lldb` to a signed build on your own machine. | 6 keys: the release 4, plus `com.apple.security.get-task-allow` **and** `com.apple.security.cs.allow-dyld-environment-variables`. **Notarization rejects any bundle carrying `get-task-allow`** - never use for distribution. (The file's own comment claims get-task-allow is the only addition. It is wrong; there are two.) |
 
 The `cs.*` block is required for any GPUI app under the hardened runtime: GPUI
 compiles `MTLComputePipelineState` objects at first use, which Apple classifies
@@ -264,17 +264,19 @@ a flag in the workflow that was never there.
    Gatekeeper prompt, app launches. If you see a prompt, the notarization ticket
    is missing. Read the `notarytool log` output dumped by the notarize step.
 
-> **Known fork item.** `assets/Info.plist` still carries upstream's bundle
-> identifier, which embeds upstream's GitHub handle. It needs to become our own
-> reverse-DNS identifier before the first release under our Developer ID. That
-> is part of the pending rename pass, not something to patch piecemeal here.
+> **Bundle identifier.** `assets/Info.plist` `CFBundleIdentifier` is
+> `com.theaamgroup.paneflow`. Changing the bundle id orphans existing TCC
+> grants, LaunchServices registration, and the defaults domain on any machine
+> that previously ran a build under the old identifier. macOS will re-prompt
+> for Accessibility / Automation / Full Disk Access on first launch. That
+> re-prompt is expected, not a regression.
 
 ---
 
 ## 7. Local dev signing (no CI)
 
 To sign a build on your own machine, typically to attach `lldb` to a
-hardened-runtime binary, use the `.dev` entitlements:
+hardened-runtime binary, use the `.debug` entitlements:
 
 ```bash
 cargo build --release --target aarch64-apple-darwin -p paneflow-app
@@ -286,7 +288,7 @@ export APPLE_DEVELOPER_CERT_PASSWORD='...'
 export APPLE_TEAM_ID='<your 10-char Team ID>'
 
 bash scripts/sign-macos.sh \
-    --entitlements packaging/macos/paneflow.dev.entitlements \
+    --entitlements packaging/macos/paneflow.debug.entitlements \
     dist/PaneFlow.app
 
 # DO NOT notarize a dev build - get-task-allow guarantees rejection.
@@ -374,6 +376,6 @@ runs (§2).
   `Sign macOS .app bundle`, `Notarize + staple macOS .app bundle`,
   `Record unsigned macOS build in job summary`, `Produce .app bundle`,
   `Free disk space before .dmg packaging`, `Produce .dmg`, `Stage macOS .dmg`.
-- `packaging/macos/paneflow.entitlements`, `paneflow.dev.entitlements`,
+- `packaging/macos/paneflow.entitlements`, `paneflow.debug.entitlements`,
   `paneflow.nightly.entitlements` - the three entitlements variants.
 - `assets/Info.plist` - templated into the bundle, carries the bundle ID.

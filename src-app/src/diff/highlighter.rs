@@ -435,7 +435,7 @@ mod tests {
         // each colored; the inline pass adds emphasis/link color the block
         // grammar leaves grey, so the doc shows several distinct colors.
         let syn = DiffSyntax::from_theme(&one_dark());
-        let doc = "# Heading\n\nSome **bold** text and a [link](https://paneflow.dev).\n\n- first item\n- second item\n\n```rust\nfn x() {}\n```\n";
+        let doc = "# Heading\n\nSome **bold** text and a [link](https://github.com/theaamgroup/paneflow).\n\n- first item\n- second item\n\n```rust\nfn x() {}\n```\n";
         let lines = highlight_lines(doc, "md", &syn);
         assert!(has_color(&lines), "expected colored markdown runs");
         assert!(

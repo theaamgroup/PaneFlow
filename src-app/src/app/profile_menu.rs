@@ -20,11 +20,14 @@ const PROFILE_MENU_WIDTH: Pixels = px(220.);
 // equals the value used to clamp the menu's left edge (no silent overflow).
 const TITLE_BAR_FILES_MENU_WIDTH: Pixels = px(200.);
 const TITLE_BAR_HELP_MENU_WIDTH: Pixels = px(220.);
-const DOCUMENTATION_URL: &str = "https://paneflow.dev/docs";
-const RELEASES_URL: &str = "https://paneflow.dev/releases";
-const AUTOMATIONS_URL: &str = "https://paneflow.dev/docs/scripting";
-const REVIEW_URL: &str = "https://paneflow.dev/docs/review";
-const TROUBLESHOOTING_URL: &str = "https://paneflow.dev/docs/troubleshooting";
+const DOCUMENTATION_URL: &str =
+    "https://github.com/theaamgroup/paneflow/blob/main/docs/user/index.md";
+const RELEASES_URL: &str = "https://github.com/theaamgroup/paneflow/releases";
+const AUTOMATIONS_URL: &str =
+    "https://github.com/theaamgroup/paneflow/blob/main/docs/user/scripting.md";
+const REVIEW_URL: &str = "https://github.com/theaamgroup/paneflow/blob/main/docs/user/review.md";
+const TROUBLESHOOTING_URL: &str =
+    "https://github.com/theaamgroup/paneflow/blob/main/docs/user/troubleshooting.md";
 type TitleBarMenuClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>;
 
 impl PaneFlowApp {
