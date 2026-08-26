@@ -19,7 +19,7 @@ dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 | Cut depth | Deep. Strip non-Mac `cfg` branches from shared source | Readable Mac-only source. Every future upstream merge conflicts across roughly 80 files. Accepted knowingly. |
 | Ghostty backend | Delete entirely | Verified unreachable on macOS. See Verification below. |
 | Self-update | **Deleted 2026-08-26** (supersedes “disable the feed”) | No feed, no minisign client, no title-bar update pill, no `--update-and-exit`. Apple Developer ID codesign + notarized DMG remains the install path. GitHub issue #8 (minisign keypair) is obsolete. |
-| Telemetry | PostHog stays wired, key stays unset | Inert. Never set `POSTHOG_API_KEY` in the new org. |
+| Telemetry | **Deleted** (post-2c grind). Do not resurrect PostHog | Never set `POSTHOG_API_KEY`. Crate, app module, consent UI, and `build.rs` env directives are gone. |
 | Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server, conductor skill and `PANEFLOW_*` stay. See `docs/fork/2026-08-25-post-2c-plan.md` |
 | gpui dependency | Keep pointing at `arthjean/zed`, take a cold-backup fork | `Cargo.lock` pins the rev with a checksum, so the risk is availability, not drift. Insurance without a diff. |
 | Apple signing | AAM Developer ID, signed and notarized DMG | Other AAM Macs can install without Gatekeeper warnings |
@@ -281,20 +281,13 @@ Found during the inventory. Each one would have cost a debugging session.
 
 ## Verification: Ghostty is unreachable on macOS
 
-Proven, not assumed. `src-app/src/terminal/view.rs:70` `auto_selects_ghostty_for_target()`
-returns false on macOS. Line 91 `should_start_ghostty()` computes availability
-from features that are target-gated away. The only branch constructing a
-`GhosttySession` (lines 581 to 600) is `cfg`-excluded on macOS entirely. Lines
-602 to 618 are the macOS arm: warn once, record
-`TerminalBackendFailurePhase::Availability`, fall through to Alacritty. An
-explicit `terminal.backend = "ghostty"` lands there. No env var selects a
-backend. There is not one byte of macOS native Ghostty artifact in the
-tree, and `manifest.toml` declares only Linux and Windows targets.
-
-The two `libghostty-*` features ARE enabled on macOS builds, since macOS CI does
-not pass `--no-default-features`. They are inert because the deps they activate
-exist only in the Linux and Windows-x64-MSVC target tables and `resolver = "2"`
-does not unify features of target-inapplicable deps.
+Proven on 2026-08-25, then the remaining compiled stubs were deleted in
+leftover-removal bucket 2 (2026-08-26). There is no Ghostty backend, no
+`auto_selects_ghostty_for_target`, no `should_start_ghostty`, no
+`GhosttySession`, and no `GhosttyBuildDiagnostics`. `TerminalBackendConfig`
+is `Auto | Alacritty` only. The loader still maps leftover
+`"backend": "ghostty"` to Alacritty so old `paneflow.json` files load. No
+env var selects a backend.
 
 ## Known costs
 

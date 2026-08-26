@@ -74,7 +74,7 @@ the only workflow here, so this is the most likely source of confusion.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1684 passed, 0 failed, 2 ignored
+cargo test --workspace                       # 1769 passed, 0 failed, 2 ignored (2026-08-26)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.1.0
@@ -326,6 +326,9 @@ issues assigned to `evilchinesefood`:
   (`dist/paneflow-0.1.0-aarch64-apple-darwin.dmg`)
 - #13 TCC re-grant after the new bundle id
 - #14–#15 keyboard / PATH-shim smoke
+
+#8 (minisign keypair) is obsolete. #12 (no GitHub Releases request) is
+automatic now that the updater is deleted. #16–#19 are closed.
 
 Product bugs continue from #20. Some early issues (#1 in particular)
 were filed before `release.yml` was cut to one aarch64 lane; check the
