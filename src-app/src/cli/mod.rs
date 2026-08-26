@@ -44,7 +44,7 @@ pub const EXIT_TIMEOUT: i32 = 4;
 /// canonical subcommand via `#[command(alias = ...)]`) so a conductor that types
 /// the tool name reaches the matching verb instead of tripping the GUI
 /// single-instance guard. This list only gates the `main.rs` intercept.
-const VERBS: &[&str] = &[
+pub(crate) const VERBS: &[&str] = &[
     "ls",
     "read",
     "search",
@@ -64,6 +64,49 @@ const VERBS: &[&str] = &[
     "read_pane",
     "search_pane",
 ];
+
+/// Canonical verbs shown in `paneflow --help`. MCP-tool aliases stay in
+/// [`VERBS`] (so they still intercept) but off this index to keep help short.
+pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
+    ("ls", "List terminal surfaces"),
+    ("read", "Print a pane's scrollback"),
+    ("search", "Search a pane's scrollback"),
+    ("ps", "List running agents"),
+    ("status", "Read one surface's agent state"),
+    ("new", "Create a new workspace"),
+    ("select", "Select a workspace by index"),
+    ("split", "Split the active pane"),
+    ("send", "Inject text into a pane"),
+    ("up", "Spawn a workspace from a TOML spec"),
+    ("wait", "Block until idle or a pattern matches"),
+    ("watch", "Stream lifecycle events as JSONL"),
+    ("focus", "Give a surface keyboard focus"),
+    ("key", "Send a named keystroke to a pane"),
+    ("flow", "Run a declarative agent DAG"),
+];
+
+/// Offline intercepts handled in `main.rs` before clap (`mcp`, `hooks`).
+/// Not in [`VERBS`]; still listed next to the verbs so unknown-verb errors
+/// that point at `paneflow --help` actually show a complete command index.
+pub(crate) const HELP_OFFLINE_COMMANDS: &[(&str, &str)] = &[
+    ("mcp", "Install, status, or uninstall the MCP bridge"),
+    ("hooks", "Install persistent agent-notification hooks"),
+];
+
+/// One padded row per [`HELP_VERBS`] entry, then [`HELP_OFFLINE_COMMANDS`].
+pub(crate) fn format_help_commands() -> String {
+    let width = HELP_VERBS
+        .iter()
+        .chain(HELP_OFFLINE_COMMANDS)
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (name, desc) in HELP_VERBS.iter().chain(HELP_OFFLINE_COMMANDS) {
+        out.push_str(&format!("  {name:<width$}  {desc}\n"));
+    }
+    out
+}
 
 /// True when `argv[1]` names one of our subcommands (including the MCP-tool
 /// aliases above).
@@ -536,8 +579,51 @@ mod tests {
         assert!(is_cli_verb(Some("focus")));
         assert!(is_cli_verb(Some("key")));
         assert!(!is_cli_verb(Some("mcp")));
+        assert!(!is_cli_verb(Some("hooks")));
         assert!(!is_cli_verb(Some("--version")));
         assert!(!is_cli_verb(None));
+    }
+
+    #[test]
+    fn cli_help_index_covers_canonical_verbs() {
+        const MCP_ALIASES: &[&str] = &["list_panes", "read_pane", "search_pane"];
+        for verb in VERBS {
+            if MCP_ALIASES.contains(verb) {
+                continue;
+            }
+            assert!(
+                HELP_VERBS.iter().any(|(name, _)| name == verb),
+                "canonical verb {verb} missing from HELP_VERBS"
+            );
+        }
+        for (name, _) in HELP_VERBS {
+            assert!(
+                VERBS.contains(name),
+                "HELP_VERBS entry {name} is not in VERBS"
+            );
+            assert!(
+                !MCP_ALIASES.contains(name),
+                "MCP alias {name} should not be a HELP_VERBS row"
+            );
+        }
+        for (name, _) in HELP_OFFLINE_COMMANDS {
+            assert!(
+                !VERBS.contains(name),
+                "offline command {name} should stay out of VERBS (main.rs intercepts it)"
+            );
+        }
+        let listing = format_help_commands();
+        for (name, desc) in HELP_VERBS.iter().chain(HELP_OFFLINE_COMMANDS) {
+            assert!(
+                listing.lines().any(|line| {
+                    let line = line.trim_start();
+                    line.starts_with(name)
+                        && line[name.len()..].starts_with(char::is_whitespace)
+                        && line.contains(desc)
+                }),
+                "help listing missing {name}: {listing}"
+            );
+        }
     }
 
     #[test]

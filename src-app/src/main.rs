@@ -341,6 +341,44 @@ fn should_extract_mcp_bridge_for_cli(args: &[String]) -> bool {
         && args.len() == 3
 }
 
+/// Top-level `--help`/`-h` text. Built as a function so tests can assert the
+/// CLI verb list without spawning GPUI. Unknown-verb errors point here.
+fn global_help_text() -> String {
+    format!(
+        "PaneFlow {version} - native terminal workspace for coding agents\n\
+         \n\
+         Usage: paneflow [OPTIONS]\n\
+         \x20      paneflow <command> [ARGS]\n\
+         \n\
+         Commands:\n\
+         {commands}\
+         \n\
+         Run `paneflow <command> --help` for details.\n\
+         \n\
+         Options:\n\
+         \x20 -h, --help       Print this help message\n\
+         \x20 -v, --version    Print version\n\
+         \x20 --update-and-exit  Check for an update and exit (CI harness)\n\
+         \n\
+         Agent workflow:\n\
+         \x20 Launch Claude Code, Codex, opencode, Pi, or any CLI agent in panes\n\
+         \x20 Use `paneflow mcp install` so capable agents can read pane output\n\
+         \n\
+         Keybindings:\n\
+         \x20 Cmd+Shift+D/E    Split horizontal/vertical\n\
+         \x20 Cmd+Shift+W      Close pane\n\
+         \x20 Alt+Arrow        Focus adjacent pane\n\
+         \x20 Cmd+Shift+N      New workspace\n\
+         \x20 Cmd+Tab          Next workspace\n\
+         \x20 Cmd+1-9          Switch to workspace N\n\
+         \n\
+         Config paths and IPC endpoints are documented in the README.\n\
+         https://github.com/theaamgroup/paneflow",
+        version = env!("CARGO_PKG_VERSION"),
+        commands = cli::format_help_commands(),
+    )
+}
+
 #[cfg(test)]
 mod native_material_tests {
     use super::{
@@ -433,6 +471,30 @@ mod native_material_tests {
         assert!(!should_extract_mcp_bridge_for_cli(&args(&[
             "paneflow", "mcp", "install", "--help"
         ])));
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::global_help_text;
+
+    #[test]
+    fn cli_help_lists_verbs_mcp_and_hooks() {
+        let help = global_help_text();
+        let listing = crate::cli::format_help_commands();
+        assert!(
+            help.contains(&listing),
+            "--help must embed the CLI command index:\n{help}"
+        );
+        assert!(
+            help.contains("paneflow <command>"),
+            "usage should show the command slot:\n{help}"
+        );
+        assert!(
+            help.contains("hooks"),
+            "--help must list hooks (real intercept, not in VERBS):\n{help}"
+        );
+        assert!(help.contains("mcp"), "--help must list mcp:\n{help}");
     }
 }
 
@@ -2521,33 +2583,7 @@ fn main() {
         .is_some_and(|verb| cli::looks_like_unknown_verb(Some(verb.as_str())));
 
     if is_global_help {
-        println!(
-            "PaneFlow {version} - native terminal workspace for coding agents\n\
-             \n\
-             Usage: paneflow [OPTIONS]\n\
-             \x20      paneflow mcp <install|status|uninstall>\n\
-             \n\
-             Options:\n\
-             \x20 -h, --help       Print this help message\n\
-             \x20 -v, --version    Print version\n\
-             \x20 --update-and-exit  Check for an update and exit (CI harness)\n\
-             \n\
-             Agent workflow:\n\
-             \x20 Launch Claude Code, Codex, opencode, Pi, or any CLI agent in panes\n\
-             \x20 Use `paneflow mcp install` so capable agents can read pane output\n\
-             \n\
-             Keybindings:\n\
-             \x20 Cmd+Shift+D/E    Split horizontal/vertical\n\
-             \x20 Cmd+Shift+W      Close pane\n\
-             \x20 Alt+Arrow        Focus adjacent pane\n\
-             \x20 Cmd+Shift+N      New workspace\n\
-             \x20 Cmd+Tab          Next workspace\n\
-             \x20 Cmd+1-9          Switch to workspace N\n\
-             \n\
-             Config paths and IPC endpoints are documented in the README.\n\
-             https://github.com/theaamgroup/paneflow",
-            version = env!("CARGO_PKG_VERSION")
-        );
+        println!("{}", global_help_text());
         return;
     }
     if is_global_version {
