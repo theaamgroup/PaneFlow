@@ -18,9 +18,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// atomic w.r.t. other writers, so each one observes the previous one's result.
 ///
 /// (It does NOT order two writes of the *same* key - the last task to acquire
-/// wins regardless of spawn order - but `cached_config` in memory stays the
-/// source of truth for the live session, so a same-key reorder only matters
-/// across a restart, and is self-healed by the next write or external reload.)
+/// wins regardless of spawn order.) In-memory `cached_config` is mutated
+/// before the spawn; ConfigWatcher reloads are ignored while a persist is
+/// in flight or stamped with an older persist generation, so write N cannot
+/// replace in-memory write N+1. Same-key last-lock-wins still matters across
+/// a restart, and is self-healed by the next write or external reload.
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Acquire the config-write lock, recovering from a poisoned mutex (the guarded

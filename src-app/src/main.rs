@@ -1163,21 +1163,31 @@ struct PaneFlowApp {
     renaming_idx: Option<usize>,
     rename_text: String,
     /// Shared slot for config changes from the background `ConfigWatcher` thread.
-    /// The watcher writes `Some(config)` on every successful reload; the main
-    /// thread `take()`s it in the 50ms poll loop to apply keybindings + theme.
+    /// The watcher writes `Some((config, persist_gen))` on every successful
+    /// reload, stamping `persist_gen` from [`Self::config_last_persist_gen`] at
+    /// deposit time; the main thread `take()`s it in the 50ms poll loop.
     pending_config:
-        std::sync::Arc<std::sync::Mutex<Option<paneflow_config::schema::PaneFlowConfig>>>,
+        std::sync::Arc<std::sync::Mutex<Option<(paneflow_config::schema::PaneFlowConfig, u64)>>>,
     /// US-011: monotonic save-coalescing token. Every `save_session` bumps it
     /// and the off-thread writer skips its disk write when a newer save has
     /// been scheduled meanwhile, collapsing a burst (e.g. closing 20
     /// workspaces) into a single write - none of it on the render thread.
     save_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Monotonic settings-persist generation. `persist_setting` `fetch_add`s
+    /// before spawning the off-thread write, matching [`Self::save_seq`].
+    config_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Off-thread settings writes that have spawned but not finished. A
+    /// ConfigWatcher reload is ignored while this is non-zero so write N's
+    /// file cannot replace in-memory write N+1.
+    config_persist_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Generation of the most recently completed settings persist. Watcher
+    /// deposits older than this are dropped even after `in_flight` hits 0.
+    config_last_persist_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// US-014: parsed `paneflow.json` cached on the main thread so render paths
     /// never call the blocking `load_config()` (fs read + JSON parse) per frame.
-    /// Hydrated at startup, invalidated in [`Self::process_config_changes`] when
-    /// the background `ConfigWatcher` reports a reload. Render code reads this;
-    /// click handlers that must observe a config write *they just made* still
-    /// read fresh from disk (the cache lags the write by the watcher debounce).
+    /// Hydrated at startup, mutated immediately by settings persist, and
+    /// replaced by a ConfigWatcher reload only when no persist is in flight
+    /// and the deposit is not older than [`Self::config_last_persist_gen`].
     cached_config: paneflow_config::schema::PaneFlowConfig,
     ipc_rx: std::sync::mpsc::Receiver<ipc::IpcRequest>,
     ipc_status: ipc::IpcStatus,

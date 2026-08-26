@@ -84,14 +84,18 @@ impl PaneFlowApp {
         // Note: `start()` moves the OS watcher into a background thread, so the
         // `ConfigWatcher` struct itself can be safely dropped after starting.
         let pending_config = std::sync::Arc::new(std::sync::Mutex::new(
-            None::<paneflow_config::schema::PaneFlowConfig>,
+            None::<(paneflow_config::schema::PaneFlowConfig, u64)>,
         ));
+        let config_last_persist_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pending_config_writer = std::sync::Arc::clone(&pending_config);
+        let last_persist_gen_writer = std::sync::Arc::clone(&config_last_persist_gen);
         if let Some(Err(e)) = paneflow_config::watcher::ConfigWatcher::new(std::sync::Arc::new(
             move |cfg: paneflow_config::schema::PaneFlowConfig| {
-                *pending_config_writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(cfg);
+                super::ipc_handler::deposit_watcher_config(
+                    &pending_config_writer,
+                    &last_persist_gen_writer,
+                    cfg,
+                );
             },
         ))
         .map(|config_watcher| config_watcher.start())
@@ -725,6 +729,9 @@ impl PaneFlowApp {
             rename_text: String::new(),
             pending_config,
             save_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            config_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            config_persist_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            config_last_persist_gen,
             // US-014: hydrate the render-path config cache once at startup.
             cached_config,
             ipc_rx,

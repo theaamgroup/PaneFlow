@@ -1290,6 +1290,30 @@ fn drain_ipc_requests_for_tick(
     ready
 }
 
+/// Deposit a ConfigWatcher reload, stamped with the last completed settings
+/// persist generation so `process_config_changes` can ignore an older write.
+pub(crate) fn deposit_watcher_config(
+    pending: &std::sync::Mutex<Option<(PaneFlowConfig, u64)>>,
+    last_persist_gen: &std::sync::atomic::AtomicU64,
+    config: PaneFlowConfig,
+) {
+    let incoming_gen = last_persist_gen.load(std::sync::atomic::Ordering::SeqCst);
+    *pending.lock().unwrap_or_else(|e| e.into_inner()) = Some((config, incoming_gen));
+}
+
+/// Whether a ConfigWatcher deposit should replace `cached_config`.
+///
+/// Settings persist mutates the cache first and writes off-thread. Skip while
+/// any persist is in flight, and skip a deposit stamped older than the last
+/// completed persist, so write N cannot clobber in-memory write N+1.
+pub(crate) fn should_apply_watcher_config(
+    in_flight: usize,
+    incoming_gen: u64,
+    last_persist_gen: u64,
+) -> bool {
+    in_flight == 0 && incoming_gen >= last_persist_gen
+}
+
 impl PaneFlowApp {
     /// One automation poll tick for IPC, surface events, config reloads, and
     /// update-check completion. Keeping this order in one method prevents the
@@ -1414,34 +1438,42 @@ impl PaneFlowApp {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        if let Some(config) = new_config {
-            let default_shell_changed =
-                normalized_shell_value(self.cached_config.default_shell.as_deref())
-                    != normalized_shell_value(config.default_shell.as_deref());
-            let theme_mode = crate::ThemeMode::from_config(
-                config.theme_mode.as_deref(),
-                config.theme.as_deref(),
-            );
-            keybindings::apply_keybindings(cx, &config.shortcuts);
-            self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
-            crate::theme::invalidate_theme_cache();
-            crate::theme::sync_markdown_global_theme(cx);
-            // US-014 (render cache): refresh the cached config so render paths
-            // pick up the reload without a per-frame `load_config()`. Last use
-            // of `config` - move it in.
-            self.cached_config = config;
-            self.theme_mode = theme_mode;
-            if default_shell_changed {
-                self.handle_default_shell_changed(cx);
+        if let Some((config, incoming_gen)) = new_config {
+            let in_flight = self
+                .config_persist_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let last_persist_gen = self
+                .config_last_persist_gen
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if should_apply_watcher_config(in_flight, incoming_gen, last_persist_gen) {
+                let default_shell_changed =
+                    normalized_shell_value(self.cached_config.default_shell.as_deref())
+                        != normalized_shell_value(config.default_shell.as_deref());
+                let theme_mode = crate::ThemeMode::from_config(
+                    config.theme_mode.as_deref(),
+                    config.theme.as_deref(),
+                );
+                keybindings::apply_keybindings(cx, &config.shortcuts);
+                self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
+                crate::theme::invalidate_theme_cache();
+                crate::theme::sync_markdown_global_theme(cx);
+                // US-014 (render cache): refresh the cached config so render paths
+                // pick up the reload without a per-frame `load_config()`. Last use
+                // of `config` - move it in.
+                self.cached_config = config;
+                self.theme_mode = theme_mode;
+                if default_shell_changed {
+                    self.handle_default_shell_changed(cx);
+                }
+                // US-015: push the refreshed config to every pane's tab-bar cache.
+                for ws in &self.workspaces {
+                    ws.propagate_config(&self.cached_config, cx);
+                }
+                // The embedded settings page reads `self.cached_config` directly and
+                // its shortcut list is refreshed above (`effective_shortcuts`), so an
+                // external `paneflow.json` edit reflects without any extra push.
+                cx.notify();
             }
-            // US-015: push the refreshed config to every pane's tab-bar cache.
-            for ws in &self.workspaces {
-                ws.propagate_config(&self.cached_config, cx);
-            }
-            // The embedded settings page reads `self.cached_config` directly and
-            // its shortcut list is refreshed above (`effective_shortcuts`), so an
-            // external `paneflow.json` edit reflects without any extra push.
-            cx.notify();
         }
 
         // US-006: drain the theme watcher's "file changed" signal. The
@@ -5771,5 +5803,25 @@ mod tests {
         assert_eq!(v["type"], "ai.session_end");
         assert_eq!(v["pid"], serde_json::Value::Null);
         assert_eq!(v["surface_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn should_apply_watcher_config_skips_while_in_flight() {
+        assert!(!super::should_apply_watcher_config(1, 4, 3));
+        assert!(!super::should_apply_watcher_config(2, 9, 9));
+        assert!(!super::should_apply_watcher_config(1, 5, 4));
+    }
+
+    #[test]
+    fn should_apply_watcher_config_skips_older_generation() {
+        assert!(!super::should_apply_watcher_config(0, 3, 4));
+        assert!(!super::should_apply_watcher_config(0, 0, 1));
+    }
+
+    #[test]
+    fn should_apply_watcher_config_applies_when_idle_and_not_older() {
+        assert!(super::should_apply_watcher_config(0, 4, 4));
+        assert!(super::should_apply_watcher_config(0, 5, 4));
+        assert!(super::should_apply_watcher_config(0, 0, 0));
     }
 }

@@ -11,9 +11,31 @@
 //!   [`PaneFlowApp::handle_shortcut_recording`] - key routing for the font-picker
 //!   typeahead, Escape handling, and shortcut capture.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
 use gpui::{Context, KeyDownEvent, ScrollHandle, Window};
 
 use crate::{PaneFlowApp, SettingsSection, config_writer, keybindings};
+
+/// Guard that keeps a settings persist marked in-flight until the off-thread
+/// write finishes (or the task is dropped). `Drop` records the generation
+/// before decrementing so a tick cannot observe `in_flight == 0` with a stale
+/// `last_persist_gen`.
+#[must_use]
+struct ConfigPersistInFlight {
+    persist_gen: u64,
+    last_persist_gen: Arc<AtomicU64>,
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for ConfigPersistInFlight {
+    fn drop(&mut self) {
+        self.last_persist_gen
+            .fetch_max(self.persist_gen, Ordering::SeqCst);
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl PaneFlowApp {
     /// Open the embedded settings (Codex-style). The Settings button and the
@@ -82,6 +104,10 @@ impl PaneFlowApp {
     /// instant feedback, repaints, then persists the field to disk off the GPUI
     /// main thread (`smol::unblock`). `nested` routes into the `terminal` block;
     /// a `Null` value clears the field.
+    ///
+    /// Bumps the persist generation before spawn so a ConfigWatcher reload of
+    /// write N cannot replace in-memory write N+1. Failed writes keep the
+    /// in-memory mutate and toast.
     pub(crate) fn persist_setting(
         &mut self,
         nested: bool,
@@ -109,6 +135,7 @@ impl PaneFlowApp {
             self.handle_default_shell_changed(cx);
         }
         cx.notify();
+        let flight = self.begin_config_persist();
         cx.spawn(async move |this, cx| {
             let ok = smol::unblock(move || {
                 if nested {
@@ -118,6 +145,7 @@ impl PaneFlowApp {
                 }
             })
             .await;
+            drop(flight);
             if !ok {
                 log::warn!(
                     "settings: failed to persist {key}; choice is in-memory only this session"
@@ -128,6 +156,18 @@ impl PaneFlowApp {
             }
         })
         .detach();
+    }
+
+    /// Mark a settings persist in-flight and assign its generation. Call
+    /// immediately before spawning the off-thread write.
+    fn begin_config_persist(&self) -> ConfigPersistInFlight {
+        self.config_persist_in_flight.fetch_add(1, Ordering::SeqCst);
+        let persist_gen = self.config_persist_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        ConfigPersistInFlight {
+            persist_gen,
+            last_persist_gen: Arc::clone(&self.config_last_persist_gen),
+            in_flight: Arc::clone(&self.config_persist_in_flight),
+        }
     }
 
     pub(crate) fn handle_default_shell_changed(&mut self, cx: &mut Context<Self>) {
@@ -207,10 +247,12 @@ impl PaneFlowApp {
         self.cached_config =
             config_writer::with_agent_panel_field(&self.cached_config, key, value.clone());
         cx.notify();
+        let flight = self.begin_config_persist();
         cx.spawn(async move |this, cx| {
             let ok =
                 smol::unblock(move || config_writer::save_agent_panel_field_checked(key, value))
                     .await;
+            drop(flight);
             if !ok {
                 log::warn!(
                     "settings: failed to persist agent_panel.{key}; choice is in-memory only this session"
