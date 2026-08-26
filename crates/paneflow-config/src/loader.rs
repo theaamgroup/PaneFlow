@@ -43,19 +43,94 @@ pub fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join(APP_SUBDIR).join("paneflow.json"))
 }
 
-/// Returns the macOS session file path:
-/// `~/Library/Caches/paneflow/session.json`.
-///
-/// The filename is namespaced per build profile (`session-dev.json` in
-/// debug builds) so a `cargo run` instance and an installed release
-/// instance never overwrite each other's persisted layout on quit.
-pub fn session_path() -> Option<PathBuf> {
-    let filename = if cfg!(debug_assertions) {
+/// Filename of the persisted session. Namespaced per build profile so a
+/// `cargo run` instance never overwrites the installed app's layout.
+fn session_filename() -> &'static str {
+    if cfg!(debug_assertions) {
         "session-dev.json"
     } else {
         "session.json"
+    }
+}
+
+/// Returns the macOS session file path:
+/// `~/Library/Application Support/paneflow/session.json`.
+///
+/// Lives next to `paneflow.json`. Debug builds write `session-dev.json`
+/// under the `paneflow-dev` subdir. The previous location was
+/// `dirs::cache_dir()`, which macOS may purge; call
+/// [`session_path_migrated`] (or [`migrate_session_from_cache`]) so a
+/// leftover cache copy is copied forward once.
+pub fn session_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join(APP_SUBDIR).join(session_filename()))
+}
+
+/// Pre-#45 location: `~/Library/Caches/paneflow/{session,session-dev}.json`.
+pub fn legacy_session_cache_path() -> Option<PathBuf> {
+    dirs::cache_dir().map(|dir| dir.join(APP_SUBDIR).join(session_filename()))
+}
+
+/// One-shot copy of a leftover cache-dir session onto `dest`.
+///
+/// No-ops when `src` and `dest` are the same path, `dest` already exists,
+/// `src` is missing, or `src` is not a regular file. Deletes `src` only
+/// after `std::fs::copy` succeeds. Returns `Ok(true)` when a copy happened.
+pub fn migrate_session_from_cache(src: &Path, dest: &Path) -> std::io::Result<bool> {
+    if src == dest {
+        return Ok(false);
+    }
+    if dest.exists() {
+        return Ok(false);
+    }
+    let src_meta = match std::fs::metadata(src) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
     };
-    dirs::cache_dir().map(|dir| dir.join(APP_SUBDIR).join(filename))
+    if !src_meta.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dest)?;
+    if let Err(e) = std::fs::remove_file(src) {
+        warn!(
+            "migrated session to {} but could not remove {}: {e}",
+            dest.display(),
+            src.display()
+        );
+    }
+    Ok(true)
+}
+
+/// [`session_path`], after copying a leftover cache-dir session into place.
+///
+/// Load and save must use this so an upgrade still restores. [`session_path`]
+/// stays a pure path computation so tests can assert the location without
+/// touching the user's files.
+pub fn session_path_migrated() -> Option<PathBuf> {
+    let dest = session_path()?;
+    if let Some(src) = legacy_session_cache_path() {
+        match migrate_session_from_cache(&src, &dest) {
+            Ok(true) => {
+                tracing::info!(
+                    "migrated session from {} to {}",
+                    src.display(),
+                    dest.display()
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(
+                    "failed to migrate session from {} to {}: {e}",
+                    src.display(),
+                    dest.display()
+                );
+            }
+        }
+    }
+    Some(dest)
 }
 
 /// Load the PaneFlow configuration from the default platform path.
@@ -569,6 +644,121 @@ mod tests {
             p.ends_with(&suffix_unix),
             "config path {p:?} does not end with {suffix_unix}"
         );
+    }
+
+    #[test]
+    fn test_session_path_uses_config_dir_not_cache_dir() {
+        let path = session_path().expect("config dir must resolve on macOS");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(session_filename())
+        );
+        let parent = path.parent().expect("session path has a parent");
+        assert_eq!(
+            parent.file_name().and_then(|name| name.to_str()),
+            Some(APP_SUBDIR),
+            "session_path parent must be APP_SUBDIR under config_dir, got {path:?}"
+        );
+
+        let config_dir = dirs::config_dir().expect("config dir must resolve on macOS");
+        assert_eq!(
+            parent,
+            config_dir.join(APP_SUBDIR),
+            "session_path {path:?} must sit next to paneflow.json"
+        );
+
+        if let Some(cache_dir) = dirs::cache_dir() {
+            assert!(
+                !path.starts_with(&cache_dir),
+                "session_path {path:?} must not live under cache_dir {cache_dir:?}"
+            );
+            let legacy = legacy_session_cache_path().expect("cache dir resolved");
+            assert_eq!(legacy.parent(), Some(cache_dir.join(APP_SUBDIR).as_path()));
+            assert_ne!(
+                path, legacy,
+                "session_path must not still be the cache-dir location"
+            );
+        }
+
+        if cfg!(debug_assertions) {
+            assert_eq!(APP_SUBDIR, "paneflow-dev");
+            assert_eq!(session_filename(), "session-dev.json");
+            assert!(
+                path.to_string_lossy().contains("paneflow-dev"),
+                "debug session must live under paneflow-dev, got {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_session_path_migration_copies_from_cache_when_dest_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp
+            .path()
+            .join("cache")
+            .join(APP_SUBDIR)
+            .join("session.json");
+        let dest = tmp
+            .path()
+            .join("config")
+            .join(APP_SUBDIR)
+            .join("session.json");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, r#"{"version":1}"#).unwrap();
+
+        let copied = migrate_session_from_cache(&src, &dest).unwrap();
+        assert!(copied, "expected a one-shot copy into the config dir");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), r#"{"version":1}"#);
+        assert!(
+            !src.exists(),
+            "old cache file must be removed after a successful copy"
+        );
+    }
+
+    #[test]
+    fn test_session_path_migration_skips_when_dest_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("old.json");
+        let dest = tmp.path().join("new.json");
+        std::fs::write(&src, "from-cache").unwrap();
+        std::fs::write(&dest, "already-new").unwrap();
+
+        let copied = migrate_session_from_cache(&src, &dest).unwrap();
+        assert!(!copied);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "already-new");
+        assert_eq!(
+            std::fs::read_to_string(&src).unwrap(),
+            "from-cache",
+            "cache copy must stay when dest already exists"
+        );
+    }
+
+    #[test]
+    fn test_session_path_migration_noop_when_src_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("missing.json");
+        let dest = tmp.path().join("config").join("session.json");
+
+        let copied = migrate_session_from_cache(&src, &dest).unwrap();
+        assert!(!copied);
+        assert!(
+            !dest.exists(),
+            "must not create dest when there is nothing to copy"
+        );
+    }
+
+    #[test]
+    fn test_session_path_migration_keeps_src_if_copy_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("old.json");
+        std::fs::write(&src, "payload").unwrap();
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, "nope").unwrap();
+        let dest = blocker.join("session.json");
+
+        assert!(migrate_session_from_cache(&src, &dest).is_err());
+        assert!(src.exists(), "src must remain when the copy fails");
+        assert!(!dest.exists());
     }
 
     #[test]

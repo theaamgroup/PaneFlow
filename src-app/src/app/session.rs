@@ -26,7 +26,7 @@ use crate::workspace::{MAX_WORKSPACES, Workspace, next_workspace_id};
 /// alongside the live session. Beyond this, the oldest are deleted on
 /// rotation. Cf. risk R8 in `prd-stabilization-2026-q2.md`: every parse
 /// failure produces a new backup, and without rotation a user with a
-/// chronic corruption (e.g. a flaky disk) would silently fill `~/.cache`.
+/// chronic corruption (e.g. a flaky disk) would silently fill Application Support.
 const MAX_CORRUPTION_BACKUPS: usize = 5;
 
 /// US-011: debounce window for coalescing a burst of [`PaneFlowApp::save_session`]
@@ -150,7 +150,7 @@ impl PaneFlowApp {
     /// replaced, so a deferred task would be lost.
     pub(crate) fn save_session(&self, cx: &App) {
         let state = self.build_session_state(cx);
-        let Some(path) = paneflow_config::loader::session_path() else {
+        let Some(path) = paneflow_config::loader::session_path_migrated() else {
             return;
         };
 
@@ -193,7 +193,7 @@ impl PaneFlowApp {
         self.save_seq
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let state = self.build_session_state(cx);
-        let Some(path) = paneflow_config::loader::session_path() else {
+        let Some(path) = paneflow_config::loader::session_path_migrated() else {
             return;
         };
         write_session_json(&path, &state);
@@ -218,13 +218,13 @@ impl PaneFlowApp {
     /// `save_session` overwrites it, so we keep forensic evidence even
     /// when the user immediately moves on. The backup directory is
     /// rotated down to [`MAX_CORRUPTION_BACKUPS`] entries (R8) so a
-    /// chronic-corruption case can't silently fill `~/.cache`.
+    /// chronic-corruption case can't silently fill Application Support.
     ///
     pub(crate) fn load_session() -> (
         Option<paneflow_config::schema::SessionState>,
         Option<SessionCorruptionInfo>,
     ) {
-        let Some(path) = paneflow_config::loader::session_path() else {
+        let Some(path) = paneflow_config::loader::session_path_migrated() else {
             return (None, None);
         };
         Self::load_session_at(&path)
@@ -232,7 +232,7 @@ impl PaneFlowApp {
 
     /// Path-parametrised core of [`load_session`]. Direct test surface -
     /// the wrapper above resolves `paneflow_config::loader::session_path()`
-    /// against the user's XDG cache dir, which is unsuitable for unit
+    /// against the user's config dir, which is unsuitable for unit
     /// tests because every run would race against a live install.
     pub(crate) fn load_session_at(
         path: &Path,

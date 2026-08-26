@@ -444,7 +444,7 @@ checklist is manual.
 | Symptom | Top 3 recoveries |
 |---|---|
 | Update fails closed on a release you know is good | 1. Check the release actually has a `.minisig` sibling (Step 4). 2. Check whether the *installed* build embeds a key at all: a locally built binary has none and correctly refuses everything. 3. If you rotated the minisign key, confirm the installed build carries a slot that trusts the new key. Skipping the dual-key release in the rotation causes exactly this. |
-| Update succeeds but the app never restarts | 1. `session.json` may have failed to write: check `~/Library/Caches/paneflow`. 2. The restart path must be the `.app` bundle; a bare Mach-O path silently does nothing under `open`. 3. Check `~/Library/Logs/paneflow/` (or the console) for the "restarting into" line. |
+| Update succeeds but the app never restarts | 1. `session.json` may have failed to write: check `~/Library/Application Support/paneflow`. 2. The restart path must be the `.app` bundle; a bare Mach-O path silently does nothing under `open`. 3. Check `~/Library/Logs/paneflow/` (or the console) for the "restarting into" line. |
 | A `PaneFlow.app.new` or `.old` is left in `/Applications` | The swap was interrupted. The running bundle is intact by design. Delete the leftover by hand; the next update recreates what it needs. |
 | Mount point collision | The runner uses a deterministic path under `/private/tmp/` scoped per update, so a stale `/Volumes/PaneFlow` from a manual DMG inspection does not interfere with self-update. It *does* interfere with the manual verification in Step 5. |
 

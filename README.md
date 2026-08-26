@@ -255,7 +255,7 @@ Other paths worth knowing:
 
 | What | Path |
 |---|---|
-| Restored session | `~/Library/Caches/paneflow/session.json` (`session-dev.json` in debug builds) |
+| Restored session | `~/Library/Application Support/paneflow/session.json` (`session-dev.json` in the `paneflow-dev` debug subdir) |
 | App data, including the extracted MCP bridge binary | `~/Library/Application Support/paneflow/` (`paneflow-dev/` in debug builds) |
 | JSON-RPC control socket | `$TMPDIR/paneflow/paneflow.sock` on a normal Mac, overridable with `PANEFLOW_SOCKET_PATH` |
 
