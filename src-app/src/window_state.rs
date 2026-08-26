@@ -153,8 +153,14 @@ fn load() -> Option<PersistedWindowSize> {
     }
 }
 
-fn state_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|directory| directory.join("paneflow").join("window-state.json"))
+pub(crate) fn state_path() -> Option<PathBuf> {
+    // Same APP_SUBDIR as paneflow.json so a debug `cargo run` never
+    // overwrites the installed app's window size.
+    dirs::config_dir().map(|directory| {
+        directory
+            .join(paneflow_config::loader::APP_SUBDIR)
+            .join("window-state.json")
+    })
 }
 
 fn is_valid_size(state: PersistedWindowSize) -> bool {
@@ -168,4 +174,37 @@ fn last_windowed_size_guard() -> MutexGuard<'static, Option<PersistedWindowSize>
     LAST_WINDOWED_SIZE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paneflow_config::loader::APP_SUBDIR;
+
+    #[test]
+    fn state_path_uses_config_app_subdir() {
+        let path = state_path().expect("config dir must resolve on macOS");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("window-state.json")
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some(APP_SUBDIR),
+            "window-state.json parent must be APP_SUBDIR, not a hardcoded paneflow/ sibling of the release file"
+        );
+        if cfg!(debug_assertions) {
+            assert_eq!(APP_SUBDIR, "paneflow-dev");
+            assert!(
+                path.to_string_lossy().contains("paneflow-dev"),
+                "debug window-state must live under paneflow-dev, got {path:?}"
+            );
+            assert!(
+                !path.ends_with("paneflow/window-state.json"),
+                "debug window-state must not be a sibling of the release file, got {path:?}"
+            );
+        }
+    }
 }
