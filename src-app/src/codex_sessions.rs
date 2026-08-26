@@ -1,7 +1,8 @@
 //! Codex CLI session discovery - reads the on-disk transcript store at
-//! `~/.codex/sessions/YYYY/MM/DD/rollout-<TS>-<uuid>.jsonl` and produces
-//! unified [`SessionMeta`](crate::agent_sessions::SessionMeta) entries
-//! for the sessions popover.
+//! `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<TS>-<uuid>.jsonl` (default
+//! `~/.codex`) and produces unified
+//! [`SessionMeta`](crate::agent_sessions::SessionMeta) entries for the
+//! sessions popover.
 //!
 //! Format reference: PR openai/codex#3380 (RolloutItem envelope) and
 //! community discussion #3827. The first line of every rollout file is a
@@ -13,6 +14,7 @@
 //! All filesystem work happens off the GPUI main thread - call
 //! [`read_sessions_for_cwd`] from inside `smol::unblock`.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -38,10 +40,21 @@ use crate::limits::MAX_LINE_BYTES;
 /// Cap rendered first-user-message labels at this character count.
 const LABEL_MAX_CHARS: usize = 80;
 
-/// Compute the absolute path of `~/.codex/sessions/`. Returns `None` when
-/// `dirs::home_dir()` fails.
+/// Compute the absolute path of `$CODEX_HOME/sessions/` (default
+/// `~/.codex/sessions/`). Returns `None` when neither `CODEX_HOME` nor
+/// `dirs::home_dir()` yields a usable root.
 pub fn sessions_root() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".codex").join("sessions"))
+    sessions_root_from(dirs::home_dir(), std::env::var_os("CODEX_HOME"))
+}
+
+/// `$CODEX_HOME` if set and non-empty, else `~/.codex`, then `sessions/`.
+/// Duplicated from `paneflow-mcp-install` (no shared crate for this helper).
+fn sessions_root_from(home: Option<PathBuf>, codex_home: Option<OsString>) -> Option<PathBuf> {
+    codex_home
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".codex")))
+        .map(|h| h.join("sessions"))
 }
 
 /// Read all Codex CLI sessions whose recorded `cwd` matches the given
@@ -729,5 +742,96 @@ mod tests {
         // Terminates (no stack overflow) and still finds the one real file
         // exactly once - the symlinked directory was never descended.
         assert_eq!(found, vec![jsonl]);
+    }
+
+    #[test]
+    fn sessions_root_honors_codex_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            sessions_root_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(dir.path().as_os_str().to_os_string()),
+            ),
+            Some(dir.path().join("sessions")),
+        );
+    }
+
+    #[test]
+    fn sessions_root_falls_back_when_codex_home_empty() {
+        assert_eq!(
+            sessions_root_from(Some(PathBuf::from("/home/alice")), Some(OsString::from("")),),
+            Some(PathBuf::from("/home/alice/.codex/sessions")),
+        );
+        assert_eq!(
+            sessions_root_from(Some(PathBuf::from("/home/alice")), None),
+            Some(PathBuf::from("/home/alice/.codex/sessions")),
+        );
+    }
+
+    /// End-to-end: with `CODEX_HOME` pointed at a temp tree, the walker
+    /// finds a rollout under `$CODEX_HOME/sessions/YYYY/MM/DD/` and does
+    /// not require `~/.codex`.
+    #[test]
+    fn read_sessions_for_cwd_honors_codex_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let day = dir
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("26");
+        std::fs::create_dir_all(&day).expect("mkdir");
+        std::fs::write(
+            day.join("rollout.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"019dc9ea-38d7-7372-9cc4-253ce944d41b","cwd":"/tmp/issue-32-codex-proj","timestamp":"2026-08-26T00:00:00Z"}}"#,
+                "\n",
+            ),
+        )
+        .expect("write fixture");
+
+        let _guard = CodexHomeGuard::set(dir.path());
+        assert_eq!(sessions_root(), Some(dir.path().join("sessions")));
+
+        let sessions = read_sessions_for_cwd("/tmp/issue-32-codex-proj");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].session_id,
+            "019dc9ea-38d7-7372-9cc4-253ce944d41b"
+        );
+        assert_eq!(sessions[0].cwd, "/tmp/issue-32-codex-proj");
+    }
+
+    /// Serializes process-wide `CODEX_HOME` mutation for the walker test.
+    struct CodexHomeGuard {
+        previous: Option<OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static CODEX_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl CodexHomeGuard {
+        fn set(path: &Path) -> Self {
+            let lock = CODEX_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("CODEX_HOME");
+            // SAFETY: serialised by CODEX_HOME_LOCK; restored on drop.
+            unsafe { std::env::set_var("CODEX_HOME", path) };
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for CodexHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialised by CODEX_HOME_LOCK (still held via `_lock`).
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var("CODEX_HOME", v),
+                    None => std::env::remove_var("CODEX_HOME"),
+                }
+            }
+        }
     }
 }

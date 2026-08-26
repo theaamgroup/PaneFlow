@@ -2,7 +2,7 @@
 
 use crate::locate_sibling_hook_binary;
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 // The cross-platform atomic writers call `tmp.flush()` (method form), which
 // needs the `Write` trait in scope on both platforms.
@@ -2041,7 +2041,7 @@ pub(crate) fn write_atomic(path: &Path, value: &serde_json::Value) -> std::io::R
 
 // ---------------------------------------------------------------------------
 // Codex hook config injection (US-006, Unix) -
-//   `.codex/hooks.json` + `~/.codex/config.toml`
+//   `.codex/hooks.json` + `$CODEX_HOME/config.toml` (default `~/.codex`)
 // ---------------------------------------------------------------------------
 
 /// Codex hook events (per Codex docs as of April 2026). Notably `Notification`
@@ -2062,21 +2062,34 @@ pub(crate) const CODEX_HOOK_EVENTS: &[&str] = &[
 ];
 
 /// Marker for the TOML comment placed above `hooks = true` in
-/// `~/.codex/config.toml`. Cleanup scans for this literal line.
+/// `$CODEX_HOME/config.toml`. Cleanup scans for this literal line.
 #[cfg(unix)]
 pub(crate) const CODEX_TOML_MARKER: &str = "# _paneflow_managed: true";
 
-/// Resolve `~/.codex/config.toml` using only std. The shim has no `dirs` dep
-/// and `HOME` is universally set on Unix. Returns `None` on Windows builds
-/// (unreachable at runtime - this function is `#[cfg(unix)]` - but kept for
-/// documentation).
+/// Resolve `$CODEX_HOME/config.toml` using only std. The shim has no `dirs`
+/// dep. `CODEX_HOME` wins when set and non-empty; otherwise `HOME/.codex`
+/// (Unix `HOME` is universally set). Returns `None` when neither yields a
+/// usable root.
 #[cfg(unix)]
 pub(crate) fn codex_global_config_toml() -> Option<PathBuf> {
-    let home = env::var_os("HOME")?;
-    if home.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(home).join(".codex").join("config.toml"))
+    let home = env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    codex_global_config_toml_from(home, env::var_os("CODEX_HOME"))
+}
+
+/// `$CODEX_HOME` if set and non-empty, else `~/.codex`, then `config.toml`.
+/// Duplicated from `paneflow-mcp-install` (no shared crate for this helper).
+#[cfg(unix)]
+fn codex_global_config_toml_from(
+    home: Option<PathBuf>,
+    codex_home: Option<OsString>,
+) -> Option<PathBuf> {
+    codex_home
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".codex")))
+        .map(|h| h.join("config.toml"))
 }
 
 /// RAII guard for Codex's project-level hooks.json + the global config.toml
@@ -2087,8 +2100,8 @@ pub(crate) struct CodexHookConfigGuard {
     codex_dir: PathBuf,
     /// Whether the shim created `./.codex/`. Only rmdir on drop if we did.
     created_dir: bool,
-    /// Absolute path to `~/.codex/config.toml` (if resolvable); `None` means
-    /// no `HOME` - skip global-config work entirely.
+    /// Absolute path to `$CODEX_HOME/config.toml` (if resolvable); `None`
+    /// means no usable Codex root - skip global-config work entirely.
     config_toml_path: Option<PathBuf>,
     /// Whether we appended the feature-flag block on install. Drop undoes it
     /// only if we did; never touches a pre-existing user-authored flag.
@@ -2112,7 +2125,7 @@ impl CodexHookConfigGuard {
     }
 
     /// Testable inner. `config_toml_path` is the absolute path to the global
-    /// `config.toml` (usually `~/.codex/config.toml`); pass `None` to skip
+    /// `config.toml` (usually `$CODEX_HOME/config.toml`); pass `None` to skip
     /// the feature-flag step entirely (used by tests that don't want to
     /// pollute the test runner's home dir).
     pub(crate) fn install_at(codex_dir: &Path, config_toml_path: Option<&Path>) -> Option<Self> {
@@ -2481,8 +2494,8 @@ mod hooks_tests {
         PersistentHookState,
     };
     use serde_json::json;
-    use std::ffi::OsStr;
-    use std::path::Path;
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
 
     /// Unix path rendering is unchanged (no separator rewrite).
     #[cfg(unix)]
@@ -2493,6 +2506,83 @@ mod hooks_tests {
             display_hook_program(p),
             "/home/u/.cache/paneflow/bin/0.4.4/paneflow-ai-hook"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_global_config_toml_honors_codex_home() {
+        let td = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            super::codex_global_config_toml_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(td.path().as_os_str().to_os_string()),
+            ),
+            Some(td.path().join("config.toml")),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_global_config_toml_falls_back_when_codex_home_empty() {
+        assert_eq!(
+            super::codex_global_config_toml_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("")),
+            ),
+            Some(PathBuf::from("/home/alice/.codex/config.toml")),
+        );
+        assert_eq!(
+            super::codex_global_config_toml_from(Some(PathBuf::from("/home/alice")), None),
+            Some(PathBuf::from("/home/alice/.codex/config.toml")),
+        );
+    }
+
+    /// Process-env path: `CODEX_HOME` pointed at a temp dir must win over
+    /// `HOME/.codex` when resolving the Unix `hooks = true` flag file.
+    #[cfg(unix)]
+    #[test]
+    fn codex_global_config_toml_reads_codex_home_env() {
+        let td = tempfile::TempDir::new().unwrap();
+        let _guard = CodexHomeGuard::set(td.path());
+        assert_eq!(
+            super::codex_global_config_toml(),
+            Some(td.path().join("config.toml")),
+        );
+    }
+
+    #[cfg(unix)]
+    struct CodexHomeGuard {
+        previous: Option<OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    #[cfg(unix)]
+    static CODEX_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    #[allow(deprecated)]
+    impl CodexHomeGuard {
+        fn set(path: &Path) -> Self {
+            let lock = CODEX_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("CODEX_HOME");
+            // Edition 2021: `set_var` is still safe (unsafe only in 2024).
+            std::env::set_var("CODEX_HOME", path);
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[allow(deprecated)]
+    impl Drop for CodexHomeGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var("CODEX_HOME", v),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
     }
 
     #[test]
