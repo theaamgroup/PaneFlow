@@ -901,12 +901,10 @@ pub struct ProfileConfig {
     pub tools: Vec<String>,
 }
 
-/// Per-thread display mode for thinking / reasoning blocks
-/// (US-109 of `tasks/prd-agent-ui-refactor-2026-Q3.md`).
+/// Per-thread display mode for thinking / reasoning blocks.
 ///
-/// Mirrors Zed's `ThinkingBlockDisplay` enum cited in §12 of
-/// `docs/ZED_AGENT_REFERENCE.md`. The default is [`Auto`] -- last
-/// burst expanded, previous bursts collapsed to header-only.
+/// Default is [`Auto`]: last burst expanded, previous bursts collapsed
+/// to header-only.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum ThinkingDisplayMode {
@@ -925,15 +923,10 @@ pub enum ThinkingDisplayMode {
     AlwaysCollapsed,
 }
 
-/// US-116: where OS notifications are surfaced when an agent turn
-/// completes (or refuses / errors) while Paneflow is not foregrounded.
+/// Where OS notifications are surfaced when an agent turn completes
+/// while PaneFlow is not foregrounded.
 ///
-/// Mirrors Zed's `NotifyWhenAgentWaiting` setting cited in §23 of
-/// `docs/ZED_AGENT_REFERENCE.md`. PaneFlow keeps the setting opt-in by
-/// defaulting to [`NotifyWhenAgentWaiting::Never`]. Native OS notification
-/// APIs do not expose reliable per-display fan-out on every platform;
-/// `PrimaryScreen` and `AllScreens` therefore share the same
-/// foreground-window gate.
+/// Opt-in: default [`NotifyWhenAgentWaiting::Never`].
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum NotifyWhenAgentWaiting {
