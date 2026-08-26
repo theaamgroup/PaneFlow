@@ -1222,8 +1222,10 @@ mod tests {
 
     #[test]
     fn layout_terminal_count_skips_markdown_surfaces() {
-        let mut markdown: paneflow_config::schema::SurfaceDefinition = Default::default();
-        markdown.surface_type = Some("markdown".to_string());
+        let markdown = paneflow_config::schema::SurfaceDefinition {
+            surface_type: Some("markdown".to_string()),
+            ..Default::default()
+        };
         let layout = LayoutNode::Pane {
             surfaces: vec![Default::default(), markdown, Default::default()],
         };

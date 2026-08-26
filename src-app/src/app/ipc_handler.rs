@@ -2258,13 +2258,13 @@ impl PaneFlowApp {
             // Single, separate CR write. Weak-guarded: a pane that vanished
             // between the last poll and here writes nothing.
             cx.update(|cx| {
-                if let Some(t) = weak.upgrade() {
-                    if let Err(err) = t.read(cx).terminal.try_write_to_pty(b"\r".as_slice()) {
-                        log::warn!(
-                            target: "paneflow::ipc",
-                            "deferred submit CR dropped: {err}"
-                        );
-                    }
+                if let Some(t) = weak.upgrade()
+                    && let Err(err) = t.read(cx).terminal.try_write_to_pty(b"\r".as_slice())
+                {
+                    log::warn!(
+                        target: "paneflow::ipc",
+                        "deferred submit CR dropped: {err}"
+                    );
                 }
             });
         })
