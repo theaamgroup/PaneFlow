@@ -23,10 +23,22 @@ pub(crate) const ENTRY: &str = "paneflow";
 // Config paths (resolved against the real home / XDG dirs)
 // ---------------------------------------------------------------------------
 
-/// `~/.claude.json` - where `claude mcp add -s user` stores user-scope MCP
-/// servers (verified 2026: NOT `~/.claude/settings.json`).
+/// User-scope MCP file. Official default is `$HOME/.claude.json` (NOT
+/// `~/.claude/.claude.json`). When `CLAUDE_CONFIG_DIR` is set and non-empty,
+/// Claude Code reads `.claude.json` from inside that directory instead.
 pub(crate) fn claude_config() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude.json"))
+    claude_config_from(dirs::home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+fn claude_config_from(
+    home: Option<PathBuf>,
+    claude_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    claude_config_dir
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|d| d.join(".claude.json"))
+        .or_else(|| home.map(|h| h.join(".claude.json")))
 }
 
 /// `$CODEX_HOME/config.toml`, falling back to `~/.codex/config.toml`.
@@ -390,6 +402,70 @@ mod tests {
 
     fn validate_string_entry(entry: &serde_json::Value, expected: Option<&Path>) -> StatusOutcome {
         classify_entry(string_command(entry), expected, true, "shape mismatch")
+    }
+
+    #[test]
+    fn claude_config_default_is_home_dot_claude_json() {
+        assert_eq!(
+            claude_config_from(Some(PathBuf::from("/home/alice")), None).unwrap(),
+            PathBuf::from("/home/alice/.claude.json")
+        );
+        assert_eq!(
+            claude_config_from(Some(PathBuf::from("/home/alice")), Some(OsString::from("")))
+                .unwrap(),
+            PathBuf::from("/home/alice/.claude.json")
+        );
+    }
+
+    #[test]
+    fn claude_config_honors_claude_config_dir() {
+        assert_eq!(
+            claude_config_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/tmp/claude-cfg"))
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/claude-cfg").join(".claude.json")
+        );
+    }
+
+    #[test]
+    fn claude_config_reads_claude_config_dir_env() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let _guard = ClaudeConfigDirGuard::set(dir.path());
+        assert_eq!(claude_config(), Some(dir.path().join(".claude.json")));
+    }
+
+    struct ClaudeConfigDirGuard {
+        previous: Option<OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[allow(deprecated)]
+    impl ClaudeConfigDirGuard {
+        fn set(path: &Path) -> Self {
+            let lock = CLAUDE_CONFIG_DIR_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+            std::env::set_var("CLAUDE_CONFIG_DIR", path);
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    #[allow(deprecated)]
+    impl Drop for ClaudeConfigDirGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
     }
 
     #[test]

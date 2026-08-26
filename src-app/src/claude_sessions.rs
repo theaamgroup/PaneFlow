@@ -1,5 +1,6 @@
 //! Claude Code session discovery - reads the on-disk session store at
-//! `~/.claude/projects/<slug>/<uuid>.jsonl` and produces unified
+//! `$CLAUDE_CONFIG_DIR/projects/<slug>/<uuid>.jsonl` (default `~/.claude`)
+//! and produces unified
 //! [`SessionMeta`](crate::agent_sessions::SessionMeta) entries for the
 //! sessions popover.
 //!
@@ -12,6 +13,7 @@
 //! All filesystem work happens off the GPUI main thread - call
 //! [`read_sessions_for_cwd`] from inside `smol::unblock`.
 
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -61,30 +63,83 @@ struct FirstLineEnvelope {
 }
 
 /// Convert an absolute path into the slug Claude Code uses as the directory
-/// name under `~/.claude/projects/`. Algorithm (matches Claude Code's own
-/// encoder): every character that is **not** ASCII alphanumeric becomes `-`.
-/// That covers `/`, `\`, the Windows drive `:` (so `C:\dev\paneflow` →
-/// `C--dev-paneflow`, NOT `C:-dev-paneflow`), spaces (`C:\Program Files\..`
-/// → `C--Program-Files-..`), and `.` (so `/home/u/.claude` → `-home-u--claude`,
-/// the dir Claude Code actually writes). Runs of separators are NOT collapsed -
-/// `C:\` produces the literal `C--`. No percent-encoding or hashing.
+/// name under `$CLAUDE_CONFIG_DIR/projects/` (default `~/.claude/projects/`).
+/// Algorithm (matches Claude Code's own encoder): every character that is
+/// **not** ASCII alphanumeric becomes `-`. That covers `/`, `\`, the Windows
+/// drive `:` (so `C:\dev\paneflow` → `C--dev-paneflow`, NOT `C:-dev-paneflow`),
+/// spaces (`C:\Program Files\..` → `C--Program-Files-..`), and `.` (so
+/// `/home/u/.claude` → `-home-u--claude`, the dir Claude Code actually
+/// writes). Runs of separators are NOT collapsed - `C:\` produces the literal
+/// `C--`. No percent-encoding or hashing.
 ///
 /// The previous encoder only replaced `/` and `\`, leaving the drive `:`
 /// intact: on Windows it produced `C:-dev-paneflow` while the on-disk dir is
 /// `C--dev-paneflow`, so `read_dir` opened a path that never existed and the
 /// sessions sidebar came up empty.
+///
+/// A "truncate to 200 + hash" encoder appears in some Claude Code issue
+/// reports but was not reproduced (Claude still `ENAMETOOLONG`s at 255 as of
+/// anthropics/claude-code#19742); this helper does not guess a hash.
 pub fn slug_for_cwd(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 
-/// Compute the absolute path of `~/.claude/projects/<slug>/`. Returns
-/// `None` when `dirs::home_dir()` fails (no `$HOME` / `%USERPROFILE%`).
+/// Compute the absolute path of `$CLAUDE_CONFIG_DIR/projects/<slug>/`
+/// (default `~/.claude/projects/<slug>/`). Returns `None` when neither
+/// `CLAUDE_CONFIG_DIR` nor `dirs::home_dir()` yields a usable root.
 pub fn project_dir_for_cwd(cwd: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let slug = slug_for_cwd(cwd);
-    Some(home.join(".claude").join("projects").join(slug))
+    project_dir_for_cwd_from(
+        cwd,
+        dirs::home_dir(),
+        std::env::var_os("CLAUDE_CONFIG_DIR"),
+        std::env::var_os("CLAUDE_CODE_PROJECT_DIR_NAME"),
+    )
+}
+
+/// `$CLAUDE_CONFIG_DIR` if set and non-empty, else `~/.claude`.
+fn claude_config_dir_from(
+    home: Option<PathBuf>,
+    claude_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    claude_config_dir
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".claude")))
+}
+
+/// Sessions live at `$config_dir/projects/<slug>/`.
+///
+/// `CLAUDE_CODE_PROJECT_DIR_NAME` replaces the path-derived slug when it is
+/// a single relative component **and** `CLAUDE_CONFIG_DIR` is set (Claude
+/// Code ignores the name override otherwise; docs: env-vars).
+fn project_dir_for_cwd_from(
+    cwd: &str,
+    home: Option<PathBuf>,
+    claude_config_dir: Option<OsString>,
+    project_dir_name: Option<OsString>,
+) -> Option<PathBuf> {
+    let config_dir_set = claude_config_dir.as_ref().is_some_and(|v| !v.is_empty());
+    let config_dir = claude_config_dir_from(home, claude_config_dir)?;
+    let projects = config_dir.join("projects");
+    if config_dir_set && let Some(name) = project_dir_name.filter(|n| is_usable_project_dir_name(n))
+    {
+        return Some(projects.join(name));
+    }
+    Some(projects.join(slug_for_cwd(cwd)))
+}
+
+fn is_usable_project_dir_name(name: &OsStr) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let path = Path::new(name);
+    if path.is_absolute() {
+        return false;
+    }
+    let mut comps = path.components();
+    matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
 }
 
 fn project_snapshot_mtime(project_dir: &Path) -> Option<SystemTime> {
@@ -882,5 +937,170 @@ mod tests {
             read_session_meta(&path).is_none(),
             "an oversized line must be skipped, not parsed"
         );
+    }
+
+    #[test]
+    fn project_dir_honors_claude_config_dir() {
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/tmp/claude-cfg")),
+                None,
+            ),
+            Some(PathBuf::from("/tmp/claude-cfg/projects/-home-alice-myapp")),
+        );
+    }
+
+    #[test]
+    fn project_dir_falls_back_when_claude_config_dir_empty() {
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("")),
+                None,
+            ),
+            Some(PathBuf::from(
+                "/home/alice/.claude/projects/-home-alice-myapp"
+            )),
+        );
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                None,
+                None,
+            ),
+            Some(PathBuf::from(
+                "/home/alice/.claude/projects/-home-alice-myapp"
+            )),
+        );
+    }
+
+    #[test]
+    fn project_dir_honors_project_dir_name_when_config_dir_set() {
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/srv/tenant-a")),
+                Some(OsString::from("work")),
+            ),
+            Some(PathBuf::from("/srv/tenant-a/projects/work")),
+        );
+    }
+
+    #[test]
+    fn project_dir_name_ignored_when_config_dir_unset() {
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                None,
+                Some(OsString::from("work")),
+            ),
+            Some(PathBuf::from(
+                "/home/alice/.claude/projects/-home-alice-myapp"
+            )),
+        );
+    }
+
+    #[test]
+    fn project_dir_name_rejects_non_component_override() {
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/srv/tenant-a")),
+                Some(OsString::from("foo/bar")),
+            ),
+            Some(PathBuf::from("/srv/tenant-a/projects/-home-alice-myapp")),
+        );
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/srv/tenant-a")),
+                Some(OsString::from("")),
+            ),
+            Some(PathBuf::from("/srv/tenant-a/projects/-home-alice-myapp")),
+        );
+    }
+
+    /// End-to-end: with `CLAUDE_CONFIG_DIR` pointed at a temp tree, the walker
+    /// finds a session under `$CLAUDE_CONFIG_DIR/projects/<slug>/` and does
+    /// not require `~/.claude`.
+    #[test]
+    fn read_sessions_for_cwd_honors_claude_config_dir() {
+        crate::agent_sessions::cache::clear();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = "/tmp/issue-31-claude-proj";
+        let project = dir.path().join("projects").join(slug_for_cwd(cwd));
+        std::fs::create_dir_all(&project).expect("mkdir");
+        std::fs::write(
+            project.join("aaaaaaaa-1111-2222-3333-444444444444.jsonl"),
+            concat!(
+                r#"{"parentUuid":null,"type":"user","message":{"role":"user","content":"hi"},"uuid":"u","timestamp":"2026-08-26T00:00:00Z","cwd":"/tmp/issue-31-claude-proj","sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}"#,
+                "\n",
+            ),
+        )
+        .expect("write fixture");
+
+        let _guard = ClaudeConfigDirGuard::set(dir.path());
+        assert_eq!(project_dir_for_cwd(cwd), Some(project));
+
+        let sessions = read_sessions_for_cwd(cwd);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].session_id,
+            "aaaaaaaa-1111-2222-3333-444444444444"
+        );
+        assert_eq!(sessions[0].cwd, cwd);
+    }
+
+    /// Serializes process-wide `CLAUDE_CONFIG_DIR` mutation for the walker test.
+    struct ClaudeConfigDirGuard {
+        previous_config_dir: Option<OsString>,
+        previous_project_dir_name: Option<OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl ClaudeConfigDirGuard {
+        fn set(path: &Path) -> Self {
+            let lock = CLAUDE_CONFIG_DIR_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let previous_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+            let previous_project_dir_name = std::env::var_os("CLAUDE_CODE_PROJECT_DIR_NAME");
+            // SAFETY: serialised by CLAUDE_CONFIG_DIR_LOCK; restored on drop.
+            unsafe {
+                std::env::set_var("CLAUDE_CONFIG_DIR", path);
+                std::env::remove_var("CLAUDE_CODE_PROJECT_DIR_NAME");
+            }
+            Self {
+                previous_config_dir,
+                previous_project_dir_name,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ClaudeConfigDirGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialised by CLAUDE_CONFIG_DIR_LOCK (still held via `_lock`).
+            unsafe {
+                match &self.previous_config_dir {
+                    Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                }
+                match &self.previous_project_dir_name {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_PROJECT_DIR_NAME", v),
+                    None => std::env::remove_var("CLAUDE_CODE_PROJECT_DIR_NAME"),
+                }
+            }
+        }
     }
 }

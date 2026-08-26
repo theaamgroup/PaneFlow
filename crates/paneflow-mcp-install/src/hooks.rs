@@ -22,6 +22,7 @@
 //! All writes go through [`crate::io::write_if_changed`] (idempotent, backed
 //! up, atomic) and refuse to clobber a present-but-invalid config.
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -47,18 +48,36 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
 /// hook. Mirror of the shim's marker so both writers recognize each other.
 const MANAGED_MARKER: &str = "_paneflow_managed";
 
-/// `~/.claude/settings.json` - where Claude Code reads user-scope hooks. NOT
-/// `~/.claude.json` (that is the MCP-server file `mcp install` targets).
+/// `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`) -
+/// where Claude Code reads user-scope hooks. NOT `~/.claude.json` (that is
+/// the MCP-server file `mcp install` targets).
 fn claude_settings_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
+    claude_settings_path_from(dirs::home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+/// `$CLAUDE_CONFIG_DIR` if set and non-empty, else `~/.claude`.
+fn claude_config_dir_from(
+    home: Option<PathBuf>,
+    claude_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    claude_config_dir
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".claude")))
+}
+
+fn claude_settings_path_from(
+    home: Option<PathBuf>,
+    claude_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    claude_config_dir_from(home, claude_config_dir).map(|d| d.join("settings.json"))
 }
 
 /// Is Claude Code present (CLI on PATH or its config dir exists)?
 fn claude_detected() -> bool {
     which::which("claude").is_ok()
-        || dirs::home_dir()
-            .map(|h| h.join(".claude").exists())
-            .unwrap_or(false)
+        || claude_config_dir_from(dirs::home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
+            .is_some_and(|d| d.exists())
 }
 
 /// The managed matcher-group for one event - byte-identical to the shim's
@@ -541,6 +560,29 @@ mod tests {
 
     fn read(path: &Path) -> Value {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn claude_settings_path_honors_claude_config_dir() {
+        assert_eq!(
+            claude_settings_path_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/tmp/claude-cfg")),
+            ),
+            Some(PathBuf::from("/tmp/claude-cfg").join("settings.json")),
+        );
+    }
+
+    #[test]
+    fn claude_settings_path_default_is_home_dot_claude() {
+        assert_eq!(
+            claude_settings_path_from(Some(PathBuf::from("/home/alice")), None),
+            Some(PathBuf::from("/home/alice/.claude/settings.json")),
+        );
+        assert_eq!(
+            claude_settings_path_from(Some(PathBuf::from("/home/alice")), Some(OsString::from("")),),
+            Some(PathBuf::from("/home/alice/.claude/settings.json")),
+        );
     }
 
     #[test]

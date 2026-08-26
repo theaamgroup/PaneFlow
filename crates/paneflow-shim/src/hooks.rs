@@ -514,16 +514,16 @@ enum PersistentHookState {
     Stale { command: Option<String> },
 }
 
-/// EP-004 US-018 + hardening US-005: state of `~/.claude/settings.json`.
+/// EP-004 US-018 + hardening US-005: state of user-scope
+/// `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`).
 /// Persistent hooks suppress the project-local injection only when at least
 /// one managed command points at a binary we can prove exists. A stale global
 /// hook is worse than no hook: it blocks the local fallback and leaves the
 /// agent permanently `hooked:false`.
 fn persistent_claude_hooks_state() -> PersistentHookState {
-    let Some(home) = home_dir_env() else {
+    let Some(settings) = persistent_claude_hooks_path() else {
         return PersistentHookState::Absent;
     };
-    let settings = home.join(".claude").join("settings.json");
     let Ok(bytes) = std::fs::read(&settings) else {
         return PersistentHookState::Absent;
     };
@@ -531,6 +531,24 @@ fn persistent_claude_hooks_state() -> PersistentHookState {
         return PersistentHookState::Absent;
     };
     settings_managed_hook_state(&root)
+}
+
+fn persistent_claude_hooks_path() -> Option<PathBuf> {
+    persistent_claude_hooks_path_from(home_dir_env(), env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+/// `$CLAUDE_CONFIG_DIR` if set and non-empty, else `~/.claude`, then
+/// `settings.json`. Duplicated from `paneflow-mcp-install` (no shared crate
+/// for this helper).
+fn persistent_claude_hooks_path_from(
+    home: Option<PathBuf>,
+    claude_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    claude_config_dir
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".claude")))
+        .map(|d| d.join("settings.json"))
 }
 
 /// Pure check: does a parsed settings tree carry a Paneflow-managed hook for
@@ -2535,6 +2553,76 @@ mod hooks_tests {
             super::codex_global_config_toml_from(Some(PathBuf::from("/home/alice")), None),
             Some(PathBuf::from("/home/alice/.codex/config.toml")),
         );
+    }
+
+    #[test]
+    fn persistent_claude_hooks_path_honors_claude_config_dir() {
+        assert_eq!(
+            super::persistent_claude_hooks_path_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/tmp/claude-cfg")),
+            ),
+            Some(PathBuf::from("/tmp/claude-cfg").join("settings.json")),
+        );
+    }
+
+    #[test]
+    fn persistent_claude_hooks_path_default_is_home_dot_claude() {
+        assert_eq!(
+            super::persistent_claude_hooks_path_from(Some(PathBuf::from("/home/alice")), None),
+            Some(PathBuf::from("/home/alice/.claude/settings.json")),
+        );
+        assert_eq!(
+            super::persistent_claude_hooks_path_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("")),
+            ),
+            Some(PathBuf::from("/home/alice/.claude/settings.json")),
+        );
+    }
+
+    /// Process-env path: `CLAUDE_CONFIG_DIR` pointed at a temp dir must win
+    /// over `HOME/.claude` when resolving durable Claude hooks.
+    #[test]
+    fn persistent_claude_hooks_path_reads_claude_config_dir_env() {
+        let td = tempfile::TempDir::new().unwrap();
+        let _guard = ClaudeConfigDirGuard::set(td.path());
+        assert_eq!(
+            super::persistent_claude_hooks_path(),
+            Some(td.path().join("settings.json")),
+        );
+    }
+
+    struct ClaudeConfigDirGuard {
+        previous: Option<OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[allow(deprecated)]
+    impl ClaudeConfigDirGuard {
+        fn set(path: &Path) -> Self {
+            let lock = CLAUDE_CONFIG_DIR_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+            std::env::set_var("CLAUDE_CONFIG_DIR", path);
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    #[allow(deprecated)]
+    impl Drop for ClaudeConfigDirGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
     }
 
     /// Process-env path: `CODEX_HOME` pointed at a temp dir must win over
