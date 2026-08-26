@@ -103,6 +103,11 @@ jobs:
           # downloaded DMGs. An unset var resolves to "" / None.
           PANEFLOW_MINISIGN_PUBKEY: ${{ vars.PANEFLOW_MINISIGN_PUBKEY }}
           PANEFLOW_MINISIGN_PUBKEY_NEXT: ${{ vars.PANEFLOW_MINISIGN_PUBKEY_NEXT }}
+          # Same secret later used to codesign. Baked via option_env! so
+          # verify_macos_bundle pins leaf[subject.OU] to this Team ID.
+          # Unset interpolates as ""; the binary treats empty as missing
+          # and fail-closes the pin (no hardcoded fallback).
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: cargo build --release -p paneflow-app --locked --target "$TARGET"
 
       - name: Produce .app bundle
@@ -133,16 +138,21 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          # APPLE_TEAM_ID is also baked into the binary at the Build step
+          # via option_env!. A whitespace-only value would codesign later
+          # but leave the updater pin empty (fail-closed at install). Treat
+          # whitespace as missing so tag-push still fails here cheaply.
+          team_id="$(printf '%s' "${APPLE_TEAM_ID:-}" | tr -d '[:space:]')"
           if [ -n "${APPLE_DEVELOPER_CERT_P12:-}" ] \
              && [ -n "${APPLE_DEVELOPER_CERT_PASSWORD:-}" ] \
              && [ -n "${APPLE_ID:-}" ] \
              && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] \
-             && [ -n "${APPLE_TEAM_ID:-}" ]; then
+             && [ -n "${team_id}" ]; then
               echo "All 5 Apple signing secrets are present - will sign + notarize."
               echo "signing_available=true" >> "$GITHUB_OUTPUT"
           else
               if [ "${RELEASE_MODE}" = "release" ]; then
-                  echo "::error title=macOS signing required::One or more APPLE_* secrets are missing. Tag-push releases must sign and notarize."
+                  echo "::error title=macOS signing required::One or more APPLE_* secrets are missing. Tag-push releases must sign and notarize. APPLE_TEAM_ID is also baked into the binary at Build via option_env!."
                   exit 1
               fi
               echo "::warning title=macOS signing skipped::One or more APPLE_* secrets are missing - emitting an UNSIGNED .app. See docs/release-runbook.md."

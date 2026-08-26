@@ -128,19 +128,45 @@ fn dmg_cache_dir(home: &Path) -> PathBuf {
         .join(crate::runtime_paths::APP_SUBDIR)
 }
 
-/// Paneflow's Apple Developer **Team ID** (project_macos_signing, populated
-/// 2026-05-04 with the first signed release; cert valid until 2031-05-05).
+/// Apple Developer Team ID baked at compile time from `APPLE_TEAM_ID`.
+/// CI sets this in the release Build step (`option_env!`), the same
+/// secret later used to codesign. `None` when the env was unset.
+///
+/// Actions interpolates an unset secret as `""`, so empty (after trim)
+/// is treated as missing. There is no hardcoded Team ID fallback -
+/// `verify_macos_bundle` fail-closes if this slot is empty.
+///
 /// For a Developer ID Application certificate the leaf cert's
 /// `subject.OU` equals the Team ID, so pinning it rejects any
-/// validly-notarised-but-*foreign* bundle.
-///
-/// US-018: the plain `codesign --verify` + `spctl --assess` checks below
-/// only prove "signed by *someone* Apple trusts and notarised" - NOT
-/// "signed by us". A second developer's notarised app would pass them. This
-/// pin closes that gap (defense-in-depth on top of the minisign root-of-trust
-/// that already gates the DMG bytes before the bundle is ever mounted).
-#[cfg(target_os = "macos")]
-const APPLE_TEAM_ID: &str = "228F9H5P95";
+/// validly-notarised-but-*foreign* bundle. The plain `codesign --verify`
+/// + `spctl --assess` checks only prove "signed by *someone* Apple trusts
+/// and notarised", not "signed by us". This pin closes that gap
+/// (defense-in-depth on top of the minisign root-of-trust that already
+/// gates the DMG bytes before the bundle is ever mounted).
+#[cfg(any(target_os = "macos", test))]
+const EMBEDDED_APPLE_TEAM_ID: Option<&str> = option_env!("APPLE_TEAM_ID");
+
+/// Treat missing / whitespace-only Team IDs as absent. Actions interpolates
+/// unset secrets as `""`; a fallback to a hardcoded identity would pin
+/// updates to the wrong Apple team.
+#[cfg(any(target_os = "macos", test))]
+fn nonempty_team_id(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|id| !id.is_empty())
+}
+
+/// Resolve a Team ID for the codesign designated-requirement pin.
+/// Fail-closed: missing or empty is an `IntegrityMismatch`, never a skip
+/// and never a hardcoded identity.
+#[cfg(any(target_os = "macos", test))]
+fn require_apple_team_id(raw: Option<&str>) -> Result<&str> {
+    nonempty_team_id(raw).ok_or_else(|| {
+        anyhow::Error::new(super::super::error::IntegrityMismatch {
+            expected: "valid macOS code signature".to_string(),
+            got: "no Apple Team ID embedded in this build - refusing to install an unverifiable update"
+                .to_string(),
+        })
+    })
+}
 
 /// Build the `codesign` argument that pins the signing identity to our Apple
 /// Team ID, using the attached `-R=<requirement>` form.
@@ -171,21 +197,26 @@ fn team_id_requirement_arg(team_id: &str) -> String {
 /// bundle, not a fixture.
 #[cfg(target_os = "macos")]
 fn verify_macos_bundle(bundle: &Path) -> Result<()> {
+    // Fail closed *before* the pin check if this build has no Team ID.
+    // Skipping the pin (or falling back to a hardcoded identity) would
+    // either accept a foreign-but-notarised bundle or reject our own
+    // signed DMG. `require_apple_team_id` does not invoke codesign.
+    let team_id = require_apple_team_id(EMBEDDED_APPLE_TEAM_ID)?;
     run_gatekeeper_tool(
         "codesign",
         &["--verify", "--strict", "--deep", "--verbose=2"],
         bundle,
     )?;
-    // US-018: pin the signing identity to our Team ID via a designated
-    // requirement. Fails closed if the leaf cert's OU is not our Team ID, so a
-    // foreign-but-notarised bundle is rejected even though it passes the plain
-    // `--verify` and `spctl` checks.
+    // Pin the signing identity to the Team ID baked into this binary via a
+    // designated requirement. Fails closed if the leaf cert's OU is not
+    // that Team ID, so a foreign-but-notarised bundle is rejected even
+    // though it passes the plain `--verify` and `spctl` checks.
     //
     // The requirement MUST be passed as the attached `-R=<req>` form (see
     // `team_id_requirement_arg`): macOS 15+/26 interpret a *separate*
     // `-R <req>` argument as a file path, silently failing this pin on every
     // DMG self-update.
-    let team_arg = team_id_requirement_arg(APPLE_TEAM_ID);
+    let team_arg = team_id_requirement_arg(team_id);
     run_gatekeeper_tool("codesign", &["--verify", team_arg.as_str()], bundle)?;
     run_gatekeeper_tool("spctl", &["--assess", "--type", "execute"], bundle)?;
     Ok(())
@@ -667,14 +698,53 @@ mod tests {
         // the "Update keeps failing" toast. The arg MUST be the attached
         // `-R=<requirement>` form (one argv element), which codesign parses as
         // inline requirement source.
-        let arg = team_id_requirement_arg("228F9H5P95");
+        // Explicit Team ID: this helper must interpolate whatever identity
+        // the caller passes, not a compile-time const. A synthetic value
+        // proves the attached `-R=` form without pinning this fork to
+        // any real Apple team.
+        let arg = team_id_requirement_arg("ABCD123456");
         assert!(
             arg.starts_with("-R="),
             "must be the attached form, got: {arg}"
         );
         assert!(
-            arg.contains("certificate leaf[subject.OU] = \"228F9H5P95\""),
+            arg.contains("certificate leaf[subject.OU] = \"ABCD123456\""),
             "requirement must pin the leaf OU to the Team ID, got: {arg}"
+        );
+    }
+
+    #[test]
+    fn nonempty_team_id_treats_empty_as_missing() {
+        // Actions interpolates unset secrets as "". Whitespace must not
+        // become a Team ID (that would emit `-R=... = ""` instead of
+        // fail-closing).
+        assert_eq!(nonempty_team_id(None), None);
+        assert_eq!(nonempty_team_id(Some("")), None);
+        assert_eq!(nonempty_team_id(Some("   ")), None);
+        assert_eq!(nonempty_team_id(Some("\n\t")), None);
+        assert_eq!(nonempty_team_id(Some("ABCD123456")), Some("ABCD123456"));
+        assert_eq!(nonempty_team_id(Some("  ABCD123456  ")), Some("ABCD123456"));
+    }
+
+    #[test]
+    fn missing_baked_team_id_fails_closed_without_codesign() {
+        for raw in [None, Some(""), Some("   ")] {
+            let err = require_apple_team_id(raw).unwrap_err();
+            let classified = UpdateError::classify(&err);
+            assert!(
+                matches!(classified, UpdateError::IntegrityMismatch { .. }),
+                "missing Team ID must fail closed as IntegrityMismatch, got: {classified:?}"
+            );
+            if let UpdateError::IntegrityMismatch { got, .. } = classified {
+                assert!(
+                    got.contains("no Apple Team ID embedded"),
+                    "fail-closed message must name the missing bake, got: {got}"
+                );
+            }
+        }
+        assert_eq!(
+            require_apple_team_id(Some("ABCD123456")).unwrap(),
+            "ABCD123456"
         );
     }
 
