@@ -6,8 +6,8 @@
 //!   keys and sibling MCP servers are preserved byte-for-meaning. Only the
 //!   `paneflow` entry under the agent's container key is inserted/updated.
 //! - **TOML** (Codex) is edited via `toml_edit::DocumentMut`, which
-//!   preserves comments and key order. Only `[<table>.paneflow]` is
-//!   upserted.
+//!   preserves comments and key order. Only `command` / `args` under
+//!   `[<table>.paneflow]` are upserted; unknown keys in that table stay.
 //!
 //! Both `read_*_or_default` helpers treat a **missing** file as an empty
 //! skeleton (so a fresh install creates it) but a **present-but-invalid**
@@ -249,10 +249,13 @@ pub fn read_toml_or_default(path: &Path) -> Result<toml_edit::DocumentMut> {
     }
 }
 
-/// Upsert `[<table_path>.<name>]` with `command = <command>` and
-/// `args = [...]`, preserving the rest of the document (comments, key
-/// order, sibling tables). Returns `true` iff the serialized document
-/// changed.
+/// Upsert `command` and `args` under `[<table_path>.<name>]`.
+///
+/// An existing table (or inline table) is updated in place so unknown keys
+/// (`env`, `cwd`, timeouts, `enabled`, ...) and their comments stay. A
+/// missing entry is created as a standard table with only `command` /
+/// `args`. Sibling tables, parent comments, and key order are left
+/// untouched. Returns `true` iff the serialized document changed.
 pub fn upsert_toml_entry(
     doc: &mut toml_edit::DocumentMut,
     table_path: &str,
@@ -260,7 +263,7 @@ pub fn upsert_toml_entry(
     command: &str,
     args: &[&str],
 ) -> Result<bool> {
-    use toml_edit::{value, Array, Item, Table, Value};
+    use toml_edit::{Item, Table};
 
     let before = doc.to_string();
 
@@ -281,16 +284,66 @@ pub fn upsert_toml_entry(
         .as_table_mut()
         .with_context(|| format!("`{table_path}` is not a TOML table - refusing to overwrite"))?;
 
-    let mut entry = Table::new();
-    entry["command"] = value(command);
-    let mut arr = Array::new();
-    for a in args {
-        arr.push(Value::from(*a));
+    match parent.get_mut(name) {
+        Some(existing) => {
+            if let Some(table) = existing.as_table_like_mut() {
+                write_toml_command_args(table, command, args);
+            } else {
+                // Managed key, but not a table: replace with the managed shape.
+                *existing = Item::Table(new_toml_command_args_table(command, args));
+            }
+        }
+        None => {
+            parent[name] = Item::Table(new_toml_command_args_table(command, args));
+        }
     }
-    entry["args"] = value(arr);
-    parent[name] = Item::Table(entry);
 
     Ok(doc.to_string() != before)
+}
+
+fn new_toml_command_args_table(command: &str, args: &[&str]) -> toml_edit::Table {
+    let mut entry = toml_edit::Table::new();
+    write_toml_command_args(&mut entry, command, args);
+    entry
+}
+
+/// Set `command` / `args` on an existing table without touching other keys.
+/// Skips a key whose value already matches so user formatting is preserved
+/// when the managed contract is already satisfied.
+fn write_toml_command_args(table: &mut dyn toml_edit::TableLike, command: &str, args: &[&str]) {
+    use toml_edit::{value, Array, Value};
+
+    if table.get("command").and_then(|c| c.as_str()) != Some(command) {
+        set_toml_item(table, "command", value(command));
+    }
+    let args_ok = table
+        .get("args")
+        .and_then(|a| a.as_array())
+        .is_some_and(|arr| {
+            arr.len() == args.len()
+                && arr
+                    .iter()
+                    .zip(args)
+                    .all(|(item, expected)| item.as_str() == Some(*expected))
+        });
+    if !args_ok {
+        let mut arr = Array::new();
+        for a in args {
+            arr.push(Value::from(*a));
+        }
+        set_toml_item(table, "args", value(arr));
+    }
+}
+
+fn set_toml_item(table: &mut dyn toml_edit::TableLike, key: &str, item: toml_edit::Item) {
+    match table.entry(key) {
+        toml_edit::Entry::Vacant(v) => {
+            v.insert(item);
+        }
+        toml_edit::Entry::Occupied(mut o) => {
+            *o.get_mut() = item;
+        }
+    }
 }
 
 /// Remove `[<table_path>.<name>]`. Returns `true` iff the document changed.
@@ -454,6 +507,92 @@ args = []
         assert!(changed);
         assert!(doc.to_string().contains("/new"));
         assert!(!doc.to_string().contains("/old"));
+    }
+
+    #[test]
+    fn upsert_toml_preserves_unknown_keys_on_path_update() {
+        let input = "\
+[mcp_servers.paneflow]
+command = \"/old\"
+args = []
+# keep this timeout
+startup_timeout_sec = 60
+env = { FOO = \"bar\" }
+cwd = \"/tmp\"
+tool_timeout_sec = 30
+enabled = true
+";
+        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
+        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/new", &[]).unwrap();
+        assert!(changed);
+        let out = doc.to_string();
+        assert!(out.contains("command = \"/new\""));
+        assert!(!out.contains("/old"));
+        assert!(
+            out.contains("# keep this timeout"),
+            "comment on extra key preserved"
+        );
+        assert!(out.contains("startup_timeout_sec = 60"));
+        assert!(out.contains("FOO"));
+        assert!(out.contains("bar"));
+        assert!(out.contains("cwd = \"/tmp\""));
+        assert!(out.contains("tool_timeout_sec = 30"));
+        assert!(out.contains("enabled = true"));
+    }
+
+    #[test]
+    fn upsert_toml_is_noop_when_identical_with_unknown_keys() {
+        let input = "\
+[mcp_servers.paneflow]
+command = \"/p\"
+args = []
+startup_timeout_sec = 60
+env = { FOO = \"bar\" }
+";
+        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
+        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/p", &[]).unwrap();
+        assert!(!changed, "matching command/args must not rewrite extras");
+        let out = doc.to_string();
+        assert!(out.contains("startup_timeout_sec = 60"));
+        assert!(out.contains("FOO"));
+        assert!(out.contains("bar"));
+    }
+
+    #[test]
+    fn upsert_toml_leaves_enabled_false_in_place() {
+        // Merge does not strip `enabled = false`. Status treats that as
+        // NeedsRepair (the managed contract) without treating other extra
+        // keys as a repair signal.
+        let input = "\
+[mcp_servers.paneflow]
+command = \"/old\"
+args = []
+enabled = false
+startup_timeout_sec = 60
+";
+        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
+        upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/new", &[]).unwrap();
+        let out = doc.to_string();
+        assert!(out.contains("command = \"/new\""));
+        assert!(out.contains("enabled = false"));
+        assert!(out.contains("startup_timeout_sec = 60"));
+    }
+
+    #[test]
+    fn upsert_toml_preserves_inline_table_unknown_keys() {
+        let input = "\
+[mcp_servers]
+paneflow = { command = \"/old\", args = [], env = { FOO = \"bar\" }, startup_timeout_sec = 60 }
+";
+        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
+        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/new", &[]).unwrap();
+        assert!(changed);
+        let out = doc.to_string();
+        assert!(out.contains("/new"));
+        assert!(!out.contains("/old"));
+        assert!(out.contains("FOO"));
+        assert!(out.contains("bar"));
+        assert!(out.contains("startup_timeout_sec"));
     }
 
     #[test]
