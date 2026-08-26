@@ -1933,11 +1933,11 @@ impl Render for PaneFlowApp {
                 }),
             )
             // US-012: macOS menu-bar actions. `Quit` mirrors `CloseWindow`;
-            // `About` opens the in-app About dialog. `Copy` / `Paste`
-            // delegate to the existing terminal clipboard actions so Edit >
-            // Copy works when a terminal pane is focused (matches the ⌘C
-            // keybinding from US-010). `SelectAll` is a no-op until the
-            // terminal exposes a select-all action.
+            // `About` opens the in-app About dialog. `Copy` / `Paste` /
+            // `SelectAll` delegate to the existing terminal clipboard and
+            // selection actions so Edit > Copy / Paste / Select All work
+            // when a terminal pane is focused. Widget cmd-a stays on its
+            // own action type (TextInput / PaneflowTextArea).
             .on_action(cx.listener(|this: &mut Self, _: &Quit, _window, cx| {
                 this.save_session_blocking(cx);
                 cx.quit();
@@ -1952,11 +1952,9 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(|_this: &mut Self, _: &Paste, _window, cx| {
                 cx.dispatch_action(&TerminalPaste);
             }))
-            .on_action(
-                cx.listener(|_this: &mut Self, _: &SelectAll, _window, _cx| {
-                    log::debug!("Edit > Select All dispatched (terminal select-all not yet wired)");
-                }),
-            )
+            .on_action(cx.listener(|_this: &mut Self, _: &SelectAll, _window, cx| {
+                cx.dispatch_action(&TerminalSelectAll);
+            }))
             .on_action(cx.listener(|_this: &mut Self, _: &OpenHelp, _window, _cx| {
                 if let Err(e) =
                     crate::external_open::open_url("https://github.com/theaamgroup/paneflow#readme")

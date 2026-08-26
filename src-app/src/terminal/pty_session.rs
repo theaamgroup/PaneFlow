@@ -441,6 +441,22 @@ impl TerminalSessionBackend {
         self.term.lock().selection = Some(Selection::new(kind, point.into(), side));
     }
 
+    /// Select the full copyable buffer: scrollback (`topmost_line`) through the
+    /// last display line, using the same line-selection path as a triple-click.
+    pub(crate) fn select_all(&self) {
+        let metrics = self.grid_metrics();
+        let last_column = metrics.columns.saturating_sub(1);
+        self.start_selection(
+            SelectionKind::Lines,
+            Point::new(metrics.topmost_line.0, 0),
+            SelectionSide::Left,
+        );
+        let _ = self.update_selection(
+            Point::new(metrics.bottommost_line.0, last_column),
+            SelectionSide::Right,
+        );
+    }
+
     pub(crate) fn update_selection(&self, point: Point, side: SelectionSide) -> Option<String> {
         let mut term = self.term.lock();
         let side = match side {
@@ -3022,6 +3038,62 @@ mod tests {
         // notifier must report no PTY so the input path drops bytes.
         let state = TerminalState::new_display_only(24, 80);
         assert!(!state.notifier.0.is_pty());
+    }
+
+    #[test]
+    fn select_all_on_empty_screen_sets_full_grid_selection() {
+        let state = TerminalState::new_display_only(6, 10);
+        let backend = state.session_backend();
+        let metrics = backend.grid_metrics();
+        backend.select_all();
+        let range = backend
+            .selection_range()
+            .expect("select_all must leave a selection");
+        assert_eq!(range.start.line, metrics.topmost_line);
+        assert_eq!(range.end.line, metrics.bottommost_line);
+        assert_eq!(range.start.column.0, 0);
+        assert_eq!(range.end.column.0, metrics.columns.saturating_sub(1));
+        assert!(!range.is_block);
+    }
+
+    #[test]
+    fn select_all_covers_history_and_screen() {
+        let state = TerminalState::new_display_only(8, 40);
+        state.write_output(b"HISTORY_HEAD unique-select-all\n");
+        for i in 0..20 {
+            state.write_output(format!("row-{i}\n").as_bytes());
+        }
+        state.write_output(b"HISTORY_TAIL unique-select-all\n");
+
+        let backend = state.session_backend();
+        let metrics = backend.grid_metrics();
+        assert!(
+            metrics.topmost_line.0 < 0,
+            "fixture must overflow the 8-row screen into history, topmost={}",
+            metrics.topmost_line.0
+        );
+
+        backend.select_all();
+
+        let range = backend
+            .selection_range()
+            .expect("select_all must leave a selection");
+        assert_eq!(range.start.line, metrics.topmost_line);
+        assert_eq!(range.end.line, metrics.bottommost_line);
+        assert_eq!(range.start.column.0, 0);
+        assert_eq!(range.end.column.0, metrics.columns.saturating_sub(1));
+
+        let text = backend
+            .selection_text()
+            .expect("select_all must produce copyable text");
+        assert!(
+            text.contains("HISTORY_HEAD unique-select-all"),
+            "history head missing from selection: {text:?}"
+        );
+        assert!(
+            text.contains("HISTORY_TAIL unique-select-all"),
+            "tail missing from selection: {text:?}"
+        );
     }
 
     #[test]

@@ -39,6 +39,7 @@ actions!(
         SelectWorkspace9,
         TerminalCopy,
         TerminalPaste,
+        TerminalSelectAll,
         ScrollPageUp,
         ScrollPageDown,
         CloseWindow,

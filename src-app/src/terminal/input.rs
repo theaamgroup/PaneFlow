@@ -866,6 +866,16 @@ impl TerminalView {
         }
     }
 
+    pub(super) fn handle_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Nested widgets (find bar, composer-adjacent inputs) bind their own
+        // SelectAll. Skip when this view's handle is not the focused one.
+        if !self.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        self.terminal.session_backend().select_all();
+        cx.notify();
+    }
+
     pub(super) fn handle_paste(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;

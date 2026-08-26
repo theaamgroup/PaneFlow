@@ -1092,7 +1092,7 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
 pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     use crate::{
         About, CloseWorkspace, Copy, NewWorkspace, NextWorkspace, OpenHelp, PaneFlowApp, Paste,
-        Quit, SelectAll, TerminalCopy, TerminalPaste,
+        Quit, SelectAll, TerminalCopy, TerminalPaste, TerminalSelectAll,
     };
 
     fn with_active_paneflow_window(
@@ -1126,9 +1126,7 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
 
     cx.on_action(|_: &Copy, cx| cx.dispatch_action(&TerminalCopy));
     cx.on_action(|_: &Paste, cx| cx.dispatch_action(&TerminalPaste));
-    cx.on_action(|_: &SelectAll, _cx| {
-        log::debug!("Edit > Select All dispatched (terminal select-all not yet wired)");
-    });
+    cx.on_action(|_: &SelectAll, cx| cx.dispatch_action(&TerminalSelectAll));
 
     cx.on_action(|_: &NewWorkspace, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
