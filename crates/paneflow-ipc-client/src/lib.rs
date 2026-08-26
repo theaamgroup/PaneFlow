@@ -555,6 +555,12 @@ mod tests {
         use interprocess::local_socket::{Listener, ListenerOptions};
         use interprocess::TryClone;
 
+        // Serialised against the $TMPDIR-mutating tests below:
+        // `TempDir::new()` reads $TMPDIR, and
+        // `paneflow_socket_path_env_wins_when_absolute` briefly points it
+        // at a path that does not exist. Reading it without the lock is a
+        // race that fails this test with a spurious NotFound.
+        let _env = SocketEnvGuard::take();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("paneflow-test.sock");
         let name = path.as_path().to_fs_name::<GenericFilePath>().unwrap();
@@ -591,6 +597,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ipc_client_call_errors_when_socket_missing() {
+        // Serialised against the $TMPDIR-mutating tests below:
+        // `TempDir::new()` reads $TMPDIR, and
+        // `paneflow_socket_path_env_wins_when_absolute` briefly points it
+        // at a path that does not exist. Reading it without the lock is a
+        // race that fails this test with a spurious NotFound.
+        let _env = SocketEnvGuard::take();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("does-not-exist.sock");
         let client = IpcClient::new(path);
@@ -612,6 +624,12 @@ mod tests {
         use std::thread;
         use std::time::Instant;
 
+        // Serialised against the $TMPDIR-mutating tests below:
+        // `TempDir::new()` reads $TMPDIR, and
+        // `paneflow_socket_path_env_wins_when_absolute` briefly points it
+        // at a path that does not exist. Reading it without the lock is a
+        // race that fails this test with a spurious NotFound.
+        let _env = SocketEnvGuard::take();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("never-accept.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -683,8 +701,10 @@ mod tests {
         }
 
         fn clear(&self) {
-            // SAFETY: serialised by SOCKET_ENV_LOCK; no other test mutates
-            // these vars during the test window.
+            // SAFETY: serialised by SOCKET_ENV_LOCK. Every test that
+            // reads or writes these vars must hold that lock - reads
+            // count, because `tempfile::TempDir::new()` consults
+            // $TMPDIR and would observe a half-applied window.
             unsafe {
                 std::env::remove_var("PANEFLOW_SOCKET_PATH");
                 std::env::remove_var("XDG_RUNTIME_DIR");
