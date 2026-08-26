@@ -472,15 +472,76 @@ pub(crate) fn percentile_us(values: &[Duration], percentile: usize) -> u128 {
     percentile_duration(values, percentile).as_micros()
 }
 
-/// macOS stubs: RSS and CPU time are not sampled here (libproc is tracked separately).
+fn task_all_info() -> Option<libproc::libproc::task_info::TaskAllInfo> {
+    use libproc::libproc::proc_pid::pidinfo;
+    use libproc::libproc::task_info::TaskAllInfo;
+    pidinfo::<TaskAllInfo>(std::process::id() as i32, 0).ok()
+}
+
 pub(crate) fn resident_set_bytes() -> u64 {
-    0
+    task_all_info()
+        .map(|info| info.ptinfo.pti_resident_size)
+        .unwrap_or(0)
 }
 
 pub(crate) fn process_cpu_time() -> Duration {
-    Duration::ZERO
+    task_all_info()
+        .map(|info| {
+            duration_from_mach_ticks(
+                info.ptinfo
+                    .pti_total_user
+                    .saturating_add(info.ptinfo.pti_total_system),
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// `pti_total_user` / `pti_total_system` are Mach absolute-time ticks, not
+/// nanoseconds. Convert with the kernel timebase (observed 125/3 on arm64).
+fn duration_from_mach_ticks(ticks: u64) -> Duration {
+    #[repr(C)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+    }
+
+    let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+    // SAFETY: `info` is a local C-layout struct; the syscall only writes it.
+    let kr = unsafe { mach_timebase_info(&mut info) };
+    if kr != 0 || info.denom == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = u64::try_from(u128::from(ticks) * u128::from(info.numer) / u128::from(info.denom))
+        .unwrap_or(u64::MAX);
+    Duration::from_nanos(nanos)
 }
 
 pub(crate) fn cpu_model() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+#[test]
+fn resident_set_bytes_samples_the_live_process() {
+    assert!(
+        resident_set_bytes() > 0,
+        "live process RSS must be greater than zero"
+    );
+}
+
+#[test]
+fn process_cpu_time_samples_the_live_process() {
+    // Burn a little user time so a freshly spawned test process is not at zero.
+    let mut acc = 0u64;
+    for i in 0..50_000u64 {
+        acc = acc.wrapping_add(i);
+    }
+    std::hint::black_box(acc);
+    assert!(
+        process_cpu_time() > Duration::ZERO,
+        "live process CPU time must be greater than zero"
+    );
 }
