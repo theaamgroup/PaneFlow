@@ -123,6 +123,18 @@ pub fn search_term(
     query: &str,
     regex_mode: bool,
 ) -> SearchResult {
+    search_term_windowed(term, query, regex_mode, None)
+}
+
+/// Like [`search_term`], optionally limited to the most recent `max_lines`
+/// grid rows (history + viewport). `None` walks the full grid. Used by
+/// `surface.search` so the GPUI tick does not scan 10k history rows.
+pub(crate) fn search_term_windowed(
+    term: &Arc<FairMutex<Term<ZedListener>>>,
+    query: &str,
+    regex_mode: bool,
+    max_lines: Option<usize>,
+) -> SearchResult {
     if query.is_empty() {
         return SearchResult {
             matches: Vec::new(),
@@ -163,6 +175,12 @@ pub fn search_term(
     let mut line_text = String::with_capacity(initial_cols);
     let mut char_to_col = Vec::with_capacity(initial_cols);
     let mut line = top;
+    if let Some(max_lines) = max_lines {
+        let oldest = bottom.0.saturating_sub(max_lines.saturating_sub(1) as i32);
+        if oldest > line.0 {
+            line = alacritty_terminal::index::Line(oldest);
+        }
+    }
     while line <= bottom {
         let Some(()) = ({
             let term = term.lock();

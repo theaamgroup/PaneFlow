@@ -37,7 +37,7 @@ use super::types::{
     SelectionKind, SelectionRange, SelectionSide, SharedTerm, ShellQuoting, TerminalWindowSize,
     content_from_term_visible, resize_if_needed,
 };
-use crate::limits::{MAX_CHARS, MAX_OSC52_BYTES};
+use crate::limits::{MAX_CHARS, MAX_OSC52_BYTES, MAX_SCROLLBACK_EXTRACT_LINES};
 use paneflow_config::schema::{TerminalBackendConfig, TerminalConfig, TerminalSurfaceProfile};
 
 /// Default scrollback history length, in lines. Paneflow keeps this standard
@@ -2310,72 +2310,94 @@ impl TerminalState {
     /// Extract terminal history as plain text (ANSI stripped) for session persistence.
     /// The active viewport is deliberately excluded so restoring a session cannot
     /// replay the previous visible frame ahead of fresh shell output.
-    /// Caps at 4000 lines and 400,000 characters. Returns None if history is empty.
+    /// Caps at [`MAX_SCROLLBACK_EXTRACT_LINES`] and [`MAX_CHARS`]. Returns None if
+    /// history is empty.
     pub fn extract_scrollback(&self) -> Option<String> {
         Self::extract_scrollback_from(&self.term)
+    }
+
+    /// Windowed history extract for `surface.read` (issue #29).
+    ///
+    /// `offset` skips lines from the newest end; `lines` is the window size.
+    /// `total` is the retained history length (viewport excluded, trailing
+    /// empty trimmed, capped at [`MAX_SCROLLBACK_EXTRACT_LINES`]) counted as a
+    /// row span — the lock does not join a 4000-line String to learn it.
+    /// Only the requested window is materialized.
+    pub(crate) fn extract_scrollback_window(
+        &self,
+        lines: usize,
+        offset: usize,
+    ) -> (String, usize, usize, bool) {
+        Self::extract_scrollback_window_from(&self.term, lines, offset)
     }
 
     /// US-011: scrollback drain decoupled from `&self` so `save_session` can
     /// run it on a background thread against a cloned [`SharedTerm`] handle
     /// (the term mutex is `Send + Sync` - it is the only cross-thread state in
     /// the app) instead of holding the GPUI main thread. US-012's windowing
-    /// keeps the lock bounded to the most-recent `MAX_LINES` rows.
+    /// keeps the lock bounded to the most-recent [`MAX_SCROLLBACK_EXTRACT_LINES`]
+    /// rows. The 400k-char cap stays on this persistence path only.
     fn extract_scrollback_from(term: &SharedTerm) -> Option<String> {
-        const MAX_LINES: usize = 4000;
-
-        // Read-only scrollback drain for session persistence.
-        let term = term.lock_unfair();
-        let top = term.topmost_line();
-        let cols = term.last_column();
-
-        // Alacritty addresses real history with negative grid lines. Line zero
-        // starts the active viewport, which must never be persisted as history.
-        if top.0 >= 0 {
+        let (mut result, returned, _, _) =
+            Self::extract_scrollback_window_from(term, MAX_SCROLLBACK_EXTRACT_LINES, 0);
+        if returned == 0 {
             return None;
         }
-
-        // US-012: window to the most-recent MAX_LINES *before* the loop so the
-        // lock is never held while materializing the full history (scrollback
-        // can be very large - see DEFAULT_SCROLLBACK_LINES). Walk oldest to
-        // newest from the bounded negative-line window through line -1.
-        let start = (-(MAX_LINES as i32)).max(top.0);
-        let mut lines: Vec<String> = Vec::with_capacity((-start).max(0) as usize);
-        let mut row = start;
-        while row < 0 {
-            let text = term.bounds_to_string(
-                AlacPoint::new(GridLine(row), GridCol(0)),
-                AlacPoint::new(GridLine(row), cols),
-            );
-            lines.push(text.trim_end().to_string());
-            row += 1;
-        }
-
-        // Trim trailing empty lines
-        while lines.last().is_some_and(|l| l.is_empty()) {
-            lines.pop();
-        }
-
-        if lines.is_empty() {
-            return None;
-        }
-
-        // Keep only the most recent MAX_LINES
-        if lines.len() > MAX_LINES {
-            lines.drain(..lines.len() - MAX_LINES);
-        }
-
-        let mut result = lines.join("\n");
-
-        // Cap at MAX_CHARS, then trim to last complete line and strip any
-        // partial ANSI escape at the boundary. Shared by both the background
-        // save path and the synchronous quit path (`save_session_blocking`).
         cap_scrollback_at_char_boundary(&mut result, MAX_CHARS);
-
         if result.is_empty() {
             None
         } else {
             Some(result)
         }
+    }
+
+    /// Read-only history window. Viewport excluded (same as session
+    /// persistence). Trailing empty rows are omitted from `total` by probing
+    /// newest-to-oldest; the retained span is then sliced and only that slice
+    /// is converted to Strings.
+    fn extract_scrollback_window_from(
+        term: &SharedTerm,
+        lines: usize,
+        offset: usize,
+    ) -> (String, usize, usize, bool) {
+        let term = term.lock_unfair();
+        let top = term.topmost_line();
+        let cols = term.last_column();
+
+        // Alacritty addresses real history with negative grid lines. Line zero
+        // starts the active viewport, which must never be persisted as history
+        // and is not part of the `surface.read` window either.
+        if top.0 >= 0 {
+            return (String::new(), 0, 0, true);
+        }
+
+        let start = (-(MAX_SCROLLBACK_EXTRACT_LINES as i32)).max(top.0);
+        let mut last = -1_i32;
+        while last >= start {
+            if !trimmed_grid_line(&term, last, cols).is_empty() {
+                break;
+            }
+            last -= 1;
+        }
+        if last < start {
+            return (String::new(), 0, 0, true);
+        }
+
+        let total = (last - start + 1) as usize;
+        let end = total.saturating_sub(offset);
+        if end == 0 {
+            return (String::new(), 0, total, true);
+        }
+        let win_start = end.saturating_sub(lines);
+        let row_first = start + win_start as i32;
+        let row_last = start + end as i32 - 1;
+
+        let mut out = Vec::with_capacity(end - win_start);
+        for row in row_first..=row_last {
+            out.push(trimmed_grid_line(&term, row, cols));
+        }
+        let returned = out.len();
+        (out.join("\n"), returned, total, win_start == 0)
     }
 
     /// Best-effort foreground command of this surface, cached by the off-thread
@@ -2389,18 +2411,31 @@ impl TerminalState {
     /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
     /// return matching lines as `(grid_line, text)` pairs, deduped by line and
     /// capped at `max_matches`. The bool is `true` when the cap truncated the
-    /// result. Backs the `surface.search` IPC method (US-004). Alacritty holds
-    /// its grid lock only for text extraction; Ghostty performs search and
-    /// matched-line extraction atomically on its runtime thread.
+    /// result. Backs the `surface.search` IPC method (US-004).
+    ///
+    /// Scans the most recent [`MAX_SCROLLBACK_EXTRACT_LINES`] grid rows
+    /// (history + viewport) in place — no 4000-line String is materialized.
+    /// Older history beyond that window is not searched. In-buffer Find still
+    /// uses the unbounded `search_term` path.
     pub fn search_scrollback(
         &self,
         pattern: &str,
         max_matches: usize,
     ) -> (Vec<(i32, String)>, bool) {
+        self.search_scrollback_limited(pattern, max_matches, MAX_SCROLLBACK_EXTRACT_LINES)
+    }
+
+    fn search_scrollback_limited(
+        &self,
+        pattern: &str,
+        max_matches: usize,
+        max_lines: usize,
+    ) -> (Vec<(i32, String)>, bool) {
         if pattern.is_empty() || max_matches == 0 {
             return (Vec::new(), false);
         }
-        let result = crate::search::search_term(&self.term, pattern, false);
+        let result =
+            crate::search::search_term_windowed(&self.term, pattern, false, Some(max_lines));
 
         // Collect unique line numbers in order of first appearance.
         let mut seen = std::collections::HashSet::new();
@@ -2506,6 +2541,15 @@ impl TerminalState {
             processor.advance(&mut *term, b"\r\n");
         }
     }
+}
+
+fn trimmed_grid_line(term: &Term<ZedListener>, row: i32, cols: GridCol) -> String {
+    term.bounds_to_string(
+        AlacPoint::new(GridLine(row), GridCol(0)),
+        AlacPoint::new(GridLine(row), cols),
+    )
+    .trim_end()
+    .to_string()
 }
 
 /// Cap `result` at `max_chars` bytes, cutting on a UTF-8 char boundary, then
@@ -3909,6 +3953,34 @@ mod tests {
         assert!(all[2].1.contains("third needle"));
     }
 
+    #[test]
+    fn search_scrollback_limited_does_not_scan_older_than_window() {
+        let state = TerminalState::new_display_only(5, 40);
+        let mut body = String::from("ancient-needle\n");
+        for i in 0..40 {
+            body.push_str(&format!("pad-{i}\n"));
+        }
+        body.push_str("recent-needle\n");
+        state.restore_scrollback(&body);
+
+        let (hits, _) = state.search_scrollback_limited("ancient-needle", 50, 8);
+        assert!(
+            hits.is_empty(),
+            "oldest marker must sit outside an 8-line scan window; got {hits:?}"
+        );
+
+        let (hits, _) = state.search_scrollback_limited("recent-needle", 50, 8);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].1.contains("recent-needle"));
+
+        let (hits, _) = state.search_scrollback_limited("ancient-needle", 50, 10_000);
+        assert_eq!(
+            hits.len(),
+            1,
+            "an unbounded scan still sees the oldest marker"
+        );
+    }
+
     // A display-only terminal (child_pid == 0, no real PTY) must resolve no CWD
     // and, critically, must NOT reach the platform process-table FFI: on macOS
     // `proc_pidinfo(0, …)` targets the kernel swapper, fails with EPERM, and
@@ -4242,6 +4314,69 @@ mod tests {
                 "active viewport must exclude {marker:?}; got:\n{drained}"
             );
         }
+    }
+
+    fn seed_numbered_history(rows: usize, cols: usize, n: usize) -> TerminalState {
+        let state = TerminalState::new_display_only(rows, cols);
+        let mut body = String::new();
+        for i in 0..n {
+            body.push_str(&format!("line-{i:04}\n"));
+        }
+        state.restore_scrollback(&body);
+        state
+    }
+
+    /// Windowed extract returns the last N history lines and a row-span
+    /// `total` matching `extract_scrollback` + `paginate_scrollback`, without
+    /// joining the full 4000-line persistence string first.
+    #[test]
+    fn extract_scrollback_window_returns_last_n_without_full_buffer() {
+        let state = seed_numbered_history(4, 40, 80);
+        let full = state
+            .extract_scrollback()
+            .expect("numbered restore should leave history");
+        let (expected, returned, total, eof) =
+            crate::app::ipc_handler::paginate_scrollback(&full, 5, 0);
+        assert!(
+            total > 5,
+            "fixture must have more history than the window; total={total}"
+        );
+        assert!(!eof, "a 5-line tail of a larger buffer is not eof");
+
+        let (text, got_returned, got_total, got_eof) = state.extract_scrollback_window(5, 0);
+        assert_eq!(text, expected);
+        assert_eq!(got_returned, returned);
+        assert_eq!(got_total, total);
+        assert_eq!(got_eof, eof);
+        assert!(
+            text.starts_with("line-") && text.contains('\n'),
+            "window should be joined history lines, got {text:?}"
+        );
+        let last = full.rsplit('\n').next().unwrap();
+        assert!(
+            text.ends_with(last),
+            "offset 0 must end on the newest history line {last:?}; got {text:?}"
+        );
+    }
+
+    #[test]
+    fn extract_scrollback_window_offset_matches_paginate() {
+        let state = seed_numbered_history(4, 40, 80);
+        let full = state.extract_scrollback().expect("history");
+        for &(lines, offset) in &[(5, 0), (5, 5), (10, 20), (3, 40), (200, 0)] {
+            let expected = crate::app::ipc_handler::paginate_scrollback(&full, lines, offset);
+            let got = state.extract_scrollback_window(lines, offset);
+            assert_eq!(got, expected, "lines={lines} offset={offset}");
+        }
+    }
+
+    #[test]
+    fn extract_scrollback_window_empty_terminal_is_eof() {
+        let state = TerminalState::new_display_only(24, 80);
+        assert_eq!(
+            state.extract_scrollback_window(200, 0),
+            (String::new(), 0, 0, true)
+        );
     }
 
     /// U-001: a multibyte codepoint straddling the byte cap must not panic

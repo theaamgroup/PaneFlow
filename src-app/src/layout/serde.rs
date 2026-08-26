@@ -17,6 +17,10 @@ use super::tree::{LayoutChild, LayoutTree, SplitDirection};
 
 #[derive(Clone, Copy)]
 enum ScrollbackCapture {
+    /// Full history extract. Kept for [`LayoutTree::serialize`]; IPC
+    /// `workspace.current` and session persistence use [`Self::Omit`] so the
+    /// GPUI tick does not walk 4000 lines per pane (issue #29).
+    #[allow(dead_code)]
     Inline,
     Omit,
 }
@@ -28,6 +32,10 @@ impl LayoutTree {
     /// tab, capturing the terminal's CWD and OSC title. The active tab is marked
     /// with `focus: true`. Each container produces a `LayoutNode::Split` with
     /// per-child `ratios` and recursive children.
+    ///
+    /// Not used by `workspace.current` (issue #29); the inline extract is the
+    /// snapshot-with-scrollback path.
+    #[allow(dead_code)]
     pub fn serialize(&self, cx: &App) -> LayoutNode {
         self.serialize_with(cx, ScrollbackCapture::Inline)
     }

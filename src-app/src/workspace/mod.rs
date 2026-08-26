@@ -290,10 +290,13 @@ impl Workspace {
         }
     }
 
-    /// Serialize the workspace layout to a `LayoutNode`.
+    /// Serialize the workspace layout to a `LayoutNode`, including per-pane
+    /// scrollback. When zoomed, serializes the saved (un-zoomed) layout so the
+    /// full pane arrangement is captured rather than just the single zoomed pane.
     ///
-    /// When zoomed, serializes the saved (un-zoomed) layout so that the full
-    /// pane arrangement is captured rather than just the single zoomed pane.
+    /// IPC `workspace.current` uses [`Self::serialize_layout_without_scrollback`]
+    /// so the GPUI tick does not extract 4000 lines per pane (issue #29).
+    #[allow(dead_code)]
     pub fn serialize_layout(&self, cx: &App) -> Option<LayoutNode> {
         let tree = self.saved_layout.as_ref().or(self.root.as_ref())?;
         Some(tree.serialize(cx))

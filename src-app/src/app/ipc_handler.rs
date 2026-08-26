@@ -960,10 +960,15 @@ fn surface_meta_value(s: SurfaceMeta) -> serde_json::Value {
     })
 }
 
-/// Window a scrollback string by line for `surface.read` (US-003). `offset`
-/// counts lines skipped from the most-recent end; `lines` is the window size.
-/// Returns `(text, returned_line_count, total_lines, eof)`, where `eof` is
-/// `true` once the window reaches the oldest retained line. Pure → unit-tested.
+/// Window a scrollback string by line. `offset` counts lines skipped from the
+/// most-recent end; `lines` is the window size. Returns
+/// `(text, returned_line_count, total_lines, eof)`, where `eof` is `true`
+/// once the window reaches the oldest retained line.
+///
+/// Live `surface.read` paginates on the grid (`extract_scrollback_window`);
+/// this helper stays as the string-level spec the windowed extract is tested
+/// against.
+#[cfg(test)]
 pub(crate) fn paginate_scrollback(
     full: &str,
     lines: usize,
@@ -2346,7 +2351,10 @@ impl PaneFlowApp {
             }
             "workspace.current" => {
                 if let Some(ws) = self.active_workspace() {
-                    let layout = ws.serialize_layout(cx);
+                    // Metadata only: do not extract_scrollback every pane on
+                    // the GPUI tick (issue #29). Session persistence already
+                    // uses the omit-scrollback path.
+                    let layout = ws.serialize_layout_without_scrollback(cx);
                     serde_json::json!({
                         "index": self.active_idx,
                         "title": ws.title,
@@ -2488,12 +2496,10 @@ impl PaneFlowApp {
                     Err(e) => return e.into_value(),
                 };
                 const DEFAULT_LINES: usize = 200;
-                // Mirror `extract_scrollback`'s own 4000-line cap.
-                const MAX_LINES: usize = 4000;
                 let lines = params
                     .get("lines")
                     .and_then(|v| v.as_u64())
-                    .map(|n| (n as usize).clamp(1, MAX_LINES))
+                    .map(|n| (n as usize).clamp(1, crate::limits::MAX_SCROLLBACK_EXTRACT_LINES))
                     .unwrap_or(DEFAULT_LINES);
                 let offset = params
                     .get("offset")
@@ -2506,18 +2512,19 @@ impl PaneFlowApp {
                 let output_generation = terminal.read(cx).terminal.output_generation;
                 let sid = terminal.entity_id().as_u64();
                 let read_started = std::time::Instant::now();
-                let full = terminal
+                // Windowed extract: lock only walks the requested lines plus a
+                // trailing-empty probe for total_lines / eof. wait/flow ask for
+                // 500 and must not pay a 4000-line String (issue #29).
+                let (text, returned, total, eof) = terminal
                     .read(cx)
                     .terminal
-                    .extract_scrollback()
-                    .unwrap_or_default();
+                    .extract_scrollback_window(lines, offset);
                 let extract_elapsed = read_started.elapsed();
-                let (text, returned, total, eof) = paginate_scrollback(&full, lines, offset);
                 let total_elapsed = read_started.elapsed();
                 if total_elapsed >= std::time::Duration::from_millis(10) {
                     log::debug!(
                         "surface.read sid={sid} lines={lines} offset={offset} total_lines={total} returned={returned} bytes={} extract_ms={} total_ms={}",
-                        full.len(),
+                        text.len(),
                         extract_elapsed.as_millis(),
                         total_elapsed.as_millis()
                     );
@@ -4678,6 +4685,46 @@ mod tests {
         assert!(
             4 > total_past,
             "offset > total is out of range → handler returns -32602"
+        );
+    }
+
+    #[test]
+    fn surface_read_uses_windowed_extract() {
+        let src = include_str!("ipc_handler.rs");
+        let arm = src
+            .split("\"surface.read\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"fleet.list\"").next())
+            .expect("surface.read arm");
+        assert!(
+            arm.contains("extract_scrollback_window"),
+            "surface.read must window the grid extract so wait/flow do not pay 4000 lines"
+        );
+        assert!(
+            !arm.contains("extract_scrollback()"),
+            "surface.read must not call the persistence full-history extract"
+        );
+        assert!(
+            !arm.contains("paginate_scrollback("),
+            "pagination is applied in the windowed extract, not after a full String"
+        );
+    }
+
+    #[test]
+    fn workspace_current_omits_scrollback_extract() {
+        let src = include_str!("ipc_handler.rs");
+        let arm = src
+            .split("\"workspace.current\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"workspace.create\"").next())
+            .expect("workspace.current arm");
+        assert!(
+            arm.contains("serialize_layout_without_scrollback"),
+            "workspace.current must not extract_scrollback every pane on the GPUI tick"
+        );
+        assert!(
+            !arm.contains("serialize_layout(cx)"),
+            "the inline-scrollback serializer is the persistence path, not IPC metadata"
         );
     }
 

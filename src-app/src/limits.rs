@@ -31,6 +31,11 @@ pub(crate) const MAX_LINE_BYTES: u64 = 64 * 1024;
 /// [`MAX_SESSION_SIZE_BYTES`], which is sized from this × panes × workspaces.
 pub(crate) const MAX_CHARS: usize = 400_000;
 
+/// Maximum history rows session persistence and IPC `surface.read` /
+/// `surface.search` will walk. `wait`/`flow` request 500 lines and must not
+/// materialize this many rows on every GPUI tick (issue #29).
+pub(crate) const MAX_SCROLLBACK_EXTRACT_LINES: usize = 4000;
+
 /// Cap on an OSC52 clipboard payload, applied on BOTH the Store (write) and
 /// Load (read) paths in the terminal. Deduplicated from two identical `const`s
 /// (US-013); keeping one source is what guarantees Store and Load stay
