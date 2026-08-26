@@ -38,6 +38,7 @@ use super::types::{
     content_from_term_visible, resize_if_needed,
 };
 use crate::limits::{MAX_CHARS, MAX_OSC52_BYTES, MAX_SCROLLBACK_EXTRACT_LINES};
+use paneflow_acp::INHERITED_AGENT_SESSION_ENV;
 use paneflow_config::schema::{TerminalBackendConfig, TerminalConfig, TerminalSurfaceProfile};
 
 /// Default scrollback history length, in lines. Paneflow keeps this standard
@@ -47,7 +48,6 @@ use paneflow_config::schema::{TerminalBackendConfig, TerminalConfig, TerminalSur
 /// [`paneflow_config::TerminalConfig::resolved_scrollback_lines`].
 const DEFAULT_SCROLLBACK_LINES: usize = TerminalConfig::DEFAULT_SCROLLBACK_LINES;
 const PTY_DRAIN_ON_EXIT: bool = true;
-const CLAUDECODE_ENV: &str = "CLAUDECODE";
 // zsh shell-integration keys. `setup_shell_integration` writes these before
 // `assemble_pty_env` merges untrusted `terminal.env` / surface env; they must
 // not be overridable.
@@ -2760,8 +2760,24 @@ fn is_loader_influencing_env_key(key: &str) -> bool {
     key.starts_with("LD_") || key.starts_with("DYLD_")
 }
 
+/// True if `key` is one of the launching agent session's identity/credential
+/// markers - see [`INHERITED_AGENT_SESSION_ENV`].
+///
+/// A pane that inherits them believes it is a *nested child* of the Claude
+/// Code session that launched Paneflow. On inheriting
+/// `CLAUDE_CODE_CHILD_SESSION` the agent turns transcript saving off, so its
+/// conversation never lands in `~/.claude/projects/<slug>/<uuid>.jsonl` and
+/// reopening the thread after a restart starts an empty conversation. The
+/// messaging socket/token pair is a live credential for the launching
+/// session's IPC channel. A pane must always look like a fresh terminal;
+/// inheriting is the only way these reach the child - Paneflow itself
+/// namespaces everything it sets under `PANEFLOW_*`.
+fn is_inherited_agent_session_env_key(key: &str) -> bool {
+    INHERITED_AGENT_SESSION_ENV.contains(&key)
+}
+
 fn is_forbidden_child_env_key(key: &str) -> bool {
-    key == CLAUDECODE_ENV
+    is_inherited_agent_session_env_key(key)
         || key == ZDOTDIR_ENV
         || key == PANEFLOW_ORIG_ZDOTDIR_ENV
         || is_loader_influencing_env_key(key)
@@ -2885,7 +2901,9 @@ fn assemble_pty_env(
         }
     }
 
-    env.remove(CLAUDECODE_ENV);
+    // Runs after the user/session merge so neither an inherited value nor a
+    // hand-written `terminal.env` entry can put these back.
+    env.retain(|k, _| !is_inherited_agent_session_env_key(k));
     reassert_paneflow_bin_dir_first(&mut env);
     reassert_shell_integration_zdotdir(&mut env, integration_zdotdir, integration_orig_zdotdir);
 
@@ -3961,6 +3979,40 @@ mod tests {
             env.get("PANEFLOW_ORIG_ZDOTDIR"),
             None,
             "untrusted PANEFLOW_ORIG_ZDOTDIR must not be injected when integration did not set it"
+        );
+    }
+
+    #[test]
+    fn inherited_agent_session_markers_are_dropped_from_child_env() {
+        // Launching Paneflow from inside an agent session (or from an IDE
+        // terminal that carries these) otherwise leaks the parent session's
+        // identity into every pane. `CLAUDE_CODE_CHILD_SESSION` in particular
+        // makes the agent disable transcript saving, so its conversation never
+        // reaches `~/.claude/projects` and the thread cannot be resumed after a
+        // restart.
+        let mut base = HashMap::new();
+        let mut user = HashMap::new();
+        for key in INHERITED_AGENT_SESSION_ENV {
+            base.insert((*key).to_string(), "inherited".to_string());
+            // Also offered through `terminal.env`: the strip runs after the
+            // merge, so a hand-written config cannot reinstate them either.
+            user.insert((*key).to_string(), "from-config".to_string());
+        }
+        user.insert("KEEP_ME".to_string(), "yes".to_string());
+
+        let env = assemble_pty_env(base, 1, 1, Some(user));
+
+        for key in INHERITED_AGENT_SESSION_ENV {
+            assert_eq!(
+                env.get(*key),
+                None,
+                "{key} must never reach an agent spawned in a pane"
+            );
+        }
+        assert_eq!(
+            env.get("KEEP_ME").map(String::as_str),
+            Some("yes"),
+            "a benign var alongside the markers must still pass through"
         );
     }
 

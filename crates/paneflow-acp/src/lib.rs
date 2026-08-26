@@ -7,7 +7,7 @@
         clippy::unwrap_in_result,
     )
 )]
-//! paneflow-acp: agent identity + the `CLAUDECODE` env scrub.
+//! paneflow-acp: agent identity + the inherited agent-session env scrub (7 markers).
 //!
 //! The in-app ACP chat, the PATH discovery scanner, and the auth/sign-in
 //! probing were all removed when the Agents view became terminal-only
@@ -23,4 +23,4 @@ pub mod discovery;
 pub mod spawn;
 
 pub use discovery::AgentKind;
-pub use spawn::{scrub_claudecode_env, scrub_claudecode_from_command};
+pub use spawn::{scrub_claudecode_env, scrub_claudecode_from_command, INHERITED_AGENT_SESSION_ENV};

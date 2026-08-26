@@ -27,10 +27,20 @@ use crate::agent_sessions::{AssistantUsage, SessionAgent, SessionMeta, clean_ses
 /// first lines of a Claude Code session file are typically
 /// `permission-mode` and `file-history-snapshot` records with no `cwd`;
 /// the actual user/assistant events start on line 3+. The `ai-title`
-/// record (when present) is usually around line 9 but can appear later.
-/// 256 covers >95% of files in the wild without the scan being visible
-/// to the user.
-const TITLE_SCAN_LIMIT: usize = 256;
+/// record (when present) usually lands around line 18, but a session that
+/// resumed or opened on slash commands writes it much later: 420 and 543
+/// measured on real files, both of which silently fell back to the first
+/// user message under the previous cap of 256.
+const TITLE_SCAN_LIMIT: usize = 2048;
+
+/// Byte budget for the same scan, and the real bound: transcript lines carry
+/// whole tool results, so line 256 already sits ~600 KB into a working
+/// session file and the line cap alone would allow 2048 x [`MAX_LINE_BYTES`]
+/// = 128 MiB. 1 MiB covers the common `ai-title` position (63-220 KB
+/// measured) plus one late outlier, and caps a file the scan can't satisfy.
+/// Applies to the title path only - the attribution path (`scan_usage`) is
+/// bounded by [`MODEL_USAGE_SCAN_LIMIT`] and runs once per diff column.
+const TITLE_SCAN_BYTES: u64 = 1024 * 1024;
 
 /// EP-004 US-016: deeper line cap for the attribution scan, which walks PAST
 /// the title break to aggregate `message.usage` across assistant turns. A
@@ -46,6 +56,23 @@ use crate::limits::MAX_LINE_BYTES;
 /// Cap rendered first-user-message labels at this character count to keep
 /// the popover row from overflowing horizontally.
 const LABEL_MAX_CHARS: usize = 80;
+
+/// Prefixes of the synthetic `type:"user"` records Claude Code writes into a
+/// transcript. They are plumbing, not human input: `<local-command-caveat>`
+/// and `<local-command-stdout>` wrap local-command execution, and
+/// `<system-reminder>` wraps injected context. The caveat record is `isMeta`
+/// and sits on line 3 of nearly every recent session, so without this filter
+/// it wins the fallback-title race and the row renders as
+/// "<local-command-caveat>Caveat: Th…". Mirrors cmux's
+/// `isClaudeSyntheticEnvelope`.
+const SYNTHETIC_USER_PREFIXES: [&str; 2] = ["<local-command-", "<system-reminder>"];
+
+/// Slash commands that reset the conversation rather than describe work. They
+/// are real user input, but as a title they say nothing: a session opened with
+/// `/clear` puts the prompt that matters two records later (measured on three
+/// real sessions, where `/clear` on line 4 masked `/review-epic <prd>` and
+/// `/implement-epic <prd>` on line 7). Skipping them lets the scan reach it.
+const CONTEXT_RESET_COMMANDS: [&str; 2] = ["clear", "compact"];
 
 /// First-line envelope. Tolerant: any missing field falls back via
 /// `serde(default)` so the parser never bails on a forward-compatible schema
@@ -89,6 +116,13 @@ pub fn slug_for_cwd(cwd: &str) -> String {
 /// Compute the absolute path of `$CLAUDE_CONFIG_DIR/projects/<slug>/`
 /// (default `~/.claude/projects/<slug>/`). Returns `None` when neither
 /// `CLAUDE_CONFIG_DIR` nor `dirs::home_dir()` yields a usable root.
+///
+/// A trailing separator is normalized away first. Claude derives its own slug
+/// from the agent process's cwd, which never carries one, so `/a/b/` has to
+/// resolve to the same directory as `/a/b` - otherwise the lookup misses a
+/// directory that exists, and [`session_file_exists`] reports "no session"
+/// for a session that is very much there, sending `--session-id` for an id
+/// the CLI already knows.
 pub fn project_dir_for_cwd(cwd: &str) -> Option<PathBuf> {
     project_dir_for_cwd_from(
         cwd,
@@ -127,7 +161,7 @@ fn project_dir_for_cwd_from(
     {
         return Some(projects.join(name));
     }
-    Some(projects.join(slug_for_cwd(cwd)))
+    Some(projects.join(slug_for_cwd(normalize_cwd_for_slug(cwd))))
 }
 
 fn is_usable_project_dir_name(name: &OsStr) -> bool {
@@ -140,6 +174,44 @@ fn is_usable_project_dir_name(name: &OsStr) -> bool {
     }
     let mut comps = path.components();
     matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
+}
+
+/// Strip trailing path separators, unless that would reduce `cwd` to a bare
+/// root. `/` is all separator and `C:\` is a drive root: trimming those
+/// changes the slug (`-` → ``, `C--` → `C-`) instead of normalizing it, and
+/// Claude keeps them intact.
+fn normalize_cwd_for_slug(cwd: &str) -> &str {
+    let trimmed = cwd.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        cwd
+    } else {
+        trimmed
+    }
+}
+
+/// Whether the CLI already holds a session file for `session_id` under
+/// `cwd`'s project dir.
+///
+/// Drives the mint-vs-resume choice in
+/// [`crate::agent_launcher::SessionBinding::resolve`]: `--session-id` is only
+/// legal for an id the CLI has never seen, so a thread may only pass it on
+/// the launch that creates the session.
+///
+/// Unlike the readers below this is a single `stat` - it never walks or
+/// parses the project dir - so it is cheap enough for the PTY-mount path on
+/// the GPUI main thread. Ids are filtered through
+/// [`crate::agent_sessions::is_valid_session_id`] first, whose allow-list
+/// admits only ASCII alphanumerics plus `-`/`_` (and never a leading `-`):
+/// no separator, no `.`, no space, no shell metacharacter. A tampered
+/// `session.json` can therefore neither escape the project dir here nor
+/// smuggle an extra argument into the launch command.
+pub fn session_file_exists(cwd: &str, session_id: &str) -> bool {
+    if !crate::agent_sessions::is_valid_session_id(session_id) {
+        return false;
+    }
+    project_dir_for_cwd(cwd)
+        .map(|dir| dir.join(format!("{session_id}.jsonl")).is_file())
+        .unwrap_or(false)
 }
 
 fn project_snapshot_mtime(project_dir: &Path) -> Option<SystemTime> {
@@ -323,7 +395,15 @@ fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta>
     } else {
         TITLE_SCAN_LIMIT
     };
+    let mut title_budget = TITLE_SCAN_BYTES;
     for _ in 0..scan_limit {
+        // Stop once the remaining budget can no longer hold a full line. The
+        // threshold is MAX_LINE_BYTES rather than zero so the oversized-line
+        // detection below stays exact: it compares the read length against
+        // that constant, which only holds while the whole cap is available.
+        if !scan_usage && title_budget < MAX_LINE_BYTES {
+            break;
+        }
         buf.clear();
         // US-010 (cli-hardening-followup-2026-Q3): cap each line read
         // at MAX_LINE_BYTES. An agent can write to
@@ -343,6 +423,7 @@ fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta>
         if n == 0 {
             break;
         }
+        title_budget = title_budget.saturating_sub(n as u64);
         if n as u64 == MAX_LINE_BYTES && !buf.ends_with('\n') {
             // U-017: an exactly-MAX_LINE_BYTES line with no trailing newline is
             // ambiguous - it may be a genuinely TRUNCATED oversized line, or a
@@ -387,6 +468,7 @@ fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta>
                     }
                     let consumed = chunk.len();
                     reader.consume(consumed);
+                    title_budget = title_budget.saturating_sub(consumed as u64);
                 }
                 continue;
             }
@@ -443,9 +525,14 @@ fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta>
                     }
                 }
             }
-            Some("user") if user_fallback.is_none() => {
+            // Sub-agent traffic is inline in the same transcript, flagged
+            // `isSidechain`. A sidechain turn is the orchestrator talking to a
+            // sub-agent, never the human, so it must not win the title race -
+            // the assistant arm below deliberately does NOT skip it, since
+            // those tokens are billed and belong in the attribution total.
+            Some("user") if user_fallback.is_none() && !json_flag(&value, "isSidechain") => {
                 if let Some(text) = extract_user_content(&value)
-                    && let Some(cleaned) = clean_user_message(&text)
+                    && let Some(cleaned) = clean_user_message(&text, json_flag(&value, "isMeta"))
                 {
                     user_fallback = Some(cleaned);
                 }
@@ -518,13 +605,31 @@ fn extract_user_content(line: &serde_json::Value) -> Option<String> {
     None
 }
 
-fn clean_user_message(raw: &str) -> Option<String> {
+/// Read a boolean transcript flag, defaulting to `false` when absent or of
+/// another type. Claude Code omits these keys rather than writing `false`.
+fn json_flag(value: &serde_json::Value, key: &str) -> bool {
+    value.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Turn one `type:"user"` record into a fallback title, or `None` when the
+/// record is not human input. `is_meta` is the record's `isMeta` flag: Claude
+/// Code sets it on the plumbing records it injects on the user's behalf.
+fn clean_user_message(raw: &str, is_meta: bool) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || is_meta {
+        return None;
+    }
+    if SYNTHETIC_USER_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
         return None;
     }
 
     if let Some(name) = extract_xml_block(trimmed, "command-name") {
+        if CONTEXT_RESET_COMMANDS.contains(&name.trim_start_matches('/')) {
+            return None;
+        }
         let args = extract_xml_block(trimmed, "command-args").unwrap_or_default();
         let joined = if args.is_empty() {
             name
@@ -589,6 +694,68 @@ mod tests {
         // Verified against a real install: Claude Code stores `C:\dev\paneflow`
         // sessions under `~/.claude/projects/C--dev-paneflow/`.
         assert_eq!(slug_for_cwd("C:\\dev\\paneflow"), "C--dev-paneflow");
+    }
+
+    #[test]
+    fn trailing_separator_resolves_to_the_same_project_dir() {
+        // Claude's own cwd never carries a trailing separator, so a stored
+        // `thread.cwd` that does must still find the directory that exists.
+        // Getting this wrong makes `session_file_exists` report "no session"
+        // for a live one, which re-sends `--session-id` and reproduces
+        // `Session ID <uuid> is already in use`.
+        //
+        // Goes through the `_from` seam with fixed args so a concurrent
+        // `ClaudeConfigDirGuard` cannot make both sides match vacuously via
+        // process-wide `CLAUDE_CONFIG_DIR` / `CLAUDE_CODE_PROJECT_DIR_NAME`.
+        let home = Some(PathBuf::from("/home/alice"));
+        let expected = Some(PathBuf::from(
+            "/home/alice/.claude/projects/-home-alice-myapp",
+        ));
+        assert_eq!(
+            project_dir_for_cwd_from("/home/alice/myapp/", home.clone(), None, None),
+            expected,
+        );
+        assert_eq!(
+            project_dir_for_cwd_from("/home/alice/myapp", home.clone(), None, None),
+            expected,
+        );
+        assert_eq!(
+            project_dir_for_cwd_from("/home/alice/myapp///", home.clone(), None, None),
+            expected,
+        );
+        let win_expected = Some(PathBuf::from(
+            "/home/alice/.claude/projects/C--dev-paneflow",
+        ));
+        assert_eq!(
+            project_dir_for_cwd_from("C:\\dev\\paneflow\\", home.clone(), None, None),
+            win_expected,
+        );
+        assert_eq!(
+            project_dir_for_cwd_from("C:\\dev\\paneflow", home, None, None),
+            win_expected,
+        );
+    }
+
+    #[test]
+    fn bare_roots_keep_their_slug() {
+        // All-separator paths are not normalized: trimming would change the
+        // slug rather than canonicalize it.
+        assert_eq!(normalize_cwd_for_slug("/"), "/");
+        assert_eq!(normalize_cwd_for_slug("C:\\"), "C:\\");
+        assert_eq!(slug_for_cwd(normalize_cwd_for_slug("/")), "-");
+        assert_eq!(slug_for_cwd(normalize_cwd_for_slug("C:\\")), "C--");
+    }
+
+    #[test]
+    fn session_file_exists_rejects_ids_outside_the_allow_list() {
+        // The allow-list gate runs before any path join, so no id can escape
+        // the project dir or reach the filesystem as a traversal.
+        for hostile in ["../../etc/passwd", "a/b", "a\\b", "with space", ".hidden"] {
+            assert!(
+                !session_file_exists("/home/alice/myapp", hostile),
+                "hostile id {hostile:?} must be rejected before the path join"
+            );
+        }
     }
 
     #[test]
@@ -744,10 +911,86 @@ mod tests {
         assert_eq!(usage.cache_creation, 5);
     }
 
+    /// The line-3 caveat record Claude Code writes into nearly every recent
+    /// session: `isMeta`, `<local-command-caveat>` prefixed, and the first
+    /// `type:"user"` line in the file. It must never become the row label.
+    #[test]
+    fn meta_caveat_record_never_becomes_the_title() {
+        assert_eq!(
+            clean_user_message(
+                "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>",
+                true,
+            ),
+            None,
+        );
+        // The prefix alone is enough, even without the isMeta flag.
+        assert_eq!(clean_user_message("<local-command-stdout>ok", false), None);
+        assert_eq!(
+            clean_user_message("<system-reminder>context</system-reminder>", false),
+            None,
+        );
+        // isMeta on ordinary text is still plumbing, not a prompt.
+        assert_eq!(clean_user_message("some injected note", true), None);
+        // A real prompt still passes.
+        assert_eq!(
+            clean_user_message("Corrige la sidebar", false).as_deref(),
+            Some("Corrige la sidebar"),
+        );
+    }
+
+    /// `/clear` opens a large share of sessions and describes none of them;
+    /// a command that carries an argument still does.
+    #[test]
+    fn context_reset_commands_do_not_become_the_title() {
+        assert_eq!(
+            clean_user_message(
+                "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>",
+                false,
+            ),
+            None,
+        );
+        assert_eq!(
+            clean_user_message(
+                "<command-name>/review-epic</command-name>\n<command-args>tasks/prd.md EP-005</command-args>",
+                false,
+            )
+            .as_deref(),
+            Some("/review-epic tasks/prd.md EP-005"),
+        );
+    }
+
+    /// End to end: the caveat is skipped and the first real prompt below it
+    /// becomes the fallback title. Sidechain (sub-agent) turns are skipped
+    /// too, so a sub-agent prompt can never label the parent session.
+    #[test]
+    fn fallback_title_skips_meta_and_sidechain_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>"},"sessionId":"aaaaaaaa-1111-2222-3333-444444444444","cwd":"/home/arthur/dev/paneflow","gitBranch":"main","timestamp":"2026-08-25T10:00:00Z"}"#,
+                "\n",
+                r#"{"type":"user","isSidechain":true,"message":{"content":"You are a sub-agent, review the diff"}}"#,
+                "\n",
+                r#"{"type":"user","message":{"content":"Corrige la sidebar agent sessions"}}"#,
+                "\n",
+            ),
+        )
+        .expect("write fixture");
+
+        let meta = read_session_meta(&path).expect("meta");
+        assert_eq!(
+            meta.summary.as_deref(),
+            Some("Corrige la sidebar agent sessions")
+        );
+        assert_eq!(meta.git_branch, "main");
+    }
+
     #[test]
     fn truncate_label_caps_long_text() {
         let long = "a".repeat(120);
-        let label = clean_user_message(&long).expect("label");
+        let label = clean_user_message(&long, false).expect("label");
         assert_eq!(label.chars().count(), LABEL_MAX_CHARS + 1);
         assert!(label.ends_with('…'));
     }
@@ -944,6 +1187,24 @@ mod tests {
         assert_eq!(
             project_dir_for_cwd_from(
                 "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("/tmp/claude-cfg")),
+                None,
+            ),
+            Some(PathBuf::from("/tmp/claude-cfg/projects/-home-alice-myapp")),
+        );
+    }
+
+    #[test]
+    fn trailing_separator_normalisation_keeps_claude_config_dir_precedence() {
+        // Normalisation must fold `/a/b/` onto the same slug as `/a/b`
+        // *without* bypassing `$CLAUDE_CONFIG_DIR`. A name-override
+        // (`CLAUDE_CODE_PROJECT_DIR_NAME`) is not in play here, so the
+        // slug branch is the one that would miss if the trailing `/`
+        // survived.
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp/",
                 Some(PathBuf::from("/home/alice")),
                 Some(OsString::from("/tmp/claude-cfg")),
                 None,
