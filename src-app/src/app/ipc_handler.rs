@@ -373,8 +373,10 @@ fn extract_last_result_capped(path: &std::path::Path, cap: u64) -> Option<String
 // `context` param of `surface.split` / `workspace.up`. Inlining it would hit the
 // 64 KiB `send_text` cap and silently truncate; instead it is staged to a temp
 // file and the path is handed to the agent through `PANEFLOW_CONTEXT_FILE`. The
-// write is off the render thread; the agent reads the file at startup. Files are
-// age-swept on the next launch, so a crash never leaks disk unboundedly.
+// write finishes before that env var is inserted and before the IPC method
+// returns success; a failed write is an error, not a spawn whose env points at
+// a missing file. Files are age-swept on the next launch, so a crash never
+// leaks disk unboundedly.
 // ---------------------------------------------------------------------------
 
 /// Per-process monotonic counter for unique context-file names.
@@ -393,32 +395,41 @@ fn next_context_file_path() -> std::path::PathBuf {
 }
 
 /// Write `content` to `path` atomically (temp + rename) so a fast-booting agent
-/// reading `PANEFLOW_CONTEXT_FILE` sees the whole file or nothing. Best-effort:
-/// a failure is logged, not fatal (the agent simply finds no file). Blocking, so
-/// callers run it via `smol::unblock` off the render thread.
+/// reading `PANEFLOW_CONTEXT_FILE` sees the whole file or nothing. Blocking; the
+/// blob is small enough to run on the automation tick. Callers must not insert
+/// the env var or return IPC success until this returns `Ok`.
 ///
 /// The blob is a conductor's inter-agent payload (task text, code, possibly
 /// secrets). `std::env::temp_dir()` can resolve to a world-traversable root
 /// (e.g. `/tmp`), so the dir is locked owner-only (0700) and the file is created
 /// 0600 - parity with the IPC socket dir hardening in `ipc.rs`. `create_new`
 /// also means the staging write never follows a pre-planted symlink (CWE-59).
-/// Unix-only mode bits; Windows `%TEMP%` is already per-user ACL'd.
-fn write_context_file(path: &std::path::Path, content: &str) {
-    let Some(dir) = path.parent() else { return };
+fn write_context_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let Some(dir) = path.parent() else {
+        log::warn!(
+            "context file: failed to stage {}: path has no parent directory",
+            path.display()
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "context file path has no parent directory",
+        ));
+    };
     if let Err(e) = create_private_dir(dir) {
         log::warn!("context file: cannot create {}: {e}", dir.display());
-        return;
+        return Err(e);
     }
     let tmp = path.with_extension("tmp");
     // Clear any stale tmp from a same-PID crash so `create_new` below can own the
     // path (and so it can't fail on, or follow, a leftover/planted entry).
     let _ = std::fs::remove_file(&tmp);
-    if write_private_file(&tmp, content)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .is_err()
-    {
-        log::warn!("context file: failed to stage {}", path.display());
-        let _ = std::fs::remove_file(&tmp);
+    match write_private_file(&tmp, content).and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            log::warn!("context file: failed to stage {}: {e}", path.display());
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 
@@ -477,44 +488,58 @@ fn sweep_orphaned_context_files() {
     }
 }
 
-/// Stage a `context` blob (when present) to a temp file off the render thread
-/// and return `env` with `PANEFLOW_CONTEXT_FILE` set to its path. Absent/empty
-/// context returns `env` unchanged.
+/// Write `context` (when non-empty) to `path`, then insert `PANEFLOW_CONTEXT_FILE`.
+/// A write error returns `Err` without inserting the env var so callers cannot
+/// spawn a pane that believes the file exists.
+fn stage_context_file_at(
+    context: Option<&str>,
+    mut env: Option<HashMap<String, String>>,
+    path: std::path::PathBuf,
+) -> std::io::Result<Option<HashMap<String, String>>> {
+    if let Some(content) = context.filter(|c| !c.is_empty()) {
+        write_context_file(&path, content)?;
+        env.get_or_insert_with(HashMap::new).insert(
+            "PANEFLOW_CONTEXT_FILE".to_string(),
+            path.to_string_lossy().into_owned(),
+        );
+    }
+    Ok(env)
+}
+
+/// Stage a `context` blob (when present) to a temp file and return `env` with
+/// `PANEFLOW_CONTEXT_FILE` set to its path. The write is synchronous and must
+/// succeed before the env var is inserted. Absent/empty context returns `env`
+/// unchanged. Orphan sweep stays detached/once and is not on the success path.
 fn stage_context_file(
     context: Option<&str>,
     env: Option<HashMap<String, String>>,
     cx: &mut gpui::Context<crate::PaneFlowApp>,
-) -> Option<HashMap<String, String>> {
-    let mut env = env;
-    if let Some(content) = context.filter(|c| !c.is_empty()) {
-        // AC4: lazily sweep stale files from a prior run, once per process, the
-        // first time the context channel is actually used (off the render
-        // thread). Lazy rather than at boot so an unused feature costs nothing
-        // and so this stays self-contained in the handler module.
-        static CONTEXT_SWEEP_ONCE: std::sync::Once = std::sync::Once::new();
-        CONTEXT_SWEEP_ONCE.call_once(|| {
-            cx.background_spawn(async {
-                smol::unblock(sweep_orphaned_context_files).await;
-            })
-            .detach();
-        });
-        let path = next_context_file_path();
-        let path_str = path.to_string_lossy().into_owned();
-        let content = content.to_string();
-        cx.background_spawn(async move {
-            smol::unblock(move || write_context_file(&path, &content)).await;
+) -> std::io::Result<Option<HashMap<String, String>>> {
+    let Some(content) = context.filter(|c| !c.is_empty()) else {
+        return Ok(env);
+    };
+    // AC4: lazily sweep stale files from a prior run, once per process, the
+    // first time the context channel is actually used (off the render
+    // thread). Lazy rather than at boot so an unused feature costs nothing
+    // and so this stays self-contained in the handler module.
+    static CONTEXT_SWEEP_ONCE: std::sync::Once = std::sync::Once::new();
+    CONTEXT_SWEEP_ONCE.call_once(|| {
+        cx.background_spawn(async {
+            smol::unblock(sweep_orphaned_context_files).await;
         })
         .detach();
-        env.get_or_insert_with(HashMap::new)
-            .insert("PANEFLOW_CONTEXT_FILE".to_string(), path_str);
-    }
-    env
+    });
+    stage_context_file_at(Some(content), env, next_context_file_path())
+}
+
+fn context_file_stage_rpc_error(err: std::io::Error) -> JsonRpcError {
+    JsonRpcError::internal_error(format!("failed to stage context file: {err}"))
 }
 
 pub(crate) fn stage_planned_pane_env(
     pane: &PlannedPane,
     cx: &mut gpui::Context<crate::PaneFlowApp>,
-) -> Option<HashMap<String, String>> {
+) -> std::io::Result<Option<HashMap<String, String>>> {
     stage_context_file(pane.context.as_deref(), pane.env.clone(), cx)
 }
 
@@ -1786,16 +1811,29 @@ impl PaneFlowApp {
             })
             .collect();
 
-        // Phase 2: spawn every pane (cwd + env honored). `self.workspaces` is
-        // untouched until the tree is built, so a failed layout strands nothing.
+        // Stage context files before any PTY spawn. A write failure is a
+        // JSON-RPC error, not success with PANEFLOW_CONTEXT_FILE pointing at a
+        // missing path. `self.workspaces` stays untouched until the tree is built.
+        let mut staged_envs: Vec<Option<HashMap<String, String>>> =
+            Vec::with_capacity(planned.len());
+        for (i, pp) in planned.iter().enumerate() {
+            match stage_planned_pane_env(pp, cx) {
+                Ok(env) => staged_envs.push(env),
+                Err(err) => {
+                    return JsonRpcError::internal_error(format!(
+                        "pane {i}: failed to stage context file: {err}"
+                    ))
+                    .into_value();
+                }
+            }
+        }
+
+        // Phase 2: spawn every pane (cwd + env honored).
         let ws_id = next_workspace_id();
         let mut panes: Vec<Entity<Pane>> = Vec::with_capacity(planned.len());
         let mut launches: Vec<(Entity<TerminalView>, Option<String>, Option<String>)> =
             Vec::with_capacity(planned.len());
-        for pp in &planned {
-            // EP-004 US-015: stage any per-pane context blob to a file and pass
-            // its path via PANEFLOW_CONTEXT_FILE (merged into the pane's env).
-            let env = stage_planned_pane_env(pp, cx);
+        for (pp, env) in planned.iter().zip(staged_envs) {
             let terminal = cx.new(|cx| {
                 TerminalView::with_cwd_env_and_profile(
                     ws_id,
@@ -2884,14 +2922,6 @@ impl PaneFlowApp {
                     },
                     None => None,
                 };
-                // EP-004 US-015: stage a (possibly large) `context` blob to a
-                // temp file and pass its path via PANEFLOW_CONTEXT_FILE, instead
-                // of prefilling it inline (capped at 64 KiB by send_text).
-                let spawn_env = stage_context_file(
-                    params.get("context").and_then(|c| c.as_str()),
-                    parse_env_object(params.get("env")),
-                    cx,
-                );
                 let spawn_command = params
                     .get("command")
                     .and_then(|c| c.as_str())
@@ -2942,12 +2972,23 @@ impl PaneFlowApp {
                 {
                     return JsonRpcError::invalid_params("Surface not found").into_value();
                 }
+                // EP-004 US-015: stage a (possibly large) `context` blob to a
+                // temp file and pass its path via PANEFLOW_CONTEXT_FILE. Write
+                // before spawn; a failure is a JSON-RPC error, not success.
+                let spawn_env = match stage_context_file(
+                    params.get("context").and_then(|c| c.as_str()),
+                    parse_env_object(params.get("env")),
+                    cx,
+                ) {
+                    Ok(env) => env,
+                    Err(err) => return context_file_stage_rpc_error(err).into_value(),
+                };
                 let new_terminal = cx.new(|cx| {
                     TerminalView::with_cwd_env_and_profile(
                         ws_id,
                         spawn_cwd.clone(),
                         None,
-                        spawn_env.clone(),
+                        spawn_env,
                         spawn_profile,
                         cx,
                     )
@@ -3850,10 +3891,19 @@ impl JsonRpcError {
     pub(crate) const METHOD_NOT_ENABLED: i32 = -32601;
     /// JSON-RPC 2.0 reserved error code for unknown methods.
     pub(crate) const METHOD_NOT_FOUND: i32 = -32601;
+    /// JSON-RPC 2.0 reserved error code for internal errors (I/O, staging).
+    pub(crate) const INTERNAL_ERROR: i32 = -32603;
 
     pub(crate) fn invalid_params(message: impl Into<String>) -> Self {
         Self {
             code: Self::INVALID_PARAMS,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn internal_error(message: impl Into<String>) -> Self {
+        Self {
+            code: Self::INTERNAL_ERROR,
             message: message.into(),
         }
     }
@@ -5073,7 +5123,7 @@ mod tests {
         let p2 = super::next_context_file_path();
         assert_ne!(p1, p2, "each context file gets a distinct path");
         let big = "x".repeat(128 * 1024);
-        super::write_context_file(&p1, &big);
+        super::write_context_file(&p1, &big).expect("context file staged");
         let read = std::fs::read_to_string(&p1).expect("context file staged");
         assert_eq!(
             read.len(),
@@ -5091,7 +5141,8 @@ mod tests {
     fn context_file_and_dir_are_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
         let path = super::next_context_file_path();
-        super::write_context_file(&path, "secret inter-agent context");
+        super::write_context_file(&path, "secret inter-agent context")
+            .expect("context file staged");
         let file_mode = std::fs::metadata(&path)
             .expect("file staged")
             .permissions()
@@ -5111,6 +5162,73 @@ mod tests {
             "context dir must be 0700, got {dir_mode:o}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_context_file_error_is_observable_when_parent_is_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent_as_file = dir.path().join("blocked");
+        std::fs::write(&parent_as_file, b"not a dir").expect("write blocker");
+        let path = parent_as_file.join("ctx-test.txt");
+        super::write_context_file(&path, "blob")
+            .expect_err("parent path is a file so the write must fail");
+        assert!(
+            !path.exists(),
+            "failed write must not leave a destination file"
+        );
+    }
+
+    #[test]
+    fn context_file_failed_write_does_not_insert_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent_as_file = dir.path().join("blocked");
+        std::fs::write(&parent_as_file, b"not a dir").expect("write blocker");
+        let path = parent_as_file.join("ctx-test.txt");
+        let mut env = HashMap::new();
+        env.insert("KEEP".into(), "yes".into());
+        super::stage_context_file_at(Some("secret inter-agent context"), Some(env), path.clone())
+            .expect_err("write must fail before env insert");
+        assert!(
+            !path.exists(),
+            "failed stage must not leave a destination file"
+        );
+    }
+
+    #[test]
+    fn stage_context_file_at_inserts_env_only_after_successful_write() {
+        let path = super::next_context_file_path();
+        let env = super::stage_context_file_at(Some("hello"), None, path.clone())
+            .expect("write must succeed");
+        let env = env.expect("env populated after successful write");
+        assert_eq!(
+            env.get("PANEFLOW_CONTEXT_FILE").map(String::as_str),
+            Some(path.to_string_lossy().as_ref())
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "hello");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn context_file_empty_does_not_write_or_insert_env() {
+        let path = super::next_context_file_path();
+        let env = super::stage_context_file_at(Some(""), None, path.clone()).expect("no write");
+        assert!(env.is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn context_file_stage_failure_is_jsonrpc_internal_error() {
+        let err = super::context_file_stage_rpc_error(std::io::Error::other("disk full"));
+        assert_eq!(err.code, JsonRpcError::INTERNAL_ERROR);
+        assert!(
+            err.message.contains("failed to stage context file"),
+            "got: {}",
+            err.message
+        );
+        assert!(err.message.contains("disk full"), "got: {}", err.message);
+        let v = err.into_value();
+        assert_eq!(v[super::JSONRPC_ERROR_KEY]["code"], -32603);
+        assert!(v.get("result").is_none());
     }
 
     // -----------------------------------------------------------------

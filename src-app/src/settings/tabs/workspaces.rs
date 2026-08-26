@@ -1326,10 +1326,16 @@ impl PaneFlowApp {
 
         let ws_id = self.workspaces[target_idx].id;
         let focus_idx = planned.iter().position(|plan| plan.focus).unwrap_or(0);
+        let mut staged_envs = Vec::with_capacity(planned.len());
+        for (idx, plan) in planned.iter().enumerate() {
+            staged_envs.push(
+                stage_planned_pane_env(plan, cx)
+                    .map_err(|err| format!("pane {idx}: failed to stage context file: {err}"))?,
+            );
+        }
         let mut launches = Vec::with_capacity(planned.len());
         let mut panes = Vec::with_capacity(planned.len());
-        for plan in planned {
-            let env = stage_planned_pane_env(&plan, cx);
+        for (plan, env) in planned.into_iter().zip(staged_envs) {
             let terminal = cx.new(|cx| {
                 TerminalView::with_cwd_env_and_profile(
                     ws_id,
