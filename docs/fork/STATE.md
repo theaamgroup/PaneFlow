@@ -71,7 +71,7 @@ cargo build                                  # exit 0
 cargo test --workspace                       # 1725 passed, 0 failed, 2 ignored
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
-./target/debug/paneflow --version            # paneflow 0.8.2
+./target/debug/paneflow --version            # paneflow 0.1.0
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
                                              # negative control: cfg(unix) 152, cfg(macos) 77

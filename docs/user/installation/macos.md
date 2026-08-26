@@ -106,7 +106,7 @@ release path.
 
 ```bash
 cargo build --release
-scripts/bundle-macos.sh --version 0.8.2 --arch aarch64
+scripts/bundle-macos.sh --version 0.1.0 --arch aarch64
 ```
 
 That writes `dist/PaneFlow.app` with the executable at

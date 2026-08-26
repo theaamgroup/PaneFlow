@@ -5862,11 +5862,11 @@ dependencies = [
 
 [[package]]
 name = "paneflow-acp"
-version = "0.8.2"
+version = "0.1.0"
 
 [[package]]
 name = "paneflow-ai-hook"
-version = "0.8.2"
+version = "0.1.0"
 dependencies = [
  "interprocess",
  "serde",
@@ -5876,7 +5876,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-app"
-version = "0.8.2"
+version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5956,7 +5956,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-config"
-version = "0.8.2"
+version = "0.1.0"
 dependencies = [
  "dirs",
  "notify 7.0.0",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-ipc-client"
-version = "0.8.2"
+version = "0.1.0"
 dependencies = [
  "interprocess",
  "serde_json",
@@ -5978,7 +5978,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-mcp"
-version = "0.8.2"
+version = "0.1.0"
 dependencies = [
  "paneflow-ipc-client",
  "serde",
@@ -5987,7 +5987,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-mcp-install"
-version = "0.8.2"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -6001,11 +6001,11 @@ dependencies = [
 
 [[package]]
 name = "paneflow-process"
-version = "0.8.2"
+version = "0.1.0"
 
 [[package]]
 name = "paneflow-shim"
-version = "0.8.2"
+version = "0.1.0"
 dependencies = [
  "libc",
  "same-file",
