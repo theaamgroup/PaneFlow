@@ -269,8 +269,7 @@ impl PtyNotifier {
 
 /// Cloneable renderer-facing session facade. The concrete Alacritty handles
 /// stay private to this backend module; GPUI receives only Paneflow-owned
-/// commands and snapshots. EP-002 can add a Ghostty implementation behind the
-/// same facade without changing `TerminalElement`.
+/// commands and snapshots.
 #[derive(Clone)]
 pub(crate) struct TerminalSessionBackend {
     term: SharedTerm,
@@ -655,114 +654,19 @@ pub(super) fn hsla_to_alac_rgb(hsla: gpui::Hsla) -> AlacRgb {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GhosttyBuildDiagnostics {
-    pub version: &'static str,
-    pub source_sha: &'static str,
-    pub api_version: &'static str,
-    pub zig_version: &'static str,
-    pub optimization: &'static str,
-    pub simd: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "native backend failure phases are cfg-dependent across the target matrix"
-)]
-pub enum TerminalBackendFailurePhase {
-    Availability,
-    Initialization,
-    OpenPty,
-    Spawn,
-    PostSpawn,
-}
-
-impl TerminalBackendFailurePhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Availability => "availability",
-            Self::Initialization => "initialization",
-            Self::OpenPty => "open_pty",
-            Self::Spawn => "spawn",
-            Self::PostSpawn => "post_spawn",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TerminalBackendFailureDiagnostics {
-    pub phase: TerminalBackendFailurePhase,
-    pub reason_code: &'static str,
-    pub os_error: Option<i32>,
-}
-
-#[allow(
-    dead_code,
-    reason = "native backend reason codes are cfg-dependent across the target matrix"
-)]
-impl TerminalBackendFailureDiagnostics {
-    pub(super) const GHOSTTY_UNAVAILABLE: &'static str = "ghostty_unavailable";
-    pub(super) const GHOSTTY_INITIALIZATION_FAILED: &'static str = "ghostty_initialization_failed";
-    pub(super) const GHOSTTY_OPEN_PTY_FAILED: &'static str = "ghostty_open_pty_failed";
-    pub(super) const GHOSTTY_SPAWN_FAILED: &'static str = "ghostty_spawn_failed";
-    pub(super) const GHOSTTY_POST_SPAWN_FAILED: &'static str = "ghostty_post_spawn_failed";
-
-    pub(super) fn new(
-        phase: TerminalBackendFailurePhase,
-        reason_code: &'static str,
-        os_error: Option<i32>,
-    ) -> Self {
-        Self {
-            phase,
-            reason_code,
-            os_error,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalBackendDiagnostics {
     pub requested: TerminalBackendConfig,
     pub effective: &'static str,
-    pub failure: Option<TerminalBackendFailureDiagnostics>,
     pub target_triple: &'static str,
-    pub ghostty: Option<GhosttyBuildDiagnostics>,
 }
 
 impl std::fmt::Display for TerminalBackendDiagnostics {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (failure_phase, reason_code, os_error) =
-            self.failure
-                .as_ref()
-                .map_or(("none", "none", None), |failure| {
-                    (
-                        failure.phase.as_str(),
-                        failure.reason_code,
-                        failure.os_error,
-                    )
-                });
         write!(
             formatter,
-            "requested={:?} effective={} failure_phase={} reason_code={} target={} os_error=",
-            self.requested, self.effective, failure_phase, reason_code, self.target_triple
-        )?;
-        match os_error {
-            Some(code) => write!(formatter, "{code}")?,
-            None => formatter.write_str("none")?,
-        }
-        if let Some(ghostty) = self.ghostty.as_ref() {
-            write!(
-                formatter,
-                " ghostty_version={} ghostty_source_sha={} ghostty_api_version={} zig_version={} optimization={} simd={}",
-                ghostty.version,
-                ghostty.source_sha,
-                ghostty.api_version,
-                ghostty.zig_version,
-                ghostty.optimization,
-                ghostty.simd,
-            )?;
-        }
-        Ok(())
+            "requested={:?} effective={} target={}",
+            self.requested, self.effective, self.target_triple
+        )
     }
 }
 
@@ -799,7 +703,6 @@ pub struct TerminalState {
     events_rx: Option<UnboundedReceiver<AlacEvent>>,
     requested_backend: TerminalBackendConfig,
     effective_backend: &'static str,
-    backend_failure: Option<TerminalBackendFailureDiagnostics>,
     cwd_rx: Option<UnboundedReceiver<String>>,
     marks_rx: Option<std::sync::mpsc::Receiver<RawMark>>,
     pub(crate) marks: SharedMarkRing,
@@ -1439,24 +1342,13 @@ impl TerminalState {
 
     pub(super) fn set_backend_request(&mut self, requested: TerminalBackendConfig) {
         self.requested_backend = requested;
-        self.backend_failure = None;
-    }
-
-    // Used by the cfg branch compiled when no native Ghostty backend is present.
-    #[allow(dead_code)]
-    pub(super) fn record_backend_failure(&mut self, failure: TerminalBackendFailureDiagnostics) {
-        self.backend_failure = Some(failure);
     }
 
     pub fn backend_diagnostics(&self) -> TerminalBackendDiagnostics {
-        let ghostty = None;
-
         TerminalBackendDiagnostics {
             requested: self.requested_backend,
             effective: self.effective_backend,
-            failure: self.backend_failure.clone(),
             target_triple: env!("PANEFLOW_TARGET_TRIPLE"),
-            ghostty,
         }
     }
 
@@ -1899,7 +1791,6 @@ impl TerminalState {
             events_rx: Some(events_rx),
             requested_backend: TerminalBackendConfig::Auto,
             effective_backend: "alacritty",
-            backend_failure: None,
             cwd_rx: None,
             marks_rx: None,
             marks: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -3264,54 +3155,22 @@ mod tests {
     }
 
     #[test]
-    fn backend_diagnostics_extract_os_codes_without_sensitive_error_text() {
+    fn raw_os_error_from_anyhow_extracts_os_codes_without_sensitive_error_text() {
         const CANARY: &str =
             r#"C:\Users\synthetic-user\private\launch.ps1 --token super-secret-canary"#;
         let error = anyhow::Error::new(io::Error::from_raw_os_error(5)).context(CANARY);
         let os_error = raw_os_error_from_anyhow(&error);
         assert_eq!(os_error, Some(5));
 
-        let mut state = TerminalState::new_display_only(24, 80);
-        state.set_backend_request(TerminalBackendConfig::Alacritty);
-        state.record_backend_failure(TerminalBackendFailureDiagnostics::new(
-            TerminalBackendFailurePhase::OpenPty,
-            TerminalBackendFailureDiagnostics::GHOSTTY_OPEN_PTY_FAILED,
-            os_error,
-        ));
-
-        let formatted = state.backend_diagnostics().to_string();
-        assert!(formatted.contains("failure_phase=open_pty"));
-        assert!(formatted.contains("reason_code=ghostty_open_pty_failed"));
-        assert!(formatted.contains("os_error=5"));
+        let formatted = TerminalState::new_display_only(24, 80)
+            .backend_diagnostics()
+            .to_string();
+        assert!(formatted.contains("effective=alacritty"));
         assert!(!formatted.contains(CANARY));
         assert!(!formatted.contains("private"));
         assert!(!formatted.contains("super-secret-canary"));
-    }
-
-    #[test]
-    fn backend_failure_phases_and_reason_codes_are_stable() {
-        assert_eq!(
-            TerminalBackendFailurePhase::Availability.as_str(),
-            "availability"
-        );
-        assert_eq!(
-            TerminalBackendFailurePhase::Initialization.as_str(),
-            "initialization"
-        );
-        assert_eq!(TerminalBackendFailurePhase::OpenPty.as_str(), "open_pty");
-        assert_eq!(TerminalBackendFailurePhase::Spawn.as_str(), "spawn");
-        assert_eq!(
-            TerminalBackendFailurePhase::PostSpawn.as_str(),
-            "post_spawn"
-        );
-        assert_eq!(
-            TerminalBackendFailureDiagnostics::GHOSTTY_UNAVAILABLE,
-            "ghostty_unavailable"
-        );
-        assert_eq!(
-            TerminalBackendFailureDiagnostics::GHOSTTY_POST_SPAWN_FAILED,
-            "ghostty_post_spawn_failed"
-        );
+        assert!(!formatted.contains("failure_phase"));
+        assert!(!formatted.contains("ghostty"));
     }
 
     #[test]

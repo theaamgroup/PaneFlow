@@ -14,14 +14,11 @@ use gpui::{
     App, ClipboardItem, Context, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
     KeyContext, MouseButton, Render, Styled, Window, div, prelude::*,
 };
-use paneflow_config::schema::{TerminalBackendConfig, TerminalConfig, TerminalSurfaceProfile};
+use paneflow_config::schema::{TerminalConfig, TerminalSurfaceProfile};
 
 use super::TerminalState;
 use super::element::TerminalElement;
-use super::pty_session::{
-    ClipboardOp, TerminalBackendEvent, TerminalBackendFailureDiagnostics,
-    TerminalBackendFailurePhase, raw_os_error_from_anyhow,
-};
+use super::pty_session::{ClipboardOp, raw_os_error_from_anyhow};
 use super::service_detector::ServiceInfo;
 use super::types::{
     CopyModeCursorState, CursorShape, HyperlinkZone, Line, Modes, Point, SearchHighlight,
@@ -30,54 +27,8 @@ use super::types::{
 use crate::limits::MAX_OSC52_BYTES;
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 
-#[cfg(test)]
-fn should_start_ghostty_for_policy(
-    requested: TerminalBackendConfig,
-    available: bool,
-    auto_selects: bool,
-) -> bool {
-    available && policy_requests_ghostty(requested, auto_selects)
-}
-
-fn policy_requests_ghostty(requested: TerminalBackendConfig, auto_selects: bool) -> bool {
-    match requested {
-        TerminalBackendConfig::Auto => auto_selects,
-        TerminalBackendConfig::Alacritty => false,
-    }
-}
-
-/// This fork ships only the Alacritty backend, so nothing ever auto-selects
-/// Ghostty. Kept as a function because the backend-policy tests and the
-/// availability warning below both read it.
-fn auto_selects_ghostty_for_target() -> bool {
-    false
-}
-
-#[cfg(test)]
-fn should_start_ghostty(requested: TerminalBackendConfig) -> bool {
-    should_start_ghostty_for_policy(
-        requested,
-        false, /* libghostty backend removed from this fork */
-        auto_selects_ghostty_for_target(),
-    )
-}
-
 enum BackgroundSpawnOutcome {
     Alacritty(anyhow::Result<super::pty_session::SpawnedPty>),
-}
-
-fn should_render_ghostty_wakeup_immediately(_event: &TerminalBackendEvent) -> bool {
-    false
-}
-
-fn warn_ghostty_unavailable_once() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        log::warn!(
-            target: "paneflow::terminal::backend",
-            "Ghostty backend requested but unavailable on this platform/build; using Alacritty"
-        );
-    });
 }
 
 fn log_backend_diagnostics(terminal: &TerminalState) {
@@ -262,11 +213,6 @@ pub struct TerminalView {
     /// Focus subscriptions update the clipboard gate at event time, before
     /// queued terminal output can reach the GPUI event drain.
     focus_subscriptions: Option<(gpui::Subscription, gpui::Subscription)>,
-    /// Key presses accepted by Ghostty and therefore eligible for a matching
-    /// release event. Prevents app-consumed shortcuts from leaking key-up data.
-    /// Printable key metadata held until GPUI commits the final text. This
-    /// keeps IME as the single text source while still giving Kitty encoding
-    /// the logical key, modifiers, repeat action, and matching release.
     /// Last hovered cell position for URL regex detection (US-015).
     pub(super) hovered_cell: Option<Point>,
     /// Active hyperlink under Ctrl+hover - drives underline rendering and Ctrl+click.
@@ -462,15 +408,6 @@ impl TerminalView {
             .unwrap_or_default()
             .backend;
         terminal.set_backend_request(requested_backend);
-
-        if policy_requests_ghostty(requested_backend, auto_selects_ghostty_for_target()) {
-            warn_ghostty_unavailable_once();
-            terminal.record_backend_failure(TerminalBackendFailureDiagnostics::new(
-                TerminalBackendFailurePhase::Availability,
-                TerminalBackendFailureDiagnostics::GHOSTTY_UNAVAILABLE,
-                None,
-            ));
-        }
         // Route the Drop-time force-kill timer through GPUI's background
         // executor instead of a detached OS thread (Zed parity, prevents a
         // thread leak per closed pane under heavy use).
@@ -552,50 +489,28 @@ impl TerminalView {
 
         // Backend event coalescing:
         // Phase 1: Block until first event (zero CPU when idle)
-        // Phase 2: Render the leading Linux Ghostty wakeup immediately. Windows
-        // Ghostty and Alacritty wait 4ms (max 100, dedup Wakeup) so ConPTY cannot
-        // expose a partial multi-write terminal frame.
+        // Phase 2: 4 ms / 100-event window (dedup Wakeup) so a PTY burst
+        // becomes one entity update.
         // Phase 3: Process batch, yield to other GPUI tasks
         let events_rx = terminal.take_backend_events();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let mut events_rx = events_rx;
-                let mut immediate_ghostty_wakeup_burst_active = false;
                 loop {
                     // Phase 1: Block until first event arrives (zero CPU when idle)
                     let Some(first_event) = events_rx.next().await else {
                         break; // Channel closed
                     };
 
-                    // Phase 2: Keep the existing low-latency path for Linux PTYs. Windows
-                    // Ghostty holds its first wakeup until the batch closes because ConPTY can
-                    // split or normalize the synchronized-output sequence around TUI redraws.
+                    // Phase 2: Wait 4 ms (max 100 events). Wakeups are folded
+                    // into `had_wakeup`; other events stay in `batch`.
                     let mut batch = Vec::with_capacity(32);
                     let mut dequeued = 1usize;
-                    let render_wakeup_immediately =
-                        should_render_ghostty_wakeup_immediately(&first_event);
                     let mut had_wakeup = first_event.is_wakeup();
-                    let leading_immediate_wakeup = render_wakeup_immediately
-                        && had_wakeup
-                        && !immediate_ghostty_wakeup_burst_active;
-                    if leading_immediate_wakeup {
-                        immediate_ghostty_wakeup_burst_active = true;
-                        let result = cx.update(|cx| {
-                            this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                                view.terminal.process_backend_wakeup();
-                                view.process_dirty_terminal(cx);
-                            })
-                        });
-                        if result.is_err() {
-                            break;
-                        }
-                        had_wakeup = false;
-                    }
-                    if !had_wakeup && !leading_immediate_wakeup {
+                    if !had_wakeup {
                         batch.push(first_event);
                     }
 
-                    let mut batch_window_elapsed = false;
                     {
                         let timer = futures::FutureExt::fuse(smol::Timer::after(
                             std::time::Duration::from_millis(4),
@@ -618,14 +533,10 @@ impl TerminalView {
                                     if dequeued >= 100 { break; }
                                 }
                                 _ = timer => {
-                                    batch_window_elapsed = true;
                                     break;
                                 },
                             }
                         }
-                    }
-                    if batch_window_elapsed {
-                        immediate_ghostty_wakeup_burst_active = false;
                     }
 
                     // Phase 3: Process the batch in a single entity update
@@ -1363,11 +1274,8 @@ impl TerminalView {
         if reports_focus {
             // This protocol write is not user input. It must not mark a failed
             // spawn as interactive merely because its pane received focus.
-            let ghostty_encoded = false;
-            if !ghostty_encoded {
-                let report = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                self.terminal.write_to_pty_silent(report.to_vec());
-            }
+            let report = if focused { b"\x1b[I" } else { b"\x1b[O" };
+            self.terminal.write_to_pty_silent(report.to_vec());
         }
         self.was_focused = focused;
     }
@@ -1648,45 +1556,30 @@ fn resolve_cursor_visible(
 mod tests {
     use super::*;
     use crate::terminal::pty_session::strip_partial_ansi_tail;
+    use paneflow_config::schema::TerminalBackendConfig;
 
     #[test]
-    fn terminal_backend_policy_keeps_alacritty_as_explicit_rollback() {
-        let ghostty_available = false /* libghostty backend removed from this fork */;
-
-        assert_eq!(
-            should_start_ghostty(TerminalBackendConfig::Auto),
-            ghostty_available && auto_selects_ghostty_for_target()
-        );
-        assert!(!should_start_ghostty(TerminalBackendConfig::Alacritty));
+    fn auto_and_explicit_alacritty_are_the_only_backends() {
+        // Published schema is Auto | Alacritty. Ghostty deserializes to Alacritty
+        // in paneflow-config; this view never branches on a second backend.
+        let auto = TerminalBackendConfig::Auto;
+        let alacritty = TerminalBackendConfig::Alacritty;
+        assert_ne!(format!("{auto:?}"), "");
+        assert_eq!(format!("{alacritty:?}"), "Alacritty");
     }
 
     #[test]
-    fn promoted_auto_policy_preserves_rollback_and_unavailable_fallback() {
-        assert!(should_start_ghostty_for_policy(
-            TerminalBackendConfig::Auto,
-            true,
-            true,
-        ));
-        assert!(!should_start_ghostty_for_policy(
-            TerminalBackendConfig::Auto,
-            false,
-            true,
-        ));
-        assert!(!should_start_ghostty_for_policy(
-            TerminalBackendConfig::Auto,
-            true,
-            false,
-        ));
-        assert!(!should_start_ghostty_for_policy(
-            TerminalBackendConfig::Alacritty,
-            true,
-            false,
-        ));
-        assert!(policy_requests_ghostty(TerminalBackendConfig::Auto, true));
-        assert!(!policy_requests_ghostty(
-            TerminalBackendConfig::Alacritty,
-            true
-        ));
+    fn ghostty_helpers_are_gone_and_alacritty_is_unconditional() {
+        // Runtime: Auto does not record a backend failure (the old Ghostty
+        // unavailable path). Diagnostics are requested / effective / target.
+        let state = TerminalState::new_display_only(24, 80);
+        let d = state.backend_diagnostics();
+        assert_eq!(d.effective, "alacritty");
+        assert_eq!(d.target_triple, env!("PANEFLOW_TARGET_TRIPLE"));
+        let formatted = d.to_string();
+        assert!(formatted.contains("effective=alacritty"));
+        assert!(!formatted.contains("ghostty"));
+        assert!(!formatted.contains("failure_phase"));
     }
 
     // --- send_keystroke submission guard (US-005, orchestration-v2) ---

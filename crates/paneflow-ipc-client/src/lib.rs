@@ -10,10 +10,9 @@
 //! paneflow-ipc-client - blocking JSON-RPC client for Paneflow's local IPC socket.
 //!
 //! Mirrors the server wire protocol at `src-app/src/ipc.rs`: newline-delimited
-//! JSON-RPC 2.0 over an `interprocess` local socket (Unix domain socket /
-//! Windows named pipe). Unlike `paneflow-ai-hook` (fire-and-forget), this
-//! client is request/response - it reads back the one-line response the
-//! server writes on the same connection.
+//! JSON-RPC 2.0 over a Unix domain socket. Unlike `paneflow-ai-hook`
+//! (fire-and-forget), this client is request/response - it reads back the
+//! one-line response the server writes on the same connection.
 //!
 //! One connection per request: simple and robust (a stale connection can't
 //! wedge the caller). The server's peer-UID check passes because the client
@@ -123,9 +122,9 @@ fn jsonrpc_error_message_from_value(value: &Value) -> Option<String> {
 /// Open a connection, write the newline-terminated request, and read back one
 /// newline-delimited response line.
 ///
-/// US-023: the read deadline is enforced at the OS level on Unix and through
-/// bounded, cancelable Win32 overlapped I/O operations on Windows.
-/// The previous scratch-thread + `recv_timeout` pattern leaked one OS thread
+/// US-023: the read deadline is enforced at the OS level via socket
+/// send/recv timeouts. The previous scratch-thread + `recv_timeout`
+/// pattern leaked one OS thread
 /// and one socket FD on every timeout - the spawned reader owned `stream` and
 /// stayed blocked in `read_line` forever (no deadline ever reached it), so an
 /// agent retrying `read_pane` against a wedged Paneflow exhausted the
@@ -170,8 +169,8 @@ fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
                 "paneflow response exceeded the size cap",
             )),
             Ok(_) => Ok(line),
-            // SO_RCVTIMEO surfaces as EAGAIN/`WouldBlock` on Unix and `TimedOut`
-            // on Windows - normalize both to a friendly timeout message.
+            // SO_RCVTIMEO surfaces as EAGAIN/`WouldBlock` (or `TimedOut` on
+            // some stacks) - normalize both to a friendly timeout message.
             Err(e)
                 if matches!(
                     e.kind(),
@@ -295,11 +294,11 @@ pub enum StreamEvent<'a> {
 /// stop.
 ///
 /// Unlike [`send_and_receive`], the recv deadline here is REQUIRED, not
-/// best-effort: the `Tick` contract is impossible without it, and a platform
-/// that drops the timeout (Windows named pipes -> `Unsupported`) would block
-/// forever in `read_line` instead of ticking - a hang past the caller's overall
-/// deadline. So an `Unsupported` recv timeout is surfaced as `Err`; callers that
-/// still need quiescence can fall back to another deterministic clock.
+/// best-effort: the `Tick` contract is impossible without it, and a socket
+/// that cannot set a recv timeout (`Unsupported`) would block forever in
+/// `read_line` instead of ticking - a hang past the caller's overall
+/// deadline. So an `Unsupported` recv timeout is surfaced as `Err`; callers
+/// that still need quiescence can fall back to another deterministic clock.
 pub fn subscribe_stream_timed(
     socket: &Path,
     params: Value,
@@ -313,8 +312,7 @@ pub fn subscribe_stream_timed(
         if e.kind() == io::ErrorKind::Unsupported {
             io::Error::new(
                 io::ErrorKind::Unsupported,
-                "the event stream needs a recv-timeout-capable socket (this \
-                 platform's named pipe rejects it)",
+                "the event stream needs a recv-timeout-capable Unix socket",
             )
         } else {
             e
@@ -454,14 +452,13 @@ mod tests {
 
     #[test]
     fn tolerate_unsupported_swallows_only_unsupported() {
-        // Regression (prd-windows-port): Windows named pipes reject I/O
-        // deadlines with ErrorKind::Unsupported. That must NOT fail the IPC
-        // call (it silently broke the MCP bridge + CLI on Windows); any other
+        // Regression: some local-socket stacks reject I/O deadlines with
+        // ErrorKind::Unsupported. That must NOT fail the IPC call; any other
         // error must still propagate.
         assert!(tolerate_unsupported(Ok(())).is_ok());
         assert!(
             tolerate_unsupported(Err(io::Error::from(io::ErrorKind::Unsupported))).is_ok(),
-            "Unsupported (named-pipe timeout) must be tolerated"
+            "Unsupported timeout must be tolerated"
         );
         let other = tolerate_unsupported(Err(io::Error::from(io::ErrorKind::PermissionDenied)));
         assert_eq!(
@@ -536,11 +533,7 @@ mod tests {
 
     #[test]
     fn socket_path_from_env_requires_absolute() {
-        // "Absolute" is platform-specific: a Unix domain-socket path on Unix,
-        // the named-pipe device path on Windows (`Path::is_absolute` accepts
-        // `\\.\pipe\…`). The previous Unix-only literal made this test fail on
-        // Windows, where `/run/...` is NOT absolute (no drive) and
-        // `socket_path_from_env` correctly returned None.
+        // Absolute Unix domain-socket path. Relative paths are rejected.
         let absolute = "/run/user/1000/paneflow/paneflow.sock";
         assert_eq!(
             socket_path_from_env(Some(absolute)),
@@ -554,8 +547,8 @@ mod tests {
     /// US-005 AC: a full request/response round-trip over a real local socket
     /// (not just the pure helpers). Spins up an `interprocess` listener that
     /// speaks the Paneflow framing - read one newline-delimited request, echo
-    /// its `id` back in a JSON-RPC `result` envelope. Unix-only: the test path
-    /// is a filesystem socket, not a Windows `\\.\pipe\` name.
+    /// its `id` back in a JSON-RPC `result` envelope. The test path is a
+    /// filesystem Unix socket.
     #[cfg(unix)]
     #[test]
     fn ipc_client_round_trips_against_a_live_socket() {

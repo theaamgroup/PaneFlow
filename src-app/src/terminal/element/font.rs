@@ -98,8 +98,8 @@ fn expand_paneflow_alias(name: &str) -> &str {
 // `terminal.font_fallbacks` in their settings. Paneflow mirrors that
 // pattern: `base_font` emits `Some(FontFallbacks)` ONLY when the user sets
 // the top-level `font_fallbacks` array in `paneflow.json` (e.g. a Nerd
-// Font for Starship / oh-my-posh / Terminal-Icons glyphs that no Windows
-// system font carries), and `None` otherwise - never a hardcoded chain.
+// Font for Starship / oh-my-posh / Terminal-Icons glyphs that the primary
+// family may not carry), and `None` otherwise - never a hardcoded chain.
 //
 // Glyph fallback for codepoints the primary font doesn't cover (emoji, CJK,
 // symbols) still works: GPUI walks its built-in `fallback_font_stack`
@@ -109,15 +109,9 @@ fn expand_paneflow_alias(name: &str) -> &str {
 // chain is global, not per-`Font`, so it does NOT pollute the
 // per-Font CTFont cascade list.
 
-/// Registry of installed monospace families (Core Text), used ONLY on macOS to
+/// Registry of installed monospace families (Core Text), used to
 /// validate a configured `font_family` against the documented c3e2331
 /// empty-raster failure mode. Populated lazily on first access.
-///
-/// macOS-only by design: on Linux the equivalent `fc-list :spacing=mono`
-/// validation wrongly rejected real monospace fonts that fontconfig didn't tag
-/// (patched Nerd Fonts) and forked `fc-list` on the first terminal layout; on
-/// Windows the registry was always empty (no enumeration). `resolve_font_family`
-/// therefore trusts the configured family on those platforms.
 #[cfg(target_os = "macos")]
 static INSTALLED_MONO_FONTS: LazyLock<HashSet<String>> =
     LazyLock::new(|| crate::fonts::load_mono_fonts().into_iter().collect());
@@ -228,8 +222,8 @@ where
 /// The default monospace family PaneFlow uses out of the box.
 ///
 /// Uses bundled JetBrainsMono Nerd Font Mono so fresh installs are visually
-/// consistent across Linux, macOS, and Windows while avoiding the Core Text
-/// empty-raster failure documented by commit c3e2331.
+/// consistent while avoiding the Core Text empty-raster failure documented
+/// by commit c3e2331.
 ///
 /// Users can still override with any system font via
 /// `paneflow.json#font_family` - `resolve_font_family` validates the
@@ -262,14 +256,8 @@ pub fn resolve_font_family(configured: Option<&str>) -> String {
         return candidate.to_string();
     }
 
-    // The installed-monospace validation guards a macOS-specific Core Text
-    // failure mode (a system family that resolves but rasterizes empty - commit
-    // c3e2331), so it is gated to macOS. On Linux it wrongly rejected real
-    // monospace fonts fontconfig didn't tag `:spacing=mono` (patched Nerd
-    // Fonts) AND ran `fc-list` on the first terminal layout; on Windows the
-    // registry was always empty. Elsewhere we trust the configured family -
-    // GPUI's text system resolves it, and an unresolvable name already falls
-    // through to the embedded fallback stack.
+    // The installed-monospace validation guards a Core Text failure mode
+    // (a system family that resolves but rasterizes empty - commit c3e2331).
     #[cfg(target_os = "macos")]
     if !INSTALLED_MONO_FONTS.is_empty() && !INSTALLED_MONO_FONTS.contains(candidate) {
         let fallback = default_font_family();

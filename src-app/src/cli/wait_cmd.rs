@@ -34,9 +34,7 @@ const DEFAULT_IDLE_FOR_MS: u64 = 1000;
 /// Recv-timeout slice for the idle subscription. Caps the event-stream
 /// detection latency at `--for + IDLE_SLICE` (NFR: `<= for + 100 ms`) because
 /// the slice - not server events - drives the quiescence clock even when the
-/// pane is wholly silent. Windows named pipes cannot provide that tick through
-/// `interprocess`, so `wait --idle` falls back to bounded `output_generation`
-/// sampling there instead of failing.
+/// pane is wholly silent.
 const IDLE_SLICE_CAP_MS: u64 = 100;
 /// Recent scrollback window read per poll. Bounded well under the client's
 /// 256 KiB response cap.
@@ -388,10 +386,10 @@ fn pane_matches_since(
 /// to fire (US-008). Exit codes: 0 idle/match, 1 dead stream, 3 no instance /
 /// bad selector / unsupported platform, 4 timeout.
 ///
-/// Platform note: Unix/macOS use the pushed event stream. When a transport
-/// cannot tick a subscription (Windows named pipes), the CLI falls back to
-/// bounded `output_generation` sampling so the command remains deterministic
-/// and cross-platform instead of returning an unsupported-platform error.
+/// Uses the pushed event stream on the Unix socket. When a transport cannot
+/// tick a subscription, the CLI falls back to bounded `output_generation`
+/// sampling so the command remains deterministic instead of returning an
+/// unsupported-platform error.
 pub fn wait_idle(
     client: &IpcClient,
     target: &str,

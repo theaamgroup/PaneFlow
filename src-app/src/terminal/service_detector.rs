@@ -19,10 +19,10 @@ const SERVICE_TAIL_MAX_TOTAL_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 const TAB_WIDTH: usize = 8;
 
-/// Bounded, ANSI-aware tail of raw PTY output used by the Ghostty backend.
+/// Bounded, ANSI-aware tail of raw PTY output used by service-detector tests.
 ///
-/// Keeping this beside service detection makes the hot runtime path independent
-/// from Ghostty's per-cell grid FFI. The VTE parser owns partial UTF-8 and escape
+/// Keeping this beside service detection makes the hot path independent
+/// from the terminal grid. The VTE parser owns partial UTF-8 and escape
 /// state across reads, while the performer retains only text that the detector
 /// can inspect.
 #[derive(Default)]

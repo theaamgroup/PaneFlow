@@ -1,13 +1,11 @@
 //! JSON-RPC socket server for AI agent control.
 //!
-//! Listens on `<runtime_dir>/paneflow/paneflow.sock` on Unix and
-//! `\\.\pipe\paneflow` on Windows (US-009). Each connection reads
-//! newline-delimited JSON-RPC requests and writes responses.
+//! Listens on `<runtime_dir>/paneflow/paneflow.sock` (Unix domain socket).
+//! Each connection reads newline-delimited JSON-RPC requests and writes
+//! responses.
 //!
-//! Cross-platform IPC is handled by the `interprocess` crate's
-//! `local_socket` module, which dispatches to Unix domain sockets on
-//! POSIX and named pipes on Windows transparently. The wire protocol
-//! (newline-delimited JSON-RPC 2.0) is byte-identical across platforms.
+//! The `interprocess` crate's `local_socket` module provides the Unix
+//! domain socket. The wire protocol is newline-delimited JSON-RPC 2.0.
 //!
 //! ## Trust model - local-only, owner-UID enforcement (US-010)
 //!
@@ -15,20 +13,16 @@
 //! no port binding, no remote identity. Trust derives entirely from
 //! filesystem and kernel-credential boundaries:
 //!
-//! - **Socket file mode 0600** (Unix): set immediately after bind in
+//! - **Socket file mode 0600**: set immediately after bind in
 //!   `bind_socket`. Non-owner processes on the same machine cannot
 //!   `connect()` past the kernel filesystem check.
-//! - **Peer-UID enforcement** (Unix): every accepted connection runs
-//!   `getsockopt(SO_PEERCRED)` (Linux) / `LOCAL_PEERCRED` (macOS) and
-//!   compares the peer's UID to the server's. A mismatch returns a
-//!   JSON-RPC `-32001 permission denied` error envelope and closes
-//!   the stream BEFORE any method dispatches. Defence-in-depth - if a
-//!   privileged third party bypasses the file-mode check
-//!   (e.g. CAP_DAC_OVERRIDE, mode-fixing automation), the kernel
+//! - **Peer-UID enforcement**: every accepted connection runs
+//!   `LOCAL_PEERCRED` and compares the peer's UID to the server's.
+//!   A mismatch returns a JSON-RPC `-32001 permission denied` error
+//!   envelope and closes the stream BEFORE any method dispatches.
+//!   Defence-in-depth - if a privileged third party bypasses the
+//!   file-mode check (e.g. mode-fixing automation), the kernel
 //!   credential check still rejects them.
-//! - **Windows** uses Named Pipes with an explicit SDDL security
-//!   descriptor for LocalSystem, Administrators, and the object owner.
-//!   We do not rely on the platform default DACL.
 //!
 //! No HMAC tokens, no TLS - both would add complexity without
 //! meaningful gain on a local-only socket. If the IPC ever grows a
@@ -110,8 +104,8 @@ use interprocess::TryClone;
 use interprocess::local_socket::{
     ConnectOptions, GenericFilePath, Listener, ListenerOptions, Stream, prelude::*,
 };
-// `ListenerNonblockingMode` is only referenced by the Unix-only clobber-
-// detection accept loop; gating the import keeps the Windows build warning-free.
+// `ListenerNonblockingMode` is only referenced by the clobber-detection
+// accept loop.
 #[cfg(unix)]
 use interprocess::local_socket::ListenerNonblockingMode;
 use serde_json::{Value, json};
@@ -131,8 +125,8 @@ pub struct IpcRequest {
     /// `workspace.up` / `surface.split` cannot still run after `-32002`.
     pub dispatch: Arc<AtomicU8>,
     /// EP-003 US-010 (agent-control-plane): the socket peer's PID, captured
-    /// from `SO_PEERCRED` once per connection (None on macOS/Windows, where
-    /// the local-socket peer PID is not exposed). Used only to trace writes
+    /// from `LOCAL_PEERCRED` once per connection (None when the kernel does
+    /// not expose a peer PID). Used only to trace writes
     /// granted by AI free-access mode; never an authorization input.
     pub caller_pid: Option<i64>,
 }
@@ -281,13 +275,10 @@ fn allow_multiple_from(value: Option<&str>) -> bool {
 /// Start the IPC server on a dedicated OS thread.
 /// Returns the receiver for IPC requests to be polled by the GPUI thread.
 ///
-/// On Unix, the server monitors the socket file on disk and automatically
+/// The server monitors the socket file on disk and automatically
 /// re-binds when another instance (e.g. `cargo run`) clobbers it. Without
 /// this, the listener becomes orphaned (wrong inode) and all new connections
-/// get `ECONNREFUSED`, silently disabling AI hook integration. Named pipes
-/// on Windows have different lifecycle semantics (the second process to
-/// claim the pipe name fails at creation, not silently), so the clobber
-/// detection is Unix-only.
+/// get `ECONNREFUSED`, silently disabling AI hook integration.
 pub fn start_server() -> (
     mpsc::Receiver<IpcRequest>,
     IpcStatus,
@@ -378,9 +369,7 @@ pub fn start_server() -> (
             };
             let socket_path = socket_spec.path().to_path_buf();
 
-            // Only Unix needs the containing directory to exist - the
-            // Windows named-pipe path lives in the kernel namespace, not
-            // the filesystem.
+            // The socket lives on the filesystem, so the parent dir must exist.
             #[cfg(unix)]
             if !prepare_socket_parent(&socket_spec) {
                 thread_status.disable();
@@ -475,9 +464,7 @@ pub fn start_server() -> (
                 }
 
                 // Every 5 seconds, verify our socket file hasn't been
-                // clobbered (Unix inode check). Skipped on Windows: named
-                // pipes don't have inodes and a concurrent `CreateNamedPipe`
-                // fails loudly rather than silently orphaning us.
+                // clobbered (inode check).
                 #[cfg(unix)]
                 if last_health_check.elapsed() >= Duration::from_secs(5) {
                     last_health_check = std::time::Instant::now();
@@ -505,9 +492,8 @@ pub fn start_server() -> (
             }
 
             // interprocess' auto name reclamation unlinks the socket file
-            // on `Listener::drop` for Unix; this explicit remove is a
-            // belt-and-braces no-op there and never runs on Windows
-            // (nothing to remove in the named-pipe namespace).
+            // on `Listener::drop`; this explicit remove is a belt-and-braces
+            // no-op if the listener already unlinked it.
             #[cfg(unix)]
             let _ = remove_socket_file_if_socket(&socket_path, "shutdown cleanup");
         });
@@ -530,13 +516,11 @@ pub fn start_server() -> (
     (rx, status, event_bus)
 }
 
-/// Bind a new listener at the given path/pipe name.
+/// Bind a new listener at the given Unix socket path.
 fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
-    // Unix: remove any stale socket file from a crashed prior run. The
+    // Remove any stale socket file from a crashed prior run. The
     // interprocess crate's name reclamation handles graceful shutdown;
     // this pre-clean covers `kill -9` / SIGKILL / crash paths.
-    // Windows: no-op; the kernel pipe namespace does not retain stale
-    // entries after the owning process exits.
     #[cfg(unix)]
     if !remove_socket_file_if_socket(socket_path, "stale IPC socket cleanup") {
         return None;
@@ -566,7 +550,7 @@ fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
         }
     };
 
-    // chmod 0o600 - Unix only. Windows named pipes use the explicit SDDL above.
+    // chmod 0o600 - owner-only connect is the primary trust boundary.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -955,8 +939,7 @@ fn handle_connection(
 
     // US-022 / EP-004: drop a peer that opens a connection and then goes mute,
     // so it can't pin this handler thread forever. Unix sockets use the OS
-    // receive timeout here; Windows named pipes are bounded inside
-    // `pipe_read_some` because `set_recv_timeout` is unsupported there.
+    // receive timeout here.
     let _ = stream.set_recv_timeout(Some(IPC_IDLE_TIMEOUT));
 
     let mut reader = BufReader::new(stream);
@@ -978,8 +961,8 @@ fn handle_connection(
                 break;
             }
             Ok(LineRead::Got) => {}
-            // Idle timeout (WouldBlock on Unix, TimedOut on Windows) or any
-            // other read error → drop the connection.
+            // Idle timeout (WouldBlock) or any other read error → drop
+            // the connection.
             Err(_) => break,
         }
 
@@ -1098,14 +1081,9 @@ fn handle_connection(
 /// marker. Returns when a push fails (client gone) or the bus shuts down; the
 /// `Subscription` drops here, unsubscribing (RAII).
 ///
-/// Cross-platform (US-013). On Windows, every push goes through [`push_frame`] /
-/// [`push_line`], which probe the named pipe's liveness with `PeekNamedPipe`
-/// BEFORE writing: a write to an already-disconnected named pipe does NOT return
-/// an error from `interprocess` - it aborts the whole process via the overlapped
-/// `WriteFileEx` `CannotUnwind` guard (the same abort the request/response path
-/// dodges with `suppress_reply`), and no `catch_unwind` can stop a `process::
-/// abort`. The probe turns a `watch` client's Ctrl-C into a clean RAII eviction.
-/// Runtime behaviour is smoke-tested on Windows (US-014); the build host is Linux.
+/// Every push goes through [`push_frame`] / [`push_line`]. A write to a
+/// closed Unix socket returns `BrokenPipe`, so the `watch` client's
+/// disconnect is a clean RAII eviction of the `Subscription`.
 fn serve_subscription(writer: &mut Stream, params: &Value, bus: &Arc<crate::ipc_events::EventBus>) {
     use std::sync::mpsc::RecvTimeoutError;
 
@@ -1119,8 +1097,8 @@ fn serve_subscription(writer: &mut Stream, params: &Value, bus: &Arc<crate::ipc_
                 "error": {"code": -32602, "message": msg},
                 "id": Value::Null,
             });
-            // Guarded like every other push: on Windows the subscribe request's
-            // pipe may already be abandoned by the time we reply.
+            // Guarded like every other push: the subscribe request's
+            // socket may already be closed by the time we reply.
             push_frame(writer, &err);
             return;
         }
@@ -1169,7 +1147,7 @@ fn push_frame(writer: &mut Stream, value: &Value) -> bool {
 }
 
 /// Like [`push_frame`] but for bytes that ALREADY carry their trailing newline
-/// (a pushed event line, written verbatim). Same Windows liveness guard.
+/// (a pushed event line, written verbatim). Same liveness guard.
 fn push_line(writer: &mut Stream, line: &[u8]) -> bool {
     if !subscriber_connected(writer) {
         return false;
@@ -1179,8 +1157,8 @@ fn push_line(writer: &mut Stream, line: &[u8]) -> bool {
 
 /// Serialize a JSON-RPC value as a newline-terminated frame and send it
 /// abort-safely. `true` on success. Shared by the subscription push path and the
-/// request/response + rejection writes, so every server-side write to the pipe
-/// goes through the same Windows-safe path.
+/// request/response + rejection writes, so every server-side write to the
+/// socket goes through the same path.
 fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
     let mut frame = value.to_string();
     frame.push('\n');
@@ -1191,12 +1169,8 @@ fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
 ///
 /// The `subscriber_connected` probe narrows but cannot close the disconnect
 /// window: the peer can still vanish between the probe and this write, and the
-/// rejection / reply writes have no probe at all. On Windows that previously
-/// reached interprocess's overlapped `WriteFileEx`, which turns a closed-pipe
-/// failure into a `CannotUnwind` -> `process::abort` (STATUS_STACK_BUFFER_OVERRUN
-/// 0xC0000409) that no `catch_unwind` can stop. [`pipe_write_all`] keeps the
-/// failure a returned `io::Error`. Unix writes to a closed socket return
-/// `BrokenPipe` cleanly, so the normal `Write` path is already safe there.
+/// rejection / reply writes have no probe at all. A write to a closed Unix
+/// socket returns `BrokenPipe` cleanly.
 fn push_bytes(writer: &mut Stream, buf: &[u8]) -> bool {
     if let Err(e) = writer.set_send_timeout(Some(IPC_WRITE_TIMEOUT))
         && e.kind() != std::io::ErrorKind::Unsupported
@@ -1305,8 +1279,7 @@ mod auth {
     //!   (matching pair → allow, mismatched pair → deny).
     //! - [`server_uid`]: thin wrapper over `getuid(2)`.
     //! - [`check_peer`]: glue that runs `Stream::peer_creds()` (provided
-    //!   by interprocess 2.4 - `getsockopt(SO_PEERCRED)` on Linux,
-    //!   `LOCAL_PEERCRED` on macOS, `xucred` on the BSDs) and feeds
+    //!   by interprocess 2.4 - `LOCAL_PEERCRED` on macOS) and feeds
     //!   the result into `authorize`.
     //!
     //! [`check_peer`] returns an [`AuthOutcome`] the caller turns into
@@ -1362,9 +1335,8 @@ mod auth {
 
     /// Run the peer-credential query against the connected stream and
     /// translate the outcome. Defers the kernel-call mechanics to
-    /// `interprocess::local_socket::Stream::peer_creds()` (`SO_PEERCRED`
-    /// on Linux, `LOCAL_PEERCRED` on macOS, `xucred` on the BSDs);
-    /// upstream owns those per-OS quirks so paneflow doesn't
+    /// `interprocess::local_socket::Stream::peer_creds()` (`LOCAL_PEERCRED`
+    /// on macOS); upstream owns the kernel call so paneflow doesn't
     /// duplicate `getsockopt` boilerplate per target.
     pub(super) fn check_peer(stream: &Stream) -> AuthOutcome {
         let server = server_uid();

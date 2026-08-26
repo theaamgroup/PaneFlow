@@ -11,7 +11,7 @@
 //!
 //! Invoked by Claude Code / Codex CLI hooks from inside a PaneFlow PTY. Reads
 //! the hook JSON from stdin, builds a JSON-RPC 2.0 frame, and writes it to
-//! PaneFlow's IPC socket/pipe. Exits 0 on every path (silent fail) so a
+//! PaneFlow's IPC socket. Exits 0 on every path (silent fail) so a
 //! PaneFlow outage never breaks the user's AI CLI session.
 //!
 //! US-001 scope: crate scaffolding + blocking JSON-RPC client `send_frame`.
@@ -106,9 +106,8 @@ fn send_frame_with_retry(socket_path: &Path, frame: &serde_json::Value) -> std::
 /// serialized as JSON + a single `\n` terminator, then close the stream.
 ///
 /// Mirrors the server framing at `src-app/src/ipc.rs` (newline-delimited
-/// JSON-RPC 2.0 read via `BufReader::lines`). Uses `GenericFilePath` on both
-/// Unix (domain socket path) and Windows (`\\.\pipe\<name>` pipe path);
-/// `interprocess` dispatches to the correct platform primitive internally.
+/// JSON-RPC 2.0 read via `BufReader::lines`). Uses `GenericFilePath` for
+/// the Unix domain socket; `interprocess` binds it.
 ///
 /// # Errors
 ///
@@ -136,8 +135,8 @@ pub fn send_frame(socket_path: &Path, frame: &serde_json::Value) -> std::io::Res
     // is the PRD's "fail silent, never break the session" contract (a bounded
     // failure is strictly better than an unbounded hang).
     //
-    // Windows named pipes reject set_send_timeout in interprocess, so Windows
-    // uses a nonblocking stream and an explicit deadline below.
+    // Tolerate ErrorKind::Unsupported if a local-socket stack rejects
+    // set_send_timeout; Unix domain sockets honor it.
     {
         if let Err(e) = stream.set_send_timeout(Some(HOOK_IPC_TIMEOUT)) {
             if e.kind() != std::io::ErrorKind::Unsupported {
@@ -712,11 +711,10 @@ fn read_stdin_json(event: &str) -> Option<serde_json::Value> {
 // Tests
 // ---------------------------------------------------------------------------
 
-// Unix-only: the `send_frame` round-trip test uses a filesystem path inside
-// `tempfile::TempDir`, which is not a valid Windows named-pipe path
-// (`\\.\pipe\...`). Windows coverage is scoped to US-011. The pure-function
-// `build_frame` and `diagnose` tests are cfg'd separately below so Windows
-// still exercises the mapping table.
+// The `send_frame` round-trip test uses a filesystem path inside
+// `tempfile::TempDir`. The pure-function `build_frame` and `diagnose`
+// tests are cfg'd separately below so the mapping table is still
+// exercised without a live socket.
 #[cfg(all(test, unix))]
 mod unix_tests {
     use super::*;
