@@ -1686,7 +1686,7 @@ impl TerminalState {
         #[cfg(unix)]
         let child_proc_start = child_pid_start_time(child_pid);
         #[cfg(all(unix, not(test)))]
-        let pty_guard = crate::agents::parent_guard::spawn_pty_guard(child_pid);
+        let pty_guard = crate::agents::parent_guard::spawn_pty_guard(child_pid, child_proc_start);
         #[cfg(target_os = "macos")]
         let pty_master_fd = {
             use std::os::unix::io::AsRawFd;
@@ -2936,10 +2936,10 @@ fn assemble_pty_env(
 /// session we spawned. alacritty's `tty::new` calls `setsid()` on the child, so
 /// `child_pid` is both the PID and the PGID of the session leader and
 /// `getpgid(pid) == pid` holds for as long as that session lives. After the
-/// child exits the kernel can recycle `pid` onto an unrelated process whose
-/// pgid differs; this identity check closes the PID-reuse window that a bare
-/// `kill(-pid, 0)` existence probe leaves open, so teardown never signals a
-/// stranger's group.
+/// child exits the kernel can recycle `pid` onto an unrelated process that
+/// also called `setsid()`, so this leader check is not sufficient on its
+/// own: callers must also require the spawn-time start pin
+/// ([`crate::agents::parent_guard::may_signal_group`]).
 #[cfg(unix)]
 fn is_own_session_group(pid: i32) -> bool {
     if pid <= 0 {
@@ -2951,17 +2951,28 @@ fn is_own_session_group(pid: i32) -> bool {
     unsafe { libc::getpgid(pid) == pid }
 }
 
-/// Send SIGTERM to the child's process group, guarded by the session-identity
-/// check ([`is_own_session_group`]) so a dead or recycled `pid` is a harmless
-/// no-op. Returns true if SIGTERM was delivered. Factored out of `Drop` so the
-/// graceful-shutdown step is unit-testable (US-001).
 #[cfg(unix)]
-fn terminate_process_group(pid: i32) -> bool {
-    if !is_own_session_group(pid) {
+fn may_signal_own_session(pid: i32, pinned_start: Option<u64>) -> bool {
+    crate::agents::parent_guard::may_signal_group(
+        pid,
+        pinned_start,
+        child_pid_start_time(pid as u32),
+        is_own_session_group(pid),
+    )
+}
+
+/// Send SIGTERM to the child's process group, guarded by leader + start-time
+/// identity so a dead or recycled `pid` is a harmless no-op. Returns true if
+/// SIGTERM was delivered. Factored out of `Drop` so the graceful-shutdown
+/// step is unit-testable.
+#[cfg(unix)]
+fn terminate_process_group(pid: i32, pinned_start: Option<u64>) -> bool {
+    if !may_signal_own_session(pid, pinned_start) {
         return false;
     }
     // SAFETY: kill(-pid, SIGTERM) signals every member of the group; FFI-safe
-    // with the positive `pid` we just confirmed is our session leader.
+    // with the positive `pid` we just confirmed is our session leader with a
+    // matching spawn-time pin.
     unsafe { libc::kill(-pid, libc::SIGTERM) == 0 }
 }
 
@@ -3018,19 +3029,20 @@ impl Drop for TerminalState {
         #[cfg(unix)]
         {
             let pid = self.child_pid as i32;
-            // US-034: skip the kill ladder entirely once the child has exited.
+            let pinned_start = self.child_proc_start;
+            // Skip the kill ladder entirely once the child has exited.
             // `child_pid` may have been reused by the OS by now, and signaling
             // a reused PGID would terminate an unrelated process group - the
             // synchronous SIGTERM below has the same PID-reuse window as the
             // delayed SIGKILL. An already-exited child has nothing to kill.
             if pid > 0 && self.exited.is_none() {
-                // US-001: graceful shutdown ladder - send SIGTERM to the group
+                // Graceful shutdown ladder - send SIGTERM to the group
                 // synchronously FIRST so agents/shells run their TERM handlers
                 // (state checkpoint, HISTFILE flush) before the 100ms-grace
                 // SIGKILL escalation below. Mirrors Zed's
                 // terminate_child_process() -> 100ms -> kill_child_process()
                 // (crates/terminal/src/terminal.rs:2697-2704, pty_info.rs:142-151).
-                terminate_process_group(pid);
+                terminate_process_group(pid, pinned_start);
 
                 let kill = move || {
                     // Target the entire process group (`-pid`) so any
@@ -3044,10 +3056,10 @@ impl Drop for TerminalState {
                     //
                     // Re-check identity at fire time: 100ms after the child
                     // died the kernel may have recycled `pid` onto an unrelated
-                    // group, so confirm `getpgid(pid) == pid` (our setsid
-                    // session leader) before the SIGKILL - a bare `kill(-pid,0)`
-                    // existence probe would not catch the reuse.
-                    if is_own_session_group(pid) {
+                    // session leader (also `setsid()`), so require both
+                    // `getpgid(pid) == pid` and a matching spawn-time pin
+                    // before the SIGKILL.
+                    if may_signal_own_session(pid, pinned_start) {
                         // SAFETY: kill(-pid, SIGKILL) signals every member of
                         // the process group; FFI-safe with the positive `pid`
                         // captured by value and just confirmed to be ours.
@@ -3586,8 +3598,9 @@ mod tests {
             .expect("read readiness line");
         assert_eq!(ready.trim_end(), "ready", "handshake line");
 
+        let pinned_start = child_pid_start_time(pid as u32);
         assert!(
-            terminate_process_group(pid),
+            terminate_process_group(pid, pinned_start),
             "US-001: SIGTERM must be delivered to the live process group"
         );
 
@@ -3622,19 +3635,63 @@ mod tests {
         // no-op guarded by the `getpgid(pid) == pid` identity check - no panic,
         // returns false.
         assert!(
-            !terminate_process_group(0),
+            !terminate_process_group(0, None),
             "pid 0 must be rejected (would signal the caller's own group)"
         );
         assert!(
-            !terminate_process_group(-5),
+            !terminate_process_group(-5, None),
             "negative pid must be rejected"
         );
         // A very high pid is almost certainly not its own live group leader;
         // getpgid returns ESRCH (≠ pid) so SIGTERM is never sent.
         assert!(
-            !terminate_process_group(0x7FFF_FFF0),
+            !terminate_process_group(0x7FFF_FFF0, Some(1)),
             "non-existent group must be a no-op, not a panic"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_process_group_is_noop_for_mismatched_start_pin() {
+        // A live setsid leader with a non-matching spawn pin must not be
+        // signaled: that is the recycled-session-leader window.
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo ready; exec sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // SAFETY: setsid() runs in the forked child before exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().expect("spawn test child");
+        let pid = child.id() as i32;
+
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().expect("piped stdout"))
+            .read_line(&mut ready)
+            .expect("read readiness line");
+        assert_eq!(ready.trim_end(), "ready", "handshake line");
+
+        let live_start = child_pid_start_time(pid as u32);
+        let bogus_pin = Some(live_start.map(|s| s.wrapping_add(1)).unwrap_or(1));
+        assert!(
+            !terminate_process_group(pid, bogus_pin),
+            "mismatched start pin must not SIGTERM a live session leader"
+        );
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "child must still be running after the mismatched-pin no-op"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     // -----------------------------------------------------------------

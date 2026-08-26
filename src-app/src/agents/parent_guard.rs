@@ -43,6 +43,23 @@ pub fn install_process_job() -> Result<ParentGuardStatus, Box<dyn std::error::Er
     Ok(ParentGuardStatus::Unsupported)
 }
 
+/// Whether teardown may signal process group `-pid`.
+///
+/// `getpgid_is_leader` is the live `getpgid(pid) == pid` result (false on
+/// ESRCH / a recycled pid that is not a session leader). Start times use
+/// the same `pbi_start_tvsec`/`pbi_start_tvusec` encoding as session
+/// `proc_start` / `child_proc_start`; comparison is `same_process`.
+pub(crate) fn may_signal_group(
+    pid: i32,
+    pinned_start: Option<u64>,
+    current_start: Option<u64>,
+    getpgid_is_leader: bool,
+) -> bool {
+    pid > 0
+        && getpgid_is_leader
+        && crate::app::event_handlers::same_process(pinned_start, current_start)
+}
+
 #[cfg(unix)]
 pub fn run_pty_guard_from_args(args: &[String]) -> i32 {
     let Some(parent_pid) = args.get(2).and_then(|arg| arg.parse::<u32>().ok()) else {
@@ -54,24 +71,31 @@ pub fn run_pty_guard_from_args(args: &[String]) -> i32 {
     if parent_pid <= 1 || child_pgid <= 1 {
         return 2;
     }
+    let pinned_start = match args.get(4) {
+        None => None,
+        Some(arg) => match arg.parse::<u64>() {
+            Ok(start) => Some(start),
+            Err(_) => return 2,
+        },
+    };
 
     set_control_pipe_nonblocking();
-    while parent_still_attached(parent_pid) && process_group_alive(child_pgid) {
+    while parent_still_attached(parent_pid) && process_group_alive(child_pgid, pinned_start) {
         if control_pipe_closed() {
             return 0;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
-    if !parent_still_attached(parent_pid) && process_group_alive(child_pgid) {
-        terminate_process_group(child_pgid);
+    if !parent_still_attached(parent_pid) && process_group_alive(child_pgid, pinned_start) {
+        terminate_process_group(child_pgid, pinned_start);
     }
     0
 }
 
 #[cfg(unix)]
 #[cfg_attr(test, allow(dead_code))]
-pub fn spawn_pty_guard(child_pgid: u32) -> Option<PtyGuardHandle> {
+pub fn spawn_pty_guard(child_pgid: u32, child_proc_start: Option<u64>) -> Option<PtyGuardHandle> {
     if child_pgid <= 1 {
         return None;
     }
@@ -80,11 +104,18 @@ pub fn spawn_pty_guard(child_pgid: u32) -> Option<PtyGuardHandle> {
         return None;
     };
 
+    // Prefer the caller's spawn pin (`child_proc_start`); fall back to a
+    // live probe so the guard still pins when the caller had a miss.
+    let pinned_start = child_proc_start.or_else(|| current_group_start(child_pgid));
+
     let mut cmd = Command::new(exe);
     cmd.arg(PTY_GUARD_SUBCOMMAND)
         .arg(std::process::id().to_string())
-        .arg(child_pgid.to_string())
-        .stdin(Stdio::piped())
+        .arg(child_pgid.to_string());
+    if let Some(start) = pinned_start {
+        cmd.arg(start.to_string());
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     use std::os::unix::process::CommandExt;
@@ -116,29 +147,61 @@ fn parent_still_attached(parent_pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn process_group_alive(pgid: u32) -> bool {
-    let Ok(pgid) = i32::try_from(pgid) else {
-        return false;
-    };
-    // SAFETY: kill with signal 0 only probes process-group existence.
-    let rc = unsafe { libc::kill(-pgid, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+fn current_group_start(pgid: u32) -> Option<u64> {
+    crate::app::event_handlers::pid_start_time(pgid)
 }
 
 #[cfg(unix)]
-fn terminate_process_group(pgid: u32) {
-    let Ok(pgid) = i32::try_from(pgid) else {
+fn is_session_leader(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: getpgid is a pure query; ESRCH yields -1, which is never a
+    // positive pid, so a recycled-or-dead pid is not reported as leader.
+    unsafe { libc::getpgid(pid) == pid }
+}
+
+#[cfg(unix)]
+fn process_group_alive(pgid: u32, pinned_start: Option<u64>) -> bool {
+    let Ok(pid) = i32::try_from(pgid) else {
+        return false;
+    };
+    // SAFETY: kill with signal 0 only probes process-group existence.
+    let rc = unsafe { libc::kill(-pid, 0) };
+    if rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return false;
+    }
+    may_signal_group(
+        pid,
+        pinned_start,
+        current_group_start(pgid),
+        is_session_leader(pid),
+    )
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pgid: u32, pinned_start: Option<u64>) {
+    let Ok(pid) = i32::try_from(pgid) else {
         return;
     };
-    // SAFETY: negative pid targets the process group. The pgid is checked above.
+    if !may_signal_group(
+        pid,
+        pinned_start,
+        current_group_start(pgid),
+        is_session_leader(pid),
+    ) {
+        return;
+    }
+    // SAFETY: negative pid targets the process group. Identity (leader +
+    // start-time pin) was just confirmed.
     unsafe {
-        libc::kill(-pgid, libc::SIGTERM);
+        libc::kill(-pid, libc::SIGTERM);
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
-    if process_group_alive(pgid as u32) {
-        // SAFETY: same process-group target after a liveness probe.
+    if process_group_alive(pgid, pinned_start) {
+        // SAFETY: same process-group target after a leader+start re-check.
         unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
+            libc::kill(-pid, libc::SIGKILL);
         }
     }
 }
@@ -205,5 +268,58 @@ mod tests {
             "2".to_string(),
         ];
         assert_eq!(run_pty_guard_from_args(&args), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_guard_rejects_unparseable_start_pin() {
+        let args = vec![
+            "paneflow".to_string(),
+            PTY_GUARD_SUBCOMMAND.to_string(),
+            "2".to_string(),
+            "3".to_string(),
+            "not-a-start".to_string(),
+        ];
+        assert_eq!(run_pty_guard_from_args(&args), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_guard_exits_immediately_when_group_is_gone() {
+        // parent_pid is this process (not getppid), so the parent looks
+        // detached; child_pgid is unused so kill(-pgid,0) is ESRCH. Must
+        // return without signaling and without polling.
+        let args = vec![
+            "paneflow".to_string(),
+            PTY_GUARD_SUBCOMMAND.to_string(),
+            std::process::id().to_string(),
+            "999999".to_string(),
+            "1".to_string(),
+        ];
+        assert_eq!(run_pty_guard_from_args(&args), 0);
+    }
+
+    #[test]
+    fn may_signal_group_leader_matching_start() {
+        assert!(may_signal_group(42, Some(100), Some(100), true));
+    }
+
+    #[test]
+    fn may_signal_group_leader_mismatched_start() {
+        assert!(!may_signal_group(42, Some(100), Some(200), true));
+    }
+
+    #[test]
+    fn may_signal_group_not_leader() {
+        assert!(!may_signal_group(42, Some(100), Some(100), false));
+    }
+
+    #[test]
+    fn may_signal_group_dead_or_esrch() {
+        // getpgid ESRCH / dead pid: not a leader, no current start.
+        assert!(!may_signal_group(42, Some(100), None, false));
+        // Pinned + missing current start is not the original process
+        // (`same_process` treats this as dead).
+        assert!(!may_signal_group(42, Some(100), None, true));
     }
 }
