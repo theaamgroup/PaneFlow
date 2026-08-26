@@ -399,7 +399,9 @@ docs: description
 chore: description
 ```
 
-Atomic commits per logical change. Branch naming: `feat/description`. Do not add new `US-NNN` story IDs to commit messages: there is no story tracker in this fork.
+Atomic commits per logical change. Branch naming: `feat/description`, cut from `main`. Do not add new `US-NNN` story IDs to commit messages: there is no story tracker in this fork.
+
+Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork): drop non-macOS packaging scripts`, so the divergence stays greppable in the log. The rest of the working agreement is in README's "Working agreement" section.
 
 ## Platform (macOS only)
 

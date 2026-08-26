@@ -143,7 +143,7 @@ paneflow search <target> <pattern>                       # grep a pane
 paneflow watch --type ai.stop                            # stream events
 paneflow send codex-review "Review this branch"          # prefill a prompt
 paneflow wait --match claude-impl --pattern "REPORT_DONE" # block on output
-paneflow up                                              # spawn a declarative workspace
+paneflow up workspace.toml                               # spawn a declarative workspace
 paneflow flow run examples/review-pipeline.flow.toml      # run a flow DAG
 ```
 
@@ -256,7 +256,7 @@ Other paths worth knowing:
 | What | Path |
 |---|---|
 | Restored session | `~/Library/Caches/paneflow/session.json` (`session-dev.json` in debug builds) |
-| App data, including the extracted MCP bridge binary | `~/Library/Application Support/paneflow/` |
+| App data, including the extracted MCP bridge binary | `~/Library/Application Support/paneflow/` (`paneflow-dev/` in debug builds) |
 | JSON-RPC control socket | `$TMPDIR/paneflow/paneflow.sock` on a normal Mac, overridable with `PANEFLOW_SOCKET_PATH` |
 
 ## Safety model
@@ -273,6 +273,44 @@ PaneFlow is local-first by design.
   `ctrl-j`) outright.
 - MCP tools are read-only.
 - Terminal output returned to agents is marked as untrusted.
+
+### Reporting a security issue
+
+This fork is private and has no public advisory process, so raise anything you
+find directly with the repository owner rather than filing a normal issue.
+Include repro steps or a proof of concept, the output of `paneflow --version`,
+and your macOS version and chip.
+
+The surfaces most worth attacking:
+
+- the **JSON-RPC IPC server** on the Unix socket, and every method it exposes;
+- the **MCP bridge** (`list_panes` / `read_pane` / `search_pane`), especially the
+  wrapping that marks returned pane output as untrusted;
+- the **in-app updater** - download, minisign verification, atomic install
+  ([docs/self-update-signing.md](docs/self-update-signing.md) is the root of
+  trust);
+- **PTY handling**, and any path where untrusted agent or terminal output
+  reaches a privileged surface, an OS notification being the obvious one.
+
+## Working agreement
+
+This is an internal fork, not a project taking outside contributions. The rules
+that are not obvious from reading the code:
+
+- Branch from `main` as `feat/<description>` or `fix/<description>`. The older
+  `mac-only-fork` branch is behind `main` and is not a base for new work.
+- Use the `(fork)` commit scope for anything that diverges from upstream, for
+  example `chore(fork): drop non-macOS packaging scripts`, so the divergence
+  stays greppable in the log. Everything else uses
+  `feat|fix|refactor|docs|chore(module): description`.
+- `panic!`, `unimplemented!`, and `dbg!` are denied by the workspace clippy
+  lints in [Cargo.toml](Cargo.toml), and `todo!` warns. Reach for `?`,
+  `ok_or(...)?`, or `match`; use `expect("invariant")` only where the invariant
+  is provable, and say why.
+- Verify, do not assume. If a claim about behavior is load-bearing in a PR
+  description, run the thing and paste the output.
+- Run the [checks](#checks) before every commit. `cargo fmt --check` is the one
+  that burns a whole CI run if you skip it.
 
 ## Docs
 
@@ -292,6 +330,8 @@ PaneFlow is local-first by design.
   latency debugging
 - [docs/memory-smoke-test.md](docs/memory-smoke-test.md) - memory smoke-test procedure
 - [docs/release/macos-signing.md](docs/release/macos-signing.md) - signing and notarization
+- [docs/self-update-signing.md](docs/self-update-signing.md) - minisign keys, the
+  updater's root of trust
 
 ## Attribution and license
 

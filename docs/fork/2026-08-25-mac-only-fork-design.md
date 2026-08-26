@@ -189,8 +189,11 @@ Everything below points at upstream and must be cut or repointed.
    `HOMEBREW_TAP_DEPLOY_KEY`, `GPG_*`, `POSTHOG_API_KEY`, `AZURE_*`.
 5. Author identity to scrub: `src-app/src/app/about_dialog.rs:117` reads
    "(c) Arthur Jean"; `src-app/Cargo.toml:490` maintainer email; five
-   `paneflow.dev` menu links at `src-app/src/app/profile_menu.rs:23` to `:27`;
-   `.github/SECURITY.md:13` and `.github/CODE_OF_CONDUCT.md:32`.
+   `paneflow.dev` menu links at `src-app/src/app/profile_menu.rs:23` to `:27`.
+   `.github/SECURITY.md` and `.github/CODE_OF_CONDUCT.md` also carried upstream
+   URLs; both are deleted, so that pair of sites is closed rather than scrubbed.
+   The disclosure process SECURITY.md described now lives in README's
+   "Safety model" section.
 
 ## Traps register
 
