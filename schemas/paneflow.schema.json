@@ -36,7 +36,7 @@
     },
     "font_fallbacks": {
       "type": ["array", "null"],
-      "description": "Ordered fallback font families consulted (in order) for glyphs the primary font_family does not cover - e.g. a Nerd Font for the Powerline/icon glyphs used by Starship, oh-my-posh or Terminal-Icons, which no system font provides on Windows. Null or an empty list keeps GPUI's built-in fallback stack only.",
+      "description": "Ordered fallback font families consulted (in order) for glyphs the primary font_family does not cover - e.g. a Nerd Font for the Powerline/icon glyphs used by Starship, oh-my-posh or Terminal-Icons, which no system font provides. Null or an empty list keeps GPUI's built-in fallback stack only.",
       "items": {
         "type": "string"
       }
