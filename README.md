@@ -269,8 +269,7 @@ to agents is marked untrusted.
 
 This repo is private and has no public issue tracker, SECURITY.md, or advisory
 process. Report problems to the repository owner. The surfaces that matter:
-the JSON-RPC socket, the MCP bridge, the updater
-([docs/self-update-signing.md](docs/self-update-signing.md)), and any path
+the JSON-RPC socket, the MCP bridge, and any path
 where untrusted terminal output reaches a privileged surface.
 
 Working rules for agents live in [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).

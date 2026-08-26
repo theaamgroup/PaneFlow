@@ -1,17 +1,17 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-08-25, after the post-2c task list
-landed (schema, telemetry, updater feed, identity, CI, version 0.1.0).
+Living handoff record. Updated 2026-08-26, after leftover-removal buckets
+1–4 (hygiene, Ghostty stubs, in-app updater deleted, docs match the tree).
 
 Companion documents:
-- `docs/fork/2026-08-25-post-2c-plan.md` is the **plan of record for what
-  happens next** - the locked decisions, the ordering and its two real
-  dependencies, the delegation machinery that worked in 2c, and the verification
-  contract. The live task list (ten tasks) is in the harness; that file holds
-  what a task description cannot carry.
+- `docs/fork/2026-08-25-post-2c-plan.md` is the **historical 2026-08-25
+  execution plan** (schema, telemetry, identity, CI). Leftover-removal
+  buckets 1–4 (2026-08-26) superseded its self-update “disable the feed”
+  decision: the in-app updater is deleted. Remaining human work is GitHub
+  issues #7, #9–#11, #13–#15.
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
   **leak register**, and a **16-item traps register**. Read it before touching
-  platform code, the updater, or the config schema.
+  platform code or the config schema. The in-app updater is gone.
 - `CLAUDE.md` holds build prerequisites, the module tree, and the commands.
 
 This file holds only: where the work stands, what is next, and the rules the
@@ -63,9 +63,9 @@ the only workflow here, so this is the most likely source of confusion.
 | 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
 | Config-schema pass | **Done.** Ghostty and `windows_*_material` dropped from the published schema, Rust struct, and docs. Loader still accepts leftover keys; `"backend":"ghostty"` maps to Alacritty. |
 | Telemetry | **Gone.** `paneflow-telemetry` crate, app module, consent toasts, config block. |
-| Self-update feed | **Disabled.** `DEFAULT_FEED_URL = None`. Re-enable is one const (or `PANEFLOW_UPDATE_FEED_URL`). |
+| Self-update | **Gone.** In-app updater and minisign client deleted 2026-08-26. Apple DMG signing remains. |
 | Identity | **Done.** Bundle id `com.theaamgroup.paneflow`, authors The AAM Group, Help/`--help`/schema `$id` point at `theaamgroup/paneflow`. |
-| CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Needs `APPLE_*` secrets and a minisign keypair before a real tag. |
+| CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Needs `APPLE_*` secrets before a real tag. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product/build page; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
 | Version | **0.1.0.** Local inherited `v*` tags deleted; only `upstream-fork-point` remains. Do not tag until secrets exist. |
@@ -314,22 +314,18 @@ need it:
 
 ## Biggest remaining liability
 
-`main` is pushed to `origin`. CI and the updater are rewritten. What still
-needs a human, filed as GitHub issues assigned to `evilchinesefood`:
+`main` is pushed to `origin`. What still needs a human, filed as GitHub
+issues assigned to `evilchinesefood`:
 
 - #7 Apple signing secrets (never create `GPG_*`, `AZURE_*`,
   `POSTHOG_API_KEY`, or a truncated `APPLE_DEVELOPER_CERT_P` —
   the real name is `APPLE_DEVELOPER_CERT_P12`)
-- #8 minisign keypair
-- #9 first tag / signed GitHub Release
+- #9 first tag / signed GitHub Release (no minisign)
 - #10 Cmd+Tab next-workspace
 - #11 unsigned `.dmg` Gatekeeper open
   (`dist/paneflow-0.1.0-aarch64-apple-darwin.dmg`)
-- #12 confirm no GitHub Releases request on launch
 - #13 TCC re-grant after the new bundle id
 - #14–#15 keyboard / PATH-shim smoke
-- #16–#19 audit follow-ups (`audit.yml` ubuntu cron, `build-icons.sh`
-  WiX path, stale path-filter names, `font_fallbacks` copy)
 
 Product bugs continue from #20. Some early issues (#1 in particular)
 were filed before `release.yml` was cut to one aarch64 lane; check the

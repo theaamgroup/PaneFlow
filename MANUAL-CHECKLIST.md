@@ -48,18 +48,20 @@ entry.
     granting, the app still works.
   - Failure implicates: the new CFBundleIdentifier / TCC mapping.
 
-- [ ] **Task 11 — no request to api.github.com**
-  - Commit: `7ffedc4`
-  - Agent log (not a packet capture): unsigned 0.1.0 bundle printed
-    `self-update feed disabled; set DEFAULT_FEED_URL or PANEFLOW_UPDATE_FEED_URL to re-enable`
-    and did not print `up to date`.
-  - Why a machine cannot fully do this: the agent can grep logs; it cannot
-    observe the network (Little Snitch / a proxy).
-  - Steps: launch the app with the feed disabled. Watch outbound HTTPS.
-  - Expected: no request to `api.github.com/repos/arthjean/paneflow` or
-    any other GitHub releases endpoint in normal use.
-  - Failure implicates: `src-app/src/update/checker.rs` still spawning a
-    check.
+- [ ] **Task 11 — no in-app updater (deleted 2026-08-26)**
+  - Commit: updater removal on `issue-63` (bucket 3). The feed, minisign
+    client, title-bar update pill, and `spawn_check` are gone. There is no
+    `src-app/src/update/` left to poll GitHub.
+  - Why a machine cannot fully do this: the agent can grep the binary and
+    logs; it cannot watch outbound HTTPS (Little Snitch / a proxy).
+  - Steps: launch the app. Confirm there is no title-bar "Update available"
+    / "vX available" pill, and the log has no `spawn_check` line and no
+    `self-update feed disabled` line. Optionally watch outbound HTTPS.
+  - Expected: no request to `api.github.com/repos/arthjean/paneflow` or any
+    other GitHub releases endpoint in normal use. Help → What’s New is a
+    browser link (`RELEASES_URL`), not a feed poll.
+  - Failure implicates: leftover updater wiring that should have been
+    deleted with bucket 3.
 
 - [ ] **Task 20 — unsigned .dmg first open**
   - Commit: local artifact at `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (30M)

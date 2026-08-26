@@ -16,10 +16,9 @@ This document is operator-only. Application code never reads the entitlements
 plists described here. It does consume `assets/Info.plist`, which
 `bundle-macos.sh` templates into the shipped bundle.
 
-Related: [`docs/release-signing.md`](../release-signing.md) explains why this is
-a separate mechanism from the minisign self-update signature, and
-[`docs/release-runbook.md`](../release-runbook.md) is the per-release checklist
-that calls these scripts in order.
+Related: [`docs/release-signing.md`](../release-signing.md) and
+[`docs/release-runbook.md`](../release-runbook.md) (the per-release checklist
+that calls these scripts in order).
 
 ---
 
@@ -164,9 +163,10 @@ CI log rendering. It still runs fine locally, the annotations are just noise.
 dist/paneflow-<version>-<arch>-apple-darwin.dmg
 ```
 
-**The `-apple-darwin` suffix is a contract, not cosmetics.** The in-app
-updater's asset matcher looks releases up by that suffix, so renaming the asset
-breaks self-update for every installed client.
+**The `-apple-darwin` suffix is a contract, not cosmetics.** The release
+workflow, the runbook, and `scripts/create-dmg.sh` all name the asset
+`paneflow-<version>-<arch>-apple-darwin.dmg`. Keep that spelling so
+operators and CI stay aligned. There is no in-app updater matching on it.
 
 After `hdiutil create` and `hdiutil verify`, the script mounts the image
 read-only and re-runs three independent checks against the bundle *inside the
