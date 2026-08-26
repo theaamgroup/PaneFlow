@@ -394,6 +394,34 @@ mod tests {
     }
 
     #[test]
+    fn test_attempt_reload_non_object_root_keeps_old_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        fs::write(&path, "[]").unwrap();
+
+        let mut current = PaneFlowConfig {
+            default_shell: Some("/bin/bash".to_string()),
+            ..Default::default()
+        };
+        let called = Arc::new(Mutex::new(false));
+        let called_clone = Arc::clone(&called);
+        let cb: Arc<dyn Fn(PaneFlowConfig) + Send + Sync> =
+            Arc::new(move |_| *called_clone.lock().unwrap() = true);
+
+        attempt_reload(&path, &mut current, &cb);
+
+        assert!(
+            !*called.lock().unwrap(),
+            "callback should not be called for a non-object root"
+        );
+        assert_eq!(
+            current.default_shell,
+            Some("/bin/bash".to_string()),
+            "old config should be preserved"
+        );
+    }
+
+    #[test]
     fn test_attempt_reload_valid_config_calls_callback() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("paneflow.json");

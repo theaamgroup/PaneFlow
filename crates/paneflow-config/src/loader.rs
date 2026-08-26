@@ -217,18 +217,16 @@ pub fn parse_and_validate_with_path(json: &str, path: &Path) -> PaneFlowConfig {
     })
 }
 
-/// US-029: parse + validate, parsing the JSON exactly once and surfacing a
-/// syntax error as `Err` instead of silently returning defaults. The hot
-/// reload path uses this so it can keep the previous config on a malformed
-/// save (never broadcasting defaults) AND avoid the old double-parse (a
-/// syntax-guard `from_str` followed by a second parse inside
-/// `parse_and_validate_with_path`). Command filtering + layout fixups are
-/// applied on the success path, unchanged.
+/// Parse + validate, parsing the JSON exactly once and surfacing a syntax
+/// error (or a non-object root) as `Err` instead of silently returning
+/// defaults. The hot reload path uses this so it can keep the previous
+/// config on a malformed save (never broadcasting defaults). Command
+/// filtering + layout fixups are applied on the success path, unchanged.
 pub fn try_parse_and_validate(json: &str) -> Result<PaneFlowConfig, serde_json::Error> {
     let raw: Value = serde_json::from_str(json)?;
     let Some(root) = raw.as_object() else {
-        warn!("config root is not a JSON object; using defaults");
-        return Ok(PaneFlowConfig::default());
+        warn!("config root is not a JSON object; parse failed");
+        return Err(serde::de::Error::custom("config root is not a JSON object"));
     };
 
     let mut config = PaneFlowConfig::default();
@@ -618,6 +616,27 @@ mod tests {
     fn test_empty_json_object_returns_defaults() {
         let config = parse_and_validate("{}");
         assert_eq!(config, PaneFlowConfig::default());
+    }
+
+    #[test]
+    fn test_try_parse_non_object_root_is_err() {
+        // Hot reload must not treat a non-object root as a successful
+        // defaults load: the watcher broadcasts Ok, then Settings refuses
+        // to overwrite a non-object file.
+        assert!(
+            try_parse_and_validate("[]").is_err(),
+            "array root must not load as defaults"
+        );
+        assert!(
+            try_parse_and_validate("null").is_err(),
+            "null root must not load as defaults"
+        );
+        assert!(
+            try_parse_and_validate("\"x\"").is_err(),
+            "string root must not load as defaults"
+        );
+        let empty = try_parse_and_validate("{}").expect("empty object is a valid config");
+        assert_eq!(empty, PaneFlowConfig::default());
     }
 
     #[test]
