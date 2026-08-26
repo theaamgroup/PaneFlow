@@ -66,7 +66,7 @@ Populate multi-line secrets from a file, never from a pipe:
 ```bash
 base64 -i DeveloperID.p12 -o /tmp/cert.p12.b64
 chmod 600 /tmp/cert.p12.b64
-gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/panescli < /tmp/cert.p12.b64
+gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/paneflow < /tmp/cert.p12.b64
 rm -P /tmp/cert.p12.b64
 ```
 

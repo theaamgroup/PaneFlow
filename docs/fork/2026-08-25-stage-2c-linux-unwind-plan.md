@@ -11,7 +11,7 @@ Read `docs/fork/STATE.md` and `CLAUDE.md` first. This file does not repeat them.
 | Updater scope | **Full collapse to DMG-only.** Delete `update/linux/`, collapse `InstallMethod` and `AssetFormat` to the macOS-reachable set. Same pattern as 2b's MSI cascade. |
 | `not(unix)` / `not(macos)` | **Folded into 2c.** All three predicate families die in this stage. After 2c the only platform predicates left are `cfg(unix)` and `cfg(target_os = "macos")`. |
 | Delegation | **Inventory fans out, execution mostly orchestrator.** ~6 read-only grok agents for inventory; 2-3 delegated batches for genuinely file-local work; enum collapse, unix-adjacent sites, `cfg!` sweep and `not(unix)` all done by the orchestrator. |
-| Config-schema debt | **Not in 2c.** Its own stage between 2c and the 2d rename. |
+| Config-schema debt | **Not in 2c.** Its own stage after 2c (not gated on a product rename). |
 | Branch | `mac-only-fork` directly, one commit per compiler-verified increment. |
 
 ## Measured scope (taken 2026-08-25, post-2b)
@@ -279,8 +279,9 @@ count alone cannot.
   the `windows_terminal_material` / `windows_chrome_material` no-op fields.
   `schema.rs` + `schemas/paneflow.schema.json` + `docs/user/configuration/schema.md`
   must move together — a drift test enforces it.
-- **2d rename to PanesCLI**: 273 files (202 `.rs`, 40 `.md`, 13 `.toml`). One
-  atomic pass across prose and code.
+- **2d rename to PanesCLI**: **Dropped.** It was scoped (273 files) and then
+  dropped; the product stays PaneFlow. See
+  `docs/fork/2026-08-25-post-2c-plan.md`.
 - **Stage 3 signed release**: `release.yml` is still 3,177 lines of upstream's
   four-platform pipeline with live `GPG_*`, `AZURE_TRUSTED_SIGNING_*` and
   `POSTHOG_API_KEY` references. Also needs the Mach-O re-baseline of the

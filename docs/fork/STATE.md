@@ -1,4 +1,4 @@
-# PanesCLI fork: current state
+# PaneFlow fork: current state
 
 Living handoff record. Updated 2026-08-25, after stage 2c landed.
 
@@ -30,16 +30,19 @@ session learned the hard way.
 
 ## Naming, confirmed and locked
 
-| Thing | Current on disk | Target |
-|---|---|---|
-| Product | PaneFlow | PanesCLI |
-| Bundle id | `io.github.arthurdev44.paneflow` | `com.theaamgroup.panescli` |
-| Binary and CLI | `paneflow` | `panescli` |
-| Config dir | `~/Library/Application Support/paneflow/` | `~/Library/Application Support/panescli/` |
-| Debug config dir | `paneflow-dev` | `panescli-dev` |
-| Env prefix | `PANEFLOW_*` | `PANESCLI_*` |
-| MCP server | `paneflow` | `panescli`, needs re-registering locally |
-| Conductor skill | `skills/paneflow-conductor/` | `panescli-conductor` |
+The product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and
+dropped; see `docs/fork/2026-08-25-post-2c-plan.md`.
+
+| Thing | Value |
+|---|---|
+| Product | PaneFlow |
+| Bundle id | `com.theaamgroup.paneflow` (task 12 replaced upstream's `io.github.arthurdev44.paneflow`) |
+| Binary and CLI | `paneflow` |
+| Config dir | `~/Library/Application Support/paneflow/` |
+| Debug config dir | `paneflow-dev` |
+| Env prefix | `PANEFLOW_*` |
+| MCP server | `paneflow` |
+| Conductor skill | `skills/paneflow-conductor/` |
 
 The debug sibling is not optional. `APP_SUBDIR` in
 `crates/paneflow-config/src/loader.rs:17` switches to `paneflow-dev` under
@@ -58,7 +61,7 @@ the only workflow here, so this is the most likely source of confusion.
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
 | 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
 | Config-schema pass | **Not started. Next.** `TerminalBackendConfig::Ghostty` (`schema.rs:568`), `windows_terminal_material` (`:57`), `windows_chrome_material` (`:60`), `windows_terminal_material_enabled` (`:310`), the `pane.rs` material call sites and their two `terminal_material_scopes_*` tests, and the loader's `set_field!` material keys. 2c deliberately left all 15 of these standing. schema.rs + schemas/paneflow.schema.json + docs/user/configuration/schema.md move together (drift test). |
-| 2d. Rename to PanesCLI | **Not started.** 273 files mention `paneflow` (202 `.rs`, 40 `.md`, 13 `.toml`). Must be one atomic pass across prose and code together. |
+| 2d. Rename to PanesCLI | **Dropped.** Scoped (273 files) then dropped; the product stays PaneFlow. See `docs/fork/2026-08-25-post-2c-plan.md`. |
 | 3. Signed release | **Not started.** Needs a fresh minisign keypair, a macOS-only `release.yml`, and the six `APPLE_*` secrets. |
 
 ## Verified green, and how to reproduce it

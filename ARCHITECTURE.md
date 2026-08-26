@@ -191,13 +191,14 @@ Both are driven by one in-app updater. Update artifacts are verified with
 installed. macOS builds add Developer ID / notarization checks with Team ID
 pinning.
 
-The release feed is being repointed at the private `theaamgroup/panescli`
-repository. Upstream hardcodes `arthjean/paneflow` at
-`src-app/src/update/checker.rs`, and `App::new()` calls the checker with no
-config gate, so until the repoint lands every launch polls the upstream repo
-and would offer upstream releases as updates. A private repo's release API
-returns 404 without a Bearer token, so the repoint needs credentialed requests
-and our own minisign keypair. See the leak register in the fork design doc.
+The release feed is **disabled**. `DEFAULT_FEED_URL` in
+`src-app/src/update/checker.rs` is `None` (task 11). The previous default
+pointed at upstream `arthjean/paneflow` and would have offered someone else's
+binaries; this fork's GitHub repo is private, so its release assets are not
+anonymously downloadable. Minisign verification, `verified_download`, the DMG
+installer and `UpdateError` stay intact — re-enabling is a one-line feed URL
+once there is a public distribution host. The e2e harness can still override
+via `PANEFLOW_UPDATE_FEED_URL`.
 
 ## Platform surface
 

@@ -1,4 +1,4 @@
-# PanesCLI: macOS-only private fork of PaneFlow
+# PaneFlow: macOS-only private fork
 
 Date: 2026-08-25
 Status: approved, Stage 1 in progress
@@ -6,9 +6,10 @@ Fork point: `arthjean/paneflow` v0.8.2, commit `f53f982291f75a9daf565827b3167d0e
 
 ## Purpose
 
-Take PaneFlow private under `theaamgroup`, strip it to macOS only, and rebrand it
-as PanesCLI so The AAM Group can make improvements and fixes to it. The result is
-never published publicly.
+Take PaneFlow private under `theaamgroup` and strip it to macOS only, so The
+AAM Group can make improvements and fixes to it. The result is never published
+publicly. The product name stays PaneFlow; a rebrand to PanesCLI was scoped and
+dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 
 ## Decisions
 
@@ -17,23 +18,30 @@ never published publicly.
 | Fork model | Keep all 1035 commits, keep `upstream` remote | `git blame` works, upstream fixes are cherry-pickable, `.git` stays 60M (no history rewrite, since `filter-repo` would destroy the merge base) |
 | Cut depth | Deep. Strip non-Mac `cfg` branches from shared source | Readable Mac-only source. Every future upstream merge conflicts across roughly 80 files. Accepted knowingly. |
 | Ghostty backend | Delete entirely | Verified unreachable on macOS. See Verification below. |
-| Self-update | Repoint feed at `theaamgroup/panescli` | Needs a Bearer token (private repo releases 404 without one) and our own minisign keypair |
+| Self-update | **Disable the feed** (task 11). The fork's GitHub repo is private and there is no other host yet | Keep minisign verification, `verified_download`, the DMG installer and `UpdateError`. Re-enable with a one-line feed URL once assets are anonymously downloadable |
 | Telemetry | PostHog stays wired, key stays unset | Inert. Never set `POSTHOG_API_KEY` in the new org. |
-| Branding | Full rebrand to PanesCLI | Bundle id, binary, CLI, config dir, MCP server, conductor skill all move |
+| Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server, conductor skill and `PANEFLOW_*` stay. See `docs/fork/2026-08-25-post-2c-plan.md` |
 | gpui dependency | Keep pointing at `arthjean/zed`, take a cold-backup fork | `Cargo.lock` pins the rev with a checksum, so the risk is availability, not drift. Insurance without a diff. |
 | Apple signing | AAM Developer ID, signed and notarized DMG | Other AAM Macs can install without Gatekeeper warnings |
 
 ## Naming
 
-| Thing | Was | Becomes |
-|---|---|---|
-| Product name | PaneFlow | PanesCLI |
-| Bundle identifier | `io.github.arthurdev44.paneflow` | `com.theaamgroup.panescli` |
-| Binary and CLI | `paneflow` | `panescli` |
-| Config dir | `~/Library/Application Support/paneflow/paneflow.json` | `~/Library/Application Support/panescli/panescli.json`. Driven by `APP_SUBDIR` in `crates/paneflow-config/src/loader.rs:45` via `dirs::config_dir()`. NOT `~/.config`: that is the Linux path and an earlier draft of this spec had it wrong. |
-| MCP server | `paneflow` | `panescli` (needs re-registering locally) |
-| Conductor skill | `paneflow-conductor` | `panescli-conductor` (references the binary name) |
-| Env var prefix | `PANEFLOW_*` | `PANESCLI_*` |
+The product stays **PaneFlow**. A full rebrand to PanesCLI was scoped (bundle
+id, binary, CLI, config dir, MCP server, conductor skill, `PANEFLOW_*` env)
+and dropped. See `docs/fork/2026-08-25-post-2c-plan.md`.
+
+Task 12 still replaced *upstream's* identity so this fork is not signed as
+`io.github.arthurdev44.paneflow`.
+
+| Thing | Value |
+|---|---|
+| Product name | PaneFlow |
+| Bundle identifier | `com.theaamgroup.paneflow` |
+| Binary and CLI | `paneflow` |
+| Config dir | `~/Library/Application Support/paneflow/paneflow.json`. Driven by `APP_SUBDIR` in `crates/paneflow-config/src/loader.rs` via `dirs::config_dir()`. NOT `~/.config`: that is the Linux path and an earlier draft of this spec had it wrong. |
+| MCP server | `paneflow` |
+| Conductor skill | `paneflow-conductor` |
+| Env var prefix | `PANEFLOW_*` |
 
 ## Toolchain prerequisites
 
@@ -48,7 +56,7 @@ never published publicly.
 
 Verified load-bearing. Each of these looks like cruft and is not.
 
-- `schemas/paneflow.schema.json` (still the on-disk name until the rename pass): two tests in `crates/paneflow-config/src/schema.rs` (lines 1685, 1778) read it off disk. Drift fails the suite.
+- `schemas/paneflow.schema.json`: two tests in `crates/paneflow-config/src/schema.rs` (lines 1685, 1778) read it off disk. Drift fails the suite.
 - `examples/review-pipeline.flow.toml`: `include_str!` target at `src-app/src/cli/flow_spec.rs:749`. Deleting it breaks the build. `examples/TASK.md` is its fixture.
 - `clippy.toml`: the `allow-unwrap-in-tests` escape hatch for the workspace lint policy in `Cargo.toml`. Without it, test code starts warning.
 - `rust-toolchain.toml`: the 1.96.1 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
@@ -56,7 +64,7 @@ Verified load-bearing. Each of these looks like cruft and is not.
 - `CLAUDE.md`: the single most useful file in the repo. Real build and test commands, annotated module tree, thread model, keystroke-to-pixel data flow, and a Gotchas section with hard-won GPUI behaviour.
 - `ARCHITECTURE.md`, `docs/hooks.md`, `docs/mcp-bridge.md`, `docs/debugging-rendering.md`, `docs/memory-smoke-test.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
 - `src-app/assets/fonts/`: 23M of TTFs, `rust-embed`ed into the binary.
-- `assets/PaneFlow.icns`, `assets/Info.plist`, `assets/dmg-background.png`: macOS bundle inputs (icns to be regenerated for the rebrand).
+- `assets/PaneFlow.icns`, `assets/Info.plist`, `assets/dmg-background.png`: macOS bundle inputs.
 
 ## Stage 1: file-level deletion
 
@@ -242,8 +250,7 @@ Found during the inventory. Each one would have cost a debugging session.
     `paneflow-dev` sibling. The doc comment at `loader.rs:42` states the release
     path as though it were universal, which makes this easy to miss. This is the
     single most likely source of confusion for a build-from-source workflow,
-    which is now the only workflow here. The rename must produce both `panescli`
-    and `panescli-dev`.
+    which is now the only workflow here.
 14. **`schemas/paneflow.schema.json` disagrees with the code on
     `option_as_meta`.** The schema declares `"default": true` (line 101) while
     `src-app/src/keys.rs:83` computes `!cfg!(target_os = "macos")`, so the real
@@ -284,8 +291,8 @@ from features that are target-gated away. The only branch constructing a
 `GhosttySession` (lines 581 to 600) is `cfg`-excluded on macOS entirely. Lines
 602 to 618 are the macOS arm: warn once, record
 `TerminalBackendFailurePhase::Availability`, fall through to Alacritty. An
-explicit `terminal.backend = "ghostty"` lands there. No `PANESCLI_*` env var
-selects a backend. There is not one byte of macOS native Ghostty artifact in the
+explicit `terminal.backend = "ghostty"` lands there. No env var selects a
+backend. There is not one byte of macOS native Ghostty artifact in the
 tree, and `manifest.toml` declares only Linux and Windows targets.
 
 The two `libghostty-*` features ARE enabled on macOS builds, since macOS CI does
@@ -301,5 +308,7 @@ does not unify features of target-inapplicable deps.
   (marketing images, master icons, the demo mp4, prebuilt static libs), but
   reclaiming it needs `filter-repo`, which rewrites every SHA and destroys the
   upstream merge base.
-- The rebrand orphans any existing local PaneFlow config and requires
-  re-registering the MCP server and the conductor skill.
+- A product-name rebrand (scoped and dropped; see
+  `docs/fork/2026-08-25-post-2c-plan.md`) would orphan any existing local
+  PaneFlow config and require re-registering the MCP server and the conductor
+  skill. That cost is one reason it did not happen.

@@ -230,7 +230,7 @@ a flag in the workflow that was never there.
    retain history):
    ```bash
    gh secret set APPLE_DEVELOPER_CERT_P12 \
-     -R theaamgroup/panescli < <(base64 -i developer-id.p12)
+     -R theaamgroup/paneflow < <(base64 -i developer-id.p12)
    ```
    If `gh` is unavailable, write to a temp file, paste it into the GitHub
    Secrets UI, and erase:
