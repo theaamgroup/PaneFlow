@@ -6,9 +6,9 @@ pub(crate) fn open_url(url: &str) -> std::io::Result<()> {
 
 /// Open an untrusted URL after requiring `http://` or `https://`.
 ///
-/// Feed `html_url` and other attacker-controlled strings must go through
-/// this, not [`open_url`]. `file://` / `javascript:` / unknown schemes are
-/// refused so they never reach `open::that`.
+/// Untrusted or user-facing web links must go through this, not [`open_url`].
+/// `file://` / `javascript:` / unknown schemes are refused so they never
+/// reach `open::that`.
 pub(crate) fn open_http_url(url: &str) -> std::io::Result<()> {
     let validated = require_http_url(url)?;
     open_url_impl(&validated)

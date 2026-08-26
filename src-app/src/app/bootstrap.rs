@@ -1,7 +1,7 @@
 //! `PaneFlowApp::new()` - the application constructor.
 //!
-//! Wires the title bar, IPC server, config watcher, git-dir watcher, update
-//! checker, and all background tickers (50 ms IPC poll, 30 s git fallback,
+//! Wires the title bar, IPC server, config watcher, git-dir watcher,
+//! and all background tickers (50 ms IPC poll, 30 s git fallback,
 //! 30 s stale-PID sweep). Restores a saved session or creates a fresh
 //! single-workspace state.
 //!
@@ -17,7 +17,7 @@ use crate::terminal::TerminalView;
 use crate::terminal::blink::{BlinkPhase, BlinkPhaseGlobal, CURSOR_BLINK_INTERVAL};
 use crate::window_chrome::title_bar;
 use crate::workspace::{Workspace, next_workspace_id};
-use crate::{PaneFlowApp, ipc, keybindings, update};
+use crate::{PaneFlowApp, ipc, keybindings};
 
 impl PaneFlowApp {
     fn default_workspace(cx: &mut Context<Self>) -> Workspace {
@@ -680,8 +680,6 @@ impl PaneFlowApp {
         )
         .detach();
 
-        let install_method = update::install_method::detect();
-
         // EP-003 US-008 (agent-control-plane): one-shot boot warn when AI
         // free-access mode is enabled, mirroring the PANEFLOW_IPC_SCRIPTING
         // boot warn in `ipc::start_server()`. The fence is independent and
@@ -692,7 +690,6 @@ impl PaneFlowApp {
                 "ai.unrestricted is ON; same-UID callers may auto-submit prompts to agent panes without PANEFLOW_IPC_SCRIPTING (toggle in Settings -> AI Agent)"
             );
         }
-        let pending_update = update::checker::spawn_check();
 
         // US-008: the diff panel's persistent file filter. Observe it so each
         // keystroke re-renders the app (the TextInput only notifies itself).
@@ -867,14 +864,6 @@ impl PaneFlowApp {
             fleet_search_pending_focus: false,
             launch_pad: None,
             launch_pad_focus: cx.focus_handle(),
-            self_update: crate::SelfUpdateState {
-                pending_update,
-                update_status: None,
-                self_update_status: update::SelfUpdateStatus::default(),
-                install_method,
-                update_attempt_count: 0,
-                download_generation: 0,
-            },
             custom_buttons_modal: None,
             custom_buttons_modal_focus: cx.focus_handle(),
             // US-006: shared signal flipped by the theme watcher's debounce

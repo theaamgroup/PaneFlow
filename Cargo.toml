@@ -47,7 +47,6 @@ log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 notify = "7"
 tempfile = "3"
 tracing = "0.1"
-ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 which = "8"
 

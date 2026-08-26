@@ -72,11 +72,6 @@ actions!(
         // EP-006 US-018 - widen the open search to every pane of every
         // workspace (fleet grep). Search context (find bar open).
         ToggleFleetSearch,
-        StartSelfUpdate,
-        /// US-007 AC3: dismiss the update pill for the current launch
-        /// (no persistence - re-prompts on next start). Dispatched by
-        /// the `×` button on the Idle / Errored pill states.
-        DismissUpdate,
         // US-012: macOS native menu-bar actions. Dispatched by `cx.set_menus`
         // via GPUI's `on_app_menu_action` → `cx.dispatch_action`, then caught
         // by the `.on_action(...)` handlers on the PaneFlowApp render root.
@@ -135,7 +130,7 @@ actions!(
         // access to agents state), caught by `PaneFlowApp` which resolves the
         // selected target and opens the shared thread context menu. The
         // button never calls agents methods directly - it dispatches this
-        // typed action, mirroring the update pill's `StartSelfUpdate`.
+        // typed action.
         OpenAgentsThreadMenu,
         // EP-001 (CLI Cockpit) - CLI cockpit
         // steering. `OpenComposer` (US-001) anchors the multi-line prompt

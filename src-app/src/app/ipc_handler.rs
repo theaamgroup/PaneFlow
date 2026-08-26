@@ -1,13 +1,11 @@
 //! Cross-thread channel pumps and JSON-RPC dispatcher for `PaneFlowApp`.
 //!
-//! Runs on the GPUI main thread and owns three pull-based intakes:
+//! Runs on the GPUI main thread and owns two pull-based intakes:
 //! - `process_ipc_requests` - drains the Unix-socket IPC receiver and routes
 //!   each request through `handle_ipc` (dispatches over the `workspace.*`,
 //!   `surface.*`, and `ai.*` namespaces).
 //! - `process_config_changes` - picks up a hot-reloaded config deposited by
 //!   the `ConfigWatcher` background thread and reapplies keybindings + theme.
-//! - `process_update_check` - picks up the background update-check result
-//!   once (no-op once resolved).
 //!
 //! Extracted from `main.rs` per US-024 of the src-app refactor PRD. `handle_ipc`
 //! remains a single function here; if future additions push it over the
@@ -28,7 +26,7 @@ use crate::layout::{MAX_PANES, SplitDirection};
 use crate::pane::Pane;
 use crate::terminal::TerminalView;
 use crate::workspace::{MAX_WORKSPACES, Workspace, next_workspace_id};
-use crate::{PaneFlowApp, ai_types, keybindings, update};
+use crate::{PaneFlowApp, ai_types, keybindings};
 
 /// Prompt-prefill readiness window for `workspace.up` (US-010,
 /// prd-cli-agent-orchestration).
@@ -1362,14 +1360,13 @@ pub(crate) fn should_apply_watcher_config(
 }
 
 impl PaneFlowApp {
-    /// One automation poll tick for IPC, surface events, config reloads, and
-    /// update-check completion. Keeping this order in one method prevents the
-    /// bootstrap closure from becoming the implicit event-loop contract.
+    /// One automation poll tick for IPC, surface events, and config reloads.
+    /// Keeping this order in one method prevents the bootstrap closure from
+    /// becoming the implicit event-loop contract.
     pub(crate) fn process_automation_tick(&mut self, cx: &mut Context<Self>) {
         self.process_ipc_requests(cx);
         self.broadcast_surface_changes(cx);
         self.process_config_changes(cx);
-        self.process_update_check(cx);
     }
 
     pub(crate) fn process_ipc_requests(&mut self, cx: &mut Context<Self>) {
@@ -1534,32 +1531,6 @@ impl PaneFlowApp {
         {
             crate::theme::sync_markdown_global_theme(cx);
             cx.notify();
-        }
-    }
-
-    /// Pick up the background update check result (runs once, then stops polling).
-    pub(crate) fn process_update_check(&mut self, cx: &mut Context<Self>) {
-        if self.self_update.update_status.is_some() {
-            return; // Already resolved
-        }
-        let status = self
-            .self_update
-            .pending_update
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(status) = status
-            && !matches!(status, update::checker::UpdateStatus::Checking)
-        {
-            self.self_update.update_status = Some(status);
-            cx.notify();
-            // Zed-style silent pre-install: as soon as we know there's
-            // a new release and the install method supports an in-app
-            // download, kick off the install in the background. By the
-            // time the user notices the pill and clicks it, the new
-            // binary is already on disk and the click handler only has
-            // to invoke `cx.restart()`.
-            self.try_auto_kickoff_install(cx);
         }
     }
 

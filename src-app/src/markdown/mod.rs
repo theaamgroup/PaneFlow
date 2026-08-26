@@ -14,8 +14,8 @@
 
 mod parser;
 // Image-ref helpers in this module are still unused (no image load path).
-// `validate_link_url` is live: updater `html_url` and `open_http_url` gate
-// on it. Markdown click hit-testing is not wired yet; when it is, use the
+// `validate_link_url` is live: Help-menu URLs go through `open_http_url`.
+// Markdown click hit-testing is not wired yet; when it is, use the
 // same function before `open::that`.
 pub(crate) mod security;
 mod state;

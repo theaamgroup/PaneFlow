@@ -2,31 +2,22 @@
 //!
 //! Owns:
 //! - `Toast`: ephemeral bottom-right confirmation/error pop-ups.
-//! - `ToastAction`: optional buttons inside a toast (retry/open-releases).
-//! - `show_toast` / `show_update_error_toast` / `push_toast`: convenience
-//!   helpers attached to `PaneFlowApp`.
+//! - `show_toast` / `push_toast`: convenience helpers attached to `PaneFlowApp`.
 //! - `render_toast`: the deferred rendering block used by `Render for
 //!   PaneFlowApp` to paint the active toast.
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AsyncApp, Context, IntoElement, MouseButton,
-    ParentElement, SharedString, Styled, WeakEntity, deferred, div, ease_in_out, prelude::*, px,
-    svg,
+    Animation, AnimationExt, AnyElement, AsyncApp, Context, IntoElement, ParentElement,
+    SharedString, Styled, WeakEntity, deferred, div, ease_in_out, prelude::*, px, svg,
 };
 
+use crate::PaneFlowApp;
 use crate::app::constants::{TOAST_ENTER_MS, TOAST_EXIT_MS, TOAST_HOLD_MS};
-use crate::settings::components::with_alpha;
 use crate::theme::UiColors;
-use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
-use crate::{PaneFlowApp, StartSelfUpdate, update};
 
 #[derive(Clone)]
 pub(crate) struct Toast {
     pub(crate) message: String,
-    /// Optional action buttons shown inside the toast. Empty for the
-    /// ordinary confirmation toasts ("Path copied", etc); populated for
-    /// update-failure toasts (US-013) with Retry / "Open releases" buttons.
-    pub(crate) actions: Vec<ToastAction>,
     /// How long the "hold" phase of the toast animation lasts, in ms.
     /// Must match the auto-dismiss timer in [`PaneFlowApp::push_toast`] -
     /// otherwise the exit animation plays early and the element persists
@@ -34,50 +25,13 @@ pub(crate) struct Toast {
     pub(crate) hold_ms: u64,
 }
 
-#[derive(Clone)]
-pub(crate) enum ToastAction {
-    /// "Retry" - re-dispatches the `StartSelfUpdate` action. The action
-    /// handler's existing guards (busy check, attempt counter) apply.
-    RetryUpdate,
-    /// "Open releases" - opens the given URL in the user's browser.
-    /// Used for the 4th-attempt fallback (AC: "Download manually from the
-    /// releases page").
-    OpenReleasesPage(String),
-}
-
 impl PaneFlowApp {
     pub(crate) fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
-        self.push_toast(message.into(), Vec::new(), TOAST_HOLD_MS, cx);
+        self.push_toast(message.into(), TOAST_HOLD_MS, cx);
     }
 
-    /// Surface an update failure as a toast with a "Retry" action button
-    /// (US-013). Hold is extended so the user has time to click the button
-    /// before auto-dismiss.
-    pub(crate) fn show_update_error_toast(
-        &mut self,
-        err: &update::UpdateError,
-        cx: &mut Context<Self>,
-    ) {
-        self.push_toast(
-            err.user_message(),
-            vec![ToastAction::RetryUpdate],
-            TOAST_HOLD_MS * 4,
-            cx,
-        );
-    }
-
-    pub(crate) fn push_toast(
-        &mut self,
-        message: String,
-        actions: Vec<ToastAction>,
-        hold_ms: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let toast = Toast {
-            message,
-            actions,
-            hold_ms,
-        };
+    pub(crate) fn push_toast(&mut self, message: String, hold_ms: u64, cx: &mut Context<Self>) {
+        let toast = Toast { message, hold_ms };
         if self.toast.is_some() {
             self.toast_queue.push_back(toast);
             cx.notify();
@@ -88,11 +42,7 @@ impl PaneFlowApp {
 
     fn show_next_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
         let total = TOAST_ENTER_MS + toast.hold_ms + TOAST_EXIT_MS;
-        self.toast = Some(Toast {
-            message: toast.message,
-            actions: toast.actions,
-            hold_ms: toast.hold_ms,
-        });
+        self.toast = Some(toast);
         cx.notify();
 
         self._toast_task = Some(cx.spawn(
@@ -117,8 +67,7 @@ impl PaneFlowApp {
     /// bottom-right of the window. Caller is responsible for the
     /// `if let Some(toast) = &self.toast` guard.
     pub(crate) fn render_toast(&self, toast: &Toast, ui: UiColors) -> AnyElement {
-        let has_actions = !toast.actions.is_empty();
-        let is_error = has_actions || toast_message_reads_like_error(&toast.message);
+        let is_error = toast_message_reads_like_error(&toast.message);
         let (icon, icon_color, max_w) = if is_error {
             ("icons/triangle-alert.svg", ui.agent_error, px(440.))
         } else {
@@ -149,50 +98,6 @@ impl PaneFlowApp {
                     .child(toast.message.clone()),
             );
 
-        let action_row = if has_actions {
-            let mut row = div().flex().flex_row().gap(px(8.)).mt(px(10.)).pl(px(24.));
-            for (idx, action) in toast.actions.iter().enumerate() {
-                let (label, button_id): (&str, String) = match action {
-                    ToastAction::RetryUpdate => ("Retry", format!("toast-retry-{idx}")),
-                    ToastAction::OpenReleasesPage(_) => {
-                        ("Open releases", format!("toast-releases-{idx}"))
-                    }
-                };
-                let action_clone = action.clone();
-                let resting_background = with_alpha(ui.text, 0.08);
-                let hover_background = with_alpha(ui.text, 0.12);
-                let btn = div()
-                    .id(SharedString::from(button_id))
-                    .h(px(26.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(7.))
-                    .bg(resting_background)
-                    .text_color(ui.text)
-                    .text_size(px(12.))
-                    .animated_hover(move |style, delta| {
-                        style.bg(lerp_color(resting_background, hover_background, delta));
-                    })
-                    .child(label)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| match &action_clone {
-                        ToastAction::RetryUpdate => {
-                            window.dispatch_action(Box::new(StartSelfUpdate), cx);
-                        }
-                        ToastAction::OpenReleasesPage(url) => {
-                            if let Err(err) = crate::external_open::open_http_url(url) {
-                                log::warn!("toast: open releases URL failed: {err}");
-                            }
-                        }
-                    });
-                row = row.child(btn);
-            }
-            Some(row)
-        } else {
-            None
-        };
-
         let hold_ms = toast.hold_ms;
         deferred(
             div()
@@ -214,8 +119,7 @@ impl PaneFlowApp {
                         .pl(px(12.))
                         .pr(px(14.))
                         .py(px(11.))
-                        .child(header)
-                        .children(action_row),
+                        .child(header),
                 )
                 .with_animations(
                     SharedString::from("copy-toast-anim"),
