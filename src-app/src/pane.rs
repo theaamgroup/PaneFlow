@@ -28,6 +28,7 @@ use crate::settings::components::with_alpha;
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 
 use crate::diff::DiffView;
+use crate::limits::MAX_PANE_SURFACES;
 use crate::markdown::MarkdownView;
 use crate::pane_drag::{
     DropEdge, InsertSide, MarkdownFileDrag, SPLIT_EDGE_BAND, SessionDrag, TabDrag, TabDragPreview,
@@ -157,6 +158,22 @@ const DROP_OVERLAY_BACKGROUND_ALPHA: f32 = 0.10;
 /// `MAX_TAB_TITLE_LEN` (`zed/crates/editor/src/items.rs:64`). Anything past
 /// this is replaced with a trailing ellipsis before the CSS ellipsis layer.
 const MAX_TAB_TITLE_LEN: usize = 24;
+
+/// Whether a pane with `len` tabs can accept another under `cap`.
+/// Live write counterpart of [`MAX_PANE_SURFACES`] (issue #30).
+pub(crate) const fn can_add_tab(len: usize, cap: usize) -> bool {
+    len < cap
+}
+
+/// Push `item` onto `tabs` when [`can_add_tab`] allows it.
+/// Extracted so the cap can be unit-tested without constructing a GPUI Entity.
+pub(crate) fn push_tab_if_room<T>(tabs: &mut Vec<T>, item: T, cap: usize) -> bool {
+    if !can_add_tab(tabs.len(), cap) {
+        return false;
+    }
+    tabs.push(item);
+    true
+}
 
 /// Char-boundary-safe `truncate_and_trailoff`. Counts chars (not bytes) so
 /// filenames with multibyte UTF-8 (accents, CJK, emoji) don't trigger a
@@ -829,11 +846,23 @@ impl Pane {
     }
 
     /// Append a new terminal tab and focus it.
-    pub fn add_tab(&mut self, terminal: Entity<TerminalView>, cx: &mut Context<Self>) {
+    ///
+    /// Returns `false` and leaves the pane unchanged when [`MAX_PANE_SURFACES`]
+    /// tabs are already open (issue #30). Callers that spawn a PTY must check
+    /// [`can_add_tab`] first so a refused tab does not leak a shell.
+    pub fn add_tab(&mut self, terminal: Entity<TerminalView>, cx: &mut Context<Self>) -> bool {
+        if !can_add_tab(self.tabs.len(), MAX_PANE_SURFACES) {
+            return false;
+        }
         Self::subscribe_terminal(&terminal, cx);
         Self::apply_terminal_render_config(&terminal, &self.cached_config, cx);
-        self.tabs.push(TabContent::Terminal(terminal));
+        push_tab_if_room(
+            &mut self.tabs,
+            TabContent::Terminal(terminal),
+            MAX_PANE_SURFACES,
+        );
         self.selected_idx = self.tabs.len().saturating_sub(1);
+        true
     }
 
     /// Append a markdown viewer tab and focus it. Used by the doc-button
@@ -844,17 +873,31 @@ impl Pane {
     /// Markdown tabs don't need an event subscription: `MarkdownView` does
     /// not emit pane-level events. Closing the tab through the tab strip's
     /// close button drops the entity, which in turn drops its file watcher.
-    pub fn add_markdown_tab(&mut self, markdown: Entity<MarkdownView>, _cx: &mut Context<Self>) {
-        self.tabs.push(TabContent::Markdown(markdown));
+    pub fn add_markdown_tab(
+        &mut self,
+        markdown: Entity<MarkdownView>,
+        _cx: &mut Context<Self>,
+    ) -> bool {
+        if !push_tab_if_room(
+            &mut self.tabs,
+            TabContent::Markdown(markdown),
+            MAX_PANE_SURFACES,
+        ) {
+            return false;
+        }
         self.selected_idx = self.tabs.len().saturating_sub(1);
+        true
     }
 
     /// Append a multi-worktree diff tab and select it. Like markdown tabs,
     /// `DiffView` emits no pane-level events, so no subscription is needed;
     /// closing the tab drops the entity (and any future watchers it owns).
-    pub fn add_diff_tab(&mut self, diff: Entity<DiffView>, _cx: &mut Context<Self>) {
-        self.tabs.push(TabContent::Diff(diff));
+    pub fn add_diff_tab(&mut self, diff: Entity<DiffView>, _cx: &mut Context<Self>) -> bool {
+        if !push_tab_if_room(&mut self.tabs, TabContent::Diff(diff), MAX_PANE_SURFACES) {
+            return false;
+        }
         self.selected_idx = self.tabs.len().saturating_sub(1);
+        true
     }
 
     /// Subscribe to a terminal's events - close tab on exit, repaint on title change.
@@ -1098,10 +1141,14 @@ impl Pane {
             TAB_RADIUS,
             ui.muted,
             Some(ui.text),
-            cx.listener(|_this, _e: &ClickEvent, _window, cx| {
+            cx.listener(|this, _e: &ClickEvent, _window, cx| {
                 // See `PaneEvent::NewTerminalTab`: spawning in the app gives
                 // the new terminal the workspace cwd + app-level subscriptions.
-                cx.emit(PaneEvent::NewTerminalTab);
+                // Guard here so a full pane does not spawn a PTY that `add_tab`
+                // would then refuse (issue #30).
+                if can_add_tab(this.tabs.len(), MAX_PANE_SURFACES) {
+                    cx.emit(PaneEvent::NewTerminalTab);
+                }
                 cx.stop_propagation();
             }),
             cx,
@@ -1452,6 +1499,9 @@ impl Pane {
         dest_idx: usize,
         cx: &mut Context<Self>,
     ) {
+        if !can_add_tab(self.tabs.len(), MAX_PANE_SURFACES) {
+            return;
+        }
         if let TabContent::Terminal(t) = &tab {
             Self::subscribe_terminal(t, cx);
             Self::apply_terminal_render_config(t, &self.cached_config, cx);
@@ -1669,8 +1719,10 @@ impl Pane {
                     style
                 }
             })
-            .on_click(cx.listener(|_this, e: &ClickEvent, _window, cx| {
-                if matches!(e, ClickEvent::Mouse(m) if m.down.click_count == 2) {
+            .on_click(cx.listener(|this, e: &ClickEvent, _window, cx| {
+                if matches!(e, ClickEvent::Mouse(m) if m.down.click_count == 2)
+                    && can_add_tab(this.tabs.len(), MAX_PANE_SURFACES)
+                {
                     // Routed to PaneFlowApp so the new terminal spawns at the
                     // workspace cwd (the Pane doesn't know it) with app-level
                     // subscriptions wired - see `PaneEvent::NewTerminalTab`.
@@ -2895,9 +2947,10 @@ impl Render for Pane {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_TAB_TITLE_LEN, pane_content_background, peek_badge_line, tab_bar_background,
-        truncate_tab_title,
+        MAX_TAB_TITLE_LEN, can_add_tab, pane_content_background, peek_badge_line, push_tab_if_room,
+        tab_bar_background, truncate_tab_title,
     };
+    use crate::limits::MAX_PANE_SURFACES;
 
     #[test]
     fn terminal_material_scopes_tab_bar_to_windows() {
@@ -3012,5 +3065,32 @@ mod tests {
             None,
             "repo names must not be mistaken for agent processes"
         );
+    }
+
+    #[test]
+    fn can_add_tab_rejects_at_and_above_cap() {
+        assert!(can_add_tab(0, MAX_PANE_SURFACES));
+        assert!(can_add_tab(MAX_PANE_SURFACES - 1, MAX_PANE_SURFACES));
+        assert!(!can_add_tab(MAX_PANE_SURFACES, MAX_PANE_SURFACES));
+        assert!(!can_add_tab(MAX_PANE_SURFACES + 10, MAX_PANE_SURFACES));
+    }
+
+    #[test]
+    fn add_tab_does_not_push_when_at_cap() {
+        let mut tabs: Vec<u8> = vec![0; MAX_PANE_SURFACES];
+        assert!(
+            !push_tab_if_room(&mut tabs, 1, MAX_PANE_SURFACES),
+            "add_tab must refuse once tabs.len() == MAX_PANE_SURFACES"
+        );
+        assert_eq!(tabs.len(), MAX_PANE_SURFACES);
+        assert!(tabs.iter().all(|&t| t == 0));
+    }
+
+    #[test]
+    fn add_tab_pushes_when_under_cap() {
+        let mut tabs: Vec<u8> = vec![0; MAX_PANE_SURFACES - 1];
+        assert!(push_tab_if_room(&mut tabs, 1, MAX_PANE_SURFACES));
+        assert_eq!(tabs.len(), MAX_PANE_SURFACES);
+        assert_eq!(tabs[MAX_PANE_SURFACES - 1], 1);
     }
 }

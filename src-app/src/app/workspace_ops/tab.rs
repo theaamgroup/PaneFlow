@@ -5,6 +5,8 @@
 use gpui::{AppContext, Context, Focusable, Window};
 
 use crate::PaneFlowApp;
+use crate::limits::MAX_PANE_SURFACES;
+use crate::pane::can_add_tab;
 use crate::terminal::TerminalView;
 use crate::{CloseTab, NewTab};
 
@@ -15,22 +17,35 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ws) = self.active_workspace()
-            && let Some(root) = &ws.root
-            && let Some(pane) = root.focused_pane(window, cx)
-        {
-            let ws_id = ws.id;
-            let cwd = (!ws.cwd.is_empty()).then(|| std::path::PathBuf::from(&ws.cwd));
-            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd, None, cx));
-            cx.subscribe(&terminal, Self::handle_terminal_event)
-                .detach();
-            pane.update(cx, |p, cx| {
-                p.add_tab(terminal, cx);
-            });
-            pane.read(cx).focus_handle(cx).focus(window, cx);
-            self.save_session(cx);
-            cx.notify();
+        let Some(pane) = self.active_workspace().and_then(|ws| {
+            ws.root
+                .as_ref()
+                .and_then(|root| root.focused_pane(window, cx))
+        }) else {
+            return;
+        };
+        if !can_add_tab(pane.read(cx).tabs.len(), MAX_PANE_SURFACES) {
+            self.show_toast(
+                format!("Maximum tab count reached ({MAX_PANE_SURFACES})"),
+                cx,
+            );
+            return;
         }
+        let Some((ws_id, cwd)) = self.active_workspace().map(|ws| {
+            let cwd = (!ws.cwd.is_empty()).then(|| std::path::PathBuf::from(&ws.cwd));
+            (ws.id, cwd)
+        }) else {
+            return;
+        };
+        let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd, None, cx));
+        cx.subscribe(&terminal, Self::handle_terminal_event)
+            .detach();
+        pane.update(cx, |p, cx| {
+            p.add_tab(terminal, cx);
+        });
+        pane.read(cx).focus_handle(cx).focus(window, cx);
+        self.save_session(cx);
+        cx.notify();
     }
 
     pub(crate) fn handle_close_tab(

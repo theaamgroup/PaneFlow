@@ -407,22 +407,29 @@ const MAX_LAYOUT_LEAVES: usize = 32;
 /// US-011: max direct children of one `Split` node at the schema boundary.
 const MAX_SPLIT_CHILDREN: usize = 32;
 
-/// US-011: max surfaces (tabs) in one `Pane` at the schema boundary.
-const MAX_PANE_SURFACES: usize = 64;
+/// US-011 / issue #30: max surfaces (tabs) in one `Pane` at the schema
+/// boundary. Live `add_tab` in src-app re-exports this as
+/// `limits::MAX_PANE_SURFACES` so the write cap cannot drift from the
+/// restore truncate. Includes markdown (and any other non-PTY tab): the
+/// restore cap is surfaces, not terminals-only.
+pub const MAX_PANE_SURFACES: usize = 64;
 
 /// Recursively validate and fix a layout node, bounding its breadth and total
 /// leaf count at the schema boundary (U-008/U-016).
 ///
-/// - Attacker-driven panes (leaves) are capped to [`MAX_LAYOUT_LEAVES`]: a wide
-///   OR deep tree can never restore more terminals than that from session.json
-///   content, so a hand-edited / agent-written file can't spawn unbounded PTYs.
-///   (A pruned split may gain ≤1 app-synthesized pad pane to stay structurally
-///   valid; that is bounded and not attacker-amplified - see the pad note.)
+/// - Attacker-driven panes (leaves) are capped to [`MAX_LAYOUT_LEAVES`]. That
+///   is a leaf budget, not a PTY budget: each leaf may still hold up to
+///   [`MAX_PANE_SURFACES`] surfaces, and every non-markdown surface becomes a
+///   terminal on restore. Session restore counts those PTY surfaces against a
+///   workspace terminal budget (issue #30). A pruned split may gain ≤1
+///   app-synthesized pad pane to stay structurally valid; that is bounded and
+///   not attacker-amplified - see the pad note.
 /// - Split nodes: direct children bounded to [`MAX_SPLIT_CHILDREN`]; must have
 ///   at least 2 children; legacy `ratio` clamped to [0.1, 0.9] and (for a
 ///   2-child split) converted to an explicit `ratios` pair (U-007); per-child
 ///   `ratios` clamped to [0.01, 1.0].
-/// - Pane nodes: surfaces bounded to [`MAX_PANE_SURFACES`]; must have at least 1.
+/// - Pane nodes: surfaces bounded to [`MAX_PANE_SURFACES`] (logged truncate);
+///   must have at least 1.
 pub fn validate_layout(node: &mut LayoutNode) {
     let mut leaf_budget = MAX_LAYOUT_LEAVES;
     validate_node(node, &mut leaf_budget);
@@ -566,9 +573,9 @@ fn validate_node(node: &mut LayoutNode, leaf_budget: &mut usize) {
         LayoutNode::Pane {
             ref mut surfaces, ..
         } => {
-            // U-008: bound tabs per pane - a pane is one leaf in the tree (so
-            // the leaf budget does not catch it), but each surface still spawns
-            // a real terminal on restore.
+            // U-008 / issue #30: bound tabs per pane - a pane is one leaf in
+            // the tree (so the leaf budget does not catch it), but each
+            // non-markdown surface still spawns a real terminal on restore.
             if surfaces.len() > MAX_PANE_SURFACES {
                 warn!(
                     "pane has {} surfaces (cap {MAX_PANE_SURFACES}); truncating",

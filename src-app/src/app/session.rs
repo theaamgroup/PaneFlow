@@ -17,7 +17,7 @@ use paneflow_config::schema::LayoutNode;
 use crate::PaneFlowApp;
 use crate::launch_cwd;
 use crate::layout::{LayoutTree, MAX_PANES};
-use crate::limits::MAX_SESSION_SIZE_BYTES;
+use crate::limits::{MAX_PANE_SURFACES, MAX_SESSION_SIZE_BYTES, MAX_WORKSPACE_TERMINALS};
 use crate::pane::Pane;
 use crate::terminal::TerminalView;
 use crate::workspace::{MAX_WORKSPACES, Workspace, next_workspace_id};
@@ -370,14 +370,13 @@ impl PaneFlowApp {
             }
             let ws_id = next_workspace_id();
 
-            // US-009 AC2 / US-011: `validate_layout` best-effort-caps the leaf
-            // budget, but its ">= 2 children" padding re-introduces a bounded
-            // O(depth) overshoot of app-synthesized pad panes once that budget
-            // is spent (a crafted deeply-nested session.json - local-only, but
-            // still a self-DoS). Enforce the hard MAX_PANES ceiling HERE, the
-            // location US-009 AC2 names, so no workspace can ever restore more
-            // than MAX_PANES real PTYs: over the cap we drop the layout and fall
-            // back to a single default terminal.
+            // US-009 AC2 / US-011 / issue #30: `validate_layout` caps leaves
+            // and truncates each pane to MAX_PANE_SURFACES (logged), but its
+            // ">= 2 children" padding can overshoot MAX_PANES, and leaf_count
+            // is not a PTY count - each leaf may hold 64 non-markdown surfaces.
+            // Enforce both ceilings HERE: more than MAX_PANES leaves, or more
+            // than MAX_WORKSPACE_TERMINALS PTY surfaces, drops the layout and
+            // restores a single default terminal.
             let restored_layout = ws_session
                 .layout
                 .clone()
@@ -461,7 +460,8 @@ impl PaneFlowApp {
 
     /// Create a `Pane` (with one tab per surface) from serialized surface
     /// definitions. Falls back to a single terminal in `fallback_cwd` when
-    /// the surface list is empty.
+    /// the surface list is empty. Never spawns more than [`MAX_PANE_SURFACES`]
+    /// tabs, even if the caller skipped `validate_layout` (issue #30).
     pub(crate) fn spawn_pane_from_surfaces(
         workspace_id: u64,
         surfaces: &[paneflow_config::schema::SurfaceDefinition],
@@ -469,6 +469,16 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> Entity<Pane> {
         use std::path::PathBuf;
+
+        let surfaces = if surfaces.len() > MAX_PANE_SURFACES {
+            log::warn!(
+                "spawn_pane_from_surfaces: pane has {} surfaces (cap {MAX_PANE_SURFACES}); not spawning the rest",
+                surfaces.len()
+            );
+            &surfaces[..MAX_PANE_SURFACES]
+        } else {
+            surfaces
+        };
 
         let mut focus_idx: usize = 0;
         let tabs: Vec<crate::pane::TabContent> = if surfaces.is_empty() {
@@ -698,25 +708,55 @@ fn without_persisted_scrollback(mut layout: LayoutNode) -> LayoutNode {
     layout
 }
 
-/// Validate a persisted layout and enforce the hard `MAX_PANES` ceiling
-/// (US-009 AC2 / US-011). `validate_layout` best-effort-caps the leaf budget,
-/// but its ">= 2 children" padding re-introduces a bounded `O(depth)` overshoot
-/// of app-synthesized pad panes once that budget is spent (a crafted
-/// deeply-nested session.json). Returns `None` - restore a single default
-/// terminal - when the post-validation leaf count still exceeds `MAX_PANES`, so
-/// no workspace can ever restore more than `MAX_PANES` real PTYs. The location
-/// US-009 AC2 names; defence-in-depth on top of `validate_layout`'s budget.
-fn validated_layout_within_cap(mut layout: LayoutNode) -> Option<LayoutNode> {
+/// Validate a persisted layout and enforce the hard leaf + terminal ceilings
+/// (US-009 AC2 / US-011 / issue #30). `validate_layout` best-effort-caps the
+/// leaf budget and truncates each pane to [`MAX_PANE_SURFACES`] (logged), but
+/// its ">= 2 children" padding re-introduces a bounded `O(depth)` overshoot
+/// of app-synthesized pad panes, and `leaf_count()` is not a PTY count.
+/// Returns `None` - restore a single default terminal - when the
+/// post-validation leaf count exceeds `MAX_PANES` or the non-markdown surface
+/// count exceeds [`MAX_WORKSPACE_TERMINALS`].
+fn validated_layout_within_cap(layout: LayoutNode) -> Option<LayoutNode> {
+    validated_layout_within_caps(layout, MAX_PANES, MAX_WORKSPACE_TERMINALS)
+}
+
+fn validated_layout_within_caps(
+    mut layout: LayoutNode,
+    max_leaves: usize,
+    max_terminals: usize,
+) -> Option<LayoutNode> {
     paneflow_config::loader::validate_layout(&mut layout);
     let leaves = layout.leaf_count();
-    if leaves > MAX_PANES {
+    if leaves > max_leaves {
         log::warn!(
             "session restore: layout has {leaves} panes after validation \
-             (> MAX_PANES {MAX_PANES}); discarding it and restoring a single terminal"
+             (> MAX_PANES {max_leaves}); discarding it and restoring a single terminal"
+        );
+        return None;
+    }
+    let terminals = layout_terminal_count(&layout);
+    if terminals > max_terminals {
+        log::warn!(
+            "session restore: layout has {terminals} terminal surfaces after validation \
+             (> MAX_WORKSPACE_TERMINALS {max_terminals}); discarding it and restoring a single terminal"
         );
         return None;
     }
     Some(layout)
+}
+
+/// Non-markdown surfaces spawn a `TerminalView` / PTY on restore.
+fn is_pty_surface(surface: &paneflow_config::schema::SurfaceDefinition) -> bool {
+    surface.surface_type.as_deref() != Some("markdown")
+}
+
+/// Count PTY-spawning surfaces in a layout. Distinct from [`LayoutNode::leaf_count`]:
+/// one leaf may hold up to [`MAX_PANE_SURFACES`] terminals.
+fn layout_terminal_count(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Pane { surfaces } => surfaces.iter().filter(|s| is_pty_surface(s)).count(),
+        LayoutNode::Split { children, .. } => children.iter().map(layout_terminal_count).sum(),
+    }
 }
 
 fn should_repair_restored_root_terminal(title: &str, cwd: &Path) -> bool {
@@ -1096,6 +1136,87 @@ mod tests {
             validated_layout_within_cap(deep).is_none(),
             "a layout exceeding MAX_PANES after validation must be discarded"
         );
+    }
+
+    #[test]
+    fn layout_terminal_count_counts_pty_surfaces_not_leaves() {
+        let layout = LayoutNode::Pane {
+            surfaces: (0..10).map(|_| Default::default()).collect(),
+        };
+        assert_eq!(layout.leaf_count(), 1);
+        assert_eq!(layout_terminal_count(&layout), 10);
+    }
+
+    #[test]
+    fn layout_terminal_count_skips_markdown_surfaces() {
+        let mut markdown: paneflow_config::schema::SurfaceDefinition = Default::default();
+        markdown.surface_type = Some("markdown".to_string());
+        let layout = LayoutNode::Pane {
+            surfaces: vec![Default::default(), markdown, Default::default()],
+        };
+        assert_eq!(layout.leaf_count(), 1);
+        assert_eq!(layout_terminal_count(&layout), 2);
+    }
+
+    #[test]
+    fn layout_terminal_count_sums_split_children() {
+        let layout = LayoutNode::Split {
+            direction: "vertical".to_string(),
+            ratio: None,
+            ratios: None,
+            children: vec![
+                LayoutNode::Pane {
+                    surfaces: (0..3).map(|_| Default::default()).collect(),
+                },
+                LayoutNode::Pane {
+                    surfaces: (0..4).map(|_| Default::default()).collect(),
+                },
+            ],
+        };
+        assert_eq!(layout.leaf_count(), 2);
+        assert_eq!(layout_terminal_count(&layout), 7);
+    }
+
+    #[test]
+    fn validated_layout_within_cap_accepts_max_surfaces_on_one_leaf() {
+        let layout = LayoutNode::Pane {
+            surfaces: (0..MAX_PANE_SURFACES).map(|_| Default::default()).collect(),
+        };
+        let restored = validated_layout_within_cap(layout)
+            .expect("64 terminal tabs in one pane are within the workspace PTY budget");
+        assert_eq!(restored.leaf_count(), 1);
+        assert_eq!(layout_terminal_count(&restored), MAX_PANE_SURFACES);
+    }
+
+    #[test]
+    fn validated_layout_within_caps_rejects_terminal_overshoot_even_when_leaves_fit() {
+        let layout = LayoutNode::Pane {
+            surfaces: (0..10).map(|_| Default::default()).collect(),
+        };
+        assert_eq!(layout.leaf_count(), 1);
+        assert!(
+            validated_layout_within_caps(layout.clone(), MAX_PANES, 10).is_some(),
+            "10 PTY surfaces fit a 10-terminal budget"
+        );
+        assert!(
+            validated_layout_within_caps(layout, MAX_PANES, 9).is_none(),
+            "10 PTY surfaces must fail a 9-terminal budget even though leaf_count is 1"
+        );
+    }
+
+    #[test]
+    fn validated_layout_within_cap_keeps_per_pane_truncate_then_counts_terminals() {
+        let layout = LayoutNode::Pane {
+            surfaces: (0..200).map(|_| Default::default()).collect(),
+        };
+        let restored = validated_layout_within_cap(layout)
+            .expect("per-pane truncate to 64 keeps the layout under the workspace PTY budget");
+        match restored {
+            LayoutNode::Pane { surfaces } => {
+                assert_eq!(surfaces.len(), MAX_PANE_SURFACES);
+            }
+            other => panic!("expected pane, got {other:?}"),
+        }
     }
 
     #[test]

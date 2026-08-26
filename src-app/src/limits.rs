@@ -5,15 +5,18 @@
 //! cap stay in sync - the "validate on both directions" invariant can't
 //! silently rot when the two numbers live a screen apart in different files.
 //!
-//! Three caps are owned by the module/crate that defines their domain and are
-//! cross-referenced (not duplicated) here, since a `const` cannot span a crate
-//! boundary and moving a `pub(crate)` const would only churn its many import
-//! sites for no behavioral gain:
+//! Four caps are owned by the module/crate that defines their domain and are
+//! cross-referenced (not duplicated) here, since moving a `pub(crate)` const
+//! would only churn its many import sites for no behavioral gain:
 //!
 //! - **`MAX_PANES`** (32) - [`crate::layout::MAX_PANES`]. Live UI create cap
 //!   (split / drop-to-split / IPC `surface.split` / `workspace.create`) ↔ read
 //!   cap in [`paneflow_config::loader::validate_layout`] (US-011) and at session
-//!   restore (US-009).
+//!   restore (US-009). This is a **leaf** cap, not a PTY cap (issue #30).
+//! - **`MAX_PANE_SURFACES`** (64) - `paneflow_config::loader::MAX_PANE_SURFACES`.
+//!   Live `Pane::add_tab` / `add_markdown_tab` write cap ↔ per-pane truncate
+//!   in `validate_layout` and session restore (issue #30). The config crate
+//!   owns the value because it is a leaf crate; this module re-exports it.
 //! - **`MAX_WORKSPACES`** (20) - [`crate::workspace::MAX_WORKSPACES`]. Live
 //!   `workspace.create` cap ↔ `restore_workspaces` cap (US-009).
 //! - **`MAX_CONFIG_SIZE_BYTES`** (1 MiB) - `paneflow_config::loader`. Read cap
@@ -65,3 +68,17 @@ pub(crate) const MAX_SESSION_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 /// Paneflow but lives in a user-writable cache directory, so a corrupt or
 /// maliciously oversized local file must not be read whole before JSON parse.
 pub(crate) const MAX_MARKDOWN_STATE_SIZE_BYTES: u64 = 1024 * 1024;
+
+/// Per-pane tab/surface cap (issue #30). Re-export of
+/// [`paneflow_config::loader::MAX_PANE_SURFACES`] so live `add_tab` and
+/// session restore cannot drift from `validate_layout`'s logged truncate.
+/// Includes markdown: the restore cap is surfaces, not terminals-only.
+pub(crate) const MAX_PANE_SURFACES: usize = paneflow_config::loader::MAX_PANE_SURFACES;
+
+/// Workspace-level restore cap on PTY-spawning (non-markdown) surfaces.
+/// Matches the live write envelope: [`crate::layout::MAX_PANES`] leaves ×
+/// [`MAX_PANE_SURFACES`] tabs. `validated_layout_within_cap` counts
+/// terminals, not layout leaves, so a single leaf with 64 terminals is
+/// accepted while a hostile tree that would spawn more PTYs than this is
+/// discarded rather than restored.
+pub(crate) const MAX_WORKSPACE_TERMINALS: usize = crate::layout::MAX_PANES * MAX_PANE_SURFACES;
