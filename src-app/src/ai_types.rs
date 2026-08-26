@@ -141,8 +141,9 @@ pub struct AgentSession {
     /// (macOS `pbi_start_tvsec` - opaque, only compared for equality).
     /// Guards the sweep's `pid_is_alive` probe against PID reuse:
     /// a live PID whose start time changed belongs to a DIFFERENT process,
-    /// so the session is dead. `None` (synthetic PID, probe failure) keeps
-    /// the conservative liveness-only check.
+    /// so the session is dead. Upsert also replaces the row when a pinned
+    /// start no longer matches. `None` (synthetic PID, first-pin failure)
+    /// keeps the conservative liveness-only check.
     pub proc_start: Option<u64>,
     /// EP-004 US-015 (agent-control-plane): an optional summary of the agent's
     /// last completed turn, surfaced by `fleet.list` / `surface.status` so a

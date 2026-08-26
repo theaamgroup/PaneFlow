@@ -780,6 +780,10 @@ pub struct TerminalState {
     pub exit_signal: Option<String>,
     /// PID of the shell child process, used for port detection.
     pub child_pid: u32,
+    /// OS start time of `child_pid`, pinned at spawn (same encoding as
+    /// session `proc_start`). Distinguishes a recycled PID from this
+    /// terminal's original child when `ChildExit` has not yet cleared the pid.
+    pub child_proc_start: Option<u64>,
     /// US-019: raw fd of the PTY master, captured at spawn before the master
     /// moves into the message-loop thread. macOS uses it to call
     /// `tcgetpgrp(fd)` for live foreground-process naming. `None` on the
@@ -935,6 +939,7 @@ pub(super) struct SpawnParams {
 pub(super) struct SpawnedPty {
     channel: EventLoopSender,
     child_pid: u32,
+    child_proc_start: Option<u64>,
     /// The directory the shell was spawned in. Seeds [`TerminalState::current_cwd`]
     /// at promotion so the sessions sidebar can resolve a project before the
     /// first `cwd_now()` poll - and at all on Windows, where `cwd_now()` is a
@@ -946,6 +951,24 @@ pub(super) struct SpawnedPty {
     pty_guard: Option<crate::agents::parent_guard::PtyGuardHandle>,
     #[cfg(target_os = "macos")]
     pty_master_fd: Option<i32>,
+}
+
+/// Spawn-time pin for `child_pid`. Same encoding as session `proc_start`
+/// (`pbi_start_tvsec`/`pbi_start_tvusec`). EPERM and dead-pid races degrade
+/// to `None`.
+#[cfg(target_os = "macos")]
+fn child_pid_start_time(pid: u32) -> Option<u64> {
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::proc_pid::pidinfo;
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
+    let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
+    Some(
+        info.pbi_start_tvsec
+            .wrapping_mul(1_000_000)
+            .wrapping_add(info.pbi_start_tvusec),
+    )
 }
 
 const OSC7_MAX_PAYLOAD: usize = 4096;
@@ -1660,6 +1683,8 @@ impl TerminalState {
         // `ProcessIdGetter::from(&AlacrittyPty)`.
         #[cfg(unix)]
         let child_pid = pty.child().id();
+        #[cfg(unix)]
+        let child_proc_start = child_pid_start_time(child_pid);
         #[cfg(all(unix, not(test)))]
         let pty_guard = crate::agents::parent_guard::spawn_pty_guard(child_pid);
         #[cfg(target_os = "macos")]
@@ -1695,6 +1720,7 @@ impl TerminalState {
         Ok(SpawnedPty {
             channel,
             child_pid,
+            child_proc_start,
             cwd: launch_cwd,
             cwd_rx,
             marks_rx,
@@ -1717,6 +1743,7 @@ impl TerminalState {
         self.cwd_rx = Some(spawned.cwd_rx);
         self.marks_rx = Some(spawned.marks_rx);
         self.child_pid = spawned.child_pid;
+        self.child_proc_start = spawned.child_proc_start;
         #[cfg(all(unix, not(test)))]
         {
             self.pty_guard = spawned.pty_guard;
@@ -1836,6 +1863,7 @@ impl TerminalState {
             keyboard_input_sent: std::sync::atomic::AtomicBool::new(false),
             exit_signal: None,
             child_pid: 0,
+            child_proc_start: None,
             #[cfg(target_os = "macos")]
             pty_master_fd: None,
             current_cwd: None,
@@ -3149,6 +3177,7 @@ mod tests {
         let (state, _events_tx) = TerminalState::new_pending(80, 24);
         assert!(!state.notifier.0.is_pty());
         assert_eq!(state.child_pid, 0);
+        assert!(state.child_proc_start.is_none());
     }
 
     #[test]

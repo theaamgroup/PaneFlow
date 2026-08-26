@@ -71,16 +71,40 @@ pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
 
 /// [`pid_is_alive`] hardened against PID reuse: when the session pinned a
 /// start time at creation, a live PID with a DIFFERENT current start time
-/// is a recycled PID - the original agent is gone. An unknown start time on
-/// either side keeps the conservative "alive" answer.
+/// is a recycled PID - the original agent is gone. A pinned session whose
+/// current start cannot be read is treated as dead (a false-dead is safer
+/// than inheriting a recycled identity). An unpinned session keeps the
+/// conservative "alive" answer.
 fn pid_matches(pid: u32, pinned_start: Option<u64>) -> bool {
     if !pid_is_alive(pid) {
         return false;
     }
-    match (pinned_start, pid_start_time(pid)) {
+    same_process(pinned_start, pid_start_time(pid))
+}
+
+/// Whether `current_start` is still the process we pinned.
+///
+/// Unpinned sessions (`None`) stay conservative so a transient probe miss
+/// before the first pin does not drop the row. Once pinned, a missing or
+/// different current start is not the original process.
+pub(crate) fn same_process(pinned_start: Option<u64>, current_start: Option<u64>) -> bool {
+    match (pinned_start, current_start) {
         (Some(pinned), Some(current)) => pinned == current,
-        _ => true,
+        (Some(_), None) => false,
+        (None, _) => true,
     }
+}
+
+/// A pane child's pid is a surface/port-scan candidate only while the child
+/// has not exited and the spawn-time pin still matches the process currently
+/// occupying that pid.
+pub(crate) fn child_identity_is_live(
+    pid: u32,
+    exited: Option<i32>,
+    pinned_start: Option<u64>,
+    current_start: Option<u64>,
+) -> bool {
+    pid > 0 && exited.is_none() && same_process(pinned_start, current_start)
 }
 
 fn keep_session_after_surface_purge(
@@ -1232,8 +1256,15 @@ impl PaneFlowApp {
                 pane.read(cx)
                     .terminals()
                     .filter_map(|tv| {
-                        let child_pid = tv.read(cx).terminal.child_pid;
-                        (child_pid > 0).then_some((tv.entity_id().as_u64(), child_pid))
+                        let t = tv.read(cx);
+                        let child_pid = t.terminal.child_pid;
+                        let exited = t.terminal.exited;
+                        let pin = t.terminal.child_proc_start;
+                        let current = (child_pid > 0 && exited.is_none())
+                            .then(|| pid_start_time(child_pid))
+                            .flatten();
+                        child_identity_is_live(child_pid, exited, pin, current)
+                            .then_some((tv.entity_id().as_u64(), child_pid))
                     })
                     .collect::<Vec<_>>()
             })
@@ -1374,6 +1405,12 @@ impl PaneFlowApp {
                     .and_then(|b| crate::agent_launcher::TerminalAgent::from_binary(b));
                 tv.update(cx, |view, _cx| {
                     let t = &mut view.terminal;
+                    let current = (t.child_pid > 0 && t.exited.is_none())
+                        .then(|| pid_start_time(t.child_pid))
+                        .flatten();
+                    if !child_identity_is_live(t.child_pid, t.exited, t.child_proc_start, current) {
+                        return;
+                    }
                     // A port that left LISTEN must become re-announceable -
                     // a dev server restarted inside a live shell (nodemon,
                     // plain re-run) re-prints its banner, and that line must
@@ -1566,14 +1603,42 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        announced_port_conflicts, keep_session_after_surface_purge, merge_scan_workspace_state,
-        merge_service_label, port_ownership, stale_sweep_keeps_without_pid_probe,
+        announced_port_conflicts, child_identity_is_live, keep_session_after_surface_purge,
+        merge_scan_workspace_state, merge_service_label, port_ownership, same_process,
+        stale_sweep_keeps_without_pid_probe,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
     use crate::terminal::ServiceInfo;
     use crate::workspace::{PaneScan, PortEntry};
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn same_process_pinned_missing_current_does_not_match() {
+        assert!(same_process(None, None), "unpinned stays conservative");
+        assert!(same_process(None, Some(1)), "unpinned stays conservative");
+        assert!(same_process(Some(1), Some(1)));
+        assert!(!same_process(Some(1), Some(2)), "recycled pid");
+        assert!(
+            !same_process(Some(1), None),
+            "pinned session whose start probe fails is dead"
+        );
+    }
+
+    #[test]
+    fn child_identity_skips_exited_and_mismatched_start() {
+        assert!(child_identity_is_live(42, None, Some(1), Some(1)));
+        assert!(
+            !child_identity_is_live(42, Some(0), Some(1), Some(1)),
+            "exited overlay must not be a candidate"
+        );
+        assert!(
+            !child_identity_is_live(42, None, Some(1), Some(2)),
+            "spawn pin vs current start mismatch is PID reuse"
+        );
+        assert!(!child_identity_is_live(0, None, None, None));
+        assert!(!child_identity_is_live(42, None, Some(1), None));
+    }
 
     #[test]
     fn surface_purge_drops_sessions_bound_to_dying_surface() {

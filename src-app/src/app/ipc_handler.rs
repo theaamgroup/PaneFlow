@@ -2185,6 +2185,8 @@ impl PaneFlowApp {
     /// known `terminal.child_pid`. Direct children (agents launched by
     /// `paneflow up`) hit the fast path synchronously; deeper chains walk
     /// `/proc`/libproc OFF the render thread and deposit the result back.
+    /// Exited overlays and spawn-pin mismatches are skipped; deposit
+    /// re-reads the live terminal and requires pid+start to still match.
     /// A synthetic session key (legacy no-pid frames) or an unresolvable
     /// chain leaves `surface_id = None` - workspace-level badge only, never
     /// a wrong pane.
@@ -2207,41 +2209,110 @@ impl PaneFlowApp {
             return;
         }
         // child_pid → surface entity id, across every workspace (the hook's
-        // workspace_id can lag a moved pane; the chain decides).
+        // workspace_id can lag a moved pane; the chain decides). Skip exited
+        // overlays and children whose spawn-time pin no longer matches the
+        // process currently occupying that pid (PID reuse).
         let mut candidates: HashMap<u32, u64> = HashMap::new();
+        let mut pins: HashMap<u32, Option<u64>> = HashMap::new();
         for ws in &self.workspaces {
             if let Some(root) = &ws.root {
                 for pane in root.collect_leaves() {
                     for terminal in pane.read(cx).terminals() {
-                        let pid = terminal.read(cx).terminal.child_pid;
-                        if pid > 0 {
-                            candidates.insert(pid, terminal.entity_id().as_u64());
-                        }
+                        let t = terminal.read(cx);
+                        let pid = t.terminal.child_pid;
+                        let exited = t.terminal.exited;
+                        let pin = t.terminal.child_proc_start;
+                        let current = (pid > 0 && exited.is_none())
+                            .then(|| super::event_handlers::pid_start_time(pid))
+                            .flatten();
+                        offer_live_child_candidate(
+                            &mut candidates,
+                            &mut pins,
+                            pid,
+                            terminal.entity_id().as_u64(),
+                            exited,
+                            pin,
+                            current,
+                        );
                     }
                 }
             }
         }
         // Fast path: the agent IS the pane's direct child (`up`-launched).
         if let Some(&sid) = candidates.get(&session_key) {
-            self.set_session_surface(ws_id, session_key, sid, cx);
+            let pin = pins.get(&session_key).copied().flatten();
+            self.bind_session_surface_if_child_current(
+                ws_id,
+                session_key,
+                sid,
+                session_key,
+                pin,
+                cx,
+            );
             return;
         }
+        let walk_candidates = candidates.clone();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let resolved = smol::unblock(move || {
-                    crate::workspace::pid_resolve::resolve_surface_for_pid(session_key, &candidates)
+                    crate::workspace::pid_resolve::resolve_surface_for_pid(
+                        session_key,
+                        &walk_candidates,
+                    )
                 })
                 .await;
                 if let Some(sid) = resolved {
                     let _ = cx.update(|cx| {
                         this.update(cx, |app, cx| {
-                            app.set_session_surface(ws_id, session_key, sid, cx);
+                            let Some((&child_pid, _)) = candidates.iter().find(|(_, s)| **s == sid)
+                            else {
+                                return;
+                            };
+                            let pin = pins.get(&child_pid).copied().flatten();
+                            app.bind_session_surface_if_child_current(
+                                ws_id,
+                                session_key,
+                                sid,
+                                child_pid,
+                                pin,
+                                cx,
+                            );
                         })
                     });
                 }
             },
         )
         .detach();
+    }
+
+    /// Bind `sid` only if the live terminal still owns the snapshot child
+    /// (same pid, not exited, spawn pin still matches the current process).
+    fn bind_session_surface_if_child_current(
+        &mut self,
+        ws_id: u64,
+        session_key: u32,
+        sid: u64,
+        expected_child_pid: u32,
+        expected_start: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let still_valid =
+            find_terminal_by_surface_id(&self.workspaces, sid, cx).is_some_and(|terminal| {
+                let t = terminal.read(cx);
+                let current = (t.terminal.child_pid > 0 && t.terminal.exited.is_none())
+                    .then(|| super::event_handlers::pid_start_time(t.terminal.child_pid))
+                    .flatten();
+                surface_candidate_still_valid(
+                    expected_child_pid,
+                    expected_start,
+                    t.terminal.child_pid,
+                    t.terminal.exited,
+                    current,
+                )
+            });
+        if still_valid {
+            self.set_session_surface(ws_id, session_key, sid, cx);
+        }
     }
 
     fn set_session_surface(&mut self, ws_id: u64, key: u32, sid: u64, cx: &mut Context<Self>) {
@@ -3804,6 +3875,23 @@ fn upsert_session_state(
     state: ai_types::AgentState,
     active_tool_name: Option<String>,
 ) -> u32 {
+    upsert_session_state_with_start(sessions, pid, tool, state, active_tool_name, |k| {
+        if k <= i32::MAX as u32 {
+            super::event_handlers::pid_start_time(k)
+        } else {
+            None
+        }
+    })
+}
+
+fn upsert_session_state_with_start(
+    sessions: &mut std::collections::HashMap<u32, AgentSession>,
+    pid: Option<u32>,
+    tool: crate::agent_launcher::TerminalAgent,
+    state: ai_types::AgentState,
+    active_tool_name: Option<String>,
+    probe_start: impl Fn(u32) -> Option<u64>,
+) -> u32 {
     let key = match pid {
         Some(p) => p,
         None => {
@@ -3839,16 +3927,18 @@ fn upsert_session_state(
     let now = std::time::Instant::now();
     // Pin the process start time for real-PID sessions so the sweep can
     // tell a recycled PID from the original agent (an opaque value, only
-    // compared for equality). Probed once - a `Some` is immutable for the
+    // compared for equality). A matching `Some` is immutable for the
     // process's lifetime; a `None` (transient EPERM) retries on the next
-    // frame.
-    let probe_start = |k: u32| {
-        if k <= i32::MAX as u32 {
-            super::event_handlers::pid_start_time(k)
-        } else {
-            None
-        }
-    };
+    // frame. A pinned row whose current start differs - or can no longer
+    // be read - is a different process: drop the stale surface/state/pin
+    // and insert a fresh session.
+    let current_start = probe_start(key);
+    if sessions
+        .get(&key)
+        .is_some_and(|s| !super::event_handlers::same_process(s.proc_start, current_start))
+    {
+        sessions.remove(&key);
+    }
     sessions
         .entry(key)
         .and_modify(|s| {
@@ -3859,7 +3949,7 @@ fn upsert_session_state(
             s.active_tool_name = active_tool_name.clone();
             s.last_activity = now;
             if s.proc_start.is_none() {
-                s.proc_start = probe_start(key);
+                s.proc_start = current_start;
             }
         })
         .or_insert_with(|| {
@@ -3869,10 +3959,46 @@ fn upsert_session_state(
             // Same `now` as the and_modify arm - `AgentSession::new` stamps
             // its own Instant, which would skew (sub-µs) from the wait stamp.
             session.last_activity = now;
-            session.proc_start = probe_start(key);
+            session.proc_start = current_start;
             session
         });
     key
+}
+
+/// Insert `pid → surface` only when the child is still live and the spawn
+/// pin matches the process currently occupying that pid.
+fn offer_live_child_candidate(
+    candidates: &mut HashMap<u32, u64>,
+    pins: &mut HashMap<u32, Option<u64>>,
+    pid: u32,
+    surface_id: u64,
+    exited: Option<i32>,
+    pinned_start: Option<u64>,
+    current_start: Option<u64>,
+) -> bool {
+    if !super::event_handlers::child_identity_is_live(pid, exited, pinned_start, current_start) {
+        return false;
+    }
+    candidates.insert(pid, surface_id);
+    pins.insert(pid, pinned_start);
+    true
+}
+
+/// Deposit-time re-check: the live terminal must still be the snapshot child.
+fn surface_candidate_still_valid(
+    expected_pid: u32,
+    expected_start: Option<u64>,
+    live_pid: u32,
+    live_exited: Option<i32>,
+    live_current_start: Option<u64>,
+) -> bool {
+    live_pid == expected_pid
+        && super::event_handlers::child_identity_is_live(
+            live_pid,
+            live_exited,
+            expected_start,
+            live_current_start,
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -4911,6 +5037,181 @@ mod tests {
             key >= super::SYNTHETIC_SESSION_PID_BASE,
             "synthetic key lands in the reserved band"
         );
+    }
+
+    #[test]
+    fn upsert_session_state_replaces_row_on_recycled_pid() {
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{AgentSession, AgentState};
+        let mut sessions: std::collections::HashMap<u32, AgentSession> =
+            std::collections::HashMap::new();
+        let mut stale = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::WaitingForInput);
+        stale.proc_start = Some(1_000);
+        stale.surface_id = Some(99);
+        stale.message = Some("old question".into());
+        sessions.insert(4242, stale);
+
+        let key = super::upsert_session_state_with_start(
+            &mut sessions,
+            Some(4242),
+            TerminalAgent::ClaudeCode,
+            AgentState::Thinking,
+            Some("Bash".into()),
+            |_| Some(2_000),
+        );
+        assert_eq!(key, 4242);
+        assert_eq!(sessions.len(), 1);
+        let row = &sessions[&4242];
+        assert_eq!(row.state, AgentState::Thinking);
+        assert_eq!(row.active_tool_name.as_deref(), Some("Bash"));
+        assert!(
+            row.surface_id.is_none(),
+            "recycled pid must drop the old pane binding"
+        );
+        assert!(row.message.is_none());
+        assert!(row.waiting_since.is_none());
+        assert_eq!(row.proc_start, Some(2_000));
+    }
+
+    #[test]
+    fn upsert_session_state_keeps_row_when_start_matches() {
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{AgentSession, AgentState};
+        let mut sessions: std::collections::HashMap<u32, AgentSession> =
+            std::collections::HashMap::new();
+        let mut live = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::WaitingForInput);
+        live.proc_start = Some(1_000);
+        live.surface_id = Some(99);
+        live.message = Some("approve?".into());
+        sessions.insert(4242, live);
+
+        let key = super::upsert_session_state_with_start(
+            &mut sessions,
+            Some(4242),
+            TerminalAgent::ClaudeCode,
+            AgentState::Thinking,
+            None,
+            |_| Some(1_000),
+        );
+        assert_eq!(key, 4242);
+        let row = &sessions[&4242];
+        assert_eq!(row.surface_id, Some(99), "same process keeps the pane bind");
+        assert_eq!(row.proc_start, Some(1_000));
+        assert_eq!(row.state, AgentState::Thinking);
+    }
+
+    #[test]
+    fn upsert_session_state_replaces_row_when_pinned_start_unreadable() {
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{AgentSession, AgentState};
+        let mut sessions: std::collections::HashMap<u32, AgentSession> =
+            std::collections::HashMap::new();
+        let mut pinned = AgentSession::new(TerminalAgent::Codex, AgentState::WaitingForInput);
+        pinned.proc_start = Some(1_000);
+        pinned.surface_id = Some(7);
+        sessions.insert(4242, pinned);
+
+        let key = super::upsert_session_state_with_start(
+            &mut sessions,
+            Some(4242),
+            TerminalAgent::Codex,
+            AgentState::Thinking,
+            None,
+            |_| None,
+        );
+        assert_eq!(key, 4242);
+        let row = &sessions[&4242];
+        assert!(
+            row.surface_id.is_none(),
+            "pinned + missing current start is not the same live agent"
+        );
+        assert!(row.proc_start.is_none());
+        assert_eq!(row.state, AgentState::Thinking);
+    }
+
+    #[test]
+    fn same_process_pinned_missing_current_does_not_match() {
+        use super::super::event_handlers::same_process;
+        assert!(same_process(None, None));
+        assert!(same_process(None, Some(1)));
+        assert!(same_process(Some(1), Some(1)));
+        assert!(!same_process(Some(1), Some(2)));
+        assert!(!same_process(Some(1), None));
+    }
+
+    #[test]
+    fn live_child_identity_skips_exited_and_mismatched_start() {
+        let mut candidates = std::collections::HashMap::new();
+        let mut pins = std::collections::HashMap::new();
+        assert!(
+            !super::offer_live_child_candidate(
+                &mut candidates,
+                &mut pins,
+                100,
+                7,
+                Some(0),
+                Some(1),
+                Some(1),
+            ),
+            "exited overlay must not enter the candidate map"
+        );
+        assert!(candidates.is_empty());
+        assert!(
+            !super::offer_live_child_candidate(
+                &mut candidates,
+                &mut pins,
+                100,
+                7,
+                None,
+                Some(1),
+                Some(2),
+            ),
+            "mismatched start is PID reuse"
+        );
+        assert!(candidates.is_empty());
+        assert!(super::offer_live_child_candidate(
+            &mut candidates,
+            &mut pins,
+            100,
+            7,
+            None,
+            Some(1),
+            Some(1),
+        ));
+        assert_eq!(candidates.get(&100), Some(&7));
+        assert_eq!(pins.get(&100), Some(&Some(1)));
+        assert!(
+            !super::surface_candidate_still_valid(100, Some(1), 100, Some(0), Some(1)),
+            "deposit must refuse an exited child"
+        );
+        assert!(!super::surface_candidate_still_valid(
+            100,
+            Some(1),
+            100,
+            None,
+            Some(2)
+        ));
+        assert!(!super::surface_candidate_still_valid(
+            100,
+            Some(1),
+            200,
+            None,
+            Some(1)
+        ));
+        assert!(super::surface_candidate_still_valid(
+            100,
+            Some(1),
+            100,
+            None,
+            Some(1)
+        ));
+        assert!(!super::surface_candidate_still_valid(
+            100,
+            Some(1),
+            100,
+            None,
+            None
+        ));
     }
 
     #[test]
