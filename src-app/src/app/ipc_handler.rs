@@ -165,6 +165,9 @@ pub(crate) fn dedupe_planned_pane_labels(planned: &mut [PlannedPane]) {
 /// (Vertical divider), `even_v` = stacked (Horizontal divider), `main_vertical`
 /// = the focused pane on the left with the rest stacked, `tiled` = tmux grid.
 /// Unknown names fall back to `even_h`.
+///
+/// `focus_idx` picks the left/main slot for `main_vertical` only. Other presets
+/// keep pane order. Keyboard focus is the caller's job after the tree is built.
 pub(crate) fn build_up_layout(
     preset: &str,
     panes: Vec<Entity<Pane>>,
@@ -180,6 +183,23 @@ pub(crate) fn build_up_layout(
         "tiled" => LayoutTree::tiled(panes),
         _ => LayoutTree::from_panes_equal(SplitDirection::Vertical, panes),
     }
+}
+
+/// Keyboard focus needs a `&mut Window`, which IPC dispatch does not carry.
+/// Defer one tick and re-enter through the main window handle (locate it
+/// among `cx.windows()` by downcast). Deferring keeps the re-entrant
+/// `PaneFlowApp` update out of the in-flight one. Shared by `surface.focus`
+/// and `workspace.up`.
+fn defer_pane_focus(pane: Entity<Pane>, cx: &mut Context<PaneFlowApp>) {
+    cx.defer(move |cx| {
+        for handle in cx.windows() {
+            if let Some(main) = handle.downcast::<PaneFlowApp>() {
+                let _ = main.update(cx, |_, window, cx| {
+                    pane.read(cx).focus_handle(cx).focus(window, cx);
+                });
+            }
+        }
+    });
 }
 
 fn fire_turn_end_notification(
@@ -1925,6 +1945,7 @@ impl PaneFlowApp {
         }
 
         let focus_idx = planned.iter().position(|p| p.focus).unwrap_or(0);
+        let focus_pane = panes.get(focus_idx).cloned();
         let Some(tree) = build_up_layout(preset, panes, focus_idx) else {
             return JsonRpcError::invalid_params("could not build layout from panes").into_value();
         };
@@ -1940,6 +1961,12 @@ impl PaneFlowApp {
         self.workspaces.push(ws);
         let idx = self.workspaces.len() - 1;
         self.activate_workspace_without_window(idx, cx);
+        // Activation never focuses a leaf, and `focus_idx` only changes the
+        // main_vertical slot. Give the `focus = true` pane keyboard focus for
+        // every preset (same Window-defer path as `surface.focus`).
+        if let Some(pane) = focus_pane {
+            defer_pane_focus(pane, cx);
+        }
 
         // Phase 3: launch each agent (typed-ahead into the shell is fine) and
         // schedule the prompt prefill after a bounded readiness wait. The
@@ -2824,20 +2851,10 @@ impl PaneFlowApp {
                     }
                     cx.notify();
                 });
-                // …but the keyboard focus needs a `&mut Window`, which the IPC
-                // dispatch doesn't carry. Defer one tick and re-enter through
-                // the main window handle (locate it among `cx.windows()` by
-                // downcast); deferring keeps the re-entrant `PaneFlowApp` update
-                // out of this in-flight one.
-                cx.defer(move |cx| {
-                    for handle in cx.windows() {
-                        if let Some(main) = handle.downcast::<PaneFlowApp>() {
-                            let _ = main.update(cx, |_, window, cx| {
-                                pane.read(cx).focus_handle(cx).focus(window, cx);
-                            });
-                        }
-                    }
-                });
+                // Keyboard focus needs a `&mut Window`, which IPC dispatch
+                // doesn't carry. Same defer-through-main-window path as
+                // `workspace.up`.
+                defer_pane_focus(pane, cx);
                 self.save_session(cx);
                 cx.notify();
                 serde_json::json!({
@@ -5764,6 +5781,65 @@ mod tests {
         let long = "x".repeat(200);
         let p = serde_json::json!({ "new_name": long });
         assert_eq!(super::parse_rename_name(&p).map(|s| s.len()), Some(64));
+    }
+
+    #[test]
+    fn workspace_up_focuses_focus_idx_leaf_for_every_preset() {
+        // Issue #40: `focus_idx` only picks the main_vertical slot.
+        // even_h/even_v/tiled ignore it for geometry, and activation never
+        // focuses a leaf. Keyboard focus must be applied after the tree is
+        // built, for every preset.
+        let src = include_str!("ipc_handler.rs");
+        let body = src
+            .split("pub(crate) fn handle_workspace_up")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn schedule_prompt_prefill").next())
+            .expect("handle_workspace_up body");
+        assert!(
+            body.contains("let focus_pane = panes.get(focus_idx).cloned()"),
+            "must capture the focus pane before build_up_layout consumes the vec"
+        );
+        assert!(
+            body.contains("build_up_layout(preset, panes, focus_idx)"),
+            "focus_idx still selects the main_vertical slot"
+        );
+        let after_activate = body
+            .split("activate_workspace_without_window")
+            .nth(1)
+            .expect("activation");
+        assert!(
+            after_activate.contains("defer_pane_focus"),
+            "must focus the focus_idx leaf after activation, for every preset"
+        );
+        let layout_fn = src
+            .split("pub(crate) fn build_up_layout")
+            .nth(1)
+            .and_then(|rest| rest.split("fn defer_pane_focus").next())
+            .expect("build_up_layout body");
+        assert!(
+            layout_fn.contains("let main = panes.get(focus_idx)"),
+            "main_vertical still uses focus_idx for the left slot"
+        );
+        for arm in ["even_v", "tiled"] {
+            let arm_body = layout_fn
+                .split(&format!("\"{arm}\" =>"))
+                .nth(1)
+                .and_then(|rest| rest.split('\n').next())
+                .unwrap_or("");
+            assert!(
+                !arm_body.contains("focus_idx"),
+                "{arm} must not consume focus_idx for geometry"
+            );
+        }
+        let default_arm = layout_fn
+            .split("_ =>")
+            .nth(1)
+            .and_then(|rest| rest.split('\n').next())
+            .unwrap_or("");
+        assert!(
+            !default_arm.contains("focus_idx"),
+            "even_h fallback must not consume focus_idx for geometry"
+        );
     }
 
     #[test]
