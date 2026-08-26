@@ -524,6 +524,31 @@ mod tests {
         assert!(found.is_none());
     }
 
+    /// Timing guard. Replaces the PRD's "criterion benchmark"
+    /// (PRD US-004 AC bullet 7) with a lightweight check that stays within
+    /// budget even with a realistic number of stale `$PATH` entries.
+    /// Criterion would pull ~30 dev-deps for one number; this guards the
+    /// same invariant at ~zero cost.
+    ///
+    /// Originally Linux-gated at 15 ms. Restored for macOS: a 20-entry
+    /// walk of nonexistent dirs measures well under 1 ms locally, but CI
+    /// macOS runners add scheduler noise, so the ceiling is 50 ms.
+    #[test]
+    fn find_real_binary_in_completes_under_50ms_budget() {
+        let dirs: Vec<PathBuf> = (0..20)
+            .map(|i| PathBuf::from(format!("/tmp/paneflow-nonexistent-{i}")))
+            .collect();
+
+        let start = std::time::Instant::now();
+        let _ = find_real_binary_in("claude", dirs, None, None);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "PATH walk must complete under 50 ms; got {elapsed:?}"
+        );
+    }
+
     // ---------- US-005: HookConfigGuard ----------
     //
     // All tests call `HookConfigGuard::install_at` with a tempdir-backed

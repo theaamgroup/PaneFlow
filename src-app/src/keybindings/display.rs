@@ -213,6 +213,21 @@ mod tests {
     }
 
     #[test]
+    fn effective_shortcuts_user_override_replaces_key() {
+        let mut overrides = HashMap::new();
+        overrides.insert("cmd-alt-h".to_string(), "split_horizontally".to_string());
+        let entries = effective_shortcuts(&overrides);
+        let split_h = entries
+            .iter()
+            .find(|e| e.description == "Split horizontal")
+            .expect("Split horizontal should be in effective list");
+        assert_eq!(
+            split_h.key, "\u{2318}\u{2325}H",
+            "User override should replace the default key"
+        );
+    }
+
+    #[test]
     fn effective_shortcuts_carry_matching_action_name() {
         // US-021: every row knows the action it rebinds. The editor keys off
         // this, so it must line up with the row's description.
@@ -261,6 +276,21 @@ mod tests {
     }
 
     #[test]
+    fn effective_shortcuts_none_unbinds_canonical_equivalent_key() {
+        let mut overrides = HashMap::new();
+        // `cmd+shift+d` is the plus-separated, macOS-resolved form of the
+        // default `secondary-shift-d` chord; unbind must match by physical
+        // chord, not by the raw config string.
+        overrides.insert("cmd+shift+d".to_string(), "none".to_string());
+        let entries = effective_shortcuts(&overrides);
+        let split_h = entries
+            .iter()
+            .find(|e| e.action_name == "split_horizontally")
+            .expect("unbound actions remain visible for rebinding");
+        assert_eq!(split_h.key, "Unassigned");
+    }
+
+    #[test]
     fn effective_shortcuts_lists_registry_actions_without_defaults() {
         let entries = effective_shortcuts(&HashMap::new());
         let close_window = entries
@@ -280,6 +310,33 @@ mod tests {
             .iter()
             .any(|e| e.description == "Unknown" && e.key == "Ctrl+X");
         assert!(!has_bogus, "Invalid action should not be in effective list");
+    }
+
+    #[test]
+    fn effective_shortcuts_preserves_unoverridden_defaults() {
+        let mut overrides = HashMap::new();
+        overrides.insert("cmd-alt-h".to_string(), "split_horizontally".to_string());
+        let entries = effective_shortcuts(&overrides);
+        // close_pane should still be at its default key. Default is
+        // `secondary-shift-w`, which renders as "⌘⇧W" on macOS.
+        let close = entries
+            .iter()
+            .find(|e| e.description == "Close pane")
+            .expect("Close pane should be in effective list");
+        assert_eq!(
+            close.key, "\u{2318}\u{21E7}W",
+            "Unoverridden action should keep default key"
+        );
+    }
+
+    #[test]
+    fn format_keystroke_produces_readable_output() {
+        // Apple HIG glyphs, no plus separator - matches the native macOS
+        // menu bar convention consumed by US-012.
+        assert_eq!(format_keystroke("ctrl-shift-d"), "\u{2303}\u{21E7}D");
+        assert_eq!(format_keystroke("alt-left"), "\u{2325}Left");
+        assert_eq!(format_keystroke("ctrl-1"), "\u{2303}1");
+        assert_eq!(format_keystroke("shift-pageup"), "\u{21E7}PageUp");
     }
 
     #[cfg(target_os = "macos")]

@@ -554,4 +554,29 @@ mod tests {
         let err = anyhow::Error::new(tagged.clone()).context("self-update/dmg");
         assert_eq!(UpdateError::classify(&err), tagged);
     }
+
+    #[test]
+    fn classify_recovers_install_declined_through_context_wrapping() {
+        // Chain walk must recover an inner `InstallDeclined` so the toast
+        // shows the wrapped message rather than the context string.
+        let tagged = UpdateError::InstallDeclined {
+            message: "Unable to replace /Applications/PaneFlow.app - reinstall manually".into(),
+        };
+        let err = anyhow::Error::new(tagged.clone())
+            .context("self-update/dmg: authorization prompt dismissed");
+        assert_eq!(UpdateError::classify(&err), tagged);
+    }
+
+    #[test]
+    fn classify_recovers_install_failed_through_context_wrapping() {
+        // The DMG installer passes `PathBuf::new()` because it does not
+        // write a standalone verbose log. Chain walk must still recover
+        // the inner tag through a context wrapper.
+        let tagged = UpdateError::InstallFailed {
+            log_path: PathBuf::new(),
+        };
+        let err = anyhow::Error::new(tagged.clone())
+            .context("self-update/dmg: promote-and-rollback both failed");
+        assert_eq!(UpdateError::classify(&err), tagged);
+    }
 }
