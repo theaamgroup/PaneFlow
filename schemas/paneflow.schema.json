@@ -344,17 +344,6 @@
       "description": "Per-tool always-allow and always-deny input patterns.",
       "additionalProperties": { "$ref": "#/definitions/toolPermissionsEntry" },
       "default": {}
-    },
-    "telemetry": {
-      "type": ["object", "null"],
-      "description": "Opt-in desktop telemetry consent. The first-run consent modal only appears when 'enabled' is unanswered.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": ["boolean", "null"],
-          "description": "Tri-state consent: null = unanswered, true = opted in, false = opted out. The PANEFLOW_NO_TELEMETRY=1 environment variable overrides this unconditionally."
-        }
-      }
     }
   },
   "definitions": {

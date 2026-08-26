@@ -35,7 +35,6 @@ focused library crates:
 | `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | GPU-free install engine for the MCP bridge: per-agent detection, idempotent config merge, backup + atomic write |
 | `paneflow-process` | `crates/paneflow-process/` | Bounded external-process execution (wall-clock deadline + stdout cap) shared across crates |
 | `paneflow-acp` | `crates/paneflow-acp/` | Legacy Claude/Codex identity enum plus the `CLAUDECODE` environment scrub |
-| `paneflow-telemetry` | `crates/paneflow-telemetry/` | Opt-in telemetry plumbing (no event leaves the machine unless consent resolves to `true`) |
 
 `src-app` is the default workspace member, so bare `cargo run` starts the
 desktop app instead of becoming ambiguous across helper binaries. The split is
@@ -199,17 +198,6 @@ config gate, so until the repoint lands every launch polls the upstream repo
 and would offer upstream releases as updates. A private repo's release API
 returns 404 without a Bearer token, so the repoint needs credentialed requests
 and our own minisign keypair. See the leak register in the fork design doc.
-
-## Telemetry (opt-in, fail-closed)
-
-Telemetry is **disabled by default**. A first-run modal asks for consent; no
-event is sent unless the answer is an explicit yes. `PANEFLOW_NO_TELEMETRY=1`,
-`DO_NOT_TRACK`, or `NO_TELEMETRY` override everything unconditionally. The full
-client lives in `crates/paneflow-telemetry/`; app-level emitters live in
-`src-app/src/app/telemetry_events.rs`. The event surface covers app lifecycle,
-update funnel, telemetry re-enable, and session-corruption events, with no
-terminal content, no paths, and no prompts. In this fork the PostHog key is
-deliberately left unset, which makes the whole client inert.
 
 ## Platform surface
 

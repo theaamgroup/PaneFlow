@@ -56,15 +56,6 @@ source: see [installation](installation.md).
 | Architecture | Apple Silicon. There is no `x86_64-apple-darwin` build. |
 | GPU | Metal, built in |
 
-## Telemetry
-
-Desktop telemetry is opt-in and off unless `telemetry.enabled` is set to
-`true`. It never includes terminal contents, prompts, or paths.
-Setting `PANEFLOW_NO_TELEMETRY` (or `DO_NOT_TRACK`, or `NO_TELEMETRY`)
-disables it unconditionally; the check is presence-based, so any value
-works. In this fork the PostHog key is deliberately left unset, so the
-path is inert regardless.
-
 ## Licence
 
 GPL-3.0-or-later. GPUI is a Zed fork, so the licence is mandatory, not a

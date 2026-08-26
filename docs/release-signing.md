@@ -90,11 +90,10 @@ them, and treat their presence in a workflow file as a bug to remove:
 | `CLOUDFLARE_*` | Cache purges and DNS for that same domain |
 | `HOMEBREW_TAP_DEPLOY_KEY` | Push access to upstream's Homebrew tap |
 | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`, `GPG_KEY_ID` | Signing `.deb`/`.rpm` packages and apt/dnf repo metadata |
-| `POSTHOG_API_KEY` | Upstream's product-analytics project |
 | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_TRUSTED_SIGNING_*` | Windows Authenticode signing via Azure Trusted Signing |
 
 > **Known gap.** `.github/workflows/release.yml` is still upstream's
-> multi-platform workflow and continues to reference `GPG_*`, `AZURE_*`, and
-> `POSTHOG_API_KEY`, alongside Linux and Windows build legs and deb/rpm smoke
-> tests. Those references are dead only because the secrets are absent. Cutting
-> the workflow down to the macOS path is a separate, still-pending change.
+> multi-platform workflow and continues to reference `GPG_*` and `AZURE_*`,
+> alongside Linux and Windows build legs and deb/rpm smoke tests. Those
+> references are dead only because the secrets are absent. Cutting the workflow
+> down to the macOS path is a separate, still-pending change.

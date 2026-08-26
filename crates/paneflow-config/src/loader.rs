@@ -289,7 +289,6 @@ pub fn try_parse_and_validate(json: &str) -> Result<PaneFlowConfig, serde_json::
     set_field!(factory_button_visible);
     set_field!(qoder_button_visible);
     set_field!(openclaw_button_visible);
-    set_field!(telemetry);
     set_field!(terminal);
     set_field!(agent_panel);
     set_field!(tool_permissions);
@@ -634,6 +633,18 @@ mod tests {
         assert_eq!(config.default_shell, Some("/bin/zsh".to_string()));
         assert_eq!(config.shortcuts.get("ctrl+t"), Some(&"new_tab".to_string()));
         assert!(config.commands.is_empty());
+    }
+
+    #[test]
+    fn test_leftover_telemetry_key_is_ignored_and_rest_of_config_is_used() {
+        // Existing paneflow.json files may still contain a telemetry block
+        // after the subsystem was removed. Unknown keys are ignored; the
+        // rest of the file must still load.
+        let config = parse_and_validate(
+            r#"{"theme": "Vercel", "default_shell": "/bin/zsh", "telemetry": {"enabled": true}}"#,
+        );
+        assert_eq!(config.theme.as_deref(), Some("Vercel"));
+        assert_eq!(config.default_shell.as_deref(), Some("/bin/zsh"));
     }
 
     #[test]
@@ -1072,7 +1083,6 @@ mod tests {
             factory_button_visible: None,
             qoder_button_visible: None,
             openclaw_button_visible: None,
-            telemetry: None,
             terminal: None,
             agent_panel: None,
             external_editor: None,
@@ -1532,69 +1542,6 @@ mod tests {
             !json.contains("scrollback"),
             "None scrollback should be omitted from JSON"
         );
-    }
-
-    // ─── Telemetry config (US-009) ────────────────────────────────────────
-    //
-    // Tri-state encoding:
-    //   - outer None          → user never prompted (block missing from JSON)
-    //   - Some { enabled: None } → block present, question unanswered
-    //   - Some { enabled: Some(true|false) } → explicit consent answer
-    //
-    // No event is ever emitted unless `enabled == Some(true)` at the
-    // capture layer (US-012).
-
-    #[test]
-    fn test_telemetry_missing_block() {
-        // No `telemetry` key at all → outer None (never asked).
-        let config = parse_and_validate(r#"{"default_shell": "/bin/sh"}"#);
-        assert!(config.telemetry.is_none());
-    }
-
-    #[test]
-    fn test_telemetry_enabled_null_and_empty() {
-        // Both `{"enabled": null}` and `{}` must parse to the same state:
-        // block present, enabled unresolved. Both forms are expected in
-        // the wild (users editing by hand vs. the modal writing `{}` before
-        // the user clicks).
-        let via_null = parse_and_validate(r#"{"telemetry": {"enabled": null}}"#);
-        let via_empty = parse_and_validate(r#"{"telemetry": {}}"#);
-
-        assert_eq!(via_null.telemetry, Some(TelemetryConfig { enabled: None }));
-        assert_eq!(via_empty.telemetry, Some(TelemetryConfig { enabled: None }));
-        assert_eq!(via_null.telemetry, via_empty.telemetry);
-    }
-
-    #[test]
-    fn test_telemetry_enabled_true() {
-        let config = parse_and_validate(r#"{"telemetry": {"enabled": true}}"#);
-        assert_eq!(
-            config.telemetry,
-            Some(TelemetryConfig {
-                enabled: Some(true)
-            })
-        );
-
-        // Round-trip: re-serialize then re-parse - the consent answer
-        // must survive without loss so the modal never re-prompts.
-        let json = serde_json::to_string(&config).unwrap();
-        let reparsed = parse_and_validate(&json);
-        assert_eq!(reparsed.telemetry, config.telemetry);
-    }
-
-    #[test]
-    fn test_telemetry_enabled_false() {
-        let config = parse_and_validate(r#"{"telemetry": {"enabled": false}}"#);
-        assert_eq!(
-            config.telemetry,
-            Some(TelemetryConfig {
-                enabled: Some(false)
-            })
-        );
-
-        let json = serde_json::to_string(&config).unwrap();
-        let reparsed = parse_and_validate(&json);
-        assert_eq!(reparsed.telemetry, config.telemetry);
     }
 
     // ─── Terminal config - ligatures (US-008) ─────────────────────────────

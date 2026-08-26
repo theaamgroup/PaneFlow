@@ -13,7 +13,6 @@ use notify::Watcher;
 
 use crate::launch_cwd;
 use crate::pane::Pane;
-use crate::telemetry;
 use crate::terminal::TerminalView;
 use crate::terminal::blink::{BlinkPhase, BlinkPhaseGlobal, CURSOR_BLINK_INTERVAL};
 use crate::window_chrome::title_bar;
@@ -34,23 +33,6 @@ impl PaneFlowApp {
         let ws = Workspace::with_cwd_and_id(ws_id, dir_name, cwd, pane);
         Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
         ws
-    }
-
-    pub(crate) fn spawn_telemetry_flusher(
-        telemetry: std::sync::Arc<telemetry::client::TelemetryClient>,
-        cx: &mut Context<Self>,
-    ) {
-        cx.background_spawn(async move {
-            loop {
-                smol::Timer::after(std::time::Duration::from_secs(5)).await;
-                let client = std::sync::Arc::clone(&telemetry);
-                if !client.is_active() {
-                    break;
-                }
-                smol::unblock(move || client.poll_flush()).await;
-            }
-        })
-        .detach();
     }
 
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
@@ -142,19 +124,19 @@ impl PaneFlowApp {
             }
         }
 
-        // Background update check is deferred until after the telemetry
-        // client is constructed below - `spawn_check` now takes the
-        // client by Arc so it can emit `update_check_started` /
-        // `update_available` (US-007), and the client doesn't exist
-        // this early in bootstrap.
-
         // Restore session or create a single default workspace. The
         // tuple's second component carries forensic context when
-        // `session.json` was unparseable (US-006); we hold onto it and
-        // emit the `session_corrupted` PostHog event after the
-        // telemetry client is constructed below - load_session itself
-        // runs too early in bootstrap to call `self.telemetry`.
+        // `session.json` was unparseable (US-006).
         let (saved_session, session_corruption) = Self::load_session();
+        if let Some(info) = &session_corruption {
+            log::warn!(
+                "session.json corrupted: category={} size={} age_secs={:?} backup={:?}",
+                info.error_category,
+                info.file_size,
+                info.file_age_seconds,
+                info.backup_path.as_ref().map(|p| p.display()),
+            );
+        }
 
         // US-009 (prd-agents-view.md): pull the Agents-view bits out of
         // the saved session BEFORE the workspaces match consumes it.
@@ -673,54 +655,17 @@ impl PaneFlowApp {
 
         let install_method = update::install_method::detect();
 
-        // Compile-time env vars: the PostHog project key is injected by the
-        // release pipeline; the host defaults to EU Cloud so a build that
-        // omits the override still honours the PRD's EU-residency constraint.
-        let posthog_api_key = option_env!("POSTHOG_API_KEY").unwrap_or("");
-        let posthog_host = option_env!("POSTHOG_HOST").unwrap_or("https://eu.i.posthog.com");
-        let telemetry_config_snapshot = paneflow_config::loader::load_config();
-        let telemetry_enabled_last = telemetry_config_snapshot
-            .telemetry
-            .as_ref()
-            .and_then(|t| t.enabled);
-        let telemetry_consent = telemetry::client::TelemetryConsent::new(telemetry_enabled_last);
-        // US-010/US-012 - resolve the anonymous telemetry_id only after the
-        // consent and kill-switch gates pass. Opt-out, unanswered consent, and
-        // env kill-switches must not create persistent telemetry state.
-        let (telemetry_distinct_id, is_first_run_for_telemetry) =
-            if telemetry::client::TelemetryClient::consent_allows_capture(telemetry_consent) {
-                telemetry::id::telemetry_id_with_first_run()
-            } else {
-                (String::new(), false)
-            };
-        let telemetry = std::sync::Arc::new(telemetry::client::TelemetryClient::from_consent(
-            telemetry_consent,
-            posthog_api_key,
-            posthog_host,
-            &telemetry_distinct_id,
-        ));
         // EP-003 US-008 (agent-control-plane): one-shot boot warn when AI
         // free-access mode is enabled, mirroring the PANEFLOW_IPC_SCRIPTING
-        // boot warn in `ipc::start_server()`. Reuses the snapshot already
-        // loaded for telemetry so the file is not re-read. The fence is
-        // independent and defaults ON, so it does not warn.
-        if telemetry_config_snapshot.ai_unrestricted_enabled() {
+        // boot warn in `ipc::start_server()`. The fence is independent and
+        // defaults ON, so it does not warn.
+        let config_snapshot = paneflow_config::loader::load_config();
+        if config_snapshot.ai_unrestricted_enabled() {
             tracing::warn!(
                 "ai.unrestricted is ON; same-UID callers may auto-submit prompts to agent panes without PANEFLOW_IPC_SCRIPTING (toggle in Settings -> AI Agent)"
             );
         }
-        // US-007: now that the telemetry client exists, fire off the
-        // background update check. The detached worker emits
-        // `update_check_started` immediately and `update_available`
-        // only when both the version is greater AND an asset matched.
-        let pending_update = update::checker::spawn_check(
-            std::sync::Arc::clone(&telemetry),
-            update::checker::UpdateCheckTrigger::Auto,
-        );
-        // Background flusher: every 5 s the client inspects its queue and
-        // posts when the size or age threshold is met. Re-spawned when the
-        // telemetry client is swapped by config reconciliation.
-        Self::spawn_telemetry_flusher(std::sync::Arc::clone(&telemetry), cx);
+        let pending_update = update::checker::spawn_check();
 
         // US-008: the diff panel's persistent file filter. Observe it so each
         // keystroke re-renders the app (the TextInput only notifies itself).
@@ -901,9 +846,6 @@ impl PaneFlowApp {
             },
             custom_buttons_modal: None,
             custom_buttons_modal_focus: cx.focus_handle(),
-            telemetry,
-            launch_instant: std::time::Instant::now(),
-            telemetry_enabled_last,
             // US-006: shared signal flipped by the theme watcher's debounce
             // thread; drained by the 50 ms IPC loop to schedule a repaint.
             theme_changed,
@@ -1032,19 +974,6 @@ impl PaneFlowApp {
             } else {
                 app.mode = paneflow_config::schema::AppMode::Cli;
             }
-        }
-
-        // US-013 AC #1 - fire `app_started` once per launch. `Null` clients
-        // (opt-out / unanswered consent / env kill-switch) no-op; only a
-        // consenting user produces an HTTP call, batched on the flusher
-        // above. Must happen after the struct literal so `self.telemetry`
-        // and `self.self_update.install_method` are both populated.
-        app.emit_app_started(is_first_run_for_telemetry);
-        // US-006: emit the corruption event after the client is up.
-        // `Null` clients (consent off / kill-switch active) make this
-        // a no-op without a network call.
-        if let Some(info) = session_corruption {
-            app.emit_session_corrupted(&info);
         }
 
         // EP-002 (memory): opportunistically release exited cached agent
@@ -1184,7 +1113,6 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     cx.on_action(|_: &Quit, cx| {
         with_active_paneflow_window(cx, |app, _window, cx| {
             app.save_session_blocking(cx);
-            app.emit_app_exited_and_flush();
             cx.quit();
         });
     });

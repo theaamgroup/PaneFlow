@@ -7,7 +7,6 @@
 
 use gpui::{ClipboardItem, Context, Window};
 
-use crate::app::telemetry_events::UpdateDismissReason;
 use crate::{DismissUpdate, PaneFlowApp, StartSelfUpdate, TOAST_HOLD_MS, ToastAction, update};
 
 /// App-level backstop for a wedged `Downloading` state (EP-002,
@@ -83,11 +82,10 @@ impl PaneFlowApp {
         self.kickoff_self_update_install(cx);
     }
 
-    /// US-007 AC3: dismiss the update pill for the current launch.
-    /// Clears `update_status` so the title-bar pill disappears, fires
-    /// a `update_dismissed` PostHog event, and forces a re-render.
-    /// Intentionally NOT persisted - the next paneflow launch will
-    /// re-detect the update and re-show the pill (we don't want a
+    /// Dismiss the update pill for the current launch.
+    /// Clears `update_status` so the title-bar pill disappears and forces
+    /// a re-render. Intentionally NOT persisted - the next paneflow launch
+    /// will re-detect the update and re-show the pill (we don't want a
     /// user accidentally sticking on an old version because the
     /// preference outlived their interest).
     pub(crate) fn handle_dismiss_update(
@@ -96,24 +94,17 @@ impl PaneFlowApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Capture the to_version BEFORE we drop update_status so the
-        // emit helper can reference it.
-        self.emit_update_dismissed(UpdateDismissReason::UserDismissed);
         self.self_update.update_status = None;
         cx.notify();
     }
 
     /// US-017: shared completion for every pre-installed update path. Flips to
-    /// `ReadyToRestart`, persists the session (blocking - the next event is a
-    /// process-replacing restart), and queues the `update_installed` analytics
-    /// event WITHOUT a blocking flush (the background `poll_flush` loop drains
-    /// it; the restart click stays zero-I/O). Dedups the six identical blocks
-    /// that previously inlined this - and that previously called
-    /// `flush_blocking` on the render thread, the `[HIGH]` finding.
+    /// `ReadyToRestart` and persists the session (blocking - the next event is
+    /// a process-replacing restart). Dedups the six identical blocks that
+    /// previously inlined this.
     fn on_preinstall_success(&mut self, cx: &mut Context<Self>) {
         self.self_update.self_update_status = update::SelfUpdateStatus::ReadyToRestart;
         self.save_session_blocking(cx);
-        self.emit_update_success();
         cx.notify();
     }
 

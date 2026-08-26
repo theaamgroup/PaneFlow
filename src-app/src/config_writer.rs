@@ -118,9 +118,8 @@ fn write_config_checked(path: &PathBuf, value: &serde_json::Value) -> bool {
 /// Save a top-level config field, returning `true` on success and `false`
 /// when the config path could not be resolved or the file write failed.
 ///
-/// Callers that need to surface persistence failures to the user (e.g. the
-/// telemetry consent modal in US-011, which must honor the choice
-/// in-memory and show a toast when the disk write fails) use this variant.
+/// Callers that need to surface persistence failures to the user use this
+/// variant.
 pub fn save_config_value_checked(key: &str, value: serde_json::Value) -> bool {
     save_config_values_checked([(key, value)])
 }

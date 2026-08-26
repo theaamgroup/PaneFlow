@@ -71,10 +71,6 @@ paneflow-config = { path = "../crates/paneflow-config" }
 # Legacy agent identity plus the CLAUDECODE env scrub. The terminal-only
 # Agents view no longer carries the in-app ACP chat or SDK wrapper here.
 paneflow-acp = { path = "../crates/paneflow-acp" }
-# US-003: telemetry plumbing extracted to its own workspace crate so future
-# `paneflow-trust` member can emit events without pulling the desktop binary
-# into its dep graph.
-paneflow-telemetry = { workspace = true }
 # EP-002 (prd-mcp-bridge-distribution): GPU-free install engine behind
 # `paneflow mcp install|uninstall|status`. Kept in its own crate so its
 # `toml_edit` dep stays out of the size-budgeted embedded `paneflow-mcp`
@@ -181,7 +177,7 @@ semver = "1"
 # Re-added as a direct dep: forced per-thread Claude session IDs
 # (`claude --session-id <uuid>`) so a live Agents thread maps 1:1 to its
 # on-disk session file and can adopt the LLM `ai-title` for its sidebar
-# row. `v4` only - already in the build graph via `paneflow-telemetry`.
+# row. `v4` only.
 uuid.workspace = true
 # Resolve the default shell and agent CLIs on $PATH (`terminal/shell.rs`).
 which.workspace = true

@@ -50,7 +50,7 @@ Common examples:
 * `terminal.ligatures`, `terminal.cursor_blink`, `terminal.env`, and
   `terminal.scroll_multiplier` for advanced terminal behavior.
 * `commands[]` entries that are not workspace templates.
-* Profiles, telemetry, window-decoration, and agent-panel options.
+* Profiles, window-decoration, and agent-panel options.
 * `option_as_meta`, which defaults to off on macOS. Set it to `true` if you want Option to send an ESC prefix instead of producing Unicode input.
 
 PaneFlow reloads valid config changes through its watcher (a `notify`

@@ -5910,7 +5910,6 @@ dependencies = [
  "paneflow-ipc-client",
  "paneflow-mcp-install",
  "paneflow-process",
- "paneflow-telemetry",
  "parking_lot",
  "polling",
  "pulldown-cmark 0.10.3",
@@ -6012,18 +6011,6 @@ dependencies = [
  "same-file",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "paneflow-telemetry"
-version = "0.8.2"
-dependencies = [
- "log",
- "serde",
- "serde_json",
- "tempfile",
- "ureq",
- "uuid",
 ]
 
 [[package]]

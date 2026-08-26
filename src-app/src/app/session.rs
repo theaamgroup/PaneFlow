@@ -45,20 +45,15 @@ fn session_write_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Forensic context emitted alongside a `session_corrupted` telemetry
-/// event (US-006). Gathered by [`PaneFlowApp::load_session_at`] inside
+/// Forensic context gathered by [`PaneFlowApp::load_session_at`] inside
 /// the parse-failure branch *before* the empty fallback session is
 /// returned, so the values reflect the file the user actually had on
-/// disk - not the one we're about to overwrite. Stays a plain data
-/// struct (no telemetry client coupling) because `load_session` runs
-/// in bootstrap before the `TelemetryClient` is constructed; the
-/// caller in `bootstrap.rs` defers the emit until after telemetry is
-/// up.
+/// disk - not the one we're about to overwrite.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionCorruptionInfo {
     /// Canonical `serde_json::Error::classify()` bucket (`io | syntax | data
     /// | eof`) or a guarded-load bucket such as `oversize`, `non_regular`, or
-    /// `unsupported_version`. Plain string keeps the telemetry schema fixed.
+    /// `unsupported_version`. Plain string keeps the bucket names fixed.
     pub(crate) error_category: &'static str,
     /// Size in bytes of the corrupted file, or `0` if the metadata
     /// call itself failed (rare - file just got read successfully).
@@ -225,11 +220,6 @@ impl PaneFlowApp {
     /// rotated down to [`MAX_CORRUPTION_BACKUPS`] entries (R8) so a
     /// chronic-corruption case can't silently fill `~/.cache`.
     ///
-    /// Telemetry: callers receive a `SessionCorruptionInfo` they can
-    /// pass to `PaneFlowApp::emit_session_corrupted` once the
-    /// telemetry client is up. The emit is consent-gated by the
-    /// existing `TelemetryClient::Null` factory branch - opted-out
-    /// users never produce a network call.
     pub(crate) fn load_session() -> (
         Option<paneflow_config::schema::SessionState>,
         Option<SessionCorruptionInfo>,
@@ -253,7 +243,7 @@ impl PaneFlowApp {
         // U-008/U-016: bound the read so a multi-hundred-MB hand-edited /
         // agent-written session.json (or a non-regular file swapped in) can't
         // OOM/stall the load before parse. Guard hits start from an empty
-        // session, but still surface forensic context to telemetry.
+        // session, but still surface forensic context to the caller.
         let bytes = match read_session_capped(path) {
             Ok(SessionRead::Data(d)) => d,
             Ok(SessionRead::Missing) => return (None, None),
@@ -329,9 +319,6 @@ impl PaneFlowApp {
                 let backup_path =
                     write_corruption_backup(path, data.as_bytes()).unwrap_or_else(|e| {
                         // AC6: backup write failure must not block startup.
-                        // Log and proceed - telemetry still fires with a
-                        // `backup_path: None`, so the operator can still see
-                        // the corruption rate even if forensics are missing.
                         log::warn!(
                             "session load: backup write failed at {}: {e}",
                             path.display()
@@ -856,9 +843,8 @@ fn session_tmp_path(path: &Path) -> PathBuf {
     parent.join(format!(".{file_name}.tmp.{}.{}", std::process::id(), seq))
 }
 
-/// Convert `serde_json::Error::classify()` to a fixed string. Telemetry
-/// schema commits to these four buckets so we can dashboard them
-/// directly without remapping if serde widens its enum later.
+/// Convert `serde_json::Error::classify()` to a fixed string. These four
+/// buckets stay stable if serde widens its enum later.
 fn serde_category_tag(err: &serde_json::Error) -> &'static str {
     match err.classify() {
         serde_json::error::Category::Io => "io",

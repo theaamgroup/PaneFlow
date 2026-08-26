@@ -235,15 +235,11 @@ pub fn augment_path_for_gui_launch() {
 ///
 /// - Linux: `$XDG_DATA_HOME/paneflow` (typically `~/.local/share/paneflow`)
 /// - macOS: `~/Library/Application Support/paneflow`
-/// - Windows: `%LOCALAPPDATA%\paneflow` - **non-roaming** on purpose, so a
-///   roamed profile does not carry the per-install telemetry_id to another
-///   machine.
+/// - Windows: `%LOCALAPPDATA%\paneflow` - **non-roaming** on purpose.
 ///
 /// The directory is created if it does not already exist. Returns `None` if
 /// either the platform helper returns `None` (broken environment) or the
 /// `create_dir_all` call fails (read-only FS, permission denied, etc.).
-/// Callers should fall back to an ephemeral in-memory UUID in that case
-/// (see `telemetry::id::telemetry_id`).
 pub fn data_dir() -> Option<PathBuf> {
     let dir = dirs::data_local_dir()?.join(APP_SUBDIR);
     if let Err(e) = std::fs::create_dir_all(&dir) {

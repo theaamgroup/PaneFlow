@@ -56,7 +56,6 @@ That strictness is an editor-side aid only; it never affects loading.
 | `claude_code_bypass_permissions` | boolean or null | `false` | Adds Claude Code `--permission-mode bypassPermissions` when launching from PaneFlow. |
 | `ai_unrestricted` | boolean or null | `false` | Allows trusted automation to submit via IPC without `PANEFLOW_IPC_SCRIPTING=1`. |
 | `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI conductors. |
-| `telemetry` | object or null | unanswered | Opt-in desktop telemetry consent. No event is sent unless `telemetry.enabled` is `true`. |
 | `agent_panel` | object or null | defaults below | Agents-view display, profiles, and notification settings. |
 | `tool_permissions` | object | `{}` | Per-tool always-allow and always-deny input patterns. |
 
@@ -256,27 +255,6 @@ test fixture leaves it unset.
 }
 ```
 
-## Telemetry
-
-`telemetry.enabled` is tri-state:
-
-| Value | Meaning |
-|---|---|
-| `null` or omitted | Unanswered. PaneFlow may show the first-run consent prompt. |
-| `false` | Explicit opt-out. |
-| `true` | Explicit opt-in. |
-
-Desktop telemetry never includes terminal contents, prompts, or paths.
-`PANEFLOW_NO_TELEMETRY` overrides config and disables reporting
-unconditionally. The check is presence-based, so any value works,
-including an empty one. `DO_NOT_TRACK` and `NO_TELEMETRY` are honoured
-the same way. In this fork the PostHog key is left unset, so the path is
-inert regardless.
-
-```json
-{ "telemetry": { "enabled": false } }
-```
-
 ## Complete example
 
 ```json
@@ -314,7 +292,6 @@ inert regardless.
     "env": {},
     "scroll_multiplier": 1.0
   },
-  "telemetry": { "enabled": null },
   "agent_panel": {
     "max_content_width": 760,
     "thinking_display": "Auto",

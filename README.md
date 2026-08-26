@@ -273,11 +273,6 @@ PaneFlow is local-first by design.
   `ctrl-j`) outright.
 - MCP tools are read-only.
 - Terminal output returned to agents is marked as untrusted.
-- Telemetry is inert here. The PostHog wiring is still present, but the API key is
-  injected only by the release pipeline, so a local `cargo build` sends nothing,
-  and this fork never sets `POSTHOG_API_KEY`. `PANEFLOW_NO_TELEMETRY=1` (or
-  `DO_NOT_TRACK`, or `NO_TELEMETRY`) disables it unconditionally regardless of
-  config.
 
 ## Docs
 

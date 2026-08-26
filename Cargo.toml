@@ -9,7 +9,6 @@ members = [
     "crates/paneflow-mcp-install",
     "crates/paneflow-process",
     "crates/paneflow-shim",
-    "crates/paneflow-telemetry",
     "src-app",
 ]
 # Scope bare `cargo run` / `cargo build` / `cargo test` to the desktop app.
@@ -56,7 +55,6 @@ which = "8"
 paneflow-config = { path = "crates/paneflow-config" }
 paneflow-ipc-client = { path = "crates/paneflow-ipc-client" }
 paneflow-process = { path = "crates/paneflow-process" }
-paneflow-telemetry = { path = "crates/paneflow-telemetry" }
 
 # Workspace-wide clippy lint policy (US-007). Mirrors the mandatory
 # CLAUDE.md cherry-picked restriction set. `warn` is preferred over `deny`

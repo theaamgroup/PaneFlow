@@ -9,16 +9,7 @@
 //! Build script for `paneflow-app`.
 //!
 //! Responsibilities:
-//! 1. Invalidate the build when telemetry-related compile-time env vars
-//!    change. `option_env!("POSTHOG_API_KEY")` and
-//!    `option_env!("POSTHOG_HOST")` are resolved at compile time (see
-//!    `src-app/src/app/bootstrap.rs`); without these `rerun-if-env-changed`
-//!    directives Cargo has no way to know the macro output depends on those
-//!    vars, so rotating the key or host in CI would produce a binary that
-//!    still embeds the previous value until an unrelated source change
-//!    forces a rebuild.
-//!
-//! 2. **US-008 / EP-001 - embedded binary staging.** Build the
+//! 1. **US-008 / EP-001 - embedded binary staging.** Build the
 //!    `paneflow-shim`, `paneflow-ai-hook` and `paneflow-mcp` workspace
 //!    binaries for the current target triple and stage them into
 //!    `src-app/target/embed/bin/<target>/` so the `Bins` `RustEmbed` struct
@@ -76,10 +67,6 @@ use std::process::Command;
 /// this cap, so an unexpectedly bloated dependency cannot ship silently.
 const EMBED_SIZE_LIMIT_BYTES: u64 = 1_835_008;
 fn main() {
-    // 1. Telemetry env vars (unchanged behavior - preserved so a key
-    //    rotation forces the downstream `option_env!` to be re-resolved).
-    println!("cargo:rerun-if-env-changed=POSTHOG_API_KEY");
-    println!("cargo:rerun-if-env-changed=POSTHOG_HOST");
     println!("cargo:rerun-if-env-changed=PANEFLOW_SKIP_EMBED_BUILD");
 
     // 2. US-008 - stage the AI-hook binaries into a dir that

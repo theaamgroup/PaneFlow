@@ -185,15 +185,6 @@ pub enum AssetFormat {
 }
 
 impl AssetFormat {
-    /// Canonical lowercase tag used in telemetry payloads (US-007).
-    /// Stable across format-suffix changes so a future suffix rename does
-    /// not break dashboards.
-    pub(crate) fn telemetry_tag(&self) -> &'static str {
-        match self {
-            AssetFormat::Dmg => "dmg",
-        }
-    }
-
     /// Canonical filename suffix the CI emits for this format. Matching is
     /// performed case-insensitively so a release with `.DMG` still works.
     fn filename_suffix(&self) -> &'static str {
@@ -242,48 +233,14 @@ pub enum UpdateStatus {
 
 pub type SharedUpdateSlot = std::sync::Arc<std::sync::Mutex<Option<UpdateStatus>>>;
 
-/// Trigger source for an `update_check_started` telemetry event.
-/// Only the startup auto-check exists today; a `Manual` variant should
-/// be added when a "Check for updates…" menu entry lands.
-#[derive(Clone, Copy, Debug)]
-pub enum UpdateCheckTrigger {
-    Auto,
-}
-
-impl UpdateCheckTrigger {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            UpdateCheckTrigger::Auto => "auto",
-        }
-    }
-}
-
 /// Spawn a detached thread that checks GitHub for a newer release.
 /// The result is deposited into the returned shared slot.
-///
-/// `telemetry` is moved into the worker thread; PostHog events
-/// (`update_check_started` at the top of the poll, `update_available`
-/// inside [`check_github_release`] when both the version and asset
-/// match) ride through that handle. A `Null` client produces no
-/// network call (consent-gated by the factory), so callers that
-/// don't want telemetry - the `--update-and-exit` harness in
-/// particular - pass a Null client.
-pub fn spawn_check(
-    telemetry: std::sync::Arc<crate::telemetry::client::TelemetryClient>,
-    trigger: UpdateCheckTrigger,
-) -> SharedUpdateSlot {
+pub fn spawn_check() -> SharedUpdateSlot {
     let slot: SharedUpdateSlot =
         std::sync::Arc::new(std::sync::Mutex::new(Some(UpdateStatus::Checking)));
     let writer = std::sync::Arc::clone(&slot);
     std::thread::spawn(move || {
-        // AC1: emit at the very start of the poll so the funnel still
-        // has a numerator for users who go offline mid-check.
-        crate::app::telemetry_events::emit_update_check_started(
-            &telemetry,
-            trigger,
-            CURRENT_VERSION,
-        );
-        let status = check_github_release(&telemetry);
+        let status = check_github_release();
         *writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
     });
     slot
@@ -378,12 +335,8 @@ fn transient_update_error(e: &ureq::Error) -> bool {
 }
 
 /// Blocking entry point used by both the background `spawn_check` thread
-/// and the synchronous `--update-and-exit` CLI flag (US-005). The
-/// `telemetry` handle drives the `update_available` event (US-007 AC2)
-/// pass a `Null` client to opt out.
-pub(crate) fn check_github_release(
-    telemetry: &crate::telemetry::client::TelemetryClient,
-) -> UpdateStatus {
+/// and the synchronous `--update-and-exit` CLI flag (US-005).
+pub(crate) fn check_github_release() -> UpdateStatus {
     // Dev-only override: lets `cargo run` short-circuit the GitHub check
     // and synthesize an `Available { version }` so the update pill can be
     // exercised end-to-end without a real release. Pair with
@@ -470,20 +423,6 @@ pub(crate) fn check_github_release(
         log::info!(
             "update available: v{remote} (current: v{local}) - asset_format: {asset_format:?}"
         );
-        // AC2: only emit when both version-greater AND asset-matched.
-        // Releases that ship without the host-specific format already
-        // surface as `asset_url: None` so the title bar falls back to
-        // the release-page browser link - counting those as "available"
-        // would inflate the funnel with users who can't actually
-        // accept the update in-app.
-        if let Some(format) = asset_format.as_ref() {
-            crate::app::telemetry_events::emit_update_available(
-                telemetry,
-                CURRENT_VERSION,
-                &remote.to_string(),
-                format.telemetry_tag(),
-            );
-        }
         UpdateStatus::Available {
             version: remote.to_string(),
             url: release.html_url,
@@ -757,101 +696,12 @@ mod tests {
         assert!(r.is_none());
     }
 
-    // ─── US-007: telemetry events ──────────────────────────────────────
-    //
-    // These tests exercise the *property bag* shape directly via the
-    // `*_props` helpers in `app::telemetry_events`. Inspecting the
-    // actual TelemetryClient queue would require crossing the
-    // `paneflow-telemetry` crate's private test-only API, but the
-    // emit helpers are thin (`client.capture(name, props)`) so a
-    // schema check on the props plus a Null-client smoke test
-    // covers the same regression surface as a queue-level mock -
-    // the only thing left untested is whether `capture()` itself
-    // enqueues correctly, and that's covered by the existing
-    // `paneflow_telemetry::client::tests::capture_enqueues_event`.
-
-    use crate::app::telemetry_events::{
-        UpdateDismissReason, emit_update_available, emit_update_check_started,
-        emit_update_dismissed_via, update_available_props, update_check_started_props,
-        update_dismissed_props,
-    };
-    use crate::telemetry::client::TelemetryClient;
-
-    /// AC1 + AC5: `update_check_started` carries `trigger` and
-    /// `current_version` exactly as documented in the PRD; Null-client
-    /// emit is a no-op (consent gating verified at the adapter level).
-    #[test]
-    fn update_check_started_props_match_ac1_schema() {
-        let props = update_check_started_props(UpdateCheckTrigger::Auto, "0.2.11");
-        assert_eq!(props["trigger"], "auto");
-        assert_eq!(props["current_version"], "0.2.11");
-
-        // Null-client emit must not panic and must not enqueue.
-        emit_update_check_started(&TelemetryClient::Null, UpdateCheckTrigger::Auto, "0.2.11");
-    }
-
-    /// AC2 + AC5: `update_available` payload pins from/to/asset_format.
-    /// Null-client emit is a no-op.
-    #[test]
-    fn update_available_props_match_ac2_schema() {
-        let props = update_available_props("0.2.11", "0.2.12", "deb");
-        assert_eq!(props["from_version"], "0.2.11");
-        assert_eq!(props["to_version"], "0.2.12");
-        assert_eq!(props["asset_format"], "deb");
-
-        emit_update_available(&TelemetryClient::Null, "0.2.11", "0.2.12", "deb");
-    }
-
-    /// AC3 + AC5: `update_dismissed` payload pins the reason enum
-    /// values verbatim - dashboards key off these strings.
-    #[test]
-    fn update_dismissed_props_match_ac3_schema() {
-        let props = update_dismissed_props("0.2.11", "0.2.12", UpdateDismissReason::UserDismissed);
-        assert_eq!(props["from_version"], "0.2.11");
-        assert_eq!(props["to_version"], "0.2.12");
-        assert_eq!(props["reason"], "user_dismissed");
-
-        let dialog = update_dismissed_props("0.2.11", "0.2.12", UpdateDismissReason::DialogClosed);
-        assert_eq!(dialog["reason"], "dialog_closed");
-
-        emit_update_dismissed_via(
-            &TelemetryClient::Null,
-            "0.2.11",
-            "0.2.12",
-            UpdateDismissReason::UserDismissed,
-        );
-    }
-
-    /// AC2 fires only when an asset matched. The `check_github_release`
-    /// branch above explicitly gates the emit on `asset_format.is_some()`
-    /// verify that with a property-style assertion: pick_asset
-    /// returning None means the funnel correctly drops the user
-    /// (they'll see the browser-fallback pill instead).
     #[test]
     fn update_available_skipped_when_no_asset_matches() {
         // A release carrying only the detached signature and no .dmg -
         // nothing for an .app-bundle install to download.
         let assets = vec![make_asset("paneflow-0.2.12-x86_64-apple-darwin.dmg.sig")];
         let picked = pick_asset(&assets, "x86_64", app_bundle());
-        assert!(picked.is_none(), "no .dmg asset → no update_available emit");
-    }
-
-    /// AC4: a Null-client `capture` call is the consent-off path. Trip
-    /// the three free-function emitters with a Null client back to
-    /// back; if any path ever evolves to side-effect even on Null, the
-    /// `is_active() == false` guard inside `client.capture` would
-    /// catch it but this asserts it at the call site too.
-    #[test]
-    fn null_client_emits_are_no_ops() {
-        let null = TelemetryClient::Null;
-        assert!(!null.is_active());
-        emit_update_check_started(&null, UpdateCheckTrigger::Auto, "0.2.11");
-        emit_update_available(&null, "0.2.11", "0.2.12", "targz");
-        emit_update_dismissed_via(
-            &null,
-            "0.2.11",
-            "0.2.12",
-            UpdateDismissReason::UserDismissed,
-        );
+        assert!(picked.is_none(), "no .dmg asset should match");
     }
 }

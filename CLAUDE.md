@@ -122,7 +122,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs / project_ops/   ← agent launcher UI, project actions
-│   ├── telemetry_events.rs            ← opt-in event emitters
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
 ├── cli/                               ← `paneflow up|flow|watch|wait|send|read` over the IPC socket
 ├── window_chrome/
@@ -181,7 +180,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── install_method.rs              ← detect install mode (.app bundle / .tar.gz)
 │   ├── signature.rs / verified_download.rs ← minisign verify, fail-closed download
 │   └── macos/dmg.rs                   ← bundle replacement from a .dmg
-├── telemetry/                         ← opt-in telemetry id + tags
 ├── widgets/                           ← text_input, text_area, scrollbar, callout
 ├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
 ├── ai_types.rs                        ← AiToolState enum shared by workspace/event_handlers
@@ -231,7 +229,6 @@ KeyDownEvent → TerminalView::handle_key_down() → keys::to_esc_str()
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
 | `paneflow-acp` | `crates/paneflow-acp/` | Library | Agent identity enum + `CLAUDECODE` env scrub |
-| `paneflow-telemetry` | `crates/paneflow-telemetry/` | Library | Opt-in telemetry client (inert without a key) |
 
 Everything that runs outside the GUI process must stay GPU-free and never link GPUI.
 

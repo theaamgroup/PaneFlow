@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-PaneFlow is a Rust workspace, macOS only in this fork. `src-app/` is the `paneflow` desktop binary and CLI entrypoint: UI, terminal rendering, pane management, IPC, themes, and embedded helper binaries under `src-app/assets/`. `crates/paneflow-*` holds the config, IPC client, process, telemetry, ACP, shim, AI-hook, MCP, and MCP-installer crates. Top-level `assets/` holds macOS bundle inputs, `scripts/` utility scripts, `schemas/` the published config JSON Schema, and `skills/` the conductor skill.
+PaneFlow is a Rust workspace, macOS only in this fork. `src-app/` is the `paneflow` desktop binary and CLI entrypoint: UI, terminal rendering, pane management, IPC, themes, and embedded helper binaries under `src-app/assets/`. `crates/paneflow-*` holds the config, IPC client, process, ACP, shim, AI-hook, MCP, and MCP-installer crates. Top-level `assets/` holds macOS bundle inputs, `scripts/` utility scripts, `schemas/` the published config JSON Schema, and `skills/` the conductor skill.
 
 ## Build, Test, and Development Commands
 Run all commands from the repository root.

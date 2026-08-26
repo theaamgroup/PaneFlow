@@ -39,8 +39,7 @@ skipped rather than aborting, so one malformed variable cannot disable the
 other, good key.
 
 > **Local-rebuild trap.** `src-app/build.rs` registers
-> `cargo:rerun-if-env-changed` for `POSTHOG_API_KEY`, `POSTHOG_HOST`, and
-> `PANEFLOW_SKIP_EMBED_BUILD` only. Neither minisign variable is registered, so
+> `cargo:rerun-if-env-changed` for `PANEFLOW_SKIP_EMBED_BUILD` only. Neither minisign variable is registered, so
 > changing `PANEFLOW_MINISIGN_PUBKEY` locally can reuse a cached object file and
 > silently keep the previously embedded key. Force a rebuild
 > (`touch src-app/src/update/signature.rs`, or `cargo clean -p paneflow-app`)

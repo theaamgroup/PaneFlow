@@ -34,7 +34,7 @@ Prerequisites (one-time, not part of the per-release cadence):
 
 > **Known gap.** `.github/workflows/release.yml` is still upstream's
 > multi-platform workflow: it carries Linux and Windows build legs, deb/rpm/MSI
-> smoke tests, and references to `GPG_*`, `AZURE_*`, and `POSTHOG_API_KEY`.
+> smoke tests, and references to `GPG_*` and `AZURE_*`.
 > Cutting it down to the single macOS leg is a separate, still-pending change.
 > Until that lands, Step 3 will show failing or skipped legs that are not about
 > your release, and the timings below assume the trimmed workflow.
