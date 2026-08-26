@@ -90,6 +90,17 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'clippy.toml'
+              # On-disk drift tests / include_str! targets, not "docs-only".
+              # cargo test reads these files; a schema- or example-only PR
+              # must run macos_check so drift cannot land green.
+              # public_json_schema_covers_every_config_field reads schemas/
+              # public_configuration_schema_doc_mentions_schema_keys reads
+              # docs/user/configuration/schema.md
+              # demo_review_pipeline_flow_is_valid include_str!'s
+              # examples/review-pipeline.flow.toml (TASK.md is its fixture)
+              - 'schemas/**'
+              - 'docs/user/configuration/schema.md'
+              - 'examples/**'
             ci:
               - '.github/workflows/**'
               - 'scripts/**'
