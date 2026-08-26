@@ -285,14 +285,19 @@ impl PaneFlowApp {
             }
         }
 
-        // Poll git watcher events with 300ms debounce.
-        // Filter: only HEAD and index matter. NonRecursive mode limits events to
-        // top-level entries of .git/ so no subdirectory false positives.
+        // Poll git watcher events with 300ms trailing debounce and a 1s
+        // max-wait ceiling so a continuous HEAD/index stream (checkout,
+        // rebase) cannot postpone badge refresh indefinitely. Mirrors
+        // ConfigWatcher's first_event_at + MAX_DEBOUNCE. Filter: only HEAD
+        // and index matter. NonRecursive mode limits events to top-level
+        // entries of .git/ so no subdirectory false positives.
         // On debounce fire, run git probes off main thread and apply results.
         cx.spawn(
             async |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let debounce = std::time::Duration::from_millis(300);
+                let max_debounce = std::time::Duration::from_secs(1);
                 let mut last_event = std::time::Instant::now() - debounce;
+                let mut first_event_at: Option<std::time::Instant> = None;
                 let mut pending = false;
                 let mut pending_git_dirs = std::collections::HashSet::<std::path::PathBuf>::new();
 
@@ -323,16 +328,32 @@ impl PaneFlowApp {
                     match new_dirs {
                         Ok(dirs) if !dirs.is_empty() => {
                             pending_git_dirs.extend(dirs);
-                            last_event = std::time::Instant::now();
+                            let now = std::time::Instant::now();
+                            if first_event_at.is_none() {
+                                first_event_at = Some(now);
+                            }
+                            last_event = now;
                             pending = true;
                         }
                         Ok(_) => {}
                         Err(_) => break, // app shutting down
                     }
 
-                    // Debounce: fire after 300ms of quiet
-                    if pending && last_event.elapsed() >= debounce {
+                    // Trailing debounce, but never postponed past max_debounce
+                    // from the first event of the burst.
+                    let should_fire = pending
+                        && first_event_at.is_some_and(|start| {
+                            git_head_index_should_fire(
+                                last_event,
+                                start,
+                                std::time::Instant::now(),
+                                debounce,
+                                max_debounce,
+                            )
+                        });
+                    if should_fire {
                         pending = false;
+                        first_event_at = None;
                         let affected_dirs = std::mem::take(&mut pending_git_dirs);
                         log::debug!(
                             "git watcher: debounced event fired for {} dir(s)",
@@ -1040,6 +1061,20 @@ impl PaneFlowApp {
     }
 }
 
+/// Trailing debounce with a max-wait cap for the git HEAD/index drain loop.
+/// Fires after `debounce` of quiet, or once `max_debounce` has elapsed since
+/// the first event of the burst, whichever comes first.
+fn git_head_index_should_fire(
+    last_event: std::time::Instant,
+    first_event_at: std::time::Instant,
+    now: std::time::Instant,
+    debounce: std::time::Duration,
+    max_debounce: std::time::Duration,
+) -> bool {
+    now.saturating_duration_since(last_event) >= debounce
+        || now.saturating_duration_since(first_event_at) >= max_debounce
+}
+
 // ---------------------------------------------------------------------------
 // Free helper functions called from `fn main()` (US-002 extraction).
 // ---------------------------------------------------------------------------
@@ -1207,6 +1242,57 @@ pub(crate) fn warn_if_rosetta_translated() {
         log::warn!(
             "running under Rosetta 2 translation - GPU rendering will be \
              degraded. For best performance, run the native aarch64 build"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_head_index_should_fire;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn git_head_index_fires_after_quiet_debounce() {
+        let first = Instant::now();
+        let last = first + Duration::from_millis(50);
+        let now = last + Duration::from_millis(300);
+        assert!(git_head_index_should_fire(
+            last,
+            first,
+            now,
+            Duration::from_millis(300),
+            Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn git_head_index_does_not_fire_while_events_keep_arriving_inside_cap() {
+        let first = Instant::now();
+        let last = first + Duration::from_millis(200);
+        let now = last + Duration::from_millis(50);
+        assert!(!git_head_index_should_fire(
+            last,
+            first,
+            now,
+            Duration::from_millis(300),
+            Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn git_head_index_fires_at_max_debounce_even_without_quiet() {
+        let first = Instant::now();
+        let last = first + Duration::from_millis(950);
+        let now = last + Duration::from_millis(50);
+        assert!(
+            git_head_index_should_fire(
+                last,
+                first,
+                now,
+                Duration::from_millis(300),
+                Duration::from_secs(1),
+            ),
+            "1 s from first event must flush even if last_event is 50 ms ago"
         );
     }
 }

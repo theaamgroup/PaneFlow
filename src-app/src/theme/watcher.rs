@@ -4,9 +4,9 @@
 //! first call to [`active_theme`]. Invalidation comes from two paths:
 //!
 //!   1. **Event-driven (preferred)** - [`ThemeWatcher`] (US-006) installs a
-//!      `notify::RecommendedWatcher` on the config-directory parent, debounces
-//!      events at 300 ms, and calls [`invalidate_theme_cache`] + the user
-//!      callback on every relevant change.
+//!      `notify::RecommendedWatcher` on the config-directory parent, trailing-
+//!      debounces events at 300 ms with a 1 s max-wait ceiling, and calls
+//!      [`invalidate_theme_cache`] + the user callback on every relevant change.
 //!   2. **Polling fallback** - when `notify` initialisation fails (filesystem
 //!      that doesn't support inotify/FSEvents/ReadDirectoryChangesW, locked-down
 //!      sandbox, …), [`active_theme`] falls back to its historical 500 ms
@@ -41,6 +41,14 @@ const THEME_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 /// arrive as a burst of events (write → fsync → atomic-rename) reload the
 /// theme exactly once.
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(300);
+
+/// Hard ceiling on how long the debounce may keep postponing a reload.
+/// Each event pushes the 300 ms deadline forward; a source touching the
+/// watched file faster than 300 ms would otherwise starve theme reload
+/// indefinitely. Once events have been arriving for this long, the reload
+/// fires regardless (trailing debounce with a max-wait). Mirrors
+/// `paneflow_config::watcher::MAX_DEBOUNCE`.
+const MAX_DEBOUNCE: Duration = Duration::from_secs(1);
 
 struct CachedTheme {
     theme: TerminalTheme,
@@ -169,6 +177,8 @@ pub fn active_theme() -> TerminalTheme {
 ///     on macOS FSEvents canonicalisation in the config watcher).
 ///   - Debounces at [`DEBOUNCE_DURATION`] (300 ms) using `recv_timeout`,
 ///     never `thread::sleep` - so the loop wakes up only on FS events.
+///     A continuous event stream is capped at [`MAX_DEBOUNCE`] (1 s)
+///     from the first event of the burst, matching `ConfigWatcher`.
 ///   - No `Drop` impl: the background thread terminates when the
 ///     `notify::RecommendedWatcher` is dropped (which closes the
 ///     `mpsc::Sender` captured in the watcher's closure).
@@ -313,6 +323,10 @@ fn event_loop(
     _watcher: &RecommendedWatcher,
 ) {
     let mut pending_reload: Option<Instant> = None;
+    // Timestamp of the first event in the current debounce burst, used
+    // to cap the trailing debounce so a continuous event stream can't
+    // starve the reload forever. Same contract as ConfigWatcher.
+    let mut first_event_at: Option<Instant> = None;
 
     loop {
         let event_result = if let Some(deadline) = pending_reload {
@@ -320,6 +334,7 @@ fn event_loop(
             if remaining.is_zero() {
                 // Debounce window expired - fire.
                 pending_reload = None;
+                first_event_at = None;
                 fire_reload(callback);
                 continue;
             }
@@ -335,8 +350,11 @@ fn event_loop(
         match event_result {
             Ok(Ok(event)) => {
                 if is_relevant_event(&event.kind) && event_targets_config(&event, config_path) {
-                    // Start (or extend) the debounce window.
-                    pending_reload = Some(Instant::now() + DEBOUNCE_DURATION);
+                    let now = Instant::now();
+                    let burst_start = *first_event_at.get_or_insert(now);
+                    // Trailing debounce, but never pushed past the max-wait
+                    // cap measured from the first event of the burst.
+                    pending_reload = Some(capped_debounce_deadline(now, burst_start));
                 }
             }
             Ok(Err(e)) => {
@@ -344,6 +362,7 @@ fn event_loop(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 pending_reload = None;
+                first_event_at = None;
                 fire_reload(callback);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -356,6 +375,12 @@ fn event_loop(
     // polling so the UI keeps refreshing on subsequent edits.
     WATCHER_ACTIVE.store(false, Ordering::Release);
     log::debug!("theme watcher event loop exited");
+}
+
+/// Trailing debounce, capped so a continuous event stream cannot postpone
+/// reload past [`MAX_DEBOUNCE`] from the first event of the burst.
+fn capped_debounce_deadline(now: Instant, first_event_at: Instant) -> Instant {
+    (now + DEBOUNCE_DURATION).min(first_event_at + MAX_DEBOUNCE)
 }
 
 /// Centralised debounce-fire path: invalidate the cache so the next render
@@ -462,6 +487,34 @@ mod tests {
             Duration::from_millis(1500),
         );
         assert!(fired, "callback should fire at least once on a file modify");
+    }
+
+    #[test]
+    fn test_capped_debounce_deadline_extends_trailing_window() {
+        let first = Instant::now();
+        let now = first + Duration::from_millis(200);
+        assert_eq!(
+            capped_debounce_deadline(now, first),
+            now + DEBOUNCE_DURATION,
+            "within the cap, each event pushes the deadline by DEBOUNCE_DURATION"
+        );
+    }
+
+    #[test]
+    fn test_capped_debounce_deadline_never_exceeds_max_from_first_event() {
+        let first = Instant::now();
+        let near_cap = first + Duration::from_millis(850);
+        assert_eq!(
+            capped_debounce_deadline(near_cap, first),
+            first + MAX_DEBOUNCE,
+            "850 ms + 300 ms would overshoot; cap at first + 1 s"
+        );
+        let past_cap = first + Duration::from_millis(1200);
+        assert_eq!(
+            capped_debounce_deadline(past_cap, first),
+            first + MAX_DEBOUNCE,
+            "a burst already past MAX_DEBOUNCE fires immediately (deadline in the past)"
+        );
     }
 
     /// US-006 AC #1 - a burst of writes within the debounce window
