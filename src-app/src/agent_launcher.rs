@@ -13,7 +13,7 @@
 //! `claude_code_bypass_permissions` exactly as the tab bar does.
 
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use paneflow_config::schema::PaneFlowConfig;
@@ -291,9 +291,12 @@ impl TerminalAgent {
     /// Whether this agent's CLI binary is found on `PATH`. Drives the
     /// default visibility in [`Self::is_visible`].
     ///
-    /// Probed through a short-lived process cache: `which` walks `PATH` for
-    /// every agent, too costly to repeat on the render thread each frame, but
-    /// a process-lifetime cache would hide agents installed after startup.
+    /// `which` walks `PATH` off-thread. Render (and every other caller with a
+    /// snapshot already in hand) reads that snapshot and never waits on the
+    /// walk: a TTL miss schedules `paneflow-agent-which` and returns the last
+    /// answer. The first lookup in a process waits for that thread so CLI
+    /// PATH checks (`paneflow up`) cannot race an empty cache. The cache
+    /// mutex is never held across `which`.
     pub fn is_installed(self) -> bool {
         installed_binaries_contains(self.binary())
     }
@@ -458,57 +461,225 @@ pub(crate) fn is_plain_shell_token(token: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'='))
 }
 
+const INSTALLED_BINARIES_TTL: Duration = Duration::from_secs(2);
+
+type ProbeFn = Arc<dyn Fn() -> HashSet<&'static str> + Send + Sync>;
+
 struct InstalledBinaryCache {
     checked_at: Option<Instant>,
     found: HashSet<&'static str>,
+    refresh_in_flight: bool,
 }
 
 impl InstalledBinaryCache {
-    fn refresh(&mut self) {
-        self.found = TerminalAgent::ALL
-            .into_iter()
-            .map(TerminalAgent::binary)
-            .filter(|bin| which::which(bin).is_ok())
-            .collect();
-        self.checked_at = Some(Instant::now());
-    }
-
     fn is_stale(&self) -> bool {
         self.checked_at
             .is_none_or(|checked_at| checked_at.elapsed() >= INSTALLED_BINARIES_TTL)
     }
 }
 
-const INSTALLED_BINARIES_TTL: Duration = Duration::from_secs(2);
+struct InstalledBinaryInner {
+    cache: Mutex<InstalledBinaryCache>,
+    initial_ready: Mutex<bool>,
+    initial_cvar: Condvar,
+    probe: ProbeFn,
+}
 
-fn installed_binary_cache() -> &'static Mutex<InstalledBinaryCache> {
-    static CACHE: OnceLock<Mutex<InstalledBinaryCache>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        Mutex::new(InstalledBinaryCache {
-            checked_at: None,
-            found: HashSet::new(),
-        })
-    })
+/// Dropped without `published` when the probe panics or the spawn callback
+/// unwinds: clears `refresh_in_flight` and unblocks cold waiters so a failed
+/// walk cannot stick the cache.
+struct RefreshGuard {
+    inner: Arc<InstalledBinaryInner>,
+    published: bool,
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        if !self.published {
+            self.inner.abandon_refresh();
+        }
+    }
+}
+
+impl InstalledBinaryInner {
+    fn lock_cache(&self) -> std::sync::MutexGuard<'_, InstalledBinaryCache> {
+        match self.cache.lock() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                tracing::warn!(
+                    target: "paneflow_app::agent_launcher",
+                    "installed binary cache mutex poisoned; recovering"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn lock_initial_ready(&self) -> std::sync::MutexGuard<'_, bool> {
+        match self.initial_ready.lock() {
+            Ok(ready) => ready,
+            Err(poisoned) => {
+                tracing::warn!(
+                    target: "paneflow_app::agent_launcher",
+                    "installed binary ready mutex poisoned; recovering"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn mark_initial_ready(&self) {
+        let mut ready = self.lock_initial_ready();
+        *ready = true;
+        self.initial_cvar.notify_all();
+    }
+
+    fn wait_for_initial(&self) {
+        let mut ready = self.lock_initial_ready();
+        while !*ready {
+            ready = match self.initial_cvar.wait(ready) {
+                Ok(ready) => ready,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
+    }
+
+    fn publish(&self, found: HashSet<&'static str>) {
+        {
+            let mut cache = self.lock_cache();
+            cache.found = found;
+            cache.checked_at = Some(Instant::now());
+            cache.refresh_in_flight = false;
+        }
+        self.mark_initial_ready();
+    }
+
+    fn abandon_refresh(&self) {
+        {
+            let mut cache = self.lock_cache();
+            cache.refresh_in_flight = false;
+            if cache.checked_at.is_none() {
+                // Unblock cold waiters with the empty snapshot rather than
+                // deadlock if the probe thread never publishes.
+                cache.checked_at = Some(Instant::now());
+            }
+        }
+        self.mark_initial_ready();
+    }
+
+    fn run_refresh(self: &Arc<Self>) {
+        let mut guard = RefreshGuard {
+            inner: Arc::clone(self),
+            published: false,
+        };
+        let found = (self.probe)();
+        self.publish(found);
+        guard.published = true;
+    }
+}
+
+struct InstalledBinaries {
+    inner: Arc<InstalledBinaryInner>,
+}
+
+impl InstalledBinaries {
+    fn new() -> Self {
+        Self::with_probe(Arc::new(probe_installed_binaries))
+    }
+
+    fn with_probe(probe: ProbeFn) -> Self {
+        Self {
+            inner: Arc::new(InstalledBinaryInner {
+                cache: Mutex::new(InstalledBinaryCache {
+                    checked_at: None,
+                    found: HashSet::new(),
+                    refresh_in_flight: false,
+                }),
+                initial_ready: Mutex::new(false),
+                initial_cvar: Condvar::new(),
+                probe,
+            }),
+        }
+    }
+
+    fn contains(&self, binary: &'static str) -> bool {
+        let (snapshot, spawn, wait_for_initial) = {
+            let mut cache = self.inner.lock_cache();
+            let spawn = cache.is_stale() && !cache.refresh_in_flight;
+            if spawn {
+                cache.refresh_in_flight = true;
+            }
+            let wait_for_initial = cache.checked_at.is_none();
+            (cache.found.clone(), spawn, wait_for_initial)
+        };
+
+        if spawn {
+            self.spawn_refresh();
+        }
+
+        if wait_for_initial {
+            self.inner.wait_for_initial();
+            return self.inner.lock_cache().found.contains(binary);
+        }
+
+        snapshot.contains(binary)
+    }
+
+    fn spawn_refresh(&self) {
+        let inner = Arc::clone(&self.inner);
+        match std::thread::Builder::new()
+            .name("paneflow-agent-which".into())
+            .spawn(move || inner.run_refresh())
+        {
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    target: "paneflow_app::agent_launcher",
+                    error = %err,
+                    "failed to spawn installed-binary probe thread; probing on caller"
+                );
+                // Last resort: still never hold the cache mutex across which.
+                self.inner.run_refresh();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn seed(&self, found: HashSet<&'static str>, checked_at: Instant) {
+        {
+            let mut cache = self.inner.lock_cache();
+            cache.found = found;
+            cache.checked_at = Some(checked_at);
+            cache.refresh_in_flight = false;
+        }
+        self.inner.mark_initial_ready();
+    }
+
+    #[cfg(test)]
+    fn cache_mutex_is_free(&self) -> bool {
+        self.inner.cache.try_lock().is_ok()
+    }
+}
+
+fn probe_installed_binaries() -> HashSet<&'static str> {
+    TerminalAgent::ALL
+        .into_iter()
+        .map(TerminalAgent::binary)
+        .filter(|bin| which::which(bin).is_ok())
+        .collect()
+}
+
+fn installed_binaries() -> &'static InstalledBinaries {
+    static CACHE: OnceLock<InstalledBinaries> = OnceLock::new();
+    CACHE.get_or_init(InstalledBinaries::new)
 }
 
 /// Agent binaries found on `PATH`. The cache is short-lived rather than
 /// process-lifetime so agents installed while Paneflow is open can appear
-/// without a restart, while render paths avoid re-walking `PATH` every frame.
+/// without a restart. Render reads a snapshot; `which` runs on
+/// `paneflow-agent-which` and never under the cache mutex.
 fn installed_binaries_contains(binary: &'static str) -> bool {
-    let mut cache = match installed_binary_cache().lock() {
-        Ok(cache) => cache,
-        Err(poisoned) => {
-            tracing::warn!(
-                target: "paneflow_app::agent_launcher",
-                "installed binary cache mutex poisoned; refreshing recovered state"
-            );
-            poisoned.into_inner()
-        }
-    };
-    if cache.is_stale() {
-        cache.refresh();
-    }
-    cache.found.contains(binary)
+    installed_binaries().contains(binary)
 }
 
 #[cfg(test)]
@@ -795,5 +966,187 @@ mod tests {
             TerminalAgent::ClaudeCode.command_with_session(&cfg, None),
             "claude"
         );
+    }
+
+    #[test]
+    fn probe_only_reports_known_agent_binaries() {
+        for bin in probe_installed_binaries() {
+            assert!(
+                TerminalAgent::ALL.iter().any(|a| a.binary() == bin),
+                "probe returned unknown binary {bin}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_snapshot_is_not_reprobed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let binaries = InstalledBinaries::with_probe(Arc::new({
+            let probe_calls = Arc::clone(&probe_calls);
+            move || {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                HashSet::from(["claude"])
+            }
+        }));
+        binaries.seed(HashSet::from(["codex"]), Instant::now());
+
+        assert!(binaries.contains("codex"));
+        assert!(!binaries.contains("claude"));
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn first_contains_waits_for_initial_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let binaries = InstalledBinaries::with_probe(Arc::new({
+            let probe_calls = Arc::clone(&probe_calls);
+            move || {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(30));
+                HashSet::from(["claude"])
+            }
+        }));
+
+        let start = Instant::now();
+        assert!(binaries.contains("claude"));
+        assert!(
+            start.elapsed() >= Duration::from_millis(30),
+            "cold lookup must wait for the off-thread probe"
+        );
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
+        assert!(binaries.contains("claude"));
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "a fresh snapshot must not schedule another walk"
+        );
+    }
+
+    #[test]
+    fn concurrent_cold_lookups_share_one_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let binaries = Arc::new(InstalledBinaries::with_probe(Arc::new({
+            let probe_calls = Arc::clone(&probe_calls);
+            move || {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(40));
+                HashSet::from(["claude"])
+            }
+        })));
+
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let binaries = Arc::clone(&binaries);
+                std::thread::spawn(move || binaries.contains("claude"))
+            })
+            .collect();
+        for thread in threads {
+            assert!(thread.join().expect("lookup thread"));
+        }
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stale_refresh_does_not_block_contains_or_hold_the_cache_mutex() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let in_probe = Arc::new((Mutex::new(false), Condvar::new()));
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+
+        let binaries = InstalledBinaries::with_probe(Arc::new({
+            let release = Arc::clone(&release);
+            let in_probe = Arc::clone(&in_probe);
+            let probe_calls = Arc::clone(&probe_calls);
+            move || {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                {
+                    let mut entered = in_probe.0.lock().expect("in_probe");
+                    *entered = true;
+                    in_probe.1.notify_all();
+                }
+                let mut released = release.0.lock().expect("release");
+                while !*released {
+                    released = release.1.wait(released).expect("release wait");
+                }
+                HashSet::from(["codex"])
+            }
+        }));
+
+        binaries.seed(
+            HashSet::from(["claude"]),
+            Instant::now() - INSTALLED_BINARIES_TTL - Duration::from_millis(1),
+        );
+
+        let start = Instant::now();
+        assert!(
+            binaries.contains("claude"),
+            "stale lookup must serve the snapshot"
+        );
+        assert!(
+            !binaries.contains("codex"),
+            "stale lookup must not wait for the in-flight probe"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "render-path contains must not block on which"
+        );
+
+        {
+            let mut entered = in_probe.0.lock().expect("in_probe");
+            let deadline = Duration::from_secs(2);
+            let start_wait = Instant::now();
+            while !*entered {
+                let remaining = deadline.saturating_sub(start_wait.elapsed());
+                assert!(
+                    !remaining.is_zero(),
+                    "probe thread never entered which-equivalent work"
+                );
+                let (guard, result) = in_probe
+                    .1
+                    .wait_timeout(entered, remaining)
+                    .expect("in_probe wait");
+                entered = guard;
+                assert!(
+                    !result.timed_out() || *entered,
+                    "probe thread never entered which-equivalent work"
+                );
+            }
+        }
+        assert!(
+            binaries.cache_mutex_is_free(),
+            "which must not run under the cache mutex"
+        );
+
+        {
+            let mut released = release.0.lock().expect("release");
+            *released = true;
+            release.1.notify_all();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if binaries.contains("codex") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            binaries.contains("codex"),
+            "snapshot must publish once the off-thread probe finishes"
+        );
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn is_installed_reads_without_panicking() {
+        let _ = TerminalAgent::ClaudeCode.is_installed();
+        let _ = TerminalAgent::Codex.is_installed();
     }
 }
