@@ -4139,7 +4139,7 @@ name = "paneflow-ai-hook"
 version = "0.1.0"
 dependencies = [
  "interprocess",
- "serde",
+ "paneflow-ipc-client",
  "serde_json",
  "tempfile",
 ]
