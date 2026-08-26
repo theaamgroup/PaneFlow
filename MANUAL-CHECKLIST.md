@@ -94,5 +94,6 @@ Done at the start of this run, 2026-08-25, against HEAD `35af5bb`:
 - Log: `font: resolved family='JetBrainsMono Nerd Font Mono'`;
   `Terminal backend selected: … effective=alacritty`;
   `Assets::load_fonts: registered 36 embedded font file(s)`.
-- Also observed (task 11 evidence): `update::checker up to date (v0.8.2)`
-  — the feed still contacts GitHub at HEAD.
+- Historical (HEAD `35af5bb`, before leftover-removal deleted the
+  updater): `update::checker up to date (v0.8.2)`. That feed is gone;
+  Task 11 above is the current check.

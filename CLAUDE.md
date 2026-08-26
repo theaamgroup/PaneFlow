@@ -24,7 +24,7 @@ Run all five, before and after any pass, and quote the actual output:
 
 ```bash
 cargo build                                # exit 0
-cargo test --workspace                     # 1684 passed, 0 failed, 2 ignored (2026-08-25)
+cargo test --workspace                     # 1769 passed, 0 failed, 2 ignored (2026-08-26)
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
 ./target/debug/paneflow --version          # paneflow 0.1.0
@@ -164,7 +164,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 86 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 85 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -244,7 +244,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
-The Ghostty backend is gone: `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/` were all deleted in stage 2a, and `auto_selects_ghostty_for_target()` is a literal `false`. `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Comments and identifiers that still say Ghostty (for example in `terminal/view.rs`) are leftover copy, not a live backend.
+The Ghostty backend is gone: `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/` were all deleted in stage 2a. Leftover-removal (2026-08-26) also deleted the compiled stubs (`auto_selects_ghostty_for_target`, `should_start_ghostty`, `GhosttyBuildDiagnostics`). `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Remaining Ghostty identifiers in comments or tests that assert absence are leftover copy, not a live backend.
 
 ### Thread model
 
@@ -333,7 +333,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 86 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 85 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs:420`) adds `Cmd+C`, `Cmd+V` (Terminal) and `Cmd+Q` (quit) on top.
 
