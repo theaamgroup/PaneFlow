@@ -1,5 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: Latest release
-    url: https://github.com/theaamgroup/paneflow/releases/latest
-    about: Check the newest build before filing a bug.

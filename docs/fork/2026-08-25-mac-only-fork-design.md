@@ -198,10 +198,11 @@ Everything below points at upstream and must be cut or repointed.
 5. Author identity to scrub: `src-app/src/app/about_dialog.rs:117` reads
    "(c) Arthur Jean"; `src-app/Cargo.toml:490` maintainer email; five
    `paneflow.dev` menu links at `src-app/src/app/profile_menu.rs:23` to `:27`.
-   `.github/SECURITY.md` and `.github/CODE_OF_CONDUCT.md` also carried upstream
-   URLs; both are deleted, so that pair of sites is closed rather than scrubbed.
-   The disclosure process SECURITY.md described now lives in README's
-   "Safety model" section.
+   `.github/SECURITY.md`, `.github/CONTRIBUTING.md`, and
+   `.github/CODE_OF_CONDUCT.md` carried upstream URLs; all three are deleted.
+   This is a private fork: no public advisory process, no contribution guide.
+   Report problems to the repository owner. README's Safety model keeps a
+   one-paragraph version; agent working rules live in `AGENTS.md` / `CLAUDE.md`.
 
 ## Traps register
 

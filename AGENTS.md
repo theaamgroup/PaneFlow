@@ -28,8 +28,13 @@ Put unit tests alongside the module when the logic is self-contained, as in `src
 ## Pre-commit checks (mandatory)
 **Before EVERY `git commit` and EVERY `git push` that touches Rust code, run `cargo fmt --check`.** If it reports a diff, run `cargo fmt`, re-stage, then commit. This is the cheapest guard against the most expensive CI failure on this repo: the release pipeline runs `cargo fmt --check` inside the Build job, so one mis-formatted line fails the build, skips the publish step, and burns the entire run before producing anything. A dirty tag commit is worse still: the original tagged build cannot be salvaged, so you have to delete and re-create the tag at the fix commit. Run `cargo fmt --check` one last time on the exact commit you are about to tag. rustfmt also drifts between Rust point releases, so code that was clean last week can need re-formatting after a toolchain bump.
 
-## Commit & Pull Request Guidelines
-History uses Conventional Commit prefixes plus a scope, for example `feat(app): adapt paneflow-hook for Codex PID env var`. Follow `type(scope): description`. PRs should explain user-visible behavior, list validation steps, and include screenshots or short recordings for UI changes.
+## Commit guidelines
+This is a private fork. There is no CONTRIBUTING.md, SECURITY.md, or public
+advisory process. History uses Conventional Commit prefixes plus a scope, for
+example `feat(app): adapt paneflow-hook for Codex PID env var`. Follow
+`type(scope): description`. Use `(fork)` for anything that diverges from
+upstream. `panic!`, `unimplemented!`, and `dbg!` are denied by workspace clippy;
+`todo!` warns. Verify load-bearing claims by running them.
 
 ## Platform
 macOS only. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`. There is no Linux or Windows target in this fork: do not add `#[cfg(target_os = "linux")]` or `#[cfg(windows)]` branches back, and do not reintroduce the Ghostty backend. Config lives at `~/Library/Application Support/paneflow/paneflow.json`.

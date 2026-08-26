@@ -29,6 +29,9 @@ Cmd+Tab remains in `--help` and `MANUAL-CHECKLIST.md` (task 6).
 `create-dmg.sh` codesign/stapler/spctl checks fail on an unsigned
 artifact; the .dmg itself was produced.
 
+`SECURITY.md`, `CONTRIBUTING.md`, issue templates, and the PR template
+are deleted. This is a private fork.
+
 ## Not findings
 
 Zed lockfile crates named `telemetry` / `telemetry_events` (markdown

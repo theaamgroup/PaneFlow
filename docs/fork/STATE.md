@@ -1,6 +1,7 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-08-25, after stage 2c landed.
+Living handoff record. Updated 2026-08-25, after the post-2c task list
+landed (schema, telemetry, updater feed, identity, CI, version 0.1.0).
 
 Companion documents:
 - `docs/fork/2026-08-25-post-2c-plan.md` is the **plan of record for what
@@ -60,21 +61,26 @@ the only workflow here, so this is the most likely source of confusion.
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
 | 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
-| Config-schema pass | **Not started. Next.** `TerminalBackendConfig::Ghostty` (`schema.rs:568`), `windows_terminal_material` (`:57`), `windows_chrome_material` (`:60`), `windows_terminal_material_enabled` (`:310`), the `pane.rs` material call sites and their two `terminal_material_scopes_*` tests, and the loader's `set_field!` material keys. 2c deliberately left all 15 of these standing. schema.rs + schemas/paneflow.schema.json + docs/user/configuration/schema.md move together (drift test). |
-| 2d. Rename to PanesCLI | **Dropped.** Scoped (273 files) then dropped; the product stays PaneFlow. See `docs/fork/2026-08-25-post-2c-plan.md`. |
-| 3. Signed release | **Not started.** Needs a fresh minisign keypair, a macOS-only `release.yml`, and the six `APPLE_*` secrets. |
+| Config-schema pass | **Done.** Ghostty and `windows_*_material` dropped from the published schema, Rust struct, and docs. Loader still accepts leftover keys; `"backend":"ghostty"` maps to Alacritty. |
+| Telemetry | **Gone.** `paneflow-telemetry` crate, app module, consent toasts, config block. |
+| Self-update feed | **Disabled.** `DEFAULT_FEED_URL = None`. Re-enable is one const (or `PANEFLOW_UPDATE_FEED_URL`). |
+| Identity | **Done.** Bundle id `com.theaamgroup.paneflow`, authors The AAM Group, Help/`--help`/schema `$id` point at `theaamgroup/paneflow`. |
+| CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Needs `APPLE_*` secrets and a minisign keypair before a real tag. |
+| 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
+| Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product/build page; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
+| Version | **0.1.0.** Local inherited `v*` tags deleted; only `upstream-fork-point` remains. Do not tag until secrets exist. |
 
 ## Verified green, and how to reproduce it
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1725 passed, 0 failed, 2 ignored
+cargo test --workspace                       # 1684 passed, 0 failed, 2 ignored
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.1.0
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
-                                             # negative control: cfg(unix) 152, cfg(macos) 77
+                                             # negative control: cfg(unix) 151, cfg(macos) 77
 ```
 
 The census negative control is not decoration. Read it every time: a census
@@ -248,7 +254,7 @@ before writing another one:
 What those passes proved, kept because the next platform-shaped pass will
 need it:
 
-- `#[cfg(unix)]` now appears **152 times** and macOS needs nearly all of it.
+- `#[cfg(unix)]` now appears **151 times** and macOS needs nearly all of it.
   `#[cfg(target_os = "macos")]` appears **77 times**. Both are live arms; both
   stay. This was the highest-risk distinction in 2c and no batch got it wrong -
   because every brief opened with the same four lines, verbatim:
@@ -287,48 +293,26 @@ need it:
   **Resolved in 2b.** Note the correction: both sat INSIDE
   `#[cfg(target_os = "windows")]` blocks, so the delete rule removed them as a
   side effect. They did not need separate handling and did not survive to 2c.
-- `TerminalBackendConfig::Ghostty` is still a live variant in
-  `crates/paneflow-config/src/schema.rs:568` and in `schemas/paneflow.schema.json`.
-  It is permanently dead: 2c reduced `terminal/view.rs`'s
-  `auto_selects_ghostty_for_target()` to a literal `false`, so `auto` never
-  selects it and an explicit `ghostty` logs the unavailable warning and runs
-  Alacritty. Decide its fate during the config-schema work, and note that a
-  drift test asserts every schema key appears in
-  `docs/user/configuration/schema.md`.
-- The binary-size budget at `src-app/build.rs:61` and in `run_tests.yml` is
-  baselined on Linux ELF. It needs a Mach-O re-baseline, not deletion.
+- `TerminalBackendConfig::Ghostty` is gone from the published schema and the
+  Rust enum. `"ghostty"` still parses to Alacritty so old config files load.
+- Embed size cap is Mach-O `release-min` (2026-08-25): 1,161,424 B measured,
+  `EMBED_SIZE_LIMIT_BYTES = 1_400_000`.
 
 ## Biggest remaining liability
 
-`.github/workflows/release.yml` is still 3,177 lines of upstream's
-four-platform pipeline, with live references to `GPG_*`,
-`AZURE_TRUSTED_SIGNING_*` and `POSTHOG_API_KEY`. Those are inert only because
-the secrets do not exist in this org. Never create them here. See the leak
-register in the design doc for what each one fed upstream.
+CI and the updater are rewritten. What still needs a human:
 
-**`run_tests.yml` is the same problem and it is not inert - it runs on every
-PR.** An adversarial audit at the end of 2c enumerated it (the cfg census
-cannot see YAML, which is exactly why that audit exists):
+- Apple signing secrets and a fresh minisign keypair (see
+  `docs/release-runbook.md`). Never create `GPG_*`, `AZURE_*`, or
+  `POSTHOG_API_KEY`.
+- Cmd+Tab next-workspace (`MANUAL-CHECKLIST.md`).
+- Unsigned `.dmg` Gatekeeper open.
+- Audit follow-ups in `docs/fork/2026-08-25-final-audit.md` (ubuntu
+  cargo-deny cron, `build-icons.sh` WiX path, stale path-filter names).
 
-- Linux legs: `check_style` (`:243`, ubuntu-22.04, installs `libwayland-dev` /
-  `libx11-dev`, then `cargo clippy --workspace`), `run_tests_linux` (`:286`),
-  `release_build_linux` (`:325`) whose size budget at `:405` stats an ELF at
-  `target/embed-build/x86_64-unknown-linux-gnu/release-min`, and
-  `linux_aarch64_check` (`:1158`).
-- Windows legs: `windows_check` (`:835`), `windows_render_smoke` (`:1044`,
-  downloads `paneflow.exe`), `windows_aarch64_check` (`:1267`).
-- The `tests_pass` aggregator (`:1357-1371`) still `needs:` all six. Prune jobs
-  without editing `needs:` and the workflow never completes; leave them and it
-  goes red.
-
-Two of those legs cannot pass any more, independently of anything 2c did:
-`windows_check:956` passes `--features paneflow-app/libghostty-windows`, and no
-`[features]` table or that feature exists anywhere in the workspace; and a Linux
-build now fails to compile because `workspace/pid_resolve.rs` defines
-`parent_of` only under `#[cfg(target_os = "macos")]` while
-`resolve_surface_for_pid` calls it with no other arm. Stage 3 owns the fix; the
-point of recording it here is that the CI signal is already meaningless, so a
-green tree locally is currently the only real gate.
+The 2c-era four-platform `run_tests.yml` / `release.yml` are gone. Both
+workflows are macos-15. YAML is still its own sweep: the cfg census cannot
+see it.
 
 ## Parallel work
 

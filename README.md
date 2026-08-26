@@ -261,77 +261,35 @@ Other paths worth knowing:
 
 ## Safety model
 
-PaneFlow is local-first by design.
+PaneFlow is local-first. Agents run as normal CLI processes in normal PTYs. The
+UI supervises them; it is not a hosted runtime. Prompt prefill is the default.
+Auto-submit needs `--submit` plus `PANEFLOW_IPC_SCRIPTING=1`. `paneflow key`
+refuses submitting keystrokes. MCP tools are read-only, and pane output handed
+to agents is marked untrusted.
 
-- Agents run as normal CLI processes inside normal PTYs.
-- The UI is a supervisor surface, not a hosted agent runtime.
-- Prompt prefill is the default. Auto-submit needs an explicit `--submit` plus
-  the `PANEFLOW_IPC_SCRIPTING=1` scripting gate, and the `ai_unrestricted` config
-  bypass defaults to off.
-- IPC writes are gated behind that same explicit scripting access.
-- `paneflow key` refuses to send submitting keystrokes (`enter`, `ctrl-m`,
-  `ctrl-j`) outright.
-- MCP tools are read-only.
-- Terminal output returned to agents is marked as untrusted.
+This repo is private and has no public issue tracker, SECURITY.md, or advisory
+process. Report problems to the repository owner. The surfaces that matter:
+the JSON-RPC socket, the MCP bridge, the updater
+([docs/self-update-signing.md](docs/self-update-signing.md)), and any path
+where untrusted terminal output reaches a privileged surface.
 
-### Reporting a security issue
-
-This fork is private and has no public advisory process, so raise anything you
-find directly with the repository owner rather than filing a normal issue.
-Include repro steps or a proof of concept, the output of `paneflow --version`,
-and your macOS version and chip.
-
-The surfaces most worth attacking:
-
-- the **JSON-RPC IPC server** on the Unix socket, and every method it exposes;
-- the **MCP bridge** (`list_panes` / `read_pane` / `search_pane`), especially the
-  wrapping that marks returned pane output as untrusted;
-- the **in-app updater** - download, minisign verification, atomic install
-  ([docs/self-update-signing.md](docs/self-update-signing.md) is the root of
-  trust);
-- **PTY handling**, and any path where untrusted agent or terminal output
-  reaches a privileged surface, an OS notification being the obvious one.
-
-## Working agreement
-
-This is an internal fork, not a project taking outside contributions. The rules
-that are not obvious from reading the code:
-
-- Branch from `main` as `feat/<description>` or `fix/<description>`. The older
-  `mac-only-fork` branch is behind `main` and is not a base for new work.
-- Use the `(fork)` commit scope for anything that diverges from upstream, for
-  example `chore(fork): drop non-macOS packaging scripts`, so the divergence
-  stays greppable in the log. Everything else uses
-  `feat|fix|refactor|docs|chore(module): description`.
-- `panic!`, `unimplemented!`, and `dbg!` are denied by the workspace clippy
-  lints in [Cargo.toml](Cargo.toml), and `todo!` warns. Reach for `?`,
-  `ok_or(...)?`, or `match`; use `expect("invariant")` only where the invariant
-  is provable, and say why.
-- Verify, do not assume. If a claim about behavior is load-bearing in a PR
-  description, run the thing and paste the output.
-- Run the [checks](#checks) before every commit. `cargo fmt --check` is the one
-  that burns a whole CI run if you skip it.
+Working rules for agents live in [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
+There is no CONTRIBUTING.md.
 
 ## Docs
 
+- [docs/fork/STATE.md](docs/fork/STATE.md) — where the fork stands
 - [docs/fork/2026-08-25-mac-only-fork-design.md](docs/fork/2026-08-25-mac-only-fork-design.md)
-  how this fork diverges from upstream, what was deleted, and the traps found on
-  the way
-- [CLAUDE.md](CLAUDE.md)
-  build and test commands, annotated module tree, thread model, and the hard-won
-  GPUI gotchas
-- [ARCHITECTURE.md](ARCHITECTURE.md) - runtime architecture and thread model
-- [AGENTS.md](AGENTS.md) - repository instructions for coding agents
-- [docs/mcp-bridge.md](docs/mcp-bridge.md) - MCP bridge behavior and per-agent install
-- [docs/hooks.md](docs/hooks.md) - agent hook wiring behind the live status
-- [docs/user/configuration/schema.md](docs/user/configuration/schema.md) - full `paneflow.json` schema
-- [docs/user/scripting/reference.md](docs/user/scripting/reference.md) - CLI and JSON-RPC reference
-- [docs/debugging-rendering.md](docs/debugging-rendering.md) - rendering and
-  latency debugging
-- [docs/memory-smoke-test.md](docs/memory-smoke-test.md) - memory smoke-test procedure
-- [docs/release/macos-signing.md](docs/release/macos-signing.md) - signing and notarization
-- [docs/self-update-signing.md](docs/self-update-signing.md) - minisign keys, the
-  updater's root of trust
+  — decisions, leak register, traps
+- [CLAUDE.md](CLAUDE.md) — build, module tree, GPUI gotchas
+- [AGENTS.md](AGENTS.md) — coding-agent instructions
+- [ARCHITECTURE.md](ARCHITECTURE.md) — runtime architecture
+- [docs/mcp-bridge.md](docs/mcp-bridge.md) — MCP bridge
+- [docs/hooks.md](docs/hooks.md) — agent hook wiring
+- [docs/user/configuration/schema.md](docs/user/configuration/schema.md) — `paneflow.json`
+- [docs/user/scripting/reference.md](docs/user/scripting/reference.md) — CLI and JSON-RPC
+- [docs/release/macos-signing.md](docs/release/macos-signing.md) — signing and notarization
+- [MANUAL-CHECKLIST.md](MANUAL-CHECKLIST.md) — checks a build cannot prove
 
 ## Attribution and license
 

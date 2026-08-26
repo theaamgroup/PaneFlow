@@ -401,14 +401,14 @@ chore: description
 
 Atomic commits per logical change. Branch naming: `feat/description`, cut from `main`. Do not add new `US-NNN` story IDs to commit messages: there is no story tracker in this fork.
 
-Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork): drop non-macOS packaging scripts`, so the divergence stays greppable in the log. The rest of the working agreement is in README's "Working agreement" section.
+Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork): drop non-macOS packaging scripts`, so the divergence stays greppable in the log. There is no CONTRIBUTING.md or SECURITY.md; this is a private fork.
 
 ## Platform (macOS only)
 
 This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`.
 
 - Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, no Ghostty backend.
-- **`#[cfg(unix)]` is not Linux-only.** It appears **152 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears 77 times. Both are live arms and both stay.
+- **`#[cfg(unix)]` is not Linux-only.** It appears **151 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears 77 times. Both are live arms and both stay.
 - **After stage 2c those two are the ONLY platform predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`, no `[target.'cfg(...)']` table in any `Cargo.toml`. `./scripts/linux-census.sh` enforces this with a zero-condition; it prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.
 - Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
