@@ -1,9 +1,14 @@
 //! Codex writer (EP-003 US-008).
 //!
 //! Preferred path: shell out to `codex mcp add paneflow -- <bridge>` when
-//! the `codex` CLI is on PATH. Fallback: format-preserving `toml_edit`
-//! upsert of `[mcp_servers.paneflow]` in `~/.codex/config.toml`, keeping
-//! comments and sibling tables intact.
+//! the `codex` CLI is on PATH. Do **not** `mcp remove` first: a crash
+//! between remove and add used to drop the paneflow entry while the rest
+//! of the file stayed intact, and holding [`crate::io::ConfigLock`] across
+//! the CLI does not serialize `codex`. After a successful add, the on-disk
+//! file is verified; a mismatch or a failed add falls back to a locked,
+//! format-preserving `toml_edit` upsert of `[mcp_servers.paneflow]` in
+//! `~/.codex/config.toml`, keeping comments, sibling tables, and unknown
+//! keys intact. Fallback also runs when `codex` is absent.
 //!
 //! **Volatility:** Codex's config schema and `codex mcp` subcommand flags
 //! move fast (verified 2026: `[mcp_servers.<name>]` with `command`/`args`,
@@ -21,9 +26,16 @@ use crate::{io, merge};
 
 const CLI: &str = "codex";
 
+#[cfg(test)]
+type CliHook = Box<dyn Fn(&[&str]) -> Result<()>>;
+
 pub struct Codex {
     config_path: Option<PathBuf>,
     allow_cli: bool,
+    /// Test-only stand-in for `codex`. When set, install/uninstall never
+    /// consult PATH or spawn a real process.
+    #[cfg(test)]
+    cli: Option<CliHook>,
 }
 
 impl Codex {
@@ -32,6 +44,8 @@ impl Codex {
         Self {
             config_path: support::codex_config(),
             allow_cli: true,
+            #[cfg(test)]
+            cli: None,
         }
     }
 
@@ -39,6 +53,22 @@ impl Codex {
         self.config_path
             .as_deref()
             .ok_or_else(|| anyhow!("cannot resolve Codex config path"))
+    }
+
+    fn cli_available(&self) -> bool {
+        #[cfg(test)]
+        if self.cli.is_some() {
+            return true;
+        }
+        self.allow_cli && support::cli_on_path(CLI)
+    }
+
+    fn invoke_cli(&self, args: &[&str]) -> Result<()> {
+        #[cfg(test)]
+        if let Some(cli) = &self.cli {
+            return cli(args);
+        }
+        support::shell_out(CLI, args)
     }
 }
 
@@ -80,19 +110,28 @@ impl AgentConfigWriter for Codex {
         }
         let had_prior = support::toml_entry_present(path)?;
 
-        if self.allow_cli && support::cli_on_path(CLI) {
+        if self.cli_available() {
             io::backup(path)?;
-            if had_prior {
-                let _ = support::shell_out(CLI, &["mcp", "remove", "paneflow"]);
-            }
-            match support::shell_out(CLI, &["mcp", "add", "paneflow", "--", &bridge_s]) {
-                Ok(()) => {
-                    return Ok(if had_prior {
-                        InstallOutcome::Updated
-                    } else {
-                        InstallOutcome::Installed
-                    });
-                }
+            // Skip `mcp remove`. A crash between remove and add used to
+            // drop `[mcp_servers.paneflow]` while the rest of the file
+            // stayed intact. `add` is attempted as-is; a non-idempotent
+            // CLI (entry already present) fails here and the locked merge
+            // repairs it without wiping unknown keys.
+            match self.invoke_cli(&["mcp", "add", "paneflow", "--", &bridge_s]) {
+                Ok(()) => match self.status(Some(bridge))? {
+                    StatusOutcome::Installed { .. } => {
+                        return Ok(if had_prior {
+                            InstallOutcome::Updated
+                        } else {
+                            InstallOutcome::Installed
+                        });
+                    }
+                    _ => {
+                        log::warn!(
+                            "paneflow mcp: `codex mcp add` exited 0 but ~/.codex/config.toml does not match the managed entry; falling back to direct edit"
+                        );
+                    }
+                },
                 Err(e) => {
                     log::warn!(
                         "paneflow mcp: `codex mcp add` failed ({e:#}); falling back to direct ~/.codex/config.toml edit"
@@ -118,9 +157,9 @@ impl AgentConfigWriter for Codex {
         if !support::toml_entry_present(path)? {
             return Ok(UninstallOutcome::NothingToRemove);
         }
-        if self.allow_cli && support::cli_on_path(CLI) {
+        if self.cli_available() {
             io::backup(path)?;
-            if let Ok(()) = support::shell_out(CLI, &["mcp", "remove", "paneflow"]) {
+            if let Ok(()) = self.invoke_cli(&["mcp", "remove", "paneflow"]) {
                 return Ok(UninstallOutcome::Removed);
             }
         }
@@ -135,12 +174,34 @@ impl AgentConfigWriter for Codex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn test_writer(path: PathBuf) -> Codex {
         Codex {
             config_path: Some(path),
             allow_cli: false,
+            cli: None,
         }
+    }
+
+    fn record_args(calls: &Rc<RefCell<Vec<Vec<String>>>>, args: &[&str]) {
+        calls
+            .borrow_mut()
+            .push(args.iter().map(|s| (*s).to_string()).collect());
+    }
+
+    fn assert_add_without_remove(calls: &[Vec<String>]) {
+        assert!(
+            calls.iter().all(|args| !args.iter().any(|a| a == "remove")),
+            "install must not call mcp remove: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|args| args.windows(2).any(|w| w == ["mcp", "add"])),
+            "expected mcp add: {calls:?}"
+        );
     }
 
     #[test]
@@ -234,6 +295,116 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let w = test_writer(dir.path().join("missing.toml"));
         assert_eq!(w.uninstall().unwrap(), UninstallOutcome::NothingToRemove);
+    }
+
+    #[test]
+    fn install_cli_add_skips_remove_and_verifies_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        let dest = p.clone();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_h = Rc::clone(&calls);
+        let w = Codex {
+            config_path: Some(p.clone()),
+            allow_cli: true,
+            cli: Some(Box::new(move |args| {
+                record_args(&calls_h, args);
+                std::fs::write(
+                    &dest,
+                    "[mcp_servers.paneflow]\ncommand = \"/data/paneflow-mcp\"\nargs = []\n",
+                )
+                .unwrap();
+                Ok(())
+            })),
+        };
+
+        assert_eq!(
+            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
+            InstallOutcome::Installed
+        );
+        assert_add_without_remove(&calls.borrow());
+        let doc = std::fs::read_to_string(&p)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["paneflow"]["command"].as_str(),
+            Some("/data/paneflow-mcp")
+        );
+    }
+
+    #[test]
+    fn install_cli_success_falls_back_when_file_does_not_match() {
+        // CLI exited 0 but did not write our watched file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_h = Rc::clone(&calls);
+        let w = Codex {
+            config_path: Some(p.clone()),
+            allow_cli: true,
+            cli: Some(Box::new(move |args| {
+                record_args(&calls_h, args);
+                Ok(())
+            })),
+        };
+
+        assert_eq!(
+            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
+            InstallOutcome::Installed
+        );
+        assert_add_without_remove(&calls.borrow());
+        let doc = std::fs::read_to_string(&p)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["paneflow"]["command"].as_str(),
+            Some("/data/paneflow-mcp")
+        );
+    }
+
+    #[test]
+    fn install_cli_failure_falls_back_without_remove() {
+        // Non-idempotent `mcp add` must not be preceded by `mcp remove`.
+        // The locked in-place upsert (#42) updates command/args and keeps
+        // unknown keys.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "# codex config\nmodel = \"gpt-5\"\n\n[mcp_servers.github]\ncommand = \"gh-mcp\"\n\n[mcp_servers.paneflow]\ncommand = \"/old/paneflow-mcp\"\nargs = []\nstartup_timeout_sec = 10\n",
+        )
+        .unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_h = Rc::clone(&calls);
+        let w = Codex {
+            config_path: Some(p.clone()),
+            allow_cli: true,
+            cli: Some(Box::new(move |args| {
+                record_args(&calls_h, args);
+                Err(anyhow!("mcp add: already exists"))
+            })),
+        };
+
+        assert_eq!(
+            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
+            InstallOutcome::Updated
+        );
+        assert_add_without_remove(&calls.borrow());
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert!(txt.contains("# codex config"));
+        assert!(txt.contains("model = \"gpt-5\""));
+        assert!(txt.contains("gh-mcp"), "sibling server preserved");
+        assert!(
+            txt.contains("startup_timeout_sec = 10"),
+            "unknown keys must survive the locked merge fallback"
+        );
+        let doc = txt.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["paneflow"]["command"].as_str(),
+            Some("/data/paneflow-mcp")
+        );
     }
 
     #[test]
