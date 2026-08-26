@@ -40,7 +40,8 @@ permissions:
 jobs:
   cron_audit:
     name: cargo-deny check (cron)
-    runs-on: ubuntu-22.04
+    # Advisory-cron runner (not a compile lane); ubuntu-22.04 is deprecated.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
