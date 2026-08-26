@@ -57,7 +57,6 @@ mod settings;
 mod terminal;
 pub mod theme;
 mod ui_primitives;
-mod update;
 mod widgets;
 mod window_chrome;
 mod window_state;
@@ -81,15 +80,15 @@ use crate::workspace::Workspace;
 // references in sibling modules keep compiling without a crate-wide import churn.
 pub use app::actions::*;
 // US-002: items extracted out of `main.rs` are re-exported at crate root
-// so callers like `crate::TOAST_HOLD_MS` keep resolving without an
+// so callers like `crate::SIDEBAR_WIDTH` keep resolving without an
 // import-rewrite churn across the workspace.
 pub(crate) use app::constants::{
-    MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, RESIZE_BORDER, SIDEBAR_WIDTH, TOAST_HOLD_MS,
+    MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, RESIZE_BORDER, SIDEBAR_WIDTH,
 };
 // `TOAST_ENTER_MS` and `TOAST_EXIT_MS` are used only by the toast
 // renderer inside `app::notifications`; not re-exported at crate root.
 pub(crate) use app::drag::{WorkspaceDrag, WorkspaceDragPreview};
-pub(crate) use app::notifications::{Toast, ToastAction};
+pub(crate) use app::notifications::Toast;
 // Free helpers extracted to bootstrap.rs but still callable as
 #[cfg(target_os = "macos")]
 pub(crate) use app::bootstrap::{
@@ -244,39 +243,6 @@ pub(crate) struct ClosedPaneRecord {
     pub(crate) workspace_id: u64,
 }
 
-/// US-053: in-app self-update flow state, extracted from the `PaneFlowApp`
-/// god-struct. Grouped: the background-check slot/result, the live flow
-/// status, the detected install method, and the consecutive-failure counter.
-struct SelfUpdateState {
-    /// Shared slot for the background update checker result.
-    pending_update: update::checker::SharedUpdateSlot,
-    /// Resolved update status (set once the background check completes).
-    update_status: Option<update::checker::UpdateStatus>,
-    /// Live state of the in-app self-update flow (download → install → restart).
-    self_update_status: update::SelfUpdateStatus,
-    /// How the running binary was installed. Detected once at startup -
-    /// drives the update pill's label/click behaviour (US-012) and the
-    /// in-app updater's branch selection.
-    install_method: update::install_method::InstallMethod,
-    /// Count of consecutive in-app update failures since process start
-    /// (US-013). Bumped on every classified error; after 3 failures the
-    /// 4th click skips the network and shows the "download manually"
-    /// escape hatch toast.
-    ///
-    /// Never decremented. The only success path for an update calls
-    /// `cx.restart()`, which replaces this process - the fresh
-    /// `PaneFlowApp::new` initializes the counter back to 0. So "failures
-    /// since last success" and "failures since process start" coincide by
-    /// construction; the PRD's "three consecutive failures" requirement
-    /// holds without an explicit reset.
-    update_attempt_count: u32,
-    /// Monotonic token identifying the current `Downloading` attempt (EP-002,
-    /// U-015). Bumped each time the flow enters `Downloading`; the per-attempt
-    /// watchdog captures the value and only fires if it still matches - so a
-    /// stale watchdog from a superseded attempt can't reset a newer one.
-    download_generation: u64,
-}
-
 const PRIMARY_SIDEBAR_ANIMATION_MS: u64 = 280;
 const PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA: f32 = 0.5;
 const STARTUP_SPLASH_TEXT_WIDTH: f32 = 198.;
@@ -325,14 +291,9 @@ fn should_load_login_shell_env_for_startup(
     is_mcp_subcommand: bool,
     is_cli_subcommand: bool,
     is_hooks_subcommand: bool,
-    is_update_and_exit: bool,
     is_unknown_verb: bool,
 ) -> bool {
-    !(is_mcp_subcommand
-        || is_cli_subcommand
-        || is_hooks_subcommand
-        || is_update_and_exit
-        || is_unknown_verb)
+    !(is_mcp_subcommand || is_cli_subcommand || is_hooks_subcommand || is_unknown_verb)
 }
 
 fn should_extract_mcp_bridge_for_cli(args: &[String]) -> bool {
@@ -456,22 +417,19 @@ mod native_material_tests {
     #[test]
     fn login_shell_env_capture_only_runs_for_gui_launches() {
         assert!(should_load_login_shell_env_for_startup(
-            false, false, false, false, false
+            false, false, false, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            true, false, false, false, false
+            true, false, false, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, true, false, false, false
+            false, true, false, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, false, true, false, false
+            false, false, true, false
         ));
         assert!(!should_load_login_shell_env_for_startup(
-            false, false, false, true, false
-        ));
-        assert!(!should_load_login_shell_env_for_startup(
-            false, false, false, false, true
+            false, false, false, true
         ));
     }
 
@@ -518,7 +476,7 @@ mod native_material_tests {
 
 #[cfg(test)]
 mod help_tests {
-    use super::{global_help_text, update_and_exit_refusal};
+    use super::global_help_text;
 
     #[test]
     fn cli_help_lists_verbs_mcp_and_hooks() {
@@ -553,21 +511,6 @@ mod help_tests {
         assert!(
             help.contains("-v, --version"),
             "--help must still list -v/--version:\n{help}"
-        );
-    }
-
-    #[test]
-    fn update_and_exit_refuses_without_installing() {
-        let (code, msg) = update_and_exit_refusal();
-        assert_ne!(code, 0, "removed flag must exit non-zero");
-        assert!(
-            msg.contains("removed") && msg.contains("in-app updater"),
-            "refusal must say the flag is gone and point at the in-app updater: {msg}"
-        );
-        let lower = msg.to_ascii_lowercase();
-        assert!(
-            !lower.contains("installing") && !lower.contains("ci harness"),
-            "refusal must not claim to install: {msg}"
         );
     }
 }
@@ -1435,8 +1378,6 @@ struct PaneFlowApp {
     /// EP-002 US-005 (cli-cockpit): Launch Pad modal state, `None` = closed.
     launch_pad: Option<app::launch_pad::LaunchPadState>,
     launch_pad_focus: FocusHandle,
-    /// US-053: self-update flow state (see `SelfUpdateState`).
-    self_update: SelfUpdateState,
     /// State of the "Custom Buttons" management modal opened from the
     /// workspace context menu. `None` = closed.
     custom_buttons_modal: Option<app::custom_buttons_modal::CustomButtonsModal>,
@@ -1667,25 +1608,6 @@ impl PaneFlowApp {
         pane
     }
 
-    /// Centralised bookkeeping for a failed update attempt (US-013):
-    /// classify the error, log it, update state, show the retry toast,
-    /// and bump the attempt counter (which gates the 4th-click escape
-    /// hatch).
-    pub(crate) fn record_update_failure(
-        &mut self,
-        context: &str,
-        err: &anyhow::Error,
-        cx: &mut Context<Self>,
-    ) {
-        log::error!("self-update/{context}: {err:#}");
-        let tag = update::UpdateError::classify(err);
-        self.self_update.self_update_status = update::SelfUpdateStatus::Errored(tag.clone());
-        self.self_update.update_attempt_count =
-            self.self_update.update_attempt_count.saturating_add(1);
-        self.show_update_error_toast(&tag, cx);
-        cx.notify();
-    }
-
     // --- Sidebar rendering ---
 }
 
@@ -1910,16 +1832,12 @@ impl Render for PaneFlowApp {
             } else {
                 (None, None, false)
             };
-        // Update CTA state - extracted to `update_pill_info()` so the Cli/
-        // Agents sidebar banner and the Diff title-bar pill share one source.
-        let update_info = self.update_pill_info();
         self.title_bar.update(cx, |tb, _| {
             tb.workspace_name = ws_name;
             tb.sidebar_visible = self.primary_sidebar_visible;
             tb.left_rail_width = title_bar_rail_width;
             tb.files_menu_open = self.title_bar_files_menu_open.is_some();
             tb.help_menu_open = self.title_bar_help_menu_open.is_some();
-            tb.update_available = update_info;
             tb.ipc_state = self.ipc_status.state();
             // US-010/US-011: push the Agents brand context (None/false on
             // Cli/Diff frames, leaving the brand slot empty).
@@ -2017,8 +1935,6 @@ impl Render for PaneFlowApp {
                     log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 }
             }))
-            .on_action(cx.listener(Self::handle_start_self_update))
-            .on_action(cx.listener(Self::handle_dismiss_update))
             .on_action(cx.listener(Self::handle_open_agents_view))
             .on_action(cx.listener(Self::handle_toggle_files_sidebar))
             // US-011: title-bar `⋯` overflow menu for the current Agents thread.
@@ -2487,33 +2403,6 @@ impl Render for PaneFlowApp {
 }
 
 // ---------------------------------------------------------------------------
-// `--update-and-exit` (removed; leftover token is refused, not an installer)
-// ---------------------------------------------------------------------------
-
-/// Exit code for a leftover `--update-and-exit` token. Matches clap / unknown
-/// verb (`2`): this is a usage refusal, not a failed install.
-const UPDATE_AND_EXIT_REMOVED_CODE: i32 = 2;
-
-/// Message + exit code for the leftover `--update-and-exit` intercept.
-/// Kept as a function so tests can assert the copy without spawning GPUI.
-fn update_and_exit_refusal() -> (i32, &'static str) {
-    (
-        UPDATE_AND_EXIT_REMOVED_CODE,
-        "paneflow: --update-and-exit was removed; use the in-app updater",
-    )
-}
-
-/// Intercept for leftover `--update-and-exit` tokens. The Linux TarGz/AppImage
-/// runners this flag used to drive are gone, and the macOS `.app` path was
-/// never wired, so a successful feed match used to print "installing" and then
-/// always fail with exit 5. Do not check the feed or install from here.
-fn run_update_and_exit() -> i32 {
-    let (code, msg) = update_and_exit_refusal();
-    eprintln!("{msg}");
-    code
-}
-
-// ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
 
@@ -2612,10 +2501,6 @@ fn main() {
         && !is_cli_subcommand
         && !is_hooks_subcommand
         && args.iter().any(|a| a == "--version" || a == "-v");
-    let is_update_and_exit = !is_mcp_subcommand
-        && !is_cli_subcommand
-        && !is_hooks_subcommand
-        && args.iter().any(|a| a == "--update-and-exit");
     let is_unknown_verb = args
         .get(1)
         .is_some_and(|verb| cli::looks_like_unknown_verb(Some(verb.as_str())));
@@ -2670,7 +2555,7 @@ fn main() {
     // Adopt the user's login-shell environment only for the real GUI path
     // (Finder / Dock / `.desktop`), where the inherited launchd / systemd-user
     // PATH omits Homebrew, Nix, version managers, and `~/.zprofile` additions.
-    // Scriptable CLI/MCP/hooks/update invocations must not execute an
+    // Scriptable CLI/MCP/hooks invocations must not execute an
     // interactive login shell as a side effect. Runs before the static prepend
     // below so per-user bin dirs stay first. Must run before any other thread
     // spawns - it mutates the process environment (see the module's safety note).
@@ -2678,7 +2563,6 @@ fn main() {
         is_mcp_subcommand,
         is_cli_subcommand,
         is_hooks_subcommand,
-        is_update_and_exit,
         is_unknown_verb,
     ) {
         login_shell_env::load_login_shell_env();
@@ -2692,18 +2576,10 @@ fn main() {
     // `augment_path_for_gui_launch`.
     runtime_paths::augment_path_for_gui_launch();
 
-    // Leftover `--update-and-exit` is refused (no feed check, no install) so
-    // old CI/docs do not silently launch the GUI. Still gated on the SAME
-    // three intercepts as `--help`/`--version`: a literal token as a CLI/hooks
-    // *argument* (`paneflow send <t> "--update-and-exit"`) must not hijack.
-    if is_update_and_exit {
-        std::process::exit(run_update_and_exit());
-    }
-
     // EP-002 US-004: `paneflow mcp <subcommand>` runs as a scriptable CLI
     // and exits - it never initializes GPUI / opens a window. Placed after
     // `augment_path_for_gui_launch` (so agent-CLI detection sees `~/.bun/bin`
-    // etc.) and after `--update-and-exit`, before any GUI bootstrap. The
+    // etc.), before any GUI bootstrap. The
     // install engine lives in the GPU-free `paneflow-mcp-install` crate.
     // Only `install` extracts the bridge; `status` and `uninstall` must stay
     // read-only with respect to Paneflow's own data dir.

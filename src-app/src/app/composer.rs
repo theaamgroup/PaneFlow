@@ -232,7 +232,6 @@ impl PaneFlowApp {
             // PRD-specified 4 s hold (longer than the default confirmations).
             self.push_toast(
                 format!("Broadcast: {delivered} delivered · {queued} queued"),
-                Vec::new(),
                 COMPOSER_RECAP_HOLD_MS,
                 cx,
             );
@@ -251,7 +250,6 @@ impl PaneFlowApp {
                 self.sync_pending_chips(cx);
                 self.push_toast(
                     "Agent is generating - prompt queued, will pre-fill when it settles".into(),
-                    Vec::new(),
                     COMPOSER_RECAP_HOLD_MS,
                     cx,
                 );

@@ -225,7 +225,6 @@ impl PaneFlowApp {
         }
         self.push_toast(
             session_save_failure_toast_message().to_string(),
-            Vec::new(),
             TOAST_HOLD_MS * 2,
             cx,
         );

@@ -96,44 +96,7 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --locked --target "$TARGET" -- -D warnings
 
-      # Tag-push must bake a non-empty minisign public key. An unset
-      # Actions variable interpolates as "", so option_env! is Some("")
-      # and embedded_public_keys() drops the empty slot: cargo still
-      # exits 0. Fail here, before cargo build, so we never produce a
-      # release binary that cannot verify updates. Dry-run may still
-      # build without a key (existing unsigned-dry-run posture).
-      - name: Require minisign public key for tag-push
-        env:
-          PANEFLOW_MINISIGN_PUBKEY: ${{ vars.PANEFLOW_MINISIGN_PUBKEY }}
-        run: |
-          # Same emptiness rule as APPLE_TEAM_ID in Detect: whitespace
-          # is missing. Do not strip for the bake; Build still receives
-          # the raw var and Rust trims the slot at use.
-          pubkey="$(printf '%s' "${PANEFLOW_MINISIGN_PUBKEY:-}" | tr -d '[:space:]')"
-          if [ -n "${pubkey}" ]; then
-              echo "PANEFLOW_MINISIGN_PUBKEY is set - will bake into the binary."
-          else
-              if [ "${RELEASE_MODE}" = "release" ]; then
-                  echo "::error title=minisign public key required::vars.PANEFLOW_MINISIGN_PUBKEY is empty. Tag-push builds must bake a minisign public key so the in-app updater can verify downloads. Set the repository variable (Settings → Secrets and variables → Actions → Variables). See docs/self-update-signing.md."
-                  exit 1
-              fi
-              echo "::warning title=minisign public key missing::vars.PANEFLOW_MINISIGN_PUBKEY is empty - this dry-run binary cannot verify self-updates. See docs/self-update-signing.md."
-          fi
-
       - name: Build release binary
-        env:
-          # Public minisign keys (repository variables, never secrets).
-          # Baked in via option_env! so the in-app updater can verify
-          # downloaded DMGs. An unset var interpolates as ""; the
-          # previous step already refused tag-push on empty/whitespace.
-          # Dry-run may still bake empty (has_embedded_key() is false).
-          PANEFLOW_MINISIGN_PUBKEY: ${{ vars.PANEFLOW_MINISIGN_PUBKEY }}
-          PANEFLOW_MINISIGN_PUBKEY_NEXT: ${{ vars.PANEFLOW_MINISIGN_PUBKEY_NEXT }}
-          # Same secret later used to codesign. Baked via option_env! so
-          # verify_macos_bundle pins leaf[subject.OU] to this Team ID.
-          # Unset interpolates as ""; the binary treats empty as missing
-          # and fail-closes the pin (no hardcoded fallback).
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: cargo build --release -p paneflow-app --locked --target "$TARGET"
 
       - name: Produce .app bundle
@@ -164,10 +127,8 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # APPLE_TEAM_ID is also baked into the binary at the Build step
-          # via option_env!. A whitespace-only value would codesign later
-          # but leave the updater pin empty (fail-closed at install). Treat
-          # whitespace as missing so tag-push still fails here cheaply.
+          # Treat whitespace-only APPLE_TEAM_ID as missing so tag-push
+          # fails here cheaply instead of at codesign/notarize.
           team_id="$(printf '%s' "${APPLE_TEAM_ID:-}" | tr -d '[:space:]')"
           if [ -n "${APPLE_DEVELOPER_CERT_P12:-}" ] \
              && [ -n "${APPLE_DEVELOPER_CERT_PASSWORD:-}" ] \
@@ -178,7 +139,7 @@ jobs:
               echo "signing_available=true" >> "$GITHUB_OUTPUT"
           else
               if [ "${RELEASE_MODE}" = "release" ]; then
-                  echo "::error title=macOS signing required::One or more APPLE_* secrets are missing. Tag-push releases must sign and notarize. APPLE_TEAM_ID is also baked into the binary at Build via option_env!."
+                  echo "::error title=macOS signing required::One or more APPLE_* secrets are missing. Tag-push releases must sign and notarize."
                   exit 1
               fi
               echo "::warning title=macOS signing skipped::One or more APPLE_* secrets are missing - emitting an UNSIGNED .app. See docs/release-runbook.md."
@@ -246,8 +207,7 @@ jobs:
           df -h /
           echo "::endgroup::"
 
-      # Filename shape is a contract with the in-app updater
-      # (src-app/src/update/checker.rs): paneflow-<semver>-aarch64-apple-darwin.dmg
+      # Filename shape: paneflow-<semver>-aarch64-apple-darwin.dmg
       - name: Produce .dmg
         if: steps.macos_signing.outputs.signing_available == 'true' && steps.notarize.outcome == 'success'
         env:
@@ -347,55 +307,13 @@ jobs:
             exit 1
           fi
 
-      # Sign the DMG with the project minisign key so clients can verify
-      # downloads against the public key baked into their binary. Missing
-      # key is a hard failure: clients with embedded keys verify
-      # fail-closed, so an unsigned release would publish unusable
-      # self-update assets.
-      - name: Sign release artifacts (minisign)
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-        run: |
-          if [ -z "${MINISIGN_SECRET_KEY}" ]; then
-            echo "::error::MINISIGN_SECRET_KEY is required. Clients with an embedded key refuse unsigned self-update assets."
-            exit 1
-          fi
-          MINISIGN_VERSION=0.12
-          MINISIGN_SHA256=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63
-          curl -sSfL --retry 3 -o /tmp/minisign.zip \
-            "https://github.com/jedisct1/minisign/releases/download/${MINISIGN_VERSION}/minisign-${MINISIGN_VERSION}-macos.zip"
-          echo "${MINISIGN_SHA256}  /tmp/minisign.zip" | shasum -a 256 -c -
-          mkdir -p "$HOME/bin" /tmp/minisign-macos
-          unzip -o /tmp/minisign.zip -d /tmp/minisign-macos minisign
-          install -m 0755 /tmp/minisign-macos/minisign "$HOME/bin/minisign"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/bin:$PATH"
-          minisign -v
-          key_file="$(mktemp)"
-          trap 'rm -f "$key_file"' EXIT
-          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "$key_file"
-          chmod 600 "$key_file"
-          shopt -s nullglob
-          for f in release-assets/*; do
-            case "$f" in
-              *.sha256|*.minisig) continue ;;
-            esac
-            [ -f "$f" ] || continue
-            base="$(basename "$f")"
-            minisign -S -s "$key_file" -m "$f" \
-              -t "paneflow release artifact ${base}" >/dev/null
-            echo "signed: ${base} -> ${base}.minisig"
-          done
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
           generate_release_notes: true
           # Keep the release hidden from /releases/latest until every
-          # signed asset is attached. The updater fetches <asset>.minisig
-          # and fails closed, so exposing a half-populated release looks
-          # like a tampered artifact to clients that click Update.
+          # staged asset is attached and verified against the local set.
           draft: true
           prerelease: ${{ contains(env.RELEASE_TAG, 'alpha') || contains(env.RELEASE_TAG, 'beta') || contains(env.RELEASE_TAG, 'rc') }}
 

@@ -4,7 +4,7 @@
 //! (`paneflow-ipc-client`) and exits before any GPUI init. `main.rs` dispatches
 //! here only when `argv[1]` names a known verb ([`is_cli_verb`]) - mirroring the
 //! `paneflow mcp …` intercept - so every other invocation (no args, unknown
-//! args, `--help`/`--version`/`--update-and-exit`) is left untouched and the GUI
+//! args, `--help`/`--version`) is left untouched and the GUI
 //! launch path is preserved. clap therefore never has to own the "no subcommand
 //! => launch the GUI" default, and never eats the manually-parsed top-level
 //! flags handled above it.
