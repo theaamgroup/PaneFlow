@@ -225,16 +225,22 @@ pub(crate) fn fetch_and_verify(artifact: &Path, asset_url: &str) -> Result<()> {
 /// surfaces a distinct, actionable message (the release predates signing, or
 /// the signature was not uploaded) rather than a generic network error.
 fn fetch_signature_text(sig_url: &str) -> Result<String> {
-    let mut response = ureq::get(sig_url)
-        .config()
-        .timeout_global(Some(SIG_HTTP_TIMEOUT))
-        .build()
-        .header(
-            "User-Agent",
-            &format!("paneflow/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .call()
-        .with_context(|| "Could not fetch update signature. Try again when online.".to_string())?;
+    let mut response = super::redirect::follow_allowed_redirects_anyhow(
+        sig_url,
+        |url| {
+            ureq::get(url)
+                .config()
+                .timeout_global(Some(SIG_HTTP_TIMEOUT))
+                .max_redirects(0)
+                .build()
+                .header(
+                    "User-Agent",
+                    &format!("paneflow/{}", env!("CARGO_PKG_VERSION")),
+                )
+                .call()
+        },
+        "Could not fetch update signature. Try again when online.",
+    )?;
 
     let status = response.status();
     if !status.is_success() {

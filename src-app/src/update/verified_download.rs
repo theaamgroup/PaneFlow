@@ -26,14 +26,19 @@ pub(crate) fn download_verified_asset(
 
     let agent = large_asset_http_agent(connect_timeout, body_timeout);
     let partial = append_suffix(dest, ".partial")?;
-    let mut response = agent
-        .get(asset_url)
-        .header(
-            "User-Agent",
-            &format!("paneflow/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .call()
-        .with_context(|| "Could not download update. Try again when online.".to_string())?;
+    let mut response = super::redirect::follow_allowed_redirects_anyhow(
+        asset_url,
+        |url| {
+            agent
+                .get(url)
+                .header(
+                    "User-Agent",
+                    &format!("paneflow/{}", env!("CARGO_PKG_VERSION")),
+                )
+                .call()
+        },
+        "Could not download update. Try again when online.",
+    )?;
     if !response.status().is_success() {
         bail!(
             "Update download returned HTTP {}. Try again later.",
@@ -90,6 +95,7 @@ fn large_asset_http_agent(connect_timeout: Duration, body_timeout: Duration) -> 
         .timeout_send_request(Some(connect_timeout))
         .timeout_recv_response(Some(connect_timeout))
         .timeout_recv_body(Some(body_timeout))
+        .max_redirects(0)
         .build()
         .into()
 }
@@ -137,5 +143,12 @@ mod tests {
         assert_eq!(timeouts.send_request, Some(connect));
         assert_eq!(timeouts.recv_response, Some(connect));
         assert_eq!(timeouts.recv_body, Some(body));
+        assert_eq!(
+            large_asset_http_agent(connect, body)
+                .config()
+                .max_redirects(),
+            0,
+            "ureq must not follow redirects; hop hosts are re-validated in redirect.rs"
+        );
     }
 }

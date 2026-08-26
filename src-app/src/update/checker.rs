@@ -31,16 +31,18 @@ const UPDATE_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_FEED_URL: Option<&str> = None;
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Hosts the update flow is allowed to talk to (US-007). GitHub serves the
-/// release JSON from `api.github.com` and the asset bytes from `github.com`
-/// (which 302-redirects to `objects.githubusercontent.com`, followed
-/// transparently by ureq - we only validate the URL we were handed). A feed
-/// override or an asset URL pointing anywhere else is rejected so a tampered
-/// release JSON can't redirect the downloader off-domain.
+/// Hosts the update flow is allowed to talk to (US-007), including every
+/// redirect hop (see [`super::redirect`]). GitHub serves the release JSON
+/// from `api.github.com` and the asset bytes from `github.com`, which 302s
+/// to a `*.githubusercontent.com` CDN (`objects.` historically,
+/// `release-assets.` as of 2025). A feed override, asset URL, or hop
+/// pointing anywhere else is rejected so a tampered release JSON can't
+/// send the downloader off-domain.
 const ALLOWED_UPDATE_HOSTS: &[&str] = &[
     "api.github.com",
     "github.com",
     "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
 ];
 
 /// Resolve the URL the update checker fetches `<release>` JSON from.
@@ -72,7 +74,7 @@ pub(crate) fn update_feed_url() -> Option<String> {
 /// asset download). Delegates to the pure [`is_allowed_update_url_impl`] with
 /// the build's debug-assertion flag so the loosened "plain http to any host"
 /// rule is dev-only and the security-relevant logic stays unit-testable.
-fn is_allowed_update_url(url: &str) -> bool {
+pub(crate) fn is_allowed_update_url(url: &str) -> bool {
     is_allowed_update_url_impl(url, cfg!(debug_assertions))
 }
 
@@ -91,15 +93,25 @@ fn is_allowed_update_url_impl(url: &str, allow_insecure_http: bool) -> bool {
     };
     let host = url_host(rest);
     if scheme.eq_ignore_ascii_case("https") {
-        return is_loopback_host(host)
-            || ALLOWED_UPDATE_HOSTS
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(host));
+        return is_loopback_host(host) || is_allowed_update_host(host);
     }
     if scheme.eq_ignore_ascii_case("http") {
         return is_loopback_host(host) || allow_insecure_http;
     }
     false
+}
+
+/// Exact allow-list plus GitHub's asset CDN zone (`*.githubusercontent.com`).
+/// `githubusercontent.com.evil.com` does not match.
+fn is_allowed_update_host(host: &str) -> bool {
+    if ALLOWED_UPDATE_HOSTS
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+    {
+        return true;
+    }
+    let host = host.to_ascii_lowercase();
+    host == "githubusercontent.com" || host.ends_with(".githubusercontent.com")
 }
 
 /// Extract the host from a URL whose scheme prefix has been stripped.
@@ -330,6 +342,19 @@ pub fn pick_asset<'a>(
     Some(picked)
 }
 
+/// `html_url` from the feed is later handed to `open::that`. Only http(s)
+/// survives; `file://` / `javascript:` / unknown schemes become empty so
+/// the title-bar fallback and "Open releases" toast never launch them.
+fn sanitized_html_url(html_url: &str) -> String {
+    match crate::markdown::security::validate_link_url(html_url) {
+        Ok(v) => v.as_str().to_string(),
+        Err(err) => {
+            log::warn!("update check: ignoring html_url ({err:?}): {html_url}");
+            String::new()
+        }
+    }
+}
+
 /// Whether an update-check transport error is a transient hiccup rather than
 /// an actionable, config-shaped failure.
 ///
@@ -376,22 +401,27 @@ pub(crate) fn check_github_release() -> UpdateStatus {
         );
         return UpdateStatus::Disabled;
     };
-    let response = ureq::get(&feed_url)
-        .config()
-        .timeout_global(Some(UPDATE_HTTP_TIMEOUT))
-        .build()
-        .header("User-Agent", &format!("paneflow/{CURRENT_VERSION}"))
-        .header("Accept", "application/vnd.github.v3+json")
-        .call();
-
-    let mut response = match response {
+    let mut response = match super::redirect::follow_allowed_redirects(&feed_url, |url| {
+        ureq::get(url)
+            .config()
+            .timeout_global(Some(UPDATE_HTTP_TIMEOUT))
+            .max_redirects(0)
+            .build()
+            .header("User-Agent", &format!("paneflow/{CURRENT_VERSION}"))
+            .header("Accept", "application/vnd.github.v3+json")
+            .call()
+    }) {
         Ok(r) => r,
-        Err(e) => {
+        Err(super::redirect::UpdateHttpError::Transport(e)) => {
             if transient_update_error(&e) {
                 log::debug!("update check skipped (transient): {e}");
             } else {
                 log::warn!("update check failed: {e}");
             }
+            return UpdateStatus::Failed;
+        }
+        Err(super::redirect::UpdateHttpError::Policy(msg)) => {
+            log::warn!("update check failed: {msg}");
             return UpdateStatus::Failed;
         }
     };
@@ -445,7 +475,7 @@ pub(crate) fn check_github_release() -> UpdateStatus {
         );
         UpdateStatus::Available {
             version: remote.to_string(),
-            url: release.html_url,
+            url: sanitized_html_url(&release.html_url),
             asset_url,
             asset_format,
         }
@@ -506,6 +536,55 @@ mod tests {
             "https://github.com/arthjean/paneflow/releases/download/v1/x.tar.gz",
             false
         ));
+        assert!(is_allowed_update_url_impl(
+            "https://objects.githubusercontent.com/github-production-release-asset/x",
+            false
+        ));
+        assert!(is_allowed_update_url_impl(
+            "https://release-assets.githubusercontent.com/github-production-release-asset/x",
+            false
+        ));
+    }
+
+    #[test]
+    fn githubusercontent_cdn_suffix_is_allowed_but_not_as_suffix_attack() {
+        assert!(is_allowed_update_url_impl(
+            "https://cdn.githubusercontent.com/x",
+            false
+        ));
+        assert!(!is_allowed_update_url_impl(
+            "https://githubusercontent.com.evil.com/x",
+            false
+        ));
+        assert!(!is_allowed_update_url_impl(
+            "https://evilgithubusercontent.com/x",
+            false
+        ));
+    }
+
+    #[test]
+    fn html_url_scheme_is_http_https_only() {
+        assert_eq!(
+            sanitized_html_url("https://github.com/theaamgroup/paneflow/releases/tag/v1"),
+            "https://github.com/theaamgroup/paneflow/releases/tag/v1"
+        );
+        assert_eq!(
+            sanitized_html_url("http://127.0.0.1:8080/releases/v1"),
+            "http://127.0.0.1:8080/releases/v1"
+        );
+        for bad in [
+            "file:///Applications/Malware.app",
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "smb://evil/share",
+            "/etc/passwd",
+            "",
+        ] {
+            assert!(
+                sanitized_html_url(bad).is_empty(),
+                "html_url must reject {bad}"
+            );
+        }
     }
 
     #[test]

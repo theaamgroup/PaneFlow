@@ -31,6 +31,7 @@ pub mod checker;
 pub mod error;
 pub mod install_method;
 pub mod macos;
+pub(crate) mod redirect;
 // US-001 (prd-audit-remediation): minisign detached-signature verification -
 // the independent root of trust shared by every installer path.
 pub mod signature;

@@ -13,11 +13,10 @@
 //! syntax highlighting (P2 follow-up via `syntect`).
 
 mod parser;
-// `security` is currently unreferenced because the StyledText-based render
-// path doesn't yet support per-run click hit-testing - link spans are styled
-// but not clickable. The URL validator stays in-tree on purpose so the
-// follow-up that restores click handling has a reviewed safeguard ready.
-#[allow(dead_code)]
+// Image-ref helpers in this module are still unused (no image load path).
+// `validate_link_url` is live: updater `html_url` and `open_http_url` gate
+// on it. Markdown click hit-testing is not wired yet; when it is, use the
+// same function before `open::that`.
 pub(crate) mod security;
 mod state;
 mod theme;

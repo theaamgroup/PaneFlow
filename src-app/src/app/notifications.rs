@@ -181,7 +181,7 @@ impl PaneFlowApp {
                             window.dispatch_action(Box::new(StartSelfUpdate), cx);
                         }
                         ToastAction::OpenReleasesPage(url) => {
-                            if let Err(err) = crate::external_open::open_url(url) {
+                            if let Err(err) = crate::external_open::open_http_url(url) {
                                 log::warn!("toast: open releases URL failed: {err}");
                             }
                         }
