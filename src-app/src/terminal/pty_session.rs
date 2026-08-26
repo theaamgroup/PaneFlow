@@ -48,6 +48,11 @@ use paneflow_config::schema::{TerminalBackendConfig, TerminalConfig, TerminalSur
 const DEFAULT_SCROLLBACK_LINES: usize = TerminalConfig::DEFAULT_SCROLLBACK_LINES;
 const PTY_DRAIN_ON_EXIT: bool = true;
 const CLAUDECODE_ENV: &str = "CLAUDECODE";
+// zsh shell-integration keys. `setup_shell_integration` writes these before
+// `assemble_pty_env` merges untrusted `terminal.env` / surface env; they must
+// not be overridable.
+const ZDOTDIR_ENV: &str = "ZDOTDIR";
+const PANEFLOW_ORIG_ZDOTDIR_ENV: &str = "PANEFLOW_ORIG_ZDOTDIR";
 const MAX_PENDING_CLIPBOARD_OPS: usize = 8;
 
 /// Read the user's configured scrollback length, clamped to the
@@ -2610,6 +2615,33 @@ fn reassert_paneflow_bin_dir_first(env: &mut std::collections::HashMap<String, S
     prepend_bin_dir_to_path(env, std::path::Path::new(&bin_dir));
 }
 
+/// Restore zsh-integration `ZDOTDIR` / `PANEFLOW_ORIG_ZDOTDIR` after the
+/// untrusted env merge. If integration did not set a key, drop any value that
+/// slipped through so a hostile pane env cannot point zsh at attacker rc.
+fn reassert_shell_integration_zdotdir(
+    env: &mut std::collections::HashMap<String, String>,
+    zdotdir: Option<String>,
+    orig_zdotdir: Option<String>,
+) {
+    restore_or_drop_env_key(env, ZDOTDIR_ENV, zdotdir);
+    restore_or_drop_env_key(env, PANEFLOW_ORIG_ZDOTDIR_ENV, orig_zdotdir);
+}
+
+fn restore_or_drop_env_key(
+    env: &mut std::collections::HashMap<String, String>,
+    key: &str,
+    value: Option<String>,
+) {
+    match value {
+        Some(value) => {
+            env.insert(key.into(), value);
+        }
+        None => {
+            env.remove(key);
+        }
+    }
+}
+
 /// Prepend `bin_dir` to `env["PATH"]` (or to the process `PATH` if the
 /// env map does not yet carry one). Cross-platform: uses
 /// `std::env::join_paths`, which emits `:` on Unix and `;` on Windows.
@@ -2681,7 +2713,10 @@ fn is_loader_influencing_env_key(key: &str) -> bool {
 }
 
 fn is_forbidden_child_env_key(key: &str) -> bool {
-    key == CLAUDECODE_ENV || is_loader_influencing_env_key(key)
+    key == CLAUDECODE_ENV
+        || key == ZDOTDIR_ENV
+        || key == PANEFLOW_ORIG_ZDOTDIR_ENV
+        || is_loader_influencing_env_key(key)
 }
 
 /// True if `key` is a well-formed environment variable name safe to insert into
@@ -2697,8 +2732,9 @@ fn is_valid_env_name(key: &str) -> bool {
 /// Assemble the child PTY environment: PaneFlow identity vars, explicit TERM /
 /// locale / terminal-program identification, the AI-hook PATH prepend, and the
 /// user-env merge (a user var wins on collision EXCEPT the protected keys
-/// PaneFlow owns and `PANEFLOW_BIN_DIR` is re-prepended after any user PATH).
-/// Pure except for `inject_ai_hook_env` staging the shim
+/// PaneFlow owns, `PANEFLOW_BIN_DIR` is re-prepended after any user PATH, and
+/// zsh-integration `ZDOTDIR` / `PANEFLOW_ORIG_ZDOTDIR` are restored after the
+/// merge). Pure except for `inject_ai_hook_env` staging the shim
 /// binaries, so the env contract stays unit-testable now that the mockable
 /// `PtyBackend::spawn` seam is gone (EP-002 US-004). Mirrors Zed's
 /// `insert_zed_terminal_env`.
@@ -2758,11 +2794,17 @@ fn assemble_pty_env(
     // Silent-fail (the terminal still opens). Sets `PANEFLOW_BIN_DIR`.
     inject_ai_hook_env(&mut env);
 
+    // Snapshot zsh-integration keys before the untrusted merge so a hostile
+    // ZDOTDIR / PANEFLOW_ORIG_ZDOTDIR cannot stick even if the skip lists drift.
+    let integration_zdotdir = env.get(ZDOTDIR_ENV).cloned();
+    let integration_orig_zdotdir = env.get(PANEFLOW_ORIG_ZDOTDIR_ENV).cloned();
+
     // Merge user-supplied env on top, EXCEPT the protected keys PaneFlow owns:
     // TERM/COLORTERM/TERM_PROGRAM drive capability detection; SHLVL is reset so
     // shells start fresh; the PANEFLOW_* identity vars are how the MCP bridge
-    // and the AI-hook shim find PaneFlow - letting a user clobber them would
-    // silently break those features.
+    // and the AI-hook shim find PaneFlow; ZDOTDIR / PANEFLOW_ORIG_ZDOTDIR are
+    // the zsh-startup hook - letting a user clobber them would source attacker
+    // rc. `NODE_OPTIONS` stays mergeable (documented US-014 use).
     if let Some(user_vars) = user_env {
         const PROTECTED: &[&str] = &[
             "TERM",
@@ -2774,6 +2816,8 @@ fn assemble_pty_env(
             "PANEFLOW_SURFACE_ID",
             "PANEFLOW_SOCKET_PATH",
             "PANEFLOW_BIN_DIR",
+            ZDOTDIR_ENV,
+            PANEFLOW_ORIG_ZDOTDIR_ENV,
         ];
         for (k, v) in user_vars {
             // Reject malformed env names (empty / `=` / NUL) and drop
@@ -2795,6 +2839,7 @@ fn assemble_pty_env(
 
     env.remove(CLAUDECODE_ENV);
     reassert_paneflow_bin_dir_first(&mut env);
+    reassert_shell_integration_zdotdir(&mut env, integration_zdotdir, integration_orig_zdotdir);
 
     env
 }
@@ -3646,6 +3691,77 @@ mod tests {
             "CLAUDECODE must never reach agent child processes"
         );
         assert_eq!(env.get("KEEP_ME").map(String::as_str), Some("yes"));
+    }
+
+    #[test]
+    fn hostile_zdotdir_cannot_override_shell_integration() {
+        let mut base = HashMap::new();
+        base.insert(
+            "ZDOTDIR".to_string(),
+            "/app/shell-integration/zsh".to_string(),
+        );
+        base.insert(
+            "PANEFLOW_ORIG_ZDOTDIR".to_string(),
+            "/real/zdot".to_string(),
+        );
+        let mut user = HashMap::new();
+        user.insert("ZDOTDIR".to_string(), "/tmp/evil-zdot".to_string());
+        user.insert(
+            "PANEFLOW_ORIG_ZDOTDIR".to_string(),
+            "/tmp/evil-orig".to_string(),
+        );
+        user.insert("KEEP_ME".to_string(), "yes".to_string());
+        user.insert(
+            "NODE_OPTIONS".to_string(),
+            "--max-old-space-size=4096".to_string(),
+        );
+
+        let env = assemble_pty_env(base, 1, 1, Some(user));
+
+        assert_eq!(
+            env.get("ZDOTDIR").map(String::as_str),
+            Some("/app/shell-integration/zsh"),
+            "hostile ZDOTDIR must not replace the value shell integration set"
+        );
+        assert_eq!(
+            env.get("PANEFLOW_ORIG_ZDOTDIR").map(String::as_str),
+            Some("/real/zdot"),
+            "hostile PANEFLOW_ORIG_ZDOTDIR must not replace the integration original"
+        );
+        assert_eq!(env.get("KEEP_ME").map(String::as_str), Some("yes"));
+        assert_eq!(
+            env.get("NODE_OPTIONS").map(String::as_str),
+            Some("--max-old-space-size=4096"),
+            "NODE_OPTIONS remains mergeable (US-014); not part of the zsh-startup denylist"
+        );
+    }
+
+    #[test]
+    fn hostile_zdotdir_is_dropped_when_integration_did_not_set_it() {
+        let mut user = HashMap::new();
+        user.insert("ZDOTDIR".to_string(), "/tmp/evil-zdot".to_string());
+        user.insert(
+            "PANEFLOW_ORIG_ZDOTDIR".to_string(),
+            "/tmp/evil-orig".to_string(),
+        );
+
+        let env = assemble_pty_env(HashMap::new(), 1, 1, Some(user));
+
+        assert_ne!(
+            env.get("ZDOTDIR").map(String::as_str),
+            Some("/tmp/evil-zdot"),
+            "assembling pty env with hostile ZDOTDIR must not keep the hostile value"
+        );
+        assert_eq!(
+            env.get("ZDOTDIR"),
+            None,
+            "untrusted ZDOTDIR must not be injected when integration did not set it"
+        );
+        assert_eq!(
+            env.get("PANEFLOW_ORIG_ZDOTDIR"),
+            None,
+            "untrusted PANEFLOW_ORIG_ZDOTDIR must not be injected when integration did not set it"
+        );
     }
 
     // US-019: foreground_command degrades gracefully (no panic, None) on a
