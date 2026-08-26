@@ -165,20 +165,19 @@ exceptions = [
 # workspace dependency_source_policy test.
 unknown-registry = "deny"
 unknown-git      = "deny"
-required-git-spec = "tag"
+required-git-spec = "rev"
 # Pin the crates.io registry explicitly; anything else is "unknown".
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
 # Keep repository authorization exact. Organization-wide grants would let a
 # transitive update introduce an unrelated repository without review.
 allow-git = [
-    "https://github.com/arthjean/zed",
     "https://github.com/proptest-rs/proptest",
     "https://github.com/smol-rs/async-task.git",
     "https://github.com/zed-industries/async-process.git",
     "https://github.com/zed-industries/calloop",
     "https://github.com/zed-industries/font-kit",
-    "https://github.com/zed-industries/lsp-types",
-    "https://github.com/zed-industries/merman",
-    "https://github.com/zed-industries/trash-rs",
+    "https://github.com/zed-industries/scap",
+    "https://github.com/zed-industries/wasm_thread",
+    "https://github.com/zed-industries/zed",
     "https://github.com/zed-industries/xim-rs.git",
 ]

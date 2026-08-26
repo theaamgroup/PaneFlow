@@ -1500,7 +1500,6 @@ impl PaneFlowApp {
                 keybindings::apply_keybindings(cx, &config.shortcuts);
                 self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
                 crate::theme::invalidate_theme_cache();
-                crate::theme::sync_markdown_global_theme(cx);
                 // US-014 (render cache): refresh the cached config so render paths
                 // pick up the reload without a per-frame `load_config()`. Last use
                 // of `config` - move it in.
@@ -1529,7 +1528,6 @@ impl PaneFlowApp {
             .theme_changed
             .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
-            crate::theme::sync_markdown_global_theme(cx);
             cx.notify();
         }
     }

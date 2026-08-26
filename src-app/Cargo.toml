@@ -36,27 +36,23 @@ path = "src/main.rs"
 # resolves PRIMARY MATCH, the window opens, SVG icons + cursor quads
 # paint correctly, but every text glyph rasterizes as an empty bitmap.
 # Zed enables this feature explicitly in `zed/crates/zed/Cargo.toml`.
-gpui = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
-gpui_platform = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db", features = ["font-kit"] }
-collections = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8", features = ["font-kit"] }
 
 # Zed markdown rendering pipeline + design-system primitives. Pinned at the
 # same rev as gpui so the workspace graph resolves consistently. Pulls ~51
 # Zed workspace crates transitively (language/theme/ui/lsp/...) - accepted
 # trade-off for visual parity with Zed's agent panel.
-markdown = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
 # Bootstraps Zed's `GlobalTheme` at startup. `MarkdownElement::paint` reads
 # `cx.theme().colors()` unconditionally for secondary chrome (borders, panel
 # backgrounds, etc.) regardless of the `MarkdownStyle` we pass in, so the
 # global must exist. `theme::init(LoadThemes::JustBase, cx)` is the minimal
 # bootstrap - no JSON theme bundles, no `theme_settings` integration.
-theme = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
 # Zed's design-system primitives (Icon + IconName, Disclosure, Label, ...).
 # Pinned at the same rev as gpui/markdown/theme. Required so the agent-panel
 # thinking + tool-call rows match Zed's exact rendering (`Icon::new(IconName::
 # ToolSearch).size(IconSize::Small).color(Color::Muted)` etc.) instead of
 # hand-rolled svg() paths.
-ui = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db" }
 
 # Alacritty terminal emulation (upstream crates.io - migrated from Zed fork in US-005)
 alacritty_terminal = "0.26"
@@ -243,7 +239,7 @@ cocoa = "0.26"
 objc = "0.2"
 
 [dev-dependencies]
-gpui = { git = "https://github.com/arthjean/zed", rev = "3aaba57b95c22f4d21bbbf9f4b10b513173209db", features = ["test-support"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8", features = ["test-support", "profiler"] }
 tracing-test = "0.2"
 
 # Clippy lint policy (US-007). Mirrors `[workspace.lints.clippy]` in the
