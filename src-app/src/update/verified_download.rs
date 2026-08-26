@@ -9,23 +9,25 @@ use anyhow::{Context, Result, bail};
 /// Download `asset_url` to `dest`, verify its detached minisign sibling, then
 /// promote the verified bytes into place.
 ///
-/// The caller owns installer-specific policy through `max_bytes`, `timeout`,
-/// and `label`; the trust and staging mechanics stay identical across tar.gz,
-/// DMG, and MSI paths.
+/// The caller owns installer-specific policy through `max_bytes`,
+/// `connect_timeout`, `body_timeout`, and `label`. HTTP timeouts are split:
+/// ureq 3.3 `timeout_global` is DNS-through-body, so a short global would
+/// kill a 60-100 MB DMG on a mediocre link. Connect/DNS/headers stay short;
+/// only the response-body phase uses `body_timeout`.
 pub(crate) fn download_verified_asset(
     asset_url: &str,
     dest: &Path,
     max_bytes: u64,
-    timeout: Duration,
+    connect_timeout: Duration,
+    body_timeout: Duration,
     label: &str,
 ) -> Result<()> {
     log::info!("self-update/{label}: downloading {asset_url}");
 
+    let agent = large_asset_http_agent(connect_timeout, body_timeout);
     let partial = append_suffix(dest, ".partial")?;
-    let mut response = ureq::get(asset_url)
-        .config()
-        .timeout_global(Some(timeout))
-        .build()
+    let mut response = agent
+        .get(asset_url)
         .header(
             "User-Agent",
             &format!("paneflow/{}", env!("CARGO_PKG_VERSION")),
@@ -77,6 +79,21 @@ pub(crate) fn download_verified_asset(
     Ok(())
 }
 
+/// ureq agent for a large signed asset. `timeout_global` stays unset: it
+/// covers DNS through the last body byte, which is the wrong shape for a
+/// 60-100 MB DMG. Phase timeouts: resolve/connect/send/recv-headers use
+/// `connect_timeout`; `timeout_recv_body` uses `body_timeout`.
+fn large_asset_http_agent(connect_timeout: Duration, body_timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_resolve(Some(connect_timeout))
+        .timeout_connect(Some(connect_timeout))
+        .timeout_send_request(Some(connect_timeout))
+        .timeout_recv_response(Some(connect_timeout))
+        .timeout_recv_body(Some(body_timeout))
+        .build()
+        .into()
+}
+
 fn append_suffix(path: &Path, suffix: &str) -> Result<PathBuf> {
     let name = path
         .file_name()
@@ -101,5 +118,24 @@ mod tests {
     #[test]
     fn append_suffix_rejects_pathless_input() {
         assert!(append_suffix(Path::new("/"), ".partial").is_err());
+    }
+
+    #[test]
+    fn download_timeout_splits_connect_and_body() {
+        // Dummy values so this test does not depend on the DMG constants
+        // and does not open a socket.
+        let connect = Duration::from_secs(7);
+        let body = Duration::from_secs(99);
+        let timeouts = large_asset_http_agent(connect, body).config().timeouts();
+        assert_eq!(
+            timeouts.global, None,
+            "timeout_global is DNS-through-body; a short global would kill the DMG"
+        );
+        assert_eq!(timeouts.per_call, None);
+        assert_eq!(timeouts.resolve, Some(connect));
+        assert_eq!(timeouts.connect, Some(connect));
+        assert_eq!(timeouts.send_request, Some(connect));
+        assert_eq!(timeouts.recv_response, Some(connect));
+        assert_eq!(timeouts.recv_body, Some(body));
     }
 }

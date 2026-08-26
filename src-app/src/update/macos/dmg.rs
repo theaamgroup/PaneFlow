@@ -3,7 +3,9 @@
 //! Flow:
 //!   1. Download the `.dmg` to the native user cache dir
 //!      (`~/Library/Caches/paneflow` on macOS) as `update-<pid>.dmg`
-//!      via ureq with the 30-second per-call timeout (US-001).
+//!      via ureq with a 30s connect/DNS timeout and a 15-minute body
+//!      timeout (matching the install watchdog). ureq 3.3 `timeout_global`
+//!      is DNS-through-body and must not wrap the DMG.
 //!   2. Verify the asset's detached **minisign** signature (`.minisig`
 //!      sibling) against a key baked into this binary (US-001) **before
 //!      mounting**. A missing/invalid signature deletes the partial and
@@ -43,8 +45,15 @@ use anyhow::{Context, Result, bail};
 
 use super::super::error::UpdateError;
 
-/// Upper bound on any single HTTP call (US-001).
-const UPDATE_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// DNS / TCP / TLS / request-header budget for the DMG fetch.
+/// A hung peer must not sit for the 15-minute body budget.
+const DMG_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Body budget for the DMG download. Real releases are ~60-100 MB; a 30s
+/// ureq `timeout_global` (DNS-through-body) cannot finish that on a
+/// mediocre link, and `Errored` does not retry. Matches the 15-minute
+/// install watchdog in `self_update_flow`.
+const DMG_HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Upper bound for native macOS installer tools that can otherwise block the
 /// update worker indefinitely (`hdiutil`, `cp`, `codesign`, `spctl`).
@@ -322,7 +331,8 @@ fn download_with_verification(asset_url: &str, dest: &Path) -> Result<()> {
         asset_url,
         dest,
         MAX_DMG_BYTES,
-        UPDATE_HTTP_TIMEOUT,
+        DMG_HTTP_CONNECT_TIMEOUT,
+        DMG_HTTP_BODY_TIMEOUT,
         "DMG",
     )
 }
@@ -681,6 +691,21 @@ mod tests {
     use std::cell::RefCell;
 
     // ── Pure helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn dmg_download_timeout_covers_hundred_mb_asset() {
+        // 100 MB in 15 minutes is ~0.9 Mbps. The old 30s global required
+        // ~27 Mbps and left Errored (no auto-retry). Does not hit the network.
+        assert!(
+            DMG_HTTP_BODY_TIMEOUT >= Duration::from_secs(15 * 60),
+            "DMG body timeout must be >= 15 minutes, got {DMG_HTTP_BODY_TIMEOUT:?}"
+        );
+        assert_eq!(
+            DMG_HTTP_CONNECT_TIMEOUT,
+            Duration::from_secs(30),
+            "connect/DNS must stay short so a hung peer cannot sit for the body budget"
+        );
+    }
 
     #[test]
     fn staging_dirs_derives_sibling_paths() {

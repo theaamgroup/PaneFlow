@@ -263,10 +263,11 @@ impl PaneFlowApp {
             let bundle = bundle_path.clone();
             // EP-002 AC2: `dmg::install` runs `hdiutil attach/detach` + `cp` on
             // the ALREADY-downloaded local `.dmg` (network fetch separately
-            // bounded by `UPDATE_HTTP_TIMEOUT`). Killing a mounted-volume
-            // operation mid-flight risks leaking a mount / corrupting the swap,
-            // so these local tools are NOT wrapped in `run_with_timeout`; the
-            // worker watchdog armed below bounds a wedged install.
+            // bounded by the 15-minute DMG body timeout, matching this
+            // watchdog). Killing a mounted-volume operation mid-flight risks
+            // leaking a mount / corrupting the swap, so these local tools are
+            // NOT wrapped in `run_with_timeout`; the worker watchdog armed
+            // below bounds a wedged install.
             self.enter_downloading("dmg", cx);
 
             cx.spawn(async move |this, cx| {

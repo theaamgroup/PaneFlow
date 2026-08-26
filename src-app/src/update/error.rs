@@ -132,11 +132,10 @@ impl UpdateError {
                     got: mm.got.clone(),
                 };
             }
-            // US-001: the update flow bounds every ureq call with a 30 s
-            // global timeout. When it fires at the request/response layer,
-            // the error surfaces as `ureq::Error::Timeout(_)` - treat it as
-            // a network failure so the title bar renders the "no connection"
-            // toast instead of the generic `Other` catch-all.
+            // ureq timeouts (feed/signature `timeout_global`, DMG connect
+            // and recv-body) surface as `ureq::Error::Timeout(_)` at the
+            // request/response layer - treat as a network failure so the
+            // title bar renders the "no connection" toast, not `Other`.
             if let Some(ureq::Error::Timeout(_)) = cause.downcast_ref::<ureq::Error>() {
                 return UpdateError::Network(format!("{err:#}"));
             }
