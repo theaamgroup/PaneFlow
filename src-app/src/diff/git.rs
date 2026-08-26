@@ -146,9 +146,9 @@ const GIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// stdout cap for diff-viewer git calls. Comfortably above [`MAX_FILE_BYTES`]
 /// (512 KiB) so a legitimate `git show` of an accepted file is never truncated,
-/// while bounding a runaway/hijacked git that streams unbounded output. A
-/// too-large file is read up to this ceiling and then rejected downstream by
-/// the `MAX_FILE_BYTES` check, so truncated bytes are never displayed.
+/// while bounding a runaway/hijacked git that streams unbounded output.
+/// Exceeding the cap fails the run outright; `MAX_FILE_BYTES` is no longer the
+/// backstop for a truncated payload.
 const GIT_STDOUT_CAP: u64 = 16 * 1024 * 1024;
 
 /// Run a git subprocess in `dir`, returning captured stdout bytes on success.

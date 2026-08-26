@@ -34,7 +34,8 @@ const OPENCODE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15
 
 /// stdout cap for `opencode session list --format json` (U-032). 8 MiB is far
 /// beyond any realistic session list while bounding a malicious binary that
-/// streams gigabytes; past the cap the stream is drained and discarded.
+/// streams gigabytes. Exceeding the cap fails the run instead of draining
+/// overflow.
 const OPENCODE_STDOUT_CAP: u64 = 8 * 1024 * 1024;
 
 /// Read all OpenCode CLI sessions whose recorded `directory` matches the

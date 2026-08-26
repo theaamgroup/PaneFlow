@@ -255,12 +255,24 @@ fn is_interrupt_exit_code(exit_code: i32) -> bool {
 /// PTY after the wrapped agent has exited.
 const HOOK_NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// stdout capture cap for a synthesized hook child. `paneflow-ai-hook` writes
+/// nothing to stdout, but `run_with_timeout` pipes it regardless (it overrides
+/// the caller's `Stdio::null()`), and a capture limit now FAILS the run and
+/// SIGKILLs the child's process group rather than truncating. A cap of `0`
+/// therefore turns a single stray byte into a lost `ai.exit` /
+/// `ai.session_end`. 64 KiB matches the crate's own `STDERR_CAP`, is orders of
+/// magnitude beyond anything the hook could legitimately emit, and still bounds
+/// a PATH-hijacked impostor.
+const HOOK_STDOUT_CAP: u64 = 64 * 1024;
+// A regression of this cap to 0 fails to compile.
+const _: () = assert!(HOOK_STDOUT_CAP >= 64 * 1024);
+
 fn run_synthesized_hook(cmd: std::process::Command) {
     run_synthesized_hook_with_deadline(cmd, HOOK_NOTIFY_TIMEOUT);
 }
 
 fn run_synthesized_hook_with_deadline(cmd: std::process::Command, deadline: Duration) {
-    let _ = paneflow_process::run_with_timeout(cmd, deadline, 0);
+    let _ = paneflow_process::run_with_timeout(cmd, deadline, HOOK_STDOUT_CAP);
 }
 
 fn notify_exit(tool: &str, exit_code: i32, interrupted: bool) {
@@ -562,6 +574,19 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "hook wait must not block for the child lifetime; elapsed {elapsed:?}"
         );
+    }
+
+    /// A hook child that writes to stdout must still be waited on successfully.
+    /// With `stdout_cap = 0` this returns `Err(OutputLimitExceeded)` and SIGKILLs
+    /// the child's process group before the IPC notify completes.
+    #[cfg(unix)]
+    #[test]
+    fn synthesized_hook_tolerates_child_stdout() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("printf 'hook chatter'; exit 0");
+        let out = paneflow_process::run_with_timeout(cmd, HOOK_NOTIFY_TIMEOUT, HOOK_STDOUT_CAP)
+            .expect("a hook that writes to stdout must not fail the bounded run");
+        assert!(out.status.success());
     }
 
     #[test]

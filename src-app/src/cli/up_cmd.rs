@@ -33,6 +33,21 @@ const PORT_STRIDE: u16 = 10;
 /// Default wall-clock bound for a pane's `setup` command (US-007).
 const DEFAULT_SETUP_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// stdout cap for a pane's `setup` command. `setup` is arbitrary user shell -
+/// the documented use is a dependency install - and a capture limit now fails
+/// the run and SIGKILLs the process group instead of truncating, so a cap that
+/// a real `npm ci` can reach would abort the install and leave a half-populated
+/// tree. 8 MiB is far past any realistic install log while still bounding a
+/// runaway command.
+const SETUP_STDOUT_CAP: u64 = 8 * 1024 * 1024;
+// A regression of this cap to 0 fails to compile.
+const _: () = assert!(SETUP_STDOUT_CAP >= 1024 * 1024);
+
+/// stderr cap for a pane's `setup` command. `setup` is arbitrary user shell;
+/// cargo/npm write their progress to stderr, so the stderr budget must match
+/// stdout's or the install gets killed.
+const SETUP_STDERR_CAP: u64 = SETUP_STDOUT_CAP;
+
 /// `paneflow up <file> [--dry-run]`.
 pub fn up(client: &impl IpcTransport, file: &str, dry_run: bool) -> Result<i32, CliError> {
     let src = std::fs::read_to_string(file)
@@ -425,7 +440,12 @@ pub(super) fn execute_worktree_plan(plan: &WorktreePlan) -> Result<(), CliError>
             c
         };
         cmd.current_dir(&plan.path);
-        match paneflow_process::run_with_timeout(cmd, plan.setup_timeout, 256 * 1024) {
+        match paneflow_process::run_with_timeout_capped(
+            cmd,
+            plan.setup_timeout,
+            SETUP_STDOUT_CAP,
+            SETUP_STDERR_CAP,
+        ) {
             Ok(out) if out.status.success() => {}
             Ok(out) => eprintln!(
                 "pane {}: setup failed in {} (exit {}) - agent started anyway",

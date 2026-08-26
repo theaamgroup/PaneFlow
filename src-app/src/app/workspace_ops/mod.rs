@@ -20,6 +20,7 @@ mod swap;
 mod tab;
 
 use gpui::{App, AppContext, ClipboardItem, Context, Focusable, PathPromptOptions, Window};
+use paneflow_process::spawn_detached;
 
 use crate::layout::{LayoutTree, MAX_PANES, SplitDirection};
 use crate::terminal::TerminalView;
@@ -842,11 +843,9 @@ impl PaneFlowApp {
         let bin = resolve_editor_binary(command);
 
         let toast_label = editor_toast_label(label);
-        if let Err(err) = std::process::Command::new(&bin)
-            .current_dir(&cwd)
-            .arg(".")
-            .spawn()
-        {
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.current_dir(&cwd).arg(".");
+        if let Err(err) = spawn_detached(&mut cmd) {
             log::warn!("failed to open workspace in {toast_label}: {err}");
             self.show_toast(format!("Couldn't open in {toast_label}: {err}"), cx);
         }
@@ -972,20 +971,14 @@ impl PaneFlowApp {
 /// Returns `Err(message)` on spawn failure where `message` is already
 /// phrased for a user-visible toast (US-011 AC7, AC9).
 pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
+    spawn_detached(std::process::Command::new("open").arg(path))
         .map_err(|err| format!("Could not open Finder: {err}"))
 }
 
 /// Open a directory in Finder without going through the `open` crate's
 /// generic shell dispatch. Used for "System default" folder actions.
 pub(crate) fn open_folder_in_file_manager(path: &std::path::Path) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
+    spawn_detached(std::process::Command::new("open").arg(path))
         .map_err(|err| format!("Could not open Finder: {err}"))
 }
 
