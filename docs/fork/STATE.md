@@ -65,10 +65,10 @@ the only workflow here, so this is the most likely source of confusion.
 | Telemetry | **Gone.** `paneflow-telemetry` crate, app module, consent toasts, config block. |
 | Self-update | **Gone.** In-app updater and minisign client deleted 2026-08-26. Apple DMG signing remains. |
 | Identity | **Done.** Bundle id `com.theaamgroup.paneflow`, authors The AAM Group, Help/`--help`/schema `$id` point at `theaamgroup/paneflow`. |
-| CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Needs `APPLE_*` secrets before a real tag. |
+| CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.1.0.** Local inherited `v*` tags deleted; only `upstream-fork-point` remains. Do not tag until secrets exist. |
+| Version | **0.1.0.** First release tag `v0.1.0` is on `44150ff` (2026-08-26). GitHub Release: DMG + `.sha256` only. `upstream-fork-point` remains. |
 
 ## Verified green, and how to reproduce it
 
@@ -314,18 +314,21 @@ need it:
 
 ## Biggest remaining liability
 
-`main` is pushed to `origin`. What still needs a human, filed as GitHub
-issues assigned to `evilchinesefood`:
+`main` is pushed to `origin`. First signed GitHub Release is out:
+https://github.com/theaamgroup/paneflow/releases/tag/v0.1.0
+(`v0.1.0` on `44150ff`, DMG + `.sha256`). #7 and #9 are closed.
 
-- #7 Apple signing secrets (never create `GPG_*`, `AZURE_*`,
-  `POSTHOG_API_KEY`, or a truncated `APPLE_DEVELOPER_CERT_P` —
-  the real name is `APPLE_DEVELOPER_CERT_P12`)
-- #9 first tag / signed GitHub Release (no minisign)
-- #10 Cmd+Tab next-workspace
+What still needs a human, filed as GitHub issues assigned to
+`evilchinesefood`:
+
+- #10 Cmd+Tab next-workspace (physical keypress; synthetic does not answer)
 - #11 unsigned `.dmg` Gatekeeper open
   (`dist/paneflow-0.1.0-aarch64-apple-darwin.dmg`)
-- #13 TCC re-grant after the new bundle id
-- #14–#15 keyboard / PATH-shim smoke
+- #13 TCC / Notifications on a machine that has never seen
+  `com.theaamgroup.paneflow` (signed app launched here; prefs already existed)
+- #14 close / undo-close chords (split layout via IPC is proven; W/T are not)
+- #15 PATH-shim idle transition after a tool-using turn (thinking + `Bash`
+  hooked=true is proven)
 
 #8 (minisign keypair) is obsolete. #12 (no GitHub Releases request) is
 automatic now that the updater is deleted. #16–#19 are closed.

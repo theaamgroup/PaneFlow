@@ -14,9 +14,10 @@ rename was dropped). Version **0.1.0**. Origin `theaamgroup/paneflow` on
 `main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The in-app updater is **deleted**; Apple DMG
-signing remains. Remaining work is human: Apple signing secrets, first tag,
-Cmd+Tab, unsigned-DMG Gatekeeper open. Tracked as GitHub issues **#7, #9–#11,
-#13–#15**.
+signing remains. First signed GitHub Release is **v0.1.0**. Remaining
+human work: Cmd+Tab, unsigned-DMG Gatekeeper open, TCC/Notifications on a
+fresh bundle-id machine, close/undo-close chords, PATH-shim idle
+transition. Tracked as GitHub issues **#10, #11, #13–#15**.
 
 ## Verify before claiming
 

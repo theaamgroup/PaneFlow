@@ -9,8 +9,9 @@ spent waiting on Apple's notarization queue. If a step pushes you past its
 budget, check that step's troubleshooting box before plowing on. The runbook has
 probably already anticipated the failure.
 
-**Last validated on:** _never. This fork has not cut a release yet. Update this
-line after the first one._
+**Last validated on:** 2026-08-26, tag `v0.1.0` (`44150ff`). Signed
+`paneflow-0.1.0-aarch64-apple-darwin.dmg` + `.sha256`. Workflow run
+https://github.com/theaamgroup/paneflow/actions/runs/33010849870.
 
 Related runbooks:
 
