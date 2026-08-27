@@ -8,6 +8,7 @@ pub mod attention_queue;
 pub mod bootstrap;
 pub mod broadcast;
 pub mod cli_diff_dock;
+pub mod close_guard;
 pub mod composer;
 pub mod constants;
 pub mod custom_buttons_modal;
