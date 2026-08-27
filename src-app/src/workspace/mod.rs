@@ -619,6 +619,47 @@ mod tests {
         Workspace::build(1, "ws".to_string(), String::new(), LayoutTree::Leaf(pane))
     }
 
+    /// A single-terminal pane whose cached foreground command is seeded to
+    /// `foreground_command` - the field the off-thread pane scanner writes and
+    /// the only thing [`Workspace::is_idle`] reads.
+    fn terminal_pane(
+        cx: &mut impl AppContext,
+        foreground_command: Option<&str>,
+    ) -> gpui::Entity<crate::pane::Pane> {
+        let command = foreground_command.map(str::to_string);
+        let terminal = cx.new(|cx| {
+            let mut view = TerminalView::display_only_for_test(1, cx);
+            view.terminal.cached_foreground_command = command;
+            view
+        });
+        cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+    }
+
+    /// A workspace holding one terminal per entry of `commands`, each in its
+    /// own tab (a pane is mono-surface). One tab per terminal on purpose:
+    /// `is_idle` walks the whole tab list, not just the visible tab, so the
+    /// fixture has to make that walk observable.
+    fn workspace_with_foreground_commands(
+        cx: &mut impl AppContext,
+        commands: &[Option<&str>],
+    ) -> Workspace {
+        let (first, rest) = commands.split_first().expect("at least one terminal");
+        let mut ws = Workspace::build(
+            1,
+            "ws".to_string(),
+            String::new(),
+            LayoutTree::Leaf(terminal_pane(cx, *first)),
+        );
+        for command in rest {
+            let pane = terminal_pane(cx, *command);
+            assert!(
+                ws.open_tab(Tab::new(String::new(), Some(LayoutTree::Leaf(pane)))),
+                "the fixture must be under MAX_TABS_PER_WORKSPACE"
+            );
+        }
+        ws
+    }
+
     #[gpui::test]
     fn workspace_keeps_one_tab_when_the_last_one_is_closed(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
@@ -902,14 +943,78 @@ mod tests {
         assert!(!commands_are_idle(&[Some("vim".into())]));
     }
 
+    /// [`Workspace::is_idle`] over a real workspace, asserted in BOTH
+    /// directions off the same fixture. The positive half alone would pass
+    /// against `fn is_idle(&self, _) -> bool { true }`; changing one terminal's
+    /// cached command and requiring the answer to follow is what proves the
+    /// walk actually reaches the terminals and reads them.
     #[gpui::test]
-    fn a_workspace_whose_terminals_report_no_command_is_idle(cx: &mut TestAppContext) {
+    fn workspace_idleness_is_read_off_the_terminals_it_walks(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
-        let ws = test_workspace(cx);
+        let ws = workspace_with_foreground_commands(cx, &[None, Some("zsh"), Some("/bin/bash -l")]);
+
         cx.update(|_window, cx| {
+            assert_eq!(ws.tab_count(), 3, "one terminal per tab");
             assert!(
                 ws.is_idle(cx),
-                "a display-only terminal has no foreground command, so nothing is running"
+                "an unknown command and two shells are all idle"
+            );
+
+            // Same workspace, one field changed. The LAST tab, so a walk that
+            // stopped at the visible tab would still report idle.
+            let last_pane = ws
+                .collect_panes()
+                .last()
+                .expect("the fixture has panes")
+                .clone();
+            let terminal = last_pane
+                .read(cx)
+                .terminals()
+                .next()
+                .expect("the pane holds a terminal")
+                .clone();
+            terminal.update(cx, |view, _cx| {
+                view.terminal.cached_foreground_command = Some("cargo run".into());
+            });
+
+            assert!(
+                !ws.is_idle(cx),
+                "is_idle must follow the terminals' cached foreground command"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_workspace_running_a_command_is_not_idle(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let ws = workspace_with_foreground_commands(cx, &[Some("cargo run")]);
+        cx.update(|_window, cx| {
+            assert!(
+                !ws.is_idle(cx),
+                "a single busy terminal is the whole workspace's answer"
+            );
+        });
+    }
+
+    /// The "every terminal" half of the definition: idle is an `all`, so one
+    /// busy pane beside a prompt is enough to make the workspace active - in
+    /// either position, which also pins that the walk visits every tab rather
+    /// than short-circuiting on the first.
+    #[gpui::test]
+    fn one_busy_terminal_beside_a_shell_makes_the_workspace_active(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let shell_first = workspace_with_foreground_commands(cx, &[Some("zsh"), Some("cargo run")]);
+        let busy_first = workspace_with_foreground_commands(cx, &[Some("cargo run"), Some("zsh")]);
+
+        cx.update(|_window, cx| {
+            assert_eq!(shell_first.tab_count(), 2);
+            assert!(
+                !shell_first.is_idle(cx),
+                "the busy terminal is in the second tab and still counts"
+            );
+            assert!(
+                !busy_first.is_idle(cx),
+                "the trailing shell must not talk the workspace back into idle"
             );
         });
     }
