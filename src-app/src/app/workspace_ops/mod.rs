@@ -38,9 +38,61 @@ use crate::{
 #[derive(Clone)]
 pub(crate) enum WorkspaceFocusTarget {
     FirstPane,
+    /// Issue #78: focus the pane whose agent is waiting for input, falling
+    /// back to [`Self::FirstPane`] when nothing in the workspace is waiting.
+    WaitingElseFirst,
     Pane {
         pane: gpui::Entity<crate::pane::Pane>,
     },
+}
+
+/// Issue #78: the pane in `ws` whose agent session is
+/// [`crate::ai_types::AgentState::WaitingForInput`], as
+/// `(tab index, pane, surface id)`.
+///
+/// Searches **every tab**, not just the visible one. A workspace-level
+/// gesture should find the agent wherever it lives, and the sidebar already
+/// advertises waiting agents that sit in a background tab - so a walk limited
+/// to the visible tab would leave the badge pointing at a pane the gesture
+/// refuses to reach. The caller is responsible for making the returned tab
+/// visible before focusing the pane.
+///
+/// Returns the first match in (tab order, then layout order) so repeated
+/// selections of the same workspace are stable. Sessions whose `surface_id`
+/// never resolved are skipped: never jump to a guessed pane.
+///
+/// A free function, not a `PaneFlowApp` method, because `PaneFlowApp` cannot
+/// be constructed in a test - keeping the rule here is what makes it testable.
+fn waiting_pane_in_workspace(
+    ws: &Workspace,
+    cx: &App,
+) -> Option<(usize, gpui::Entity<crate::pane::Pane>, u64)> {
+    let waiting: std::collections::HashSet<u64> = ws
+        .agent_sessions
+        .values()
+        .filter(|s| s.state == crate::ai_types::AgentState::WaitingForInput)
+        .filter_map(|s| s.surface_id)
+        .collect();
+    if waiting.is_empty() {
+        return None;
+    }
+    for (tab_idx, tab) in ws.tabs().iter().enumerate() {
+        let Some(root) = tab.root.as_ref() else {
+            continue;
+        };
+        for pane in root.collect_leaves() {
+            let sid = pane
+                .read(cx)
+                .active_terminal_opt()
+                .map(|t| t.entity_id().as_u64());
+            if let Some(sid) = sid
+                && waiting.contains(&sid)
+            {
+                return Some((tab_idx, pane, sid));
+            }
+        }
+    }
+    None
 }
 
 fn push_closed_pane_record(records: &mut Vec<ClosedPaneRecord>, mut record: ClosedPaneRecord) {
@@ -282,12 +334,28 @@ impl PaneFlowApp {
 
         match focus_target {
             WorkspaceFocusTarget::FirstPane => {
-                // Issue #108: a workspace whose visible tab is empty has no
-                // pane to focus. Park focus on the placeholder instead, or the
-                // window ends up with nothing focused and every global
-                // `context: None` binding stops reaching its handler.
-                if !self.workspaces[idx].focus_first(window, cx) {
-                    window.focus(&self.empty_workspace_focus, cx);
+                self.focus_first_pane_or_placeholder(idx, window, cx)
+            }
+            WorkspaceFocusTarget::WaitingElseFirst => {
+                // Bind before the `match` so the immutable borrow of
+                // `self.workspaces` ends here - the `Some` arm needs `&mut`.
+                let waiting = waiting_pane_in_workspace(&self.workspaces[idx], cx);
+                match waiting {
+                    Some((tab_idx, pane, sid)) => {
+                        // Focus can only land on a rendered pane (the
+                        // invariant `Workspace::focus_first` documents), so the
+                        // owning tab has to become visible BEFORE the focus
+                        // call. Same recipe as `attention_queue_activate`.
+                        self.workspaces[idx].set_active_tab(tab_idx);
+                        pane.update(cx, |_p, cx| cx.notify());
+                        pane.read(cx).focus_handle(cx).focus(window, cx);
+                        // Keep the jump cycle coherent: landing on a waiting
+                        // pane counts as visiting it, so the next
+                        // Cmd+Shift+J continues from here instead of
+                        // restarting at the first waiting surface.
+                        self.jump_cursor = Some(sid);
+                    }
+                    None => self.focus_first_pane_or_placeholder(idx, window, cx),
                 }
             }
             WorkspaceFocusTarget::Pane { pane } => {
@@ -317,6 +385,20 @@ impl PaneFlowApp {
         self.reconcile_diff_after_workspace_change(cx);
         cx.notify();
         changed
+    }
+
+    /// Issue #108: a workspace whose visible tab is empty has no pane to
+    /// focus. Park focus on the placeholder instead, or the window ends up
+    /// with nothing focused and every global `context: None` binding stops
+    /// reaching its handler.
+    ///
+    /// Shared by [`WorkspaceFocusTarget::FirstPane`] and the "nothing is
+    /// waiting" branch of [`WorkspaceFocusTarget::WaitingElseFirst`] so the
+    /// two can never drift apart.
+    fn focus_first_pane_or_placeholder(&self, idx: usize, window: &mut Window, cx: &mut App) {
+        if !self.workspaces[idx].focus_first(window, cx) {
+            window.focus(&self.empty_workspace_focus, cx);
+        }
     }
 
     pub(crate) fn activate_workspace_without_window(
@@ -1020,13 +1102,20 @@ impl PaneFlowApp {
         }
     }
 
+    /// The single chokepoint for Cmd+1..9 (`handle_ws1`..`handle_ws9` all
+    /// funnel through here). Issue #78: an explicit "go to workspace N"
+    /// gesture lands on the pane whose agent is waiting for input when there
+    /// is one, so clicking through an "Input" badge reaches the agent instead
+    /// of whatever pane happens to sort first. Tab-selection gestures keep
+    /// plain `select_workspace`: routing there would undo the tab the user
+    /// just picked.
     pub(crate) fn handle_select_ws(
         &mut self,
         idx: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_workspace(idx, window, cx);
+        self.activate_workspace_at(idx, WorkspaceFocusTarget::WaitingElseFirst, window, cx);
     }
 
     // Macro-like handlers for Ctrl+1-9
@@ -1207,6 +1296,134 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Issue #78: workspace-level selection targets the waiting pane.
+    //
+    // `PaneFlowApp` is not constructible in a test, so the routing rule
+    // lives in the free `waiting_pane_in_workspace` and is exercised
+    // directly. Panes are real (`display_only_for_test` - no PTY).
+    // ═══════════════════════════════════════════════════════════════════
+
+    fn waiting_test_pane(
+        cx: &mut gpui::VisualTestContext,
+    ) -> (gpui::Entity<crate::pane::Pane>, u64) {
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let surface_id = terminal.entity_id().as_u64();
+        let pane = cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx));
+        (pane, surface_id)
+    }
+
+    fn session_waiting_on(surface_id: Option<u64>) -> crate::ai_types::AgentSession {
+        let mut session = crate::ai_types::AgentSession::new(
+            crate::agent_launcher::TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::WaitingForInput,
+        );
+        session.surface_id = surface_id;
+        session
+    }
+
+    #[gpui::test]
+    fn workspace_with_a_waiting_pane_targets_that_pane(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (first_pane, first_sid) = waiting_test_pane(cx);
+        let (waiting_pane, waiting_sid) = waiting_test_pane(cx);
+        assert_ne!(first_sid, waiting_sid, "two distinct surfaces");
+
+        let root = LayoutTree::from_panes_equal(
+            SplitDirection::Vertical,
+            vec![first_pane.clone(), waiting_pane.clone()],
+        )
+        .expect("two panes build a container");
+        let mut ws = Workspace::with_layout_and_id(1, "ws", std::path::PathBuf::new(), root);
+        ws.agent_sessions
+            .insert(4321u32, session_waiting_on(Some(waiting_sid)));
+
+        let found = cx.update(|_, cx| waiting_pane_in_workspace(&ws, cx));
+        let (tab_idx, pane, sid) = found.expect("the waiting pane must be found");
+        assert_eq!(tab_idx, 0, "the only tab");
+        assert_eq!(sid, waiting_sid, "reports the waiting surface id");
+        assert!(
+            pane == waiting_pane,
+            "must target the waiting pane, not the first leaf"
+        );
+        assert!(pane != first_pane, "the first leaf is not the target");
+    }
+
+    #[gpui::test]
+    fn workspace_without_a_waiting_pane_yields_none(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (pane, sid) = waiting_test_pane(cx);
+        let mut ws = Workspace::with_layout_and_id(
+            1,
+            "ws",
+            std::path::PathBuf::new(),
+            LayoutTree::Leaf(pane),
+        );
+        // A live session that is NOT waiting must not match, or every
+        // selection would hijack the caller's first-pane fallback.
+        let mut thinking = crate::ai_types::AgentSession::new(
+            crate::agent_launcher::TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Thinking,
+        );
+        thinking.surface_id = Some(sid);
+        ws.agent_sessions.insert(4321u32, thinking);
+
+        assert!(
+            cx.update(|_, cx| waiting_pane_in_workspace(&ws, cx))
+                .is_none(),
+            "nothing is waiting, so the caller must fall back to the first pane"
+        );
+    }
+
+    #[gpui::test]
+    fn waiting_pane_in_a_background_tab_reports_its_tab(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (visible_pane, _visible_sid) = waiting_test_pane(cx);
+        let (hidden_pane, hidden_sid) = waiting_test_pane(cx);
+
+        let mut ws = Workspace::with_layout_and_id(
+            1,
+            "ws",
+            std::path::PathBuf::new(),
+            LayoutTree::Leaf(visible_pane),
+        );
+        assert!(ws.open_tab(crate::workspace::Tab::new(
+            "background",
+            Some(LayoutTree::Leaf(hidden_pane.clone())),
+        )));
+        // Make tab 0 visible so the waiting pane genuinely sits out of sight.
+        ws.set_active_tab(0);
+        ws.agent_sessions
+            .insert(4321u32, session_waiting_on(Some(hidden_sid)));
+
+        let (tab_idx, pane, sid) = cx
+            .update(|_, cx| waiting_pane_in_workspace(&ws, cx))
+            .expect("a waiting agent in a background tab must still be found");
+        assert_eq!(tab_idx, 1, "reports the owning tab, not the visible one");
+        assert_eq!(sid, hidden_sid);
+        assert!(pane == hidden_pane);
+    }
+
+    #[gpui::test]
+    fn waiting_session_without_a_resolved_surface_is_skipped(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (pane, _sid) = waiting_test_pane(cx);
+        let mut ws = Workspace::with_layout_and_id(
+            1,
+            "ws",
+            std::path::PathBuf::new(),
+            LayoutTree::Leaf(pane),
+        );
+        // The hook PID never resolved to a pane.
+        ws.agent_sessions.insert(4321u32, session_waiting_on(None));
+
+        assert!(
+            cx.update(|_, cx| waiting_pane_in_workspace(&ws, cx))
+                .is_none(),
+            "an unresolved waiting session must never target a guessed pane"
+        );
+    }
 
     // Pure-Rust tests only - spawning actual binaries is brittle in CI
     // (macOS runners may not have `open` on PATH under a non-GUI session).

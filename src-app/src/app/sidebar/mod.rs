@@ -20,6 +20,7 @@ use crate::{
     PaneFlowApp, SIDEBAR_WIDTH, TabContextMenu, TabDrag, WorkspaceContextMenu, WorkspaceDrag,
     WorkspaceDragPreview, ai_types,
     app::pane_palette::PalettePlacement,
+    app::workspace_ops::WorkspaceFocusTarget,
     pane_drag::PaneDrag,
     ui_primitives::{ROW_RADIUS, squircle, squircle_skin},
     workspace::{Tab, Workspace},
@@ -1057,7 +1058,16 @@ impl PaneFlowApp {
                     let was_renaming = this.renaming_idx == Some(idx);
                     this.commit_rename(cx);
                     this.dismiss_transient_surfaces();
-                    this.select_workspace(idx, window, cx);
+                    // Issue #78: a single click on the row is a workspace-level
+                    // gesture, so it lands on the pane whose agent is waiting
+                    // for input (the one the row's "Input" badge advertises)
+                    // rather than the first pane in layout order.
+                    this.activate_workspace_at(
+                        idx,
+                        WorkspaceFocusTarget::WaitingElseFirst,
+                        window,
+                        cx,
+                    );
                     // US-008: the whole card is the disclosure control, not just
                     // the folder icon. Committing a rename is exempt: that click
                     // ends an edit, and folding the row under the cursor would
