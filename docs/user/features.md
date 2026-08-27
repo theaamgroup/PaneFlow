@@ -24,8 +24,8 @@ with no login, no API key, and no model picker inside the app itself.
 
 PaneFlow's mental model is two layers - **workspaces** (independent
 project contexts) and **panes** (terminal splits inside a workspace).
-Add a workspace with `Cmd+Shift+N` and jump between them with
-`Cmd+1-9`. Each workspace is named after the directory it opened
+Add a workspace with `Cmd+Shift+N`, jump between them with
+`Cmd+1-9`, or cycle with `Ctrl+Tab`. Each workspace is named after the directory it opened
 from, so the window always tells you where you are.
 
 ## Persistent sessions

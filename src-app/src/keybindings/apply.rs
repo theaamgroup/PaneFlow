@@ -226,7 +226,7 @@ mod tests {
     }
 
     /// US-020 (prd-cli-tab-hierarchy): the two tab-cycling defaults parse,
-    /// claim free chords, and leave `secondary-tab` (next *workspace*) alone.
+    /// claim free chords, and leave `ctrl-tab` (next *workspace*) alone.
     #[test]
     fn tab_cycling_defaults_are_bindable_and_do_not_collide() {
         use super::super::defaults::DEFAULTS;
@@ -249,12 +249,46 @@ mod tests {
             );
         }
 
-        // `secondary-tab` keeps meaning "next workspace".
+        // `ctrl-tab` keeps meaning "next workspace".
         assert!(
             DEFAULTS
                 .iter()
-                .any(|d| d.key == "secondary-tab" && d.action_name == "next_workspace"),
-            "the tab shortcuts must not steal secondary-tab from next_workspace"
+                .any(|d| d.key == "ctrl-tab" && d.action_name == "next_workspace"),
+            "the tab shortcuts must not steal ctrl-tab from next_workspace"
+        );
+    }
+
+    /// Issue #10: macOS owns Cmd+Tab for the application switcher, so
+    /// `next_workspace` lives on `ctrl-tab`. The chord must parse, must be
+    /// claimed by exactly one default, and nothing may bind `secondary-tab`
+    /// (which resolves to Cmd+Tab here and never reaches the app).
+    #[test]
+    fn next_workspace_is_bound_to_ctrl_tab_and_nothing_binds_cmd_tab() {
+        use super::super::defaults::DEFAULTS;
+
+        let action = action_from_name("next_workspace").expect("registered action");
+        assert!(
+            make_binding("ctrl-tab", action, None).is_some(),
+            "ctrl-tab must parse into a valid KeyBinding"
+        );
+        let claimants: Vec<&str> = DEFAULTS
+            .iter()
+            .filter(|d| keystrokes_conflict(d.key, "ctrl-tab"))
+            .map(|d| d.action_name)
+            .collect();
+        assert_eq!(
+            claimants,
+            vec!["next_workspace"],
+            "ctrl-tab must be claimed by next_workspace and nothing else"
+        );
+        let cmd_tab: Vec<&str> = DEFAULTS
+            .iter()
+            .filter(|d| keystrokes_conflict(d.key, "secondary-tab"))
+            .map(|d| d.action_name)
+            .collect();
+        assert!(
+            cmd_tab.is_empty(),
+            "secondary-tab is the macOS app switcher; no default may bind it, found {cmd_tab:?}"
         );
     }
 

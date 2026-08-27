@@ -9,23 +9,6 @@ entry.
 
 ---
 
-- [ ] **Task 6 — Cmd+Tab next-workspace**
-  - Commit: still advertised in `--help` (`Cmd+Tab`) and `defaults.rs` `secondary-tab`
-  - Why a machine cannot do this: Cmd+Tab is the chord macOS intercepts for
-    the application switcher. A synthetic System Events keystroke does not
-    answer whether the action reaches PaneFlow.
-  - Steps: focus a PaneFlow window that has at least two workspaces. Press
-    Cmd+Tab on the physical keyboard.
-  - Expected: either the next workspace becomes active, **or** macOS's app
-    switcher appears. Record which. If the switcher appears, the binding
-    does not reach the app.
-  - Failure implicates: `src-app/src/keybindings/defaults.rs` `secondary-tab`
-    and the `--help` copy that advertises it.
-  - Agent observed (2026-08-27, synthetic only, does not tick this): System
-    Events Cmd+Tab on a debug instance (pid-checked frontmost) moved focus to
-    another app both times and left `paneflow ls` at workspace 0; Cmd+1 /
-    Cmd+2 via the same path switched workspaces. Expect the switcher.
-
 - [ ] **Keyboard-driven pane flows**
   - Commit: (standing)
   - Steps: with a PaneFlow window focused, press Cmd+Shift+D (split

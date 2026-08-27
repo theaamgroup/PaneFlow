@@ -366,7 +366,7 @@ fn global_help_text() -> String {
          \x20 Cmd+Shift+W      Close pane\n\
          \x20 Alt+Arrow        Focus adjacent pane\n\
          \x20 Cmd+Shift+N      New workspace\n\
-         \x20 Cmd+Tab          Next workspace\n\
+         \x20 Ctrl+Tab         Next workspace\n\
          \x20 Cmd+1-9          Switch to workspace N\n\
          \n\
          Config paths and IPC endpoints are documented in the README.\n\

@@ -67,7 +67,9 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         context: None,
     },
     DefaultBinding {
-        key: "secondary-tab",
+        // Issue #10: `secondary-tab` resolves to Cmd+Tab on macOS, which the
+        // system reserves for the app switcher and never delivers to the app.
+        key: "ctrl-tab",
         action_name: "next_workspace",
         context: None,
     },
@@ -161,8 +163,8 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
     },
     // US-020 (prd-cli-tab-hierarchy): cycle the active workspace's tabs.
     // `secondary-]` / `secondary-[` are unclaimed (the taken set above:
-    // d/e/w/n/q/t/z/=/s/a/g plus digits), and `secondary-tab` keeps its
-    // existing meaning - next *workspace*, not next tab.
+    // d/e/w/n/q/t/z/=/s/a/g plus digits); next *workspace* is `ctrl-tab`
+    // (issue #10), so neither chord means next tab.
     DefaultBinding {
         key: "secondary-]",
         action_name: "next_tab",
@@ -498,14 +500,16 @@ mod tests {
 
     #[test]
     fn us009_migrated_defaults_use_secondary() {
-        // AC1: the seven migrated actions must carry a `secondary-` prefix.
+        // AC1: the migrated actions must carry a `secondary-` prefix.
+        // `next_workspace` is the one exception: `secondary-tab` is Cmd+Tab,
+        // which the macOS app switcher eats, so it lives on `ctrl-tab`
+        // (issue #10; guarded in apply.rs).
         let migrated = [
             "split_horizontally",
             "split_vertically",
             "close_pane",
             "new_workspace",
             "close_workspace",
-            "next_workspace",
             "select_workspace_1",
             "select_workspace_2",
             "select_workspace_3",

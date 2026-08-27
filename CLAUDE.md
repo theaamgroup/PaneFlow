@@ -16,9 +16,9 @@ rename was dropped). Version **0.1.0**. Origin `theaamgroup/paneflow` on
 `CONTRIBUTING.md`) are gone. The in-app updater is **deleted**; Apple DMG
 signing remains. First signed GitHub Release is **v0.1.0** (Developer ID
 signed, notarized, stapled; #11 closed with `spctl` evidence). Remaining
-human work: a physical Cmd+Tab press (#10) and the Notifications prompt on
-a machine that has never run the bundle id (#13). #14 and #15 were closed
-on 2026-08-27 by IPC-verified smokes.
+human work: the Notifications prompt on a machine that has never run the
+bundle id (#13). #10 was closed by rebinding next-workspace to `Ctrl+Tab`;
+#14 and #15 were closed on 2026-08-27 by IPC-verified smokes.
 
 ## Verify before claiming
 
@@ -354,7 +354,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 85 ac
 | `Cmd+]` / `Cmd+[` | Next tab / previous tab | Global |
 | `Alt+Arrow` | Focus navigation | Global |
 | `Cmd+Shift+N` / `Cmd+Shift+Q` | New / close workspace | Global |
-| `Cmd+Tab` | Next workspace | Global |
+| `Ctrl+Tab` | Next workspace | Global |
 | `Cmd+1`-`Cmd+9` | Select workspace | Global |
 | `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
 | `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
@@ -378,7 +378,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 85 ac
 | `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
 | `Cmd+Q` | Quit (macOS only) | Global |
 
-`Cmd+Tab` for next-workspace is inherited from the cross-platform `secondary-tab` default. macOS reserves Cmd+Tab for the system application switcher, so treat this binding as suspect and verify it actually reaches the app before relying on it.
+Next-workspace is `ctrl-tab`, not the upstream `secondary-tab` (Cmd+Tab): macOS reserves Cmd+Tab for the application switcher and never delivers it to the app (issue #10; a synthetic Cmd+Tab on 2026-08-27 moved focus to another app while Cmd+1/Cmd+2 through the same path switched workspaces). A test in `keybindings/apply.rs` fails if any default binds `secondary-tab` again.
 
 ## Config
 
@@ -450,7 +450,7 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`terminal/backend_corpus.rs`).
 - **`scripts/create-dmg.sh` is allowed to fail `codesign --verify --deep --strict` on an unsigned smoke.** The script writes the `.dmg` first, then the strict check exits 1 because the enclosed binary is adhoc/linker-signed. That check is for a signed+notarized release. Local artifact: `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (~30M), `CFBundleIdentifier=com.theaamgroup.paneflow`. Gatekeeper will quarantine a copied copy.
 - **Comments still mention Windows and Linux.** `runtime_paths.rs` still documents a named-pipe fallback. That is leftover copy. Do not re-implement from a comment. Same for Ghostty identifiers in `terminal/view.rs` and `pty_session.rs`.
-- **`Cmd+Tab` next-workspace is unverified.** `secondary-tab` still binds it; macOS owns the chord for the app switcher. Record the result on `MANUAL-CHECKLIST.md` (issue #10) before relying on the binding.
+- **Never bind `secondary-tab`.** It is Cmd+Tab on macOS and the app switcher eats it. Next-workspace moved to `ctrl-tab` (issue #10) and `next_workspace_is_bound_to_ctrl_tab_and_nothing_binds_cmd_tab` guards the table.
 
 ## MCP bridge (`paneflow-mcp`)
 

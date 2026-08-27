@@ -106,6 +106,7 @@ else is in **Settings → Keyboard Shortcuts**.
 | `Cmd+Alt+T` / `Cmd+W` | New tab / close tab |
 | `Cmd+Shift+N` | New workspace |
 | `Cmd+1`–`Cmd+9` | Jump to workspace |
+| `Ctrl+Tab` | Next workspace |
 | `Alt+Arrow` | Move focus between panes |
 | `Cmd+Shift+K` / `Cmd+Shift+J` | Attention Queue / next waiting agent |
 | `Cmd+Shift+G` | Review diffs |
@@ -113,8 +114,8 @@ else is in **Settings → Keyboard Shortcuts**.
 | `Cmd+C` / `Cmd+V` | Copy / paste in a terminal |
 | `Cmd+=` / `Cmd+-` | Font size |
 
-`Cmd+Tab` is bound to next-workspace in the defaults, but macOS owns
-that chord for the app switcher, so rebind it if you want the action.
+Next-workspace is `Ctrl+Tab`, not `Cmd+Tab`: macOS owns `Cmd+Tab` for
+the app switcher and never delivers it to the app.
 
 ## More
 

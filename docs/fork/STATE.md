@@ -8,7 +8,7 @@ Companion documents:
   execution plan** (schema, telemetry, identity, CI). Leftover-removal
   buckets 1–4 (2026-08-26) superseded its self-update “disable the feed”
   decision: the in-app updater is deleted. Remaining human work is GitHub
-  issues #10 (physical Cmd+Tab) and #13 (fresh-machine Notifications prompt).
+  issue #13 (fresh-machine Notifications prompt).
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
   **leak register**, and a **16-item traps register**. Read it before touching
   platform code or the config schema. The in-app updater is gone.
@@ -80,7 +80,7 @@ the only workflow here, so this is the most likely source of confusion.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1899 passed, 0 failed, 2 ignored (2026-08-27)
+cargo test --workspace                       # 1900 passed, 0 failed, 2 ignored (2026-08-27)
 cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
@@ -328,17 +328,17 @@ https://github.com/theaamgroup/paneflow/releases/tag/v0.1.0
 
 What still needs a human (2026-08-27 smoke results are on each issue):
 
-- #10 Cmd+Tab next-workspace: **physical keypress only.** Synthetic
-  System Events Cmd+Tab (both `keystroke tab` and `key code 48`) moved
-  frontmost to another app and left the workspace index unchanged, while
-  Cmd+1 / Cmd+2 through the same path switched workspaces. Expect the
-  switcher; the follow-up is the replacement chord in the issue body.
 - #13 Notifications prompt on a machine that has never run
   `com.theaamgroup.paneflow`. Only Notifications is in play: no
   `*UsageDescription` keys, entitlements are apple-events + JIT only, so
   Accessibility / Automation / FDA prompts cannot fire.
 
 Closed by machine evidence on 2026-08-27:
+
+- #10: next-workspace rebound from `secondary-tab` (Cmd+Tab, eaten by the
+  macOS app switcher; synthetic Cmd+Tab moved focus to another app while
+  Cmd+1/Cmd+2 switched workspaces) to `ctrl-tab`, with a test that fails
+  if any default binds `secondary-tab` again.
 
 - #11: the shipped v0.1.0 dmg is Developer ID signed (K7X6VGPFR8),
   notarized and stapled; `spctl -a -t exec` on a quarantined copy →
