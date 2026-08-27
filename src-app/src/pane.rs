@@ -216,6 +216,12 @@ pub enum PaneEvent {
     /// has exactly one surface, so this is what closing the last tab of a pane
     /// used to do, and no empty pane is ever left behind.
     Remove,
+    /// The USER asked to close this pane - the pane header's `x`, or the
+    /// sidebar pane context menu's "Close Pane". Distinct from [`Self::Remove`]
+    /// so the parent can record an undo entry first: `Remove` is also what a
+    /// terminal re-emits when its child process exits on its own, and there is
+    /// nothing to undo about a shell that already quit (issue #83).
+    CloseRequested,
     /// Request a split in the given direction from this pane.
     Split(crate::layout::SplitDirection),
     /// Toggle the docked agent-sessions sidebar for the active terminal's cwd
@@ -1269,8 +1275,13 @@ impl Pane {
     /// Close this pane (EP-002 US-004). A pane holds exactly one surface, so
     /// closing it always removes the pane from the layout tree - there is no
     /// intermediate "empty pane" state, and the parent owns the reflow.
+    ///
+    /// Emits [`PaneEvent::CloseRequested`], not [`PaneEvent::Remove`]: this is
+    /// a user gesture, so the parent records an undo entry before it reflows.
+    /// Both callers - the pane header's `x` and the sidebar pane context
+    /// menu's "Close Pane" - become undoable through this one line.
     pub fn close(&mut self, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Remove);
+        cx.emit(PaneEvent::CloseRequested);
     }
 
     /// Shared `on_drag_move` body for every drag type accepted by a pane
@@ -2016,6 +2027,45 @@ mod tests {
 
         let material = pane_card_background(&theme, true, true);
         assert_eq!(material, theme.background);
+    }
+
+    /// Issue #83: the two `PaneEvent` emit sites must not converge again.
+    /// `Pane::close` is a user gesture and the parent records an undo entry for
+    /// it; the `ChildExited` re-emit is a process that already quit, and
+    /// recording that would let every dead shell displace a real close off the
+    /// five-deep undo stack. Collapsing them back into one variant compiles
+    /// silently, so pin the shapes.
+    #[test]
+    fn close_requests_and_child_exit_emit_different_pane_events() {
+        let src = include_str!("pane.rs");
+
+        let close_body = src
+            .split("pub fn close(&mut self, cx: &mut Context<Self>) {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("Pane::close body");
+        assert!(
+            close_body.contains("PaneEvent::CloseRequested"),
+            "the header x / context-menu close must be undoable"
+        );
+        assert!(
+            !close_body.contains("PaneEvent::Remove"),
+            "a user close must not take the un-recorded path"
+        );
+
+        let child_exited = src
+            .split("TerminalEvent::ChildExited => {")
+            .nth(1)
+            .and_then(|rest| rest.split("TerminalEvent::TitleChanged").next())
+            .expect("ChildExited arm");
+        assert!(
+            child_exited.contains("PaneEvent::Remove"),
+            "a shell that exited on its own still tears its pane down"
+        );
+        assert!(
+            !child_exited.contains("PaneEvent::CloseRequested"),
+            "an exited process has nothing to restore"
+        );
     }
 
     #[test]

@@ -259,6 +259,24 @@ pub(crate) struct ClosedPaneRecord {
     pub(crate) workspace_id: u64,
 }
 
+/// Captured state of a closed tab: the whole pane tree, not one surface.
+pub(crate) struct ClosedTabRecord {
+    /// Stable [`Workspace::id`], not a positional index (issue #48).
+    pub(crate) workspace_id: u64,
+    pub(crate) title: String,
+    /// Position the tab held, so undo puts it back where it was. Clamped on
+    /// restore.
+    pub(crate) index: usize,
+    /// The tab's whole layout, serialized WITH scrollback.
+    pub(crate) layout: paneflow_config::schema::LayoutNode,
+}
+
+/// One entry on the undo-close stack: a pane or a whole tab.
+pub(crate) enum ClosedRecord {
+    Pane(ClosedPaneRecord),
+    Tab(ClosedTabRecord),
+}
+
 const PRIMARY_SIDEBAR_ANIMATION_MS: u64 = 280;
 const PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA: f32 = 0.5;
 const STARTUP_SPLASH_TEXT_WIDTH: f32 = 198.;
@@ -1253,7 +1271,9 @@ struct PaneFlowApp {
     /// Source pane for swap mode, or `None` if not in swap mode.
     swap_source: Option<Entity<crate::pane::Pane>>,
     /// LIFO stack of recently closed panes for undo-close (US-014).
-    closed_panes: Vec<ClosedPaneRecord>,
+    /// Issue #83 widened it to whole tabs, so the newest entry can be either
+    /// and one `Cmd+Shift+T` pops whichever kind that is.
+    closed_items: Vec<ClosedRecord>,
     /// Whether the "About PaneFlow" dialog is visible.
     show_about_dialog: bool,
     /// Whether the command-palette-style theme picker is visible.

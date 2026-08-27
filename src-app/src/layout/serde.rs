@@ -20,7 +20,6 @@ enum ScrollbackCapture {
     /// Full history extract. Kept for [`LayoutTree::serialize`]; IPC
     /// `workspace.current` and session persistence use [`Self::Omit`] so the
     /// GPUI tick does not walk 4000 lines per pane (issue #29).
-    #[allow(dead_code)]
     Inline,
     Omit,
 }
@@ -36,8 +35,7 @@ impl LayoutTree {
     /// recursive children.
     ///
     /// Not used by `workspace.current` (issue #29); the inline extract is the
-    /// snapshot-with-scrollback path.
-    #[allow(dead_code)]
+    /// snapshot-with-scrollback path, taken by the undo-close-tab record.
     pub fn serialize(&self, cx: &App) -> LayoutNode {
         self.serialize_with(cx, ScrollbackCapture::Inline)
     }

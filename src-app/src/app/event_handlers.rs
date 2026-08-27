@@ -11,12 +11,13 @@ use gpui::{App, AppContext, Context, Entity};
 use notify::Watcher;
 use paneflow_config::schema::TerminalSurfaceProfile;
 
+use crate::app::workspace_ops::{capture_closed_pane_record, push_closed_record};
 use crate::layout::{LayoutTree, MAX_PANES};
 use crate::pane::{self, Pane};
 use crate::pane_drag::DropEdge;
 use crate::terminal::{self, TerminalView};
 use crate::window_chrome::title_bar;
-use crate::{PaneFlowApp, ai_types};
+use crate::{ClosedRecord, PaneFlowApp, ai_types};
 
 /// "Is this PID still running?" probe used by the AI agent stale-PID sweep.
 /// Uses `kill(pid, 0)` + `ESRCH` semantics (EPERM ⇒ alive).
@@ -464,6 +465,73 @@ impl PaneFlowApp {
         }
     }
 
+    /// Drop `pane` out of whichever tab owns it and reflow, respawning a
+    /// terminal when that would have left the tab with no pane at all.
+    ///
+    /// Shared by [`pane::PaneEvent::Remove`] and
+    /// [`pane::PaneEvent::CloseRequested`]: the two differ only in whether an
+    /// undo record is pushed first, never in how the tree is mutated.
+    fn remove_pane_from_tree(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
+        // Find the workspace that owns this pane (not necessarily the
+        // active one - shells can exit in background workspaces).
+        // US-003: also resolve *which* tab owns it - a shell can exit
+        // in a background tab just as it can in a background workspace.
+        let Some((ws_idx, tab_idx)) = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(idx, ws)| ws.tab_index_containing_pane(pane).map(|t| (idx, t)))
+        else {
+            return;
+        };
+
+        let Some(tab) = self.workspaces[ws_idx].tabs().get(tab_idx) else {
+            return;
+        };
+        let root_contains = tab
+            .root
+            .as_ref()
+            .is_some_and(|root| root.contains_leaf(pane));
+        let saved_contains = tab
+            .saved_layout
+            .as_ref()
+            .is_some_and(|saved| saved.contains_leaf(pane));
+
+        if let Some(tab) = self.workspaces[ws_idx].tab_mut(tab_idx) {
+            if saved_contains {
+                if let Some(saved) = tab.saved_layout.take() {
+                    let (new_saved, _) = saved.remove_pane(pane);
+                    if root_contains {
+                        tab.root = new_saved;
+                    } else {
+                        tab.saved_layout = new_saved;
+                    }
+                }
+            } else if let Some(root) = tab.root.take() {
+                let (new_root, _) = root.remove_pane(pane);
+                tab.root = new_root;
+            }
+        }
+
+        // Never leave a tab without a pane - respawn at the workspace's
+        // root cwd so the user returns to the right folder.
+        let tab_is_empty = self.workspaces[ws_idx]
+            .tabs()
+            .get(tab_idx)
+            .is_none_or(|tab| tab.root.is_none());
+        if tab_is_empty {
+            let ws_id = self.workspaces[ws_idx].id;
+            let cwd = std::path::PathBuf::from(&self.workspaces[ws_idx].cwd);
+            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, Some(cwd), None, cx));
+            let new_pane = self.create_pane(terminal, ws_id, cx);
+            if let Some(tab) = self.workspaces[ws_idx].tab_mut(tab_idx) {
+                tab.root = Some(LayoutTree::Leaf(new_pane));
+            }
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
     pub(crate) fn handle_pane_event(
         &mut self,
         pane: Entity<Pane>,
@@ -472,63 +540,30 @@ impl PaneFlowApp {
     ) {
         match event {
             pane::PaneEvent::Remove => {
-                // Find the workspace that owns this pane (not necessarily the
-                // active one - shells can exit in background workspaces).
-                // US-003: also resolve *which* tab owns it - a shell can exit
-                // in a background tab just as it can in a background workspace.
-                let Some((ws_idx, tab_idx)) =
-                    self.workspaces.iter().enumerate().find_map(|(idx, ws)| {
-                        ws.tab_index_containing_pane(&pane).map(|t| (idx, t))
-                    })
-                else {
-                    return;
-                };
-
-                let Some(tab) = self.workspaces[ws_idx].tabs().get(tab_idx) else {
-                    return;
-                };
-                let root_contains = tab
-                    .root
-                    .as_ref()
-                    .is_some_and(|root| root.contains_leaf(&pane));
-                let saved_contains = tab
-                    .saved_layout
-                    .as_ref()
-                    .is_some_and(|saved| saved.contains_leaf(&pane));
-
-                if let Some(tab) = self.workspaces[ws_idx].tab_mut(tab_idx) {
-                    if saved_contains {
-                        if let Some(saved) = tab.saved_layout.take() {
-                            let (new_saved, _) = saved.remove_pane(&pane);
-                            if root_contains {
-                                tab.root = new_saved;
-                            } else {
-                                tab.saved_layout = new_saved;
-                            }
-                        }
-                    } else if let Some(root) = tab.root.take() {
-                        let (new_root, _) = root.remove_pane(&pane);
-                        tab.root = new_root;
+                // The pane is going away for a reason the user cannot undo -
+                // its child process exited on its own (`TerminalEvent::
+                // ChildExited` re-emits this). Record NOTHING: there is no
+                // live process to bring back, and pushing an entry here would
+                // let a shell that quit by itself displace a real close from
+                // the undo stack (issue #83).
+                self.remove_pane_from_tree(&pane, cx);
+            }
+            pane::PaneEvent::CloseRequested => {
+                // A user gesture: the pane header's `x`, or the sidebar pane
+                // context menu's "Close Pane". Both reach `Pane::close`, so
+                // both land here and both become undoable. Capture BEFORE the
+                // tree mutation drops the pane entity.
+                if let Some(ws) = self
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.tab_index_containing_pane(&pane).is_some())
+                {
+                    let workspace_id = ws.id;
+                    if let Some(record) = capture_closed_pane_record(&pane, workspace_id, cx) {
+                        push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
                     }
                 }
-
-                // Never leave a tab without a pane - respawn at the workspace's
-                // root cwd so the user returns to the right folder.
-                let tab_is_empty = self.workspaces[ws_idx]
-                    .tabs()
-                    .get(tab_idx)
-                    .is_none_or(|tab| tab.root.is_none());
-                if tab_is_empty {
-                    let ws_id = self.workspaces[ws_idx].id;
-                    let cwd = std::path::PathBuf::from(&self.workspaces[ws_idx].cwd);
-                    let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, Some(cwd), None, cx));
-                    let new_pane = self.create_pane(terminal, ws_id, cx);
-                    if let Some(tab) = self.workspaces[ws_idx].tab_mut(tab_idx) {
-                        tab.root = Some(LayoutTree::Leaf(new_pane));
-                    }
-                }
-                self.save_session(cx);
-                cx.notify();
+                self.remove_pane_from_tree(&pane, cx);
             }
             pane::PaneEvent::ToggleAgentSessions => {
                 // Toggle: clicking the icon again with the sidebar open closes it.

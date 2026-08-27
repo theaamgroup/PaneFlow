@@ -585,6 +585,32 @@ mod tests {
         assert_eq!(ws.pane_count(), 0);
     }
 
+    /// Issue #83: undoing the close of a workspace's LAST tab has to leave ONE
+    /// tab, not the restored tab sitting beside the `Tab::empty()` placeholder
+    /// `close_tab` left behind. `open_tab` already fills that placeholder in
+    /// place; the undo-close-tab restore leans on it, so pin it here.
+    #[gpui::test]
+    fn open_tab_fills_the_placeholder_left_by_closing_the_last_tab(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut ws = test_workspace(cx);
+        ws.close_tab(0);
+        assert_eq!(ws.tab_count(), 1);
+        assert!(ws.is_empty_shell(), "close_tab leaves a placeholder");
+
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let pane = cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx));
+        let opened = ws.open_tab(Tab::new("Restored", Some(LayoutTree::Leaf(pane))));
+
+        assert!(opened);
+        assert_eq!(
+            ws.tab_count(),
+            1,
+            "the placeholder is replaced, not pushed past"
+        );
+        assert_eq!(ws.active_tab().title, "Restored");
+        assert_eq!(ws.active_tab_idx(), 0);
+    }
+
     /// Issue #108: a workspace left with the substitute empty tab has nothing
     /// to focus, and the caller has to know that so it can park focus inside
     /// `app_content` instead (otherwise every global keybinding goes dead).

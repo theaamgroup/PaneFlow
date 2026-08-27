@@ -13,11 +13,12 @@
 use gpui::{AppContext, Context, Window};
 use paneflow_config::schema::TerminalSurfaceProfile;
 
-use crate::PaneFlowApp;
 use crate::layout::LayoutTree;
 use crate::terminal::TerminalView;
 use crate::workspace::Tab;
-use crate::{CloseTab, NewTab, NextTab, PreviousTab, TabDrag};
+use crate::{CloseTab, ClosedRecord, NewTab, NextTab, PaneFlowApp, PreviousTab, TabDrag};
+
+use super::{capture_closed_tab_record, push_closed_record};
 
 impl PaneFlowApp {
     /// US-008: toggle the sidebar folder row for `ws_idx`. Session-only state,
@@ -223,11 +224,26 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Issue #83: snapshot the tab BEFORE `close_tab` drops it - the drop
+        // takes its panes and their terminals with it. One capture here covers
+        // every route into this function: Cmd+W, the sidebar rail X, the tab
+        // context menu's Close, and the pane picker's escape.
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return;
+        };
+        let record = ws
+            .tabs()
+            .get(tab_idx)
+            .and_then(|tab| capture_closed_tab_record(tab, tab_idx, ws.id, cx));
+
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             return;
         };
         if ws.close_tab(tab_idx).is_none() {
             return;
+        }
+        if let Some(record) = record {
+            push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
         }
         // Issue #79/#108: this is a focus-tracking clear, not a plain state
         // clear - the renamed sidebar row is the only element that tracks

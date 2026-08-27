@@ -20,19 +20,20 @@ mod swap;
 mod tab;
 
 use gpui::{App, AppContext, ClipboardItem, Context, Entity, Focusable, PathPromptOptions, Window};
-use paneflow_config::schema::TerminalSurfaceProfile;
+use paneflow_config::schema::{LayoutNode, TerminalSurfaceProfile};
 use paneflow_process::spawn_detached;
 
 use crate::layout::{LayoutTree, MAX_PANES, SplitDirection};
 use crate::terminal::TerminalView;
 use crate::workspace::{MAX_WORKSPACES, Workspace, next_workspace_id};
 use crate::{
-    ClosePane, CloseWorkspace, ClosedPaneRecord, ClosedSurfaceRecord, CopyWorkspacePath,
-    MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, NewWorkspace, NextWorkspace,
-    OpenWorkspaceInCursor, OpenWorkspaceInVsCode, OpenWorkspaceInWindsurf, OpenWorkspaceInZed,
-    PaneFlowApp, RevealWorkspaceInFileManager, SelectWorkspace1, SelectWorkspace2,
-    SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6, SelectWorkspace7,
-    SelectWorkspace8, SelectWorkspace9, SplitHorizontally, SplitVertically, UndoClosePane,
+    ClosePane, CloseWorkspace, ClosedPaneRecord, ClosedRecord, ClosedSurfaceRecord,
+    CopyWorkspacePath, MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, NewWorkspace,
+    NextWorkspace, OpenWorkspaceInCursor, OpenWorkspaceInVsCode, OpenWorkspaceInWindsurf,
+    OpenWorkspaceInZed, PaneFlowApp, RevealWorkspaceInFileManager, SelectWorkspace1,
+    SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6,
+    SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitHorizontally, SplitVertically,
+    UndoClosePane,
 };
 
 #[derive(Clone)]
@@ -95,11 +96,19 @@ fn waiting_pane_in_workspace(
     None
 }
 
-fn push_closed_pane_record(records: &mut Vec<ClosedPaneRecord>, mut record: ClosedPaneRecord) {
-    if let ClosedSurfaceRecord::Terminal {
-        scrollback: Some(scrollback),
+/// Push one undo-close entry, honouring both caps: at most
+/// [`MAX_CLOSED_PANES`] whole records (oldest evicted first), and at most
+/// [`MAX_CLOSED_PANE_SCROLLBACK_BYTES`] of captured scrollback across all of
+/// them. A tab entry counts every leaf of its captured tree.
+pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: ClosedRecord) {
+    if let ClosedRecord::Pane(ClosedPaneRecord {
+        surface:
+            ClosedSurfaceRecord::Terminal {
+                scrollback: Some(scrollback),
+                ..
+            },
         ..
-    } = &mut record.surface
+    }) = &mut record
     {
         scrollback.shrink_to_fit();
     }
@@ -110,7 +119,22 @@ fn push_closed_pane_record(records: &mut Vec<ClosedPaneRecord>, mut record: Clos
     enforce_closed_pane_scrollback_budget(records, MAX_CLOSED_PANE_SCROLLBACK_BYTES);
 }
 
-fn enforce_closed_pane_scrollback_budget(records: &mut [ClosedPaneRecord], budget: usize) {
+/// Release captured scrollback until the total is back under `budget`.
+///
+/// Two nested orderings, both oldest-first: records in stack order, and inside
+/// a record its leaves in traversal order. Stripping is **per leaf**, not per
+/// record, and the budget is re-checked after each leaf. That distinction is
+/// what keeps a tab record usable: one tab can hold up to
+/// [`crate::layout::MAX_PANES`] leaves of up to [`crate::limits::MAX_CHARS`]
+/// each - far past the whole budget - so an all-or-nothing sweep would return
+/// a multi-pane tab with no history at all rather than trimming the oldest
+/// leaves and keeping the rest.
+///
+/// Records themselves are always kept: an undo that restores a pane or a tab
+/// without its history is still an undo, while dropping the record would lose
+/// the layout too. A single-surface pane record is the degenerate one-leaf
+/// case of the same walk.
+fn enforce_closed_pane_scrollback_budget(records: &mut [ClosedRecord], budget: usize) {
     let mut total = closed_pane_scrollback_bytes(records);
     if total <= budget {
         return;
@@ -119,27 +143,154 @@ fn enforce_closed_pane_scrollback_budget(records: &mut [ClosedPaneRecord], budge
         if total <= budget {
             break;
         }
-        if let ClosedSurfaceRecord::Terminal { scrollback, .. } = &mut record.surface
-            && let Some(scrollback) = scrollback.take()
-        {
-            total = total.saturating_sub(scrollback.len());
+        release_record_scrollback(record, &mut total, budget);
+    }
+}
+
+/// Clear one record's leaves, one at a time in traversal order, stopping the
+/// moment `total` drops to `budget`.
+fn release_record_scrollback(record: &mut ClosedRecord, total: &mut usize, budget: usize) {
+    match record {
+        ClosedRecord::Pane(pane) => {
+            if *total <= budget {
+                return;
+            }
+            if let ClosedSurfaceRecord::Terminal { scrollback, .. } = &mut pane.surface
+                && let Some(scrollback) = scrollback.take()
+            {
+                *total = total.saturating_sub(scrollback.len());
+            }
+        }
+        ClosedRecord::Tab(tab) => release_layout_scrollback(&mut tab.layout, total, budget),
+    }
+}
+
+/// Leaf-by-leaf half of [`release_record_scrollback`] for a serialized tree.
+fn release_layout_scrollback(
+    node: &mut paneflow_config::schema::LayoutNode,
+    total: &mut usize,
+    budget: usize,
+) {
+    match node {
+        paneflow_config::schema::LayoutNode::Pane { surfaces } => {
+            for surface in surfaces.iter_mut() {
+                if *total <= budget {
+                    return;
+                }
+                if let Some(scrollback) = surface.scrollback.take() {
+                    *total = total.saturating_sub(scrollback.len());
+                }
+            }
+        }
+        paneflow_config::schema::LayoutNode::Split { children, .. } => {
+            for child in children.iter_mut() {
+                if *total <= budget {
+                    return;
+                }
+                release_layout_scrollback(child, total, budget);
+            }
         }
     }
 }
 
-fn closed_pane_scrollback_bytes(records: &[ClosedPaneRecord]) -> usize {
+/// Drop the parts of a serialized tree that cannot be restored, returning
+/// `None` when nothing restorable is left.
+///
+/// A leaf holding a Diff surface serializes to `LayoutNode::Pane { surfaces:
+/// [] }` - `serialize_with` filters the diff `SurfaceDefinition` out but still
+/// emits the leaf. Restoring that leaf would fall into
+/// `spawn_pane_from_surfaces`' fallback and silently hand back a plain shell,
+/// contradicting the pane-level rule that a diff surface is derived state and
+/// not restorable at all. So the leaf goes, and the tree closes over the gap:
+/// a split left with one child collapses into that child, a split left with
+/// none disappears, and a tree that prunes away entirely yields `None`.
+fn prune_unrestorable(node: LayoutNode) -> Option<LayoutNode> {
+    match node {
+        LayoutNode::Pane { surfaces } => {
+            if surfaces.is_empty() {
+                None
+            } else {
+                Some(LayoutNode::Pane { surfaces })
+            }
+        }
+        LayoutNode::Split {
+            direction,
+            ratio,
+            ratios,
+            children,
+        } => {
+            let had_ratios = ratios.is_some();
+            let mut kept_children = Vec::with_capacity(children.len());
+            let mut kept_ratios = Vec::with_capacity(children.len());
+            for (i, child) in children.into_iter().enumerate() {
+                let child_ratio = ratios.as_ref().and_then(|rs| rs.get(i).copied());
+                if let Some(kept) = prune_unrestorable(child) {
+                    kept_children.push(kept);
+                    if let Some(child_ratio) = child_ratio {
+                        kept_ratios.push(child_ratio);
+                    }
+                }
+            }
+            match kept_children.len() {
+                0 => None,
+                // A one-child split is not a split; collapsing keeps the tree
+                // in the shape the rest of the layout code expects.
+                1 => kept_children.pop(),
+                _ => {
+                    // Ratios are positional. Keep them only when every
+                    // surviving child still has its own; a short list would
+                    // silently reassign widths, and `resolved_ratios` already
+                    // falls back to equal shares for `None`.
+                    let ratios = (had_ratios && kept_ratios.len() == kept_children.len())
+                        .then_some(kept_ratios);
+                    Some(LayoutNode::Split {
+                        direction,
+                        ratio,
+                        ratios,
+                        children: kept_children,
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Total bytes of captured scrollback held in one serialized layout tree.
+///
+/// Walks every `LayoutNode::Pane` leaf and sums its surfaces' inline
+/// scrollback. A tab-level undo record stores its whole tree, so the byte
+/// budget cannot see that text without this walk.
+fn layout_node_scrollback_bytes(node: &paneflow_config::schema::LayoutNode) -> usize {
+    match node {
+        paneflow_config::schema::LayoutNode::Pane { surfaces } => surfaces
+            .iter()
+            .filter_map(|surface| surface.scrollback.as_ref())
+            .map(String::len)
+            .sum(),
+        paneflow_config::schema::LayoutNode::Split { children, .. } => {
+            children.iter().map(layout_node_scrollback_bytes).sum()
+        }
+    }
+}
+
+/// Total captured scrollback across the whole undo stack, counting a tab
+/// record's every leaf as well as a pane record's single surface.
+fn closed_pane_scrollback_bytes(records: &[ClosedRecord]) -> usize {
     records
         .iter()
-        .map(|record| &record.surface)
-        .filter_map(|tab| match tab {
-            ClosedSurfaceRecord::Terminal { scrollback, .. } => scrollback.as_ref(),
-            ClosedSurfaceRecord::Markdown { .. } => None,
+        .map(|record| match record {
+            ClosedRecord::Pane(pane) => match &pane.surface {
+                ClosedSurfaceRecord::Terminal { scrollback, .. } => {
+                    scrollback.as_ref().map_or(0, String::len)
+                }
+                ClosedSurfaceRecord::Markdown { .. } => 0,
+            },
+            ClosedRecord::Tab(tab) => layout_node_scrollback_bytes(&tab.layout),
         })
-        .map(String::len)
         .sum()
 }
 
-fn capture_closed_pane_record(
+pub(crate) fn capture_closed_pane_record(
     pane: &gpui::Entity<crate::pane::Pane>,
     workspace_id: u64,
     cx: &App,
@@ -170,6 +321,36 @@ fn capture_closed_pane_record(
     Some(ClosedPaneRecord {
         surface,
         workspace_id,
+    })
+}
+
+/// Snapshot a whole tab for undo. `None` when the tab holds nothing worth
+/// restoring - no layout at all, or a layout that prunes away entirely.
+///
+/// Prefers `saved_layout` over `root`: while a tab is zoomed, `saved_layout`
+/// holds the FULL tree and `root` holds only the zoomed leaf, so reading
+/// `root` there would silently drop every other pane from the record.
+///
+/// Scrollback is captured INLINE, so undo replays each pane's history as inert
+/// text. No process is captured and none is resumed: restore spawns brand-new
+/// PTYs at the recorded cwds.
+///
+/// A leaf holding a Diff surface serializes with an empty surface list and is
+/// pruned out here, matching `capture_closed_pane_record`'s refusal to record
+/// a diff pane at all. Nothing in this record round-trips a Diff view.
+fn capture_closed_tab_record(
+    tab: &crate::workspace::Tab,
+    index: usize,
+    workspace_id: u64,
+    cx: &App,
+) -> Option<crate::ClosedTabRecord> {
+    let tree = tab.saved_layout.as_ref().or(tab.root.as_ref())?;
+    let layout = prune_unrestorable(tree.serialize(cx))?;
+    Some(crate::ClosedTabRecord {
+        workspace_id,
+        title: tab.title.clone(),
+        index,
+        layout,
     })
 }
 
@@ -763,7 +944,7 @@ impl PaneFlowApp {
             if let Some(pane) = closing_pane
                 && let Some(record) = capture_closed_pane_record(&pane, workspace_id, cx)
             {
-                push_closed_pane_record(&mut self.closed_panes, record);
+                push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
             }
         }
 
@@ -828,15 +1009,35 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(record) = self.closed_panes.pop() else {
-            self.show_toast("No closed pane to restore", cx);
-            return; // No closed panes to restore
+        let Some(record) = self.closed_items.pop() else {
+            self.show_toast("Nothing to restore", cx);
+            return; // The undo stack is empty
         };
+        match record {
+            ClosedRecord::Pane(record) => self.restore_closed_pane(record, window, cx),
+            ClosedRecord::Tab(record) => {
+                self.restore_closed_tab_record(record, window, cx);
+            }
+        }
+    }
 
+    /// Rebuild a closed pane by splitting it back in beside the focused one.
+    /// Unchanged behaviour: this is the original `UndoClosePane` body, lifted
+    /// out so the action handler can branch on the record kind.
+    fn restore_closed_pane(
+        &mut self,
+        record: ClosedPaneRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Restore into the workspace the pane was closed in. Indexes shift
         // on close/reorder; the record stores a stable Workspace.id.
         let ids: Vec<u64> = self.workspaces.iter().map(|ws| ws.id).collect();
         let Some(idx) = workspace_index_for_undo(&ids, record.workspace_id) else {
+            // The pop already happened, so a refusal that just returned would
+            // destroy the only copy of the thing undo exists to protect. Put
+            // it back: the workspace can be recreated and the undo retried.
+            push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
             self.show_toast("Workspace no longer exists", cx);
             return;
         };
@@ -866,6 +1067,87 @@ impl PaneFlowApp {
 
         self.save_session(cx);
         cx.notify();
+    }
+
+    /// Rebuild a closed tab in place, spawning a fresh pane per recorded
+    /// leaf. Returns the index the tab landed at, or `None` when the restore
+    /// was refused.
+    ///
+    /// Restore is a *new* tab holding *new* PTYs: recorded scrollback replays
+    /// as inert text and no agent process is resumed. Focus lands on the
+    /// restored tab's first leaf - `serialize_with` stamps `focus: true` on
+    /// every leaf and `from_layout_node` never reads it, so there is no
+    /// recorded per-pane focus to honour.
+    ///
+    /// Both refusal paths push `record` back onto the undo stack:
+    /// [`Self::handle_undo_close_pane`] pops before it dispatches, so simply
+    /// returning would consume the record and lose the tab for good.
+    fn restore_closed_tab_record(
+        &mut self,
+        record: crate::ClosedTabRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        // Indexes shift on close/reorder; the record stores a stable
+        // `Workspace.id`.
+        let ids: Vec<u64> = self.workspaces.iter().map(|ws| ws.id).collect();
+        let Some(ws_idx) = workspace_index_for_undo(&ids, record.workspace_id) else {
+            push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
+            self.show_toast("Workspace no longer exists", cx);
+            return None;
+        };
+        // `open_tab` fills an empty workspace's placeholder instead of pushing
+        // past it, so a placeholder-only workspace always has room even though
+        // `can_open_tab` reasons about the raw count.
+        if !self.workspaces[ws_idx].can_open_tab() && !self.workspaces[ws_idx].is_empty_shell() {
+            push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
+            self.show_toast("Tab limit reached", cx);
+            return None;
+        }
+
+        self.active_idx = ws_idx;
+        let crate::ClosedTabRecord {
+            title,
+            index,
+            layout,
+            ..
+        } = record;
+
+        // Copy the workspace's identity out and own its cwd before building
+        // the spawn closure: `ws`'s borrow of `self` has to end before the
+        // closure captures `cx`, and `self` is re-acquired afterwards.
+        let ws = &self.workspaces[ws_idx];
+        let ws_id = ws.id;
+        let fallback_cwd = std::path::PathBuf::from(&ws.cwd);
+        // The deque starts EMPTY on purpose: `from_layout_node` reuses handed-in
+        // panes verbatim and ignores their `SurfaceDefinition`, so any reuse
+        // here would silently drop a leaf's cwd, custom name and scrollback.
+        let mut pane_deque = std::collections::VecDeque::new();
+        let root = LayoutTree::from_layout_node(&layout, &mut pane_deque, &mut |node| {
+            let surfaces = match node {
+                LayoutNode::Pane { surfaces } => surfaces.as_slice(),
+                _ => &[],
+            };
+            Self::spawn_pane_from_surfaces(ws_id, surfaces, &fallback_cwd, cx)
+        });
+
+        let tab = crate::workspace::Tab::new(title, Some(root));
+        let ws = self.workspaces.get_mut(ws_idx)?;
+        if !ws.open_tab(tab) {
+            // Unreachable: the cap was checked above and nothing can have
+            // opened a tab in between. Kept as a fail-safe rather than a panic.
+            log::warn!("undo close tab: workspace refused the tab after the cap check");
+            return None;
+        }
+        // `open_tab` appends (or fills the placeholder); slide the newcomer
+        // back to the slot it held. `reorder_tab` re-resolves the active tab
+        // by id, so the restored tab stays the visible one.
+        let last = ws.tab_count().saturating_sub(1);
+        ws.reorder_tab(last, index.min(last));
+        let tab_idx = ws.active_tab_idx();
+        self.focus_workspace_tab(ws_idx, tab_idx, window, cx);
+        cx.notify();
+        Some(tab_idx)
     }
 
     pub(crate) fn handle_new_workspace(
@@ -1583,8 +1865,8 @@ mod tests {
         assert_eq!(resolved, std::path::PathBuf::from(bare));
     }
 
-    fn closed_pane_record_with_scrollback(len: usize) -> ClosedPaneRecord {
-        ClosedPaneRecord {
+    fn closed_pane_record_with_scrollback(len: usize) -> ClosedRecord {
+        ClosedRecord::Pane(ClosedPaneRecord {
             surface: ClosedSurfaceRecord::Terminal {
                 cwd: None,
                 scrollback: Some("x".repeat(len)),
@@ -1592,7 +1874,114 @@ mod tests {
                 font_size: None,
             },
             workspace_id: 0,
+        })
+    }
+
+    /// A pane record carrying no scrollback, tagged so eviction order is
+    /// observable.
+    fn closed_pane_record(workspace_id: u64) -> ClosedRecord {
+        ClosedRecord::Pane(ClosedPaneRecord {
+            surface: ClosedSurfaceRecord::Terminal {
+                cwd: None,
+                scrollback: None,
+                custom_name: None,
+                font_size: None,
+            },
+            workspace_id,
+        })
+    }
+
+    /// A tab record whose layout is a one-level split of `sizes.len()` leaves,
+    /// leaf `i` holding `sizes[i]` bytes of scrollback.
+    fn closed_tab_record(workspace_id: u64, sizes: &[usize]) -> ClosedRecord {
+        use paneflow_config::schema::{LayoutNode, SurfaceDefinition};
+        ClosedRecord::Tab(crate::ClosedTabRecord {
+            workspace_id,
+            title: "tab".to_string(),
+            index: 0,
+            layout: LayoutNode::Split {
+                direction: "vertical".to_string(),
+                ratio: None,
+                ratios: None,
+                children: sizes
+                    .iter()
+                    .map(|len| LayoutNode::Pane {
+                        surfaces: vec![SurfaceDefinition {
+                            scrollback: Some("x".repeat(*len)),
+                            ..Default::default()
+                        }],
+                    })
+                    .collect(),
+            },
+        })
+    }
+
+    /// Every leaf's scrollback length in traversal order; `None` for a leaf
+    /// whose history the budget released.
+    fn leaf_scrollback_lens(node: &paneflow_config::schema::LayoutNode) -> Vec<Option<usize>> {
+        use paneflow_config::schema::LayoutNode;
+        match node {
+            LayoutNode::Pane { surfaces } => surfaces
+                .iter()
+                .map(|surface| surface.scrollback.as_ref().map(String::len))
+                .collect(),
+            LayoutNode::Split { children, .. } => {
+                children.iter().flat_map(leaf_scrollback_lens).collect()
+            }
         }
+    }
+
+    fn record_workspace_ids(records: &[ClosedRecord]) -> Vec<u64> {
+        records
+            .iter()
+            .map(|record| match record {
+                ClosedRecord::Pane(pane) => pane.workspace_id,
+                ClosedRecord::Tab(tab) => tab.workspace_id,
+            })
+            .collect()
+    }
+
+    /// Nested-split scrollback must be summed leaf by leaf: a tab record
+    /// stores a whole tree, so a walk that stopped at the root would report
+    /// zero for every layout that is not a bare single pane.
+    #[test]
+    fn layout_node_scrollback_bytes_sums_nested_split_leaves() {
+        use paneflow_config::schema::{LayoutNode, SurfaceDefinition};
+
+        fn leaf(scrollback: Option<&str>) -> LayoutNode {
+            LayoutNode::Pane {
+                surfaces: vec![SurfaceDefinition {
+                    scrollback: scrollback.map(str::to_string),
+                    ..Default::default()
+                }],
+            }
+        }
+        fn split(children: Vec<LayoutNode>) -> LayoutNode {
+            LayoutNode::Split {
+                direction: "vertical".to_string(),
+                ratio: None,
+                ratios: None,
+                children,
+            }
+        }
+
+        assert_eq!(layout_node_scrollback_bytes(&leaf(None)), 0);
+        assert_eq!(layout_node_scrollback_bytes(&leaf(Some("abcd"))), 4);
+        // A surface-less leaf (the shape a Diff pane serializes to) is zero.
+        assert_eq!(
+            layout_node_scrollback_bytes(&LayoutNode::Pane { surfaces: vec![] }),
+            0
+        );
+
+        let nested = split(vec![
+            leaf(Some("aa")),
+            split(vec![leaf(Some("bbb")), leaf(None), leaf(Some("cccc"))]),
+        ]);
+        assert_eq!(
+            layout_node_scrollback_bytes(&nested),
+            9,
+            "every leaf of every depth contributes"
+        );
     }
 
     #[test]
@@ -1617,37 +2006,384 @@ mod tests {
             closed_pane_record_with_scrollback(one_mib),
         ];
 
-        push_closed_pane_record(&mut records, closed_pane_record_with_scrollback(one_mib));
+        push_closed_record(&mut records, closed_pane_record_with_scrollback(one_mib));
 
         assert_eq!(records.len(), 3, "budget must preserve undo records");
         assert!(
             matches!(
-                &records[0].surface,
-                ClosedSurfaceRecord::Terminal {
-                    scrollback: None,
+                &records[0],
+                ClosedRecord::Pane(ClosedPaneRecord {
+                    surface: ClosedSurfaceRecord::Terminal {
+                        scrollback: None,
+                        ..
+                    },
                     ..
-                }
+                })
             ),
             "oldest scrollback should be released first"
         );
         assert!(matches!(
-            &records[1].surface,
-            ClosedSurfaceRecord::Terminal {
-                scrollback: Some(_),
+            &records[1],
+            ClosedRecord::Pane(ClosedPaneRecord {
+                surface: ClosedSurfaceRecord::Terminal {
+                    scrollback: Some(_),
+                    ..
+                },
                 ..
-            }
+            })
         ));
         assert!(matches!(
-            &records[2].surface,
-            ClosedSurfaceRecord::Terminal {
-                scrollback: Some(_),
+            &records[2],
+            ClosedRecord::Pane(ClosedPaneRecord {
+                surface: ClosedSurfaceRecord::Terminal {
+                    scrollback: Some(_),
+                    ..
+                },
                 ..
-            }
+            })
         ));
         assert_eq!(
             closed_pane_scrollback_bytes(&records),
             MAX_CLOSED_PANE_SCROLLBACK_BYTES
         );
+    }
+
+    /// The record cap counts whole entries regardless of kind: a stack of
+    /// five mixed pane/tab records drops its oldest entry to admit a sixth.
+    /// A terminal pane at a known cwd with a known custom name.
+    fn named_test_pane(
+        cx: &mut gpui::VisualTestContext,
+        custom_name: &str,
+        cwd: &str,
+    ) -> gpui::Entity<crate::pane::Pane> {
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        terminal.update(cx, |view, _| {
+            view.terminal.custom_name = Some(custom_name.to_string());
+            view.terminal.current_cwd = Some(cwd.to_string());
+        });
+        cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+    }
+
+    /// Rehydrate a captured record the way `restore_closed_tab_record` does -
+    /// an EMPTY deque, so every leaf goes through `spawn` - and report the
+    /// `SurfaceDefinition` each leaf would have been rebuilt from.
+    fn respawned_surfaces(
+        cx: &mut gpui::VisualTestContext,
+        layout: &LayoutNode,
+    ) -> Vec<paneflow_config::schema::SurfaceDefinition> {
+        let mut seen = Vec::new();
+        let tree = LayoutTree::from_layout_node(
+            layout,
+            &mut std::collections::VecDeque::new(),
+            &mut |node| {
+                if let LayoutNode::Pane { surfaces } = node {
+                    seen.push(surfaces.first().cloned().unwrap_or_default());
+                }
+                let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+                cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+            },
+        );
+        assert_eq!(
+            tree.leaf_count(),
+            seen.len(),
+            "an empty deque must respawn every leaf"
+        );
+        seen
+    }
+
+    /// Capture is a whole-tree snapshot: two panes go in, two leaves come out,
+    /// and each leaf carries the cwd and custom name of the pane it came from
+    /// so the restore spawns them back where they were.
+    #[gpui::test]
+    fn capture_closed_tab_record_round_trips_a_two_pane_tab(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let left = named_test_pane(cx, "agent", "/tmp/agent");
+        let right = named_test_pane(cx, "logs", "/tmp/logs");
+        let tree = LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![left, right])
+            .expect("two panes make a tree");
+        let tab = crate::workspace::Tab::new("Agents", Some(tree));
+
+        let record = cx
+            .update(|_, cx| capture_closed_tab_record(&tab, 3, 42, cx))
+            .expect("a two-pane tab is worth recording");
+
+        assert_eq!(record.title, "Agents");
+        assert_eq!(record.index, 3, "the tab remembers the slot it held");
+        assert_eq!(record.workspace_id, 42);
+        assert_eq!(record.layout.leaf_count(), 2);
+
+        let surfaces = respawned_surfaces(cx, &record.layout);
+        assert_eq!(surfaces.len(), 2);
+        assert_eq!(surfaces[0].custom_name.as_deref(), Some("agent"));
+        assert_eq!(surfaces[0].cwd.as_deref(), Some("/tmp/agent"));
+        assert_eq!(surfaces[1].custom_name.as_deref(), Some("logs"));
+        assert_eq!(surfaces[1].cwd.as_deref(), Some("/tmp/logs"));
+    }
+
+    /// While a tab is zoomed, `root` holds ONLY the zoomed leaf and
+    /// `saved_layout` holds the full tree. Capturing `root` there would throw
+    /// away every other pane, so capture has to prefer `saved_layout`.
+    #[gpui::test]
+    fn capture_closed_tab_record_captures_the_full_tree_while_zoomed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let left = named_test_pane(cx, "agent", "/tmp/agent");
+        let right = named_test_pane(cx, "logs", "/tmp/logs");
+        let full =
+            LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![left.clone(), right])
+                .expect("two panes make a tree");
+        let mut tab = crate::workspace::Tab::new("Zoomed", Some(full));
+        // Exactly the shape `toggle_zoom` leaves behind.
+        tab.saved_layout = tab.root.take();
+        tab.root = Some(LayoutTree::Leaf(left));
+        assert!(tab.is_zoomed());
+
+        let record = cx
+            .update(|_, cx| capture_closed_tab_record(&tab, 0, 42, cx))
+            .expect("a zoomed tab is still worth recording");
+
+        assert_eq!(
+            record.layout.leaf_count(),
+            2,
+            "the zoom-saved tree is the whole tab, not just the zoomed leaf"
+        );
+    }
+
+    /// A Diff pane is derived state, not a document: `capture_closed_pane_record`
+    /// already refuses to record one, and a tab holding a diff must not smuggle
+    /// it back in. The chain has three links - `serialize_with` empties the diff
+    /// surface but still emits the leaf, `prune_unrestorable` drops that leaf,
+    /// and capture runs the two in that order.
+    ///
+    /// Links two and three are covered by the `prune_unrestorable_*` tests
+    /// above; this pins links one and three. It is deliberately NOT a
+    /// `#[gpui::test]`: constructing a real `DiffView` starts a filesystem
+    /// watcher through `smol::unblock`, which the GPUI test scheduler rejects
+    /// as non-deterministic and which aborts the whole test binary.
+    #[test]
+    fn capture_closed_tab_record_prunes_the_leaf_a_diff_pane_serializes_to() {
+        let serde_src = include_str!("../../layout/serde.rs");
+        assert!(
+            serde_src
+                .contains(r#".filter(|surface| surface.surface_type.as_deref() != Some("diff"))"#),
+            "a diff surface is filtered out of the serialized leaf"
+        );
+        assert!(
+            serde_src.contains("LayoutNode::Pane { surfaces }"),
+            "the leaf itself is still emitted, which is why pruning is needed"
+        );
+
+        let src = include_str!("mod.rs");
+        let body = src
+            .split("fn capture_closed_tab_record(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("capture_closed_tab_record body");
+        assert!(
+            body.contains("prune_unrestorable(tree.serialize(cx))"),
+            "capture must prune the serialized tree before storing it"
+        );
+    }
+
+    /// A tab holding nothing restorable records nothing, so `Cmd+Shift+T`
+    /// never resurrects it as a bare shell.
+    #[gpui::test]
+    fn capture_closed_tab_record_declines_an_empty_tab(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let tab = crate::workspace::Tab::empty();
+
+        let record = cx.update(|_, cx| capture_closed_tab_record(&tab, 0, 42, cx));
+
+        assert!(record.is_none(), "an empty tab has nothing to restore");
+    }
+
+    fn pane_leaf(names: &[&str]) -> LayoutNode {
+        LayoutNode::Pane {
+            surfaces: names
+                .iter()
+                .map(|name| paneflow_config::schema::SurfaceDefinition {
+                    custom_name: Some((*name).to_string()),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    fn split_node(ratios: Option<Vec<f64>>, children: Vec<LayoutNode>) -> LayoutNode {
+        LayoutNode::Split {
+            direction: "vertical".to_string(),
+            ratio: None,
+            ratios,
+            children,
+        }
+    }
+
+    /// A Diff pane serializes to a leaf with an EMPTY surface list: the diff
+    /// `SurfaceDefinition` is filtered out but the leaf itself survives. Left
+    /// in the record it would restore as a plain shell, which contradicts the
+    /// pane-level rule that a diff surface is not restorable at all. Pruning
+    /// drops the leaf, and a split left holding one child collapses into it.
+    #[test]
+    fn prune_unrestorable_drops_surfaceless_leaves_and_collapses_splits() {
+        let pruned = prune_unrestorable(split_node(
+            Some(vec![0.25, 0.75]),
+            vec![LayoutNode::Pane { surfaces: vec![] }, pane_leaf(&["shell"])],
+        ));
+
+        assert_eq!(
+            pruned,
+            Some(pane_leaf(&["shell"])),
+            "a two-child split with one unrestorable leaf collapses to the survivor"
+        );
+
+        // Nested: the inner split collapses to one leaf, then the outer split
+        // collapses onto it too.
+        let nested = split_node(
+            Some(vec![0.5, 0.5]),
+            vec![
+                LayoutNode::Pane { surfaces: vec![] },
+                split_node(
+                    Some(vec![0.5, 0.5]),
+                    vec![LayoutNode::Pane { surfaces: vec![] }, pane_leaf(&["deep"])],
+                ),
+            ],
+        );
+        assert_eq!(prune_unrestorable(nested), Some(pane_leaf(&["deep"])));
+
+        // Three children, one unrestorable: the split survives with its two
+        // remaining children and their matching ratios.
+        let three = split_node(
+            Some(vec![0.2, 0.3, 0.5]),
+            vec![
+                pane_leaf(&["a"]),
+                LayoutNode::Pane { surfaces: vec![] },
+                pane_leaf(&["c"]),
+            ],
+        );
+        assert_eq!(
+            prune_unrestorable(three),
+            Some(split_node(
+                Some(vec![0.2, 0.5]),
+                vec![pane_leaf(&["a"]), pane_leaf(&["c"])]
+            )),
+            "surviving children keep the ratios that belonged to them"
+        );
+    }
+
+    /// A tab holding nothing but diff panes records nothing at all - the same
+    /// answer `capture_closed_pane_record` already gives for a single one.
+    #[test]
+    fn prune_unrestorable_returns_none_for_a_wholly_unrestorable_tree() {
+        assert_eq!(
+            prune_unrestorable(LayoutNode::Pane { surfaces: vec![] }),
+            None
+        );
+        assert_eq!(
+            prune_unrestorable(split_node(
+                Some(vec![0.5, 0.5]),
+                vec![
+                    LayoutNode::Pane { surfaces: vec![] },
+                    LayoutNode::Pane { surfaces: vec![] },
+                ],
+            )),
+            None
+        );
+        assert_eq!(prune_unrestorable(split_node(None, vec![])), None);
+    }
+
+    /// Pruning is a no-op on a tree with nothing to prune: direction, ratios
+    /// and surfaces all come back untouched.
+    #[test]
+    fn prune_unrestorable_passes_a_healthy_tree_through_unchanged() {
+        let healthy = split_node(
+            Some(vec![0.3, 0.7]),
+            vec![
+                pane_leaf(&["left"]),
+                split_node(None, vec![pane_leaf(&["top"]), pane_leaf(&["bottom"])]),
+            ],
+        );
+
+        assert_eq!(prune_unrestorable(healthy.clone()), Some(healthy));
+    }
+
+    /// Issue #83: `handle_undo_close_pane` POPS before it dispatches, so a
+    /// restore that then refuses has already consumed the record - and the
+    /// pane or tab it described is gone for good. Every refusal therefore has
+    /// to push the record back before it toasts.
+    ///
+    /// `PaneFlowApp` is not constructible in a test, so this pins the shape
+    /// rather than the behaviour: inside each restore body, refusal toasts and
+    /// re-pushes must come in equal numbers.
+    #[test]
+    fn every_refused_restore_pushes_the_record_back() {
+        let src = include_str!("mod.rs");
+        for (start, end) in [
+            ("fn restore_closed_pane(", "fn restore_closed_tab_record("),
+            (
+                "fn restore_closed_tab_record(",
+                "pub(crate) fn handle_new_workspace(",
+            ),
+        ] {
+            let body = src
+                .split(start)
+                .nth(1)
+                .and_then(|rest| rest.split(end).next())
+                .unwrap_or_else(|| panic!("{start} body"));
+            let toasts = body.matches("self.show_toast(").count();
+            let pushes = body.matches("push_closed_record(").count();
+            assert!(toasts > 0, "{start}: expected at least one refusal path");
+            assert_eq!(
+                pushes, toasts,
+                "{start}: every refusal toast must be paired with a re-push"
+            );
+        }
+    }
+
+    #[test]
+    fn push_closed_record_evicts_the_oldest_of_a_mixed_stack() {
+        let mut records = Vec::new();
+        for i in 0..MAX_CLOSED_PANES as u64 {
+            let record = if i % 2 == 0 {
+                closed_pane_record(i)
+            } else {
+                closed_tab_record(i, &[])
+            };
+            push_closed_record(&mut records, record);
+        }
+        assert_eq!(records.len(), MAX_CLOSED_PANES);
+        assert_eq!(record_workspace_ids(&records), vec![0, 1, 2, 3, 4]);
+
+        push_closed_record(&mut records, closed_tab_record(99, &[]));
+
+        assert_eq!(records.len(), MAX_CLOSED_PANES, "the cap is a hard ceiling");
+        assert_eq!(
+            record_workspace_ids(&records),
+            vec![1, 2, 3, 4, 99],
+            "the oldest whole record is evicted, whatever kind it is"
+        );
+    }
+
+    /// A tab record can hold far more scrollback than the whole budget, so the
+    /// sweep has to release its leaves one at a time and stop as soon as it is
+    /// back under. Clearing the record wholesale would hand the user back a
+    /// six-pane tab with no history anywhere in it.
+    #[test]
+    fn closed_tab_budget_strips_leaves_oldest_first_and_keeps_the_rest() {
+        let mut records = vec![closed_tab_record(7, &[100; 6])];
+        assert_eq!(closed_pane_scrollback_bytes(&records), 600);
+
+        enforce_closed_pane_scrollback_budget(&mut records, 350);
+
+        let ClosedRecord::Tab(tab) = &records[0] else {
+            panic!("the record itself must survive the budget");
+        };
+        assert_eq!(
+            leaf_scrollback_lens(&tab.layout),
+            vec![None, None, None, Some(100), Some(100), Some(100)],
+            "only enough leading leaves are released to get under budget"
+        );
+        assert_eq!(closed_pane_scrollback_bytes(&records), 300);
     }
 
     #[test]
@@ -1701,26 +2437,18 @@ mod tests {
     #[test]
     fn closed_pane_budget_preserves_absent_scrollback_for_undo() {
         let mut records = Vec::new();
-        push_closed_pane_record(
-            &mut records,
-            ClosedPaneRecord {
-                surface: ClosedSurfaceRecord::Terminal {
-                    cwd: None,
-                    scrollback: None,
-                    custom_name: None,
-                    font_size: None,
-                },
-                workspace_id: 0,
-            },
-        );
+        push_closed_record(&mut records, closed_pane_record(0));
 
         assert_eq!(records.len(), 1);
         assert!(matches!(
-            &records[0].surface,
-            ClosedSurfaceRecord::Terminal {
-                scrollback: None,
+            &records[0],
+            ClosedRecord::Pane(ClosedPaneRecord {
+                surface: ClosedSurfaceRecord::Terminal {
+                    scrollback: None,
+                    ..
+                },
                 ..
-            }
+            })
         ));
         assert_eq!(closed_pane_scrollback_bytes(&records), 0);
     }

@@ -244,6 +244,17 @@ pub(crate) const TOAST_EXIT_MS: u64 = 180;
 pub(crate) const MAX_CLOSED_PANES: usize = 5;
 
 /// EP-003: cumulative text budget for undo-close captured scrollback.
+///
+/// Sized for the pane case: 5 records x one surface capped at
+/// [`crate::limits::MAX_CHARS`] (400_000) = 2_000_000 bytes, just under this
+/// 2 MiB ceiling, so eviction is a safety net rather than the normal path.
+///
+/// Issue #83 put whole tabs on the same stack and that arithmetic no longer
+/// holds: one tab record can carry [`crate::layout::MAX_PANES`] (32) leaves,
+/// i.e. up to 12.8 MB in a single record. The budget is deliberately NOT
+/// raised - `enforce_closed_pane_scrollback_budget` releases scrollback one
+/// LEAF at a time instead of one record at a time, so an oversized tab comes
+/// back with its later panes' history intact rather than with none at all.
 pub(crate) const MAX_CLOSED_PANE_SCROLLBACK_BYTES: usize = 2 * 1024 * 1024;
 
 /// Width of the invisible border zone used for CSD edge/corner resize handles.

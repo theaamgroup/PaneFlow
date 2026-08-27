@@ -749,7 +749,7 @@ impl PaneFlowApp {
             _toast_task: None,
             jump_cursor: None,
             swap_source: None,
-            closed_panes: Vec::new(),
+            closed_items: Vec::new(),
             show_about_dialog: false,
             show_theme_picker: false,
             theme_picker_query: String::new(),
