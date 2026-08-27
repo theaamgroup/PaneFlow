@@ -19,7 +19,7 @@ use crate::app::close_guard::{
     CloseTarget, ConfirmStyle, PendingClose, SurfaceCloseState, agent_needing_confirmation,
     agents_needing_confirmation_count,
 };
-use crate::app::workspace_ops::{capture_closed_pane_record, push_closed_record};
+use crate::app::workspace_ops::capture_closed_pane_record;
 use crate::pane::Pane;
 use crate::ui_primitives::AnimatedHoverExt;
 use crate::{ClosedRecord, PaneFlowApp};
@@ -418,7 +418,7 @@ impl PaneFlowApp {
         {
             let workspace_id = ws.id;
             if let Some(record) = capture_closed_pane_record(pane, workspace_id, cx) {
-                push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
+                self.push_closed_record(ClosedRecord::Pane(record), cx);
             }
         }
         // Saves the session and repaints.

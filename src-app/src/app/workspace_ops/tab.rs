@@ -18,7 +18,7 @@ use crate::terminal::TerminalView;
 use crate::workspace::Tab;
 use crate::{CloseTab, ClosedRecord, NewTab, NextTab, PaneFlowApp, PreviousTab, TabDrag};
 
-use super::{capture_closed_tab_record, push_closed_record};
+use super::capture_closed_tab_record;
 
 impl PaneFlowApp {
     /// US-008: toggle the sidebar folder row for `ws_idx`. Session-only state,
@@ -243,7 +243,7 @@ impl PaneFlowApp {
             return;
         }
         if let Some(record) = record {
-            push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
+            self.push_closed_record(ClosedRecord::Tab(record), cx);
         }
         // Issue #79/#108: this is a focus-tracking clear, not a plain state
         // clear - the renamed sidebar row is the only element that tracks

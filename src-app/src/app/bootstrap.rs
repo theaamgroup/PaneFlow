@@ -754,6 +754,8 @@ impl PaneFlowApp {
             jump_cursor: None,
             swap_source: None,
             closed_items: Vec::new(),
+            worktree_teardowns_in_flight: 0,
+            quit_after_worktree_teardowns: false,
             show_about_dialog: false,
             show_theme_picker: false,
             theme_picker_query: String::new(),
@@ -1043,10 +1045,7 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     });
     cx.on_action(|_: &NextWorkspace, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
-            if !app.workspaces.is_empty() {
-                let next = (app.active_idx + 1) % app.workspaces.len();
-                app.select_workspace(next, window, cx);
-            }
+            app.handle_next_workspace(&NextWorkspace, window, cx);
         });
     });
 
@@ -1216,6 +1215,28 @@ mod tests {
                 "missing app-global menu fallback `{fallback}`; the item would grey out"
             );
         }
+    }
+
+    #[test]
+    fn the_macos_next_workspace_fallback_uses_display_order() {
+        let production = include_str!("bootstrap.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let fallback = production
+            .split("cx.on_action(|_: &NextWorkspace, cx|")
+            .nth(1)
+            .and_then(|rest| rest.split("cx.on_action(|_: &OpenHelp").next())
+            .expect("NextWorkspace app-global fallback");
+
+        assert!(
+            fallback.contains("app.handle_next_workspace(&NextWorkspace, window, cx);"),
+            "the menu fallback must share the display-order handler: {fallback}"
+        );
+        assert!(
+            !fallback.contains("active_idx + 1") && !fallback.contains("select_workspace("),
+            "storage-order arithmetic diverges from the rendered sidebar: {fallback}"
+        );
     }
 
     #[test]

@@ -147,18 +147,20 @@ fn keep_session_after_surface_purge(
 }
 
 /// Retention rule after a fresh process scan reports an interactive shell as
-/// the surface's foreground command.
+/// the surface's representative command.
 ///
-/// Unlike OSC 133, this is process evidence rather than a prompt marker: the
-/// wrapper may still be alive, but the agent no longer owns the foreground.
-/// `Errored` remains sticky until the pane closes.
+/// [`crate::workspace::PaneScan::foreground_command`] is a descendant-selection
+/// heuristic, not a PTY foreground-process-group query. A live agent can launch
+/// a shell tool and make that heuristic say `bash`, so only an already-stalled
+/// badge is safe to reap from this weak signal. Active, waiting, finished, and
+/// sticky-error sessions require stronger lifecycle or OSC 133 evidence.
 fn keep_session_at_cached_shell(
     shell_surface_id: u64,
     foreground_command: &str,
     session: &ai_types::AgentSession,
 ) -> bool {
     session.surface_id != Some(shell_surface_id)
-        || session.state == ai_types::AgentState::Errored
+        || session.state != ai_types::AgentState::Stalled
         || !crate::workspace::surface_naming::is_shell_command(foreground_command)
 }
 
@@ -1138,9 +1140,11 @@ impl PaneFlowApp {
         }
     }
 
-    /// Drop sessions from a surface whose fresh process scan says its shell is
-    /// back in the foreground. This covers shells without OSC 133 integration
-    /// and wrappers that outlive the agent process.
+    /// Drop a stalled badge when a fresh process scan picks a shell as the
+    /// surface's representative descendant. This covers OSC-133-less shells
+    /// conservatively: the scan is not a foreground-process-group query, so
+    /// stronger active states remain until lifecycle or prompt evidence clears
+    /// them.
     fn reap_sessions_at_cached_shell(
         &mut self,
         surface_id: u64,
@@ -1892,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_shell_reaps_stalled_session_but_preserves_sticky_error() {
+    fn cached_shell_reaps_only_stalled_sessions() {
         let mut stalled = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Stalled);
         stalled.surface_id = Some(7);
         assert!(!keep_session_at_cached_shell(7, "zsh", &stalled));
@@ -1901,7 +1905,14 @@ mod tests {
 
         let mut thinking = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Thinking);
         thinking.surface_id = Some(7);
-        assert!(!keep_session_at_cached_shell(7, "/bin/zsh -l", &thinking));
+        assert!(
+            keep_session_at_cached_shell(7, "/bin/zsh -l", &thinking),
+            "the process scan reports a representative descendant, not the PTY foreground group"
+        );
+
+        let mut waiting = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::WaitingForInput);
+        waiting.surface_id = Some(7);
+        assert!(keep_session_at_cached_shell(7, "bash", &waiting));
 
         let mut errored = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Errored);
         errored.surface_id = Some(7);

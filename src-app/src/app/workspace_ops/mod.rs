@@ -118,7 +118,14 @@ fn next_workspace_in_display_order(
 /// [`MAX_CLOSED_PANES`] whole records (oldest evicted first), and at most
 /// [`MAX_CLOSED_PANE_SCROLLBACK_BYTES`] of captured scrollback across all of
 /// them. A tab entry counts every leaf of its captured tree.
-pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: ClosedRecord) {
+///
+/// Returns managed worktrees owned by an evicted workspace record. The caller
+/// must retire them off-thread; dropping this vector would orphan PaneFlow's
+/// lifecycle ownership.
+pub(crate) fn push_closed_record(
+    records: &mut Vec<ClosedRecord>,
+    mut record: ClosedRecord,
+) -> Vec<crate::workspace::worktree::ManagedWorktree> {
     match &mut record {
         ClosedRecord::Pane(ClosedPaneRecord {
             surface:
@@ -141,11 +148,35 @@ pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: Cl
         }
         ClosedRecord::Pane(_) => {}
     }
-    if records.len() >= MAX_CLOSED_PANES {
-        records.remove(0);
-    }
+    let retired_worktrees = if records.len() >= MAX_CLOSED_PANES {
+        take_closed_record_worktrees(records.remove(0))
+    } else {
+        Vec::new()
+    };
     records.push(record);
     enforce_closed_pane_scrollback_budget(records, MAX_CLOSED_PANE_SCROLLBACK_BYTES);
+    retired_worktrees
+}
+
+fn take_closed_record_worktrees(
+    record: ClosedRecord,
+) -> Vec<crate::workspace::worktree::ManagedWorktree> {
+    match record {
+        ClosedRecord::Workspace(mut workspace) => std::mem::take(&mut workspace.managed_worktrees),
+        ClosedRecord::Pane(_) | ClosedRecord::Tab(_) => Vec::new(),
+    }
+}
+
+pub(crate) fn take_all_closed_record_worktrees(
+    records: &mut [ClosedRecord],
+) -> Vec<crate::workspace::worktree::ManagedWorktree> {
+    let mut worktrees = Vec::new();
+    for record in records {
+        if let ClosedRecord::Workspace(workspace) = record {
+            worktrees.append(&mut workspace.managed_worktrees);
+        }
+    }
+    worktrees
 }
 
 /// History rows captured per leaf into an undo-close record.
@@ -176,8 +207,17 @@ const _: () = assert!(UNDO_SCROLLBACK_LINES < crate::limits::MAX_SCROLLBACK_EXTR
 pub(crate) fn drop_closed_records_for_workspace(
     records: &mut Vec<ClosedRecord>,
     workspace_id: u64,
-) {
-    records.retain(|record| record.workspace_id() != workspace_id);
+) -> Vec<crate::workspace::worktree::ManagedWorktree> {
+    let mut retired_worktrees = Vec::new();
+    let mut i = 0;
+    while i < records.len() {
+        if records[i].workspace_id() == workspace_id {
+            retired_worktrees.extend(take_closed_record_worktrees(records.remove(i)));
+        } else {
+            i += 1;
+        }
+    }
+    retired_worktrees
 }
 
 /// Release captured scrollback until the total is back under `budget`.
@@ -509,6 +549,7 @@ fn capture_closed_workspace_record(
         files_expanded: workspace.files_expanded.clone(),
         sidebar_expanded: workspace.sidebar_expanded,
         pinned: workspace.pinned,
+        managed_worktrees: workspace.managed_worktrees.clone(),
     }
 }
 
@@ -832,16 +873,33 @@ impl PaneFlowApp {
     /// subprocesses). Clean ones are removed, dirty/unverifiable ones kept,
     /// the branch never touched - all enforced by `worktree::teardown_all`.
     pub(crate) fn spawn_worktree_teardown(
+        &mut self,
         worktrees: Vec<crate::workspace::worktree::ManagedWorktree>,
         cx: &mut Context<Self>,
     ) {
         if worktrees.is_empty() {
             return;
         }
-        cx.spawn(async move |_this, _cx: &mut gpui::AsyncApp| {
+        self.worktree_teardowns_in_flight = self.worktree_teardowns_in_flight.saturating_add(1);
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             smol::unblock(move || crate::workspace::worktree::teardown_all(worktrees)).await;
+            let _ = this.update(cx, |app, cx| {
+                app.worktree_teardowns_in_flight =
+                    app.worktree_teardowns_in_flight.saturating_sub(1);
+                if app.quit_after_worktree_teardowns && app.worktree_teardowns_in_flight == 0 {
+                    cx.quit();
+                }
+            });
         })
         .detach();
+    }
+
+    /// Add an undo record and retire any managed worktrees displaced by the
+    /// fixed-size FIFO. All runtime push sites use this wrapper so eviction
+    /// cannot silently discard lifecycle ownership.
+    pub(crate) fn push_closed_record(&mut self, record: ClosedRecord, cx: &mut Context<Self>) {
+        let retired_worktrees = push_closed_record(&mut self.closed_items, record);
+        self.spawn_worktree_teardown(retired_worktrees, cx);
     }
 
     /// US-005/US-014: if in Diff mode, rebuild the mounted diff (deferred) so it
@@ -1144,7 +1202,7 @@ impl PaneFlowApp {
         {
             let workspace_id = ws.id;
             if let Some(record) = capture_closed_pane_record(pane, workspace_id, cx) {
-                push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
+                self.push_closed_record(ClosedRecord::Pane(record), cx);
             }
         }
 
@@ -1273,7 +1331,7 @@ impl PaneFlowApp {
             // count guard while losing the pane for good, which is the hole
             // the tab path next door had.
             log::warn!("undo close pane: the workspace vanished mid-restore");
-            push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
+            self.push_closed_record(ClosedRecord::Pane(record), cx);
             self.show_toast("Could not restore the pane", cx);
             return;
         }
@@ -1338,7 +1396,7 @@ impl PaneFlowApp {
             self.workspaces[ws_idx].can_open_tab(),
             self.workspaces[ws_idx].is_empty_shell(),
         ) {
-            push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
+            self.push_closed_record(ClosedRecord::Tab(record), cx);
             self.show_toast("Tab limit reached", cx);
             return;
         }
@@ -1373,14 +1431,14 @@ impl PaneFlowApp {
         // was only borrowed above: the two refusals below hand the record back
         // intact instead of dropping it on the floor.
         let put_back = |this: &mut Self, cx: &mut Context<Self>| {
-            push_closed_record(
-                &mut this.closed_items,
+            this.push_closed_record(
                 ClosedRecord::Tab(crate::ClosedTabRecord {
                     workspace_id,
                     title: title.clone(),
                     index,
                     layout: layout.clone(),
                 }),
+                cx,
             );
             this.show_toast("Could not restore the tab", cx);
         };
@@ -1422,7 +1480,7 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         if self.workspaces.len() >= MAX_WORKSPACES {
-            push_closed_record(&mut self.closed_items, ClosedRecord::Workspace(record));
+            self.push_closed_record(ClosedRecord::Workspace(record), cx);
             self.show_toast("Workspace limit reached", cx);
             return;
         }
@@ -1438,6 +1496,7 @@ impl PaneFlowApp {
             files_expanded,
             sidebar_expanded,
             pinned,
+            managed_worktrees,
         } = record;
         // A restored workspace is a new runtime object. Reusing the dead id
         // would let a late lifecycle event from an agent killed by the close
@@ -1475,6 +1534,7 @@ impl PaneFlowApp {
         workspace.files_expanded = files_expanded;
         workspace.sidebar_expanded = sidebar_expanded;
         workspace.pinned = pinned;
+        workspace.managed_worktrees = managed_worktrees;
         self.watch_git_dir(&workspace);
         Self::spawn_initial_git_stats(workspace_id, workspace.cwd.clone(), cx);
         let insert_at = index.min(self.workspaces.len());
@@ -1576,11 +1636,10 @@ impl PaneFlowApp {
         // workspace itself had been restored.
         let closed_record = capture_closed_workspace_record(&self.workspaces[idx], idx, cx);
         let closed_id = self.workspaces[idx].id;
-        drop_closed_records_for_workspace(&mut self.closed_items, closed_id);
-        push_closed_record(
-            &mut self.closed_items,
-            ClosedRecord::Workspace(closed_record),
-        );
+        let retired_worktrees =
+            drop_closed_records_for_workspace(&mut self.closed_items, closed_id);
+        self.spawn_worktree_teardown(retired_worktrees, cx);
+        self.push_closed_record(ClosedRecord::Workspace(closed_record), cx);
         // The MODAL half is left to the render stand-down when there is no
         // `Window`: `cancel_pending_close` is what hands focus back, and
         // dropping a focused modal without one strands the window (issue
@@ -1596,10 +1655,10 @@ impl PaneFlowApp {
         if let Some(dir) = self.workspaces[idx].git_dir.clone() {
             self.unwatch_git_dir(&dir);
         }
-        // US-009: this workspace's managed worktrees are torn down (clean
-        // ones only) in the background once the workspace is gone.
-        let worktrees = std::mem::take(&mut self.workspaces[idx].managed_worktrees);
-        Self::spawn_worktree_teardown(worktrees, cx);
+        // Managed worktrees stay owned by the undo record. Tearing them down
+        // here would race an immediate restore and could delete the cwd under
+        // its freshly spawned PTYs. FIFO eviction or graceful app exit retires
+        // them once the workspace is no longer undoable.
         self.workspaces.remove(idx);
         self.active_idx =
             active_idx_after_workspace_remove(self.active_idx, idx, self.workspaces.len());
@@ -2294,6 +2353,34 @@ mod tests {
         })
     }
 
+    fn managed_worktree(path: &str) -> crate::workspace::worktree::ManagedWorktree {
+        crate::workspace::worktree::ManagedWorktree {
+            path: std::path::PathBuf::from(path),
+            repo_root: std::path::PathBuf::from("/tmp/repo"),
+            branch: "feature".to_string(),
+            teardown: crate::workspace::worktree::TeardownPolicy::Keep,
+        }
+    }
+
+    fn closed_workspace_record(
+        workspace_id: u64,
+        managed_worktrees: Vec<crate::workspace::worktree::ManagedWorktree>,
+    ) -> ClosedRecord {
+        ClosedRecord::Workspace(ClosedWorkspaceRecord {
+            workspace_id,
+            title: "workspace".to_string(),
+            cwd: "/tmp/project".to_string(),
+            index: 0,
+            active_tab: 0,
+            tabs: Vec::new(),
+            custom_buttons: Vec::new(),
+            files_expanded: Vec::new(),
+            sidebar_expanded: true,
+            pinned: false,
+            managed_worktrees,
+        })
+    }
+
     /// Every leaf's scrollback length in traversal order; `None` for a leaf
     /// whose history the budget released.
     fn leaf_scrollback_lens(node: &paneflow_config::schema::LayoutNode) -> Vec<Option<usize>> {
@@ -2385,7 +2472,8 @@ mod tests {
             closed_pane_record_with_scrollback(one_mib),
         ];
 
-        push_closed_record(&mut records, closed_pane_record_with_scrollback(one_mib));
+        let retired = push_closed_record(&mut records, closed_pane_record_with_scrollback(one_mib));
+        assert!(retired.is_empty());
 
         assert_eq!(records.len(), 3, "budget must preserve undo records");
         assert!(
@@ -2517,6 +2605,7 @@ mod tests {
         workspace.files_expanded = vec![std::path::PathBuf::from("/tmp/project/src")];
         workspace.sidebar_expanded = false;
         workspace.pinned = true;
+        workspace.managed_worktrees = vec![managed_worktree("/tmp/repo.worktrees/feature")];
 
         let record = cx.update(|_, cx| capture_closed_workspace_record(&workspace, 3, cx));
 
@@ -2539,6 +2628,7 @@ mod tests {
         );
         assert!(!record.sidebar_expanded);
         assert!(record.pinned);
+        assert_eq!(record.managed_worktrees, workspace.managed_worktrees);
     }
 
     /// While a tab is zoomed, `root` holds ONLY the zoomed leaf and
@@ -2894,6 +2984,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_close_defers_managed_worktree_teardown_until_undo_retires() {
+        let src = include_str!("mod.rs");
+        let close = src
+            .split("fn close_workspace_at_inner(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn reorder_workspace(").next())
+            .expect("workspace close body");
+        assert!(
+            !close.contains("std::mem::take(&mut self.workspaces[idx].managed_worktrees)"),
+            "an undoable workspace record must keep ownership instead of racing a remover: {close}"
+        );
+
+        let restore = src
+            .split("fn restore_closed_workspace_record(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn handle_new_workspace(").next())
+            .expect("workspace restore body");
+        assert!(
+            restore.contains("workspace.managed_worktrees = managed_worktrees;"),
+            "undo must return lifecycle ownership to the restored workspace: {restore}"
+        );
+    }
+
     /// The other half of the guard above, for the pane path only: a balanced
     /// toast/push count is still satisfied by a refusal that returns
     /// SILENTLY, which is exactly the hole `restore_closed_pane` had. Its
@@ -2927,14 +3041,17 @@ mod tests {
     /// `Cmd+Shift+T`, blocking the restorable records beneath it for good.
     #[test]
     fn closing_a_workspace_drops_only_its_own_undo_records() {
+        let retired_worktree = managed_worktree("/tmp/repo.worktrees/discarded");
         let mut records = vec![
             closed_pane_record(1),
             closed_tab_record(2, &[]),
+            closed_workspace_record(2, vec![retired_worktree.clone()]),
             closed_pane_record(2),
             closed_tab_record(3, &[]),
         ];
 
-        drop_closed_records_for_workspace(&mut records, 2);
+        let retired = drop_closed_records_for_workspace(&mut records, 2);
+        assert_eq!(retired, vec![retired_worktree]);
 
         assert_eq!(
             record_workspace_ids(&records),
@@ -2944,7 +3061,8 @@ mod tests {
         );
 
         // A workspace with nothing on the stack is a clean no-op.
-        drop_closed_records_for_workspace(&mut records, 99);
+        let retired = drop_closed_records_for_workspace(&mut records, 99);
+        assert!(retired.is_empty());
         assert_eq!(record_workspace_ids(&records), vec![1, 3]);
     }
 
@@ -2987,19 +3105,22 @@ mod tests {
     /// five mixed pane/tab records drops its oldest entry to admit a sixth.
     #[test]
     fn push_closed_record_evicts_the_oldest_of_a_mixed_stack() {
-        let mut records = Vec::new();
-        for i in 0..MAX_CLOSED_PANES as u64 {
+        let owned = managed_worktree("/tmp/repo.worktrees/oldest");
+        let mut records = vec![closed_workspace_record(0, vec![owned.clone()])];
+        for i in 1..MAX_CLOSED_PANES as u64 {
             let record = if i % 2 == 0 {
                 closed_pane_record(i)
             } else {
                 closed_tab_record(i, &[])
             };
-            push_closed_record(&mut records, record);
+            let retired = push_closed_record(&mut records, record);
+            assert!(retired.is_empty());
         }
         assert_eq!(records.len(), MAX_CLOSED_PANES);
         assert_eq!(record_workspace_ids(&records), vec![0, 1, 2, 3, 4]);
 
-        push_closed_record(&mut records, closed_tab_record(99, &[]));
+        let retired = push_closed_record(&mut records, closed_tab_record(99, &[]));
+        assert_eq!(retired, vec![owned]);
 
         assert_eq!(records.len(), MAX_CLOSED_PANES, "the cap is a hard ceiling");
         assert_eq!(
@@ -3007,6 +3128,26 @@ mod tests {
             vec![1, 2, 3, 4, 99],
             "the oldest whole record is evicted, whatever kind it is"
         );
+    }
+
+    #[test]
+    fn successful_exit_drain_takes_only_closed_workspace_worktree_ownership() {
+        let first = managed_worktree("/tmp/repo.worktrees/one");
+        let second = managed_worktree("/tmp/repo.worktrees/two");
+        let mut records = vec![
+            closed_pane_record(1),
+            closed_workspace_record(2, vec![first.clone(), second.clone()]),
+            closed_tab_record(3, &[]),
+        ];
+
+        let retired = take_all_closed_record_worktrees(&mut records);
+
+        assert_eq!(retired, vec![first, second]);
+        assert_eq!(record_workspace_ids(&records), vec![1, 2, 3]);
+        assert!(matches!(
+            &records[1],
+            ClosedRecord::Workspace(workspace) if workspace.managed_worktrees.is_empty()
+        ));
     }
 
     /// A tab record can hold far more scrollback than the whole budget, so the
@@ -3082,7 +3223,8 @@ mod tests {
     #[test]
     fn closed_pane_budget_preserves_absent_scrollback_for_undo() {
         let mut records = Vec::new();
-        push_closed_record(&mut records, closed_pane_record(0));
+        let retired = push_closed_record(&mut records, closed_pane_record(0));
+        assert!(retired.is_empty());
 
         assert_eq!(records.len(), 1);
         assert!(matches!(

@@ -212,7 +212,17 @@ impl PaneFlowApp {
     /// the message is visible instead of racing the process exit.
     pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
         if self.save_session_blocking(cx) {
-            cx.quit();
+            // Closed-workspace undo records are intentionally not persisted.
+            // Once the durable session proves those workspaces absent, retire
+            // their managed worktrees and wait for every already-started FIFO
+            // eviction batch before allowing the process to exit.
+            let worktrees =
+                crate::app::workspace_ops::take_all_closed_record_worktrees(&mut self.closed_items);
+            self.quit_after_worktree_teardowns = true;
+            self.spawn_worktree_teardown(worktrees, cx);
+            if self.worktree_teardowns_in_flight == 0 {
+                cx.quit();
+            }
             return;
         }
         self.push_toast(
@@ -223,7 +233,16 @@ impl PaneFlowApp {
         let delay_ms = TOAST_ENTER_MS + TOAST_HOLD_MS * 2 + TOAST_EXIT_MS;
         cx.spawn(async move |this, cx| {
             smol::Timer::after(std::time::Duration::from_millis(delay_ms)).await;
-            let _ = this.update(cx, |_app, cx| cx.quit());
+            let _ = this.update(cx, |app, cx| {
+                // Preserve closed-record ownership after a failed final save:
+                // the older on-disk session may still restore that workspace,
+                // so deleting its cwd would corrupt recovery. We still wait
+                // for any unrelated FIFO retirement already in progress.
+                app.quit_after_worktree_teardowns = true;
+                if app.worktree_teardowns_in_flight == 0 {
+                    cx.quit();
+                }
+            });
         })
         .detach();
     }
@@ -1821,6 +1840,29 @@ mod tests {
         let message = session_save_failure_toast_message();
         assert!(message.to_lowercase().contains("could not save session"));
         assert!(message.to_lowercase().contains("layout"));
+    }
+
+    #[test]
+    fn graceful_quit_retires_closed_worktrees_only_after_a_durable_save() {
+        let src = include_str!("session.rs");
+        let quit = src
+            .split("fn quit_after_session_save(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Restore a saved session").next())
+            .expect("quit_after_session_save body");
+        let success = quit
+            .split("if self.save_session_blocking(cx) {")
+            .nth(1)
+            .and_then(|rest| rest.split("return;").next())
+            .expect("successful-save branch");
+        assert!(success.contains("take_all_closed_record_worktrees"));
+        assert!(success.contains("quit_after_worktree_teardowns = true"));
+
+        let failure = quit.split("return;").nth(1).expect("failed-save branch");
+        assert!(
+            !failure.contains("take_all_closed_record_worktrees"),
+            "an older session may still restore the cwd after a failed final save: {failure}"
+        );
     }
 
     /// EP-002 US-005: a legacy pane listing several surfaces restores the
