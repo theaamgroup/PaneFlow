@@ -1087,8 +1087,31 @@ impl PaneFlowApp {
 /// Returns `Err(message)` on spawn failure where `message` is already
 /// phrased for a user-visible toast (US-011 AC7, AC9).
 pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    validate_reveal_path(path)?;
     spawn_detached(std::process::Command::new("open").arg(path))
         .map_err(|err| format!("Could not open Finder: {err}"))
+}
+
+/// Reject a path Finder could not show before spawning `open`: a missing
+/// workspace directory (deleted worktree) or a file where a folder was
+/// expected. `open <file>` would launch the file's default app rather than
+/// Finder, and `open <missing>` fails after the spawn, where nothing reports
+/// it. Split out of [`reveal_in_file_manager`] so the toast copy is testable
+/// without launching Finder.
+fn validate_reveal_path(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!(
+            "Could not open Finder: {} does not exist",
+            path.display()
+        ));
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "Could not open Finder: {} is not a folder",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve an editor command (e.g. `"zed"`, `"code"`) to a concrete path.
@@ -1161,20 +1184,45 @@ mod tests {
 
     // Pure-Rust tests only - spawning actual binaries is brittle in CI
     // (macOS runners may not have `open` on PATH under a non-GUI session).
-    // We exercise the error-message shape so the toast copy can't drift silently.
+    // The validation step in front of the spawn is exercised directly so
+    // the toast copy can't drift silently.
 
     #[test]
     fn reveal_accepts_regular_path() {
-        // Smoke-test that the helper is callable with a plausible path
-        // and that its return type is `Result<(), String>`. Actual
-        // spawn behaviour is OS-dependent and left to CI / manual
-        // verification per US-011 AC10.
         let tmp = tempfile::TempDir::new().unwrap();
-        // Don't actually spawn - the test would flake on headless CI
-        // without a default file-manager registered. We verify the
-        // type-shape compiles and the helper is reachable from tests.
-        let _callable: fn(&std::path::Path) -> Result<(), String> = reveal_in_file_manager;
-        let _ = tmp.path();
+        assert_eq!(validate_reveal_path(tmp.path()), Ok(()));
+    }
+
+    #[test]
+    fn reveal_rejects_missing_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("paneflow-no-such-dir");
+        let err = validate_reveal_path(&missing).unwrap_err();
+        assert!(
+            err.starts_with("Could not open Finder: "),
+            "toast copy drifted: {err}"
+        );
+        assert!(err.ends_with("does not exist"), "toast copy drifted: {err}");
+        assert!(
+            err.contains(&missing.display().to_string()),
+            "toast must name the path: {err}"
+        );
+    }
+
+    #[test]
+    fn reveal_rejects_file_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("plain.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let err = validate_reveal_path(&file).unwrap_err();
+        assert!(
+            err.starts_with("Could not open Finder: "),
+            "toast copy drifted: {err}"
+        );
+        assert!(
+            err.ends_with("is not a folder"),
+            "toast copy drifted: {err}"
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════

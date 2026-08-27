@@ -1733,15 +1733,15 @@ mod tests {
     #[test]
     fn extract_scrollback_empty_terminal_returns_none() {
         let state = TerminalState::new_display_only(24, 80);
-        // Fresh terminal with no content beyond the initial blank grid
-        // May return None or Some with only whitespace - both are acceptable
+        // Fresh terminal with no content beyond the initial blank grid.
+        // `extract_scrollback` documents `None` for empty history (the
+        // viewport is excluded, so the blank grid contributes nothing).
+        // Pin that, so a `Some("")` or a leaked viewport fails here.
         let scrollback = state.extract_scrollback();
-        if let Some(ref text) = scrollback {
-            assert!(
-                text.trim().is_empty(),
-                "Expected empty or whitespace-only scrollback, got: {text}"
-            );
-        }
+        assert!(
+            scrollback.is_none(),
+            "Expected None for an empty history, got: {scrollback:?}"
+        );
     }
 
     #[test]

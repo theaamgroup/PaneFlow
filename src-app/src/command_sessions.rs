@@ -582,6 +582,11 @@ Available sessions for this project (3):\n\
             false,
             CommandScope::CurrentDirectory,
         );
+        assert_eq!(
+            sessions.len(),
+            0,
+            "Cursor parser must not accept Gemini list output: {sessions:?}"
+        );
         assert!(sessions.iter().all(|s| s.session_id != "2"));
         assert!(sessions.iter().all(|s| s.session_id != "a1b2c3d4"));
     }

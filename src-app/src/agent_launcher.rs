@@ -631,10 +631,18 @@ impl InstalledBinaries {
 }
 
 fn probe_installed_binaries() -> HashSet<&'static str> {
+    probe_installed_binaries_with(|bin| which::which(bin).is_ok())
+}
+
+/// The PATH scan with its lookup injected. The candidate list is
+/// `TerminalAgent::ALL`, so only known agent binaries can come back; the
+/// lookup decides which of them are present. Split out so a fixture can
+/// drive it without depending on what the host has installed.
+fn probe_installed_binaries_with(is_installed: impl Fn(&str) -> bool) -> HashSet<&'static str> {
     TerminalAgent::ALL
         .into_iter()
         .map(TerminalAgent::binary)
-        .filter(|bin| which::which(bin).is_ok())
+        .filter(|bin| is_installed(bin))
         .collect()
 }
 
@@ -910,8 +918,58 @@ mod tests {
     }
 
     #[test]
+    fn probe_filters_lookup_to_known_agent_binaries() {
+        use std::cell::RefCell;
+
+        // Fixture PATH: one real agent binary plus names that are on many
+        // hosts but are not agents. Only the agent may come back.
+        let installed: HashSet<&str> = ["claude", "node", "python3", "not-an-agent"]
+            .into_iter()
+            .collect();
+        let asked = RefCell::new(Vec::new());
+        let found = probe_installed_binaries_with(|bin| {
+            asked.borrow_mut().push(bin.to_owned());
+            installed.contains(bin)
+        });
+
+        let expected: HashSet<&'static str> =
+            [TerminalAgent::ClaudeCode.binary()].into_iter().collect();
+        assert_eq!(
+            found, expected,
+            "probe must report exactly the installed agent binaries"
+        );
+        for unknown in ["node", "python3", "not-an-agent"] {
+            assert!(
+                !found.contains(unknown),
+                "probe leaked non-agent binary {unknown}"
+            );
+        }
+        let mut asked = asked.into_inner();
+        asked.sort_unstable();
+        let mut candidates: Vec<String> = TerminalAgent::ALL
+            .iter()
+            .map(|a| a.binary().to_owned())
+            .collect();
+        candidates.sort_unstable();
+        assert_eq!(
+            asked, candidates,
+            "probe must consult the lookup for every known agent binary"
+        );
+    }
+
+    #[test]
     fn probe_only_reports_known_agent_binaries() {
-        for bin in probe_installed_binaries() {
+        // Live PATH scan: host-dependent, so this can only check the subset
+        // property. Say so when there is nothing to check rather than
+        // passing silently; the fixture test above covers the filter.
+        let found = probe_installed_binaries();
+        if found.is_empty() {
+            eprintln!(
+                "probe_only_reports_known_agent_binaries: no agent binaries on PATH, \
+                 subset check is vacuous on this host"
+            );
+        }
+        for bin in found {
             assert!(
                 TerminalAgent::ALL.iter().any(|a| a.binary() == bin),
                 "probe returned unknown binary {bin}"

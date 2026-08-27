@@ -546,9 +546,21 @@ fn malformed_and_oversized_streams_are_deterministic() {
     );
 }
 
-#[test]
-#[ignore = "captures the machine-specific EP-001 performance baseline"]
-fn alacritty_eight_pane_baseline() {
+/// What one eight-pane corpus run measured. The numbers are machine-specific
+/// and are printed for a human to read; the counts are structural and are
+/// what [`alacritty_eight_pane_baseline`] asserts on.
+struct EightPaneBaseline {
+    frames: usize,
+    total_bytes: usize,
+    snapshot_cells: usize,
+    json: String,
+}
+
+/// Feed the whole corpus into eight persistent panes and measure
+/// parser-to-snapshot latency, throughput, lock hold time, CPU and RSS.
+/// Measurement harness, not a threshold gate: the ceiling lives in
+/// `layout::render::tests::eight_pane_gpui_input_to_paint_performance_gate`.
+fn measure_eight_pane_baseline() -> EightPaneBaseline {
     let cases = corpus();
     let total_bytes = cases.iter().map(|case| case.bytes.len()).sum::<usize>() * 8;
     let wall_start = Instant::now();
@@ -556,6 +568,7 @@ fn alacritty_eight_pane_baseline() {
     let rss_start = resident_set_bytes();
     let mut frame_latencies = Vec::with_capacity(cases.len() * 8);
     let mut lock_durations = Vec::with_capacity(cases.len() * 8);
+    let mut snapshot_cells: usize = 0;
 
     let mut panes = (0..8).map(|_| Harness::new()).collect::<Vec<_>>();
     for (index, case) in cases.iter().enumerate() {
@@ -581,6 +594,7 @@ fn alacritty_eight_pane_baseline() {
                 content_from_term(&term)
             };
             lock_durations.push(lock_start.elapsed());
+            snapshot_cells += snapshot.cells.len();
             std::hint::black_box(snapshot);
             frame_latencies.push(feed_start.elapsed());
         }
@@ -592,7 +606,7 @@ fn alacritty_eight_pane_baseline() {
     frame_latencies.sort_unstable();
     lock_durations.sort_unstable();
     let throughput = total_bytes as f64 / wall.as_secs_f64() / (1024.0 * 1024.0);
-    println!(
+    let json = format!(
         "{{\"seed\":\"0x{CORPUS_SEED:016x}\",\"panes\":8,\"streams_per_pane\":{},\"bytes\":{total_bytes},\"throughput_mib_s\":{throughput:.3},\"input_to_snapshot_p50_us\":{},\"input_to_snapshot_p95_us\":{},\"lock_p95_us\":{},\"wall_ms\":{},\"cpu_ms\":{},\"rss_start_bytes\":{},\"rss_end_bytes\":{},\"cpu_model\":{:?},\"profile\":{:?},\"measurement_scope\":\"persistent-eight-pane-parser-to-neutral-snapshot\"}}",
         cases.len(),
         percentile_us(&frame_latencies, 50),
@@ -609,6 +623,48 @@ fn alacritty_eight_pane_baseline() {
             "release"
         },
     );
+    EightPaneBaseline {
+        frames: frame_latencies.len(),
+        total_bytes,
+        snapshot_cells,
+        json,
+    }
+}
+
+/// Prints the baseline JSON for a human to record. Run with
+/// `cargo test --release -p paneflow-app alacritty_eight_pane_baseline -- --ignored --nocapture`.
+/// The assertions pin the shape of the run (every pane replayed every case,
+/// the snapshots carried cells, the JSON has the keys a reader greps for),
+/// not a machine-specific ceiling.
+#[test]
+#[ignore = "captures the machine-specific eight-pane performance baseline; run with --release -- --ignored --nocapture"]
+fn alacritty_eight_pane_baseline() {
+    let baseline = measure_eight_pane_baseline();
+    println!("{}", baseline.json);
+    assert_eq!(
+        baseline.frames,
+        CORPUS_SIZE * 8,
+        "every pane must replay every corpus case"
+    );
+    assert!(baseline.total_bytes > 0, "corpus fed no bytes");
+    assert!(baseline.snapshot_cells > 0, "snapshots carried no cells");
+    for key in [
+        "\"panes\":8",
+        "\"streams_per_pane\":",
+        "\"bytes\":",
+        "\"throughput_mib_s\":",
+        "\"input_to_snapshot_p50_us\":",
+        "\"input_to_snapshot_p95_us\":",
+        "\"lock_p95_us\":",
+        "\"rss_end_bytes\":",
+        "\"profile\":",
+    ] {
+        assert!(
+            baseline.json.contains(key),
+            "baseline JSON missing {key}: {}",
+            baseline.json
+        );
+    }
 }
 
 pub(crate) fn percentile_duration(values: &[Duration], percentile: usize) -> Duration {
