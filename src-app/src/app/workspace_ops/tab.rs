@@ -229,9 +229,15 @@ impl PaneFlowApp {
         if ws.close_tab(tab_idx).is_none() {
             return;
         }
+        // Issue #79/#108: this is a focus-tracking clear, not a plain state
+        // clear - the renamed sidebar row is the only element that tracks
+        // `sidebar_rename_focus`, so dropping the state here without moving
+        // focus leaves the window with nothing focused. The re-focus below
+        // only runs for the ACTIVE workspace, and closing a BACKGROUND
+        // workspace's tab while renaming it is reachable straight from that
+        // tab row's right-click menu. `cancel_inline_rename` restores focus.
         if self.renaming_tab.is_some_and(|(w, _)| w == ws_idx) {
-            self.renaming_tab = None;
-            self.rename_text.clear();
+            self.cancel_inline_rename(window, cx);
         }
         self.dismiss_transient_surfaces();
         if ws_idx == self.active_idx {

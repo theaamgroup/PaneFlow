@@ -610,13 +610,39 @@ impl PaneFlowApp {
     /// nothing focused - the dispatch path collapses to the tree root, and
     /// every global `context: None` binding matches but finds no handler.
     /// Mirrors `close_attention_queue_and_restore_focus`.
-    fn restore_focus_after_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn restore_focus_after_rename(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let focused = match self.workspaces.get(self.active_idx) {
             Some(ws) => ws.focus_first(window, cx),
             None => false,
         };
         if !focused {
             window.focus(&self.empty_workspace_focus, cx);
+        }
+    }
+
+    /// Commit a live inline rename and hand focus back, in one step.
+    ///
+    /// `commit_rename` on its own became a focus-stranding path the moment a
+    /// row started tracking focus (issue #79): it clears `renaming_idx` /
+    /// `renaming_tab`, the renamed row stops tracking `sidebar_rename_focus`
+    /// on the very next frame, and unless the caller focuses something else
+    /// the window is left with nothing focused (issue #108). Callers that go
+    /// straight on to focus a pane themselves - `select_workspace_tab`,
+    /// `activate_workspace_at` - do not need this. The ones that open a
+    /// context menu do: `select_menu` tracks no focus handle, so the menu
+    /// cannot take the focus the row just gave up.
+    ///
+    /// A no-op when no rename is live, so an ordinary right-click does not
+    /// move focus.
+    fn commit_inline_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_renaming = self.renaming_idx.is_some() || self.renaming_tab.is_some();
+        self.commit_rename(cx);
+        if was_renaming {
+            self.restore_focus_after_rename(window, cx);
         }
     }
 
@@ -1044,13 +1070,14 @@ impl PaneFlowApp {
                     workspace.agent_completion_notification.acknowledge();
                 }
                 let is_double = matches!(e, ClickEvent::Mouse(m) if m.down.click_count == 2);
-                // Issue #79: `dismiss_transient_surfaces` now also cancels a
-                // live rename, so it can no longer run before the single-vs-
-                // double decision. Ahead of the double-click branch it would
-                // clear state `begin_workspace_rename` immediately re-seeds
-                // (harmless); ahead of the single-click branch it would eat the
-                // edit the click is meant to commit. Each branch dismisses at
-                // the point that is correct for it.
+                // The dismiss cannot run before the single-vs-double decision:
+                // ahead of the single-click branch it would sit between the
+                // `was_renaming` read and the commit, and the click that is
+                // meant to end an edit would throw the typed name away. Each
+                // branch dismisses at the point that is correct for it.
+                // `begin_workspace_rename` commits any rename already live
+                // before it seeds its own, so the double-click branch needs no
+                // rename handling of its own.
                 if is_double {
                     this.dismiss_transient_surfaces();
                     this.begin_workspace_rename(idx, window, cx);
@@ -1078,11 +1105,15 @@ impl PaneFlowApp {
                 }
                 cx.notify();
             }))
-            .on_aux_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
+            .on_aux_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                 if e.is_right_click()
                     && let Some(position) = e.mouse_position()
                 {
-                    this.commit_rename(cx);
+                    // Not a bare `commit_rename`: that clears `renaming_idx`,
+                    // this row stops tracking `sidebar_rename_focus`, and the
+                    // context menu about to open tracks no focus handle of its
+                    // own - so nothing would be focused (issue #108).
+                    this.commit_inline_rename(window, cx);
                     this.dismiss_transient_surfaces();
                     this.workspace_menu_open = Some(WorkspaceContextMenu { idx, position });
                     cx.stop_propagation();
@@ -1090,6 +1121,13 @@ impl PaneFlowApp {
                 }
             }))
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                // M1: this `f2` branch is structurally unreachable, and is
+                // kept only so the handler reads as a whole. A row is on
+                // GPUI's dispatch path only while it tracks
+                // `sidebar_rename_focus`, and it tracks it only while its own
+                // rename is ALREADY live - precisely the case this branch
+                // excludes. Nothing to fix here: making `f2` start a rename
+                // needs a focus handle per row, not a change to this branch.
                 if this.renaming_idx != Some(idx) {
                     if e.keystroke.key.as_str() == "f2" {
                         this.begin_workspace_rename(idx, window, cx);
@@ -1546,7 +1584,7 @@ impl PaneFlowApp {
                                 .map(|at_tab| (at_ws, at_tab))
                         })
                     {
-                        this.commit_rename(cx);
+                        this.commit_inline_rename(window, cx);
                         this.close_workspace_tab(at_ws, at_tab, window, cx);
                     }
                     cx.stop_propagation();
@@ -1583,11 +1621,13 @@ impl PaneFlowApp {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .on_aux_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
+            .on_aux_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                 if e.is_right_click()
                     && let Some(position) = e.mouse_position()
                 {
-                    this.commit_rename(cx);
+                    // Same as the folder row: the menu that replaces the
+                    // editor cannot take the focus the row gives up.
+                    this.commit_inline_rename(window, cx);
                     this.dismiss_transient_surfaces();
                     this.tab_menu_open = Some(TabContextMenu {
                         ws_idx,
@@ -1599,6 +1639,13 @@ impl PaneFlowApp {
                 }
             }))
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                // M1: this `f2` branch is structurally unreachable, and is
+                // kept only so the handler reads as a whole. A row is on
+                // GPUI's dispatch path only while it tracks
+                // `sidebar_rename_focus`, and it tracks it only while its own
+                // rename is ALREADY live - precisely the case this branch
+                // excludes. Nothing to fix here: making `f2` start a rename
+                // needs a focus handle per row, not a change to this branch.
                 if this.renaming_tab != Some((ws_idx, tab_idx)) {
                     if e.keystroke.key.as_str() == "f2" {
                         this.begin_tab_rename(ws_idx, tab_idx, window, cx);
@@ -2964,25 +3011,141 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_transient_surfaces_clears_the_inline_rename_editor() {
-        // Same constraint as above: there is no `PaneFlowApp` to call the
-        // method on, so assert the seam that IS reachable - the body as
-        // written. An editor left live after a dismiss stays live forever.
+    fn both_rename_entry_points_claim_the_rename_focus_handle() {
+        // Issue #79 review (I1): the row *renderers* are covered above, but
+        // the two functions that START a rename are not - and the focus claim
+        // lives in them, not in the renderers. `begin_workspace_rename` sits
+        // above the slice the renderer test reads, and `begin_tab_rename`
+        // lives in another module no test read at all, so deleting both
+        // `sidebar_rename_focus.focus(window, cx)` lines left every existing
+        // test green with the feature 100% dead: the editor draws, and GPUI
+        // hands its `on_key_down` nothing because the row is not on the
+        // dispatch path to the focused node.
+        let sidebar = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the sidebar module");
+        let begin_workspace_rename = sidebar
+            .split("fn begin_workspace_rename(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("begin_workspace_rename body");
+        let tab_ops = include_str!("../workspace_ops/tab.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the tab-ops module");
+        let begin_tab_rename = tab_ops
+            .split("fn begin_tab_rename(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("begin_tab_rename body");
+
+        for (label, body) in [
+            ("begin_workspace_rename", begin_workspace_rename),
+            ("begin_tab_rename", begin_tab_rename),
+        ] {
+            assert!(
+                body.contains("self.sidebar_rename_focus.focus(window, cx);"),
+                "{label} must claim the rename focus handle, or the editor it opens is drawn but receives no keys"
+            );
+        }
+    }
+
+    #[test]
+    fn the_workspace_row_commits_its_rename_before_it_dismisses_anything() {
+        // Issue #79 review (I2): the single-click branch's ordering is load
+        // bearing twice over. `was_renaming` has to be read before
+        // `commit_rename` clears `renaming_idx`, or a click that ends an edit
+        // also folds the row shut; and the commit has to run before the
+        // dismiss, or the click that is meant to keep the typed name throws it
+        // away instead. Both orderings are invisible to every other test - a
+        // contributor moving the dismiss back to the top of the handler would
+        // pass the whole suite and silently re-break double-click-to-rename.
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let workspace_row = production
+            .split("fn render_workspace_row(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("fn render_tab_row(\n").next())
+            .expect("workspace row renderer");
+
+        let capture = workspace_row
+            .find("let was_renaming")
+            .expect("the single-click branch must capture whether this row was being renamed");
+        let commit = workspace_row
+            .find("this.commit_rename(cx);")
+            .expect("the single-click branch must commit the live rename");
+        assert!(
+            capture < commit,
+            "`was_renaming` must be read BEFORE `commit_rename` clears `renaming_idx`, \
+             or the click that ends a rename also toggles the row's disclosure"
+        );
+
+        let single_click = &workspace_row[capture..];
+        let commit_in_branch = single_click
+            .find("this.commit_rename(cx);")
+            .expect("the single-click branch must commit the live rename");
+        let dismiss_in_branch = single_click
+            .find("this.dismiss_transient_surfaces();")
+            .expect("the single-click branch must dismiss the open popovers after committing");
+        assert!(
+            commit_in_branch < dismiss_in_branch,
+            "the single-click branch must commit the rename before it dismisses anything, \
+             or the click meant to end the edit discards the typed name"
+        );
+    }
+
+    #[test]
+    fn only_the_window_taking_rename_ender_clears_the_focus_tracking_state() {
+        // Issue #79 review (C1): `dismiss_transient_surfaces` takes no
+        // `Window`, and ~17 call sites rely on that - several of them (the
+        // title-bar sidebar-collapse and menu toggles, the IPC/CLI
+        // `workspace.select` path) have no `Window` to give it. The rename
+        // fields track focus: the renamed row is the only element that tracks
+        // `sidebar_rename_focus`, and it stops the instant they clear. Clearing
+        // them from a `Window`-less caller therefore leaves the window with
+        // NOTHING focused - the issue #108 state where every global
+        // `context: None` binding matches but finds no handler, with no
+        // recovery because this app registers no focus-lost listeners.
+        //
+        // Same constraint as the tests above: there is no `PaneFlowApp` to call
+        // these on, so assert the seam that IS reachable - the bodies as
+        // written.
         let src = include_str!("../workspace_ops/mod.rs");
-        let body = src
-            .split("fn dismiss_transient_surfaces")
+        let dismiss = src
+            .split("pub(crate) fn dismiss_transient_surfaces")
             .nth(1)
             .and_then(|rest| rest.split("\n    }").next())
             .expect("dismiss_transient_surfaces body");
+        for field in ["renaming_idx", "renaming_tab", "rename_text"] {
+            assert!(
+                !dismiss.contains(field),
+                "dismiss_transient_surfaces must not touch `{field}`: it has no `Window` to hand \
+                 focus back with, so clearing focus-tracking state here strands the whole window"
+            );
+        }
+
+        let cancel = src
+            .split("pub(crate) fn cancel_inline_rename(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("cancel_inline_rename body");
         for clear in [
             "self.renaming_idx = None;",
             "self.renaming_tab = None;",
             "self.rename_text.clear();",
         ] {
             assert!(
-                body.contains(clear),
-                "dismiss_transient_surfaces must run `{clear}`, or a click outside can leave an inline rename editor live"
+                cancel.contains(clear),
+                "cancel_inline_rename must run `{clear}` - it is the one path that ends a rename \
+                 without keeping the name"
             );
         }
+        assert!(
+            cancel.contains("self.restore_focus_after_rename(window, cx);"),
+            "cancel_inline_rename must hand focus back, or it is just the stranding bug again"
+        );
     }
 }

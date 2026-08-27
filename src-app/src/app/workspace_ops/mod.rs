@@ -277,6 +277,34 @@ impl PaneFlowApp {
         changed
     }
 
+    /// Close every open popover. Menus and only menus, deliberately: not one
+    /// of these seven fields tracks focus, which is why this needs no `Window`
+    /// and why its ~17 call sites - several of which have no `Window` to give
+    /// it - are safe by construction.
+    ///
+    /// Issue #79 briefly parked the inline rename's three fields here, and
+    /// that turned every one of those call sites into a focus-stranding path.
+    /// The renamed sidebar row is the ONLY element that tracks
+    /// `sidebar_rename_focus`, and it stops tracking it the instant that state
+    /// clears; clearing it from a caller with no `Window` (the title-bar
+    /// sidebar-collapse and menu toggles, the IPC/CLI `workspace.select` path)
+    /// leaves the window with nothing focused at all. That is exactly the
+    /// issue #108 state - the dispatch path collapses to the tree root and
+    /// every global `context: None` binding matches but finds no handler - and
+    /// nothing recovers from it, because this app registers no focus-lost
+    /// listeners. Ending a rename therefore goes through
+    /// [`Self::cancel_inline_rename`] or `commit_inline_rename`, both of which
+    /// hand focus back. A caller with no `Window` leaves the editor drawn
+    /// instead: a stale editor is a far smaller defect than dead keybindings.
+    ///
+    /// One route this does NOT close, because it is not this method's to
+    /// close: hiding the primary sidebar unmounts the renamed row itself, so
+    /// the handle it tracks leaves the dispatch tree even though no state was
+    /// cleared. Fixing that needs a `Window` where the title-bar event is
+    /// handled (a `subscribe_in` at the subscription site), or a
+    /// `Window::on_focus_lost` fallback parking focus on
+    /// `empty_workspace_focus` - which would cover every stranding route at
+    /// once. Neither belongs inside a menu dismisser.
     pub(crate) fn dismiss_transient_surfaces(&mut self) {
         self.title_bar_files_menu_open = None;
         self.title_bar_help_menu_open = None;
@@ -285,15 +313,24 @@ impl PaneFlowApp {
         self.pane_menu_open = None;
         self.profile_menu_open = None;
         self.files_menu_open = None;
-        // Issue #79: the sidebar's inline rename editor is a transient surface
-        // too, and nothing else closed it - an editor opened and then abandoned
-        // stayed live indefinitely. This cancels rather than commits: dismissal
-        // is the "never mind" gesture, and every caller that means to keep the
-        // typed name calls `commit_rename` first (see the sidebar row click
-        // handlers and `select_workspace_tab`).
+    }
+
+    /// End a live inline rename WITHOUT keeping the typed name, and hand focus
+    /// back to the active pane (or to the empty-workspace placeholder).
+    ///
+    /// The `Window` is the entire point - see
+    /// [`Self::dismiss_transient_surfaces`] for what happens without one. A
+    /// no-op when no rename is live, so a caller that dismisses on every click
+    /// does not also yank focus out from under whatever the user is doing.
+    pub(crate) fn cancel_inline_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming_idx.is_none() && self.renaming_tab.is_none() {
+            return;
+        }
         self.renaming_idx = None;
         self.renaming_tab = None;
         self.rename_text.clear();
+        self.restore_focus_after_rename(window, cx);
+        cx.notify();
     }
 
     pub(crate) fn active_workspace(&self) -> Option<&Workspace> {
