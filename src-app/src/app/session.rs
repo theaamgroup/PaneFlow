@@ -119,6 +119,11 @@ impl PaneFlowApp {
             // US-015 (prd-git-diff-mode-2026-Q3.md): persist the diff scope so
             // a session that quit in Diff mode reopens on the same scope.
             diff_scope: Some(self.diff_mode.diff_scope.as_persisted().to_string()),
+            // Issue #106: persist the rail as the user left it. The flag is
+            // the *intent*, never the rendered width - Settings force-shows
+            // the rail without touching it - so quitting from Settings still
+            // saves the collapse the user chose before opening it.
+            primary_sidebar_collapsed: !self.primary_sidebar_visible,
         }
     }
 
@@ -1721,6 +1726,7 @@ mod tests {
             workspaces: Vec::new(),
             mode: Default::default(),
             diff_scope: None,
+            primary_sidebar_collapsed: false,
         }
     }
 
@@ -1840,6 +1846,55 @@ mod tests {
         assert_eq!(
             super::restore_candidate_order(&[surface(None), surface(None), surface(Some(true))]),
             vec![2, 0, 1]
+        );
+    }
+
+    /// Issue #106: `primary_sidebar_collapsed` persists the user's *intent*,
+    /// which only works because `primary_sidebar_visible` is written by an
+    /// explicit toggle and by nothing else. Settings is the one place that
+    /// looks like it writes it: while `settings_section` is `Some`, the rail is
+    /// force-shown at `SETTINGS_NAV_WIDTH` - but that force lives entirely in
+    /// the width functions, which *read* the flag and never assign it. If
+    /// opening or closing Settings ever assigned it, quitting from Settings
+    /// would persist `primary_sidebar_collapsed: false` over a user who had
+    /// collapsed the rail, and the next launch would silently reopen it.
+    ///
+    /// `PaneFlowApp::new` binds a real Unix socket, so there is no
+    /// constructable app here to drive `open_settings_at` and
+    /// `build_session_state` against. Assert the seam that IS reachable - the
+    /// bodies as written - the same technique `app::sidebar` uses to pin
+    /// `dismiss_transient_surfaces`.
+    #[test]
+    fn quitting_from_settings_persists_the_pre_settings_sidebar_intent() {
+        fn body<'a>(src: &'a str, signature: &str) -> &'a str {
+            src.split(signature)
+                .nth(1)
+                .and_then(|rest| rest.split("\n    }").next())
+                .unwrap_or_else(|| panic!("no body found for `{signature}`"))
+        }
+
+        // Half one: entering and leaving Settings must not touch the intent.
+        let settings_src = include_str!("settings.rs");
+        for signature in [
+            "pub(crate) fn open_settings_window(",
+            "pub(crate) fn open_settings_at(",
+            "pub(crate) fn close_settings(",
+        ] {
+            assert!(
+                !body(settings_src, signature).contains("primary_sidebar_visible"),
+                "`{signature}` must not write `primary_sidebar_visible`: the \
+                 Settings force-show belongs in the width functions, and \
+                 assigning the flag here would overwrite the collapsed rail a \
+                 user chose before opening Settings"
+            );
+        }
+
+        // Half two: that untouched flag is exactly what reaches disk.
+        assert!(
+            body(include_str!("session.rs"), "fn build_session_state(")
+                .contains("primary_sidebar_collapsed: !self.primary_sidebar_visible,"),
+            "build_session_state must persist the live rail intent, or the \
+             Settings guarantee above protects a value nothing saves"
         );
     }
 }

@@ -1139,7 +1139,13 @@ struct PaneFlowApp {
     last_broadcast_gen: std::collections::HashMap<u64, u64>,
     title_bar: Entity<title_bar::TitleBar>,
     /// Visibility of the primary left rail shared by CLI, Agents, and Diff.
-    /// Ephemeral by design: each launch starts with navigation visible.
+    ///
+    /// This is the user's *intent*, not the rendered width: while Settings is
+    /// open the rail is force-shown at `SETTINGS_NAV_WIDTH` by the width
+    /// functions below, which read this flag and never assign it. Issue #106
+    /// persists that intent across launches as
+    /// `SessionState::primary_sidebar_collapsed`, so a collapsed rail stays
+    /// collapsed instead of reopening on every launch.
     primary_sidebar_visible: bool,
     /// Transient width interpolation for the primary rail. The boolean above is
     /// the target state; this keeps the rail mounted while its layout width
@@ -1460,6 +1466,13 @@ impl PaneFlowApp {
         let now = std::time::Instant::now();
         let from_width = self.primary_sidebar_width_at(now);
         self.primary_sidebar_visible = !self.primary_sidebar_visible;
+        // Issue #106: the rail's state is the user's intent and now outlives
+        // the process. Saved here rather than at each call site so the chord
+        // and the title-bar button cannot diverge, and ahead of the
+        // settings-open early return so a toggle made while Settings is up is
+        // persisted too. `save_session` is 150 ms debounced and writes off the
+        // render thread.
+        self.save_session(cx);
 
         if self.settings_section.is_some() {
             self.primary_sidebar_animation = None;
@@ -1485,6 +1498,36 @@ impl PaneFlowApp {
             None
         };
         cx.notify();
+    }
+
+    /// Toggle the primary rail and settle the chrome around it: collapsing it
+    /// takes every transient surface with it (popovers and menus anchor to the
+    /// rail that is going away), while expanding only clears the two title-bar
+    /// menus so the returning rail is not left overlapped by one.
+    ///
+    /// The single entry point for both routes to the rail - the title-bar
+    /// button (`TitleBarEvent::ToggleSidebar`) and the `TogglePrimarySidebar`
+    /// chord (issue #106) - so the two cannot drift into different dismissal
+    /// behaviour.
+    pub(crate) fn toggle_primary_sidebar_with_chrome(&mut self, cx: &mut Context<Self>) {
+        self.toggle_primary_sidebar(cx);
+        if !self.primary_sidebar_visible {
+            self.dismiss_transient_surfaces();
+        } else {
+            self.title_bar_files_menu_open = None;
+            self.title_bar_help_menu_open = None;
+        }
+    }
+
+    /// Issue #106: the keyboard route to the rail. Before this the title-bar
+    /// button was the only way to reach it at all.
+    pub(crate) fn handle_toggle_primary_sidebar(
+        &mut self,
+        _: &TogglePrimarySidebar,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_primary_sidebar_with_chrome(cx);
     }
 
     /// Add a workspace's `.git` directory to the file watcher.
@@ -1934,6 +1977,8 @@ impl Render for PaneFlowApp {
                 }
             }))
             .on_action(cx.listener(Self::handle_toggle_files_sidebar))
+            // Issue #106: keyboard access to the primary left rail.
+            .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // EP-001 (cli-cockpit): Composer + broadcast groups.
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))

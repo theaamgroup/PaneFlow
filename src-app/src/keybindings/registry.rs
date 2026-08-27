@@ -448,6 +448,15 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         context: "",
         description: "Toggle Files sidebar",
     },
+    // Issue #106: the primary left rail (CLI / Agents / Diff). Global context
+    // on purpose - a terminal holds focus nearly all the time, so a scoped
+    // binding would be dead exactly when it is wanted.
+    ActionMeta {
+        name: "toggle_primary_sidebar",
+        factory: || Box::new(crate::TogglePrimarySidebar),
+        context: "",
+        description: "Toggle sidebar",
+    },
     // US-003 (prd-ai-in-diff-2026-Q3.md): copy the hunk under the cursor as a
     // unified diff. Scoped to the DiffView context so Ctrl+Shift+C there never
     // collides with the global markdown / terminal copy bindings.

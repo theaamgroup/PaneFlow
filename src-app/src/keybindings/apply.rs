@@ -368,6 +368,50 @@ mod tests {
         }
     }
 
+    /// Issue #106: the primary rail's collapse chord is bindable, claimed by
+    /// exactly one default, and free of any conflict with the rest of the
+    /// table. `secondary-alt-b` sits one modifier away from
+    /// `secondary-shift-b` (`toggle_broadcast_member`), and
+    /// `keystrokes_conflict` normalizes modifier order, so a chord picked by
+    /// eye rather than by this assertion could silently shadow broadcast
+    /// membership instead of failing loudly.
+    #[test]
+    fn primary_sidebar_chord_is_bindable_and_does_not_collide() {
+        use super::super::defaults::DEFAULTS;
+
+        let key = "secondary-alt-b";
+        let action_name = "toggle_primary_sidebar";
+
+        let context = context_for_action(action_name);
+        assert_eq!(
+            context, None,
+            "the rail toggle is global: scoping it would make it dead while a \
+             terminal holds focus, which is nearly always"
+        );
+        let action = action_from_name(action_name).expect("registered action");
+        assert!(
+            make_binding(key, action, context).is_some(),
+            "{key} must parse into a valid KeyBinding"
+        );
+
+        let claimants: Vec<&str> = DEFAULTS
+            .iter()
+            .chain(MACOS_ONLY_DEFAULTS.iter())
+            .filter(|d| keystrokes_conflict(d.key, key))
+            .map(|d| d.action_name)
+            .collect();
+        assert_eq!(
+            claimants,
+            vec![action_name],
+            "{key} must be claimed by exactly one default on this platform"
+        );
+
+        assert!(
+            !keystrokes_conflict(key, "secondary-shift-b"),
+            "{key} must stay distinct from the broadcast-member chord"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn us010_cmd_c_parses_as_binding() {

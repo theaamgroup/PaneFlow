@@ -442,13 +442,9 @@ impl PaneFlowApp {
                 self.quit_after_session_save(cx);
             }
             title_bar::TitleBarEvent::ToggleSidebar => {
-                self.toggle_primary_sidebar(cx);
-                if !self.primary_sidebar_visible {
-                    self.dismiss_transient_surfaces();
-                } else {
-                    self.title_bar_files_menu_open = None;
-                    self.title_bar_help_menu_open = None;
-                }
+                // Issue #106: shared with the `TogglePrimarySidebar` chord, so
+                // the button and the keyboard settle the chrome identically.
+                self.toggle_primary_sidebar_with_chrome(cx);
             }
             title_bar::TitleBarEvent::ToggleFilesMenu(anchor) => {
                 let open = self.title_bar_files_menu_open.is_none();

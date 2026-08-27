@@ -111,6 +111,7 @@ else is in **Settings → Keyboard Shortcuts**.
 | `Cmd+Shift+K` / `Cmd+Shift+J` | Attention Queue / next waiting agent |
 | `Cmd+Shift+G` | Review diffs |
 | `Cmd+Shift+L` | Launch an agent |
+| `Cmd+Alt+B` | Show / hide the sidebar (remembered next launch) |
 | `Cmd+C` / `Cmd+V` | Copy / paste in a terminal |
 | `Cmd+=` / `Cmd+-` | Font size |
 

@@ -154,6 +154,10 @@ impl PaneFlowApp {
             .and_then(|s| s.diff_scope.as_deref())
             .and_then(crate::diff::DiffScope::from_persisted)
             .unwrap_or_default();
+        // Issue #106: and the primary rail's collapse, restored as the state
+        // the rail *starts* in - never as an animation.
+        let (restored_primary_sidebar_visible, restored_primary_sidebar_animation) =
+            restored_primary_sidebar(saved_session.as_ref());
 
         let (workspaces, active_idx) = match saved_session {
             Some(session) => {
@@ -677,8 +681,8 @@ impl PaneFlowApp {
             event_bus,
             last_broadcast_gen: std::collections::HashMap::new(),
             title_bar,
-            primary_sidebar_visible: true,
-            primary_sidebar_animation: None,
+            primary_sidebar_visible: restored_primary_sidebar_visible,
+            primary_sidebar_animation: restored_primary_sidebar_animation,
             title_bar_files_menu_open: None,
             title_bar_help_menu_open: None,
             git_watcher,
@@ -887,6 +891,19 @@ fn git_head_index_should_fire(
         || now.saturating_duration_since(first_event_at) >= max_debounce
 }
 
+/// Issue #106: the primary rail's boot state, read out of the saved session.
+///
+/// Returns `(visible, animation)`. The animation is ALWAYS `None` on purpose:
+/// the persisted value is where the rail *starts*, not a transition to play.
+/// Returning `Some(..)` here would give every collapsed-rail user a boot
+/// animation of the rail easing shut, layered on top of an already-slow cold
+/// start. A missing or expanded session keeps today's behaviour - visible.
+fn restored_primary_sidebar(
+    session: Option<&paneflow_config::schema::SessionState>,
+) -> (bool, Option<crate::SidebarWidthAnimation>) {
+    (!session.is_some_and(|s| s.primary_sidebar_collapsed), None)
+}
+
 // ---------------------------------------------------------------------------
 // Free helper functions called from `fn main()` (US-002 extraction).
 // ---------------------------------------------------------------------------
@@ -1060,8 +1077,48 @@ pub(crate) fn warn_if_rosetta_translated() {
 
 #[cfg(test)]
 mod tests {
-    use super::git_head_index_should_fire;
+    use super::{git_head_index_should_fire, restored_primary_sidebar};
     use std::time::{Duration, Instant};
+
+    fn session_with_sidebar_collapsed(collapsed: bool) -> paneflow_config::schema::SessionState {
+        paneflow_config::schema::SessionState {
+            version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
+            active_workspace: 0,
+            workspaces: Vec::new(),
+            mode: Default::default(),
+            diff_scope: None,
+            primary_sidebar_collapsed: collapsed,
+        }
+    }
+
+    /// Issue #106: a session saved with the rail collapsed reopens collapsed,
+    /// and reopens WITHOUT animating. The persisted value is where the rail
+    /// *starts*, not a transition to play - returning `Some(..)` here would
+    /// give every collapsed-rail user a boot animation of the rail easing shut
+    /// on top of an already-slow cold start.
+    #[test]
+    fn restored_collapsed_sidebar_starts_collapsed_and_does_not_animate() {
+        let session = session_with_sidebar_collapsed(true);
+        let (visible, animation) = restored_primary_sidebar(Some(&session));
+        assert!(!visible, "a session saved collapsed must reopen collapsed");
+        assert!(
+            animation.is_none(),
+            "the restored rail must start at its width, not ease into it"
+        );
+    }
+
+    /// The two ways to get today's behaviour - an explicitly-expanded session
+    /// and no session at all (first launch, or a session that failed to parse)
+    /// - both open with the rail visible and, equally, unanimated.
+    #[test]
+    fn restored_expanded_or_absent_session_starts_visible_and_does_not_animate() {
+        let session = session_with_sidebar_collapsed(false);
+        for saved in [Some(&session), None] {
+            let (visible, animation) = restored_primary_sidebar(saved);
+            assert!(visible, "the rail defaults to visible");
+            assert!(animation.is_none(), "and never animates on boot");
+        }
+    }
 
     #[test]
     fn git_head_index_fires_after_quiet_debounce() {

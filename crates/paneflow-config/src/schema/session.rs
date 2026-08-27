@@ -96,6 +96,19 @@ pub struct SessionState {
     /// to the app's `DiffScope::default()` (Project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_scope: Option<String>,
+    /// Issue #106: whether the primary left rail was collapsed at save time,
+    /// restored on boot so the collapse survives a quit instead of being
+    /// undone by every launch.
+    ///
+    /// Additive on v2, exactly like `mode` and `diff_scope`:
+    /// [`SESSION_SCHEMA_VERSION`] must NOT move for it. The loader routes any
+    /// version that is neither 2 nor 1 to the corruption-backup path, so a
+    /// bump would discard every existing user's workspaces to gain one bool.
+    /// `false` (the rail is visible) is both the default for a session written
+    /// before this field and the value skipped on write, so no existing
+    /// session.json changes meaning or gains a key.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub primary_sidebar_collapsed: bool,
 }
 
 #[expect(

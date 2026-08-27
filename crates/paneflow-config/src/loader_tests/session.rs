@@ -38,6 +38,7 @@ fn test_session_roundtrip_single_workspace() {
         )],
         mode: AppMode::default(),
         diff_scope: None,
+        primary_sidebar_collapsed: false,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     let restored: SessionState = serde_json::from_str(&json).unwrap();
@@ -69,6 +70,7 @@ fn test_session_roundtrip_multiple_workspaces() {
         ],
         mode: AppMode::default(),
         diff_scope: None,
+        primary_sidebar_collapsed: false,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     let restored: SessionState = serde_json::from_str(&json).unwrap();
@@ -111,6 +113,7 @@ fn test_session_roundtrip_nested_splits() {
         )],
         mode: AppMode::default(),
         diff_scope: None,
+        primary_sidebar_collapsed: false,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     let restored: SessionState = serde_json::from_str(&json).unwrap();
@@ -139,6 +142,7 @@ fn test_session_roundtrip_with_scrollback() {
         )],
         mode: AppMode::default(),
         diff_scope: None,
+        primary_sidebar_collapsed: false,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     let restored: SessionState = serde_json::from_str(&json).unwrap();
@@ -455,4 +459,62 @@ fn test_migrate_v1_is_idempotent_on_v2_shape() {
     let once = state.clone();
     migrate_session_v1(&mut state);
     assert_eq!(once, state);
+}
+
+// --- Primary sidebar collapse persistence (issue #106) ---
+
+#[test]
+fn test_session_roundtrip_primary_sidebar_collapsed() {
+    // Issue #106: the primary rail's collapsed state is the user's intent and
+    // survives a quit. Additive on the v2 schema - `SESSION_SCHEMA_VERSION`
+    // must NOT move for it, because `load_session_at` routes any version that
+    // is neither 2 nor 1 to the corruption-backup path, so a bump would
+    // discard every existing user's workspaces.
+    let state = SessionState {
+        version: SESSION_SCHEMA_VERSION,
+        active_workspace: 0,
+        workspaces: vec![make_workspace("main", "/tmp", vec![TabSession::empty()])],
+        mode: AppMode::default(),
+        diff_scope: None,
+        primary_sidebar_collapsed: true,
+    };
+    let json = serde_json::to_string_pretty(&state).unwrap();
+    assert!(
+        json.contains("\"primary_sidebar_collapsed\": true"),
+        "a collapsed rail has to reach disk to be restorable: {json}"
+    );
+    let restored: SessionState = serde_json::from_str(&json).unwrap();
+    assert_eq!(state, restored);
+    assert_eq!(
+        restored.version, SESSION_SCHEMA_VERSION,
+        "the field is additive: the schema version stays where it was"
+    );
+}
+
+#[test]
+fn test_session_without_primary_sidebar_key_restores_visible() {
+    // Every session.json written before issue #106 lacks the key entirely and
+    // must keep today's behaviour: the rail starts visible.
+    let json = r#"{ "version": 2, "active_workspace": 0, "workspaces": [] }"#;
+    let restored: SessionState = serde_json::from_str(json).unwrap();
+    assert!(
+        !restored.primary_sidebar_collapsed,
+        "an older session must not silently collapse the rail"
+    );
+
+    // And the common case stays out of the file entirely, so adding the field
+    // does not rewrite every user's session.json on the next save.
+    let visible = SessionState {
+        version: SESSION_SCHEMA_VERSION,
+        active_workspace: 0,
+        workspaces: vec![],
+        mode: AppMode::default(),
+        diff_scope: None,
+        primary_sidebar_collapsed: false,
+    };
+    let written = serde_json::to_string(&visible).unwrap();
+    assert!(
+        !written.contains("primary_sidebar_collapsed"),
+        "the default must be skipped on write: {written}"
+    );
 }

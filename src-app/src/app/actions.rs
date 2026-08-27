@@ -143,6 +143,10 @@ actions!(
         // from terminals and text widgets so a shell keeps its own Ctrl+G
         // (BEL) and Ctrl+J (LF).
         DiffNewFileTab,
-        DiffNewTerminalTab
+        DiffNewTerminalTab,
+        // Issue #106: collapse/expand the primary left rail from the keyboard.
+        // Until this existed the rail was mouse-only - the title-bar button
+        // was the single way to reach it.
+        TogglePrimarySidebar
     ]
 );

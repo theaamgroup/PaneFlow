@@ -348,6 +348,17 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "toggle_files_sidebar",
         context: None,
     },
+    // Issue #106: primary left-rail toggle. `secondary-alt-b` for the same
+    // reason `secondary-alt-f` reads that way - `b` for the sidebar, kept off
+    // `secondary-shift-b`, which is already `toggle_broadcast_member`. Alt
+    // rather than Shift also keeps it clear of `ctrl-shift-b`-style terminal
+    // chords. Pinned by `primary_sidebar_chord_is_bindable_and_does_not_collide`
+    // in `apply.rs`.
+    DefaultBinding {
+        key: "secondary-alt-b",
+        action_name: "toggle_primary_sidebar",
+        context: None,
+    },
     // US-003 (prd-ai-in-diff-2026-Q3.md): copy the hunk under the cursor as a
     // unified diff, only while the Git Diff view holds focus. Same chord as the
     // terminal / markdown copies - disambiguated by the `DiffView` context.
@@ -488,6 +499,7 @@ mod tests {
             "swap_pane",
             "undo_close_pane",
             "toggle_files_sidebar",
+            "toggle_primary_sidebar",
         ] {
             assert!(
                 action_names.contains(name),
