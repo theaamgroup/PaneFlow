@@ -4135,6 +4135,15 @@ name = "paneflow-acp"
 version = "0.1.0"
 
 [[package]]
+name = "paneflow-agent-config"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "paneflow-ai-hook"
 version = "0.1.0"
 dependencies = [
@@ -4271,6 +4280,7 @@ name = "paneflow-shim"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "paneflow-agent-config",
  "paneflow-process",
  "same-file",
  "serde_json",

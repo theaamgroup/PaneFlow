@@ -4,10 +4,9 @@
 //
 // Reports lifecycle to the Paneflow sidebar by connecting to Paneflow's IPC
 // endpoint (PANEFLOW_SOCKET_PATH) and writing a single JSON-RPC frame, then
-// closing - NO `paneflow-ai-hook` subprocess. On Windows, repeatedly spawning
-// `paneflow-ai-hook.exe` from the agent fails to start (0xC0000142) and pops
-// error dialogs; a direct socket write avoids all of that. Inert outside a
-// Paneflow PTY (the env vars are absent there).
+// closing - NO `paneflow-ai-hook` subprocess. A direct socket write avoids
+// spawning a helper per event. Inert outside a Paneflow PTY (the env vars
+// are absent there).
 
 import net from "node:net";
 

@@ -279,6 +279,17 @@ Found during the inventory. Each one would have cost a debugging session.
     change exactly one thing. A control that reproduces the positive result is
     telling you the experiment is broken, not that the finding is doubly true.
 
+17. **Ungated Windows strings (2026-08-26).** Issue #92's DoD greps
+    `powershell` / `.exe` / `.cmd` / `.bat` / `.ps1` in the ported
+    `paneflow-agent-config` and `paneflow-shim` trees and requires a
+    strip. This fork had previously *tolerated* those ungated strings
+    (`is_paneflow_hook_program` matching `paneflow-ai-hook.exe`, an
+    ungated PowerShell parser). This port strips them: a Windows-shaped
+    command in a settings file is no longer recognized on macOS, which is
+    fine because nothing in this fork can write one.
+    `crates/paneflow-mcp-install/src/hooks.rs` still carries the old
+    tolerance until the mcp-install job (`972f674`).
+
 ## Verification: Ghostty is unreachable on macOS
 
 Proven on 2026-08-25, then the remaining compiled stubs were deleted in

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/paneflow-acp",
+    "crates/paneflow-agent-config",
     "crates/paneflow-ai-hook",
     "crates/paneflow-config",
     "crates/paneflow-ipc-client",
@@ -51,6 +52,7 @@ uuid = { version = "1", features = ["v4"] }
 which = "8"
 
 # Internal crates
+paneflow-agent-config = { path = "crates/paneflow-agent-config" }
 paneflow-config = { path = "crates/paneflow-config" }
 paneflow-ipc-client = { path = "crates/paneflow-ipc-client" }
 paneflow-process = { path = "crates/paneflow-process" }

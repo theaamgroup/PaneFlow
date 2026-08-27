@@ -3,11 +3,8 @@
 // terminal. Safe to delete; do not edit (changes are overwritten).
 //
 // Reports lifecycle to the Paneflow sidebar by connecting to Paneflow's IPC
-// endpoint (PANEFLOW_SOCKET_PATH - a Unix socket on Linux/macOS, a named pipe
-// on Windows) and writing a single JSON-RPC frame, then closing. We do NOT
-// spawn `paneflow-ai-hook` per event: on Windows, firing a fresh
-// `paneflow-ai-hook.exe` rapidly from OpenCode's shell fails to start
-// (0xC0000142 / desktop-heap exhaustion) and pops error dialogs. A direct
+// endpoint (PANEFLOW_SOCKET_PATH, a Unix socket) and writing a single JSON-RPC
+// frame, then closing. We do NOT spawn `paneflow-ai-hook` per event: a direct
 // socket write has no subprocess, so it is both reliable and cheaper.
 //
 // Inert anywhere else: PANEFLOW_SOCKET_PATH / PANEFLOW_WORKSPACE_ID are absent
