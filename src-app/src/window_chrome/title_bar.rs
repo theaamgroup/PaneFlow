@@ -19,40 +19,17 @@ pub struct TitleBar {
     pub sidebar_visible: bool,
     /// Stable expanded width of the active left rail. The body can animate to
     /// zero independently, while title-bar controls remain stationary and
-    /// align with the open rail in CLI, Agents, Diff, and Settings.
+    /// align with the open rail in CLI, Diff, and Settings.
     pub left_rail_width: f32,
     pub files_menu_open: bool,
     pub help_menu_open: bool,
     pub ipc_state: crate::ipc::IpcState,
-    /// US-010 (Agents UI redesign): the brand slot's
-    /// primary text in Agents mode (current thread/chat title, or a neutral
-    /// "Agents"/project label in the picker state). `None` in Cli/Diff leaves
-    /// the brand slot empty. PUSHED by `PaneFlowApp::render` only on the Agents
-    /// arm; `TitleBar` never reads `AppMode` - the render branch tests the
-    /// presence of this field, not the mode (push-only contract).
-    pub agents_thread_title: Option<String>,
-    /// US-010: the secondary "· context" text (project name for a project
-    /// thread, "Chat" for a free chat). `None` in the picker state and in
-    /// Cli/Diff.
-    pub agents_context_label: Option<String>,
-    /// US-011: render the `⋯` overflow button. `true` only when a concrete
-    /// thread/chat is selected (the menu acts on the current target);
-    /// `false` in the picker state and in Cli/Diff.
-    pub agents_overflow: bool,
-    /// Codex cockpit polish: in Agents mode the right area is a floating
-    /// rounded panel, so the title bar drops its 1px bottom divider for a
-    /// seamless chrome. `false` in Cli/Diff keeps the divider (diff visuel
-    /// nul). PUSHED by `PaneFlowApp::render`; `TitleBar` never reads `AppMode`.
-    pub is_agents: bool,
-    /// Cockpit chrome for the Cli mode: paint the rail `#141414` and
-    /// drop the bottom divider so the title bar + sidebar read as one
-    /// continuous surface, matching the Agents cockpit. `false` in Diff keeps
-    /// the themed chrome + divider (Diff stays frozen). Mutually exclusive with
-    /// `is_agents` (Agents paints nothing). PUSHED by `PaneFlowApp::render`;
-    /// `TitleBar` never reads `AppMode`.
+    /// Cockpit chrome: paint the rail `#141414` and drop the bottom divider so
+    /// the title bar + sidebar read as one continuous surface. PUSHED by
+    /// `PaneFlowApp::render`; `TitleBar` never reads `AppMode`.
     pub cockpit: bool,
     /// Whether cockpit chrome should let the native material show through.
-    /// Pushed by `PaneFlowApp::render` so the Windows Appearance switch can
+    /// Pushed by `PaneFlowApp::render` so the Appearance switch can
     /// control title bar transparency independently from terminal cells.
     pub cockpit_material_active: bool,
     /// #10: subscription that repaints the title bar when the desktop
@@ -73,10 +50,6 @@ impl TitleBar {
             files_menu_open: false,
             help_menu_open: false,
             ipc_state: crate::ipc::IpcState::Online,
-            agents_thread_title: None,
-            agents_context_label: None,
-            agents_overflow: false,
-            is_agents: false,
             cockpit: false,
             cockpit_material_active: true,
             button_layout_observer: None,
@@ -148,13 +121,9 @@ impl Render for TitleBar {
             }
         };
 
-        // Paint our own window controls under CSD (Linux) and always on
-        // Windows, where the transparent titlebar (`appears_transparent: true`)
-        // hides the native caption buttons while gpui still reports
-        // `Decorations::Server` - so `is_csd` is false and, without this guard,
-        // the minimize/maximize/close buttons vanish entirely on Windows.
-        // macOS keeps its native traffic lights, so it stays gated on `is_csd`
-        // (false there). Mirrors the settings title bar (settings/window.rs).
+        // Paint our own window controls only under client-side decorations.
+        // macOS keeps its native traffic lights, so this stays gated on
+        // `is_csd`. Fullscreen hides them.
         let render_controls = !window.is_fullscreen() && is_csd;
 
         let left_controls = if render_controls {
@@ -182,8 +151,8 @@ impl Render for TitleBar {
         // US-011: on macOS, reserve the leftmost ~80px of the custom titlebar
         // for the native red/yellow/green traffic lights (positioned at
         // x=12,y=12 by WindowOptions::titlebar::traffic_light_position in
-        // main.rs). Linux control groups own the shared 8px edge inset;
-        // adding another brand inset would duplicate that spacing.
+        // main.rs). Custom control groups already own the shared 8px edge
+        // inset; adding another brand inset would duplicate that spacing.
         //
         // In macOS fullscreen AppKit hides the traffic lights, so the 80px
         // reservation would leave a dead gap before the brand cluster - drop
@@ -230,7 +199,7 @@ impl Render for TitleBar {
             "Show sidebar"
         }
         .into();
-        let mut brand = div()
+        let brand = div()
             .flex_1()
             .min_w_0()
             .flex()
@@ -332,87 +301,6 @@ impl Render for TitleBar {
                     })
                     .child("Help"),
             );
-        if self.is_agents {
-            // Agents: no brand text in the chrome - the thread/chat name is
-            // already shown in the rail (active row) and in the terminal
-            // itself, and the rail-width title bar would only clip it. Keep the
-            // slot empty so just the window controls remain top-left.
-        } else if let Some(title) = self.agents_thread_title.clone() {
-            // US-010: contextual brand in Agents mode - `thread title · context`.
-            // The title truncates first; the context label and the `⋯` button
-            // stay pinned.
-            let mut label_row = div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(ui.text)
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .truncate()
-                        .child(title),
-                );
-            if let Some(ctx) = self.agents_context_label.clone() {
-                label_row = label_row
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(ui.muted)
-                            .text_size(px(12.))
-                            .child("·"),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(110.))
-                            .text_color(ui.muted)
-                            .text_size(px(12.))
-                            .truncate()
-                            .child(ctx),
-                    );
-            }
-            brand = brand.child(label_row);
-            if self.agents_overflow {
-                // US-011: `⋯` overflow button. on_mouse_down + stop_propagation
-                // (NOT on_click) - same Wayland first-press / drag race the
-                // update pill documents (title_bar.rs ~354). Dispatches a typed
-                // action; `PaneFlowApp` resolves the current target and opens
-                // the shared thread context menu.
-                brand = brand.child(
-                    div()
-                        .id("agents-overflow-btn")
-                        .flex_none()
-                        .size(TITLE_BAR_CONTROL_SIZE)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.))
-                        .text_color(ui.muted)
-                        .text_size(px(15.))
-                        .animated_hover(move |style, delta| {
-                            style
-                                .bg(lerp_color(
-                                    control_hover_bg.opacity(0.0),
-                                    control_hover_bg,
-                                    delta,
-                                ))
-                                .text_color(lerp_color(ui.muted, ui.text, delta));
-                        })
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            cx.stop_propagation();
-                            window.dispatch_action(Box::new(crate::OpenAgentsThreadMenu), cx);
-                        })
-                        .child("⋯"),
-                );
-            }
-        }
-        let brand = brand;
         let left_rail = div()
             .flex_none()
             .w(px(self.left_rail_width))
@@ -470,7 +358,7 @@ impl Render for TitleBar {
         // Cockpit modes: the bar is a rail-confined overlay, so the IPC
         // notice lives in the sidebar (`render_sidebar_ipc_banner`). Diff
         // keeps the title-bar pill.
-        let chrome_pill_visible = !self.is_agents && !self.cockpit;
+        let chrome_pill_visible = !self.cockpit;
         let ipc_pill = (chrome_pill_visible && self.ipc_state == crate::ipc::IpcState::Disabled)
             .then(|| {
                 div()
@@ -512,9 +400,7 @@ impl Render for TitleBar {
             // The transparent fill reveals either the themed shell or the
             // platform material selected by the parent window.
             .bg(chrome_bg)
-            // Windows remains flush for native caption hit targets. Linux
-            // right-side controls already own their 8px edge inset; macOS
-            // and layouts without right controls keep the bar-level inset.
+            // Layouts without right-side controls keep the bar-level inset.
             .when(!right_controls_present, |d| d.pr(TITLE_BAR_EDGE_INSET));
 
         bar
@@ -555,10 +441,9 @@ impl Render for TitleBar {
             .child(content)
             .children(ipc_pill)
             .children(right_controls)
-            .when(!self.is_agents && !self.cockpit, |this| {
-                // Codex cockpit: Agents + Cli drop the bottom divider so the
-                // chrome reads as one seamless surface (Cli fuses with its
-                // #141414 sidebar); Diff keeps it (diff visuel nul).
+            .when(!self.cockpit, |this| {
+                // Cockpit chrome drops the bottom divider so the title bar
+                // and sidebar read as one surface; non-cockpit keeps it.
                 this.child(
                     div()
                         .absolute()

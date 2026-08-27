@@ -120,9 +120,8 @@ pub fn slug_for_cwd(cwd: &str) -> String {
 /// A trailing separator is normalized away first. Claude derives its own slug
 /// from the agent process's cwd, which never carries one, so `/a/b/` has to
 /// resolve to the same directory as `/a/b` - otherwise the lookup misses a
-/// directory that exists, and [`session_file_exists`] reports "no session"
-/// for a session that is very much there, sending `--session-id` for an id
-/// the CLI already knows.
+/// directory that exists and the readers below report "no sessions" for a
+/// project that is very much there.
 pub fn project_dir_for_cwd(cwd: &str) -> Option<PathBuf> {
     project_dir_for_cwd_from(
         cwd,
@@ -187,31 +186,6 @@ fn normalize_cwd_for_slug(cwd: &str) -> &str {
     } else {
         trimmed
     }
-}
-
-/// Whether the CLI already holds a session file for `session_id` under
-/// `cwd`'s project dir.
-///
-/// Drives the mint-vs-resume choice in
-/// [`crate::agent_launcher::SessionBinding::resolve`]: `--session-id` is only
-/// legal for an id the CLI has never seen, so a thread may only pass it on
-/// the launch that creates the session.
-///
-/// Unlike the readers below this is a single `stat` - it never walks or
-/// parses the project dir - so it is cheap enough for the PTY-mount path on
-/// the GPUI main thread. Ids are filtered through
-/// [`crate::agent_sessions::is_valid_session_id`] first, whose allow-list
-/// admits only ASCII alphanumerics plus `-`/`_` (and never a leading `-`):
-/// no separator, no `.`, no space, no shell metacharacter. A tampered
-/// `session.json` can therefore neither escape the project dir here nor
-/// smuggle an extra argument into the launch command.
-pub fn session_file_exists(cwd: &str, session_id: &str) -> bool {
-    if !crate::agent_sessions::is_valid_session_id(session_id) {
-        return false;
-    }
-    project_dir_for_cwd(cwd)
-        .map(|dir| dir.join(format!("{session_id}.jsonl")).is_file())
-        .unwrap_or(false)
 }
 
 fn project_snapshot_mtime(project_dir: &Path) -> Option<SystemTime> {
@@ -744,18 +718,6 @@ mod tests {
         assert_eq!(normalize_cwd_for_slug("C:\\"), "C:\\");
         assert_eq!(slug_for_cwd(normalize_cwd_for_slug("/")), "-");
         assert_eq!(slug_for_cwd(normalize_cwd_for_slug("C:\\")), "C--");
-    }
-
-    #[test]
-    fn session_file_exists_rejects_ids_outside_the_allow_list() {
-        // The allow-list gate runs before any path join, so no id can escape
-        // the project dir or reach the filesystem as a traversal.
-        for hostile in ["../../etc/passwd", "a/b", "a\\b", "with space", ".hidden"] {
-            assert!(
-                !session_file_exists("/home/alice/myapp", hostile),
-                "hostile id {hostile:?} must be rejected before the path join"
-            );
-        }
     }
 
     #[test]

@@ -85,8 +85,8 @@ fn every_svg_icon_sets_its_own_text_color() {
         "these `svg()` icons set no `text_color` and will paint as blank \
          space:\n  {}\n\nGPUI paints an svg mask in its own style's colour and \
          never inherits the parent's. Set `.text_color(..)` on the `svg()` \
-         itself - see the delete button in `agents_sidebar/mod.rs` for the \
-         hover-animated form.",
+         itself - see the title-bar sidebar toggle in \
+         `window_chrome/title_bar.rs` for the hover-animated form.",
         offenders.join("\n  ")
     );
 }
