@@ -1,14 +1,12 @@
 //! No-clobber config-merge primitives (EP-002 US-006).
 //!
-//! Three formats, three rules:
-//! - **JSON** (Claude Code, Gemini, opencode `.json`) is merged via
-//!   `serde_json::Value` - never a typed-struct round-trip - so unknown
-//!   keys and sibling MCP servers are preserved byte-for-meaning. Only the
-//!   `paneflow` entry under the agent's container key is inserted/updated.
-//! - **JSONC** (opencode `.jsonc`) is parsed to `Value` for the semantic
-//!   merge, then only `container.entry` is spliced back into the original
-//!   text so comments, trailing commas, and sibling keys stay. Do not
-//!   round-trip JSONC through `json_to_bytes`.
+//! Two formats, two rules:
+//! - **JSON** (Claude Code, Gemini) is merged via `serde_json::Value`, so
+//!   unknown keys and sibling MCP servers are preserved semantically.
+//! - **JSONC** (opencode) is parsed here and surgically edited through
+//!   `paneflow_agent_config::jsonc`. The splice is pretty-printed to the
+//!   surrounding style and asserted equal to the semantic merge so comments,
+//!   trailing commas, and sibling keys stay.
 //! - **TOML** (Codex) is edited via `toml_edit::DocumentMut`, which
 //!   preserves comments and key order. Only `command` / `args` under
 //!   `[<table>.paneflow]` are upserted; unknown keys in that table stay.
@@ -20,7 +18,8 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use paneflow_agent_config::jsonc;
 
 // ---------------------------------------------------------------------------
 // JSON
@@ -38,25 +37,17 @@ pub fn read_json_or_default(path: &Path) -> Result<serde_json::Value> {
     }
 }
 
-/// True when `path` is a JSONC config (`.jsonc`). Writes to these files
-/// must go through [`upsert_jsonc_entry`] / [`remove_jsonc_entry`] so
-/// comments are not stripped by a `Value` round-trip.
-#[must_use]
-pub fn is_jsonc_path(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()) == Some("jsonc")
-}
-
 fn parse_json_or_jsonc(path: &Path, bytes: &[u8]) -> Result<serde_json::Value> {
     match serde_json::from_slice(bytes) {
         Ok(value) => Ok(value),
-        Err(_json_error) if is_jsonc_path(path) => {
+        Err(_json_error) if path.extension().and_then(|e| e.to_str()) == Some("jsonc") => {
             let text = std::str::from_utf8(bytes).with_context(|| {
                 format!(
                     "{} is not valid UTF-8 JSONC - refusing to overwrite it; fix or remove it, then re-run",
                     path.display()
                 )
             })?;
-            parse_jsonc_text(text).with_context(|| {
+            jsonc::parse(text).with_context(|| {
                 format!(
                     "{} is not valid JSONC - refusing to overwrite it; fix or remove it, then re-run",
                     path.display()
@@ -71,125 +62,6 @@ fn parse_json_or_jsonc(path: &Path, bytes: &[u8]) -> Result<serde_json::Value> {
             )
         }),
     }
-}
-
-/// Parse JSON or JSONC text (comments + trailing commas). Used by the
-/// JSONC splicer and by tests that must not go through `serde_json` on
-/// the raw file.
-pub fn parse_jsonc_text(text: &str) -> Result<serde_json::Value> {
-    match serde_json::from_str(text) {
-        Ok(value) => Ok(value),
-        Err(_) => serde_json::from_str(&normalize_jsonc(text)).context("not valid JSONC"),
-    }
-}
-
-fn normalize_jsonc(input: &str) -> String {
-    remove_trailing_commas(&strip_jsonc_comments(input))
-}
-
-fn strip_jsonc_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-
-    while let Some(ch) = chars.next() {
-        if in_string {
-            out.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if ch == '"' {
-            in_string = true;
-            out.push(ch);
-            continue;
-        }
-
-        if ch == '/' {
-            match chars.peek().copied() {
-                Some('/') => {
-                    chars.next();
-                    for comment_ch in chars.by_ref() {
-                        if comment_ch == '\n' {
-                            out.push('\n');
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                Some('*') => {
-                    chars.next();
-                    let mut prev = '\0';
-                    for comment_ch in chars.by_ref() {
-                        if comment_ch == '\n' {
-                            out.push('\n');
-                        }
-                        if prev == '*' && comment_ch == '/' {
-                            break;
-                        }
-                        prev = comment_ch;
-                    }
-                    continue;
-                }
-                _ => {}
-            }
-        }
-
-        out.push(ch);
-    }
-
-    out
-}
-
-fn remove_trailing_commas(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if in_string {
-            out.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if ch == '"' {
-            in_string = true;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
-        if ch == ',' {
-            let next = chars[i + 1..].iter().copied().find(|c| !c.is_whitespace());
-            if matches!(next, Some('}') | Some(']')) {
-                i += 1;
-                continue;
-            }
-        }
-
-        out.push(ch);
-        i += 1;
-    }
-
-    out
 }
 
 /// Upsert `root[container_key][entry_name] = entry_value`, creating the
@@ -248,590 +120,6 @@ pub fn json_to_bytes(root: &serde_json::Value) -> Result<Vec<u8>, serde_json::Er
     let mut s = serde_json::to_string_pretty(root)?;
     s.push('\n');
     Ok(s.into_bytes())
-}
-
-/// Upsert `root[container_key][entry_name] = entry_value` by splicing the
-/// original JSONC text. Comments, trailing commas, key order, and sibling
-/// entries are left in place. Returns `Ok(None)` when the document already
-/// has that exact entry (idempotent no-op).
-///
-/// The spliced text is parsed and compared to a `Value` merge of the same
-/// edit; a mismatch is an error (never a silent fallback to pretty JSON).
-pub fn upsert_jsonc_entry(
-    source: &str,
-    container_key: &str,
-    entry_name: &str,
-    entry_value: &serde_json::Value,
-) -> Result<Option<String>> {
-    let mut expected = parse_jsonc_text(source).context(
-        "config is not valid JSONC - refusing to overwrite it; fix or remove it, then re-run",
-    )?;
-    let changed = merge_json_entry(
-        &mut expected,
-        container_key,
-        entry_name,
-        entry_value.clone(),
-    )?;
-    if !changed {
-        return Ok(None);
-    }
-    let spliced = splice_jsonc_upsert(source, container_key, entry_name, entry_value)?;
-    let got = parse_jsonc_text(&spliced)
-        .context("internal error: jsonc splice produced invalid JSONC")?;
-    if got != expected {
-        bail!("internal error: jsonc splice changed more than `{container_key}.{entry_name}`");
-    }
-    Ok(Some(spliced))
-}
-
-/// Remove `root[container_key][entry_name]` by splicing the original JSONC
-/// text. Returns `Ok(None)` when the entry is already absent.
-pub fn remove_jsonc_entry(
-    source: &str,
-    container_key: &str,
-    entry_name: &str,
-) -> Result<Option<String>> {
-    let mut expected = parse_jsonc_text(source).context(
-        "config is not valid JSONC - refusing to overwrite it; fix or remove it, then re-run",
-    )?;
-    if !remove_json_entry(&mut expected, container_key, entry_name) {
-        return Ok(None);
-    }
-    let spliced = splice_jsonc_remove(source, container_key, entry_name)?;
-    let got = parse_jsonc_text(&spliced)
-        .context("internal error: jsonc splice produced invalid JSONC")?;
-    if got != expected {
-        bail!("internal error: jsonc splice changed more than `{container_key}.{entry_name}`");
-    }
-    Ok(Some(spliced))
-}
-
-fn splice_jsonc_upsert(
-    source: &str,
-    container_key: &str,
-    entry_name: &str,
-    entry_value: &serde_json::Value,
-) -> Result<String> {
-    let (root_open, root_props, root_close) = scan_root_object(source)?;
-    if let Some(container) = last_matching(&root_props, container_key) {
-        let mut inner = Scan::new_at(source, container.value_start);
-        inner.skip_trivia()?;
-        if inner.peek() != Some('{') {
-            bail!("config key `{container_key}` is not an object - refusing to overwrite");
-        }
-        let inner_open = inner.i;
-        let (inner_props, inner_close) = object_props(&mut inner)?;
-        if let Some(existing) = last_matching(&inner_props, entry_name) {
-            let pretty = source[existing.value_start..existing.value_end].contains('\n');
-            let key_indent = line_indent_at(source, existing.key_start);
-            let formatted = format_json_value(entry_value, pretty, &key_indent, newline(source))?;
-            return Ok(replace_span(
-                source,
-                existing.value_start,
-                existing.value_end,
-                &formatted,
-            ));
-        }
-        insert_property(
-            source,
-            inner_open,
-            inner_close,
-            &inner_props,
-            entry_name,
-            entry_value,
-        )
-    } else {
-        let mut map = serde_json::Map::new();
-        map.insert(entry_name.to_string(), entry_value.clone());
-        insert_property(
-            source,
-            root_open,
-            root_close,
-            &root_props,
-            container_key,
-            &serde_json::Value::Object(map),
-        )
-    }
-}
-
-fn splice_jsonc_remove(source: &str, container_key: &str, entry_name: &str) -> Result<String> {
-    let (_root_open, root_props, _root_close) = scan_root_object(source)?;
-    let Some(container) = last_matching(&root_props, container_key) else {
-        bail!("internal error: jsonc splice could not find `{container_key}`");
-    };
-    let mut inner = Scan::new_at(source, container.value_start);
-    inner.skip_trivia()?;
-    if inner.peek() != Some('{') {
-        bail!("config key `{container_key}` is not an object - refusing to overwrite");
-    }
-    let inner_open = inner.i;
-    let (inner_props, _inner_close) = object_props(&mut inner)?;
-    let matches: Vec<&JsoncProp> = inner_props.iter().filter(|p| p.key == entry_name).collect();
-    if matches.is_empty() {
-        bail!("internal error: jsonc splice could not find `{container_key}.{entry_name}`");
-    }
-    let mut spans: Vec<(usize, usize)> = matches
-        .iter()
-        .map(|p| removal_span(source, p, inner_open))
-        .collect();
-    spans.sort_by_key(|(start, _)| *start);
-    let mut out = String::with_capacity(source.len());
-    let mut cursor = 0;
-    for (start, end) in spans {
-        if start < cursor {
-            bail!("internal error: overlapping jsonc removal spans");
-        }
-        out.push_str(&source[cursor..start]);
-        cursor = end;
-    }
-    out.push_str(&source[cursor..]);
-    Ok(out)
-}
-
-fn scan_root_object(source: &str) -> Result<(usize, Vec<JsoncProp>, usize)> {
-    let mut scan = Scan::new(source);
-    scan.skip_trivia()?;
-    if scan.peek() != Some('{') {
-        bail!("config root is not a JSON object - refusing to overwrite");
-    }
-    let open = scan.i;
-    let (props, close) = object_props(&mut scan)?;
-    Ok((open, props, close))
-}
-
-fn last_matching<'a>(props: &'a [JsoncProp], key: &str) -> Option<&'a JsoncProp> {
-    props.iter().rev().find(|p| p.key == key)
-}
-
-fn insert_property(
-    source: &str,
-    open_brace: usize,
-    close_brace: usize,
-    props: &[JsoncProp],
-    name: &str,
-    value: &serde_json::Value,
-) -> Result<String> {
-    let pretty = source[open_brace..=close_brace].contains('\n');
-    let nl = newline(source);
-    let key = serde_json::to_string(name).context("serialize jsonc key failed")?;
-    if pretty {
-        let key_indent = match props.first() {
-            Some(first) => line_indent_at(source, first.key_start),
-            None => {
-                let parent = line_indent_at(source, close_brace);
-                format!("{parent}{}", indent_unit_for(&parent))
-            }
-        };
-        let formatted = format_json_value(value, true, &key_indent, nl)?;
-        let insert_at = start_of_close_line(source, close_brace);
-        let comma_at = props.last().and_then(|last| {
-            if last.comma_end.is_none() {
-                Some(last.value_end)
-            } else {
-                None
-            }
-        });
-        let prop_text = format!("{key_indent}{key}: {formatted}{nl}");
-        Ok(apply_edits(source, comma_at, insert_at, &prop_text))
-    } else {
-        let formatted = format_json_value(value, false, "", nl)?;
-        let mut prefix = String::new();
-        if let Some(last) = props.last() {
-            if last.comma_end.is_none() {
-                prefix.push(',');
-            }
-        }
-        prefix.push_str(&key);
-        prefix.push_str(": ");
-        prefix.push_str(&formatted);
-        Ok(replace_span(source, close_brace, close_brace, &prefix))
-    }
-}
-
-fn apply_edits(source: &str, comma_at: Option<usize>, insert_at: usize, prop_text: &str) -> String {
-    match comma_at {
-        Some(comma_at) if comma_at <= insert_at => {
-            let mut out = String::with_capacity(source.len() + prop_text.len() + 1);
-            out.push_str(&source[..comma_at]);
-            out.push(',');
-            out.push_str(&source[comma_at..insert_at]);
-            out.push_str(prop_text);
-            out.push_str(&source[insert_at..]);
-            out
-        }
-        _ => replace_span(source, insert_at, insert_at, prop_text),
-    }
-}
-
-fn replace_span(source: &str, start: usize, end: usize, new: &str) -> String {
-    let mut out = String::with_capacity(source.len() - (end - start) + new.len());
-    out.push_str(&source[..start]);
-    out.push_str(new);
-    out.push_str(&source[end..]);
-    out
-}
-
-fn format_json_value(
-    value: &serde_json::Value,
-    pretty: bool,
-    key_indent: &str,
-    nl: &str,
-) -> Result<String> {
-    if pretty {
-        let pretty_s =
-            serde_json::to_string_pretty(value).context("serialize jsonc value failed")?;
-        Ok(reindent_pretty(&pretty_s, key_indent, nl))
-    } else {
-        serde_json::to_string(value).context("serialize jsonc value failed")
-    }
-}
-
-fn reindent_pretty(pretty: &str, key_indent: &str, nl: &str) -> String {
-    let mut lines = pretty.split('\n');
-    let Some(first) = lines.next() else {
-        return String::new();
-    };
-    let mut out = String::from(first);
-    for line in lines {
-        out.push_str(nl);
-        out.push_str(key_indent);
-        out.push_str(line);
-    }
-    out
-}
-
-fn newline(source: &str) -> &'static str {
-    if source.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    }
-}
-
-fn indent_unit_for(parent_indent: &str) -> &'static str {
-    if parent_indent.contains('\t') {
-        "\t"
-    } else {
-        "  "
-    }
-}
-
-fn line_indent_at(source: &str, pos: usize) -> String {
-    let line_start = source[..pos].rfind('\n').map_or(0, |i| i + 1);
-    source[line_start..pos]
-        .chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .collect()
-}
-
-fn start_of_close_line(source: &str, close: usize) -> usize {
-    match source[..close].rfind('\n') {
-        Some(nl) => {
-            let between = &source[nl + 1..close];
-            if between.chars().all(|c| c == ' ' || c == '\t') {
-                nl + 1
-            } else {
-                close
-            }
-        }
-        None => close,
-    }
-}
-
-fn removal_span(source: &str, prop: &JsoncProp, object_open: usize) -> (usize, usize) {
-    let mut start = prop.key_start;
-    let floor = object_open + 1;
-    let bytes = source.as_bytes();
-    while start > floor {
-        match bytes[start - 1] {
-            b' ' | b'\t' => start -= 1,
-            b'\n' => {
-                start -= 1;
-                if start > floor && bytes[start - 1] == b'\r' {
-                    start -= 1;
-                }
-                break;
-            }
-            _ => break,
-        }
-    }
-    let mut end = prop.comma_end.unwrap_or(prop.value_end);
-    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
-        end += 1;
-    }
-    (start, end)
-}
-
-struct JsoncProp {
-    key: String,
-    key_start: usize,
-    value_start: usize,
-    value_end: usize,
-    comma_end: Option<usize>,
-}
-
-struct Scan<'a> {
-    s: &'a str,
-    i: usize,
-}
-
-impl<'a> Scan<'a> {
-    fn new(s: &'a str) -> Self {
-        let i = if s.starts_with('\u{feff}') {
-            '\u{feff}'.len_utf8()
-        } else {
-            0
-        };
-        Self { s, i }
-    }
-
-    fn new_at(s: &'a str, i: usize) -> Self {
-        Self { s, i }
-    }
-
-    fn rest(&self) -> &'a str {
-        &self.s[self.i..]
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.rest().chars().next()
-    }
-
-    fn starts_with(&self, prefix: &str) -> bool {
-        self.rest().starts_with(prefix)
-    }
-
-    fn bump(&mut self) -> Option<char> {
-        let mut chars = self.rest().chars();
-        let ch = chars.next()?;
-        self.i += ch.len_utf8();
-        Some(ch)
-    }
-
-    fn skip_trivia(&mut self) -> Result<()> {
-        loop {
-            match self.peek() {
-                Some(c) if c.is_whitespace() => {
-                    self.bump();
-                }
-                Some('/') if self.starts_with("//") => self.skip_line_comment(),
-                Some('/') if self.starts_with("/*") => self.skip_block_comment()?,
-                _ => return Ok(()),
-            }
-        }
-    }
-
-    fn skip_line_comment(&mut self) {
-        self.i += 2;
-        while let Some(ch) = self.bump() {
-            if ch == '\n' {
-                break;
-            }
-        }
-    }
-
-    fn skip_block_comment(&mut self) -> Result<()> {
-        self.i += 2;
-        loop {
-            if self.rest().is_empty() {
-                bail!("unclosed block comment");
-            }
-            if self.starts_with("*/") {
-                self.i += 2;
-                return Ok(());
-            }
-            self.bump();
-        }
-    }
-
-    fn skip_string(&mut self) -> Result<()> {
-        if self.bump() != Some('"') {
-            bail!("expected string");
-        }
-        let mut escaped = false;
-        loop {
-            let Some(ch) = self.bump() else {
-                bail!("unclosed string");
-            };
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                return Ok(());
-            }
-        }
-    }
-
-    fn parse_string(&mut self) -> Result<String> {
-        let start = self.i;
-        self.skip_string()?;
-        let raw = &self.s[start..self.i];
-        unescape_json_string(raw)
-    }
-
-    fn skip_literal(&mut self, lit: &str) -> Result<()> {
-        if !self.starts_with(lit) {
-            bail!("expected `{lit}`");
-        }
-        self.i += lit.len();
-        Ok(())
-    }
-
-    fn skip_number(&mut self) {
-        if self.peek() == Some('-') {
-            self.bump();
-        }
-        while matches!(self.peek(), Some('0'..='9')) {
-            self.bump();
-        }
-        if self.peek() == Some('.') {
-            self.bump();
-            while matches!(self.peek(), Some('0'..='9')) {
-                self.bump();
-            }
-        }
-        if matches!(self.peek(), Some('e' | 'E')) {
-            self.bump();
-            if matches!(self.peek(), Some('+' | '-')) {
-                self.bump();
-            }
-            while matches!(self.peek(), Some('0'..='9')) {
-                self.bump();
-            }
-        }
-    }
-
-    fn skip_balanced(&mut self, open: char, close: char) -> Result<()> {
-        if self.bump() != Some(open) {
-            bail!("expected `{open}`");
-        }
-        let mut depth = 1;
-        while depth > 0 {
-            match self.peek() {
-                None => bail!("unbalanced `{open}{close}`"),
-                Some('"') => self.skip_string()?,
-                Some('/') if self.starts_with("//") => self.skip_line_comment(),
-                Some('/') if self.starts_with("/*") => self.skip_block_comment()?,
-                Some(c) if c == open => {
-                    self.bump();
-                    depth += 1;
-                }
-                Some(c) if c == close => {
-                    self.bump();
-                    depth -= 1;
-                }
-                Some(_) => {
-                    self.bump();
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn skip_value(&mut self) -> Result<()> {
-        match self.peek() {
-            Some('{') => self.skip_balanced('{', '}'),
-            Some('[') => self.skip_balanced('[', ']'),
-            Some('"') => self.skip_string(),
-            Some('t') => self.skip_literal("true"),
-            Some('f') => self.skip_literal("false"),
-            Some('n') => self.skip_literal("null"),
-            Some('-' | '0'..='9') => {
-                self.skip_number();
-                Ok(())
-            }
-            other => bail!("unexpected jsonc value starting with {other:?}"),
-        }
-    }
-}
-
-fn object_props(scan: &mut Scan<'_>) -> Result<(Vec<JsoncProp>, usize)> {
-    if scan.bump() != Some('{') {
-        bail!("expected '{{'");
-    }
-    let mut props = Vec::new();
-    loop {
-        scan.skip_trivia()?;
-        match scan.peek() {
-            Some('}') => {
-                let close = scan.i;
-                scan.bump();
-                return Ok((props, close));
-            }
-            Some(',') => {
-                scan.bump();
-            }
-            Some('"') => {
-                let key_start = scan.i;
-                let key = scan.parse_string()?;
-                scan.skip_trivia()?;
-                if scan.bump() != Some(':') {
-                    bail!("expected ':' after object key");
-                }
-                scan.skip_trivia()?;
-                let value_start = scan.i;
-                scan.skip_value()?;
-                let value_end = scan.i;
-                scan.skip_trivia()?;
-                let comma_end = if scan.peek() == Some(',') {
-                    scan.bump();
-                    Some(scan.i)
-                } else {
-                    None
-                };
-                props.push(JsoncProp {
-                    key,
-                    key_start,
-                    value_start,
-                    value_end,
-                    comma_end,
-                });
-            }
-            other => bail!("unexpected token in jsonc object: {other:?}"),
-        }
-    }
-}
-
-fn unescape_json_string(quoted: &str) -> Result<String> {
-    let inner = quoted
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .context("jsonc key is not a quoted string")?;
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        let Some(esc) = chars.next() else {
-            bail!("unterminated escape in jsonc string");
-        };
-        match esc {
-            '"' | '\\' | '/' => out.push(esc),
-            'b' => out.push('\u{0008}'),
-            'f' => out.push('\u{000c}'),
-            'n' => out.push('\n'),
-            'r' => out.push('\r'),
-            't' => out.push('\t'),
-            'u' => {
-                let mut hex = String::with_capacity(4);
-                for _ in 0..4 {
-                    let Some(h) = chars.next() else {
-                        bail!("truncated \\u escape in jsonc string");
-                    };
-                    hex.push(h);
-                }
-                let code =
-                    u32::from_str_radix(&hex, 16).context("invalid \\u escape in jsonc string")?;
-                let ch = char::from_u32(code).context("invalid \\u codepoint in jsonc string")?;
-                out.push(ch);
-            }
-            other => bail!("invalid escape `\\{other}` in jsonc string"),
-        }
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,13 +520,6 @@ args = []
     }
 
     #[test]
-    fn is_jsonc_path_matches_jsonc_extension() {
-        assert!(is_jsonc_path(Path::new("opencode.jsonc")));
-        assert!(!is_jsonc_path(Path::new("opencode.json")));
-        assert!(!is_jsonc_path(Path::new("config.toml")));
-    }
-
-    #[test]
     fn upsert_jsonc_preserves_comments_and_trailing_commas() {
         let input = r#"
 {
@@ -1250,7 +531,7 @@ args = []
   "url": "https://example.com/path//kept"
 }
 "#;
-        let out = upsert_jsonc_entry(input, "mcp", "paneflow", &jsonc_entry())
+        let out = jsonc::upsert_entry(input, "mcp", "paneflow", &jsonc_entry())
             .unwrap()
             .expect("insert should write");
         assert!(
@@ -1266,83 +547,10 @@ args = []
             serde_json::from_str::<serde_json::Value>(&out).is_err(),
             "must remain JSONC, not rewritten as JSON"
         );
-        let v = parse_jsonc_text(&out).unwrap();
+        let v = jsonc::parse(&out).unwrap();
         assert_eq!(v["mcp"]["paneflow"], jsonc_entry());
         assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
         assert_eq!(v["url"], json!("https://example.com/path//kept"));
-    }
-
-    #[test]
-    fn upsert_jsonc_is_noop_when_identical() {
-        let input = r#"{
-  // keep
-  "mcp": {
-    "paneflow": { "type": "local", "command": ["/p"], "enabled": true }
-  }
-}
-"#;
-        let out = upsert_jsonc_entry(input, "mcp", "paneflow", &jsonc_entry()).unwrap();
-        assert!(out.is_none(), "identical entry must be a no-op");
-    }
-
-    #[test]
-    fn upsert_jsonc_replaces_existing_value_without_touching_siblings() {
-        let input = r#"{
-  // top
-  "mcp": {
-    "paneflow": {
-      // inside managed entry: may be rewritten
-      "type": "local",
-      "command": ["/old"],
-      "enabled": true
-    },
-    "weather": { "type": "local", "command": ["weather-mcp"], "enabled": true }
-  }
-}
-"#;
-        let new_entry = json!({ "type": "local", "command": ["/new"], "enabled": true });
-        let out = upsert_jsonc_entry(input, "mcp", "paneflow", &new_entry)
-            .unwrap()
-            .expect("update should write");
-        assert!(out.contains("// top"), "sibling comment preserved:\n{out}");
-        assert!(out.contains("weather-mcp"), "sibling entry preserved");
-        assert!(!out.contains("/old"));
-        let v = parse_jsonc_text(&out).unwrap();
-        assert_eq!(v["mcp"]["paneflow"]["command"], json!(["/new"]));
-    }
-
-    #[test]
-    fn upsert_jsonc_creates_container_when_absent() {
-        let input = r#"{
-  // schema comment
-  "$schema": "https://opencode.ai/config.json",
-}
-"#;
-        let out = upsert_jsonc_entry(input, "mcp", "paneflow", &jsonc_entry())
-            .unwrap()
-            .expect("insert should write");
-        assert!(out.contains("// schema comment"));
-        assert!(out.contains("$schema"));
-        let v = parse_jsonc_text(&out).unwrap();
-        assert_eq!(v["mcp"]["paneflow"], jsonc_entry());
-        assert_eq!(v["$schema"], json!("https://opencode.ai/config.json"));
-    }
-
-    #[test]
-    fn upsert_jsonc_inserts_into_compact_object() {
-        let input = r#"{"mcp":{"weather":{"type":"local","command":["w"],"enabled":true}}}"#;
-        let out = upsert_jsonc_entry(input, "mcp", "paneflow", &jsonc_entry())
-            .unwrap()
-            .expect("insert should write");
-        let v = parse_jsonc_text(&out).unwrap();
-        assert_eq!(v["mcp"]["paneflow"], jsonc_entry());
-        assert_eq!(v["mcp"]["weather"]["command"], json!(["w"]));
-    }
-
-    #[test]
-    fn upsert_jsonc_errors_on_non_object_container() {
-        let input = r#"{ "mcp": [] }"#;
-        assert!(upsert_jsonc_entry(input, "mcp", "paneflow", &jsonc_entry()).is_err());
     }
 
     #[test]
@@ -1355,7 +563,7 @@ args = []
   }
 }
 "#;
-        let out = remove_jsonc_entry(input, "mcp", "paneflow")
+        let out = jsonc::remove_entry(input, "mcp", "paneflow")
             .unwrap()
             .expect("remove should write");
         assert!(out.contains("// keep"), "comment preserved:\n{out}");
@@ -1363,18 +571,10 @@ args = []
             !out.contains("\"paneflow\""),
             "managed key must be removed:\n{out}"
         );
-        let v = parse_jsonc_text(&out).unwrap();
+        let v = jsonc::parse(&out).unwrap();
         assert!(v["mcp"].get("paneflow").is_none());
         assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
-        assert!(remove_jsonc_entry(&out, "mcp", "paneflow")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn remove_jsonc_is_noop_when_absent() {
-        let input = r#"{ "mcp": { "weather": {} } }"#;
-        assert!(remove_jsonc_entry(input, "mcp", "paneflow")
+        assert!(jsonc::remove_entry(&out, "mcp", "paneflow")
             .unwrap()
             .is_none());
     }

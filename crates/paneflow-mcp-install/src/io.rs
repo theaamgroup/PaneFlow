@@ -11,131 +11,17 @@
 //!   and `rename`d into place, mirroring `session.rs`'s tmp+rename pattern.
 //!   A crash mid-write leaves the temp file, never a half-written config.
 
-use std::fs::{File, OpenOptions};
-use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-
-const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const LOCK_RETRY: Duration = Duration::from_millis(50);
-/// Match the shim's stale-lock steal window (`STALE_CONFIG_LOCK_AFTER`).
-/// Caps PID-reuse: a live PID in an old lockfile is not trusted forever.
-const STALE_LOCK_AFTER: Duration = Duration::from_secs(60);
-
-/// Best-effort inter-process lock for one config file. Paneflow writers honor
-/// it before any read-modify-write pass, so two Paneflow invocations cannot
-/// race each other and lose an edit between read and atomic persist.
-pub struct ConfigLock {
-    path: PathBuf,
-    _file: File,
-}
-
-impl Drop for ConfigLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-fn lock_path(path: &Path) -> PathBuf {
-    let mut lock = path.as_os_str().to_owned();
-    lock.push(".lock");
-    PathBuf::from(lock)
-}
+pub use paneflow_agent_config::ConfigLock;
 
 /// Acquire the Paneflow lock for `path`, retrying briefly if another
-/// Paneflow process is already editing the same config.
+/// Paneflow process is already editing the same config. Abandoned leases are
+/// recovered by the shared dependency-light config layer.
 pub fn lock_config(path: &Path) -> Result<ConfigLock> {
-    lock_config_with_timeout(path, LOCK_TIMEOUT)
-}
-
-fn lock_config_with_timeout(path: &Path, timeout: Duration) -> Result<ConfigLock> {
-    lock_config_with(path, timeout, STALE_LOCK_AFTER)
-}
-
-fn lock_config_with(path: &Path, timeout: Duration, stale_after: Duration) -> Result<ConfigLock> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    std::fs::create_dir_all(&parent)
-        .with_context(|| format!("create parent dir {} failed", parent.display()))?;
-
-    let lock = lock_path(path);
-    let deadline = Instant::now() + timeout;
-    loop {
-        match OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(mut file) => match write_holder_pid(&mut file) {
-                Ok(()) => {
-                    return Ok(ConfigLock {
-                        path: lock,
-                        _file: file,
-                    });
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(&lock);
-                    return Err(e).with_context(|| {
-                        format!("write holder pid into {} failed", lock.display())
-                    });
-                }
-            },
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                if try_steal_lock(&lock, stale_after) {
-                    continue;
-                }
-                if Instant::now() < deadline {
-                    std::thread::sleep(LOCK_RETRY);
-                } else {
-                    anyhow::bail!("timed out waiting for config lock {}", lock.display());
-                }
-            }
-            Err(e) => return Err(e).with_context(|| format!("lock {} failed", lock.display())),
-        }
-    }
-}
-
-fn write_holder_pid(file: &mut File) -> std::io::Result<()> {
-    file.write_all(std::process::id().to_string().as_bytes())
-}
-
-fn read_lock_pid(path: &Path) -> Option<u32> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let pid: u32 = raw.trim().parse().ok()?;
-    (pid > 0).then_some(pid)
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    // SAFETY: `libc::kill` with sig=0 performs error-checking only and
-    // does not deliver a signal. The call takes an i32 pid by value and
-    // has no memory aliasing requirements.
-    let ret = unsafe { libc::kill(pid as i32, 0) };
-    if ret == -1 {
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        // ESRCH = no such process. EPERM/etc. => process exists but we
-        // can't signal it; treat as alive so we do not steal.
-        return errno != libc::ESRCH;
-    }
-    true
-}
-
-fn lock_mtime_age(path: &Path) -> Option<Duration> {
-    path.metadata().ok()?.modified().ok()?.elapsed().ok()
-}
-
-/// Steal if the recorded PID is dead (or missing/unparseable) **or** the
-/// lockfile is older than `stale_after`. Never steal a live PID whose
-/// mtime is still within the stale window.
-fn try_steal_lock(path: &Path, stale_after: Duration) -> bool {
-    let aged_out = lock_mtime_age(path).is_some_and(|age| age > stale_after);
-    let pid_dead = match read_lock_pid(path) {
-        Some(pid) => !pid_is_alive(pid),
-        None => true,
-    };
-    (aged_out || pid_dead) && std::fs::remove_file(path).is_ok()
+    paneflow_agent_config::lock_config(path)
+        .with_context(|| format!("lock {} failed", path.display()))
 }
 
 /// Run a closure while holding the Paneflow config lock for `path`.
@@ -162,8 +48,7 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>> {
 }
 
 /// Atomically write `contents` to `path`: temp file in the same directory,
-/// flush + fsync, then `rename`. The rename is atomic on POSIX and on
-/// Windows NTFS (`MoveFileEx` semantics inside `persist`).
+/// flush + fsync, then `rename`. The rename is atomic on POSIX.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -213,6 +98,13 @@ pub(crate) fn write_if_changed_unlocked(path: &Path, contents: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    /// Mirror of `paneflow_agent_config::lock::LOCK_TIMEOUT` (5s). That
+    /// constant is private and `lock.rs` is outside this job's allowlist, so
+    /// this value can drift if the agent-config timeout changes.
+    const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[test]
     fn backup_noop_when_absent() {
@@ -287,112 +179,80 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"data");
     }
 
-    fn dead_child_pid() -> u32 {
-        let mut child = std::process::Command::new("/usr/bin/true")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        let _ = child.wait();
-        assert!(!pid_is_alive(pid), "reaped child must not still be alive");
-        pid
-    }
-
+    /// OS advisory lock is released on process death, including SIGKILL.
+    ///
+    /// `paneflow_agent_config::lock_config` uses one process-global lockfile
+    /// (`<config_dir>/paneflow/agent-config.lock`), so this test contends
+    /// with every other installer/shim test that acquires the same lock.
+    /// Keep the hold window tiny: the child prints `LOCKED` and self-exits
+    /// after 500 ms if the parent has not SIGKILL'd it yet.
     #[test]
-    fn lock_config_steals_dead_pid() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.json");
-        let lock = lock_path(&p);
-        std::fs::write(&lock, format!("{}\n", dead_child_pid())).unwrap();
-
-        let acquired = lock_config(&p).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&lock).unwrap(),
-            std::process::id().to_string()
-        );
-        drop(acquired);
-        assert!(
-            !lock.exists(),
-            "Drop must unlink the lock after a stolen acquire"
-        );
-    }
-
-    #[test]
-    fn lock_config_times_out_on_live_pid() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.json");
-        let lock = lock_path(&p);
-        let pid = std::process::id();
-        std::fs::write(&lock, pid.to_string()).unwrap();
-
-        let timeout = Duration::from_millis(150);
-        let err = lock_config_with_timeout(&p, timeout)
-            .err()
-            .expect("live holder must not be stolen");
-        assert!(
-            err.to_string()
-                .contains("timed out waiting for config lock"),
-            "live holder must not be stolen: {err}"
-        );
-        assert!(lock.exists(), "must not unlink a live lock on timeout");
-        assert_eq!(std::fs::read_to_string(&lock).unwrap(), pid.to_string());
-    }
-
-    #[test]
-    fn lock_config_drop_unlinks_and_reacquire_works() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.json");
-        let lock = lock_path(&p);
-
-        {
-            let _held = lock_config(&p).unwrap();
-            assert!(lock.exists());
-            assert_eq!(
-                std::fs::read_to_string(&lock).unwrap(),
-                std::process::id().to_string()
-            );
+    fn lock_survives_a_crashed_holder() {
+        const CHILD_TARGET: &str = "PANE_FLOW_LOCK_CHILD_TARGET";
+        if let Some(target) = std::env::var_os(CHILD_TARGET) {
+            let _lock = lock_config(Path::new(&target)).expect("child acquire");
+            eprintln!("LOCKED");
+            let _ = std::io::stderr().flush();
+            std::thread::sleep(Duration::from_millis(500));
+            std::process::exit(0);
         }
-        assert!(!lock.exists(), "Drop must unlink the lockfile");
 
-        let _held_again = lock_config(&p).unwrap();
-        assert!(lock.exists());
-        assert_eq!(
-            std::fs::read_to_string(&lock).unwrap(),
-            std::process::id().to_string()
-        );
-    }
-
-    #[test]
-    fn lock_config_steals_aged_lock_with_live_pid() {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("config.json");
-        let lock = lock_path(&p);
-        std::fs::write(&lock, std::process::id().to_string()).unwrap();
-        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(&p, b"{}").unwrap();
 
-        let acquired =
-            lock_config_with(&p, Duration::from_secs(1), Duration::from_millis(1)).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&lock).unwrap(),
-            std::process::id().to_string()
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(&exe)
+            .env(CHILD_TARGET, &p)
+            .args([
+                "--exact",
+                "io::tests::lock_survives_a_crashed_holder",
+                "--nocapture",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn lock-holder child");
+
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let mut buf = String::new();
+        let wait_start = Instant::now();
+        loop {
+            if wait_start.elapsed() > LOCK_TIMEOUT {
+                let _ = child.kill();
+            }
+            assert!(
+                wait_start.elapsed() <= LOCK_TIMEOUT,
+                "child did not acquire lock within LOCK_TIMEOUT: {buf}"
+            );
+            let mut tmp = [0u8; 64];
+            let n = match stderr.read(&mut tmp) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    assert_eq!(
+                        e.kind(),
+                        std::io::ErrorKind::Interrupted,
+                        "read child stderr: {e}"
+                    );
+                    continue;
+                }
+            };
+            assert!(n > 0, "child exited before acquiring lock: {buf}");
+            buf.push_str(&String::from_utf8_lossy(&tmp[..n]));
+            if buf.contains("LOCKED") {
+                break;
+            }
+        }
+
+        child.kill().expect("SIGKILL child");
+        let _ = child.wait();
+
+        let acquire_start = Instant::now();
+        lock_config(&p).expect("a SIGKILLed holder must not strand the lock");
+        assert!(
+            acquire_start.elapsed() < LOCK_TIMEOUT,
+            "parent must acquire within LOCK_TIMEOUT after SIGKILL"
         );
-        drop(acquired);
-        assert!(!lock.exists());
-    }
-
-    #[test]
-    fn lock_config_steals_empty_lockfile() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.json");
-        let lock = lock_path(&p);
-        std::fs::write(&lock, b"").unwrap();
-
-        let acquired = lock_config(&p).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&lock).unwrap(),
-            std::process::id().to_string()
-        );
-        drop(acquired);
     }
 }

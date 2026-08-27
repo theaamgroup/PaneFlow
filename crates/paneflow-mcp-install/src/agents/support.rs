@@ -11,7 +11,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use paneflow_agent_config::jsonc;
 
 use crate::agents::{InstallOutcome, StatusOutcome, UninstallOutcome};
 use crate::{io, merge};
@@ -34,10 +35,15 @@ fn claude_config_from(
     home: Option<PathBuf>,
     claude_config_dir: Option<OsString>,
 ) -> Option<PathBuf> {
+    // `$CLAUDE_CONFIG_DIR/.claude.json` when set, else `$HOME/.claude.json`
+    // (NOT `~/.claude/.claude.json` — that is the settings dir).
     claude_config_dir
-        .map(PathBuf::from)
+        .clone()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(|d| d.join(".claude.json"))
+        .and_then(|dir| {
+            paneflow_agent_config::claude_config_dir_from(home.clone(), Some(dir))
+                .map(|d| d.join(".claude.json"))
+        })
         .or_else(|| home.map(|h| h.join(".claude.json")))
 }
 
@@ -135,14 +141,8 @@ pub(crate) fn cli_on_path(cli: &str) -> bool {
 /// Run `program args...`, capturing output. `Ok(())` iff it exits 0;
 /// otherwise an error carrying the trimmed stderr (for `log`/report).
 pub(crate) fn shell_out(program: &str, args: &[&str]) -> Result<()> {
-    // US-042 (Windows): a bare `Command::new("claude")` goes through
-    // `CreateProcessW`, which ignores `PATHEXT` and so cannot launch the
-    // `claude.cmd` shim that npm/bun install - even though `cli_on_path`
-    // (via `which::which`) resolved it, so the "preferred CLI path" was
-    // entered and then died with `NotFound`. Resolve the full `.cmd`/`.exe`
-    // path first; Rust std ≥1.77 wraps `.cmd`/`.bat` through `cmd.exe`
-    // automatically. On Unix `execvp` honors PATH for a bare name, so the
-    // original behavior is kept there.
+    // `which::which` resolved the CLI before we spawn it (`cli_on_path`).
+    // On POSIX `execvp` honors `PATH` for a bare program name.
     let mut command = Command::new(program);
     command.args(args);
 
@@ -179,6 +179,27 @@ pub(crate) fn json_install(
     entry: serde_json::Value,
 ) -> Result<InstallOutcome> {
     io::with_config_lock(path, || {
+        if is_jsonc(path) {
+            let source = read_jsonc_source(path)?;
+            let root = jsonc::parse(&source)
+                .with_context(|| format!("{} is not valid JSONC", path.display()))?;
+            let had_prior = root
+                .get(container)
+                .and_then(|value| value.get(ENTRY))
+                .is_some();
+            let Some(updated) = jsonc::upsert_entry(&source, container, ENTRY, &entry)
+                .with_context(|| format!("edit {} failed", path.display()))?
+            else {
+                return Ok(InstallOutcome::AlreadyCurrent);
+            };
+            io::write_if_changed_unlocked(path, updated.as_bytes())?;
+            return Ok(if had_prior {
+                InstallOutcome::Updated
+            } else {
+                InstallOutcome::Installed
+            });
+        }
+
         let mut root = merge::read_json_or_default(path)?;
         let had_prior = root.get(container).and_then(|c| c.get(ENTRY)).is_some();
         let changed = merge::merge_json_entry(&mut root, container, ENTRY, entry)?;
@@ -204,6 +225,17 @@ pub(crate) fn json_uninstall(path: &Path, container: &str) -> Result<UninstallOu
         if !path.exists() {
             return Ok(UninstallOutcome::NothingToRemove);
         }
+        if is_jsonc(path) {
+            let source = read_jsonc_source(path)?;
+            let Some(updated) = jsonc::remove_entry(&source, container, ENTRY)
+                .with_context(|| format!("edit {} failed", path.display()))?
+            else {
+                return Ok(UninstallOutcome::NothingToRemove);
+            };
+            io::write_if_changed_unlocked(path, updated.as_bytes())?;
+            return Ok(UninstallOutcome::Removed);
+        }
+
         let mut root = merge::read_json_or_default(path)?;
         if !merge::remove_json_entry(&mut root, container, ENTRY) {
             return Ok(UninstallOutcome::NothingToRemove);
@@ -237,6 +269,18 @@ pub(crate) fn json_status(
         return Ok(StatusOutcome::NotInstalled);
     };
     Ok(validate(entry, expected))
+}
+
+fn is_jsonc(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("jsonc")
+}
+
+fn read_jsonc_source(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(source) => Ok(source),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("{}\n".to_string()),
+        Err(error) => Err(error).with_context(|| format!("read {} failed", path.display())),
+    }
 }
 
 // ---------------------------------------------------------------------------

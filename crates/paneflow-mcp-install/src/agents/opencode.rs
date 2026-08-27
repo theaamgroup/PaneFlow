@@ -7,20 +7,19 @@
 //!
 //! Config lives in opencode's global config path, preferring JSONC when an
 //! existing `opencode.jsonc` is present. No CLI mutates server config, so this
-//! is always a direct merge - preserving `$schema`, sibling `mcp.*` entries,
-//! and JSONC comments / trailing commas when the chosen path is `.jsonc`.
+//! is always a direct merge - preserving `$schema` and sibling `mcp.*` entries.
+//! JSONC comments / trailing commas are preserved by `support::json_install`.
 //!
 //! **Volatility:** opencode's config schema is young; re-verify the `mcp`
 //! key, `type: "local"`, and array `command` if registration regresses.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde_json::json;
 
 use crate::agents::{support, AgentConfigWriter, InstallOutcome, StatusOutcome, UninstallOutcome};
 use crate::detect::{self, Presence};
-use crate::{io, merge};
 
 const CLI: &str = "opencode";
 const CONTAINER: &str = "mcp";
@@ -66,77 +65,6 @@ impl OpenCode {
     }
 }
 
-fn install_jsonc(path: &Path, entry: serde_json::Value) -> Result<InstallOutcome> {
-    io::with_config_lock(path, || match std::fs::read(path) {
-        Ok(bytes) => {
-            let text = std::str::from_utf8(&bytes).with_context(|| {
-                    format!(
-                        "{} is not valid UTF-8 JSONC - refusing to overwrite it; fix or remove it, then re-run",
-                        path.display()
-                    )
-                })?;
-            let root = merge::parse_jsonc_text(text).with_context(|| {
-                    format!(
-                        "{} is not valid JSONC - refusing to overwrite it; fix or remove it, then re-run",
-                        path.display()
-                    )
-                })?;
-            let had_prior = root
-                .get(CONTAINER)
-                .and_then(|c| c.get(support::ENTRY))
-                .is_some();
-            match merge::upsert_jsonc_entry(text, CONTAINER, support::ENTRY, &entry)
-                .with_context(|| format!("update {} failed", path.display()))?
-            {
-                None => Ok(InstallOutcome::AlreadyCurrent),
-                Some(new_text) => {
-                    io::write_if_changed_unlocked(path, new_text.as_bytes())?;
-                    Ok(if had_prior {
-                        InstallOutcome::Updated
-                    } else {
-                        InstallOutcome::Installed
-                    })
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut root = serde_json::Value::Object(serde_json::Map::new());
-            merge::merge_json_entry(&mut root, CONTAINER, support::ENTRY, entry)?;
-            io::write_if_changed_unlocked(path, &merge::json_to_bytes(&root)?)?;
-            Ok(InstallOutcome::Installed)
-        }
-        Err(e) => Err(e).with_context(|| format!("read {} failed", path.display())),
-    })
-}
-
-fn uninstall_jsonc(path: &Path) -> Result<UninstallOutcome> {
-    if !path.exists() {
-        return Ok(UninstallOutcome::NothingToRemove);
-    }
-    io::with_config_lock(path, || {
-        if !path.exists() {
-            return Ok(UninstallOutcome::NothingToRemove);
-        }
-        let bytes =
-            std::fs::read(path).with_context(|| format!("read {} failed", path.display()))?;
-        let text = std::str::from_utf8(&bytes).with_context(|| {
-            format!(
-                "{} is not valid UTF-8 JSONC - refusing to overwrite it; fix or remove it, then re-run",
-                path.display()
-            )
-        })?;
-        match merge::remove_jsonc_entry(text, CONTAINER, support::ENTRY)
-            .with_context(|| format!("update {} failed", path.display()))?
-        {
-            None => Ok(UninstallOutcome::NothingToRemove),
-            Some(new_text) => {
-                io::write_if_changed_unlocked(path, new_text.as_bytes())?;
-                Ok(UninstallOutcome::Removed)
-            }
-        }
-    })
-}
-
 impl Default for OpenCode {
     fn default() -> Self {
         Self::new()
@@ -157,22 +85,11 @@ impl AgentConfigWriter for OpenCode {
 
     fn install(&self, bridge: &Path) -> Result<InstallOutcome> {
         let bridge_s = bridge.to_string_lossy().into_owned();
-        let path = self.path()?;
-        let entry = Self::entry(&bridge_s);
-        if merge::is_jsonc_path(path) {
-            install_jsonc(path, entry)
-        } else {
-            support::json_install(path, CONTAINER, entry)
-        }
+        support::json_install(self.path()?, CONTAINER, Self::entry(&bridge_s))
     }
 
     fn uninstall(&self) -> Result<UninstallOutcome> {
-        let path = self.path()?;
-        if merge::is_jsonc_path(path) {
-            uninstall_jsonc(path)
-        } else {
-            support::json_uninstall(path, CONTAINER)
-        }
+        support::json_uninstall(self.path()?, CONTAINER)
     }
 
     fn status(&self, bridge: Option<&Path>) -> Result<StatusOutcome> {
@@ -321,7 +238,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&raw).is_err(),
             "must remain JSONC, not rewritten as JSON"
         );
-        let v = merge::parse_jsonc_text(&raw).unwrap();
+        let v = crate::merge::read_json_or_default(&jsonc).unwrap();
         assert_eq!(
             v["mcp"]["paneflow"]["command"],
             json!(["/data/paneflow-mcp"])
@@ -358,7 +275,11 @@ mod tests {
             raw.contains("// keep this file selected"),
             "JSONC comments must survive uninstall:\n{raw}"
         );
-        let v = merge::parse_jsonc_text(&raw).unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&raw).is_err(),
+            "must remain JSONC, not rewritten as JSON"
+        );
+        let v = crate::merge::read_json_or_default(&jsonc).unwrap();
         assert!(v["mcp"].get("paneflow").is_none());
         assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
     }

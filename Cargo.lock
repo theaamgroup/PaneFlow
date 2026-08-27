@@ -4262,8 +4262,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
- "libc",
  "log",
+ "paneflow-agent-config",
  "paneflow-process",
  "serde_json",
  "tempfile",

@@ -31,12 +31,12 @@ log.workspace = true
 # Used by `io::write_atomic` for same-dir temp file + atomic rename (not
 # test-only), so it lives in [dependencies], not [dev-dependencies].
 tempfile.workspace = true
-# `kill(pid, 0)` liveness probe so `io::lock_config` can steal a lock left
-# behind when a previous install was kill -9'd (Drop never ran).
-libc.workspace = true
 # EP-002 (prd-ultron-remediation, U-032): bound `claude mcp add` / `codex mcp
 # add` shell-outs with a wall-clock deadline. std-only, no transitive build.
 paneflow-process = { workspace = true }
+# Shared cross-process config lock (OS advisory, crash-safe), atomic writes,
+# and the JSONC surgical editor. Supersedes this crate's private lock.
+paneflow-agent-config.workspace = true
 
 [lints]
 workspace = true
