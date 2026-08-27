@@ -220,6 +220,7 @@ fn prune_unrestorable(node: LayoutNode) -> Option<LayoutNode> {
             children,
         } => {
             let had_ratios = ratios.is_some();
+            let original_children = children.len();
             let mut kept_children = Vec::with_capacity(children.len());
             let mut kept_ratios = Vec::with_capacity(children.len());
             for (i, child) in children.into_iter().enumerate() {
@@ -243,6 +244,19 @@ fn prune_unrestorable(node: LayoutNode) -> Option<LayoutNode> {
                     // falls back to equal shares for `None`.
                     let ratios = (had_ratios && kept_ratios.len() == kept_children.len())
                         .then_some(kept_ratios);
+                    // The legacy scalar `ratio` describes a BINARY split -
+                    // `resolved_ratios` reads it as `[ratio, 1 - ratio]`. Carry
+                    // it onto a split of a different width and it silently
+                    // reassigns widths that used to resolve to equal shares.
+                    // `serialize_with` always emits `None` here, so this only
+                    // bites a caller handing this pure function a tree read off
+                    // a session file - which is the shape `LayoutNode` exists
+                    // to carry.
+                    let ratio = if kept_children.len() == original_children {
+                        ratio
+                    } else {
+                        None
+                    };
                     Some(LayoutNode::Split {
                         direction,
                         ratio,
@@ -1029,9 +1043,7 @@ impl PaneFlowApp {
         };
         match record {
             ClosedRecord::Pane(record) => self.restore_closed_pane(record, window, cx),
-            ClosedRecord::Tab(record) => {
-                self.restore_closed_tab_record(record, window, cx);
-            }
+            ClosedRecord::Tab(record) => self.restore_closed_tab_record(record, window, cx),
         }
     }
 
@@ -1083,9 +1095,13 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    /// Rebuild a closed tab in place, spawning a fresh pane per recorded
-    /// leaf. Returns the index the tab landed at, or `None` when the restore
-    /// was refused.
+    /// Rebuild a closed tab in place, spawning a fresh pane per recorded leaf,
+    /// and focus it.
+    ///
+    /// Returns nothing on purpose: the restored index has no consumer outside
+    /// this body - the focus move it existed for happens here - and an
+    /// `Option<usize>` nobody reads invites a future caller to mistake it for
+    /// "did the restore succeed?".
     ///
     /// Restore is a *new* tab holding *new* PTYs: recorded scrollback replays
     /// as inert text and no agent process is resumed. Focus lands on the
@@ -1093,22 +1109,27 @@ impl PaneFlowApp {
     /// every leaf and `from_layout_node` never reads it, so there is no
     /// recorded per-pane focus to honour.
     ///
-    /// Both refusal paths push `record` back onto the undo stack:
+    /// EVERY refusal path pushes `record` back onto the undo stack and toasts:
     /// [`Self::handle_undo_close_pane`] pops before it dispatches, so simply
-    /// returning would consume the record and lose the tab for good.
+    /// returning would consume the record and lose the tab for good. Two of the
+    /// four are unreachable today (the entity lease stops `self.workspaces`
+    /// mutating mid-body, and the cap was checked above), but
+    /// `every_refused_restore_pushes_the_record_back` only proves
+    /// `toasts == pushes`, so a refusal that returned silently would satisfy
+    /// the guard while destroying the record.
     fn restore_closed_tab_record(
         &mut self,
         record: crate::ClosedTabRecord,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<usize> {
+    ) {
         // Indexes shift on close/reorder; the record stores a stable
         // `Workspace.id`.
         let ids: Vec<u64> = self.workspaces.iter().map(|ws| ws.id).collect();
         let Some(ws_idx) = workspace_index_for_undo(&ids, record.workspace_id) else {
             push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
             self.show_toast("Workspace no longer exists", cx);
-            return None;
+            return;
         };
         // `open_tab` fills an empty workspace's placeholder instead of pushing
         // past it, so a placeholder-only workspace always has room even though
@@ -1116,15 +1137,15 @@ impl PaneFlowApp {
         if !self.workspaces[ws_idx].can_open_tab() && !self.workspaces[ws_idx].is_empty_shell() {
             push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
             self.show_toast("Tab limit reached", cx);
-            return None;
+            return;
         }
 
         self.active_idx = ws_idx;
         let crate::ClosedTabRecord {
+            workspace_id,
             title,
             index,
             layout,
-            ..
         } = record;
 
         // Copy the workspace's identity out and own its cwd before building
@@ -1145,13 +1166,37 @@ impl PaneFlowApp {
             Self::spawn_pane_from_surfaces(ws_id, surfaces, &fallback_cwd, cx)
         });
 
-        let tab = crate::workspace::Tab::new(title, Some(root));
-        let ws = self.workspaces.get_mut(ws_idx)?;
+        // Rebuildable because `title` is cloned rather than moved and `layout`
+        // was only borrowed above: the two refusals below hand the record back
+        // intact instead of dropping it on the floor.
+        let put_back = |this: &mut Self, cx: &mut Context<Self>| {
+            push_closed_record(
+                &mut this.closed_items,
+                ClosedRecord::Tab(crate::ClosedTabRecord {
+                    workspace_id,
+                    title: title.clone(),
+                    index,
+                    layout: layout.clone(),
+                }),
+            );
+            this.show_toast("Could not restore the tab", cx);
+        };
+
+        let tab = crate::workspace::Tab::new(title.clone(), Some(root));
+        let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+            // Unreachable: `ws_idx` was resolved above and the entity lease
+            // stops `self.workspaces` changing under this body. Kept as a
+            // fail-safe rather than a panic.
+            log::warn!("undo close tab: the workspace vanished mid-restore");
+            put_back(self, cx);
+            return;
+        };
         if !ws.open_tab(tab) {
             // Unreachable: the cap was checked above and nothing can have
             // opened a tab in between. Kept as a fail-safe rather than a panic.
             log::warn!("undo close tab: workspace refused the tab after the cap check");
-            return None;
+            put_back(self, cx);
+            return;
         }
         // `open_tab` appends (or fills the placeholder); slide the newcomer
         // back to the slot it held. `reorder_tab` re-resolves the active tab
@@ -1161,7 +1206,6 @@ impl PaneFlowApp {
         let tab_idx = ws.active_tab_idx();
         self.focus_workspace_tab(ws_idx, tab_idx, window, cx);
         cx.notify();
-        Some(tab_idx)
     }
 
     pub(crate) fn handle_new_workspace(
@@ -2062,8 +2106,6 @@ mod tests {
         );
     }
 
-    /// The record cap counts whole entries regardless of kind: a stack of
-    /// five mixed pane/tab records drops its oldest entry to admit a sixth.
     /// A terminal pane at a known cwd with a known custom name.
     fn named_test_pane(
         cx: &mut gpui::VisualTestContext,
@@ -2306,6 +2348,53 @@ mod tests {
         assert_eq!(prune_unrestorable(split_node(None, vec![])), None);
     }
 
+    /// The LEGACY scalar `ratio` is binary-split-only: `resolved_ratios` reads
+    /// it as `[ratio, 1 - ratio]`. Carrying it through a prune that changed the
+    /// child count silently reassigns widths - a 4-child split with
+    /// `ratio: Some(0.8)` pruned to 2 children would resolve to `[0.8, 0.2]`
+    /// where it previously resolved to equal shares.
+    ///
+    /// `serialize_with` always emits `ratio: None`, so this is unreachable from
+    /// the capture path today. It is reachable the moment anything hands this
+    /// PURE function a tree read off a session file, which is exactly the shape
+    /// `LayoutNode` exists to carry.
+    #[test]
+    fn prune_unrestorable_drops_a_legacy_ratio_when_the_child_count_changes() {
+        let legacy = |ratio: Option<f64>, children: Vec<LayoutNode>| LayoutNode::Split {
+            direction: "vertical".to_string(),
+            ratio,
+            ratios: None,
+            children,
+        };
+
+        let pruned = prune_unrestorable(legacy(
+            Some(0.8),
+            vec![
+                pane_leaf(&["a"]),
+                LayoutNode::Pane { surfaces: vec![] },
+                pane_leaf(&["c"]),
+                pane_leaf(&["d"]),
+            ],
+        ));
+        assert_eq!(
+            pruned,
+            Some(legacy(
+                None,
+                vec![pane_leaf(&["a"]), pane_leaf(&["c"]), pane_leaf(&["d"])]
+            )),
+            "a legacy binary ratio must not survive onto a split of a different width"
+        );
+
+        // A split that lost nothing keeps its legacy ratio: it still describes
+        // the same two children.
+        let untouched = legacy(Some(0.8), vec![pane_leaf(&["a"]), pane_leaf(&["b"])]);
+        assert_eq!(
+            prune_unrestorable(untouched.clone()),
+            Some(untouched),
+            "an unchanged split still means what it said"
+        );
+    }
+
     /// Pruning is a no-op on a tree with nothing to prune: direction, ratios
     /// and surfaces all come back untouched.
     #[test]
@@ -2344,7 +2433,11 @@ mod tests {
                 .nth(1)
                 .and_then(|rest| rest.split(end).next())
                 .unwrap_or_else(|| panic!("{start} body"));
-            let toasts = body.matches("self.show_toast(").count();
+            // `.show_toast(` rather than `self.show_toast(`: the shared
+            // re-push helper inside `restore_closed_tab_record` toasts through
+            // its own `&mut Self` binding, and a needle that missed it would
+            // read the pair as unbalanced.
+            let toasts = body.matches(".show_toast(").count();
             let pushes = body.matches("push_closed_record(").count();
             assert!(toasts > 0, "{start}: expected at least one refusal path");
             assert_eq!(
@@ -2354,6 +2447,8 @@ mod tests {
         }
     }
 
+    /// The record cap counts whole entries regardless of kind: a stack of
+    /// five mixed pane/tab records drops its oldest entry to admit a sixth.
     #[test]
     fn push_closed_record_evicts_the_oldest_of_a_mixed_stack() {
         let mut records = Vec::new();

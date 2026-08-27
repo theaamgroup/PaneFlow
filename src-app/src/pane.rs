@@ -2136,10 +2136,15 @@ mod tests {
     fn close_requests_and_child_exit_emit_different_pane_events() {
         let src = include_str!("pane.rs");
 
+        // `.split("\n    }")` - the method's own closing brace at its own
+        // indent - not `.split('}')`, which stops at the FIRST brace: a
+        // closure or struct literal added inside `Pane::close` would silently
+        // shorten the slice and let the negative assertion below pass over
+        // unread code.
         let close_body = src
             .split("pub fn close(&mut self, cx: &mut Context<Self>) {")
             .nth(1)
-            .and_then(|rest| rest.split('}').next())
+            .and_then(|rest| rest.split("\n    }").next())
             .expect("Pane::close body");
         assert!(
             close_body.contains("PaneEvent::CloseRequested"),
