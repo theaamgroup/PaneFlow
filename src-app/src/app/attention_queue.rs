@@ -138,8 +138,14 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         self.close_attention_queue(cx);
-        if let Some(ws) = self.workspaces.get_mut(self.active_idx) {
-            ws.focus_first(window, cx);
+        // Issue #108: fall back to the empty-workspace placeholder when the
+        // workspace we are restoring focus to has no pane.
+        let focused = match self.workspaces.get(self.active_idx) {
+            Some(ws) => ws.focus_first(window, cx),
+            None => false,
+        };
+        if !focused {
+            window.focus(&self.empty_workspace_focus, cx);
         }
     }
 

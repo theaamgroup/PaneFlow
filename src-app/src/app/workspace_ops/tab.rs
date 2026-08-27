@@ -202,7 +202,10 @@ impl PaneFlowApp {
             ws.set_active_tab(tab_idx);
         }
         if ws_idx == self.active_idx {
-            self.workspaces[ws_idx].focus_first(window, cx);
+            // Issue #108: an empty tab has no pane to focus.
+            if !self.workspaces[ws_idx].focus_first(window, cx) {
+                window.focus(&self.empty_workspace_focus, cx);
+            }
             self.save_session(cx);
         } else {
             self.select_workspace(ws_idx, window, cx);
@@ -232,7 +235,12 @@ impl PaneFlowApp {
         }
         self.dismiss_transient_surfaces();
         if ws_idx == self.active_idx {
-            self.workspaces[ws_idx].focus_first(window, cx);
+            // Issue #108: closing the last tab leaves the substitute empty tab
+            // behind, so there is no pane left to take focus. Park it on the
+            // placeholder to keep the global bindings on the dispatch path.
+            if !self.workspaces[ws_idx].focus_first(window, cx) {
+                window.focus(&self.empty_workspace_focus, cx);
+            }
         }
         self.save_session(cx);
         cx.notify();

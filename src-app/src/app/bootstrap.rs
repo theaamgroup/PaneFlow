@@ -835,6 +835,7 @@ impl PaneFlowApp {
                 h_offsets: std::rc::Rc::new(Vec::new()),
             },
             sidebar_order_cache: std::cell::RefCell::new(Default::default()),
+            empty_workspace_focus: cx.focus_handle(),
         };
 
         // US-015 (prd-git-diff-mode-2026-Q3.md): restore Diff mode only when

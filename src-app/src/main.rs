@@ -1341,6 +1341,14 @@ struct PaneFlowApp {
     /// so the old per-frame `HashMap` + `Vec` rebuild was pure waste. Interior
     /// mutability because the render fn borrows `&self`.
     pub(crate) sidebar_order_cache: std::cell::RefCell<crate::app::sidebar::SidebarOrderCache>,
+    /// Issue #108: focus parking spot for a workspace with zero panes (and for
+    /// a zero-workspace app). GPUI dispatches a key event along the path of the
+    /// focused node; with nothing focused that path is only the dispatch tree's
+    /// root, and every `on_action` listener of this view is registered on the
+    /// `app_content` div, a descendant of it. Global `context: None` bindings
+    /// (Cmd+1..9, Ctrl+Tab, Cmd+Shift+N, Cmd+Alt+T) then match but find no
+    /// handler. Any focus handle mounted inside `app_content` restores the path.
+    empty_workspace_focus: FocusHandle,
 }
 
 /// Global flag for swap mode, checked by TerminalView to intercept Escape.
@@ -1704,7 +1712,13 @@ impl Render for PaneFlowApp {
                     .child(self.render_pane_palette(cx))
                     .into_any_element()
             } else {
+                // Issue #108: focusable even though it is only a placeholder.
+                // A zero-pane workspace has nothing else to focus, and with an
+                // empty dispatch path every global `context: None` binding
+                // matches but reaches no handler.
                 div()
+                    .id("empty-workspace")
+                    .track_focus(&self.empty_workspace_focus)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1713,7 +1727,12 @@ impl Render for PaneFlowApp {
                     .into_any_element()
             }
         } else {
+            // Same reason as the zero-pane branch above: a zero-workspace app
+            // has no pane to focus, so the welcome card carries the handle that
+            // keeps global keybindings on the dispatch path.
             div()
+                .id("empty-app")
+                .track_focus(&self.empty_workspace_focus)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2370,8 +2389,15 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
     });
 
     view.update(cx, |app, cx| {
-        if let Some(ws) = app.workspaces.get(app.active_idx) {
-            ws.focus_first(window, cx);
+        // Issue #108: a restored session can open onto a workspace with no
+        // panes (or no workspaces at all). Focus the placeholder then, so the
+        // global keybindings work from the first keystroke.
+        let focused = match app.workspaces.get(app.active_idx) {
+            Some(ws) => ws.focus_first(window, cx),
+            None => false,
+        };
+        if !focused {
+            window.focus(&app.empty_workspace_focus, cx);
         }
     });
     view

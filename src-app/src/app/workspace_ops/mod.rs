@@ -273,7 +273,13 @@ impl PaneFlowApp {
 
         match focus_target {
             WorkspaceFocusTarget::FirstPane => {
-                self.workspaces[idx].focus_first(window, cx);
+                // Issue #108: a workspace whose visible tab is empty has no
+                // pane to focus. Park focus on the placeholder instead, or the
+                // window ends up with nothing focused and every global
+                // `context: None` binding stops reaching its handler.
+                if !self.workspaces[idx].focus_first(window, cx) {
+                    window.focus(&self.empty_workspace_focus, cx);
+                }
             }
             WorkspaceFocusTarget::Pane { pane } => {
                 pane.update(cx, |_p, cx| cx.notify());
@@ -844,10 +850,18 @@ impl PaneFlowApp {
         self.workspaces.remove(idx);
         self.active_idx =
             active_idx_after_workspace_remove(self.active_idx, idx, self.workspaces.len());
-        if let Some(window) = window
-            && !self.workspaces.is_empty()
-        {
-            self.workspaces[self.active_idx].focus_first(window, cx);
+        if let Some(window) = window {
+            // Issue #108: the workspace we land on may have an empty visible
+            // tab, and closing the last workspace leaves none at all. Both
+            // render a placeholder with no pane to focus, so park focus there
+            // rather than leaving the window with nothing focused.
+            let focused = match self.workspaces.get(self.active_idx) {
+                Some(ws) => ws.focus_first(window, cx),
+                None => false,
+            };
+            if !focused {
+                window.focus(&self.empty_workspace_focus, cx);
+            }
         }
         self.save_session(cx);
         cx.notify();

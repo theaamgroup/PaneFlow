@@ -469,8 +469,13 @@ impl Workspace {
     /// Focus the first pane of the *visible* tab. Deliberately not a
     /// whole-workspace walk: focus can only land on a rendered pane, so
     /// background tabs are out of reach by construction.
-    pub fn focus_first(&self, window: &mut Window, cx: &mut App) {
-        self.active_tab().focus_first(window, cx);
+    ///
+    /// Returns `true` when focus landed on a pane. `false` means the visible
+    /// tab is empty (issue #108: the substitute tab a last-tab close leaves
+    /// behind), so the caller must park focus itself or the window ends up
+    /// with no focused element at all.
+    pub fn focus_first(&self, window: &mut Window, cx: &mut App) -> bool {
+        self.active_tab().focus_first(window, cx)
     }
 
     /// Serialize the visible tab's layout to a `LayoutNode`, including per-pane
@@ -546,7 +551,7 @@ fn walk_and_push_config(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::{AppContext, Focusable, TestAppContext};
 
     use super::{AgentCompletionNotification, MAX_TABS_PER_WORKSPACE, Tab, Workspace};
     use crate::layout::LayoutTree;
@@ -574,6 +579,39 @@ mod tests {
             "the substitute tab is empty"
         );
         assert_eq!(ws.pane_count(), 0);
+    }
+
+    /// Issue #108: a workspace left with the substitute empty tab has nothing
+    /// to focus, and the caller has to know that so it can park focus inside
+    /// `app_content` instead (otherwise every global keybinding goes dead).
+    #[gpui::test]
+    fn focus_first_reports_false_for_a_zero_pane_workspace(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut ws = test_workspace(cx);
+        ws.close_tab(0);
+        assert_eq!(ws.pane_count(), 0, "the substitute tab holds no panes");
+
+        let focused = cx.update(|window, cx| ws.focus_first(window, cx));
+
+        assert!(!focused, "no pane exists, so focus cannot have landed");
+    }
+
+    #[gpui::test]
+    fn focus_first_reports_true_and_focuses_when_a_pane_exists(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let ws = test_workspace(cx);
+        let pane = ws.active_tab().root.as_ref().unwrap().first_leaf().unwrap();
+
+        cx.update(|window, cx| {
+            assert!(
+                ws.focus_first(window, cx),
+                "a pane exists, so focus must land on it"
+            );
+            assert!(
+                pane.read(cx).focus_handle(cx).is_focused(window),
+                "the reported focus must be the pane's"
+            );
+        });
     }
 
     #[gpui::test]

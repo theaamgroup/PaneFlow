@@ -126,9 +126,16 @@ impl Tab {
         panes
     }
 
-    pub fn focus_first(&self, window: &mut Window, cx: &mut App) {
-        if let Some(root) = &self.root {
-            root.focus_first(window, cx);
+    /// Focus this tab's first pane. Returns `true` when focus actually landed
+    /// on a pane; `false` for an empty tab (no root), which has nothing to
+    /// focus and leaves the caller to park focus somewhere else.
+    pub fn focus_first(&self, window: &mut Window, cx: &mut App) -> bool {
+        match &self.root {
+            Some(root) => {
+                root.focus_first(window, cx);
+                true
+            }
+            None => false,
         }
     }
 
