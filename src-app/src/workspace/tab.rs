@@ -129,6 +129,11 @@ impl Tab {
     /// Focus this tab's first pane. Returns `true` when focus actually landed
     /// on a pane; `false` for an empty tab (no root), which has nothing to
     /// focus and leaves the caller to park focus somewhere else.
+    ///
+    /// `#[must_use]`: dropping the report is the issue #108 bug - the window
+    /// then keeps naming an unmounted element and every global binding goes
+    /// inert. Callers must park focus themselves on `false`.
+    #[must_use]
     pub fn focus_first(&self, window: &mut Window, cx: &mut App) -> bool {
         match &self.root {
             Some(root) => {

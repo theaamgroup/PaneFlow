@@ -474,6 +474,10 @@ impl Workspace {
     /// tab is empty (issue #108: the substitute tab a last-tab close leaves
     /// behind), so the caller must park focus itself or the window ends up
     /// with no focused element at all.
+    ///
+    /// `#[must_use]` so a discarded report is a compile error, not a silent
+    /// regression of issue #108.
+    #[must_use]
     pub fn focus_first(&self, window: &mut Window, cx: &mut App) -> bool {
         self.active_tab().focus_first(window, cx)
     }
@@ -612,6 +616,28 @@ mod tests {
                 "the reported focus must be the pane's"
             );
         });
+    }
+
+    /// Contract pin, not a behaviour claim. `Tab::focus_first` reports `true`
+    /// for any `Some(root)` - it does not check that a leaf was actually
+    /// focused - and `LayoutTree::focus_first` silently no-ops on a container
+    /// with no children, so a childless root reports success with focus
+    /// unmoved. Unreachable today (`validate_layout` pads every split to >= 2
+    /// children); this documents the hole so a future change to either side
+    /// has to notice it.
+    #[gpui::test]
+    fn focus_first_reports_true_for_a_childless_root_though_focus_never_moves(
+        cx: &mut TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let tab = Tab::new("t", Some(LayoutTree::empty()));
+
+        let reported = cx.update(|window, cx| tab.focus_first(window, cx));
+
+        assert!(
+            reported,
+            "the contract is root.is_some(), not 'a leaf was focused'"
+        );
     }
 
     #[gpui::test]

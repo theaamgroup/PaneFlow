@@ -693,7 +693,10 @@ impl PaneFlowApp {
             if let Some(ws) = self.active_workspace_mut() {
                 ws.active_tab_mut().root = Some(LayoutTree::Leaf(new_pane));
             }
-            self.workspaces[self.active_idx].focus_first(window, cx);
+            // Cannot report false here: the lines above just installed a leaf
+            // root on this workspace's visible tab, so there is always a pane
+            // to focus. No placeholder fallback is reachable.
+            let _ = self.workspaces[self.active_idx].focus_first(window, cx);
         }
 
         self.save_session(cx);

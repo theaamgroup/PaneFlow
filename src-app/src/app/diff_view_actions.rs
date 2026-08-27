@@ -527,8 +527,16 @@ impl PaneFlowApp {
         self.mode = AppMode::Cli;
         // Focus contract: hand the keyboard back to the terminal the
         // user left. PTYs are detached, so the process is still alive.
-        if let Some(ws) = self.workspaces.get_mut(self.active_idx) {
-            ws.focus_first(window, cx);
+        // Issue #108: a zero-pane workspace has no terminal to hand it back
+        // to, and the surface we just tore down may still hold focus, so park
+        // it on the placeholder rather than leaving the window naming an
+        // unmounted element.
+        let focused = match self.workspaces.get(self.active_idx) {
+            Some(ws) => ws.focus_first(window, cx),
+            None => false,
+        };
+        if !focused {
+            window.focus(&self.empty_workspace_focus, cx);
         }
         self.save_session(cx);
         cx.notify();
