@@ -841,6 +841,27 @@ impl PaneFlowApp {
             .collect()
     }
 
+    /// Storage indices in the same order as the workspace folder rows in the
+    /// rail. Keyboard navigation uses this projection too, so "workspace N"
+    /// has one meaning even when grouping or Auto sorting diverges from
+    /// storage order.
+    pub(crate) fn workspace_display_order(&self, cx: &App) -> Vec<usize> {
+        let auto_sort = self.cached_config.workspace_auto_sort_enabled();
+        let keys = self.workspace_order_keys(cx);
+        let signature = Self::sidebar_order_signature(&keys, auto_sort);
+        if self.sidebar_order_cache.borrow().signature != Some(signature) {
+            let order = if auto_sort {
+                compute_auto_order(&keys)
+            } else {
+                Self::compute_display_order(&self.workspaces)
+            };
+            let mut cache = self.sidebar_order_cache.borrow_mut();
+            cache.order = order;
+            cache.signature = Some(signature);
+        }
+        self.sidebar_order_cache.borrow().order.clone()
+    }
+
     pub(crate) fn render_sidebar(
         &self,
         window: &mut Window,
@@ -961,22 +982,9 @@ impl PaneFlowApp {
     /// Flatten the rail into the rows it renders. Built once per frame because
     /// the drop dividers are defined by the gaps between these rows.
     fn sidebar_rows(&self, cx: &App) -> Vec<SidebarRow> {
-        let auto_sort = self.cached_config.workspace_auto_sort_enabled();
-        let keys = self.workspace_order_keys(cx);
-        let signature = Self::sidebar_order_signature(&keys, auto_sort);
-        if self.sidebar_order_cache.borrow().signature != Some(signature) {
-            let order = if auto_sort {
-                compute_auto_order(&keys)
-            } else {
-                Self::compute_display_order(&self.workspaces)
-            };
-            let mut cache = self.sidebar_order_cache.borrow_mut();
-            cache.order = order;
-            cache.signature = Some(signature);
-        }
-        let order_cache = self.sidebar_order_cache.borrow();
-        let mut rows = Vec::with_capacity(order_cache.order.len());
-        for &i in &order_cache.order {
+        let order = self.workspace_display_order(cx);
+        let mut rows = Vec::with_capacity(order.len());
+        for i in order {
             rows.push(SidebarRow::Folder(i));
             // US-009: the tabs of an expanded workspace follow their folder row
             // as sibling children of the scrolling list, so a long tab list

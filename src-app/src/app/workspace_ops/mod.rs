@@ -96,6 +96,24 @@ fn waiting_pane_in_workspace(
     None
 }
 
+/// Resolve a user-visible workspace position to its storage index.
+fn workspace_at_display_position(display_order: &[usize], position: usize) -> Option<usize> {
+    display_order.get(position).copied()
+}
+
+/// Find the workspace after `active_storage_idx` in the rendered rail.
+fn next_workspace_in_display_order(
+    display_order: &[usize],
+    active_storage_idx: usize,
+) -> Option<usize> {
+    let active_position = display_order
+        .iter()
+        .position(|&storage_idx| storage_idx == active_storage_idx)?;
+    display_order
+        .get((active_position + 1) % display_order.len())
+        .copied()
+}
+
 /// Push one undo-close entry, honouring both caps: at most
 /// [`MAX_CLOSED_PANES`] whole records (oldest evicted first), and at most
 /// [`MAX_CLOSED_PANE_SCROLLBACK_BYTES`] of captured scrollback across all of
@@ -1758,8 +1776,8 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspaces.is_empty() {
-            let next = (self.active_idx + 1) % self.workspaces.len();
+        let display_order = self.workspace_display_order(cx);
+        if let Some(next) = next_workspace_in_display_order(&display_order, self.active_idx) {
             self.select_workspace(next, window, cx);
         }
     }
@@ -1777,7 +1795,15 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.activate_workspace_at(idx, WorkspaceFocusTarget::WaitingElseFirst, window, cx);
+        let display_order = self.workspace_display_order(cx);
+        if let Some(storage_idx) = workspace_at_display_position(&display_order, idx) {
+            self.activate_workspace_at(
+                storage_idx,
+                WorkspaceFocusTarget::WaitingElseFirst,
+                window,
+                cx,
+            );
+        }
     }
 
     // Macro-like handlers for Ctrl+1-9
@@ -1958,6 +1984,15 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_shortcuts_follow_display_order() {
+        let display_order = [2, 1, 0];
+
+        assert_eq!(workspace_at_display_position(&display_order, 0), Some(2));
+        assert_eq!(next_workspace_in_display_order(&display_order, 2), Some(1));
+        assert_eq!(next_workspace_in_display_order(&display_order, 0), Some(2));
+    }
 
     // ═══════════════════════════════════════════════════════════════════
     // Issue #78: workspace-level selection targets the waiting pane.

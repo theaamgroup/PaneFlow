@@ -2601,6 +2601,9 @@ impl PaneFlowApp {
             }
             "workspace.up" => self.handle_workspace_up(params, cx),
             "workspace.select" => {
+                // Deliberately a storage index: `workspace.list` exposes the
+                // same stable indices to automation, independent of how the
+                // sidebar is visually grouped or sorted.
                 let idx = params.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                 if idx < self.workspaces.len() {
                     self.activate_workspace_without_window(idx, cx);
