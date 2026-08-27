@@ -162,10 +162,14 @@ pub(crate) enum ClickOutcome {
 ///
 /// A pending close in [`ConfirmStyle::Modal`] never confirms from here: the
 /// modal owns its own Confirm button and its own `Enter`, and a click that
-/// lands on the X behind it is a fresh gesture. Re-arming just re-states the
-/// same pending close, which is indistinguishable from "nothing happened" -
-/// strictly safer than letting a stray click kill a process group through a
-/// dialog that is still asking the question.
+/// lands on the X behind it is a fresh gesture. Arming instead is the strictly
+/// safer half of that choice - it TEARS THE MODAL DOWN and replaces it with an
+/// inline arm, which is a visible re-ask, where confirming would kill a process
+/// group through a dialog that is still asking the question.
+///
+/// Defensive, not reachable: `render_close_confirm_dialog` defers a full-screen
+/// `.occlude()`d backdrop above every other overlay, so while a modal is up no
+/// click reaches either X.
 pub(crate) fn click_outcome(
     pending: Option<&PendingClose>,
     this_target: &CloseTarget,
@@ -190,6 +194,23 @@ pub(crate) fn click_outcome(
     }
 }
 
+/// Whether an `Escape` at the window root belongs to a live inline arm - and
+/// so must be CONSUMED rather than forwarded to the terminal underneath.
+///
+/// Escape is the interrupt key for Claude Code and several other agents, so
+/// forwarding it here would make "I changed my mind about closing" also
+/// interrupt the very agent the user just decided to keep: a destructive side
+/// effect on the cancel path of a safety feature. When nothing is armed - or
+/// when the pending close is a [`ConfirmStyle::Modal`], which tracks focus and
+/// handles its own key events - Escape passes through untouched, so vim and
+/// every other Escape-driven program keep the keystroke.
+///
+/// Pure so both halves are assertable: the root capture handler it drives is a
+/// GPUI closure with no test seam.
+pub(crate) fn escape_consumes_inline_arm(pending: Option<&PendingClose>) -> bool {
+    pending.is_some_and(|pending| pending.style == ConfirmStyle::Inline)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -211,6 +232,28 @@ mod tests {
             extra_agents: 0,
             label: String::new(),
         }
+    }
+
+    /// Both halves of the Escape trade. Consuming unconditionally would eat a
+    /// keystroke vim needs; forwarding unconditionally would interrupt the
+    /// agent the user just chose to keep.
+    #[test]
+    fn escape_is_consumed_only_while_an_inline_arm_is_live() {
+        assert!(
+            !escape_consumes_inline_arm(None),
+            "with nothing armed, Escape belongs to whatever is focused"
+        );
+        assert!(escape_consumes_inline_arm(Some(&inline_pending(
+            tab_target(1, 2)
+        ))));
+
+        let mut modal = inline_pending(tab_target(1, 2));
+        modal.style = ConfirmStyle::Modal;
+        assert!(
+            !escape_consumes_inline_arm(Some(&modal)),
+            "the modal tracks focus and handles its own Escape; the root capture must not \
+             swallow the key on its behalf"
+        );
     }
 
     #[test]
@@ -246,10 +289,11 @@ mod tests {
     fn a_click_under_a_modal_on_the_same_target_arms_rather_than_confirming() {
         // The modal owns its own Confirm button and its own Enter key, so a
         // click on the X behind it is a fresh gesture, not the second half of
-        // an inline arm. Arming re-states the same pending close, which is a
-        // no-op the user cannot tell from "nothing happened" - strictly safer
-        // than letting a stray click confirm a kill through a dialog that is
-        // still asking the question.
+        // an inline arm. Arming replaces the modal with an inline arm - a
+        // visible re-ask - which is strictly safer than letting a stray click
+        // confirm a kill through a dialog that is still asking the question.
+        // Defensive either way: the modal's occluding backdrop means no click
+        // reaches the X while it is up.
         let mut pending = inline_pending(tab_target(1, 2));
         pending.style = ConfirmStyle::Modal;
         assert_eq!(

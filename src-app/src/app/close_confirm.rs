@@ -25,19 +25,19 @@ use crate::pane::Pane;
 use crate::ui_primitives::AnimatedHoverExt;
 use crate::{ClosedRecord, PaneFlowApp};
 
-/// Longest label the modal will echo back. The tab title is user-typed and
-/// already bounded, but a pane label can come straight from an OSC title,
-/// which is untrusted terminal-controlled text.
-const MAX_CONFIRM_LABEL_CHARS: usize = 48;
-
 /// Scrub and clamp a label before it lands in the modal copy.
 ///
 /// The pane label can be an OSC title: a bidi override there could visually
 /// reverse the `Close "…"?` around it and make the modal name a different
-/// surface than the one about to die. Same scrub the port-conflict tooltip
-/// applies to the same source.
+/// surface than the one about to die. Same scrub the port-conflict tooltip and
+/// the fleet-search target list apply to the same source, and now literally
+/// the same cap: [`crate::limits::MAX_UNTRUSTED_LABEL_CHARS`].
 fn confirm_label(raw: &str) -> String {
-    crate::markdown::strip_bidi_zero_width(raw.chars().take(MAX_CONFIRM_LABEL_CHARS).collect())
+    crate::markdown::strip_bidi_zero_width(
+        raw.chars()
+            .take(crate::limits::MAX_UNTRUSTED_LABEL_CHARS)
+            .collect(),
+    )
 }
 
 /// Title line for the close confirmation.
@@ -356,9 +356,16 @@ impl PaneFlowApp {
             self.restore_focus_after_close_confirm(window, cx);
             return;
         };
-        // `close_workspace_tab` re-focuses on the way out, so the confirm path
-        // needs no restore of its own.
         self.close_workspace_tab(ws_idx, tab_idx, window, cx);
+        // `close_workspace_tab`'s own re-focus is GATED on
+        // `ws_idx == self.active_idx`, and a background workspace's expanded
+        // tab row right-click reaches here with a non-active `ws_idx`. The
+        // modal was holding focus, so without this the window would name an
+        // unmounted handle (issue #108). Unconditional rather than gated on
+        // the same test: it also covers the early `close_tab(..).is_none()`
+        // return inside the close, and on the active branch it re-focuses the
+        // pane the close just focused, which is a no-op.
+        self.restore_focus_after_close_confirm(window, cx);
     }
 
     /// Confirm a pending PANE close. `Window`-free by design - see
@@ -424,13 +431,21 @@ impl PaneFlowApp {
     /// False once the pending close's target has gone away underneath it (an
     /// IPC `workspace.close`, a shell that exited). The render stands the
     /// modal down rather than asking about something that no longer exists.
+    ///
+    /// Answers the id question directly instead of through
+    /// [`Self::workspace_tab_ids`]: this is a per-frame call, and only the
+    /// confirm path actually needs the resolved indices that helper builds a
+    /// `Vec<(u64, Vec<u64>)>` to produce.
     pub(crate) fn pending_close_target_is_live(&self, pending: &PendingClose) -> bool {
         match &pending.target {
             CloseTarget::Tab {
                 workspace_id,
                 tab_id,
-            } => pending_close_tab_indices(&self.workspace_tab_ids(), *workspace_id, *tab_id)
-                .is_some(),
+            } => self
+                .workspaces
+                .iter()
+                .find(|ws| ws.id == *workspace_id)
+                .is_some_and(|ws| ws.tabs().iter().any(|tab| tab.id == *tab_id)),
             CloseTarget::Pane { pane } => self
                 .workspaces
                 .iter()
@@ -563,7 +578,12 @@ impl PaneFlowApp {
             );
 
         // Above every other overlay: this one guards an irreversible kill.
-        deferred(backdrop).with_priority(9).into_any_element()
+        // 11, not 9: the About dialog (`about_dialog.rs`) and the diff base-ref
+        // popover (`diff/view/render.rs`) both defer at 10, and this modal is
+        // deliberately not mode-gated - "About open, then Cmd+W" would
+        // otherwise paint it UNDER an occluding backdrop while it silently
+        // held focus, leaving a live Enter that kills a process group.
+        deferred(backdrop).with_priority(11).into_any_element()
     }
 }
 
@@ -620,13 +640,19 @@ mod tests {
     #[test]
     fn close_confirm_body_omits_an_unbound_undo_shortcut() {
         let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, None);
-        assert!(
-            !body.contains("Cmd") && !body.contains('+'),
-            "with undo unassigned the copy must not print a keystroke at all: {body}"
+        // Pinned whole, not by absent substrings: `shortcut_for_action`
+        // returns Apple HIG glyphs on macOS (`keybindings/display.rs` formats
+        // `secondary-shift-t` as `⌘⇧T`), which contains neither "Cmd" nor
+        // '+', so the negative form would have passed even if the real
+        // shortcut had leaked into the `None` case.
+        assert_eq!(
+            body,
+            "Claude Code is still running here. Closing stops it and everything it started. \
+             Undo close brings it back with its scrollback, but does not resume the agent."
         );
         assert!(
-            body.contains("does not resume"),
-            "the fact still has to survive an unassigned shortcut: {body}"
+            !body.contains('\u{2318}'),
+            "with undo unassigned the copy must not print a keystroke at all: {body}"
         );
     }
 
@@ -657,11 +683,9 @@ mod tests {
             !cleaned.contains('\u{202e}'),
             "a right-to-left override would let the title spoof the quoted name: {cleaned}"
         );
-        let long: String = std::iter::repeat_n('x', MAX_CONFIRM_LABEL_CHARS + 40).collect();
-        assert_eq!(
-            confirm_label(&long).chars().count(),
-            MAX_CONFIRM_LABEL_CHARS
-        );
+        let cap = crate::limits::MAX_UNTRUSTED_LABEL_CHARS;
+        let long: String = std::iter::repeat_n('x', cap + 40).collect();
+        assert_eq!(confirm_label(&long).chars().count(), cap);
     }
 
     /// Issue #83 mandates the guard on all four MODAL close paths, and the
@@ -688,10 +712,14 @@ mod tests {
         );
 
         let menu_src = include_str!("sidebar/context_menu.rs");
+        // Bounded on `into_any_element()`, not on `));`: this item's chain
+        // ends `))` with no semicolon, so a `));` delimiter is not found until
+        // 37 lines into `render_pane_context_menu` and the assertions below
+        // would pass over the wrong region.
         let tab_menu = menu_src
             .split("\"tab-context-close\".into()")
             .nth(1)
-            .and_then(|rest| rest.split("));").next())
+            .and_then(|rest| rest.split(".into_any_element()").next())
             .expect("tab context menu Close item");
         assert!(
             tab_menu.contains("request_close_workspace_tab")
@@ -781,13 +809,19 @@ mod tests {
         );
     }
 
-    /// R6: Escape stands an inline arm down, through the one mutator, without
-    /// swallowing the key and without touching focus. All three matter: a
-    /// swallowed Escape costs vim a keystroke, `cancel_pending_close` would
-    /// re-focus the first pane out from under whatever is typing, and a write
-    /// that skipped the mutator would leave the pane lit.
+    /// R6: Escape stands an inline arm down, through the one mutator, and
+    /// without touching focus - `cancel_pending_close` would re-focus the
+    /// first pane out from under whatever is typing, and a write that skipped
+    /// the mutator would leave the pane lit.
+    ///
+    /// It also CONSUMES the key, but only there: the decision is
+    /// [`crate::app::close_guard::escape_consumes_inline_arm`], whose own test
+    /// pins both halves. Escape is the interrupt key for Claude Code and
+    /// several other agents, so forwarding a disarm would interrupt the agent
+    /// the user just chose to keep; with nothing armed the key passes through
+    /// untouched and vim keeps it.
     #[test]
-    fn escape_stands_an_inline_arm_down_without_eating_the_key() {
+    fn escape_stands_an_inline_arm_down_and_consumes_only_that_key() {
         let src = include_str!("../main.rs");
         let capture = src
             .split(".capture_key_down(cx.listener(")
@@ -795,29 +829,125 @@ mod tests {
             .and_then(|rest| rest.split("\n            }))").next())
             .expect("root capture_key_down body");
         assert!(
-            capture.contains("ConfirmStyle::Inline") && capture.contains("set_pending_close(None"),
+            capture.contains("escape_consumes_inline_arm(")
+                && capture.contains("set_pending_close(None"),
             "the root Escape capture must stand an inline arm down: {capture}"
         );
         assert!(
             !capture.contains("cancel_pending_close"),
             "an inline arm never took focus, so standing it down must not re-focus: {capture}"
         );
-        // The only `stop_propagation` in this handler belongs to the drag
-        // branch, which returns before the close-arm branch is reached.
+        // Two swallows, both inside a guarded branch: the drag branch (which
+        // returns before the close-arm branch is reached) and the disarm.
+        // Nothing at the top level, so an Escape with nothing armed is still
+        // forwarded.
         assert_eq!(
             capture.matches("cx.stop_propagation()").count(),
-            1,
-            "only the drag branch may swallow Escape: {capture}"
+            2,
+            "only the drag branch and the inline disarm may swallow Escape: {capture}"
         );
-        let stop_at = capture
-            .find("cx.stop_propagation()")
-            .expect("the drag branch's stop_propagation");
-        let inline_at = capture
-            .find("ConfirmStyle::Inline")
+        let disarm_at = capture
+            .find("escape_consumes_inline_arm(")
             .expect("the close-arm branch");
+        let last_stop_at = capture
+            .rfind("cx.stop_propagation()")
+            .expect("the disarm's stop_propagation");
         assert!(
-            stop_at < inline_at,
-            "standing an inline arm down must let Escape through to the terminal: {capture}"
+            last_stop_at > disarm_at,
+            "the second swallow must sit INSIDE the disarm branch, not above it: {capture}"
+        );
+    }
+
+    /// The confirmation is deliberately NOT mode-gated, so it can be raised
+    /// over any other overlay - "About dialog open, then `Cmd+W`". Painting it
+    /// UNDER one does not stand it down: it still holds focus and `Enter`
+    /// still kills a process group, so an occluded confirmation is an
+    /// invisible modal with a live destructive default.
+    #[test]
+    fn the_close_confirmation_defers_above_every_overlay_it_can_share_a_frame_with() {
+        // Built rather than written out, so the scan does not match itself.
+        let needle = format!("with_priority{}", '(');
+        let max_priority = |src: &str| -> u32 {
+            src.match_indices(needle.as_str())
+                .filter_map(|(idx, _)| {
+                    src[idx + needle.len()..]
+                        .split(')')
+                        .next()
+                        .and_then(|n| n.trim().parse::<u32>().ok())
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let ours = max_priority(include_str!("close_confirm.rs"));
+        assert!(
+            ours > 0,
+            "the confirmation must defer at an explicit priority"
+        );
+        // Every overlay that defers at 6 or above; the rest sit at 4 or lower.
+        for (label, src) in [
+            ("about_dialog.rs", include_str!("about_dialog.rs")),
+            (
+                "../diff/view/render.rs",
+                include_str!("../diff/view/render.rs"),
+            ),
+            (
+                "custom_buttons_modal.rs",
+                include_str!("custom_buttons_modal.rs"),
+            ),
+            ("launch_pad.rs", include_str!("launch_pad.rs")),
+            ("attention_queue.rs", include_str!("attention_queue.rs")),
+            ("fleet_search.rs", include_str!("fleet_search.rs")),
+            ("theme_picker.rs", include_str!("theme_picker.rs")),
+            ("broadcast.rs", include_str!("broadcast.rs")),
+        ] {
+            let theirs = max_priority(src);
+            assert!(
+                ours > theirs,
+                "{label} defers at {theirs} and the close confirmation at {ours}: an occluded \
+                 confirmation still holds focus and still kills a process group on Enter"
+            );
+        }
+    }
+
+    /// Issue #108's stranding class, on the confirm path.
+    ///
+    /// `close_workspace_tab` re-focuses only when the closed tab belonged to
+    /// the ACTIVE workspace, and a background workspace's expanded tab row
+    /// right-click reaches this path with `ws_idx != self.active_idx`. The
+    /// modal was the focused element, so dropping it there without a restore
+    /// leaves the window naming an unmounted focus handle - exactly the state
+    /// the four commits before this branch each fixed.
+    #[test]
+    fn confirming_a_tab_close_always_hands_focus_back() {
+        let src = include_str!("close_confirm.rs");
+        let body = src
+            .split("pub(crate) fn confirm_pending_close_tab(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("confirm_pending_close_tab body");
+        let closes_at = body
+            .find("self.close_workspace_tab(")
+            .expect("the confirm path's close call");
+        let restores_at = body
+            .rfind("self.restore_focus_after_close_confirm(")
+            .expect("the confirm path must hand focus back");
+        assert!(
+            restores_at > closes_at,
+            "the modal held focus, and the close it delegates to only re-focuses for the ACTIVE \
+             workspace - so the restore has to run AFTER the close, on every path: {body}"
+        );
+
+        // The premise this rests on. If the gate below ever goes away, the
+        // restore above becomes redundant rather than wrong - re-read both.
+        let tab_src = include_str!("workspace_ops/tab.rs");
+        let close_tab = tab_src
+            .split("pub(crate) fn close_workspace_tab(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("close_workspace_tab body");
+        assert!(
+            close_tab.contains("if ws_idx == self.active_idx"),
+            "the close's own re-focus is gated on the active workspace: {close_tab}"
         );
     }
 

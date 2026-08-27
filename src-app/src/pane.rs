@@ -1220,12 +1220,24 @@ impl Pane {
             CLOSE_BASE_ALPHA
         };
         let alpha = base_alpha + (CLOSE_HOVER_ALPHA - base_alpha) * progress;
+        // The glyph inverts against the EFFECTIVE fill, not against hover
+        // progress. `Hsla::blend` returns `self` when the other alpha is `<= 0`,
+        // so keying it to `progress` alone would paint a full-opacity
+        // `vc_deleted` cross on a 0.72 `vc_deleted` disc at rest: red on red,
+        // legible only under the pointer - the one condition the armed state
+        // exists not to depend on. Unarmed behaviour is unchanged, its
+        // `CLOSE_BASE_ALPHA` being the faint tint the doc above describes.
+        let glyph_mix = if armed {
+            progress.max(base_alpha)
+        } else {
+            progress
+        };
         visual.bg(with_alpha(tint, alpha)).child(
             svg()
                 .size(px(CLOSE_GLYPH_SIZE))
                 .flex_none()
                 .path("icons/close.svg")
-                .text_color(tint.blend(ui.base.opacity(progress))),
+                .text_color(tint.blend(ui.base.opacity(glyph_mix))),
         )
     }
 
@@ -1323,8 +1335,10 @@ impl Pane {
     ///
     /// Emits [`PaneEvent::CloseRequested`], not [`PaneEvent::Remove`]: this is
     /// a user gesture, so the parent records an undo entry before it reflows.
-    /// Both callers - the pane header's `x` and the sidebar pane context
-    /// menu's "Close Pane" - become undoable through this one line.
+    /// One caller - the pane header's `x`. The sidebar pane context menu's
+    /// "Close Pane" no longer routes through here: issue #83 repointed it
+    /// straight at `request_close_pane(.., Modal, ..)`, an inline arm being a
+    /// dead affordance behind a menu that has already dismissed itself.
     pub fn close(&mut self, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::CloseRequested);
     }

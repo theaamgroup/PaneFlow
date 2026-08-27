@@ -1537,6 +1537,17 @@ impl PaneFlowApp {
         // it would eat the title on every row to serve a hover-only control.
         // An empty tab has no cards, so it reserves the button's own width
         // instead, or the `x` would land on the title's tail.
+        //
+        // Issue #83: read here, not next to the button, because the swap has
+        // TWO sides. The armed `x` drops its hover gate (below), so the cards
+        // have to drop theirs too - their hide is gated on hover, and an armed
+        // row with the pointer elsewhere would otherwise paint a bare red glyph
+        // (`sidebar_action_button_tinted` has no background at rest) on top of
+        // a pane card. That is the DEFAULT armed appearance, not an edge case.
+        let close_armed = self.pending_close.as_ref().is_some_and(|pending| {
+            pending.style == crate::app::close_guard::ConfirmStyle::Inline
+                && pending.targets_tab(ws_id, tab_id)
+        });
         match render_tab_pane_icons(
             &pane_icons,
             &format!("tab-{tab_id}"),
@@ -1552,7 +1563,19 @@ impl PaneFlowApp {
                         // element phases must agree within the frame the hover
                         // flips. It also stops the hidden lane from holding its
                         // tooltip open under the close button.
-                        .group_hover(tab_group.clone(), |style| style.invisible())
+                        //
+                        // While armed the gate is not applied at all (the
+                        // `pane.rs` header slot's idiom) rather than applied
+                        // and overridden: the `x` opposite is permanently
+                        // revealed, so this lane's occupant is permanently
+                        // gone.
+                        .map(|lane| {
+                            if close_armed {
+                                lane.invisible()
+                            } else {
+                                lane.group_hover(tab_group.clone(), |style| style.invisible())
+                            }
+                        })
                         .child(cluster),
                 );
             }
@@ -1570,10 +1593,8 @@ impl PaneFlowApp {
         // click on a tab running a live agent arms it - red glyph, changed
         // tooltip, and permanently revealed - and only the second click closes.
         // A tab with nothing live still closes on one click, exactly as before.
-        let close_armed = self.pending_close.as_ref().is_some_and(|pending| {
-            pending.style == crate::app::close_guard::ConfirmStyle::Inline
-                && pending.targets_tab(ws_id, tab_id)
-        });
+        // `close_armed` is read above the pane-card lane, which shares this
+        // lane and has to drop its own hover gate in the same state.
         let close_actions = sidebar_hover_actions(tab_group.clone());
         // An armed button that is only painted while the row is hovered is not
         // painted at all the moment the pointer leaves: the user would be left

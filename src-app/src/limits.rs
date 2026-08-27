@@ -79,3 +79,13 @@ pub(crate) const MAX_MARKDOWN_STATE_SIZE_BYTES: u64 = 1024 * 1024;
 /// leaf still consumes budget before the v2 demotion / mono-surface spawn.
 pub(crate) const MAX_WORKSPACE_TERMINALS: usize =
     crate::workspace::MAX_TABS_PER_WORKSPACE * crate::layout::MAX_PANES;
+
+/// Display cap on an untrusted surface label before it is echoed back into app
+/// chrome. A terminal's own program controls its OSC title, so every sink that
+/// quotes one at the user clamps it here and strips bidi/zero-width controls
+/// with `crate::markdown::strip_bidi_zero_width` in the same breath: the
+/// port-conflict tooltip (`app/event_handlers.rs`), the fleet-search target
+/// list (`app/fleet_search.rs`), and the issue #83 close confirmation
+/// (`app/close_confirm.rs`). One constant because the three are the same
+/// scrub - they previously read 64, 64 and 48.
+pub(crate) const MAX_UNTRUSTED_LABEL_CHARS: usize = 64;

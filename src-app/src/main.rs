@@ -1958,12 +1958,14 @@ impl Render for PaneFlowApp {
                     cx.stop_propagation();
                     return;
                 }
-                if this
-                    .pending_close
-                    .as_ref()
-                    .is_some_and(|p| p.style == app::close_guard::ConfirmStyle::Inline)
-                {
+                if app::close_guard::escape_consumes_inline_arm(this.pending_close.as_ref()) {
                     this.set_pending_close(None, cx);
+                    // Consumed, unlike an Escape with nothing armed: Escape is
+                    // the interrupt key for Claude Code and friends, so
+                    // forwarding this one would make "I changed my mind about
+                    // closing" also interrupt the agent the user just decided
+                    // to keep.
+                    cx.stop_propagation();
                 }
             }))
             .on_mouse_move(|_e, _, cx| cx.stop_propagation())
@@ -2353,9 +2355,13 @@ impl Render for PaneFlowApp {
         // Issue #83: close confirmation. Deliberately NOT mode-gated - it
         // guards a `kill(-pid, …)` on a whole process group, so it stays
         // dismissible wherever the user ends up.
-        if let Some(pending) = self.pending_close.clone() {
+        //
+        // Borrowed, not cloned: this runs on every frame the modal is up while
+        // the terminal underneath repaints on a 4 ms coalescing loop, and a
+        // `PendingClose` carries an `Entity<Pane>` and a label `String`.
+        if let Some(pending) = self.pending_close.as_ref() {
             let is_modal = pending.style == app::close_guard::ConfirmStyle::Modal;
-            if !self.pending_close_target_is_live(&pending) {
+            if !self.pending_close_target_is_live(pending) {
                 // The tab or pane went away underneath the pending close.
                 // Stand down: a `CloseTarget::Pane` holds a strong
                 // `Entity<Pane>`, so keeping a dead one would keep its PTY
@@ -2372,7 +2378,7 @@ impl Render for PaneFlowApp {
                 if std::mem::take(&mut self.pending_close_focus_claim) {
                     self.pending_close_focus.focus(window, cx);
                 }
-                app_content = app_content.child(self.render_close_confirm_dialog(&pending, cx));
+                app_content = app_content.child(self.render_close_confirm_dialog(pending, cx));
             }
         }
 

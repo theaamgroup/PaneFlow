@@ -391,8 +391,16 @@ fn active_idx_after_workspace_remove(active_idx: usize, removed_idx: usize, len:
     }
 }
 
+/// Rebuild one surface from its undo record.
+///
+/// Borrows the record rather than consuming it so the caller still owns an
+/// intact `ClosedPaneRecord` if a later step refuses:
+/// `handle_undo_close_pane` has already POPPED, so a refusal that could not
+/// hand the record back would destroy the only copy of the thing undo exists
+/// to protect. The scrollback - the one big field - is only read here, never
+/// moved, so borrowing costs nothing.
 fn restore_closed_surface_record(
-    tab: ClosedSurfaceRecord,
+    tab: &ClosedSurfaceRecord,
     ws_id: u64,
     cx: &mut Context<PaneFlowApp>,
 ) -> crate::pane::PaneSurface {
@@ -403,13 +411,13 @@ fn restore_closed_surface_record(
             custom_name,
             font_size,
         } => {
-            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd, None, cx));
+            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd.clone(), None, cx));
             terminal.update(cx, |view, _| {
-                view.terminal.custom_name = custom_name;
-                view.terminal.font_size_override = font_size;
+                view.terminal.custom_name = custom_name.clone();
+                view.terminal.font_size_override = *font_size;
             });
             if let Some(scrollback) = scrollback {
-                terminal.read(cx).restore_scrollback(&scrollback);
+                terminal.read(cx).restore_scrollback(scrollback);
             }
             cx.subscribe(&terminal, PaneFlowApp::handle_terminal_event)
                 .detach();
@@ -417,7 +425,7 @@ fn restore_closed_surface_record(
         }
         ClosedSurfaceRecord::Markdown { path } => {
             let markdown = cx.new(|cx: &mut Context<crate::markdown::MarkdownView>| {
-                crate::markdown::MarkdownView::open(path, cx)
+                crate::markdown::MarkdownView::open(path.clone(), cx)
             });
             crate::pane::PaneSurface::Markdown(markdown)
         }
@@ -1069,7 +1077,7 @@ impl PaneFlowApp {
         };
         self.active_idx = idx;
         let ws_id = record.workspace_id;
-        let surface = restore_closed_surface_record(record.surface, ws_id, cx);
+        let surface = restore_closed_surface_record(&record.surface, ws_id, cx);
         let new_pane = self.create_pane_with_existing_surface(surface, ws_id, cx);
 
         // Insert via split from the currently focused pane
@@ -1087,6 +1095,16 @@ impl PaneFlowApp {
             false
         };
         if !inserted {
+            // Unreachable: `idx` indexes `self.workspaces` and the entity lease
+            // stops it changing under this body. Kept as a fail-safe rather
+            // than a panic - and it re-pushes, because the pop already
+            // happened. Returning silently here would satisfy
+            // `every_refused_restore_pushes_the_record_back` (which only
+            // proves `toasts == pushes`) while losing the pane for good, which
+            // is the hole the tab path next door had.
+            log::warn!("undo close pane: the workspace vanished mid-restore");
+            push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
+            self.show_toast("Could not restore the pane", cx);
             return;
         }
         new_pane.read(cx).focus_handle(cx).focus(window, cx);
@@ -2445,6 +2463,31 @@ mod tests {
                 "{start}: every refusal toast must be paired with a re-push"
             );
         }
+    }
+
+    /// The other half of the guard above, for the pane path only: `toasts ==
+    /// pushes` is satisfied by a refusal that returns SILENTLY, which is
+    /// exactly the hole `restore_closed_pane` had. Its `return;`s are
+    /// therefore counted too - every one of them has to be a refusal that put
+    /// the record back.
+    ///
+    /// Asserted only for the pane path: `restore_closed_tab_record` funnels
+    /// its four refusals through one shared `put_back` closure, so its literal
+    /// `push_closed_record(` count is 3 against 4 returns by construction.
+    #[test]
+    fn restore_closed_pane_has_no_silent_early_return() {
+        let src = include_str!("mod.rs");
+        let body = src
+            .split("fn restore_closed_pane(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn restore_closed_tab_record(").next())
+            .expect("restore_closed_pane body");
+        assert_eq!(
+            body.matches("return;").count(),
+            body.matches("push_closed_record(").count(),
+            "`handle_undo_close_pane` pops before it dispatches, so a bare `return` here \
+             destroys the only copy of the pane undo exists to protect: {body}"
+        );
     }
 
     /// The record cap counts whole entries regardless of kind: a stack of

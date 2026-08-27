@@ -468,9 +468,14 @@ impl PaneFlowApp {
     /// Drop `pane` out of whichever tab owns it and reflow, respawning a
     /// terminal when that would have left the tab with no pane at all.
     ///
-    /// Shared by [`pane::PaneEvent::Remove`] and
-    /// [`pane::PaneEvent::CloseRequested`]: the two differ only in whether an
-    /// undo record is pushed first, never in how the tree is mutated.
+    /// The single tree-mutating removal route. Reached directly by
+    /// [`pane::PaneEvent::Remove`] (a child that exited: no undo record, no
+    /// confirmation) and through
+    /// [`crate::PaneFlowApp::close_pane_undoably`] by every user gesture that
+    /// closes a pane - [`pane::PaneEvent::CloseRequested`] (the header `x`),
+    /// the sidebar pane context menu, and the issue #83 confirm path. They
+    /// differ only in whether an undo record is pushed first, never in how the
+    /// tree is mutated.
     pub(crate) fn remove_pane_from_tree(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
         // Find the workspace that owns this pane (not necessarily the
         // active one - shells can exit in background workspaces).
@@ -1492,7 +1497,11 @@ impl PaneFlowApp {
                             r.terminal.title.clone()
                         }
                     });
-                let name = crate::markdown::strip_bidi_zero_width(name.chars().take(64).collect());
+                let name = crate::markdown::strip_bidi_zero_width(
+                    name.chars()
+                        .take(crate::limits::MAX_UNTRUSTED_LABEL_CHARS)
+                        .collect(),
+                );
                 display_names.insert(tid, name);
             }
         }
