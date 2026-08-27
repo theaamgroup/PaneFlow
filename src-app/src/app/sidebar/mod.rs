@@ -1399,14 +1399,9 @@ impl PaneFlowApp {
         // The `+` opens the « New pane » preset palette, which covers the
         // shell, the agents, and the workspace's custom commands.
         //
-        // The `x` closes the whole folder. Dropping the `Workspace` drops its
-        // tabs, their panes and their terminals in one move - the same teardown
-        // a pane close runs - so no PTY is orphaned. It closes without
-        // confirmation, at parity with the row's context menu and with
-        // `Ctrl+Shift+Q`. That is a DEFERRAL, not an oversight: issue #83
-        // guarded the tab and pane closes and deliberately left this one out,
-        // because guarding it needs a whole-workspace undo record. See
-        // `workspace_ops::PaneFlowApp::close_workspace_at_inner`.
+        // The `x` closes the whole folder. Issue #111 routes it through the
+        // workspace-wide guard because dropping the `Workspace` also drops
+        // every tab, pane, terminal, and live agent it contains.
         body = body.child(
             sidebar_hover_actions(group_name.clone())
                 .child(
@@ -1455,7 +1450,12 @@ impl PaneFlowApp {
                             // the wrong folder.
                             if let Some(at) = this.workspaces.iter().position(|ws| ws.id == ws_id) {
                                 this.commit_rename(cx);
-                                this.close_workspace_at(at, window, cx);
+                                this.request_close_workspace(
+                                    at,
+                                    crate::app::close_guard::ConfirmStyle::Modal,
+                                    window,
+                                    cx,
+                                );
                             }
                             cx.stop_propagation();
                         },

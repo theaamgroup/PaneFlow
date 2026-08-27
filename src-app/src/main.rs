@@ -271,10 +271,34 @@ pub(crate) struct ClosedTabRecord {
     pub(crate) layout: paneflow_config::schema::LayoutNode,
 }
 
-/// One entry on the undo-close stack: a pane or a whole tab.
+/// One tab inside a closed-workspace undo record. Unlike [`ClosedTabRecord`],
+/// the layout is optional because an empty tab is still part of the workspace
+/// and must come back as empty rather than disappearing from the record.
+pub(crate) struct ClosedWorkspaceTabRecord {
+    pub(crate) title: String,
+    pub(crate) layout: Option<paneflow_config::schema::LayoutNode>,
+}
+
+/// Captured state of a closed workspace: identity, position, presentation
+/// state, and every tab's restorable pane tree.
+pub(crate) struct ClosedWorkspaceRecord {
+    pub(crate) workspace_id: u64,
+    pub(crate) title: String,
+    pub(crate) cwd: String,
+    pub(crate) index: usize,
+    pub(crate) active_tab: usize,
+    pub(crate) tabs: Vec<ClosedWorkspaceTabRecord>,
+    pub(crate) custom_buttons: Vec<paneflow_config::schema::ButtonCommand>,
+    pub(crate) files_expanded: Vec<std::path::PathBuf>,
+    pub(crate) sidebar_expanded: bool,
+    pub(crate) pinned: bool,
+}
+
+/// One entry on the undo-close stack: a pane, a whole tab, or a workspace.
 pub(crate) enum ClosedRecord {
     Pane(ClosedPaneRecord),
     Tab(ClosedTabRecord),
+    Workspace(ClosedWorkspaceRecord),
 }
 
 impl ClosedRecord {
@@ -284,6 +308,7 @@ impl ClosedRecord {
         match self {
             ClosedRecord::Pane(record) => record.workspace_id,
             ClosedRecord::Tab(record) => record.workspace_id,
+            ClosedRecord::Workspace(record) => record.workspace_id,
         }
     }
 }
@@ -1288,8 +1313,8 @@ struct PaneFlowApp {
     /// Source pane for swap mode, or `None` if not in swap mode.
     swap_source: Option<Entity<crate::pane::Pane>>,
     /// LIFO stack of recently closed panes for undo-close (US-014).
-    /// Issue #83 widened it to whole tabs, so the newest entry can be either
-    /// and one `Cmd+Shift+T` pops whichever kind that is.
+    /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
+    /// `Cmd+Shift+T` restores whichever kind was closed most recently.
     closed_items: Vec<ClosedRecord>,
     /// Whether the "About PaneFlow" dialog is visible.
     show_about_dialog: bool,

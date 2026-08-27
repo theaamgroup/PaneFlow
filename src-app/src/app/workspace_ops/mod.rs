@@ -28,12 +28,12 @@ use crate::terminal::TerminalView;
 use crate::workspace::{MAX_WORKSPACES, Workspace, next_workspace_id};
 use crate::{
     ClosePane, CloseWorkspace, ClosedPaneRecord, ClosedRecord, ClosedSurfaceRecord,
-    CopyWorkspacePath, MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, NewWorkspace,
-    NextWorkspace, OpenWorkspaceInCursor, OpenWorkspaceInVsCode, OpenWorkspaceInWindsurf,
-    OpenWorkspaceInZed, PaneFlowApp, RevealWorkspaceInFileManager, SelectWorkspace1,
-    SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6,
-    SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitHorizontally, SplitVertically,
-    UndoClosePane,
+    ClosedWorkspaceRecord, ClosedWorkspaceTabRecord, CopyWorkspacePath,
+    MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, NewWorkspace, NextWorkspace,
+    OpenWorkspaceInCursor, OpenWorkspaceInVsCode, OpenWorkspaceInWindsurf, OpenWorkspaceInZed,
+    PaneFlowApp, RevealWorkspaceInFileManager, SelectWorkspace1, SelectWorkspace2,
+    SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6, SelectWorkspace7,
+    SelectWorkspace8, SelectWorkspace9, SplitHorizontally, SplitVertically, UndoClosePane,
 };
 
 #[derive(Clone)]
@@ -114,6 +114,13 @@ pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: Cl
         // can hold up to [`crate::layout::MAX_PANES`] leaves, each with its own
         // extract - and it was the half that never shrank.
         ClosedRecord::Tab(tab) => shrink_layout_scrollback(&mut tab.layout),
+        ClosedRecord::Workspace(workspace) => {
+            for tab in &mut workspace.tabs {
+                if let Some(layout) = tab.layout.as_mut() {
+                    shrink_layout_scrollback(layout);
+                }
+            }
+        }
         ClosedRecord::Pane(_) => {}
     }
     if records.len() >= MAX_CLOSED_PANES {
@@ -198,6 +205,16 @@ fn release_record_scrollback(record: &mut ClosedRecord, total: &mut usize, budge
             }
         }
         ClosedRecord::Tab(tab) => release_layout_scrollback(&mut tab.layout, total, budget),
+        ClosedRecord::Workspace(workspace) => {
+            for tab in &mut workspace.tabs {
+                if *total <= budget {
+                    return;
+                }
+                if let Some(layout) = tab.layout.as_mut() {
+                    release_layout_scrollback(layout, total, budget);
+                }
+            }
+        }
     }
 }
 
@@ -358,6 +375,12 @@ fn closed_pane_scrollback_bytes(records: &[ClosedRecord]) -> usize {
                 ClosedSurfaceRecord::Markdown { .. } => 0,
             },
             ClosedRecord::Tab(tab) => layout_node_scrollback_bytes(&tab.layout),
+            ClosedRecord::Workspace(workspace) => workspace
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.layout.as_ref())
+                .map(layout_node_scrollback_bytes)
+                .sum(),
         })
         .sum()
 }
@@ -417,21 +440,58 @@ pub(crate) fn capture_closed_pane_record(
 /// A leaf holding a Diff surface serializes with an empty surface list and is
 /// pruned out here, matching `capture_closed_pane_record`'s refusal to record
 /// a diff pane at all. Nothing in this record round-trips a Diff view.
+fn capture_closed_tab_layout(
+    tab: &crate::workspace::Tab,
+    cx: &App,
+) -> Option<paneflow_config::schema::LayoutNode> {
+    let tree = tab.saved_layout.as_ref().or(tab.root.as_ref())?;
+    prune_unrestorable(tree.serialize_with_scrollback_limit(cx, UNDO_SCROLLBACK_LINES))
+}
+
 fn capture_closed_tab_record(
     tab: &crate::workspace::Tab,
     index: usize,
     workspace_id: u64,
     cx: &App,
 ) -> Option<crate::ClosedTabRecord> {
-    let tree = tab.saved_layout.as_ref().or(tab.root.as_ref())?;
-    let layout =
-        prune_unrestorable(tree.serialize_with_scrollback_limit(cx, UNDO_SCROLLBACK_LINES))?;
+    let layout = capture_closed_tab_layout(tab, cx)?;
     Some(crate::ClosedTabRecord {
         workspace_id,
         title: tab.title.clone(),
         index,
         layout,
     })
+}
+
+/// Snapshot a workspace before its tabs and PTYs are dropped. Empty tabs and
+/// tabs containing only derived Diff panes are retained with `layout: None`;
+/// undo restores those as empty tabs instead of silently changing the tab
+/// count. Live process state is deliberately absent: undo spawns new PTYs and
+/// replays bounded scrollback, exactly like tab undo.
+fn capture_closed_workspace_record(
+    workspace: &Workspace,
+    index: usize,
+    cx: &App,
+) -> ClosedWorkspaceRecord {
+    ClosedWorkspaceRecord {
+        workspace_id: workspace.id,
+        title: workspace.title.clone(),
+        cwd: workspace.cwd.clone(),
+        index,
+        active_tab: workspace.active_tab_idx(),
+        tabs: workspace
+            .tabs()
+            .iter()
+            .map(|tab| ClosedWorkspaceTabRecord {
+                title: tab.title.clone(),
+                layout: capture_closed_tab_layout(tab, cx),
+            })
+            .collect(),
+        custom_buttons: workspace.custom_buttons.clone(),
+        files_expanded: workspace.files_expanded.clone(),
+        sidebar_expanded: workspace.sidebar_expanded,
+        pinned: workspace.pinned,
+    }
 }
 
 /// Locate the workspace a closed-pane record should restore into.
@@ -1138,6 +1198,9 @@ impl PaneFlowApp {
         match record {
             ClosedRecord::Pane(record) => self.restore_closed_pane(record, window, cx),
             ClosedRecord::Tab(record) => self.restore_closed_tab_record(record, window, cx),
+            ClosedRecord::Workspace(record) => {
+                self.restore_closed_workspace_record(record, window, cx)
+            }
         }
     }
 
@@ -1330,6 +1393,77 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// Rebuild a closed workspace at its former position. Every terminal is a
+    /// new PTY; captured scrollback is replayed as inert text and no process
+    /// is resumed. A full workspace list is a transient refusal, so the record
+    /// is put back on the stack rather than consumed.
+    fn restore_closed_workspace_record(
+        &mut self,
+        record: ClosedWorkspaceRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspaces.len() >= MAX_WORKSPACES {
+            push_closed_record(&mut self.closed_items, ClosedRecord::Workspace(record));
+            self.show_toast("Workspace limit reached", cx);
+            return;
+        }
+
+        let ClosedWorkspaceRecord {
+            workspace_id: _,
+            title,
+            cwd,
+            index,
+            active_tab,
+            tabs,
+            custom_buttons,
+            files_expanded,
+            sidebar_expanded,
+            pinned,
+        } = record;
+        // A restored workspace is a new runtime object. Reusing the dead id
+        // would let a late lifecycle event from an agent killed by the close
+        // attach itself to the fresh workspace, and would violate the
+        // monotonic-id invariant every other workspace constructor keeps.
+        let workspace_id = next_workspace_id();
+        let fallback_cwd = std::path::PathBuf::from(&cwd);
+        let tabs = tabs
+            .into_iter()
+            .map(|tab| {
+                let root = tab.layout.map(|layout| {
+                    LayoutTree::from_layout_node(
+                        &layout,
+                        &mut std::collections::VecDeque::new(),
+                        &mut |node| {
+                            let surfaces = match node {
+                                LayoutNode::Pane { surfaces } => surfaces.as_slice(),
+                                _ => &[],
+                            };
+                            Self::spawn_pane_from_surfaces(
+                                workspace_id,
+                                surfaces,
+                                &fallback_cwd,
+                                cx,
+                            )
+                        },
+                    )
+                });
+                crate::workspace::Tab::new(tab.title, root)
+            })
+            .collect();
+        let mut workspace =
+            Workspace::restored_with_id(workspace_id, title, fallback_cwd, tabs, active_tab);
+        workspace.custom_buttons = custom_buttons;
+        workspace.files_expanded = files_expanded;
+        workspace.sidebar_expanded = sidebar_expanded;
+        workspace.pinned = pinned;
+        self.watch_git_dir(&workspace);
+        Self::spawn_initial_git_stats(workspace_id, workspace.cwd.clone(), cx);
+        let insert_at = index.min(self.workspaces.len());
+        self.workspaces.insert(insert_at, workspace);
+        let _ = self.activate_workspace_at(insert_at, WorkspaceFocusTarget::FirstPane, window, cx);
+    }
+
     pub(crate) fn handle_new_workspace(
         &mut self,
         _: &NewWorkspace,
@@ -1345,7 +1479,12 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_workspace_at(self.active_idx, window, cx);
+        self.request_close_workspace(
+            self.active_idx,
+            crate::app::close_guard::ConfirmStyle::Modal,
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn handle_copy_workspace_path(
@@ -1402,28 +1541,7 @@ impl PaneFlowApp {
         self.open_workspace_in_editor(self.active_idx, "windsurf", "Windsurf", cx);
     }
 
-    pub(crate) fn close_workspace_at(
-        &mut self,
-        idx: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_workspace_at_inner(idx, Some(window), cx);
-    }
-
-    /// Close workspace `idx` with the same index math and composer/diff
-    /// teardown as the UI closer, but skip Window-only pane focus. IPC uses
-    /// this so it cannot drift from the UI path. Does not refuse the last
-    /// workspace; `workspace.close` checks that itself.
-    pub(crate) fn close_workspace_at_without_window(
-        &mut self,
-        idx: usize,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.close_workspace_at_inner(idx, None, cx)
-    }
-
-    fn close_workspace_at_inner(
+    pub(crate) fn close_workspace_at_inner(
         &mut self,
         idx: usize,
         window: Option<&mut Window>,
@@ -1433,20 +1551,18 @@ impl PaneFlowApp {
             return false;
         }
         self.workspace_menu_open = None;
-        // Issue #83: this close is deliberately NOT guarded - it drops every
-        // tab, pane and terminal in the workspace with no confirmation and no
-        // undo, reached from `Cmd+Shift+Q`, the sidebar folder x, the
-        // workspace context menu and IPC `workspace.close`. Guarding it needs
-        // a whole-workspace undo record, which is a separate feature; the
-        // scope call was to leave it out of #83 rather than to overlook it.
-        //
-        // What it MUST do is take the state that dies with the workspace with
-        // it. Undo records for this id can never resolve again
-        // (`NEXT_WORKSPACE_ID` never reissues one), and a pending
-        // confirmation whose target lives here is asking about something that
-        // is about to stop existing.
+        // Issue #111: capture the entire workspace before dropping any pane
+        // entity. Older pane/tab records for this id become redundant once the
+        // whole workspace is represented by one newer record, and leaving
+        // them underneath would recreate stale intermediate state after the
+        // workspace itself had been restored.
+        let closed_record = capture_closed_workspace_record(&self.workspaces[idx], idx, cx);
         let closed_id = self.workspaces[idx].id;
         drop_closed_records_for_workspace(&mut self.closed_items, closed_id);
+        push_closed_record(
+            &mut self.closed_items,
+            ClosedRecord::Workspace(closed_record),
+        );
         // The MODAL half is left to the render stand-down when there is no
         // `Window`: `cancel_pending_close` is what hands focus back, and
         // dropping a focused modal without one strands the window (issue
@@ -2164,6 +2280,7 @@ mod tests {
             .map(|record| match record {
                 ClosedRecord::Pane(pane) => pane.workspace_id,
                 ClosedRecord::Tab(tab) => tab.workspace_id,
+                ClosedRecord::Workspace(workspace) => workspace.workspace_id,
             })
             .collect()
     }
@@ -2345,6 +2462,50 @@ mod tests {
         assert_eq!(surfaces[1].cwd.as_deref(), Some("/tmp/logs"));
     }
 
+    /// Workspace capture keeps the whole tab list, including a named empty
+    /// tab that a tab-only record intentionally declines. Losing that entry
+    /// would make undo return a different workspace shape from the one closed.
+    #[gpui::test]
+    fn capture_closed_workspace_record_keeps_every_tab_and_workspace_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let pane = named_test_pane(cx, "agent", "/tmp/project");
+        let mut workspace = Workspace::with_layout_and_id(
+            42,
+            "Project",
+            std::path::PathBuf::from("/tmp/project"),
+            LayoutTree::Leaf(pane),
+        );
+        workspace.active_tab_mut().title = "Agents".to_string();
+        assert!(workspace.open_tab(crate::workspace::Tab::new("Notes", None)));
+        workspace.files_expanded = vec![std::path::PathBuf::from("/tmp/project/src")];
+        workspace.sidebar_expanded = false;
+        workspace.pinned = true;
+
+        let record = cx.update(|_, cx| capture_closed_workspace_record(&workspace, 3, cx));
+
+        assert_eq!(record.workspace_id, 42);
+        assert_eq!(record.title, "Project");
+        assert_eq!(record.cwd, "/tmp/project");
+        assert_eq!(record.index, 3);
+        assert_eq!(record.active_tab, 1);
+        assert_eq!(record.tabs.len(), 2);
+        assert_eq!(record.tabs[0].title, "Agents");
+        assert!(record.tabs[0].layout.is_some());
+        assert_eq!(record.tabs[1].title, "Notes");
+        assert!(
+            record.tabs[1].layout.is_none(),
+            "an empty tab stays present as an empty tab"
+        );
+        assert_eq!(
+            record.files_expanded,
+            vec![std::path::PathBuf::from("/tmp/project/src")]
+        );
+        assert!(!record.sidebar_expanded);
+        assert!(record.pinned);
+    }
+
     /// While a tab is zoomed, `root` holds ONLY the zoomed leaf and
     /// `saved_layout` holds the full tree. Capturing `root` there would throw
     /// away every other pane, so capture has to prefer `saved_layout`.
@@ -2400,14 +2561,23 @@ mod tests {
         );
 
         let src = include_str!("mod.rs");
-        let body = src
+        let layout_capture = src
+            .split("fn capture_closed_tab_layout(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("capture_closed_tab_layout body");
+        assert!(
+            layout_capture.contains("prune_unrestorable(tree.serialize_with_scrollback_limit("),
+            "capture must prune the serialized tree before storing it"
+        );
+        let record_capture = src
             .split("fn capture_closed_tab_record(")
             .nth(1)
             .and_then(|rest| rest.split("\n}").next())
             .expect("capture_closed_tab_record body");
         assert!(
-            body.contains("prune_unrestorable(tree.serialize_with_scrollback_limit("),
-            "capture must prune the serialized tree before storing it"
+            record_capture.contains("capture_closed_tab_layout(tab, cx)?"),
+            "tab capture must keep routing through the pruning helper"
         );
     }
 

@@ -1033,7 +1033,12 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     });
     cx.on_action(|_: &CloseWorkspace, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
-            app.close_workspace_at(app.active_idx, window, cx);
+            app.request_close_workspace(
+                app.active_idx,
+                crate::app::close_guard::ConfirmStyle::Modal,
+                window,
+                cx,
+            );
         });
     });
     cx.on_action(|_: &NextWorkspace, cx| {

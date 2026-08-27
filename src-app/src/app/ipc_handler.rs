@@ -2618,10 +2618,20 @@ impl PaneFlowApp {
                         .and_then(|i| i.as_u64())
                         .map(|i| i as usize)
                         .unwrap_or(self.active_idx);
-                    if self.close_workspace_at_without_window(idx, cx) {
-                        serde_json::json!({"closed": idx})
-                    } else {
-                        serde_json::json!({"error": "Index out of bounds"})
+                    match self.request_close_workspace_without_window(
+                        idx,
+                        crate::app::close_guard::ConfirmStyle::Modal,
+                        cx,
+                    ) {
+                        crate::app::close_confirm::WorkspaceCloseOutcome::Closed => {
+                            serde_json::json!({"closed": idx})
+                        }
+                        crate::app::close_confirm::WorkspaceCloseOutcome::ConfirmationRequired => {
+                            serde_json::json!({"confirmation_required": true, "workspace": idx})
+                        }
+                        crate::app::close_confirm::WorkspaceCloseOutcome::NotFound => {
+                            serde_json::json!({"error": "Index out of bounds"})
+                        }
                     }
                 }
             }
@@ -4123,7 +4133,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_close_ipc_uses_shared_ui_closer() {
+    fn workspace_close_ipc_uses_shared_guarded_closer() {
         let src = include_str!("ipc_handler.rs");
         let close_arm = src
             .split("\"workspace.close\"")
@@ -4131,8 +4141,9 @@ mod tests {
             .and_then(|rest| rest.split("\"surface.list\"").next())
             .expect("workspace.close arm");
         assert!(
-            close_arm.contains("close_workspace_at_without_window"),
-            "workspace.close must reuse the UI closer so index math and composer/diff teardown cannot drift"
+            close_arm.contains("request_close_workspace_without_window")
+                && close_arm.contains("ConfirmStyle::Modal"),
+            "workspace.close must reuse the UI guard before the shared closer"
         );
         assert!(
             close_arm.contains("Cannot close last workspace"),
@@ -4141,6 +4152,10 @@ mod tests {
         assert!(
             !close_arm.contains("workspaces.remove"),
             "workspace.close must not re-inline a clamp-only remove"
+        );
+        assert!(
+            close_arm.contains("confirmation_required"),
+            "a live-agent workspace must report that the in-app modal now owns the decision"
         );
     }
 

@@ -24,6 +24,15 @@ use crate::pane::Pane;
 use crate::ui_primitives::AnimatedHoverExt;
 use crate::{ClosedRecord, PaneFlowApp};
 
+/// Result returned to the window-less IPC path. A guarded request is not a
+/// close: it arms the same in-app modal the UI uses and reports that fact to
+/// the caller instead of pretending the workspace is already gone.
+pub(crate) enum WorkspaceCloseOutcome {
+    Closed,
+    ConfirmationRequired,
+    NotFound,
+}
+
 /// Scrub and clamp a label before it lands in the modal copy.
 ///
 /// The pane label can be an OSC title: a bidi override there could visually
@@ -49,8 +58,7 @@ fn confirm_label(raw: &str) -> String {
 }
 
 /// Title line for the close confirmation.
-pub(crate) fn close_confirm_title(target_is_tab: bool, label: &str) -> String {
-    let noun = if target_is_tab { "tab" } else { "pane" };
+pub(crate) fn close_confirm_title(noun: &str, label: &str) -> String {
     let label = label.trim();
     if label.is_empty() {
         format!("Close this {noun}?")
@@ -215,6 +223,13 @@ impl PaneFlowApp {
         Self::surface_close_states(&tab.collect_panes(), cx)
     }
 
+    fn workspace_close_states(&self, ws_idx: usize, cx: &App) -> Vec<SurfaceCloseState> {
+        self.workspaces
+            .get(ws_idx)
+            .map(|ws| Self::surface_close_states(&ws.collect_panes(), cx))
+            .unwrap_or_default()
+    }
+
     /// `(workspace id, that workspace's tab ids in order)`, the input
     /// [`pending_close_tab_indices`] resolves against.
     fn workspace_tab_ids(&self) -> Vec<(u64, Vec<u64>)> {
@@ -222,6 +237,74 @@ impl PaneFlowApp {
             .iter()
             .map(|ws| (ws.id, ws.tabs().iter().map(|tab| tab.id).collect()))
             .collect()
+    }
+
+    /// Arm a workspace close when any terminal in any tab holds a live agent.
+    /// `None` means the index was stale; `Some(false)` means no confirmation
+    /// was needed; `Some(true)` means the modal is now pending.
+    fn arm_pending_close_workspace(
+        &mut self,
+        ws_idx: usize,
+        style: ConfirmStyle,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let workspace = self.workspaces.get(ws_idx)?;
+        let workspace_id = workspace.id;
+        let label = confirm_label(&workspace.title);
+        let states = self.workspace_close_states(ws_idx, cx);
+        let now = std::time::Instant::now();
+        let Some(agent) = agent_needing_confirmation(&states, now) else {
+            return Some(false);
+        };
+        self.set_pending_close(
+            Some(PendingClose {
+                target: CloseTarget::Workspace { workspace_id },
+                style,
+                agent,
+                extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                label,
+                armed_at: now,
+            }),
+            cx,
+        );
+        Some(true)
+    }
+
+    /// The single entry point for UI workspace-close gestures.
+    pub(crate) fn request_close_workspace(
+        &mut self,
+        ws_idx: usize,
+        style: ConfirmStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.arm_pending_close_workspace(ws_idx, style, cx) {
+            Some(true) | None => {}
+            Some(false) => {
+                self.close_workspace_at_inner(ws_idx, Some(window), cx);
+            }
+        }
+    }
+
+    /// Window-less sibling for `workspace.close`. It may arm the modal, but
+    /// only the app's visible confirmation can complete a guarded close.
+    pub(crate) fn request_close_workspace_without_window(
+        &mut self,
+        ws_idx: usize,
+        style: ConfirmStyle,
+        cx: &mut Context<Self>,
+    ) -> WorkspaceCloseOutcome {
+        match self.arm_pending_close_workspace(ws_idx, style, cx) {
+            None => WorkspaceCloseOutcome::NotFound,
+            Some(true) => WorkspaceCloseOutcome::ConfirmationRequired,
+            Some(false) => {
+                if self.close_workspace_at_inner(ws_idx, None, cx) {
+                    WorkspaceCloseOutcome::Closed
+                } else {
+                    WorkspaceCloseOutcome::NotFound
+                }
+            }
+        }
     }
 
     /// The one entry point every user-initiated tab close GESTURE goes
@@ -394,6 +477,33 @@ impl PaneFlowApp {
         }
     }
 
+    /// Confirm a pending workspace close after re-resolving its stable id.
+    pub(crate) fn confirm_pending_close_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(PendingClose {
+            target: CloseTarget::Workspace { workspace_id },
+            ..
+        }) = self.pending_close.clone()
+        else {
+            return;
+        };
+        self.set_pending_close(None, cx);
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            self.restore_focus_after_close_confirm(window, cx);
+            return;
+        };
+        if !self.close_workspace_at_inner(ws_idx, Some(window), cx) {
+            self.restore_focus_after_close_confirm(window, cx);
+        }
+    }
+
     /// Confirm a pending PANE close. `Window`-free by design - see
     /// [`Self::arm_pending_close_pane`]; tree removal needs no `Window`, and
     /// the caller that HAS one restores focus afterwards.
@@ -417,6 +527,7 @@ impl PaneFlowApp {
     /// Modal Confirm button / Enter: route to whichever half the target needs.
     pub(crate) fn confirm_pending_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.pending_close.as_ref().map(|p| p.target.clone()) {
+            Some(CloseTarget::Workspace { .. }) => self.confirm_pending_close_workspace(window, cx),
             Some(CloseTarget::Tab { .. }) => self.confirm_pending_close_tab(window, cx),
             Some(CloseTarget::Pane { pane }) => {
                 match pane.upgrade() {
@@ -503,6 +614,7 @@ impl PaneFlowApp {
             return false;
         };
         match &pending.target {
+            CloseTarget::Workspace { workspace_id } => ws.id == *workspace_id,
             CloseTarget::Tab { workspace_id, .. } => ws.id == *workspace_id,
             CloseTarget::Pane { pane } => pane
                 .upgrade()
@@ -520,6 +632,10 @@ impl PaneFlowApp {
     /// `Vec<(u64, Vec<u64>)>` to produce.
     pub(crate) fn pending_close_target_is_live(&self, pending: &PendingClose) -> bool {
         match &pending.target {
+            CloseTarget::Workspace { workspace_id } => self
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == *workspace_id),
             CloseTarget::Tab {
                 workspace_id,
                 tab_id,
@@ -559,10 +675,12 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ui = crate::theme::ui_colors();
-        let title = close_confirm_title(
-            matches!(pending.target, CloseTarget::Tab { .. }),
-            &pending.label,
-        );
+        let noun = match pending.target {
+            CloseTarget::Workspace { .. } => "workspace",
+            CloseTarget::Tab { .. } => "tab",
+            CloseTarget::Pane { .. } => "pane",
+        };
+        let title = close_confirm_title(noun, &pending.label);
         let body = close_confirm_body(
             pending.agent,
             pending.extra_agents,
@@ -779,19 +897,23 @@ mod tests {
     #[test]
     fn close_confirm_title_quotes_the_label_and_names_the_target() {
         assert_eq!(
-            close_confirm_title(true, "Fix the bug"),
+            close_confirm_title("tab", "Fix the bug"),
             "Close tab \u{201c}Fix the bug\u{201d}?"
         );
         assert_eq!(
-            close_confirm_title(false, "claude"),
+            close_confirm_title("pane", "claude"),
             "Close pane \u{201c}claude\u{201d}?"
+        );
+        assert_eq!(
+            close_confirm_title("workspace", "Paneflow"),
+            "Close workspace \u{201c}Paneflow\u{201d}?"
         );
     }
 
     #[test]
     fn close_confirm_title_falls_back_when_the_label_is_blank() {
-        assert_eq!(close_confirm_title(true, ""), "Close this tab?");
-        assert_eq!(close_confirm_title(false, "   "), "Close this pane?");
+        assert_eq!(close_confirm_title("tab", ""), "Close this tab?");
+        assert_eq!(close_confirm_title("pane", "   "), "Close this pane?");
     }
 
     #[test]
@@ -826,7 +948,7 @@ mod tests {
                 "a curly quote in the label re-opens the title's own quoting: {cleaned}"
             );
         }
-        let title = close_confirm_title(false, &cleaned);
+        let title = close_confirm_title("pane", &cleaned);
         assert_eq!(
             title.matches('\u{201c}').count(),
             1,
@@ -914,6 +1036,96 @@ mod tests {
                 && close_pane.contains("ConfirmStyle::Modal"),
             "Cmd+Shift+W must ask too: two adjacent close gestures with opposite safety \
              behaviour is worse than either alone: {close_pane}"
+        );
+    }
+
+    /// Issue #111: a workspace close has the largest blast radius of any
+    /// close gesture, so all four entry points must share the same guard and
+    /// the destructive closer must capture one undo record before removal.
+    #[test]
+    fn every_workspace_close_path_requires_confirmation_and_captures_undo() {
+        let ops = include_str!("workspace_ops/mod.rs");
+        let shortcut = ops
+            .split("pub(crate) fn handle_close_workspace(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn handle_copy_workspace_path(")
+                    .next()
+            })
+            .expect("CloseWorkspace action handler");
+        assert!(
+            shortcut.contains("request_close_workspace")
+                && shortcut.contains("ConfirmStyle::Modal"),
+            "Cmd+Shift+Q must ask before closing a workspace: {shortcut}"
+        );
+        assert!(
+            !shortcut.contains("close_workspace_at("),
+            "the shortcut must not retain an unguarded route: {shortcut}"
+        );
+        let bootstrap = include_str!("bootstrap.rs");
+        let menu_fallback = bootstrap
+            .split("cx.on_action(|_: &CloseWorkspace")
+            .nth(1)
+            .and_then(|rest| rest.split("cx.on_action(|_: &NextWorkspace").next())
+            .expect("macOS CloseWorkspace action fallback");
+        assert!(
+            menu_fallback.contains("request_close_workspace")
+                && menu_fallback.contains("ConfirmStyle::Modal"),
+            "the macOS menu fallback for the same action must ask too: {menu_fallback}"
+        );
+        assert!(!menu_fallback.contains("close_workspace_at("));
+
+        let sidebar = include_str!("sidebar/mod.rs");
+        let row_x = sidebar
+            .split("ws-close-{ws_id}")
+            .nth(1)
+            .and_then(|rest| rest.split("let row =").next())
+            .expect("workspace row close button");
+        assert!(
+            row_x.contains("request_close_workspace") && row_x.contains("ConfirmStyle::Modal"),
+            "the workspace row x must ask before closing: {row_x}"
+        );
+        assert!(!row_x.contains("close_workspace_at("));
+
+        let menu = include_str!("sidebar/context_menu.rs");
+        let menu_close = menu
+            .split("workspace-context-close")
+            .nth(1)
+            .and_then(|rest| rest.split("into_any_element()").next())
+            .expect("workspace context menu close item");
+        assert!(
+            menu_close.contains("request_close_workspace")
+                && menu_close.contains("ConfirmStyle::Modal"),
+            "the workspace context menu must ask before closing: {menu_close}"
+        );
+        assert!(!menu_close.contains("close_workspace_at("));
+
+        let ipc = include_str!("ipc_handler.rs");
+        let ipc_close = ipc
+            .split("\"workspace.close\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"surface.list\"").next())
+            .expect("workspace.close IPC arm");
+        assert!(
+            ipc_close.contains("request_close_workspace_without_window"),
+            "IPC must ask in-app rather than closing agents remotely: {ipc_close}"
+        );
+        assert!(!ipc_close.contains("close_workspace_at_without_window"));
+
+        let closer = ops
+            .split("fn close_workspace_at_inner(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// Move a workspace").next())
+            .expect("workspace closer");
+        let capture_at = closer
+            .find("capture_closed_workspace_record(")
+            .expect("workspace close must capture an undo record");
+        let remove_at = closer
+            .find("self.workspaces.remove(idx)")
+            .expect("workspace close removes the workspace");
+        assert!(
+            capture_at < remove_at && closer.contains("ClosedRecord::Workspace"),
+            "the workspace undo record must be pushed before its panes are dropped: {closer}"
         );
     }
 

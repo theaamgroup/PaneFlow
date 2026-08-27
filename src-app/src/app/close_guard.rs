@@ -96,6 +96,8 @@ pub(crate) fn agents_needing_confirmation_count(
 /// What a pending close confirmation is about to close.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CloseTarget {
+    /// Resolved by the stable workspace id, never by sidebar position.
+    Workspace { workspace_id: u64 },
     /// Resolved by stable ids, never by index - rows reorder under a drag.
     Tab { workspace_id: u64, tab_id: u64 },
     Pane {
@@ -139,6 +141,13 @@ pub(crate) struct PendingClose {
 }
 
 impl PendingClose {
+    pub(crate) fn targets_workspace(&self, workspace_id: u64) -> bool {
+        matches!(
+            &self.target,
+            CloseTarget::Workspace { workspace_id: w } if *w == workspace_id
+        )
+    }
+
     /// True when `self` is the pending close for this exact tab, so a
     /// button can render its armed state.
     pub(crate) fn targets_tab(&self, workspace_id: u64, tab_id: u64) -> bool {
@@ -228,6 +237,7 @@ pub(crate) fn click_outcome(
         return ClickOutcome::Arm;
     }
     let same_target = match this_target {
+        CloseTarget::Workspace { workspace_id } => pending.targets_workspace(*workspace_id),
         CloseTarget::Tab {
             workspace_id,
             tab_id,
