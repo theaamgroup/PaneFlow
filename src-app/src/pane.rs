@@ -1436,9 +1436,7 @@ impl Pane {
     /// a custom name.
     fn render_surface_title(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let full_title = Self::surface_full_title(&self.surface, cx);
-        let display_title = Self::surface_title(&self.surface, cx);
-        let show_tooltip = full_title != display_title
-            || full_title.chars().count() > SURFACE_TITLE_TOOLTIP_THRESHOLD;
+        let show_tooltip = full_title.chars().count() > SURFACE_TITLE_TOOLTIP_THRESHOLD;
         let mut title = div()
             .id("pane-header-title")
             .min_w_0()
@@ -1448,7 +1446,7 @@ impl Pane {
             .text_size(px(HEADER_TEXT_SIZE))
             .line_height(px(HEADER_TEXT_LINE_HEIGHT))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .child(display_title);
+            .child(full_title.clone());
         if show_tooltip {
             title = title.delayed_tooltip(crate::ui_primitives::text_tooltip(full_title));
         }
@@ -2263,6 +2261,25 @@ mod tests {
         let cjk = "プロジェクト・パネフロー・テスト・ドキュメント.md";
         let out = truncate_surface_title(cjk);
         assert_eq!(out.chars().count(), MAX_SURFACE_TITLE_LEN);
+    }
+
+    #[test]
+    fn pane_header_uses_full_title_to_fill_available_width() {
+        let src = include_str!("pane.rs");
+        let render_title = src
+            .split("fn render_surface_title(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("render_surface_title body");
+
+        assert!(
+            !render_title.contains("Self::surface_title"),
+            "the pane header must let CSS ellipsis use its actual width: {render_title}"
+        );
+        assert!(
+            render_title.contains(".child(full_title.clone())"),
+            "the pane header must render the uncapped title: {render_title}"
+        );
     }
 
     #[test]
