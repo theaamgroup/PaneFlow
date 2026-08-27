@@ -1533,8 +1533,12 @@ impl PaneFlowApp {
     /// The single entry point for both routes to the rail - the title-bar
     /// button (`TitleBarEvent::ToggleSidebar`) and the `TogglePrimarySidebar`
     /// chord (issue #106) - so the two cannot drift into different dismissal
-    /// behaviour.
+    /// behaviour. Settings is dismissed first so changing the persisted rail
+    /// intent always has an immediate, visible effect (issue #112).
     pub(crate) fn toggle_primary_sidebar_with_chrome(&mut self, cx: &mut Context<Self>) {
+        if self.settings_section.is_some() {
+            self.close_settings(cx);
+        }
         self.toggle_primary_sidebar(cx);
         if !self.primary_sidebar_visible {
             self.dismiss_transient_surfaces();

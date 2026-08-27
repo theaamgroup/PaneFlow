@@ -1903,4 +1903,32 @@ mod tests {
              Settings guarantee above protects a value nothing saves"
         );
     }
+
+    /// Issue #112: the Settings rail is force-shown, so toggling the persisted
+    /// sidebar intent behind it gives no rail-level feedback. The shared entry
+    /// point for both the shortcut and title-bar button must dismiss Settings
+    /// before it changes that intent, making the requested transition visible.
+    #[test]
+    fn toggling_sidebar_from_settings_closes_settings_before_changing_intent() {
+        let body = include_str!("../main.rs")
+            .split("pub(crate) fn toggle_primary_sidebar_with_chrome(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// Issue #106:").next())
+            .expect("toggle_primary_sidebar_with_chrome body");
+        let close_settings = body
+            .find("self.close_settings(cx);")
+            .expect("sidebar toggle must close Settings when it is open");
+        let toggle_sidebar = body
+            .find("self.toggle_primary_sidebar(cx);")
+            .expect("shared entry point must still toggle the sidebar");
+
+        assert!(
+            body[..close_settings].contains("self.settings_section.is_some()"),
+            "Settings must only be closed when it is open"
+        );
+        assert!(
+            close_settings < toggle_sidebar,
+            "Settings must close before the persisted sidebar intent changes"
+        );
+    }
 }
