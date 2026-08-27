@@ -850,6 +850,7 @@ impl Pane {
                 | TerminalEvent::OpenCodePath { .. }
                 | TerminalEvent::FontZoomChanged
                 | TerminalEvent::FleetSearchRequested { .. }
+                | TerminalEvent::FocusGained
                 | TerminalEvent::ShellPromptReady => {}
             }
         })

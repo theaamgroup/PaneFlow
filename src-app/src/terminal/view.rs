@@ -996,6 +996,9 @@ pub enum TerminalEvent {
     /// PID sweep. Covers agents whose hooks never reported an exit, and agents
     /// launched with no hook integration at all.
     ShellPromptReady,
+    /// The user focused this terminal surface. `PaneFlowApp` treats that as
+    /// acknowledgement of a stalled agent badge on this pane.
+    FocusGained,
     /// Terminal output activity detected - triggers an OS port scan
     /// (`workspace::ports`; Linux `/proc/net/tcp`, macOS libproc, Windows IP Helper).
     /// Emitted alongside `ServiceDetected` during output scan ticks.
@@ -1323,6 +1326,7 @@ impl Render for TerminalView {
             let focus_handle = self.focus_handle.clone();
             let focus_in = cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
                 view.apply_terminal_focus(true);
+                cx.emit(TerminalEvent::FocusGained);
                 cx.notify();
             });
             let focus_out = cx.on_focus_out(&focus_handle, window, |view, _event, _window, cx| {
