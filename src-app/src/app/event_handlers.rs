@@ -107,6 +107,33 @@ pub(crate) fn child_identity_is_live(
     pid > 0 && exited.is_none() && same_process(pinned_start, current_start)
 }
 
+/// The admission test `run_port_scan` applies when it collects roots (fork #28
+/// `a5234a0`) and `apply_pane_scan` re-applies at deposit time. Anything this
+/// rejects is never submitted, never deposited, and therefore never
+/// `agent_confirmed` - so `has_unscanned_surface` MUST apply it too, or the
+/// identity re-arm becomes a permanent ~8 s scan loop for that pane's life.
+fn terminal_identity_is_scannable(t: &crate::terminal::TerminalState) -> bool {
+    let current = (t.child_pid > 0 && t.exited.is_none())
+        .then(|| pid_start_time(t.child_pid))
+        .flatten();
+    child_identity_is_live(t.child_pid, t.exited, t.child_proc_start, current)
+}
+
+/// Pure form of the predicate above, so the termination property is testable
+/// without a GPUI workspace.
+#[cfg(test)]
+fn surface_awaits_scan(
+    child_pid: u32,
+    agent_confirmed: bool,
+    exited: Option<i32>,
+    pinned_start: Option<u64>,
+    current_start: Option<u64>,
+) -> bool {
+    child_pid > 0
+        && !agent_confirmed
+        && child_identity_is_live(child_pid, exited, pinned_start, current_start)
+}
+
 fn keep_session_after_surface_purge(
     dying_surface_id: u64,
     pid: u32,
@@ -116,6 +143,56 @@ fn keep_session_after_surface_purge(
         return false;
     }
     session.surface_id.is_some() || pid > i32::MAX as u32 || pid_matches(pid, session.proc_start)
+}
+
+/// Retention rule when a surface's shell comes back to its prompt.
+///
+/// The prompt proves nothing runs in that pane's foreground any more, so a
+/// session still bound to it is finished whether or not its hooks said so.
+/// Two exceptions keep the existing contracts intact:
+///
+/// - an `Errored` row stays sticky until its pane closes (same rule as
+///   [`stale_sweep_keeps_without_pid_probe`]) - the shell reaches its prompt
+///   the instant the agent crashes, and reaping here would wipe the crash
+///   signal before the user could see it;
+/// - a real PID that is still alive with its pinned start time keeps its row,
+///   which is the conservative answer for an agent that backgrounded itself.
+///
+/// Synthetic keys (legacy no-pid frames) cannot be probed, so the prompt is
+/// the only evidence available and they are reaped.
+///
+/// FORK CARVE-OUT (#28 vs 3d93a97). Our `same_process` is fail-CLOSED: a
+/// pinned session whose current start cannot be read is treated as dead. That
+/// is right for the 30 s sweep, where a wrong keep would let a recycled PID
+/// inherit a dead agent's identity and a wrong reap costs one tick. It is
+/// wrong here: this rule fires on EVERY prompt, so one denied `pidinfo`
+/// (EPERM under SIP, or a probe race) would delete a running agent's row
+/// instantly. An unreadable probe therefore keeps the row; the 30 s sweep
+/// stays the fail-closed authority.
+fn keep_session_at_shell_prompt(
+    prompt_surface_id: u64,
+    pid: u32,
+    session: &ai_types::AgentSession,
+    alive: bool,
+    current_start: Option<u64>,
+) -> bool {
+    if session.surface_id != Some(prompt_surface_id) {
+        return true;
+    }
+    if session.state == ai_types::AgentState::Errored {
+        return true;
+    }
+    if pid > i32::MAX as u32 {
+        // Synthetic key: unprobeable, so the prompt is the only evidence.
+        return false;
+    }
+    if !alive {
+        return false;
+    }
+    match (session.proc_start, current_start) {
+        (Some(_), None) => true,
+        (pinned, current) => same_process(pinned, current),
+    }
 }
 
 fn stale_sweep_keeps_without_pid_probe(
@@ -157,6 +234,26 @@ fn scan_workspace_ports(
     ports.sort_unstable();
     ports.dedup();
     ports
+}
+
+/// Whether a scan deposit must LEAVE a launch-declared identity alone.
+///
+/// A launch-declared agent ([`crate::terminal::TerminalView::declare_agent`])
+/// exists before its process does: the shell still has to start and `exec` the
+/// CLI, and the first scan lands inside that window with an empty subtree.
+/// Without this, the deposit would clear the logo the launch had just set and
+/// the next tick would put it back - a visible flicker.
+///
+/// Evidence always wins: a scan that SAW an agent resolves the surface
+/// immediately, whether it confirms the declaration or corrects it. Only the
+/// absence of evidence is deferred, and only until the declared deadline, so a
+/// declaration that never materializes is still cleared.
+fn declaration_survives_scan(
+    scanned: Option<crate::agent_launcher::TerminalAgent>,
+    declared_until: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    scanned.is_none() && declared_until.is_some_and(|until| now < until)
 }
 
 fn scan_detected_agents(
@@ -531,6 +628,7 @@ impl PaneFlowApp {
                     &self.cached_config,
                 ) {
                     term.read(cx).send_command(&resume);
+                    term.update(cx, |view, _cx| view.declare_agent(agent.terminal_agent()));
                 }
 
                 match edge {
@@ -854,6 +952,14 @@ impl PaneFlowApp {
                     })
                     .detach();
             }
+            terminal::TerminalEvent::ShellPromptReady => {
+                // The shell is back at its prompt: whatever agent this pane
+                // was running has released the foreground. Reap now instead
+                // of waiting <=30 s for the PID sweep, and cover the agents
+                // the hooks never report on (shim SIGKILLed, CLI launched
+                // without hook integration at all).
+                self.reap_sessions_at_shell_prompt(terminal.entity_id().as_u64(), cx);
+            }
             terminal::TerminalEvent::ChildExited => {
                 // The Pane's own subscription closes the tab; here we drop
                 // the dying surface's agent sessions NOW instead of waiting
@@ -915,6 +1021,37 @@ impl PaneFlowApp {
         self.workspaces
             .iter()
             .position(|ws| ws.any_pane(|pane| pane.read(cx).contains_terminal(terminal)))
+    }
+
+    /// Reap the agent sessions a surface still carries once its shell prints
+    /// a fresh prompt. Event-driven complement to [`Self::sweep_stale_pids`]:
+    /// same post-mutation trio, no timer, retention decided by the pure
+    /// [`keep_session_at_shell_prompt`].
+    pub(crate) fn reap_sessions_at_shell_prompt(
+        &mut self,
+        surface_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for ws in &mut self.workspaces {
+            if ws.agent_sessions.is_empty() {
+                continue;
+            }
+            let before = ws.agent_sessions.len();
+            ws.agent_sessions.retain(|&pid, session| {
+                let alive = pid <= i32::MAX as u32 && pid_is_alive(pid);
+                let current = alive.then(|| pid_start_time(pid)).flatten();
+                keep_session_at_shell_prompt(surface_id, pid, session, alive, current)
+            });
+            if ws.agent_sessions.len() < before {
+                changed = true;
+            }
+        }
+        if changed {
+            self.sync_attention(cx);
+            self.agent_sessions_changed(cx);
+            cx.notify();
+        }
     }
 
     /// Immediately drop agent sessions anchored to a dying surface (the
@@ -1056,6 +1193,26 @@ impl PaneFlowApp {
         }
     }
 
+    /// True when a live surface in this workspace has never been resolved by a
+    /// scan (`child_pid > 0` but still not `agent_confirmed`).
+    ///
+    /// This is the "identity not settled yet" predicate, and it is
+    /// self-extinguishing: every deposit confirms every root it was handed, so
+    /// it goes false after one complete pass and stays false for the rest of
+    /// the surface's life. Both the debounce skip and the ladder re-arm below
+    /// key off it, which is what keeps them from turning into a permanent
+    /// scan loop under sustained agent output.
+    fn has_unscanned_surface(&self, ws_idx: usize, cx: &Context<Self>) -> bool {
+        self.workspaces.get(ws_idx).is_some_and(|ws| {
+            ws.collect_panes().iter().any(|pane| {
+                pane.read(cx).terminals().any(|tv| {
+                    let t = &tv.read(cx).terminal;
+                    t.child_pid > 0 && !t.agent_confirmed && terminal_identity_is_scannable(t)
+                })
+            })
+        })
+    }
+
     /// Schedule a debounced port-scan ladder for the given workspace.
     ///
     /// `port_scan_pending` absorbs bursts while a ladder is in flight: the
@@ -1064,7 +1221,16 @@ impl PaneFlowApp {
     /// over and over and no scan ran until the terminal went quiet. The
     /// generation counter stays as the cancellation belt for workspace
     /// close/reuse.
+    ///
+    /// Two carve-outs exist for identity, which unlike ports must feel
+    /// instantaneous. A workspace holding a never-scanned surface skips the
+    /// debounce entirely, and a ladder that absorbed such a surface's burst
+    /// re-arms itself the moment it ends instead of leaving that pane
+    /// unidentified for a whole ladder (up to ~8.5s). Both are gated on
+    /// [`Self::has_unscanned_surface`], so they cannot outlive the first
+    /// successful deposit.
     fn schedule_port_scan(&mut self, ws_idx: usize, cx: &mut Context<Self>) {
+        let unscanned = self.has_unscanned_surface(ws_idx, cx);
         let ws = &mut self.workspaces[ws_idx];
         if ws.port_scan_pending {
             return;
@@ -1076,8 +1242,12 @@ impl PaneFlowApp {
 
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                // Debounce: wait 500ms for activity to settle
-                smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                // Debounce: wait 500ms for activity to settle - skipped while a
+                // surface still has no scanned identity, so a freshly launched
+                // pane resolves on this burst rather than half a second later.
+                if !unscanned {
+                    smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                }
 
                 // Burst scan at 0s, +2s, +6s after debounce
                 for delay_ms in [0u64, 2000, 6000] {
@@ -1096,11 +1266,18 @@ impl PaneFlowApp {
                 }
 
                 // Re-arm regardless of how the ladder ended - the next
-                // ActivityBurst starts a fresh one.
+                // ActivityBurst starts a fresh one. A pane launched *during*
+                // this ladder had its burst absorbed above, so relaunch
+                // immediately rather than make it wait for the next burst.
                 let _ = cx.update(|cx| {
-                    this.update(cx, |app: &mut Self, _cx| {
-                        if let Some(ws) = app.workspaces.iter_mut().find(|ws| ws.id == ws_id) {
-                            ws.port_scan_pending = false;
+                    this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                        let Some(ws_idx) = app.workspaces.iter().position(|ws| ws.id == ws_id)
+                        else {
+                            return;
+                        };
+                        app.workspaces[ws_idx].port_scan_pending = false;
+                        if app.has_unscanned_surface(ws_idx, cx) {
+                            app.schedule_port_scan(ws_idx, cx);
                         }
                     })
                 });
@@ -1144,14 +1321,8 @@ impl PaneFlowApp {
                     .terminals()
                     .filter_map(|tv| {
                         let t = tv.read(cx);
-                        let child_pid = t.terminal.child_pid;
-                        let exited = t.terminal.exited;
-                        let pin = t.terminal.child_proc_start;
-                        let current = (child_pid > 0 && exited.is_none())
-                            .then(|| pid_start_time(child_pid))
-                            .flatten();
-                        child_identity_is_live(child_pid, exited, pin, current)
-                            .then_some((tv.entity_id().as_u64(), child_pid))
+                        terminal_identity_is_scannable(&t.terminal)
+                            .then_some((tv.entity_id().as_u64(), t.terminal.child_pid))
                     })
                     .collect::<Vec<_>>()
             })
@@ -1161,13 +1332,15 @@ impl PaneFlowApp {
             return true;
         }
 
+        let submitted: Vec<u64> = roots.iter().map(|(key, _)| *key).collect();
+
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 // One unified subtree walk per tick feeds ports AND agent
                 // identity (the pre-refactor code walked the descendants
                 // once for each - this is the strictly-cheaper single pass,
                 // US-012 cost contract).
-                let scan = smol::unblock(move || {
+                let mut scan = smol::unblock(move || {
                     let agent_binaries: Vec<&'static str> =
                         crate::agent_launcher::TerminalAgent::ALL
                             .iter()
@@ -1176,6 +1349,15 @@ impl PaneFlowApp {
                     crate::workspace::scan_panes(&roots, &agent_binaries)
                 })
                 .await;
+                // A submitted root that produced no entry HAS been answered:
+                // the answer is "nothing". Materializing it keeps "no entry"
+                // meaning only "this surface was never submitted" (a pane born
+                // after root collection), which is what the deposit's skip and
+                // the ladder's identity re-arm both rely on to terminate - on
+                // the platforms whose scanner is a stub, every root lands here.
+                for key in submitted {
+                    scan.entry(key).or_default();
+                }
                 let _ = cx.update(|cx| {
                     this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
                         app.apply_pane_scan(ws_id, generation, scan, cx);
@@ -1292,10 +1474,7 @@ impl PaneFlowApp {
                     .and_then(|b| crate::agent_launcher::TerminalAgent::from_binary(b));
                 tv.update(cx, |view, _cx| {
                     let t = &mut view.terminal;
-                    let current = (t.child_pid > 0 && t.exited.is_none())
-                        .then(|| pid_start_time(t.child_pid))
-                        .flatten();
-                    if !child_identity_is_live(t.child_pid, t.exited, t.child_proc_start, current) {
+                    if !terminal_identity_is_scannable(t) {
                         return;
                     }
                     // A port that left LISTEN must become re-announceable -
@@ -1304,13 +1483,21 @@ impl PaneFlowApp {
                     // re-fire ServiceDetected (the dedup was previously
                     // cleared only on ChildExit).
                     t.retain_reported_ports(&live_ports);
-                    if t.detected_agent != agent || !t.agent_confirmed {
-                        // The live scan owns the value from here on - this
-                        // both confirms a restored "last known" pill and
-                        // clears a stale one (US-013).
-                        t.detected_agent = agent;
-                        t.agent_confirmed = true;
-                        pane_changed = true;
+                    let in_grace = declaration_survives_scan(
+                        agent,
+                        t.agent_declared_until,
+                        std::time::Instant::now(),
+                    );
+                    if !in_grace {
+                        t.agent_declared_until = None;
+                        if t.detected_agent != agent || !t.agent_confirmed {
+                            // The live scan owns the value from here on - this
+                            // both confirms a declared or restored "last known"
+                            // pill and clears a stale one (US-013).
+                            t.detected_agent = agent;
+                            t.agent_confirmed = true;
+                            pane_changed = true;
+                        }
                     }
                     let ports_with_links: Vec<(u16, Option<String>)> = s
                         .ports
@@ -1489,9 +1676,10 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        announced_port_conflicts, child_identity_is_live, keep_session_after_surface_purge,
-        merge_scan_workspace_state, merge_service_label, port_ownership, same_process,
-        stale_sweep_keeps_without_pid_probe,
+        announced_port_conflicts, child_identity_is_live, declaration_survives_scan,
+        keep_session_after_surface_purge, keep_session_at_shell_prompt, merge_scan_workspace_state,
+        merge_service_label, port_ownership, same_process, stale_sweep_keeps_without_pid_probe,
+        surface_awaits_scan,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
@@ -1526,6 +1714,33 @@ mod tests {
         assert!(!child_identity_is_live(42, None, Some(1), None));
     }
 
+    // Upstream's termination argument ("every deposit confirms every root") is
+    // false on this fork: both `run_port_scan`'s root collection and
+    // `apply_pane_scan`'s deposit early-return on `child_identity_is_live`
+    // (#28 `a5234a0`), so a terminal it rejects is never confirmed. Counting
+    // such a terminal as "not settled yet" re-arms the ladder forever.
+    #[test]
+    fn has_unscanned_surface_ignores_terminals_whose_identity_is_not_live() {
+        // A live, unconfirmed child DOES keep the ladder armed.
+        assert!(surface_awaits_scan(42, false, None, Some(1), Some(1)));
+
+        // The pinned failing input (#96 / `child_identity_skips_exited_and_mismatched_start`):
+        // live pid, not exited, pinned start, unreadable current start.
+        assert!(!child_identity_is_live(42, None, Some(1), None));
+        assert!(
+            !surface_awaits_scan(42, false, None, Some(1), None),
+            "an unscannable terminal must not re-arm the ~8s ladder forever"
+        );
+
+        // Recycled pid and exited child are equally unconfirmable.
+        assert!(!surface_awaits_scan(42, false, None, Some(1), Some(2)));
+        assert!(!surface_awaits_scan(42, false, Some(0), Some(1), Some(1)));
+
+        // Nothing to wait for.
+        assert!(!surface_awaits_scan(42, true, None, Some(1), Some(1)));
+        assert!(!surface_awaits_scan(0, false, None, None, None));
+    }
+
     #[test]
     fn surface_purge_drops_sessions_bound_to_dying_surface() {
         let mut session = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Errored);
@@ -1533,6 +1748,97 @@ mod tests {
 
         assert!(!keep_session_after_surface_purge(7, u32::MAX, &session));
         assert!(keep_session_after_surface_purge(8, u32::MAX, &session));
+    }
+
+    #[test]
+    fn shell_prompt_reaps_the_surface_it_fired_on() {
+        // A synthetic key can't be probed, so the prompt is the only evidence
+        // available and the row goes.
+        let mut thinking = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Thinking);
+        thinking.surface_id = Some(7);
+        assert!(!keep_session_at_shell_prompt(
+            7,
+            u32::MAX,
+            &thinking,
+            false,
+            None
+        ));
+        // Another pane's prompt says nothing about this session.
+        assert!(keep_session_at_shell_prompt(
+            8,
+            u32::MAX,
+            &thinking,
+            false,
+            None
+        ));
+
+        // An Errored row stays sticky until its pane closes: the shell prints
+        // its prompt the instant the agent crashes.
+        let mut errored = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Errored);
+        errored.surface_id = Some(7);
+        assert!(keep_session_at_shell_prompt(
+            7,
+            u32::MAX,
+            &errored,
+            false,
+            None
+        ));
+
+        // A live real PID with a matching start time survives - pure probe
+        // result, no live pidinfo call.
+        let mut backgrounded = AgentSession::new(TerminalAgent::Codex, AgentState::Thinking);
+        backgrounded.surface_id = Some(7);
+        backgrounded.proc_start = Some(1_000);
+        assert!(keep_session_at_shell_prompt(
+            7,
+            4242,
+            &backgrounded,
+            true,
+            Some(1_000)
+        ));
+    }
+
+    // #96 "unverified": upstream's retention rule was written against a
+    // fail-OPEN `pid_matches`. On our fail-CLOSED `same_process` a single
+    // denied `pidinfo` would delete a running agent's row on the next prompt.
+    #[test]
+    fn shell_prompt_keeps_a_session_whose_pid_pin_is_unreadable() {
+        let mut live = AgentSession::new(TerminalAgent::Codex, AgentState::Thinking);
+        live.surface_id = Some(7);
+        live.proc_start = Some(1_000);
+
+        // Probe denied (EPERM under SIP / probe race) but the process is alive:
+        // the prompt is NOT evidence that this agent is gone.
+        assert!(
+            keep_session_at_shell_prompt(7, 4242, &live, /* alive */ true, None),
+            "an unreadable start probe must not reap a live session"
+        );
+        // Probe answers, and answers a DIFFERENT process: recycled pid, reap.
+        assert!(!keep_session_at_shell_prompt(
+            7,
+            4242,
+            &live,
+            true,
+            Some(2_000)
+        ));
+        // Probe answers and matches: backgrounded agent, keep.
+        assert!(keep_session_at_shell_prompt(
+            7,
+            4242,
+            &live,
+            true,
+            Some(1_000)
+        ));
+        // Genuinely dead pid: reap, which is the latency win 3d93a97 exists for.
+        assert!(!keep_session_at_shell_prompt(
+            7, 4242, &live, /* alive */ false, None
+        ));
+        // Errored stays sticky regardless.
+        let mut errored = AgentSession::new(TerminalAgent::Codex, AgentState::Errored);
+        errored.surface_id = Some(7);
+        assert!(keep_session_at_shell_prompt(7, 4242, &errored, false, None));
+        // Another pane's prompt says nothing about this session.
+        assert!(keep_session_at_shell_prompt(8, 4242, &live, false, None));
     }
 
     #[test]
@@ -1594,6 +1900,36 @@ mod tests {
         assert_eq!(info.label.as_deref(), Some("Next.js"));
         assert_eq!(info.url.as_deref(), Some("http://localhost:3000/app"));
         assert!(info.is_frontend);
+    }
+
+    // A launch declaration must survive the scans that run before the shell
+    // has `exec`ed the CLI, but must never outlive its deadline nor override
+    // what the scan actually saw.
+    #[test]
+    fn declaration_survives_only_absent_evidence_before_its_deadline() {
+        use crate::agent_launcher::TerminalAgent;
+        let now = std::time::Instant::now();
+        let future = now.checked_add(std::time::Duration::from_secs(5));
+        let past = now.checked_sub(std::time::Duration::from_secs(5));
+
+        // Declared, process not up yet: keep the logo.
+        assert!(declaration_survives_scan(None, future, now));
+        // Declared but the deadline passed: the declaration was wrong, clear it.
+        assert!(!declaration_survives_scan(None, past, now));
+        // Never declared (a restored "last known" value): the first scan owns it.
+        assert!(!declaration_survives_scan(None, None, now));
+        // Evidence always wins, confirming...
+        assert!(!declaration_survives_scan(
+            Some(TerminalAgent::ClaudeCode),
+            future,
+            now
+        ));
+        // ...or correcting a wrong declaration, without waiting for the deadline.
+        assert!(!declaration_survives_scan(
+            Some(TerminalAgent::Codex),
+            future,
+            now
+        ));
     }
 
     #[test]

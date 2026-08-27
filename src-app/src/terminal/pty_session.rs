@@ -716,6 +716,9 @@ pub struct TerminalState {
     cwd_rx: Option<UnboundedReceiver<String>>,
     marks_rx: Option<std::sync::mpsc::Receiver<RawMark>>,
     pub(crate) marks: SharedMarkRing,
+    /// Watermark over [`super::marks::MarkRing::prompt_start_seq`], read by
+    /// [`Self::take_shell_prompt_ready`].
+    last_prompt_seq: u64,
     pub exited: Option<i32>,
     /// US-002: set true once any user input (keystroke, paste, mouse report,
     /// IME commit, user scroll) has been written via `write_to_pty`.
@@ -759,11 +762,26 @@ pub struct TerminalState {
     /// title. Drives the tab identity pill; persisted to `session.json`
     /// as the agent's stable `tag()`.
     pub detected_agent: Option<crate::agent_launcher::TerminalAgent>,
-    /// US-013: `false` while `detected_agent` is a session-restored "last
-    /// known" value awaiting its first scan confirmation (the pill renders
-    /// at 0.6 opacity); flipped `true` (or the agent cleared) by every
-    /// scan deposit.
+    /// US-013: `false` while `detected_agent` is a declared or
+    /// session-restored "last known" value awaiting its first scan
+    /// confirmation; flipped `true` (or the agent cleared) by every scan
+    /// deposit.
     pub agent_confirmed: bool,
+    /// Deadline protecting a *launch-declared* `detected_agent` from being
+    /// cleared by a scan that ran before the CLI process existed.
+    ///
+    /// Paneflow knows which agent a launch is about to run (cmux's declared
+    /// `SessionAgent`), so the surface carries its identity from frame zero -
+    /// but the shell still needs a moment to start and `exec` the binary, and
+    /// the first scan lands inside that window with an empty subtree. Without
+    /// a grace period the deposit would clear the declaration and the logo
+    /// would flicker off then back on.
+    ///
+    /// Set by [`TerminalView::declare_agent`] only. A restored "last known"
+    /// value leaves it `None` and is still cleared by the first scan, because
+    /// nothing is being launched there. Cleared as soon as any scan resolves
+    /// the surface either way.
+    pub agent_declared_until: Option<std::time::Instant>,
     /// EP-005 US-014: LISTEN ports attributed to this terminal's PTY
     /// subtree by the per-pane scan, each with the clickable frontend URL
     /// when the workspace's `service_labels` knows one. Sorted by port,
@@ -1804,6 +1822,7 @@ impl TerminalState {
             cwd_rx: None,
             marks_rx: None,
             marks: Arc::new(std::sync::Mutex::new(Default::default())),
+            last_prompt_seq: 0,
             exited: None,
             keyboard_input_sent: std::sync::atomic::AtomicBool::new(false),
             exit_signal: None,
@@ -1815,6 +1834,7 @@ impl TerminalState {
             custom_name: None,
             detected_agent: None,
             agent_confirmed: false,
+            agent_declared_until: None,
             detected_ports: Vec::new(),
             port_conflicts: Vec::new(),
             announced_ports: Vec::new(),
@@ -1903,6 +1923,26 @@ impl TerminalState {
             self.current_cwd = Some(cwd.to_string_lossy().into_owned());
         }
         self.drain_marks();
+    }
+
+    /// Whether the shell returned to its prompt since the last call.
+    ///
+    /// Reads the OSC 133 `PromptStart` sequence the PTY scanner already
+    /// maintains, so it costs one mutex read per sync tick.
+    ///
+    /// A prompt is proof that no foreground command owns the terminal any
+    /// more, which is how the app reaps a finished agent's session without
+    /// waiting for the periodic PID sweep. The first prompt of a fresh shell
+    /// fires it too; the consumer is a no-op when the surface owns no session.
+    pub(crate) fn take_shell_prompt_ready(&mut self) -> bool {
+        let seq = self
+            .marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prompt_start_seq();
+        let fired = seq != self.last_prompt_seq;
+        self.last_prompt_seq = seq;
+        fired
     }
 
     fn drain_marks(&mut self) {

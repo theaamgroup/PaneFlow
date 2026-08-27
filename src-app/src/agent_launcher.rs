@@ -198,6 +198,34 @@ impl TerminalAgent {
             .find(|a| a.binary() == name)
     }
 
+    /// Declared identity of a launch command: the first pipeline segment
+    /// whose leading token names a known agent binary.
+    ///
+    /// This is the cmux model - the agent an entry point is *about to run* is
+    /// known before any process exists, so the surface can carry its identity
+    /// from frame zero instead of waiting for the process scan. The input is
+    /// always a command Paneflow itself composed or a local IPC client sent;
+    /// it is NEVER terminal output, so this cannot be spoofed by a remote
+    /// shell the way an OSC title can. The per-pane scan stays the
+    /// PID-authoritative belt that confirms or corrects the declaration.
+    ///
+    /// Segmenting on the shell operators is what makes [`Self::launch_command`]
+    /// resolve at all: every agent command is prefixed with a clear
+    /// (`clear && claude`, `Clear-Host; claude`), so a naive first-token
+    /// read would only ever see the clear. Within a segment the leading token
+    /// must BE the binary - `npm run claude` names npm, not Claude, and
+    /// correctly declares nothing. Leading `KEY=value` env assignments are
+    /// skipped and a path prefix is stripped.
+    pub fn from_launch_command(command: &str) -> Option<TerminalAgent> {
+        command.split(['&', '|', ';', '\n']).find_map(|segment| {
+            let token = segment
+                .split_whitespace()
+                .find(|token| !is_env_assignment(token))?;
+            let base = token.rsplit('/').next().unwrap_or(token);
+            TerminalAgent::from_binary(base)
+        })
+    }
+
     pub fn from_tag(tag: &str) -> Option<TerminalAgent> {
         match tag {
             "claude_code" => Some(TerminalAgent::ClaudeCode),
@@ -252,8 +280,7 @@ impl TerminalAgent {
     }
 
     /// The CLI executable looked up on `PATH` to decide default visibility;
-    /// also the leading token of [`Self::launch_command`]. Cross-platform:
-    /// `which` resolves Windows `.exe`/`PATHEXT` extensions.
+    /// also the leading token of [`Self::launch_command`].
     pub fn binary(self) -> &'static str {
         match self {
             TerminalAgent::ClaudeCode => "claude",
@@ -342,8 +369,8 @@ impl TerminalAgent {
         // US-042: trim + drop-empty exactly like the PTY session does when it
         // resolves the shell (`pty_session.rs:442`). A config such as
         // `"default_shell": "  pwsh  "` otherwise reaches `clear_then`
-        // untrimmed, fails the `which::which` probe, falls back to `cmd.exe`,
-        // and emits the wrong clear arm (`cls && claude` for a POSIX command).
+        // untrimmed, fails the `which::which` probe, and emits the wrong
+        // clear arm for a POSIX command.
         let shell = config
             .default_shell
             .as_deref()
@@ -624,9 +651,59 @@ fn installed_binaries_contains(binary: &'static str) -> bool {
     installed_binaries().contains(binary)
 }
 
+/// `KEY=value` shell prefix in front of a command (`RUST_LOG=info codex`).
+/// Conservative: the key must be a non-empty identifier, so `--flag=x` and a
+/// bare `=foo` are not mistaken for assignments.
+fn is_env_assignment(token: &str) -> bool {
+    match token.split_once('=') {
+        Some((key, _)) => {
+            !key.is_empty()
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !key.starts_with(|c: char| c.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Every agent's own launch command must declare that agent - otherwise a
+    // pane launched from the palette shows no logo until the process scan
+    // lands, which is exactly the latency this declaration removes.
+    #[test]
+    fn launch_command_declares_its_own_agent() {
+        let config = PaneFlowConfig::default();
+        for agent in TerminalAgent::ALL {
+            assert_eq!(
+                TerminalAgent::from_launch_command(&agent.launch_command(&config)),
+                Some(agent),
+                "{} launch command must declare itself",
+                agent.display_name()
+            );
+        }
+    }
+
+    #[test]
+    fn from_launch_command_handles_paths_and_env_prefixes() {
+        assert_eq!(
+            TerminalAgent::from_launch_command("/usr/local/bin/claude --resume abc"),
+            Some(TerminalAgent::ClaudeCode)
+        );
+        assert_eq!(
+            TerminalAgent::from_launch_command("RUST_LOG=info NO_COLOR=1 codex"),
+            Some(TerminalAgent::Codex)
+        );
+        // A wrapper is not the agent: the declaration must stay silent and let
+        // the PID-authoritative scan speak.
+        assert_eq!(TerminalAgent::from_launch_command("npm run claude"), None);
+        assert_eq!(TerminalAgent::from_launch_command("claude-wrapper"), None);
+        assert_eq!(TerminalAgent::from_launch_command(""), None);
+        assert_eq!(TerminalAgent::from_launch_command("   "), None);
+        // A flag that looks like an assignment must not be skipped as env.
+        assert_eq!(TerminalAgent::from_launch_command("--model=x codex"), None);
+    }
 
     #[test]
     fn tag_roundtrip() {
