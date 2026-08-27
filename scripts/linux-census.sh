@@ -12,8 +12,13 @@
 #
 # cfg(unix) and cfg(target_os = "macos") are the LIVE arms on macOS and are
 # never counted here. macOS IS a unix.
+#
+# Exit status (issue #69): 0 when the STAGE 2c zero-condition is 0 AND the
+# negative control is non-zero; 1 otherwise, with a `FAIL:` line on stderr
+# and the offending sites listed. `--files` / `--terms` are inspection
+# modes and always exit 0. run_tests.yml::platform_census runs this.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 # A grep over `path:line:content` also matches the PATH. Files under
 # `src-app/src/update/linux/` therefore matched /\blinux\b/ on their
@@ -137,7 +142,10 @@ print('\n'.join(sorted(out)))
 PYEOF
 )
 
-if [ -z "${1:-}" ] || [ "${1:-}" = "--list" ]; then
+MODE="${1:-}"
+TOTAL=$(( $(n "$ATTR") + $(n "$MACRO") + $(n "$TOML") + $(n "$STRCHK") + $(n "$MULTILINE") + $(n "$BANGCFG") ))
+
+if [ -z "$MODE" ] || [ "$MODE" = "--list" ]; then
 echo "── NEGATIVE CONTROL (must stay LARGE; 0 means the regex is broken) ──"
 echo "cfg(unix) live sites ......... $(n "$CTL_UNIX")"
 echo "cfg(macos) live sites ........ $(n "$CTL_MAC")"
@@ -162,14 +170,13 @@ echo "different-term-space hits .... $(n "$TERMS")"
 echo "orphaned .rs files ........... $(n "$ORPHANS")"
 echo "files touched ................ $(printf '%s\n' "$ATTR" "$MACRO" | grep . | cut -d: -f1 | sort -u | wc -l | tr -d ' ')"
 echo "---"
-TOTAL=$(( $(n "$ATTR") + $(n "$MACRO") + $(n "$TOML") + $(n "$STRCHK") + $(n "$MULTILINE") + $(n "$BANGCFG") ))
 echo "STAGE 2c ZERO-CONDITION: $TOTAL   (must reach 0)"
 echo
 echo "── UNGATED PLATFORM STRINGS ──"
 echo "issue #103 (not in STAGE 2c integer) ... $(n "$UNGATED_STR")"
 fi
 
-if [ "${1:-}" = "--list" ]; then
+if [ "$MODE" = "--list" ]; then
   echo; echo "=== attribute gates ==="; printf '%s\n' "$ATTR"
   echo; echo "=== runtime cfg!() ===";  printf '%s\n' "$MACRO"
   echo; echo "=== negated cfg!(target_os) ==="; printf '%s\n' "$BANGCFG"
@@ -179,8 +186,33 @@ if [ "${1:-}" = "--list" ]; then
   echo; echo "=== orphans ==="; printf '%s\n' "$ORPHANS"
   echo; echo "=== ungated platform strings ==="; printf '%s\n' "$UNGATED_STR"
 fi
-if [ "${1:-}" = "--files" ]; then
+
+# Inspection modes stay exit 0 so they remain usable interactively.
+if [ "$MODE" = "--files" ]; then
   printf '%s\n' "$ATTR" "$MACRO" | grep . | cut -d: -f1 | sort | uniq -c | sort -rn
+  exit 0
 fi
-if [ "${1:-}" = "--terms" ]; then printf '%s\n' "$TERMS"; fi
+if [ "$MODE" = "--terms" ]; then printf '%s\n' "$TERMS"; exit 0; fi
+
+# ENFORCEMENT (issue #69). The zero-condition total is the exit status so
+# CI (run_tests.yml::platform_census) can block a PR. The negative control
+# is checked FIRST: a census that reads 0 because its regex broke must not
+# look like a clean tree. The ungated-string report (issue #103) is
+# deliberately not part of the exit status: it is not in the STAGE 2c
+# integer and no expected count is tracked for it.
+dump() { if [ -n "$2" ]; then { echo; echo "=== $1 ==="; printf '%s\n' "$2"; } >&2; fi; }
+if [ "$(n "$CTL_UNIX")" -eq 0 ] || [ "$(n "$CTL_MAC")" -eq 0 ]; then
+  echo "FAIL: negative control collapsed to 0 (cfg(unix)=$(n "$CTL_UNIX"), cfg(macos)=$(n "$CTL_MAC")) - the regex is broken, not the tree clean" >&2
+  exit 1
+fi
+if [ "$TOTAL" -ne 0 ]; then
+  echo "FAIL: STAGE 2c ZERO-CONDITION is $TOTAL, must be 0" >&2
+  dump "attribute gates" "$ATTR"
+  dump "runtime cfg!()" "$MACRO"
+  dump "negated cfg!(target_os)" "$BANGCFG"
+  dump "Cargo tables" "$TOML"
+  dump "triple string checks" "$STRCHK"
+  dump "multi-line cfg" "$MULTILINE"
+  exit 1
+fi
 exit 0
