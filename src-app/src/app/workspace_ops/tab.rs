@@ -265,13 +265,21 @@ impl PaneFlowApp {
         self.close_workspace_tab(self.active_idx, tab_idx, window, cx);
     }
 
-    /// US-010: start the inline rename of a sidebar tab row. Mirrors
+    /// Start the inline rename of a sidebar tab row. Mirrors
     /// `begin_workspace_rename`: any live rename commits first, and the input
     /// seeds with the tab's current title.
+    ///
+    /// Issue #79: takes a `Window` so it can claim `sidebar_rename_focus`.
+    /// Drawing the editor is not enough - until the renamed row is on the
+    /// dispatch path to the focused node, GPUI hands its `on_key_down`
+    /// nothing. Focus is claimed last, after the state that decides which row
+    /// tracks the handle, and after the single-click that precedes a
+    /// double-click has already focused a terminal pane.
     pub(crate) fn begin_tab_rename(
         &mut self,
         ws_idx: usize,
         tab_idx: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.commit_rename(cx);
@@ -285,6 +293,7 @@ impl PaneFlowApp {
         };
         self.rename_text = title;
         self.renaming_tab = Some((ws_idx, tab_idx));
+        self.sidebar_rename_focus.focus(window, cx);
         cx.notify();
     }
 

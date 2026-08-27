@@ -439,9 +439,9 @@ impl PaneFlowApp {
                 "Rename",
                 None,
                 ui,
-                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.tab_menu_open = None;
-                    this.begin_tab_rename(ws_idx, tab_idx, cx);
+                    this.begin_tab_rename(ws_idx, tab_idx, window, cx);
                     cx.stop_propagation();
                 }),
             ))

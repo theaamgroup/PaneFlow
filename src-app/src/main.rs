@@ -1349,6 +1349,16 @@ struct PaneFlowApp {
     /// (Cmd+1..9, Ctrl+Tab, Cmd+Shift+N, Cmd+Alt+T) then match but find no
     /// handler. Any focus handle mounted inside `app_content` restores the path.
     empty_workspace_focus: FocusHandle,
+    /// Issue #79: focus handle for the sidebar's inline rename editor, shared
+    /// by the workspace-folder rows and their tab children. One handle is
+    /// enough because one editor is: `renaming_idx` and `renaming_tab` share
+    /// `rename_text`, and `commit_rename` settles whichever is live. The row
+    /// being renamed is the only one that tracks it in a given frame - a shared
+    /// handle claimed by every row would be claimed many times per frame.
+    /// Without it a sidebar row is a sibling of the pane tree, never an
+    /// ancestor of the focused terminal, and GPUI delivers its `on_key_down`
+    /// nothing at all.
+    sidebar_rename_focus: FocusHandle,
 }
 
 /// Global flag for swap mode, checked by TerminalView to intercept Escape.

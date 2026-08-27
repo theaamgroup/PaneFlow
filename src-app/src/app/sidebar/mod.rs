@@ -558,8 +558,82 @@ fn sidebar_drop_slots(rows: &[SidebarRow], workspace_count: usize) -> Vec<Sideba
         .collect()
 }
 
+/// What one keystroke means to the sidebar's inline rename editor.
+///
+/// Issue #79: both row shells - workspace folders and their tab children -
+/// used to inline the same `match` over `keystroke.key`, and neither was
+/// reachable. Factoring the decision out gives the two handlers one shared
+/// definition and makes it testable without a live window; each handler still
+/// owns its own mutation, so this stays pure over its inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RenameKey {
+    /// `enter`: settle the edit through `commit_rename`.
+    Commit,
+    /// `escape`: drop the edit and leave the title as it was.
+    Cancel,
+    /// `backspace`: delete the last character of `rename_text`.
+    Backspace,
+    /// A printable character to append to `rename_text`.
+    Insert(String),
+    /// Nothing the editor acts on - let it through untouched.
+    Ignore,
+}
+
+/// Map a keystroke onto the editor's response.
+///
+/// `alt` suppresses insertion alongside `control` and `platform` (mirroring
+/// the broadcast picker): on macOS Option+key composes a dead key, so without
+/// this guard Option+E types a combining acute into the name instead of being
+/// ignored. `shift` is deliberately not in that set - it is how a capital
+/// arrives.
+fn rename_key_action(key: &str, key_char: Option<&str>, mods: gpui::Modifiers) -> RenameKey {
+    match key {
+        "enter" => RenameKey::Commit,
+        "escape" => RenameKey::Cancel,
+        "backspace" => RenameKey::Backspace,
+        _ => match key_char {
+            Some(ch) if !ch.is_empty() && !mods.control && !mods.platform && !mods.alt => {
+                RenameKey::Insert(ch.to_string())
+            }
+            _ => RenameKey::Ignore,
+        },
+    }
+}
+
 impl PaneFlowApp {
-    fn begin_workspace_rename(&mut self, index: usize, cx: &gpui::App) {
+    /// Hand focus back when an inline rename ends.
+    ///
+    /// Issue #79 meets issue #108: the renamed row is the only element that
+    /// tracks `sidebar_rename_focus`, and it stops tracking it the instant the
+    /// rename state clears. Without this the window ends every rename with
+    /// nothing focused - the dispatch path collapses to the tree root, and
+    /// every global `context: None` binding matches but finds no handler.
+    /// Mirrors `close_attention_queue_and_restore_focus`.
+    fn restore_focus_after_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = match self.workspaces.get(self.active_idx) {
+            Some(ws) => ws.focus_first(window, cx),
+            None => false,
+        };
+        if !focused {
+            window.focus(&self.empty_workspace_focus, cx);
+        }
+    }
+
+    /// Start the inline rename of a workspace folder row.
+    ///
+    /// Issue #79: this takes a `Window` so it can focus. Setting `renaming_idx`
+    /// only draws the editor; the row's `on_key_down` still receives nothing
+    /// until the row is on the dispatch path, which it is only while it tracks
+    /// `sidebar_rename_focus`. The focus claim has to happen here, at the end,
+    /// rather than in the caller: the first click of a double-click already ran
+    /// the single-click branch, which selected the workspace and focused one of
+    /// its terminals. Claiming focus last is what survives that.
+    fn begin_workspace_rename(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.commit_rename(cx);
         if let Some(title) = self
             .workspaces
@@ -568,6 +642,8 @@ impl PaneFlowApp {
         {
             self.rename_text = title;
             self.renaming_idx = Some(index);
+            self.sidebar_rename_focus.focus(window, cx);
+            cx.notify();
         }
     }
 
@@ -963,16 +1039,24 @@ impl PaneFlowApp {
                 },
             )
             .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                this.dismiss_transient_surfaces();
                 if let Some(workspace) = this.workspaces.get_mut(idx) {
                     workspace.agent_completion_notification.acknowledge();
                 }
                 let is_double = matches!(e, ClickEvent::Mouse(m) if m.down.click_count == 2);
+                // Issue #79: `dismiss_transient_surfaces` now also cancels a
+                // live rename, so it can no longer run before the single-vs-
+                // double decision. Ahead of the double-click branch it would
+                // clear state `begin_workspace_rename` immediately re-seeds
+                // (harmless); ahead of the single-click branch it would eat the
+                // edit the click is meant to commit. Each branch dismisses at
+                // the point that is correct for it.
                 if is_double {
-                    this.begin_workspace_rename(idx, cx);
+                    this.dismiss_transient_surfaces();
+                    this.begin_workspace_rename(idx, window, cx);
                 } else {
                     let was_renaming = this.renaming_idx == Some(idx);
                     this.commit_rename(cx);
+                    this.dismiss_transient_surfaces();
                     this.select_workspace(idx, window, cx);
                     // US-008: the whole card is the disclosure control, not just
                     // the folder icon. Committing a rename is exempt: that click
@@ -995,42 +1079,58 @@ impl PaneFlowApp {
                     cx.notify();
                 }
             }))
-            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _window, cx| {
-                let key = e.keystroke.key.as_str();
+            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
                 if this.renaming_idx != Some(idx) {
-                    if key == "f2" {
-                        this.begin_workspace_rename(idx, cx);
+                    if e.keystroke.key.as_str() == "f2" {
+                        this.begin_workspace_rename(idx, window, cx);
                         cx.stop_propagation();
-                        cx.notify();
                     }
                     return;
                 }
-                match key {
-                    "enter" => {
+                // Issue #79: stop every key the editor consumes. Escape in
+                // particular has container handlers above this row, and a
+                // cancelled rename must not also read as "dismiss that too".
+                match rename_key_action(
+                    e.keystroke.key.as_str(),
+                    e.keystroke.key_char.as_deref(),
+                    e.keystroke.modifiers,
+                ) {
+                    RenameKey::Commit => {
                         this.commit_rename(cx);
+                        this.restore_focus_after_rename(window, cx);
+                        cx.stop_propagation();
                         cx.notify();
                     }
-                    "escape" => {
+                    RenameKey::Cancel => {
                         this.renaming_idx = None;
                         this.rename_text.clear();
+                        this.restore_focus_after_rename(window, cx);
+                        cx.stop_propagation();
                         cx.notify();
                     }
-                    "backspace" => {
+                    RenameKey::Backspace => {
                         this.rename_text.pop();
+                        cx.stop_propagation();
                         cx.notify();
                     }
-                    _ => {
-                        if let Some(ch) = &e.keystroke.key_char
-                            && !ch.is_empty()
-                            && !e.keystroke.modifiers.control
-                            && !e.keystroke.modifiers.platform
-                        {
-                            this.rename_text.push_str(ch);
-                            cx.notify();
-                        }
+                    RenameKey::Insert(ch) => {
+                        this.rename_text.push_str(&ch);
+                        cx.stop_propagation();
+                        cx.notify();
                     }
+                    RenameKey::Ignore => {}
                 }
             }));
+
+        // Issue #79: only the row actually being renamed claims the handle.
+        // One handle is enough - `renaming_idx` and `renaming_tab` share
+        // `rename_text`, so at most one editor is live - but every row taking
+        // it would leave many elements claiming one handle in a single frame.
+        let row_shell = if self.renaming_idx == Some(idx) {
+            row_shell.track_focus(&self.sidebar_rename_focus)
+        } else {
+            row_shell
+        };
 
         // Row 1: title
         //
@@ -1462,7 +1562,11 @@ impl PaneFlowApp {
             .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                 let is_double = matches!(e, ClickEvent::Mouse(m) if m.down.click_count == 2);
                 if is_double {
-                    this.begin_tab_rename(ws_idx, tab_idx, cx);
+                    // `select_workspace_tab` on the single-click branch already
+                    // commits and dismisses (see `workspace_ops::tab`), so the
+                    // rename branch must not dismiss again after it - issue #79
+                    // made that call cancel a live editor.
+                    this.begin_tab_rename(ws_idx, tab_idx, window, cx);
                 } else {
                     this.select_workspace_tab(ws_idx, tab_idx, window, cx);
                 }
@@ -1484,42 +1588,53 @@ impl PaneFlowApp {
                     cx.notify();
                 }
             }))
-            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _window, cx| {
-                let key = e.keystroke.key.as_str();
+            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
                 if this.renaming_tab != Some((ws_idx, tab_idx)) {
-                    if key == "f2" {
-                        this.begin_tab_rename(ws_idx, tab_idx, cx);
+                    if e.keystroke.key.as_str() == "f2" {
+                        this.begin_tab_rename(ws_idx, tab_idx, window, cx);
                         cx.stop_propagation();
-                        cx.notify();
                     }
                     return;
                 }
-                match key {
-                    "enter" => {
+                match rename_key_action(
+                    e.keystroke.key.as_str(),
+                    e.keystroke.key_char.as_deref(),
+                    e.keystroke.modifiers,
+                ) {
+                    RenameKey::Commit => {
                         this.commit_rename(cx);
+                        this.restore_focus_after_rename(window, cx);
+                        cx.stop_propagation();
                         cx.notify();
                     }
-                    "escape" => {
+                    RenameKey::Cancel => {
                         this.renaming_tab = None;
                         this.rename_text.clear();
+                        this.restore_focus_after_rename(window, cx);
+                        cx.stop_propagation();
                         cx.notify();
                     }
-                    "backspace" => {
+                    RenameKey::Backspace => {
                         this.rename_text.pop();
+                        cx.stop_propagation();
                         cx.notify();
                     }
-                    _ => {
-                        if let Some(ch) = &e.keystroke.key_char
-                            && !ch.is_empty()
-                            && !e.keystroke.modifiers.control
-                            && !e.keystroke.modifiers.platform
-                        {
-                            this.rename_text.push_str(ch);
-                            cx.notify();
-                        }
+                    RenameKey::Insert(ch) => {
+                        this.rename_text.push_str(&ch);
+                        cx.stop_propagation();
+                        cx.notify();
                     }
+                    RenameKey::Ignore => {}
                 }
             }));
+
+        // Issue #79: same gate as the folder row - the tab being renamed is the
+        // one row that puts the shared handle on the dispatch path.
+        let row_shell = if is_renaming {
+            row_shell.track_focus(&self.sidebar_rename_focus)
+        } else {
+            row_shell
+        };
 
         let row = squircle_row(row_shell, tab_group, resting_bg, hovered_bg, title_row);
 
@@ -2119,24 +2234,24 @@ impl Render for SidebarTooltip {
 #[cfg(test)]
 mod tests {
     use super::{
-        ROW_RADIUS, SIDEBAR_ACTION_BUTTON_GAP, SIDEBAR_ACTION_BUTTON_SIZE,
+        ROW_RADIUS, RenameKey, SIDEBAR_ACTION_BUTTON_GAP, SIDEBAR_ACTION_BUTTON_SIZE,
         SIDEBAR_ACTION_LANE_WIDTH, SIDEBAR_DROP_BAND_REACH, SIDEBAR_DROP_LINE_PX,
         SIDEBAR_FOLDER_ICON_WIDTH, SIDEBAR_ROW_LINE_HEIGHT, SIDEBAR_ROW_MARGIN_X,
         SIDEBAR_ROW_PADDING_Y, SIDEBAR_ROW_SPACING, SIDEBAR_TAB_CARD_HEIGHT,
         SIDEBAR_TAB_CARD_ICON_SIZE, SIDEBAR_TAB_CARD_WIDTH, SIDEBAR_TAB_ICON_CAP,
         SIDEBAR_TAB_ICON_SIZE, SIDEBAR_TITLE_ROW_GAP, SIDEBAR_WIDTH, SidebarAgentState,
         SidebarAgentSummary, SidebarDropSlot, SidebarRow, SidebarServiceSummary,
-        folder_row_sessions, reorder_target, sidebar_agent_summary, sidebar_drop_slots,
-        sidebar_row_shell, sidebar_service_summary, tab_display_title, tab_icon_cluster_split,
-        tab_row_sessions, visible_service_ports,
+        folder_row_sessions, rename_key_action, reorder_target, sidebar_agent_summary,
+        sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary, tab_display_title,
+        tab_icon_cluster_split, tab_row_sessions, visible_service_ports,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
     use crate::terminal::ServiceInfo;
     use crate::workspace::Tab;
     use gpui::{
-        AvailableSpace, InteractiveElement, ParentElement, Styled, TestAppContext, div, point, px,
-        size,
+        AvailableSpace, InteractiveElement, Modifiers, ParentElement, Styled, TestAppContext, div,
+        point, px, size,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -2704,5 +2819,160 @@ mod tests {
             tab_icon_cluster_split(SIDEBAR_TAB_ICON_CAP + 3),
             (SIDEBAR_TAB_ICON_CAP, 3)
         );
+    }
+
+    /// Every modifier off: the state an unmodified letter arrives with.
+    fn bare_modifiers() -> Modifiers {
+        Modifiers::default()
+    }
+
+    #[test]
+    fn rename_key_action_maps_the_editor_keys() {
+        assert_eq!(
+            rename_key_action("enter", None, bare_modifiers()),
+            RenameKey::Commit
+        );
+        assert_eq!(
+            rename_key_action("escape", None, bare_modifiers()),
+            RenameKey::Cancel
+        );
+        assert_eq!(
+            rename_key_action("backspace", None, bare_modifiers()),
+            RenameKey::Backspace
+        );
+        assert_eq!(
+            rename_key_action("a", Some("a"), bare_modifiers()),
+            RenameKey::Insert("a".to_string())
+        );
+    }
+
+    #[test]
+    fn rename_key_action_ignores_held_modifiers_and_empty_chars() {
+        // Issue #79: without the `alt` arm, macOS Option+key inserts the dead
+        // key it composes (Option+e is a combining acute), not a name.
+        for (label, mods) in [
+            (
+                "control",
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+            ),
+            (
+                "platform",
+                Modifiers {
+                    platform: true,
+                    ..Modifiers::default()
+                },
+            ),
+            (
+                "alt",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                rename_key_action("a", Some("a"), mods),
+                RenameKey::Ignore,
+                "{label} held must not type into the rename editor"
+            );
+        }
+
+        // Shift is not a suppressing modifier - it is how a capital arrives.
+        assert_eq!(
+            rename_key_action(
+                "a",
+                Some("A"),
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                }
+            ),
+            RenameKey::Insert("A".to_string())
+        );
+
+        // A key with no printable character, and a key whose character is the
+        // empty string, are both nothing to insert.
+        assert_eq!(
+            rename_key_action("f5", None, bare_modifiers()),
+            RenameKey::Ignore
+        );
+        assert_eq!(
+            rename_key_action("left", Some(""), bare_modifiers()),
+            RenameKey::Ignore
+        );
+    }
+
+    #[test]
+    fn both_sidebar_rename_rows_focus_and_share_the_key_decision() {
+        // Issue #79: GPUI only walks a key event down the dispatch path to the
+        // FOCUSED node. A sidebar row that tracks no focus handle is never on
+        // that path, so every branch of its `on_key_down` is dead code. This
+        // reads the module's own source because `PaneFlowApp` cannot be built
+        // in a unit test (bootstrap opens a window and does real I/O), so the
+        // rendered element tree is not reachable from here.
+        let src = include_str!("mod.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        // The trailing `(\n` matters: `fn render_workspace_row` is also a
+        // prefix of `fn render_workspace_rows`, the plural that renders the
+        // whole rail, and slicing on the bare name lands in the wrong body.
+        let workspace_row = production
+            .split("fn render_workspace_row(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("fn render_tab_row(\n").next())
+            .expect("workspace row renderer");
+        let tab_row = production
+            .split("fn render_tab_row(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("fn render_workspace_meta_row(\n").next())
+            .expect("tab row renderer");
+
+        for (label, body) in [("workspace row", workspace_row), ("tab row", tab_row)] {
+            assert!(
+                body.contains("track_focus(&self.sidebar_rename_focus)"),
+                "{label} must track the rename focus handle, or its on_key_down is unreachable"
+            );
+            assert!(
+                body.contains("rename_key_action("),
+                "{label} must route its key decision through the shared pure function"
+            );
+            // Issue #79 meets issue #108: the renamed row is the only element
+            // tracking the shared handle, and it stops tracking it the instant
+            // the rename state clears. Ending an edit without handing focus
+            // back leaves the window with nothing focused, which silently kills
+            // every global `context: None` binding.
+            assert!(
+                body.contains("restore_focus_after_rename(window, cx)"),
+                "{label} must hand focus back when its rename ends"
+            );
+        }
+    }
+
+    #[test]
+    fn dismiss_transient_surfaces_clears_the_inline_rename_editor() {
+        // Same constraint as above: there is no `PaneFlowApp` to call the
+        // method on, so assert the seam that IS reachable - the body as
+        // written. An editor left live after a dismiss stays live forever.
+        let src = include_str!("../workspace_ops/mod.rs");
+        let body = src
+            .split("fn dismiss_transient_surfaces")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("dismiss_transient_surfaces body");
+        for clear in [
+            "self.renaming_idx = None;",
+            "self.renaming_tab = None;",
+            "self.rename_text.clear();",
+        ] {
+            assert!(
+                body.contains(clear),
+                "dismiss_transient_surfaces must run `{clear}`, or a click outside can leave an inline rename editor live"
+            );
+        }
     }
 }

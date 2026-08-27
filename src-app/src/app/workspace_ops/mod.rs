@@ -233,6 +233,15 @@ impl PaneFlowApp {
         self.pane_menu_open = None;
         self.profile_menu_open = None;
         self.files_menu_open = None;
+        // Issue #79: the sidebar's inline rename editor is a transient surface
+        // too, and nothing else closed it - an editor opened and then abandoned
+        // stayed live indefinitely. This cancels rather than commits: dismissal
+        // is the "never mind" gesture, and every caller that means to keep the
+        // typed name calls `commit_rename` first (see the sidebar row click
+        // handlers and `select_workspace_tab`).
+        self.renaming_idx = None;
+        self.renaming_tab = None;
+        self.rename_text.clear();
     }
 
     pub(crate) fn active_workspace(&self) -> Option<&Workspace> {
