@@ -32,7 +32,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `$schema` | string | none | Editor-only pointer to the public schema. Ignored at runtime. |
 | `$schemaVersion` | string | `1.0.0` | Logs a warning when unknown, but never blocks loading. |
 | `default_shell` | string or null | platform default | Chain: configured -> `$SHELL` -> `/bin/sh`. Each candidate must be an existing file with an exec bit, otherwise it is skipped with a warning. A bare name (no `/`) is resolved via `which`, then probed in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`, which is what makes `"fish"` work under a GUI launch with a minimal `PATH`. |
-| `theme` | string or null | `One Dark` | Bundled theme name. Current values: `One Dark`, `PaneFlow Light`, `Vercel`, `Claude`, `Cursor`. |
+| `theme` | string or null | `Paneflow Dark` | Bundled theme name, one preset's light or dark variant. Current values: `Paneflow Dark`, `Paneflow Light`, `Vercel Dark`, `Vercel Light`, `Claude Dark`, `Claude Light`, `Cursor Dark`, `Cursor Light`. Pre-preset names (`One Dark`, `Vercel`, `Claude`, `Cursor`) still resolve. |
 | `theme_mode` | string or null | `dark` | `light`, `dark`, or `system`. |
 | `font_family` | string or null | bundled JetBrainsMono NFM | Accepts `.PaneflowMono`, `JetBrainsMono NFM`, `.PaneflowSans`, embedded family names, or installed monospace families. |
 | `font_fallbacks` | array of strings or null | none | Ordered glyph fallback families for symbols, Powerline, CJK, emoji, or Nerd Font glyphs. |
@@ -41,6 +41,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `line_height` | number or null | `1.2` | Multiplier, range `1.0` to `2.5`. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `cell_width` | number or null | `0.6` | Multiplier, range `0.3` to `2.0`. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `unfocused_pane_opacity` | number or null | `0.7` | Opacity of panes without focus when a workspace has more than one pane, range `0.15` to `1.0`. `1.0` disables the dim. Values outside the range are clamped with a warning; non-finite values fall back to the default. |
+| `reduce_motion` | boolean or null | `false` | Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. |
 | `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material in the primary navigation card. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
@@ -257,7 +258,7 @@ test fixture leaves it unset.
   "$schema": "./schemas/paneflow.schema.json",
   "$schemaVersion": "1.0.0",
   "default_shell": null,
-  "theme": "One Dark",
+  "theme": "Paneflow Dark",
   "theme_mode": "dark",
   "font_family": null,
   "font_fallbacks": [],
@@ -266,6 +267,7 @@ test fixture leaves it unset.
   "line_height": 1.2,
   "cell_width": 0.6,
   "unfocused_pane_opacity": 0.7,
+  "reduce_motion": false,
   "window_decorations": "client",
   "window_backdrop": "auto",
   "macos_chrome_material": true,

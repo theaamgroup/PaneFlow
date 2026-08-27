@@ -68,6 +68,7 @@ impl PaneFlowApp {
         self.workspace_template_detail_open = false;
         self.font_dropdown_open = false;
         self.font_search.clear();
+        self.theme_dropdown_open = false;
         // Clear any stale nav search so the landing row is always visible (a
         // leftover query could filter the nav to a section that doesn't match
         // the displayed page).
@@ -84,6 +85,7 @@ impl PaneFlowApp {
         self.profile_menu_open = None;
         self.font_dropdown_open = false;
         self.font_search.clear();
+        self.theme_dropdown_open = false;
         self.terminal_dropdown = None;
         self.general_dropdown = None;
         self.workspace_template_dropdown = None;
@@ -142,6 +144,9 @@ impl PaneFlowApp {
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
             }
+        }
+        if !nested && key == "reduce_motion" {
+            crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
         }
         if default_shell_changed {
             self.handle_default_shell_changed(cx);

@@ -106,7 +106,7 @@ pub struct SyntaxPalette {
 }
 
 impl SyntaxPalette {
-    /// Dark diff syntax palette (`one_dark()`), tuned from the Codex App diff
+    /// Dark diff syntax palette (`paneflow_dark()`), tuned from the Codex App diff
     /// reference while keeping the existing semantic slot structure. ≥ 18
     /// distinct values.
     pub fn catppuccin_mocha() -> Self {
@@ -289,6 +289,117 @@ impl SyntaxPalette {
             link_text: h(0x8fb7ff),
             emphasis: h(0xb8e0f0),
             emphasis_strong: h(0xffffff),
+        }
+    }
+
+    /// Vercel-inspired light syntax palette: near-black structure on white,
+    /// with the Geist accent hues darkened enough to read on a light surface.
+    pub fn vercel_light() -> Self {
+        Self {
+            comment: h(0x6b7280),
+            comment_doc: h(0x52525b),
+            keyword: h(0x000000),
+            function: h(0x0068d6),
+            r#type: h(0x067f6f),
+            r#enum: h(0x0a6e64),
+            constructor: h(0x4338ca),
+            string: h(0x0f7b0f),
+            string_escape: h(0x0e7490),
+            string_special: h(0xa21caf),
+            number: h(0xa35200),
+            boolean: h(0xb45309),
+            constant: h(0x854d0e),
+            constant_builtin: h(0x0369a1),
+            property: h(0xbe123c),
+            variable: h(0x27272a),
+            variable_builtin: h(0x92400e),
+            operator: h(0x475569),
+            punctuation: h(0x64748b),
+            punctuation_special: h(0xcd2b31),
+            attribute: h(0x0068d6),
+            tag: h(0xcd2b31),
+            label: h(0x3f3f46),
+            namespace: h(0x7820bc),
+            title: h(0x000000),
+            text_literal: h(0x0f7b0f),
+            link_uri: h(0x0068d6),
+            link_text: h(0x1d4ed8),
+            emphasis: h(0xbe185d),
+            emphasis_strong: h(0x18181b),
+        }
+    }
+
+    /// Claude Desktop-inspired light syntax palette: warm ink on the cream
+    /// paper surface, with Claude orange carrying keywords and emphasis.
+    pub fn claude_light() -> Self {
+        Self {
+            comment: h(0x8f8b7d),
+            comment_doc: h(0x7a7667),
+            keyword: h(0xc2552f),
+            function: h(0x4a6fa5),
+            r#type: h(0x2f7d72),
+            r#enum: h(0x7a5ea8),
+            constructor: h(0xa2643a),
+            string: h(0x4f7a3f),
+            string_escape: h(0x2b7f8f),
+            string_special: h(0xb0562e),
+            number: h(0x9a6b1f),
+            boolean: h(0xc2552f),
+            constant: h(0x6b5f3d),
+            constant_builtin: h(0x3f6b8a),
+            property: h(0xa14d5a),
+            variable: h(0x4a4636),
+            variable_builtin: h(0x8a6b2a),
+            operator: h(0x6f6a58),
+            punctuation: h(0x807b68),
+            punctuation_special: h(0xc2552f),
+            attribute: h(0x2f7d72),
+            tag: h(0xb4442a),
+            label: h(0x6b6552),
+            namespace: h(0x7a5ea8),
+            title: h(0x8a4a2a),
+            text_literal: h(0x4f7a3f),
+            link_uri: h(0x2b6f9a),
+            link_text: h(0xc2552f),
+            emphasis: h(0xb0562e),
+            emphasis_strong: h(0x2e2b1e),
+        }
+    }
+
+    /// Cursor-inspired light syntax palette: the VS Code Light+ identity the
+    /// editor ships by default, kept recognizable token family by token family.
+    pub fn cursor_light() -> Self {
+        Self {
+            comment: h(0x008000),
+            comment_doc: h(0x3f8f3f),
+            keyword: h(0x0000ff),
+            function: h(0x795e26),
+            r#type: h(0x267f99),
+            r#enum: h(0x2b91af),
+            constructor: h(0x3b8ea5),
+            string: h(0xa31515),
+            string_escape: h(0xd16969),
+            string_special: h(0x811f3f),
+            number: h(0x098658),
+            boolean: h(0x0000ff),
+            constant: h(0x0070c1),
+            constant_builtin: h(0x0451a5),
+            property: h(0x0b5394),
+            variable: h(0x001080),
+            variable_builtin: h(0x0070c1),
+            operator: h(0x393a34),
+            punctuation: h(0x5a5a5a),
+            punctuation_special: h(0xaf00db),
+            attribute: h(0xe50000),
+            tag: h(0x800000),
+            label: h(0x3d3d3d),
+            namespace: h(0x4b69c6),
+            title: h(0x800000),
+            text_literal: h(0xa31515),
+            link_uri: h(0x0f6fc5),
+            link_text: h(0x0000ff),
+            emphasis: h(0xaf00db),
+            emphasis_strong: h(0x000080),
         }
     }
 
@@ -518,7 +629,7 @@ impl UiColors {
             };
         }
         DiffColors {
-            // Codex-inspired dark diff panel, softened for the blue-black shell.
+            // Codex-inspired dark diff panel, softened for the neutral shell.
             added: h(0x57d992),
             deleted: h(0xff6f6a),
             added_background: h(0x1d3a2b),
@@ -572,20 +683,20 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
         UiColors {
             use_theme_diff_washes: false,
             // Codex-style light shell: the right-hand work area is pure white,
-            // while controls use cool, near-white layers for hierarchy.
+            // while controls use neutral, near-white layers for hierarchy. Every
+            // grey here is hue-free by design (see the dark arm below).
             base: h(0xffffff),
-            surface: h(0xf7f7f9),
+            surface: h(0xf7f7f7),
             overlay: h(0xffffff),
-            border: h(0xe5e5ed),
-            subtle: h(0xedeef2),
-            muted: h(0x686a73),
-            text: h(0x25262b),
+            border: h(0xe6e6e6),
+            subtle: h(0xeeeeee),
+            muted: h(0x6a6a6a),
+            text: h(0x262626),
             accent: h(0x4c6fff),
-            // Light theme: a slightly warmer surface with a faint
-            // accent tint so the awaiting-confirmation row stands
-            // out from neutral card surfaces without overwhelming
-            // the chat stream.
-            tool_card_header_bg: h(0xeff1f8),
+            // Light theme: a surface one step darker than the card so the
+            // awaiting-confirmation row stands out without overwhelming the
+            // chat stream.
+            tool_card_header_bg: h(0xf1f1f1),
             // Curated diff palette (Catppuccin Latte family) - darker,
             // saturated hues that read on a light surface.
             vc_added: h(0x40a02b),
@@ -612,27 +723,31 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // Agent state (Latte family): saturated red for a crash, the
             // neutral overlay grey for a silent session.
             agent_error: h(0xd20f39),
-            agent_stalled: h(0x7c7f93),
+            agent_stalled: h(0x808080),
             agent_claude: h(0xe89271),
             agent_codex: h(0x5b6cff),
         }
     } else {
         UiColors {
             use_theme_diff_washes: false,
+            // Every neutral in the shell is hue-free: greys carry no blue
+            // cast, so color in the UI only ever means status (`vc_*`),
+            // identity (`group_*`) or the accent. The greys below hold the
+            // luminance the blue-tinted ones had, so contrast is unchanged -
+            // only the hue is gone.
             base: h(TERMINAL_BACKGROUND_HEX),
             surface: h(0x212121),
             overlay: h(CHROME_BACKGROUND_HEX),
             border: h(BORDER_HEX),
             subtle: h(0x2a2a2a),
-            muted: h(0x96a2b3),
-            text: h(0xd5deea),
+            muted: h(0xa0a0a0),
+            text: h(0xdddddd),
             accent: h(0x57d5c4),
-            // Dark theme: a touch lighter and bluer than the card
-            // surface so the accent character of the
+            // Dark theme: a touch lighter than the card surface so the
             // awaiting row reads even at a glance.
-            tool_card_header_bg: h(0x2a2e3a),
+            tool_card_header_bg: h(0x2e2e2e),
             // Premium dark diff palette: Codex-like red/green intent,
-            // softened to sit inside the blue-black terminal surface.
+            // softened to sit inside the neutral terminal surface.
             vc_added: h(0x57d992),
             vc_modified: h(0xffd166),
             vc_deleted: h(0xff6f6a),
@@ -645,7 +760,7 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             vc_word_added: ha(0x57d992, 0.40),
             vc_word_deleted: ha(0xff6f6a, 0.40),
             // Broadcast stripes: high-luminance accents that keep their
-            // identity against the new blue-black pane edge.
+            // identity against the neutral pane edge.
             group_1: h(0x7eb6ff),
             group_2: h(0x57d992),
             group_3: h(0xffd166),
@@ -656,7 +771,7 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             group_8: h(0x9ea7ff),
             // Agent state: clear, bright marks on the muted cockpit shell.
             agent_error: h(0xff6f6a),
-            agent_stalled: h(0x96a2b3),
+            agent_stalled: h(0xa0a0a0),
             agent_claude: h(0xffa657),
             agent_codex: h(0x7eb6ff),
         }
@@ -667,7 +782,10 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
 mod tests {
     use super::*;
     use crate::terminal::element::apca_contrast;
-    use crate::theme::builtin::{claude, cursor, one_dark, paneflow_light, theme_by_name, vercel};
+    use crate::theme::builtin::{
+        claude_dark, claude_light, cursor_dark, cursor_light, paneflow_dark, paneflow_light,
+        theme_by_name, vercel_dark, vercel_light,
+    };
 
     #[test]
     fn light_theme_keeps_light_surfaces_after_overrides() {
@@ -685,7 +803,7 @@ mod tests {
 
         assert_eq!(ui.base, h(0xffffff));
         assert_eq!(ui.overlay, h(0xffffff));
-        assert_eq!(ui.border, h(0xe5e5ed));
+        assert_eq!(ui.border, h(0xe6e6e6));
         assert_ne!(ui.surface, ui.base);
         assert_ne!(ui.border, ui.base);
         assert_ne!(ui.text, ui.base);
@@ -693,7 +811,7 @@ mod tests {
 
     #[test]
     fn dark_theme_still_uses_dark_surface_overrides() {
-        let theme = apply_surface_overrides(one_dark());
+        let theme = apply_surface_overrides(paneflow_dark());
 
         assert_eq!(theme.background.l, h(TERMINAL_BACKGROUND_HEX).l);
         assert_eq!(theme.ansi_background.l, h(TERMINAL_BACKGROUND_HEX).l);
@@ -702,7 +820,7 @@ mod tests {
 
     #[test]
     fn dark_ui_uses_cockpit_surface_palette() {
-        let ui = ui_colors_with(&one_dark());
+        let ui = ui_colors_with(&paneflow_dark());
 
         assert_eq!(ui.base, h(TERMINAL_BACKGROUND_HEX));
         assert_eq!(ui.overlay, h(CHROME_BACKGROUND_HEX));
@@ -721,8 +839,8 @@ mod tests {
             expected_theme_diff_washes,
         ) in [
             (
-                "Vercel",
-                vercel(),
+                "Vercel Dark",
+                vercel_dark(),
                 h(0x000000),
                 h(0x000000),
                 h(0x0a0a0a),
@@ -730,8 +848,8 @@ mod tests {
                 true,
             ),
             (
-                "Claude",
-                claude(),
+                "Claude Dark",
+                claude_dark(),
                 h(0x1f1f1e),
                 h(0x1f1f1e),
                 h(0x262626),
@@ -739,8 +857,8 @@ mod tests {
                 false,
             ),
             (
-                "Cursor",
-                cursor(),
+                "Cursor Dark",
+                cursor_dark(),
                 h(0x141414),
                 h(0x181818),
                 h(0x181818),
@@ -786,11 +904,14 @@ mod tests {
     fn bundled_themes_satisfy_selection_contrast_invariant() {
         // All bundled themes must produce a readable selection foreground.
         for (label, theme) in [
-            ("One Dark", apply_surface_overrides(one_dark())),
-            ("PaneFlow Light", apply_surface_overrides(paneflow_light())),
-            ("Vercel", apply_surface_overrides(vercel())),
-            ("Claude", apply_surface_overrides(claude())),
-            ("Cursor", apply_surface_overrides(cursor())),
+            ("Paneflow Dark", apply_surface_overrides(paneflow_dark())),
+            ("Paneflow Light", apply_surface_overrides(paneflow_light())),
+            ("Vercel Dark", apply_surface_overrides(vercel_dark())),
+            ("Vercel Light", apply_surface_overrides(vercel_light())),
+            ("Claude Dark", apply_surface_overrides(claude_dark())),
+            ("Claude Light", apply_surface_overrides(claude_light())),
+            ("Cursor Dark", apply_surface_overrides(cursor_dark())),
+            ("Cursor Light", apply_surface_overrides(cursor_light())),
         ] {
             assert_selection_invariant(&theme, label);
         }
@@ -814,7 +935,7 @@ mod tests {
         // recomputed selection_foreground still satisfies the invariant.
         // This is the canonical "user picked a clashing selection color"
         // failure mode US-007 must guard against.
-        let mut theme = one_dark();
+        let mut theme = paneflow_dark();
         theme.foreground = h(0xff0000); // bright red text
         theme.selection = ha(0xff0000, 0.4); // selection of the same hue
         theme.recompute_selection_foreground();
@@ -838,7 +959,7 @@ mod tests {
         // distinct hues. The line-wash backgrounds are subtle (Zed's
         // editor_diff_hunk_*_background: 0.12 dark / 0.16 light) - the opaque
         // gutter hunk bar carries the strong status signal, not the wash.
-        let dark = ui_colors_with(&one_dark());
+        let dark = ui_colors_with(&paneflow_dark());
         assert_ne!(dark.vc_added, dark.vc_deleted);
         assert_ne!(dark.vc_added, dark.vc_modified);
         assert_ne!(dark.vc_deleted, dark.vc_modified);
@@ -869,13 +990,13 @@ mod tests {
             );
         }
 
-        let vercel = ui_colors_with(&vercel());
+        let vercel = ui_colors_with(&vercel_dark());
         let diff = vercel.diff_colors();
         assert_eq!(diff.added, vercel.vc_added);
         assert_eq!(diff.deleted, vercel.vc_deleted);
         assert_eq!(diff.added_background, vercel.vc_added_background);
 
-        let claude = ui_colors_with(&claude());
+        let claude = ui_colors_with(&claude_dark());
         let diff = claude.diff_colors();
         let canonical_dark_diff = dark.diff_colors();
         assert_eq!(diff.added, canonical_dark_diff.added);
@@ -887,7 +1008,7 @@ mod tests {
         );
         assert_eq!(claude.vc_modified, dark.vc_modified);
 
-        let cursor = ui_colors_with(&cursor());
+        let cursor = ui_colors_with(&cursor_dark());
         let diff = cursor.diff_colors();
         assert_eq!(diff.added, canonical_dark_diff.added);
         assert_eq!(diff.deleted, canonical_dark_diff.deleted);
@@ -904,7 +1025,7 @@ mod tests {
         // Running the recompute twice must yield the same value - guards
         // against accidental mutation of `foreground` or `selection` during
         // the algorithm.
-        let mut theme = one_dark();
+        let mut theme = paneflow_dark();
         theme.recompute_selection_foreground();
         let first = theme.selection_foreground;
         theme.recompute_selection_foreground();
@@ -934,11 +1055,14 @@ mod tests {
     fn bundled_themes_populate_at_least_18_distinct_syntax_hues() {
         // US-001 AC #1/#5: ≥ 18 distinct color values per theme (up from 8).
         for (label, theme) in [
-            ("One Dark", one_dark()),
-            ("PaneFlow Light", paneflow_light()),
-            ("Vercel", vercel()),
-            ("Claude", claude()),
-            ("Cursor", cursor()),
+            ("Paneflow Dark", paneflow_dark()),
+            ("Paneflow Light", paneflow_light()),
+            ("Vercel Dark", vercel_dark()),
+            ("Vercel Light", vercel_light()),
+            ("Claude Dark", claude_dark()),
+            ("Claude Light", claude_light()),
+            ("Cursor Dark", cursor_dark()),
+            ("Cursor Light", cursor_light()),
         ] {
             let distinct = distinct_count(&theme.syntax.all_slots());
             assert!(
@@ -955,11 +1079,14 @@ mod tests {
         // that token family invisible / indistinguishable from plain text.
         let default = Hsla::default();
         for (label, theme) in [
-            ("One Dark", one_dark()),
-            ("PaneFlow Light", paneflow_light()),
-            ("Vercel", vercel()),
-            ("Claude", claude()),
-            ("Cursor", cursor()),
+            ("Paneflow Dark", paneflow_dark()),
+            ("Paneflow Light", paneflow_light()),
+            ("Vercel Dark", vercel_dark()),
+            ("Vercel Light", vercel_light()),
+            ("Claude Dark", claude_dark()),
+            ("Claude Light", claude_light()),
+            ("Cursor Dark", cursor_dark()),
+            ("Cursor Light", cursor_light()),
         ] {
             for (i, slot) in theme.syntax.all_slots().iter().enumerate() {
                 assert_ne!(*slot, default, "{label}: syntax slot #{i} left at default");

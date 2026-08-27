@@ -125,8 +125,11 @@ See [keybindings.md](keybindings.md) for the action names.
 
 ### Why is my theme not hot-reloading?
 
-Runtime theme lookup is case-insensitive, but canonical names keep
-schema validation clean. See [themes.md](themes.md) for the bundled set.
+Paneflow ships four presets in two variants each: `"Paneflow Dark"`,
+`"Paneflow Light"`, `"Vercel Dark"`, `"Vercel Light"`, `"Claude Dark"`,
+`"Claude Light"`, `"Cursor Dark"`, and `"Cursor Light"`. Runtime lookup
+is case-insensitive, but canonical names keep schema validation clean.
+See [themes.md](themes.md) for the bundled set.
 
 Theme and typography changes hot-reload from `paneflow.json`. PaneFlow
 watches the config directory, debounces changes for 300 ms, and falls
@@ -135,7 +138,7 @@ back to a 500 ms `mtime` poll if the watcher cannot start.
 If the theme does not change within a second:
 
 1. Confirm you edited the config path for the build you are running (release vs `paneflow-dev`).
-2. Use a canonical bundled theme name.
+2. Use one of the eight bundled variant names above.
 3. If the file lives on a network mount or a sandboxed path, move it back to the normal config filesystem and restart once.
 
 ## Installation

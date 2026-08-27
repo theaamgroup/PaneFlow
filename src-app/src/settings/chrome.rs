@@ -25,11 +25,11 @@ use crate::ui_primitives::{ROW_RADIUS, squircle_skin};
 use crate::widgets::scrollbar;
 use crate::{PaneFlowApp, SettingsSection};
 
-/// Width of the settings nav rail. Wider than the app rails (Codex's settings
-/// sidebar fits grouped, spelled-out section labels). Same units as
-/// `SIDEBAR_WIDTH` (raw `f32`, wrapped in `px()` at the use site) so it can
-/// feed `sidebar_px` for title-bar brand-slot alignment.
-pub(crate) const SETTINGS_NAV_WIDTH: f32 = 260.;
+/// Width of the settings nav rail. Pinned to [`SIDEBAR_WIDTH`] so every rail
+/// in the app measures the same and the title-bar brand slot never shifts
+/// when Settings opens. Raw `f32`, wrapped in `px()` at the use site, so it
+/// can feed `sidebar_px` directly.
+pub(crate) const SETTINGS_NAV_WIDTH: f32 = crate::SIDEBAR_WIDTH;
 
 /// Content-panel background - `ui.base` (`#181818`), the same opaque surface the
 /// Review / Agents content panels use. Deliberately *lighter* than the `#141414`
@@ -68,12 +68,27 @@ const NAV_GROUPS: &[NavGroup] = &[
                 section: SettingsSection::General,
                 label: "General",
                 icon: "icons/settings.svg",
-                keywords: &["window", "decorations", "mode", "shell", "default shell"],
+                keywords: &[
+                    "window",
+                    "decorations",
+                    "mode",
+                    "shell",
+                    "default shell",
+                    "permissions",
+                    "bypass",
+                    "ai access",
+                    "free access",
+                    "injection fence",
+                    "notifications",
+                    "native",
+                    "toast",
+                    "bell",
+                ],
             },
             NavItem {
                 section: SettingsSection::Appearance,
-                label: "Themes",
-                icon: "icons/palette.svg",
+                label: "Appearance",
+                icon: "icons/shadow.svg",
                 keywords: &["theme", "themes", "colors", "appearance"],
             },
             NavItem {
@@ -81,20 +96,6 @@ const NAV_GROUPS: &[NavGroup] = &[
                 label: "Keyboard Shortcuts",
                 icon: "icons/bolt.svg",
                 keywords: &["keyboard", "shortcuts", "keys", "bindings", "hotkey"],
-            },
-            NavItem {
-                section: SettingsSection::Notifications,
-                label: "Notifications",
-                icon: "icons/bell.svg",
-                keywords: &[
-                    "notifications",
-                    "native",
-                    "os",
-                    "system",
-                    "bell",
-                    "toast",
-                    "agent",
-                ],
             },
         ],
     },
@@ -134,15 +135,7 @@ const NAV_GROUPS: &[NavGroup] = &[
                 label: "AI Agent",
                 icon: "icons/sparkles.svg",
                 keywords: &[
-                    "ai",
-                    "agent",
-                    "claude",
-                    "codex",
-                    "gemini",
-                    "bypass",
-                    "permissions",
-                    "launcher",
-                    "tab bar",
+                    "ai", "agent", "claude", "codex", "gemini", "launcher", "tab bar",
                 ],
             },
             NavItem {
@@ -159,10 +152,9 @@ const NAV_GROUPS: &[NavGroup] = &[
 pub(crate) fn section_title(section: SettingsSection) -> &'static str {
     match section {
         SettingsSection::General => "General",
-        SettingsSection::Appearance => "Themes",
+        SettingsSection::Appearance => "Appearance",
         SettingsSection::Shortcuts => "Keyboard Shortcuts",
         SettingsSection::Terminal => "Terminal",
-        SettingsSection::Notifications => "Notifications",
         SettingsSection::AiAgent => "AI Agent",
         SettingsSection::McpServers => "MCP Servers",
         SettingsSection::Workspaces => "Workspaces",
@@ -385,9 +377,6 @@ impl PaneFlowApp {
             SettingsSection::Appearance => self.render_appearance_content(cx).into_any_element(),
             SettingsSection::Shortcuts => self.render_shortcuts_content(cx).into_any_element(),
             SettingsSection::Terminal => self.render_terminal_content(cx).into_any_element(),
-            SettingsSection::Notifications => {
-                self.render_notifications_content(cx).into_any_element()
-            }
             SettingsSection::AiAgent => self.render_ai_agent_content(cx).into_any_element(),
             SettingsSection::McpServers => self.render_mcp_servers_content(cx).into_any_element(),
             SettingsSection::Workspaces => self.render_workspaces_content(cx).into_any_element(),
@@ -533,6 +522,7 @@ impl PaneFlowApp {
         self.reset_settings_scroll();
         self.font_dropdown_open = false;
         self.font_search.clear();
+        self.theme_dropdown_open = false;
         self.terminal_dropdown = None;
         self.general_dropdown = None;
         self.workspace_template_dropdown = None;

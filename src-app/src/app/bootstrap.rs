@@ -794,6 +794,7 @@ impl PaneFlowApp {
             settings_focus: cx.focus_handle(),
             mono_font_names: Vec::new(),
             font_dropdown_open: false,
+            theme_dropdown_open: false,
             font_search: String::new(),
             theme_mode,
             workspace_menu_open: None,
@@ -1029,6 +1030,10 @@ impl PaneFlowApp {
             },
         )
         .detach();
+
+        // Hydrate the motion switch from the config: it gates the
+        // `AnimatedHover` transitions and the primary sidebar slide.
+        crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
 
         app
     }

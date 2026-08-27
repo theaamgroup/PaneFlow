@@ -3,7 +3,7 @@
 Committed goldens for the Window-free rendering net. Each `<fixture>.txt` is the
 deterministic `LayoutState::golden_repr()` of one fixture in
 `golden_frame_tests` (`../mod.rs`), produced with **no Window / App / GPU /
-display** — a fixed grid, theme (`one_dark`), font, and cell dimensions.
+display** — a fixed grid, theme (`paneflow_dark`), font, and cell dimensions.
 
 Floats are rendered at fixed precision and no GPUI `Debug` impl is relied upon,
 so the bytes are reproducible across platforms and the diff is human-reviewable.

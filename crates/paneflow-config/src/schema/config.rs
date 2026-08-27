@@ -14,7 +14,9 @@ pub struct PaneFlowConfig {
     /// Default shell binary path. `None` uses the system default.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub default_shell: Option<String>,
-    /// Terminal color theme name (e.g. "One Dark", "PaneFlow Light", "Vercel", "Claude", "Cursor").
+    /// Terminal color theme name: one preset's light or dark variant (e.g.
+    /// "Paneflow Dark", "Paneflow Light", "Vercel Light", "Cursor Dark").
+    /// Pre-preset names ("One Dark", "Vercel", ...) still resolve.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub theme: Option<String>,
     /// Theme selection mode: `"light"`, `"dark"`, or `"system"`. `theme`
@@ -43,6 +45,12 @@ pub struct PaneFlowConfig {
     /// it never touches the terminal renderer.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub unfocused_pane_opacity: Option<f32>,
+    /// Minimize non-essential interface motion: hover transitions settle
+    /// instantly and GPUI's decorative animations (spinners, animated images)
+    /// render a static frame. `None`/`false` keeps the full motion. Applied
+    /// through `App::set_reduce_motion`, so it hot-reloads.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub reduce_motion: Option<bool>,
     /// Terminal line height multiplier (default: 1.2, valid range: 1.0-2.5).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub line_height: Option<f32>,
@@ -343,6 +351,11 @@ impl PaneFlowConfig {
         }
 
         self.macos_chrome_material_enabled()
+    }
+
+    /// Resolve the reduce-motion switch. Absent means full motion.
+    pub fn reduce_motion_enabled(&self) -> bool {
+        self.reduce_motion.unwrap_or(false)
     }
 
     /// Resolve `agent_stall_threshold_secs`: default 60, clamped to
