@@ -40,6 +40,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `font_weight` | string or null | `normal` | `thin`, `extra_light`, `light`, `semi_light`, `normal`, `medium`, `semi_bold`, `bold`, `extra_bold`, `black`, `extra_black`. |
 | `line_height` | number or null | `1.2` | Multiplier, range `1.0` to `2.5`. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `cell_width` | number or null | `0.6` | Multiplier, range `0.3` to `2.0`. Out-of-range values revert to the default with a warning; they are not clamped. |
+| `unfocused_pane_opacity` | number or null | `0.7` | Opacity of panes without focus when a workspace has more than one pane, range `0.15` to `1.0`. `1.0` disables the dim. Values outside the range are clamped with a warning; non-finite values fall back to the default. |
 | `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material in the primary navigation card. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
@@ -264,6 +265,7 @@ test fixture leaves it unset.
   "font_weight": "normal",
   "line_height": 1.2,
   "cell_width": 0.6,
+  "unfocused_pane_opacity": 0.7,
   "window_decorations": "client",
   "window_backdrop": "auto",
   "macos_chrome_material": true,

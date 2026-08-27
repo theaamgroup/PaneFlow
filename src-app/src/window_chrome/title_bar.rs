@@ -1,3 +1,5 @@
+use crate::ui_primitives::TooltipDelayExt;
+
 use gpui::{
     Context, Decorations, EventEmitter, IntoElement, MouseButton, Render, Styled, Window,
     WindowControlArea, div, prelude::*, px, svg,
@@ -254,7 +256,7 @@ impl Render for TitleBar {
                             delta,
                         ));
                     })
-                    .tooltip(move |_window, cx| {
+                    .delayed_tooltip(move |_window, cx| {
                         let label = sidebar_tooltip.clone();
                         cx.new(|_| crate::app::sidebar::SidebarTooltip { label })
                             .into()

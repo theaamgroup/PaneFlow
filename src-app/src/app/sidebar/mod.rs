@@ -486,8 +486,7 @@ impl PaneFlowApp {
 
         list = self.render_workspace_rows(list, ui, cx);
         sidebar = sidebar.child(self.sidebar_list_wrapper(list, cx));
-        sidebar = sidebar.child(self.render_sidebar_settings_footer(self.cli_menu_items(), cx));
-        sidebar = sidebar.child(self.render_mode_toggle(cx));
+        sidebar = sidebar.child(self.render_sidebar_settings_footer(cx));
         sidebar
     }
 
@@ -921,39 +920,6 @@ impl PaneFlowApp {
         } else {
             None
         }
-    }
-
-    /// Items rendered inside the bottom Settings popover when in CLI
-    /// mode. Order: creation actions first, destructive last, escape
-    /// hatch to the Settings window.
-    fn cli_menu_items(&self) -> Vec<crate::app::sidebar_actions_menu::SidebarMenuItem> {
-        use crate::app::sidebar_actions_menu::SidebarMenuItem;
-        let mut items = vec![SidebarMenuItem {
-            id: "cli-menu-themes".into(),
-            icon: "icons/palette.svg",
-            label: "Themes".into(),
-            on_click: Box::new(|app, w, cx| {
-                app.open_theme_picker(w, cx);
-            }),
-        }];
-        items.push(SidebarMenuItem {
-            id: "cli-menu-about".into(),
-            icon: "icons/info-circle.svg",
-            label: "About Paneflow".into(),
-            on_click: Box::new(|app, _w, cx| {
-                app.show_about_dialog = true;
-                cx.notify();
-            }),
-        });
-        items.push(SidebarMenuItem {
-            id: "cli-menu-open-settings".into(),
-            icon: "icons/settings.svg",
-            label: "Settings".into(),
-            on_click: Box::new(|app, w, cx| {
-                app.open_settings_window(w, cx);
-            }),
-        });
-        items
     }
 
     pub(crate) fn sidebar_list_wrapper(

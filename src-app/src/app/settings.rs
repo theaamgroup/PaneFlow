@@ -46,8 +46,6 @@ impl PaneFlowApp {
     pub(crate) fn open_settings_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace_menu_open = None;
         self.profile_menu_open = None;
-        self.agents_view.sidebar_actions_menu_open = false;
-        self.agents_view.sidebar_mode_picker_open = false;
         self.settings_section = Some(SettingsSection::General);
         self.reset_settings_scroll();
         self.terminal_dropdown = None;

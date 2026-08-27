@@ -1034,12 +1034,6 @@ struct AgentsViewState {
     /// Stable id of the skill whose Copy button was just clicked. The card
     /// flips its label to "Copied" while this matches; a timer reverts it.
     pub(crate) agents_skills_copied: Option<String>,
-    /// True while the bottom-of-sidebar "Settings" popover is open.
-    /// Shared between CLI and Agents sidebars - only one popover is
-    /// ever visible because only one sidebar is rendered at a time.
-    pub(crate) sidebar_actions_menu_open: bool,
-    /// Whether the compact interface picker above the sidebar footer is open.
-    pub(crate) sidebar_mode_picker_open: bool,
     /// Open branch selector for the Agents environment card. The menu is
     /// scoped to a cwd because project threads and free chats can point at
     /// different repositories.
@@ -1761,6 +1755,10 @@ impl Render for PaneFlowApp {
                 let on_resize_end = std::rc::Rc::new(move |cx: &mut App| {
                     let _ = app_weak.update(cx, |app, cx| app.save_session(cx));
                 });
+                // Project focus onto the per-pane unfocused dim before the
+                // tree paints. GPUI repaints the window on every focus change
+                // and each write is idempotent, so a steady frame is a no-op.
+                root.sync_unfocused_dim(window, cx);
                 root.render(window, cx, Some(on_resize_end))
             } else {
                 div()

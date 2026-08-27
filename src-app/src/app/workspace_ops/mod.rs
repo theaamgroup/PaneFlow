@@ -200,8 +200,6 @@ impl PaneFlowApp {
         self.profile_menu_open = None;
         self.files_menu_open = None;
         self.agents_view.agents_menu_open = None;
-        self.agents_view.sidebar_actions_menu_open = false;
-        self.agents_view.sidebar_mode_picker_open = false;
     }
 
     pub(crate) fn active_workspace(&self) -> Option<&Workspace> {

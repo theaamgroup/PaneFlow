@@ -926,8 +926,6 @@ impl PaneFlowApp {
                 agents_skills: Vec::new(),
                 agents_skills_loading: false,
                 agents_skills_copied: None,
-                sidebar_actions_menu_open: false,
-                sidebar_mode_picker_open: false,
                 agents_branch_menu: None,
                 agents_environment_git: std::collections::HashMap::new(),
                 agents_environment_panel_open: true,
