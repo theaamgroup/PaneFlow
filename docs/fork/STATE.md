@@ -155,6 +155,31 @@ the work is done, and that has already happened twice in this project (once
 when the regex matched the `update/linux/` PATH, once when it could not see
 `!cfg!`).
 
+**The negative control is a MEASURED number and it drifts legitimately. A
+mismatch is not a bug to hunt - it is a doc to re-measure.** It moved 137 ->
+138 in `9e7655c6` ("give runtime_paths an env seam so tests never mutate
+$TMPDIR"), which split `socket_path_spec` into a thin wrapper plus a testable
+`socket_path_spec_from(env: &impl Fn(&str) -> Option<OsString>)`. The extracted
+inner function needs the same `#[cfg(unix)]` gate as the wrapper it came out
+of, so `src-app/src/runtime_paths.rs` went 7 -> 8 sites. Correct code,
+correctly gated, nothing to remove. `925e21ce` had written "137 times" into
+CLAUDE.md one commit earlier, so the doc was accurate for exactly one commit
+and then silently stale for twenty-two; `d007e58b` corrected CLAUDE.md and
+both STATE.md copies to 138.
+
+Two things worth keeping from tracing that one:
+
+- **Do not bisect this with checkouts.** Replicate the `CTL_UNIX` pipeline
+  (`scan` -> `content_match` on the CONTENT only -> `nocomment`) over
+  `git grep -n -E 'cfg!?\(|cfg_attr' <rev> -- '*.rs'`, which reads the object
+  store and needs no working tree. Validate the replica against the real script
+  at a known commit BEFORE trusting it, for the same reason the negative control
+  exists.
+- **Diff the sites as a per-file multiset, not a set.** Keying on
+  `path:content` collapses two identical `#[cfg(unix)]` lines in one file, so
+  the first attempt reported zero added and zero removed while the total had
+  moved by one.
+
 **A census at 0 is not a finished platform removal, and 2c proved it.** After
 the zero-condition was reached, an adversarial grok audit (run WITHOUT
 `--json-schema`, because that flag suppresses the tool loop on open-ended
