@@ -1625,7 +1625,17 @@ impl PaneFlowApp {
                         .into()
                     }
                 })
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                    // Issue #83: a double-click delivers BOTH clicks to this
+                    // listener (the row's own double-click-to-rename below
+                    // works only because it does), so without this the second
+                    // half of one would confirm an arm the user never saw.
+                    // The settle delay in `click_outcome` is the real guard;
+                    // this is the belt to its braces.
+                    if matches!(e, ClickEvent::Mouse(m) if m.down.click_count >= 2) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     // Re-resolve both indices by id: rows reorder under a drag,
                     // and a stale position would close the wrong tab.
                     if let Some((at_ws, at_tab)) = this
@@ -1648,6 +1658,7 @@ impl PaneFlowApp {
                         match crate::app::close_guard::click_outcome(
                             this.pending_close.as_ref(),
                             &target,
+                            std::time::Instant::now(),
                         ) {
                             // Re-resolves the stable ids itself, so a tab that
                             // moved between the two clicks still closes the

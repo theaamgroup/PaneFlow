@@ -9,7 +9,7 @@
 //! the request/confirm/cancel entry points); the inline arm-then-confirm
 //! buttons land in a later task.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::agent_launcher::TerminalAgent;
 
@@ -122,6 +122,9 @@ pub(crate) struct PendingClose {
     pub(crate) extra_agents: usize,
     /// Tab title (or pane title) shown in the modal copy. Empty is allowed.
     pub(crate) label: String,
+    /// When this close was armed, so [`click_outcome`] can refuse to treat the
+    /// second half of a double-click as a decision. Refreshed on every re-arm.
+    pub(crate) armed_at: Instant,
 }
 
 impl PendingClose {
@@ -153,12 +156,27 @@ pub(crate) enum ClickOutcome {
     Confirm,
 }
 
+/// How long an inline arm has to have been on screen before a click on the
+/// same X counts as the decision to close.
+///
+/// A double-click delivers BOTH clicks to the button's listener, so without
+/// this the second one confirms a kill behind an armed state that was painted
+/// for a single frame - imperceptible, and on the two most-clicked close
+/// controls in the app. 350 ms clears the macOS double-click interval while
+/// staying under a deliberate second click.
+pub(crate) const ARM_SETTLE: Duration = Duration::from_millis(350);
+
 /// Decide whether a click on the X for `this_target` arms a confirmation or
 /// confirms the one already pending.
 ///
 /// Pure on purpose - the two call sites (the sidebar rail row's X and the pane
 /// header's X) are both deep inside GPUI closures where nothing is testable,
 /// so the whole decision lives here instead.
+///
+/// A click on the SAME target inside [`ARM_SETTLE`] re-arms rather than
+/// confirming: both inline X buttons receive both clicks of a double-click, so
+/// the settle delay is what makes the armed state a perception gate instead of
+/// a single unperceivable frame.
 ///
 /// A pending close in [`ConfirmStyle::Modal`] never confirms from here: the
 /// modal owns its own Confirm button and its own `Enter`, and a click that
@@ -173,6 +191,7 @@ pub(crate) enum ClickOutcome {
 pub(crate) fn click_outcome(
     pending: Option<&PendingClose>,
     this_target: &CloseTarget,
+    now: Instant,
 ) -> ClickOutcome {
     let Some(pending) = pending else {
         return ClickOutcome::Arm;
@@ -187,7 +206,11 @@ pub(crate) fn click_outcome(
         } => pending.targets_tab(*workspace_id, *tab_id),
         CloseTarget::Pane { pane } => pending.targets_pane(pane),
     };
-    if same_target {
+    // A second click inside [`ARM_SETTLE`] is a double-click, not a decision:
+    // the armed state was painted for one frame the user could not perceive.
+    // Re-arming refreshes `armed_at`, so a burst of clicks never accumulates
+    // into a confirmation either.
+    if same_target && now.duration_since(pending.armed_at) >= ARM_SETTLE {
         ClickOutcome::Confirm
     } else {
         ClickOutcome::Arm
@@ -225,13 +248,24 @@ mod tests {
     }
 
     fn inline_pending(target: CloseTarget) -> PendingClose {
+        inline_pending_armed_at(target, Instant::now())
+    }
+
+    fn inline_pending_armed_at(target: CloseTarget, armed_at: Instant) -> PendingClose {
         PendingClose {
             target,
             style: ConfirmStyle::Inline,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
             label: String::new(),
+            armed_at,
         }
+    }
+
+    /// A `now` far enough past the arm that the settle delay has elapsed, for
+    /// the tests that are about something other than the delay itself.
+    fn settled(pending: &PendingClose) -> Instant {
+        pending.armed_at + ARM_SETTLE
     }
 
     /// Both halves of the Escape trade. Consuming unconditionally would eat a
@@ -258,29 +292,65 @@ mod tests {
 
     #[test]
     fn a_click_with_nothing_pending_arms() {
-        assert_eq!(click_outcome(None, &tab_target(1, 2)), ClickOutcome::Arm);
+        assert_eq!(
+            click_outcome(None, &tab_target(1, 2), Instant::now()),
+            ClickOutcome::Arm
+        );
     }
 
     #[test]
     fn a_second_click_on_the_same_inline_target_confirms() {
         let pending = inline_pending(tab_target(1, 2));
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2)),
+            click_outcome(Some(&pending), &tab_target(1, 2), settled(&pending)),
             ClickOutcome::Confirm
         );
+    }
+
+    /// The reason [`ARM_SETTLE`] exists. Both of the inline X buttons receive
+    /// BOTH clicks of a double-click, so without a settle delay the second one
+    /// confirms a kill behind an armed state that was painted for a single
+    /// frame - imperceptible, on the two most-clicked close controls in the
+    /// app, and not recoverable by undo (the tab comes back, the agent does
+    /// not).
+    #[test]
+    fn a_second_click_inside_the_settle_delay_re_arms_instead_of_confirming() {
+        let armed_at = Instant::now();
+        let pending = inline_pending_armed_at(tab_target(1, 2), armed_at);
+        for early in [
+            Duration::from_millis(0),
+            Duration::from_millis(100),
+            ARM_SETTLE - Duration::from_millis(1),
+        ] {
+            assert_eq!(
+                click_outcome(Some(&pending), &tab_target(1, 2), armed_at + early),
+                ClickOutcome::Arm,
+                "a click {early:?} after the arm is the tail of a double-click, not a decision"
+            );
+        }
+        // Past the delay the armed state has been on screen long enough to
+        // read, so the second click means what it says.
+        for late in [ARM_SETTLE, Duration::from_millis(500)] {
+            assert_eq!(
+                click_outcome(Some(&pending), &tab_target(1, 2), armed_at + late),
+                ClickOutcome::Confirm,
+                "a deliberate second click {late:?} after the arm must still confirm"
+            );
+        }
     }
 
     #[test]
     fn a_click_on_a_different_inline_target_re_arms_instead_of_confirming() {
         let pending = inline_pending(tab_target(1, 2));
+        let now = settled(&pending);
         // Same workspace, different tab.
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 3)),
+            click_outcome(Some(&pending), &tab_target(1, 3), now),
             ClickOutcome::Arm
         );
         // Same tab id, different workspace.
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(9, 2)),
+            click_outcome(Some(&pending), &tab_target(9, 2), now),
             ClickOutcome::Arm
         );
     }
@@ -297,7 +367,7 @@ mod tests {
         let mut pending = inline_pending(tab_target(1, 2));
         pending.style = ConfirmStyle::Modal;
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2)),
+            click_outcome(Some(&pending), &tab_target(1, 2), settled(&pending)),
             ClickOutcome::Arm
         );
     }
@@ -309,22 +379,23 @@ mod tests {
         let b = test_pane(cx, 1);
 
         let pending = inline_pending(CloseTarget::Pane { pane: a.clone() });
+        let now = settled(&pending);
         assert_eq!(
-            click_outcome(Some(&pending), &CloseTarget::Pane { pane: a.clone() }),
+            click_outcome(Some(&pending), &CloseTarget::Pane { pane: a.clone() }, now),
             ClickOutcome::Confirm
         );
         assert_eq!(
-            click_outcome(Some(&pending), &CloseTarget::Pane { pane: b }),
+            click_outcome(Some(&pending), &CloseTarget::Pane { pane: b }, now),
             ClickOutcome::Arm
         );
         // A pane click never confirms a pending TAB close, and vice versa.
         let tab_pending = inline_pending(tab_target(1, 2));
         assert_eq!(
-            click_outcome(Some(&tab_pending), &CloseTarget::Pane { pane: a }),
+            click_outcome(Some(&tab_pending), &CloseTarget::Pane { pane: a }, now),
             ClickOutcome::Arm
         );
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2)),
+            click_outcome(Some(&pending), &tab_target(1, 2), now),
             ClickOutcome::Arm
         );
     }
@@ -484,6 +555,7 @@ mod tests {
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
             label: "Fix the bug".into(),
+            armed_at: Instant::now(),
         };
         assert!(pending.targets_tab(1, 2));
         assert!(!pending.targets_tab(1, 3));
@@ -513,6 +585,7 @@ mod tests {
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
             label: String::new(),
+            armed_at: Instant::now(),
         };
         assert!(pane_pending.targets_pane(&a));
         assert!(!pane_pending.targets_pane(&b));
@@ -526,6 +599,7 @@ mod tests {
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
             label: String::new(),
+            armed_at: Instant::now(),
         };
         assert!(!tab_pending.targets_pane(&a));
         assert!(!tab_pending.targets_pane(&b));

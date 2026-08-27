@@ -567,7 +567,11 @@ impl PaneFlowApp {
                 // still closes instantly when nothing live would die, so a
                 // plain shell keeps today's one-click behaviour.
                 let target = CloseTarget::Pane { pane: pane.clone() };
-                match click_outcome(self.pending_close.as_ref(), &target) {
+                match click_outcome(
+                    self.pending_close.as_ref(),
+                    &target,
+                    std::time::Instant::now(),
+                ) {
                     // `confirm_pending_close_pane` is the `Window`-free half
                     // on purpose: this subscription has no `&mut Window`.
                     ClickOutcome::Confirm => self.confirm_pending_close_pane(pane, cx),

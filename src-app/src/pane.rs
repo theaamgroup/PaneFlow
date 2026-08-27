@@ -1321,7 +1321,17 @@ impl Pane {
             // The header is a drag handle; without this the press that closes a
             // pane would also arm a pane drag.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _e: &ClickEvent, _window, cx| {
+            .on_click(cx.listener(|this, e: &ClickEvent, _window, cx| {
+                // Issue #83: GPUI fires this listener for BOTH clicks of a
+                // double-click, and the second one used to confirm the arm the
+                // first one raised - killing an agent's whole process group
+                // behind a confirmation painted for a single frame. The settle
+                // delay in `close_guard::click_outcome` is the real guard;
+                // dropping the extra click here is the belt to its braces.
+                if matches!(e, ClickEvent::Mouse(m) if m.down.click_count >= 2) {
+                    cx.stop_propagation();
+                    return;
+                }
                 this.close(cx);
                 cx.stop_propagation();
             }))

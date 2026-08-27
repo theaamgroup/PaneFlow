@@ -256,6 +256,7 @@ impl PaneFlowApp {
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
                 label: confirm_label(&label),
+                armed_at: now,
             }),
             cx,
         );
@@ -287,6 +288,7 @@ impl PaneFlowApp {
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
                 label: confirm_label(&label),
+                armed_at: now,
             }),
             cx,
         );
@@ -809,6 +811,45 @@ mod tests {
         );
     }
 
+    /// The belt to [`crate::app::close_guard::ARM_SETTLE`]'s braces.
+    ///
+    /// GPUI fires an `on_click` listener for BOTH clicks of a double-click -
+    /// the sidebar row's own double-click-to-rename works only because it
+    /// does - so a double-click on either inline X used to arm and then
+    /// immediately confirm, killing an agent's whole process group behind a
+    /// confirmation painted for one frame nobody can perceive. Neither button
+    /// may act on a click that arrives with `click_count >= 2`.
+    ///
+    /// Scanned rather than driven: both listeners are GPUI closures with no
+    /// test seam, and the pane header's X reaches the guard indirectly (it
+    /// emits `PaneEvent::CloseRequested`, which is where the click count is
+    /// already gone - `pane.rs` is the only place that still has it).
+    #[test]
+    fn neither_inline_close_button_acts_on_the_second_click_of_a_double_click() {
+        let sidebar = include_str!("sidebar/mod.rs");
+        let tab_x = sidebar
+            .split("let close_armed = self.pending_close")
+            .nth(1)
+            .and_then(|rest| rest.split("let row_shell =").next())
+            .expect("sidebar tab close button");
+        let pane_src = include_str!("../pane.rs");
+        let header_x = pane_src
+            .split("fn render_close_button(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// Close this pane").next())
+            .expect("render_close_button body");
+
+        for (label, body) in [
+            ("the sidebar tab x", tab_x),
+            ("the pane header x", header_x),
+        ] {
+            assert!(
+                body.contains("click_count >= 2"),
+                "{label} must drop the second click of a double-click, or it arms and confirms                  in one gesture: {body}"
+            );
+        }
+    }
+
     /// R6: Escape stands an inline arm down, through the one mutator, and
     /// without touching focus - `cancel_pending_close` would re-focus the
     /// first pane out from under whatever is typing, and a write that skipped
@@ -994,6 +1035,7 @@ mod tests {
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
             label: String::new(),
+            armed_at: std::time::Instant::now(),
         }
     }
 
