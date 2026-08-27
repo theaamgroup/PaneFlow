@@ -83,6 +83,16 @@ actions!(
         Paste,
         SelectAll,
         OpenHelp,
+        // Issue #105: Settings and the theme picker are reachable from the
+        // menu bar (PaneFlow > Settings..., View > Themes...), not only from
+        // the sidebar footer and the title-bar profile menu. Both are
+        // deliberately absent from `keybindings::registry::ACTIONS`, exactly
+        // like `About` and `OpenHelp`: a menu-only action with no default
+        // chord would otherwise show up as a permanently `Unassigned` row in
+        // Settings > Keyboard Shortcuts. `Cmd+,` is NOT bound - a global
+        // default there would swallow the comma from every focused terminal.
+        OpenSettings,
+        ShowThemes,
         // US-022 (cmux port 2026-Q2) - markdown pane navigation. Scoped to
         // the `Markdown` key context (root) and `MarkdownSearch` (when the
         // find overlay is open). Defined as separate actions from terminal

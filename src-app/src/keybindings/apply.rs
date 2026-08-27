@@ -292,6 +292,30 @@ mod tests {
         );
     }
 
+    /// Issue #105: Settings gained a menu-bar item but deliberately did NOT
+    /// gain `Cmd+,`. The issue resolved that explicitly, and it is the right
+    /// call here: a global default on that chord would swallow the comma from
+    /// every focused terminal running a program that wants it. Modelled on the
+    /// `secondary-tab` prohibition above; checks both tables, because a macOS
+    /// convention chord would most plausibly be added to the macOS-only layer.
+    #[test]
+    fn no_default_binds_the_macos_preferences_chord() {
+        use super::super::defaults::{DEFAULTS, MACOS_ONLY_DEFAULTS};
+
+        let claimants: Vec<&str> = DEFAULTS
+            .iter()
+            .chain(MACOS_ONLY_DEFAULTS.iter())
+            .filter(|d| {
+                keystrokes_conflict(d.key, "cmd-,") || keystrokes_conflict(d.key, "secondary-,")
+            })
+            .map(|d| d.action_name)
+            .collect();
+        assert!(
+            claimants.is_empty(),
+            "issue #105 resolved that Settings does not claim cmd-,; bound to: {claimants:?}"
+        );
+    }
+
     /// US-020: a user who already bound `secondary-]` to something else keeps
     /// it. `apply_keybindings` drops the default sharing a user-claimed chord
     /// before registering it, so no ambiguous double binding - and no

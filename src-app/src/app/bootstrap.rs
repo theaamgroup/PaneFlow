@@ -923,12 +923,18 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
     use gpui::{Menu, MenuItem, OsAction};
 
     use crate::{
-        About, CloseWorkspace, Copy, NewWorkspace, NextWorkspace, OpenHelp, Paste, Quit, SelectAll,
+        About, CloseWorkspace, Copy, NewWorkspace, NextWorkspace, OpenHelp, OpenSettings, Paste,
+        Quit, SelectAll, ShowThemes,
     };
 
     cx.set_menus(vec![
         Menu::new("PaneFlow").items(vec![
             MenuItem::action("About PaneFlow", About),
+            // Issue #105: Settings gets a first-class menu route. It sits
+            // above the separator with About, leaving Quit alone below it.
+            // No `Cmd+,`: a global default on that chord would swallow the
+            // comma from every focused terminal.
+            MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
             MenuItem::action("Quit PaneFlow", Quit),
         ]),
@@ -938,6 +944,10 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
             MenuItem::separator(),
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
         ]),
+        // Issue #105: the theme picker used to be reachable only from the
+        // title-bar profile menu. `View` is the conventional macOS slot for
+        // appearance, and sits between Edit and Window.
+        Menu::new("View").items(vec![MenuItem::action("Themes…", ShowThemes)]),
         Menu::new("Window").items(vec![
             MenuItem::action("New Workspace", NewWorkspace),
             MenuItem::action("Close Workspace", CloseWorkspace),
@@ -965,8 +975,9 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
 #[cfg(target_os = "macos")]
 pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     use crate::{
-        About, CloseWorkspace, Copy, NewWorkspace, NextWorkspace, OpenHelp, PaneFlowApp, Paste,
-        Quit, SelectAll, TerminalCopy, TerminalPaste, TerminalSelectAll,
+        About, CloseWorkspace, Copy, NewWorkspace, NextWorkspace, OpenHelp, OpenSettings,
+        PaneFlowApp, Paste, Quit, SelectAll, ShowThemes, TerminalCopy, TerminalPaste,
+        TerminalSelectAll,
     };
 
     fn with_active_paneflow_window(
@@ -994,6 +1005,20 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
         with_active_paneflow_window(cx, |app, _window, cx| {
             app.show_about_dialog = true;
             cx.notify();
+        });
+    });
+
+    // Issue #105: both take a real `&mut Window`, which is exactly what
+    // `with_active_paneflow_window` hands the closure.
+    cx.on_action(|_: &OpenSettings, cx| {
+        with_active_paneflow_window(cx, |app, window, cx| {
+            app.open_settings_window(window, cx);
+        });
+    });
+
+    cx.on_action(|_: &ShowThemes, cx| {
+        with_active_paneflow_window(cx, |app, window, cx| {
+            app.open_theme_picker(window, cx);
         });
     });
 
@@ -1117,6 +1142,74 @@ mod tests {
             let (visible, animation) = restored_primary_sidebar(saved);
             assert!(visible, "the rail defaults to visible");
             assert!(animation.is_none(), "and never animates on boot");
+        }
+    }
+
+    /// Issue #105: Settings and Themes are reachable from the macOS menu bar,
+    /// not only from the sidebar footer and the title-bar profile menu.
+    /// `install_macos_menu_bar` hands a static tree to `cx.set_menus` on a
+    /// real `App`, which a unit test cannot build or dispatch against, so the
+    /// tree is pinned from source instead: `PaneFlow > Settings...` above the
+    /// separator that fences Quit off, and a `View` menu carrying `Themes...`
+    /// in the conventional slot between Edit and Window.
+    #[test]
+    fn the_macos_menu_bar_routes_settings_and_themes() {
+        let production = include_str!("bootstrap.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let menus = production
+            .split("cx.set_menus(vec![")
+            .nth(1)
+            .expect("the menu-bar tree");
+
+        let paneflow_menu = menus
+            .split("Menu::new(\"PaneFlow\")")
+            .nth(1)
+            .and_then(|rest| rest.split("Menu::new(\"Edit\")").next())
+            .expect("the PaneFlow menu");
+        let settings_at = paneflow_menu
+            .find("MenuItem::action(\"Settings…\", OpenSettings)")
+            .expect("PaneFlow > Settings... must exist and dispatch OpenSettings");
+        let separator_at = paneflow_menu
+            .find("MenuItem::separator()")
+            .expect("the PaneFlow menu keeps the separator above Quit");
+        assert!(
+            settings_at < separator_at,
+            "Settings... sits above the separator, beside About PaneFlow"
+        );
+
+        let view_menu = menus
+            .split("Menu::new(\"View\")")
+            .nth(1)
+            .and_then(|rest| rest.split("Menu::new(\"Window\")").next())
+            .expect("a View menu between Edit and Window");
+        assert!(
+            view_menu.contains("MenuItem::action(\"Themes…\", ShowThemes)"),
+            "View > Themes... must dispatch ShowThemes"
+        );
+        let edit_at = menus.find("Menu::new(\"Edit\")").expect("the Edit menu");
+        let view_at = menus.find("Menu::new(\"View\")").expect("the View menu");
+        let window_at = menus
+            .find("Menu::new(\"Window\")")
+            .expect("the Window menu");
+        assert!(
+            edit_at < view_at && view_at < window_at,
+            "View belongs between Edit and Window"
+        );
+
+        // AppKit validates a menu item through `is_action_available`, which
+        // can miss the render-root listeners while focus sits in a terminal.
+        // Without an app-global fallback the item paints permanently greyed,
+        // which is why every other menu action has one.
+        for fallback in [
+            "cx.on_action(|_: &OpenSettings, cx|",
+            "cx.on_action(|_: &ShowThemes, cx|",
+        ] {
+            assert!(
+                production.contains(fallback),
+                "missing app-global menu fallback `{fallback}`; the item would grey out"
+            );
         }
     }
 

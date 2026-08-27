@@ -866,10 +866,6 @@ impl PaneFlowApp {
             .flex()
             .flex_col();
 
-        let new_workspace_tooltip = self.shortcut_for_action("new_workspace").map_or_else(
-            || "New workspace".to_string(),
-            |key| format!("New workspace  {key}"),
-        );
         sidebar = sidebar.child(
             div()
                 // Tight enough that the header reads as the list's first line
@@ -889,41 +885,7 @@ impl PaneFlowApp {
                         .text_size(px(13.))
                         .text_color(ui.muted)
                         .child("Workspaces"),
-                )
-                .child({
-                    // The header action is skinned as a rail row, not as its
-                    // own control: same hover tint and same continuous corner,
-                    // so it reads as part of the list it heads.
-                    let hover_bg = crate::app::constants::sidebar_tab_hover_background();
-                    squircle_skin(
-                        div()
-                            .id("sidebar-new-workspace")
-                            .size(px(28.))
-                            .flex()
-                            .items_center()
-                            .justify_center(),
-                        "sidebar-new-workspace-group",
-                        ROW_RADIUS,
-                        None,
-                        Some(hover_bg),
-                    )
-                    .delayed_tooltip(move |_w, cx| {
-                        cx.new(|_| SidebarTooltip {
-                            label: new_workspace_tooltip.clone().into(),
-                        })
-                        .into()
-                    })
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.create_workspace_with_picker(window, cx);
-                    }))
-                    .child(
-                        svg()
-                            .size(px(SIDEBAR_FOLDER_ICON_WIDTH))
-                            .flex_none()
-                            .path("icons/folder-plus.svg")
-                            .text_color(ui.muted),
-                    )
-                }),
+                ),
         );
 
         // Workspace list - scrollable area. Wheel-scroll comes from
@@ -3237,6 +3199,31 @@ mod tests {
                 "{label} must hand focus back when its rename ends"
             );
         }
+    }
+
+    /// Issue #105: the "Workspaces" header no longer carries a `+`. Creating
+    /// a workspace already has four other entry points (`Cmd+Shift+N`, the
+    /// Window menu, the profile menu, and the empty-state "Open folder"
+    /// button), and the header glyph was the redundant fifth. Read from
+    /// source because `PaneFlowApp` cannot be built in a unit test (bootstrap
+    /// opens a window and does real I/O), so the rendered element tree is
+    /// unreachable from here.
+    #[test]
+    fn the_workspaces_header_carries_no_new_workspace_button() {
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        assert!(
+            !production.contains("sidebar-new-workspace"),
+            "the sidebar `+` button is back; issue #105 removed it"
+        );
+        // The empty-state open-folder button is a different affordance on a
+        // different surface, and deliberately stays.
+        assert!(
+            production.contains("empty-new-ws"),
+            "the empty-state open-folder button must survive the `+` removal"
+        );
     }
 
     #[test]

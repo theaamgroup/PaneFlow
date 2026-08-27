@@ -1,6 +1,8 @@
 //! Theme picker modal - command-palette style selector opened from the
-//! title-bar burger menu. Lists bundled themes from `crate::theme::THEMES`
-//! with a typeahead filter and keyboard navigation.
+//! title-bar profile menu ("Themes...") and, since issue #105, from the macOS
+//! menu bar's `View > Themes...` item. There is no burger menu; that doc line
+//! outlived the control it named. Lists bundled themes from
+//! `crate::theme::THEMES` with a typeahead filter and keyboard navigation.
 
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, InteractiveElement, IntoElement, KeyDownEvent,
