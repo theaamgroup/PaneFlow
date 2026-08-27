@@ -452,7 +452,14 @@ impl PaneFlowApp {
                 ui,
                 cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.tab_menu_open = None;
-                    this.close_workspace_tab(ws_idx, tab_idx, window, cx);
+                    // Issue #83: ask first when this tab holds a live agent.
+                    this.request_close_workspace_tab(
+                        ws_idx,
+                        tab_idx,
+                        crate::app::close_guard::ConfirmStyle::Modal,
+                        window,
+                        cx,
+                    );
                     cx.stop_propagation();
                 }),
             ))
@@ -587,8 +594,16 @@ impl PaneFlowApp {
             ui,
             cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.pane_menu_open = None;
-                source_for_close.update(cx, |pane, pane_cx| pane.close(pane_cx));
-                this.save_session(cx);
+                // Issue #83: a MODAL confirmation, not the inline
+                // arm-then-confirm - the menu has already dismissed itself, so
+                // an inline affordance here would be a dead menu item. The
+                // session save moved into the close path itself so a pending
+                // close never persists the pre-close tree.
+                this.request_close_pane(
+                    source_for_close.clone(),
+                    crate::app::close_guard::ConfirmStyle::Modal,
+                    cx,
+                );
                 cx.stop_propagation();
                 cx.notify();
             }),

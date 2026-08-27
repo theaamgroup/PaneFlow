@@ -844,7 +844,7 @@ impl Pane {
         }
     }
 
-    fn surface_title(surface: &PaneSurface, cx: &App) -> String {
+    pub(crate) fn surface_title(surface: &PaneSurface, cx: &App) -> String {
         let raw = match surface {
             PaneSurface::Markdown(md) => md.read(cx).title().to_string(),
             PaneSurface::Diff(d) => d.read(cx).title(),

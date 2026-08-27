@@ -284,7 +284,14 @@ impl PaneFlowApp {
         let Some(tab_idx) = self.active_workspace().map(|ws| ws.active_tab_idx()) else {
             return;
         };
-        self.close_workspace_tab(self.active_idx, tab_idx, window, cx);
+        // Issue #83: ask first when this tab holds a live agent.
+        self.request_close_workspace_tab(
+            self.active_idx,
+            tab_idx,
+            crate::app::close_guard::ConfirmStyle::Modal,
+            window,
+            cx,
+        );
     }
 
     /// Start the inline rename of a sidebar tab row. Mirrors

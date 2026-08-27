@@ -11,13 +11,12 @@ use gpui::{App, AppContext, Context, Entity};
 use notify::Watcher;
 use paneflow_config::schema::TerminalSurfaceProfile;
 
-use crate::app::workspace_ops::{capture_closed_pane_record, push_closed_record};
 use crate::layout::{LayoutTree, MAX_PANES};
 use crate::pane::{self, Pane};
 use crate::pane_drag::DropEdge;
 use crate::terminal::{self, TerminalView};
 use crate::window_chrome::title_bar;
-use crate::{ClosedRecord, PaneFlowApp, ai_types};
+use crate::{PaneFlowApp, ai_types};
 
 /// "Is this PID still running?" probe used by the AI agent stale-PID sweep.
 /// Uses `kill(pid, 0)` + `ESRCH` semantics (EPERM ⇒ alive).
@@ -113,7 +112,7 @@ pub(crate) fn child_identity_is_live(
 /// rejects is never submitted, never deposited, and therefore never
 /// `agent_confirmed` - so `has_unscanned_surface` MUST apply it too, or the
 /// identity re-arm becomes a permanent ~8 s scan loop for that pane's life.
-fn terminal_identity_is_scannable(t: &crate::terminal::TerminalState) -> bool {
+pub(crate) fn terminal_identity_is_scannable(t: &crate::terminal::TerminalState) -> bool {
     let current = (t.child_pid > 0 && t.exited.is_none())
         .then(|| pid_start_time(t.child_pid))
         .flatten();
@@ -471,7 +470,7 @@ impl PaneFlowApp {
     /// Shared by [`pane::PaneEvent::Remove`] and
     /// [`pane::PaneEvent::CloseRequested`]: the two differ only in whether an
     /// undo record is pushed first, never in how the tree is mutated.
-    fn remove_pane_from_tree(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
+    pub(crate) fn remove_pane_from_tree(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
         // Find the workspace that owns this pane (not necessarily the
         // active one - shells can exit in background workspaces).
         // US-003: also resolve *which* tab owns it - a shell can exit
@@ -549,21 +548,13 @@ impl PaneFlowApp {
                 self.remove_pane_from_tree(&pane, cx);
             }
             pane::PaneEvent::CloseRequested => {
-                // A user gesture: the pane header's `x`, or the sidebar pane
-                // context menu's "Close Pane". Both reach `Pane::close`, so
-                // both land here and both become undoable. Capture BEFORE the
-                // tree mutation drops the pane entity.
-                if let Some(ws) = self
-                    .workspaces
-                    .iter()
-                    .find(|ws| ws.tab_index_containing_pane(&pane).is_some())
-                {
-                    let workspace_id = ws.id;
-                    if let Some(record) = capture_closed_pane_record(&pane, workspace_id, cx) {
-                        push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
-                    }
-                }
-                self.remove_pane_from_tree(&pane, cx);
+                // A user gesture: the pane header's `x`. Undoable, unlike
+                // `Remove`. The sidebar pane context menu's "Close Pane" no
+                // longer routes here - it goes straight to
+                // `request_close_pane` so it can raise the issue #83 modal
+                // (an inline affordance would be a dead menu item, the menu
+                // having already dismissed itself).
+                self.close_pane_undoably(&pane, cx);
             }
             pane::PaneEvent::ToggleAgentSessions => {
                 // Toggle: clicking the icon again with the sidebar open closes it.

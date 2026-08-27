@@ -1335,6 +1335,16 @@ struct PaneFlowApp {
     /// pane-event subscriber); the next render claims focus for it, mirroring
     /// `pending_pane_focus`.
     pending_palette_focus: bool,
+    /// Issue #83: the close awaiting confirmation, or `None`. One slot, so
+    /// "only one close can be pending" is true by construction. Written ONLY
+    /// through `set_pending_close`.
+    pending_close: Option<app::close_guard::PendingClose>,
+    /// Focus handle routing key events to the close-confirm modal while open.
+    pending_close_focus: FocusHandle,
+    /// Set when a modal close confirmation is armed; the next render claims
+    /// focus for it. Mirrors `fleet_search_pending_focus` - the pane half of
+    /// the guard is reached from a `Window`-less subscriber.
+    pending_close_focus_claim: bool,
     /// State of the "Custom Buttons" management modal opened from the
     /// workspace context menu. `None` = closed.
     custom_buttons_modal: Option<app::custom_buttons_modal::CustomButtonsModal>,
@@ -2317,6 +2327,26 @@ impl Render for PaneFlowApp {
 
         if self.show_about_dialog {
             app_content = app_content.child(self.render_about_dialog(cx));
+        }
+
+        // Issue #83: close confirmation. Deliberately NOT mode-gated - it
+        // guards a `kill(-pid, …)` on a whole process group, so it stays
+        // dismissible wherever the user ends up.
+        if let Some(pending) = self
+            .pending_close
+            .clone()
+            .filter(|p| p.style == app::close_guard::ConfirmStyle::Modal)
+        {
+            if self.pending_close_target_is_live(&pending) {
+                if std::mem::take(&mut self.pending_close_focus_claim) {
+                    self.pending_close_focus.focus(window, cx);
+                }
+                app_content = app_content.child(self.render_close_confirm_dialog(&pending, cx));
+            } else {
+                // The tab or pane went away underneath the modal. Stand down
+                // here, where there IS a `Window` to hand focus back with.
+                self.cancel_pending_close(window, cx);
+            }
         }
 
         if let Some(menu) = self.workspace_menu_open

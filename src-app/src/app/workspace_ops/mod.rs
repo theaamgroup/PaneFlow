@@ -930,20 +930,34 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Capture state of the pane being closed for undo (US-014).
-        // Must happen BEFORE the tree mutation that drops the pane entity.
-        if let Some(ws) = self.active_workspace()
-            && let Some(root) = &ws.active_tab().root
-        {
-            let workspace_id = ws.id;
-            let closing_pane = if ws.is_zoomed() {
+        // Issue #83: the pane this gesture would close, resolved once - the
+        // guard below and the undo capture must agree on it.
+        let closing_pane = self.active_workspace().and_then(|ws| {
+            let root = ws.active_tab().root.as_ref()?;
+            if ws.is_zoomed() {
                 root.first_leaf()
             } else {
                 root.focused_pane(window, cx)
-            };
-            if let Some(pane) = closing_pane
-                && let Some(record) = capture_closed_pane_record(&pane, workspace_id, cx)
-            {
+            }
+        });
+        // Issue #83: ask first when that pane holds a live agent. Modal, like
+        // the other three user close gestures: two adjacent gestures with
+        // opposite safety behaviour is worse than either alone. The confirm
+        // path removes the pane by identity instead of re-running the
+        // focus-propagating close below, and re-focuses from the modal.
+        if let Some(pane) = &closing_pane
+            && self.arm_pending_close_pane(pane, crate::app::close_guard::ConfirmStyle::Modal, cx)
+        {
+            return;
+        }
+
+        // Capture state of the pane being closed for undo (US-014).
+        // Must happen BEFORE the tree mutation that drops the pane entity.
+        if let Some(ws) = self.active_workspace()
+            && let Some(pane) = &closing_pane
+        {
+            let workspace_id = ws.id;
+            if let Some(record) = capture_closed_pane_record(pane, workspace_id, cx) {
                 push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
             }
         }

@@ -781,6 +781,9 @@ impl PaneFlowApp {
             pane_palette: None,
             pane_palette_focus: cx.focus_handle(),
             pending_palette_focus: false,
+            pending_close: None,
+            pending_close_focus: cx.focus_handle(),
+            pending_close_focus_claim: false,
             custom_buttons_modal: None,
             custom_buttons_modal_focus: cx.focus_handle(),
             // US-006: shared signal flipped by the theme watcher's debounce

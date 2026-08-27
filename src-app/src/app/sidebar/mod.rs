@@ -518,7 +518,7 @@ fn tab_pane_icon(pane: &crate::pane::Pane, cx: &gpui::App) -> TabPaneIcon {
 /// US-009: label of a tab row. An unnamed tab (the default until it is renamed
 /// or created from a named preset) falls back to its 1-based position, so the
 /// list never shows a blank row.
-fn tab_display_title(tab: &Tab, tab_idx: usize) -> String {
+pub(crate) fn tab_display_title(tab: &Tab, tab_idx: usize) -> String {
     if tab.title.trim().is_empty() {
         format!("Tab {}", tab_idx + 1)
     } else {
