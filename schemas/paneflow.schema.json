@@ -95,6 +95,11 @@
       "description": "Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. Default false.",
       "default": false
     },
+    "workspace_auto_sort": {
+      "type": ["boolean", "null"],
+      "description": "Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. Default false (manual, drag-ordered).",
+      "default": false
+    },
     "window_decorations": {
       "type": ["string", "null"],
       "description": "Window decoration mode. 'client' = client-side decorations (custom title bar). 'server' = server-side decorations (compositor-drawn). Read once at startup; changes require a restart.",

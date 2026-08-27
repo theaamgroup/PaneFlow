@@ -199,12 +199,14 @@ impl PaneFlowApp {
             })
             .unwrap_or_default();
 
+        let is_pinned = self.workspaces.get(idx).is_some_and(|ws| ws.pinned);
         let workflow_rows = usize::from(workflow_template.is_some());
         let service_rows = services.len();
-        let separator_rows = 2 + workflow_rows + usize::from(service_rows > 0);
-        // Fixed rows: reveal, copy path, manage custom buttons, close. Renaming
-        // is not one of them - it stays on the row's double-click.
-        let menu_rows = EDITOR_CONTEXT_MENU_ITEMS.len() + 4 + workflow_rows + service_rows;
+        let separator_rows = 3 + usize::from(service_rows > 0);
+        // Fixed rows: pin/unpin, reveal, copy path, manage custom buttons,
+        // close. Renaming is not one of them - it stays on the row's
+        // double-click.
+        let menu_rows = EDITOR_CONTEXT_MENU_ITEMS.len() + 5 + workflow_rows + service_rows;
         let menu_height = px(8. + menu_rows as f32 * 28. + separator_rows as f32 * 9.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
@@ -220,6 +222,21 @@ impl PaneFlowApp {
             }))
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
 
+        // Issue #107: first row, so the pin is the cheapest thing to reach on a
+        // row the user just right-clicked. Toggling persists (`save_session`);
+        // the star on the row is the state it reports back.
+        context_menu = context_menu.child(self.render_select_menu_item(
+            "workspace-context-pin".into(),
+            if is_pinned { "Unpin" } else { "Pin" },
+            None,
+            ui,
+            cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                this.workspace_menu_open = None;
+                this.toggle_pin_workspace(idx, cx);
+                cx.stop_propagation();
+            }),
+        ));
+
         if let Some(template_idx) = workflow_template {
             context_menu = context_menu.child(self.render_select_menu_item(
                 "workspace-context-run-workflow".into(),
@@ -234,12 +251,10 @@ impl PaneFlowApp {
             ));
         }
 
-        // Conditional: with Rename gone, "Run Workflow" is the only row that can
-        // sit above this rule. Unconditional, it would open the menu on a
-        // leading divider.
-        if workflow_rows > 0 {
-            context_menu = context_menu.child(context_menu_divider(ui));
-        }
+        // Unconditional since issue #107: the pin row always sits above this
+        // rule, so it can no longer open the menu on a leading divider - which
+        // is the only reason it used to be gated on "Run Workflow" existing.
+        context_menu = context_menu.child(context_menu_divider(ui));
 
         for (port, info) in services {
             let service_name = info

@@ -111,6 +111,9 @@ impl PaneFlowApp {
                             teardown: wt.teardown.as_str().to_string(),
                         })
                         .collect(),
+                    // Issue #107: the sidebar pin is a choice about a project,
+                    // not a view state, so it survives a quit.
+                    pinned: ws.pinned,
                 })
                 .collect(),
             // Persist the live UI mode so the restore branch reopens
@@ -466,6 +469,9 @@ impl PaneFlowApp {
                 Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
 
             workspace.custom_buttons = ws_session.custom_buttons.clone();
+            // Issue #107: restore the sidebar pin. Additive on v2 - an older
+            // session has no key and deserializes to `false` (unpinned).
+            workspace.pinned = ws_session.pinned;
             // EP-002 (orchestration-v2): rehydrate worktree ownership so the
             // close-time teardown still applies after a restart.
             workspace.managed_worktrees = ws_session

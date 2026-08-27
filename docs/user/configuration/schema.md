@@ -42,6 +42,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `cell_width` | number or null | `0.6` | Multiplier, range `0.3` to `2.0`. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `unfocused_pane_opacity` | number or null | `0.7` | Opacity of panes without focus when a workspace has more than one pane, range `0.15` to `1.0`. `1.0` disables the dim. Values outside the range are clamped with a warning; non-finite values fall back to the default. |
 | `reduce_motion` | boolean or null | `false` | Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. |
+| `workspace_auto_sort` | boolean or null | `false` | Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. |
 | `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material in the primary navigation card. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
@@ -268,6 +269,7 @@ test fixture leaves it unset.
   "cell_width": 0.6,
   "unfocused_pane_opacity": 0.7,
   "reduce_motion": false,
+  "workspace_auto_sort": false,
   "window_decorations": "client",
   "window_backdrop": "auto",
   "macos_chrome_material": true,

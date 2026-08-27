@@ -11,7 +11,7 @@ pub(crate) mod context_menu;
 
 use crate::ui_primitives::TooltipDelayExt;
 use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, ClickEvent, Context, FontWeight,
+    Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, FontWeight,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled,
     Window, div, prelude::*, px, rgb, svg,
 };
@@ -26,8 +26,13 @@ use crate::{
     workspace::{Tab, Workspace},
 };
 
-/// Memoized sibling-worktree ordering. Group labels stay hidden, but sibling
-/// worktrees remain contiguous as before the visual redesign.
+/// Memoized rail ordering. Group labels stay hidden, but sibling worktrees
+/// remain contiguous as before the visual redesign - under Manual ordering and,
+/// since issue #107, inside each Auto bucket too.
+///
+/// `signature` is the whole invalidation mechanism: nothing clears this cache on
+/// mutation, so a field the order depends on that is missing from
+/// [`PaneFlowApp::sidebar_order_signature`] can never reorder the rail.
 #[derive(Default)]
 pub(crate) struct SidebarOrderCache {
     signature: Option<u64>,
@@ -547,6 +552,94 @@ fn reorder_target(from: usize, slot: usize) -> usize {
     if from < slot { slot - 1 } else { slot }
 }
 
+/// Per-workspace inputs to the sidebar's ordering, snapshotted once per frame.
+/// Pure data so both order functions and the cache signature can be unit-tested
+/// without a `Workspace` (whose constructors read `.git` off disk).
+pub(crate) struct WorkspaceOrderKey {
+    /// The user pinned this workspace to the top of the rail.
+    pub pinned: bool,
+    /// Something is running in it - the inverse of
+    /// [`crate::workspace::Workspace::is_idle`].
+    pub active: bool,
+    /// Lowercased title, so the alphabetical tie-break is case-insensitive.
+    pub title_lower: String,
+    /// Shared repo root; sibling worktrees carry an identical value and are the
+    /// only reason a workspace is not its own group.
+    pub repo_root: Option<std::path::PathBuf>,
+}
+
+/// Partition storage indices into the blocks the rail moves as a unit: sibling
+/// worktrees of one repo (2+ workspaces sharing a `repo_root`) form one group in
+/// storage order, everything else is a singleton. A group is emitted at the
+/// position of its FIRST member, so the manual order is storage order with the
+/// siblings pulled together.
+///
+/// One definition, shared by Manual ([`PaneFlowApp::compute_display_order`]) and
+/// Auto ([`compute_auto_order`]) - the two must agree on what a group is, or a
+/// mode switch would regroup the rail as well as reorder it.
+fn worktree_groups<'a>(
+    roots: impl Iterator<Item = Option<&'a std::path::Path>>,
+) -> Vec<Vec<usize>> {
+    let roots: Vec<Option<&std::path::Path>> = roots.collect();
+    let mut repo_members: std::collections::HashMap<&std::path::Path, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, root) in roots.iter().enumerate() {
+        if let Some(root) = root {
+            repo_members.entry(root).or_default().push(index);
+        }
+    }
+
+    let mut groups: Vec<Vec<usize>> = Vec::with_capacity(roots.len());
+    let mut placed = vec![false; roots.len()];
+    for (index, root) in roots.iter().enumerate() {
+        if placed[index] {
+            continue;
+        }
+        if let Some(root) = root
+            && let Some(members) = repo_members.get(root)
+            && members.len() >= 2
+        {
+            for &member in members {
+                placed[member] = true;
+            }
+            groups.push(members.clone());
+            continue;
+        }
+        placed[index] = true;
+        groups.push(vec![index]);
+    }
+    groups
+}
+
+/// Issue #107, the Auto ordering: pinned first, then active, then inactive,
+/// alphabetical within each bucket.
+///
+/// A sibling-worktree group is sorted as one row (R-D2): it is pinned if ANY
+/// member is pinned and active if ANY member is active, and it sorts under the
+/// title of its FIRST member in storage order. Bucketing a group by its
+/// strongest member is what keeps pinning one worktree from dragging its
+/// siblings to the bottom of the rail. Members keep storage order inside their
+/// group, and the sort is stable, so equal keys keep storage order too.
+fn compute_auto_order(keys: &[WorkspaceOrderKey]) -> Vec<usize> {
+    let mut groups = worktree_groups(keys.iter().map(|key| key.repo_root.as_deref()));
+    groups.sort_by(|a, b| {
+        let rank = |group: &Vec<usize>| {
+            (
+                group.iter().any(|&i| keys[i].pinned),
+                group.iter().any(|&i| keys[i].active),
+            )
+        };
+        let (a_pinned, a_active) = rank(a);
+        let (b_pinned, b_active) = rank(b);
+        // `false < true`, so descending on the two flags is `b.cmp(a)`.
+        b_pinned
+            .cmp(&a_pinned)
+            .then_with(|| b_active.cmp(&a_active))
+            .then_with(|| keys[a[0]].title_lower.cmp(&keys[b[0]].title_lower))
+    });
+    groups.into_iter().flatten().collect()
+}
+
 /// The insertion points of a rendered rail: one before every row, one after
 /// the last, so `rows.len() + 1` in all.
 ///
@@ -554,7 +647,11 @@ fn reorder_target(from: usize, slot: usize) -> usize {
 /// reading that matches what the eye sees: the line above a folder row cannot
 /// mean "first tab of that folder" (its tabs render below it), it means "last
 /// tab of the workspace the line is under".
-fn sidebar_drop_slots(rows: &[SidebarRow], workspace_count: usize) -> Vec<SidebarDropSlot> {
+fn sidebar_drop_slots(
+    rows: &[SidebarRow],
+    workspace_count: usize,
+    auto_sort: bool,
+) -> Vec<SidebarDropSlot> {
     (0..=rows.len())
         .map(|k| SidebarDropSlot {
             tab: match k.checked_sub(1).map(|above| rows[above]) {
@@ -562,7 +659,13 @@ fn sidebar_drop_slots(rows: &[SidebarRow], workspace_count: usize) -> Vec<Sideba
                 Some(SidebarRow::Tab(ws, tab)) => Some((ws, tab + 1)),
                 None => None,
             },
+            // Issue #107: no folder drop target under Auto. `workspace` is a
+            // STORAGE index fed straight to a remove-then-insert reorder, which
+            // only means what it says while display order == storage order.
+            // Under Auto it would move a different workspace than the one the
+            // line sits beside, and the sort would undo the move anyway.
             workspace: match rows.get(k) {
+                _ if auto_sort => None,
                 Some(SidebarRow::Folder(ws)) => Some(*ws),
                 // Past the last row: a folder dropped here lands at the end.
                 None => Some(workspace_count),
@@ -687,13 +790,25 @@ impl PaneFlowApp {
         }
     }
 
-    fn sidebar_order_signature(workspaces: &[Workspace]) -> u64 {
+    /// Cache key for the memoized rail order. It has to fold EVERY input the
+    /// two order functions read, or the rail paints a stale order forever: the
+    /// cache is only ever consulted, never invalidated by a mutation.
+    ///
+    /// `Workspace::id` is deliberately absent. Neither
+    /// [`Self::compute_display_order`] nor [`compute_auto_order`] reads it, and
+    /// the hash is position-sensitive, so two workspaces that swap places
+    /// either differ in a key field (new hash) or are interchangeable to both
+    /// functions (same order either way).
+    fn sidebar_order_signature(keys: &[WorkspaceOrderKey], auto_sort: bool) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        workspaces.len().hash(&mut hasher);
-        for workspace in workspaces {
-            workspace.id.hash(&mut hasher);
-            match &workspace.repo_root {
+        auto_sort.hash(&mut hasher);
+        keys.len().hash(&mut hasher);
+        for key in keys {
+            key.pinned.hash(&mut hasher);
+            key.active.hash(&mut hasher);
+            key.title_lower.hash(&mut hasher);
+            match &key.repo_root {
                 Some(root) => root.hash(&mut hasher),
                 None => 0u8.hash(&mut hasher),
             }
@@ -701,35 +816,29 @@ impl PaneFlowApp {
         hasher.finish()
     }
 
+    /// Manual ordering: storage order, with sibling worktrees pulled
+    /// contiguous. Unchanged - Auto is opt-in and this is what the rail does
+    /// without it.
     fn compute_display_order(workspaces: &[Workspace]) -> Vec<usize> {
-        let mut repo_members: std::collections::HashMap<&std::path::Path, Vec<usize>> =
-            std::collections::HashMap::new();
-        for (index, workspace) in workspaces.iter().enumerate() {
-            if let Some(root) = &workspace.repo_root {
-                repo_members.entry(root.as_path()).or_default().push(index);
-            }
-        }
+        worktree_groups(workspaces.iter().map(|ws| ws.repo_root.as_deref()))
+            .into_iter()
+            .flatten()
+            .collect()
+    }
 
-        let mut order = Vec::with_capacity(workspaces.len());
-        let mut placed = vec![false; workspaces.len()];
-        for (index, workspace) in workspaces.iter().enumerate() {
-            if placed[index] {
-                continue;
-            }
-            if let Some(root) = &workspace.repo_root
-                && let Some(members) = repo_members.get(root.as_path())
-                && members.len() >= 2
-            {
-                for &member in members {
-                    order.push(member);
-                    placed[member] = true;
-                }
-                continue;
-            }
-            order.push(index);
-            placed[index] = true;
-        }
-        order
+    /// Snapshot the per-workspace inputs both order functions and the cache
+    /// signature read. One walk per frame; every field is already resident
+    /// (`is_idle` reads the pane scanner's cache), so this does no I/O.
+    fn workspace_order_keys(&self, cx: &App) -> Vec<WorkspaceOrderKey> {
+        self.workspaces
+            .iter()
+            .map(|ws| WorkspaceOrderKey {
+                pinned: ws.pinned,
+                active: !ws.is_idle(cx),
+                title_lower: ws.title.to_lowercase(),
+                repo_root: ws.repo_root.clone(),
+            })
+            .collect()
     }
 
     pub(crate) fn render_sidebar(
@@ -889,10 +998,16 @@ impl PaneFlowApp {
 
     /// Flatten the rail into the rows it renders. Built once per frame because
     /// the drop dividers are defined by the gaps between these rows.
-    fn sidebar_rows(&self) -> Vec<SidebarRow> {
-        let signature = Self::sidebar_order_signature(&self.workspaces);
+    fn sidebar_rows(&self, cx: &App) -> Vec<SidebarRow> {
+        let auto_sort = self.cached_config.workspace_auto_sort_enabled();
+        let keys = self.workspace_order_keys(cx);
+        let signature = Self::sidebar_order_signature(&keys, auto_sort);
         if self.sidebar_order_cache.borrow().signature != Some(signature) {
-            let order = Self::compute_display_order(&self.workspaces);
+            let order = if auto_sort {
+                compute_auto_order(&keys)
+            } else {
+                Self::compute_display_order(&self.workspaces)
+            };
             let mut cache = self.sidebar_order_cache.borrow_mut();
             cache.order = order;
             cache.signature = Some(signature);
@@ -923,12 +1038,15 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let rows = self.sidebar_rows();
-        let slots = sidebar_drop_slots(&rows, self.workspaces.len());
+        let auto_sort = self.cached_config.workspace_auto_sort_enabled();
+        let rows = self.sidebar_rows(cx);
+        let slots = sidebar_drop_slots(&rows, self.workspaces.len(), auto_sort);
         for (k, row) in rows.iter().enumerate() {
             list = list.child(self.render_drop_divider(k, slots[k], ui, cx));
             list = list.child(match *row {
-                SidebarRow::Folder(i) => self.render_workspace_row(i, ui, cx).into_any_element(),
+                SidebarRow::Folder(i) => self
+                    .render_workspace_row(i, ui, auto_sort, cx)
+                    .into_any_element(),
                 SidebarRow::Tab(i, tab_idx) => {
                     self.render_tab_row(i, tab_idx, ui, cx).into_any_element()
                 }
@@ -1045,6 +1163,7 @@ impl PaneFlowApp {
         &self,
         i: usize,
         ui: crate::theme::UiColors,
+        auto_sort: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let ws = &self.workspaces[i];
@@ -1067,17 +1186,21 @@ impl PaneFlowApp {
         let row_shell = sidebar_row_shell()
             .id(SharedString::from(format!("ws-{ws_id}")))
             .group(group_name.clone())
-            .on_drag(
-                WorkspaceDrag {
-                    id: ws_id,
-                    title: ws_title.clone(),
-                },
-                |drag, _offset, _window, cx| {
-                    cx.new(|_| WorkspaceDragPreview {
-                        title: drag.title.clone(),
-                    })
-                },
-            )
+            // Issue #107: no folder drag under Auto - the sort owns the order,
+            // so a drag could only ever snap back. Tab drags are unaffected.
+            .when(!auto_sort, |shell| {
+                shell.on_drag(
+                    WorkspaceDrag {
+                        id: ws_id,
+                        title: ws_title.clone(),
+                    },
+                    |drag, _offset, _window, cx| {
+                        cx.new(|_| WorkspaceDragPreview {
+                            title: drag.title.clone(),
+                        })
+                    },
+                )
+            })
             .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                 if let Some(workspace) = this.workspaces.get_mut(idx) {
                     workspace.agent_completion_notification.acknowledge();
@@ -1272,6 +1395,19 @@ impl PaneFlowApp {
             .pr(px(SIDEBAR_ACTION_LANE_WIDTH))
             .child(disclosure)
             .child(title_el);
+        // Issue #107: the pin's only visible state. A text glyph, not an SVG -
+        // Paneflow ships no pin asset - and no hover outline when unpinned: the
+        // right-click menu owns the toggle, and the action lane
+        // (`SIDEBAR_ACTION_LANE_WIDTH`) is sized for exactly two buttons.
+        if ws.pinned {
+            title_row = title_row.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(ui.accent)
+                    .child("★"),
+            );
+        }
         if let Some(row_agent_status) = row_agent_status {
             let status_tooltip = sidebar_agent_status_tooltip(row_agent_status, &agent_status);
             title_row = title_row.child(render_workspace_agent_summary(
@@ -2384,16 +2520,16 @@ impl Render for SidebarTooltip {
 #[cfg(test)]
 mod tests {
     use super::{
-        ROW_RADIUS, RenameKey, SIDEBAR_ACTION_BUTTON_GAP, SIDEBAR_ACTION_BUTTON_SIZE,
+        PaneFlowApp, ROW_RADIUS, RenameKey, SIDEBAR_ACTION_BUTTON_GAP, SIDEBAR_ACTION_BUTTON_SIZE,
         SIDEBAR_ACTION_LANE_WIDTH, SIDEBAR_DROP_BAND_REACH, SIDEBAR_DROP_LINE_PX,
         SIDEBAR_FOLDER_ICON_WIDTH, SIDEBAR_ROW_LINE_HEIGHT, SIDEBAR_ROW_MARGIN_X,
         SIDEBAR_ROW_PADDING_Y, SIDEBAR_ROW_SPACING, SIDEBAR_TAB_CARD_HEIGHT,
         SIDEBAR_TAB_CARD_ICON_SIZE, SIDEBAR_TAB_CARD_WIDTH, SIDEBAR_TAB_ICON_CAP,
         SIDEBAR_TAB_ICON_SIZE, SIDEBAR_TITLE_ROW_GAP, SIDEBAR_WIDTH, SidebarAgentState,
-        SidebarAgentSummary, SidebarDropSlot, SidebarRow, SidebarServiceSummary,
-        folder_row_sessions, rename_key_action, reorder_target, sidebar_agent_summary,
-        sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary, tab_display_title,
-        tab_icon_cluster_split, tab_row_sessions, visible_service_ports,
+        SidebarAgentSummary, SidebarDropSlot, SidebarRow, SidebarServiceSummary, WorkspaceOrderKey,
+        compute_auto_order, folder_row_sessions, rename_key_action, reorder_target,
+        sidebar_agent_summary, sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary,
+        tab_display_title, tab_icon_cluster_split, tab_row_sessions, visible_service_ports,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
@@ -2430,7 +2566,7 @@ mod tests {
             SidebarRow::Tab(0, 1),
             SidebarRow::Folder(1),
         ];
-        let slots = sidebar_drop_slots(&rows, 2);
+        let slots = sidebar_drop_slots(&rows, 2, false);
 
         assert_eq!(slots.len(), rows.len() + 1);
         // Above everything: a folder lands first, a tab has nowhere to go.
@@ -3239,6 +3375,149 @@ mod tests {
         assert!(
             cancel.contains("self.restore_focus_after_rename(window, cx);"),
             "cancel_inline_rename must hand focus back, or it is just the stranding bug again"
+        );
+    }
+
+    fn order_key(pinned: bool, active: bool, title: &str, repo: Option<&str>) -> WorkspaceOrderKey {
+        WorkspaceOrderKey {
+            pinned,
+            active,
+            title_lower: title.to_lowercase(),
+            repo_root: repo.map(std::path::PathBuf::from),
+        }
+    }
+
+    /// Issue #107: the Auto buckets, in order. Titles are deliberately the
+    /// reverse of the expected order so only the bucket can be producing it.
+    #[test]
+    fn auto_order_puts_pinned_before_active_before_idle() {
+        let keys = [
+            order_key(false, false, "a", None),
+            order_key(false, true, "b", None),
+            order_key(true, false, "c", None),
+        ];
+        assert_eq!(compute_auto_order(&keys), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn auto_order_sorts_case_insensitively_inside_a_bucket() {
+        let keys = [
+            order_key(false, true, "gamma", None),
+            order_key(false, true, "Beta", None),
+            order_key(false, true, "alpha", None),
+        ];
+        assert_eq!(compute_auto_order(&keys), vec![2, 1, 0]);
+    }
+
+    /// R-D2: a sibling-worktree group travels as one block. Its bucket is its
+    /// strongest member, its sort title is its FIRST member in storage order,
+    /// and members keep storage order inside it.
+    #[test]
+    fn auto_order_keeps_worktree_siblings_contiguous() {
+        let keys = [
+            order_key(false, true, "zeta", Some("/repo")),
+            order_key(false, true, "alpha", None),
+            order_key(false, false, "beta", Some("/repo")),
+        ];
+        // The group sorts under "zeta" (its first member), not "beta", so the
+        // lone "alpha" leads - and the idle sibling still rides with the group.
+        assert_eq!(compute_auto_order(&keys), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn auto_order_lifts_a_worktree_group_by_its_strongest_member() {
+        let keys = [
+            order_key(false, false, "zeta", Some("/repo")),
+            order_key(false, true, "alpha", None),
+            order_key(true, false, "beta", Some("/repo")),
+        ];
+        // One pinned member pins the whole group, so the idle "zeta" outranks
+        // the active "alpha" - without that, pinning a worktree would tear its
+        // siblings to the bottom of the rail.
+        assert_eq!(compute_auto_order(&keys), vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn auto_order_is_stable_for_equal_keys() {
+        let keys = [
+            order_key(false, true, "same", None),
+            order_key(false, false, "zzz", None),
+            order_key(false, true, "same", None),
+        ];
+        assert_eq!(compute_auto_order(&keys), vec![0, 2, 1]);
+    }
+
+    /// The memoization trap: the rail repaints from a cached order, so a
+    /// signature that ignores a field means that field can never reorder the
+    /// rail. Every input the two order functions read has to be in the hash.
+    #[test]
+    fn order_signature_changes_with_every_input_the_order_depends_on() {
+        let base = [order_key(false, true, "alpha", Some("/repo"))];
+        let sig = PaneFlowApp::sidebar_order_signature(&base, false);
+
+        assert_eq!(
+            sig,
+            PaneFlowApp::sidebar_order_signature(&base, false),
+            "the signature must be deterministic"
+        );
+        assert_ne!(
+            sig,
+            PaneFlowApp::sidebar_order_signature(
+                &[order_key(true, true, "alpha", Some("/repo"))],
+                false
+            ),
+            "a pin flip must repaint the rail"
+        );
+        assert_ne!(
+            sig,
+            PaneFlowApp::sidebar_order_signature(
+                &[order_key(false, true, "beta", Some("/repo"))],
+                false
+            ),
+            "a rename must repaint the rail"
+        );
+        assert_ne!(
+            sig,
+            PaneFlowApp::sidebar_order_signature(
+                &[order_key(false, false, "alpha", Some("/repo"))],
+                false
+            ),
+            "an activity change must repaint the rail"
+        );
+        assert_ne!(
+            sig,
+            PaneFlowApp::sidebar_order_signature(
+                &[order_key(false, true, "alpha", Some("/other"))],
+                false
+            ),
+            "a repo root change must repaint the rail"
+        );
+        assert_ne!(
+            sig,
+            PaneFlowApp::sidebar_order_signature(&base, true),
+            "switching Manual to Auto must repaint the rail"
+        );
+    }
+
+    /// R6: under Auto the folder drop targets are gone, because `slot.workspace`
+    /// is a storage index and Auto breaks display-order == storage-order. Tab
+    /// targets are untouched - only folder drags are disabled.
+    #[test]
+    fn drop_slots_offer_no_workspace_target_under_auto_sort() {
+        let rows = [
+            SidebarRow::Folder(0),
+            SidebarRow::Tab(0, 0),
+            SidebarRow::Folder(1),
+        ];
+        let manual = sidebar_drop_slots(&rows, 2, false);
+        let auto = sidebar_drop_slots(&rows, 2, true);
+
+        assert!(manual.iter().any(|slot| slot.workspace.is_some()));
+        assert_eq!(auto.len(), rows.len() + 1);
+        assert!(auto.iter().all(|slot| slot.workspace.is_none()));
+        assert_eq!(
+            auto.iter().map(|slot| slot.tab).collect::<Vec<_>>(),
+            manual.iter().map(|slot| slot.tab).collect::<Vec<_>>(),
         );
     }
 }

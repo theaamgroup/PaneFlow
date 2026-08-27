@@ -198,6 +198,19 @@ pub struct WorkspaceSession {
     /// Additive + optional like `expanded_paths`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_worktrees: Vec<ManagedWorktreeDef>,
+    /// Issue #107: whether the user pinned this workspace to the top of the
+    /// sidebar's Auto ordering. A pin is a deliberate choice about a project,
+    /// so unlike the sidebar's expand/collapse state it is persisted.
+    ///
+    /// Additive on v2, exactly like `expanded_paths` and `managed_worktrees`:
+    /// [`SESSION_SCHEMA_VERSION`] must NOT move for it. The loader routes any
+    /// version that is neither 2 nor 1 to the corruption-backup path, so a
+    /// bump would discard every existing user's workspaces to gain one bool.
+    /// `false` (unpinned) is both the default for a session written before
+    /// this field and the value skipped on write, so no existing session.json
+    /// changes meaning or gains a key.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 /// Migrate a v1 `session.json` in place to the v2 tab shape (US-018).

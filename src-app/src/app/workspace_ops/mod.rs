@@ -1510,6 +1510,15 @@ impl PaneFlowApp {
         to_idx: usize,
         cx: &mut Context<Self>,
     ) {
+        // Issue #107, defence in depth. Under Auto the rail attaches no folder
+        // drag and offers no folder drop target, so nothing should reach here -
+        // but `to_idx` is a STORAGE index derived from a DISPLAY position, and
+        // Auto is exactly the mode where those two stop agreeing. A stray call
+        // would move a workspace the user never touched, and the sort would
+        // hide the damage by re-ordering the rail identically afterwards.
+        if self.cached_config.workspace_auto_sort_enabled() {
+            return;
+        }
         let Some(from_idx) = self.workspaces.iter().position(|ws| ws.id == from_id) else {
             return;
         };
@@ -1528,6 +1537,18 @@ impl PaneFlowApp {
                 .position(|ws| ws.id == id)
                 .unwrap_or(0);
         }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Issue #107: flip the sidebar pin on one workspace. Persisted, so the pin
+    /// outlives a quit; `cx.notify()` because the rail's order cache keys off
+    /// the flag and has to repaint.
+    pub(crate) fn toggle_pin_workspace(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspaces.get_mut(idx) else {
+            return;
+        };
+        workspace.pinned = !workspace.pinned;
         self.save_session(cx);
         cx.notify();
     }

@@ -51,6 +51,14 @@ pub struct PaneFlowConfig {
     /// through `App::set_reduce_motion`, so it hot-reloads.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub reduce_motion: Option<bool>,
+    /// Issue #107: order the workspace sidebar automatically - pinned first,
+    /// then active, then inactive, alphabetically within each group - instead
+    /// of keeping the order the user dragged rows into. `None`/`false` keeps
+    /// the manual order. Drag-to-reorder is disabled while this is on, because
+    /// a drop target is a storage index and Auto breaks display-order ==
+    /// storage-order.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub workspace_auto_sort: Option<bool>,
     /// Terminal line height multiplier (default: 1.2, valid range: 1.0-2.5).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub line_height: Option<f32>,
@@ -356,6 +364,12 @@ impl PaneFlowConfig {
     /// Resolve the reduce-motion switch. Absent means full motion.
     pub fn reduce_motion_enabled(&self) -> bool {
         self.reduce_motion.unwrap_or(false)
+    }
+
+    /// Resolve the workspace auto-sort switch. Absent means the manual,
+    /// drag-ordered rail.
+    pub fn workspace_auto_sort_enabled(&self) -> bool {
+        self.workspace_auto_sort.unwrap_or(false)
     }
 
     /// Resolve `agent_stall_threshold_secs`: default 60, clamped to

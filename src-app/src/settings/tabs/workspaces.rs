@@ -24,8 +24,8 @@ use crate::app::ipc_handler::{
 use crate::layout::MAX_PANES;
 use crate::settings::components::{
     SETTINGS_CONTROL_CORNER_RADIUS, card_color, card_tint, deferred_select_menu, hairline,
-    section_header_with_action, select_chevron, select_item, select_menu, select_trigger,
-    setting_card, with_alpha,
+    section_header, section_header_with_action, select_chevron, select_item, select_menu,
+    select_trigger, setting_card, toggle_row, with_alpha,
 };
 use crate::terminal::TerminalView;
 use crate::ui_primitives::{AnimatedHover, AnimatedHoverExt};
@@ -80,6 +80,21 @@ impl PaneFlowApp {
             .flex()
             .flex_col()
             .gap(px(20.))
+            // Issue #107: sidebar ordering sits above the template builder, so
+            // the page reads "Sidebar" then "Workspace templates".
+            .child(section_header(ui, "Sidebar"))
+            .child(setting_card(ui).child(toggle_row(
+                "row-workspace-auto-sort",
+                "Sort workspaces automatically",
+                "Order the sidebar by pinned first, then workspaces with something \
+                 running, then idle ones, alphabetically within each group. \
+                 Drag-to-reorder is disabled while this is on.",
+                None,
+                self.cached_config.workspace_auto_sort_enabled(),
+                "workspace_auto_sort",
+                ui,
+                cx,
+            )))
             .child(section_header_with_action(
                 ui,
                 "Workspace templates",

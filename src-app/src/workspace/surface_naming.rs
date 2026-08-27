@@ -59,6 +59,22 @@ pub fn derive_surface_base_name(cmd: Option<&str>, title: Option<&str>) -> Strin
     FALLBACK.to_string()
 }
 
+/// Whether a foreground command line is an interactive shell sitting at a
+/// prompt - the basename of its first token, lowercased, is one of [`SHELLS`].
+///
+/// The single definition of "this is a shell". Both the surface namer (which
+/// maps it to [`FALLBACK`]) and the sidebar's idle signal
+/// ([`crate::workspace::commands_are_idle`], issue #107) read it, so the two
+/// can never disagree about what counts as an idle terminal.
+pub(crate) fn is_shell_command(cmd: &str) -> bool {
+    let tokens = command_tokens(cmd);
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    let prog = basename(first);
+    !prog.is_empty() && SHELLS.contains(&prog.to_ascii_lowercase().as_str())
+}
+
 /// Build a base name from a foreground command line. A shell binary maps to
 /// `shell` (idle surface); anything else becomes `<prog>[-<subcommand>]`
 /// (`cargo run` → `cargo-run`, `node server.js` → `node-server.js`).
@@ -69,7 +85,7 @@ fn name_from_command(cmd: &str) -> Option<String> {
     if prog.is_empty() {
         return None;
     }
-    if SHELLS.contains(&prog.to_ascii_lowercase().as_str()) {
+    if is_shell_command(cmd) {
         return Some(FALLBACK.to_string());
     }
     let mut parts = vec![prog.to_string()];
@@ -363,5 +379,33 @@ mod tests {
         assert_eq!(names[1], "b");
         assert_eq!(names[0], "a@x");
         assert_eq!(names[2], "a@y");
+    }
+
+    #[test]
+    fn is_shell_command_matches_the_shell_vocabulary() {
+        // basename of the first token, lowercased, against SHELLS.
+        assert!(is_shell_command("zsh"));
+        assert!(is_shell_command("/bin/zsh"));
+        assert!(is_shell_command("ZSH"));
+        assert!(is_shell_command("zsh -l"));
+        assert!(is_shell_command("/usr/local/bin/fish -i"));
+        assert!(!is_shell_command("vim"));
+        assert!(!is_shell_command("cargo"));
+        assert!(!is_shell_command("cargo run"));
+        assert!(!is_shell_command(""));
+    }
+
+    #[test]
+    fn shell_naming_and_is_shell_command_share_one_definition() {
+        // The naming path must fall back to `shell` for exactly the strings
+        // `is_shell_command` accepts - that is the point of extracting it.
+        for cmd in ["zsh", "/bin/zsh", "ZSH", "zsh -l", "fish"] {
+            assert!(is_shell_command(cmd), "{cmd}");
+            assert_eq!(derive_surface_base_name(Some(cmd), None), "shell", "{cmd}");
+        }
+        for cmd in ["vim", "cargo run"] {
+            assert!(!is_shell_command(cmd), "{cmd}");
+            assert_ne!(derive_surface_base_name(Some(cmd), None), "shell", "{cmd}");
+        }
     }
 }

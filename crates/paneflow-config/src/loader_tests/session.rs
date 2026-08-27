@@ -13,6 +13,7 @@ fn make_workspace(title: &str, cwd: &str, tabs: Vec<TabSession>) -> WorkspaceSes
         custom_buttons: vec![],
         expanded_paths: vec![],
         managed_worktrees: vec![],
+        pinned: false,
     }
 }
 
@@ -517,4 +518,36 @@ fn test_session_without_primary_sidebar_key_restores_visible() {
         !written.contains("primary_sidebar_collapsed"),
         "the default must be skipped on write: {written}"
     );
+}
+
+/// Issue #107: the sidebar pin is user state, so it has to outlive a quit.
+/// Additive on v2 exactly like `expanded_paths` - `SESSION_SCHEMA_VERSION`
+/// must NOT move for it, or every existing session.json takes the
+/// unsupported-version corruption-backup path.
+#[test]
+fn workspace_pinned_survives_a_session_round_trip() {
+    let mut ws = make_workspace("pinned", "/tmp/pinned", vec![TabSession::empty()]);
+    ws.pinned = true;
+
+    let json = serde_json::to_string(&ws).unwrap();
+    assert!(json.contains("\"pinned\":true"), "{json}");
+
+    let back: WorkspaceSession = serde_json::from_str(&json).unwrap();
+    assert!(back.pinned);
+    assert_eq!(back, ws);
+}
+
+#[test]
+fn workspace_pinned_defaults_to_false_when_the_key_is_absent() {
+    // A session.json written before the field existed.
+    let ws: WorkspaceSession =
+        serde_json::from_str(r#"{"title":"old","cwd":"/tmp/old","tabs":[]}"#).unwrap();
+    assert!(
+        !ws.pinned,
+        "an older session must restore unpinned, not fail to load"
+    );
+
+    // And the default is skipped on write, so no existing file gains a key.
+    let written = serde_json::to_string(&ws).unwrap();
+    assert!(!written.contains("pinned"), "{written}");
 }

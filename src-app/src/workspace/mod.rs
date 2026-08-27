@@ -165,6 +165,29 @@ pub struct Workspace {
     /// state - it is never written to `session.json`, so a restart starts
     /// every workspace expanded.
     pub sidebar_expanded: bool,
+    /// Issue #107: whether the user pinned this workspace to the top of the
+    /// sidebar. Unlike [`Workspace::sidebar_expanded`] this IS persisted (as
+    /// `WorkspaceSession::pinned`) - a pin is a deliberate choice about a
+    /// project, not a transient view state, so it has to outlive a quit.
+    ///
+    /// Only the Auto ordering reads it; under Manual ordering the rail keeps
+    /// storage order and the pin is inert (the star still renders, so the
+    /// state is never invisible).
+    pub pinned: bool,
+}
+
+/// The pure half of [`Workspace::is_idle`]: a workspace is idle when every
+/// terminal's foreground command is unknown (`None`, the scanner has not
+/// answered) or an interactive shell sitting at a prompt. An empty slice - a
+/// workspace with no terminal - is idle.
+///
+/// Split out because [`Workspace`]'s constructors resolve git metadata off
+/// disk, so the truth table cannot be exercised through a real workspace.
+pub(crate) fn commands_are_idle(commands: &[Option<String>]) -> bool {
+    commands.iter().all(|command| match command {
+        None => true,
+        Some(command) => surface_naming::is_shell_command(command),
+    })
 }
 
 impl Workspace {
@@ -218,6 +241,7 @@ impl Workspace {
             files_expanded: Vec::new(),
             managed_worktrees: Vec::new(),
             sidebar_expanded: true,
+            pinned: false,
         }
     }
 
@@ -466,6 +490,32 @@ impl Workspace {
         panes
     }
 
+    /// Issue #107: whether nothing is running in this workspace - the signal
+    /// the sidebar's Auto ordering sorts "active" above "inactive" on.
+    ///
+    /// True when the workspace holds no terminal at all, or when every
+    /// terminal's foreground command is unknown or an interactive shell. Reads
+    /// only `TerminalState::cached_foreground_command`, which the off-thread
+    /// pane scanner keeps warm, so this does no I/O and is safe to call once
+    /// per frame from the render path.
+    ///
+    /// This is the *signal* only. Issue #76 owns whatever an idle row looks
+    /// like; nothing here changes a color.
+    pub fn is_idle(&self, cx: &App) -> bool {
+        // Tab-by-tab, like `ipc_handler::workspace_surface_entries`, rather than
+        // through `collect_panes`: that one dedupes with a linear `contains` per
+        // pane, and this runs once per workspace per frame.
+        let mut commands = Vec::new();
+        for tab in &self.tabs {
+            for pane in tab.collect_panes() {
+                for terminal in pane.read(cx).terminals() {
+                    commands.push(terminal.read(cx).terminal.foreground_command());
+                }
+            }
+        }
+        commands_are_idle(&commands)
+    }
+
     /// Focus the first pane of the *visible* tab. Deliberately not a
     /// whole-workspace walk: focus can only land on a rendered pane, so
     /// background tabs are out of reach by construction.
@@ -557,7 +607,9 @@ fn walk_and_push_config(
 mod tests {
     use gpui::{AppContext, Focusable, TestAppContext};
 
-    use super::{AgentCompletionNotification, MAX_TABS_PER_WORKSPACE, Tab, Workspace};
+    use super::{
+        AgentCompletionNotification, MAX_TABS_PER_WORKSPACE, Tab, Workspace, commands_are_idle,
+    };
     use crate::layout::LayoutTree;
     use crate::terminal::TerminalView;
 
@@ -821,5 +873,44 @@ mod tests {
         notification.record_finished(false);
         notification.acknowledge();
         assert!(!notification.is_unread());
+    }
+
+    /// Issue #107: the idle signal the sidebar's Auto ordering sorts on. The
+    /// truth table lives on the pure helper because a `Workspace` cannot be
+    /// built in a plain unit test (its constructors read `.git` off disk).
+    #[test]
+    fn commands_are_idle_truth_table() {
+        // No terminals at all: nothing is running.
+        assert!(commands_are_idle(&[]));
+        // Every terminal parked at a prompt.
+        assert!(commands_are_idle(&[
+            Some("zsh".into()),
+            Some("bash".into())
+        ]));
+        // The scanner has not answered yet - absence of a command is not
+        // evidence of work.
+        assert!(commands_are_idle(&[None, None]));
+        assert!(commands_are_idle(&[None, Some("zsh".into())]));
+        // A shell resolved to its absolute path, and one carrying arguments.
+        assert!(commands_are_idle(&[Some("/bin/zsh".into())]));
+        assert!(commands_are_idle(&[Some("zsh -l".into())]));
+        // One busy terminal makes the whole workspace active.
+        assert!(!commands_are_idle(&[
+            Some("zsh".into()),
+            Some("cargo run".into())
+        ]));
+        assert!(!commands_are_idle(&[Some("vim".into())]));
+    }
+
+    #[gpui::test]
+    fn a_workspace_whose_terminals_report_no_command_is_idle(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let ws = test_workspace(cx);
+        cx.update(|_window, cx| {
+            assert!(
+                ws.is_idle(cx),
+                "a display-only terminal has no foreground command, so nothing is running"
+            );
+        });
     }
 }
