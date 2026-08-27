@@ -430,6 +430,28 @@ impl PaneFlowApp {
         }
     }
 
+    /// True when this pending close's target lives in the workspace at
+    /// `ws_idx` - so destroying that workspace also destroys the thing the
+    /// confirmation is asking about.
+    ///
+    /// Separate from [`Self::pending_close_target_is_live`], which asks the
+    /// same question of the whole app AFTER the fact. This one has to be
+    /// answered BEFORE `workspaces.remove`, while the doomed workspace is
+    /// still there to be looked in.
+    pub(crate) fn pending_close_targets_workspace(
+        &self,
+        pending: &PendingClose,
+        ws_idx: usize,
+    ) -> bool {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return false;
+        };
+        match &pending.target {
+            CloseTarget::Tab { workspace_id, .. } => ws.id == *workspace_id,
+            CloseTarget::Pane { pane } => ws.tab_index_containing_pane(pane).is_some(),
+        }
+    }
+
     /// False once the pending close's target has gone away underneath it (an
     /// IPC `workspace.close`, a shell that exited). The render stands the
     /// modal down rather than asking about something that no longer exists.

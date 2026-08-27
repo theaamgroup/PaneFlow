@@ -119,6 +119,22 @@ pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: Cl
     enforce_closed_pane_scrollback_budget(records, MAX_CLOSED_PANE_SCROLLBACK_BYTES);
 }
 
+/// Drop every undo record belonging to a workspace that is going away.
+///
+/// `NEXT_WORKSPACE_ID` is a monotonic `fetch_add`, so a closed workspace's id
+/// is never handed out again and [`workspace_index_for_undo`] can never match
+/// one of these records. Left on the stack they are not merely dead weight:
+/// `handle_undo_close_pane` pops the NEWEST record, and a refusal that pushed
+/// it back would put it straight back on top, so one orphan blocks every
+/// restorable record beneath it forever - and, being always newest, is the
+/// LAST thing FIFO eviction reaches.
+pub(crate) fn drop_closed_records_for_workspace(
+    records: &mut Vec<ClosedRecord>,
+    workspace_id: u64,
+) {
+    records.retain(|record| record.workspace_id() != workspace_id);
+}
+
 /// Release captured scrollback until the total is back under `budget`.
 ///
 /// Two nested orderings, both oldest-first: records in stack order, and inside
@@ -1068,10 +1084,14 @@ impl PaneFlowApp {
         // on close/reorder; the record stores a stable Workspace.id.
         let ids: Vec<u64> = self.workspaces.iter().map(|ws| ws.id).collect();
         let Some(idx) = workspace_index_for_undo(&ids, record.workspace_id) else {
-            // The pop already happened, so a refusal that just returned would
-            // destroy the only copy of the thing undo exists to protect. Put
-            // it back: the workspace can be recreated and the undo retried.
-            push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
+            // The ONE refusal that drops the record instead of putting it
+            // back. `NEXT_WORKSPACE_ID` is a monotonic `fetch_add`, so a
+            // recreated workspace never reuses this id and the lookup above
+            // can never match again: re-pushing would re-promote a record
+            // nothing can ever restore to the top of the stack on every
+            // `Cmd+Shift+T`, blocking the restorable ones beneath it and
+            // outlasting them under FIFO eviction. The refusals below are
+            // genuinely transient and still push.
             self.show_toast("Workspace no longer exists", cx);
             return;
         };
@@ -1127,14 +1147,17 @@ impl PaneFlowApp {
     /// every leaf and `from_layout_node` never reads it, so there is no
     /// recorded per-pane focus to honour.
     ///
-    /// EVERY refusal path pushes `record` back onto the undo stack and toasts:
-    /// [`Self::handle_undo_close_pane`] pops before it dispatches, so simply
-    /// returning would consume the record and lose the tab for good. Two of the
-    /// four are unreachable today (the entity lease stops `self.workspaces`
-    /// mutating mid-body, and the cap was checked above), but
-    /// `every_refused_restore_pushes_the_record_back` only proves
-    /// `toasts == pushes`, so a refusal that returned silently would satisfy
-    /// the guard while destroying the record.
+    /// Every TRANSIENT refusal pushes `record` back onto the undo stack and
+    /// toasts: [`Self::handle_undo_close_pane`] pops before it dispatches, so
+    /// simply returning would consume the record and lose the tab for good.
+    /// Two of those three are unreachable today (the entity lease stops
+    /// `self.workspaces` mutating mid-body, and the cap was checked above),
+    /// but the guard beside this only proves `toasts == pushes + drops`, so a
+    /// refusal that returned silently would satisfy it while destroying the
+    /// record.
+    ///
+    /// The fourth refusal - the workspace is gone - deliberately DROPS the
+    /// record: its id is never reissued, so nothing could ever restore it.
     fn restore_closed_tab_record(
         &mut self,
         record: crate::ClosedTabRecord,
@@ -1145,7 +1168,10 @@ impl PaneFlowApp {
         // `Workspace.id`.
         let ids: Vec<u64> = self.workspaces.iter().map(|ws| ws.id).collect();
         let Some(ws_idx) = workspace_index_for_undo(&ids, record.workspace_id) else {
-            push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
+            // Dropped, not pushed back - see the matching arm in
+            // `restore_closed_pane`: the workspace id is never reissued, so
+            // this record is unrestorable and re-pushing it would wedge the
+            // top of the undo stack permanently.
             self.show_toast("Workspace no longer exists", cx);
             return;
         };
@@ -1329,6 +1355,32 @@ impl PaneFlowApp {
             return false;
         }
         self.workspace_menu_open = None;
+        // Issue #83: this close is deliberately NOT guarded - it drops every
+        // tab, pane and terminal in the workspace with no confirmation and no
+        // undo, reached from `Cmd+Shift+Q`, the sidebar folder x, the
+        // workspace context menu and IPC `workspace.close`. Guarding it needs
+        // a whole-workspace undo record, which is a separate feature; the
+        // scope call was to leave it out of #83 rather than to overlook it.
+        //
+        // What it MUST do is take the state that dies with the workspace with
+        // it. Undo records for this id can never resolve again
+        // (`NEXT_WORKSPACE_ID` never reissues one), and a pending
+        // confirmation whose target lives here is asking about something that
+        // is about to stop existing.
+        let closed_id = self.workspaces[idx].id;
+        drop_closed_records_for_workspace(&mut self.closed_items, closed_id);
+        // The MODAL half is left to the render stand-down when there is no
+        // `Window`: `cancel_pending_close` is what hands focus back, and
+        // dropping a focused modal without one strands the window (issue
+        // #108). An inline arm never took focus, so it can always go here.
+        let has_window = window.is_some();
+        let stand_down_pending = self.pending_close.as_ref().is_some_and(|pending| {
+            (has_window || pending.style == crate::app::close_guard::ConfirmStyle::Inline)
+                && self.pending_close_targets_workspace(pending, idx)
+        });
+        if stand_down_pending {
+            self.set_pending_close(None, cx);
+        }
         if let Some(dir) = self.workspaces[idx].git_dir.clone() {
             self.unwatch_git_dir(&dir);
         }
@@ -2430,14 +2482,20 @@ mod tests {
 
     /// Issue #83: `handle_undo_close_pane` POPS before it dispatches, so a
     /// restore that then refuses has already consumed the record - and the
-    /// pane or tab it described is gone for good. Every refusal therefore has
-    /// to push the record back before it toasts.
+    /// pane or tab it described is gone for good. Every TRANSIENT refusal
+    /// therefore has to push the record back before it toasts.
+    ///
+    /// The single exception is the workspace-is-gone arm. That id is never
+    /// reissued, so the record is unrestorable; pushing it back would put an
+    /// entry nothing can ever use straight back on top of the stack, where it
+    /// blocks the restorable records beneath it and outlives them under FIFO
+    /// eviction. Each body therefore gets exactly one such arm, and its toast
+    /// is the one that is NOT paired with a push.
     ///
     /// `PaneFlowApp` is not constructible in a test, so this pins the shape
-    /// rather than the behaviour: inside each restore body, refusal toasts and
-    /// re-pushes must come in equal numbers.
+    /// rather than the behaviour.
     #[test]
-    fn every_refused_restore_pushes_the_record_back() {
+    fn every_transient_refusal_pushes_the_record_back_and_the_orphan_drops() {
         let src = include_str!("mod.rs");
         for (start, end) in [
             ("fn restore_closed_pane(", "fn restore_closed_tab_record("),
@@ -2457,23 +2515,64 @@ mod tests {
             // read the pair as unbalanced.
             let toasts = body.matches(".show_toast(").count();
             let pushes = body.matches("push_closed_record(").count();
+            // The one deliberate drop: the workspace lookup that failed.
+            let orphan_drops = body.matches("workspace_index_for_undo(").count();
+            assert_eq!(
+                orphan_drops, 1,
+                "{start}: exactly one refusal may drop the record - the workspace-is-gone arm"
+            );
             assert!(toasts > 0, "{start}: expected at least one refusal path");
             assert_eq!(
-                pushes, toasts,
-                "{start}: every refusal toast must be paired with a re-push"
+                pushes + orphan_drops,
+                toasts,
+                "{start}: every refusal toast must be paired with a re-push, except the one                  orphan drop"
             );
         }
     }
 
-    /// The other half of the guard above, for the pane path only: `toasts ==
-    /// pushes` is satisfied by a refusal that returns SILENTLY, which is
-    /// exactly the hole `restore_closed_pane` had. Its `return;`s are
-    /// therefore counted too - every one of them has to be a refusal that put
-    /// the record back.
+    /// Issue #83: closing a workspace has to take the undo records and the
+    /// pending confirmation that die with it.
+    ///
+    /// Both are behavioural on a `PaneFlowApp` that cannot be constructed in a
+    /// test, so the ORDER is what is pinned here: the id has to be read - and
+    /// the pending close resolved against the live workspace - before
+    /// `workspaces.remove` drops it.
+    #[test]
+    fn closing_a_workspace_prunes_the_undo_stack_and_stands_down_its_pending_close() {
+        let src = include_str!("mod.rs");
+        let body = src
+            .split("fn close_workspace_at_inner(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// Move a workspace").next())
+            .expect("close_workspace_at_inner body");
+        let prune_at = body
+            .find("drop_closed_records_for_workspace(")
+            .expect("the close must prune the undo stack");
+        let stand_down_at = body
+            .find("pending_close_targets_workspace(")
+            .expect("the close must stand a pending confirmation down");
+        assert!(
+            body.contains("set_pending_close(None"),
+            "the stand-down must go through the single writer: {body}"
+        );
+        let remove_at = body
+            .find("self.workspaces.remove(idx)")
+            .expect("the close must remove the workspace");
+        assert!(
+            prune_at < remove_at && stand_down_at < remove_at,
+            "both read the workspace being destroyed, so both have to run before it is              dropped: {body}"
+        );
+    }
+
+    /// The other half of the guard above, for the pane path only: a balanced
+    /// toast/push count is still satisfied by a refusal that returns
+    /// SILENTLY, which is exactly the hole `restore_closed_pane` had. Its
+    /// `return;`s are therefore counted too - every one has to be either a
+    /// re-push or the single deliberate orphan drop.
     ///
     /// Asserted only for the pane path: `restore_closed_tab_record` funnels
-    /// its four refusals through one shared `put_back` closure, so its literal
-    /// `push_closed_record(` count is 3 against 4 returns by construction.
+    /// TWO of its four refusals through one shared `put_back` closure, so its
+    /// literal push count is one short of its return count by construction.
     #[test]
     fn restore_closed_pane_has_no_silent_early_return() {
         let src = include_str!("mod.rs");
@@ -2484,10 +2583,38 @@ mod tests {
             .expect("restore_closed_pane body");
         assert_eq!(
             body.matches("return;").count(),
-            body.matches("push_closed_record(").count(),
+            body.matches("push_closed_record(").count()
+                + body.matches("workspace_index_for_undo(").count(),
             "`handle_undo_close_pane` pops before it dispatches, so a bare `return` here \
              destroys the only copy of the pane undo exists to protect: {body}"
         );
+    }
+
+    /// Issue #83: a workspace that closes takes its undo records with it.
+    ///
+    /// The id is never reissued, so those records can never be restored; a
+    /// refusal that pushed one back would re-promote it to newest on every
+    /// `Cmd+Shift+T`, blocking the restorable records beneath it for good.
+    #[test]
+    fn closing_a_workspace_drops_only_its_own_undo_records() {
+        let mut records = vec![
+            closed_pane_record(1),
+            closed_tab_record(2, &[]),
+            closed_pane_record(2),
+            closed_tab_record(3, &[]),
+        ];
+
+        drop_closed_records_for_workspace(&mut records, 2);
+
+        assert_eq!(
+            record_workspace_ids(&records),
+            vec![1, 3],
+            "every record for the destroyed workspace goes, and only those - the survivors keep              their stack order, so undo still walks newest-first"
+        );
+
+        // A workspace with nothing on the stack is a clean no-op.
+        drop_closed_records_for_workspace(&mut records, 99);
+        assert_eq!(record_workspace_ids(&records), vec![1, 3]);
     }
 
     /// The record cap counts whole entries regardless of kind: a stack of

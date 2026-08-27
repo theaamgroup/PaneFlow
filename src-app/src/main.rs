@@ -277,6 +277,17 @@ pub(crate) enum ClosedRecord {
     Tab(ClosedTabRecord),
 }
 
+impl ClosedRecord {
+    /// The stable [`crate::workspace::Workspace::id`] this record restores
+    /// into, whichever kind it is.
+    pub(crate) fn workspace_id(&self) -> u64 {
+        match self {
+            ClosedRecord::Pane(record) => record.workspace_id,
+            ClosedRecord::Tab(record) => record.workspace_id,
+        }
+    }
+}
+
 const PRIMARY_SIDEBAR_ANIMATION_MS: u64 = 280;
 const PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA: f32 = 0.5;
 const STARTUP_SPLASH_TEXT_WIDTH: f32 = 198.;
