@@ -1952,14 +1952,13 @@ impl Render for PaneFlowApp {
             // over a non-target), so no extra wiring is needed there.
             //
             // Issue #83: the same capture also stands an INLINE close arm
-            // down. Unlike the drag, the key is deliberately NOT swallowed -
-            // an armed `x` can sit there while the user goes back to typing,
-            // and eating that Escape would cost a keystroke vim or a readline
-            // prompt was waiting for. `set_pending_close` rather than
-            // `cancel_pending_close` for the same reason: nothing took focus
-            // for an inline arm, so re-focusing would yank the caret out of
-            // whatever is typing. A MODAL pending close is left alone here -
-            // it holds focus and owns its own Escape.
+            // down, and SWALLOWS the key while doing it - see the branch
+            // below for why. `set_pending_close` rather than
+            // `cancel_pending_close`: nothing took focus for an inline arm, so
+            // re-focusing would yank the caret out of whatever is typing. A
+            // MODAL pending close is left alone here - it holds focus and owns
+            // its own Escape, and an Escape with nothing armed is forwarded
+            // untouched, so vim and a readline prompt still get the key.
             .capture_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
                 if e.keystroke.key != "escape" {
                     return;
@@ -1968,6 +1967,15 @@ impl Render for PaneFlowApp {
                     cx.stop_active_drag(window);
                     cx.stop_propagation();
                     return;
+                }
+                // The diff dock has its own arm-then-confirm close (a modified
+                // file tab arms on the first press), and it is an armed
+                // destructive control on screen too. Stand it down for the
+                // same gesture. NOT a reason to swallow the key on its own,
+                // unlike the close arm below: nothing is at stake if the
+                // terminal underneath also sees this Escape.
+                if this.diff_dock.diff_tab_close_armed.take().is_some() {
+                    cx.notify();
                 }
                 if app::close_guard::escape_consumes_inline_arm(this.pending_close.as_ref()) {
                     this.set_pending_close(None, cx);
@@ -2374,12 +2382,14 @@ impl Render for PaneFlowApp {
             let is_modal = pending.style == app::close_guard::ConfirmStyle::Modal;
             if !self.pending_close_target_is_live(pending) {
                 // The tab or pane went away underneath the pending close.
-                // Stand down: a `CloseTarget::Pane` holds a strong
-                // `Entity<Pane>`, so keeping a dead one would keep its PTY
-                // alive. Only the modal was holding focus, so only the modal
-                // hands it back - `cancel_pending_close` re-focuses, and doing
-                // that for a silent inline arm would yank focus out from under
-                // whatever the user was typing into.
+                // Stand down rather than keep asking about something that no
+                // longer exists - a modal left up here still holds focus and
+                // still has a live destructive `Enter`. The target itself is
+                // already weak (`CloseTarget::Pane`), so nothing is being
+                // kept alive by the wait. Only the modal was holding focus, so
+                // only the modal hands it back - `cancel_pending_close`
+                // re-focuses, and doing that for a silent inline arm would
+                // yank focus out from under whatever the user was typing.
                 if is_modal {
                     self.cancel_pending_close(window, cx);
                 } else {

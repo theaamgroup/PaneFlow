@@ -89,3 +89,16 @@ pub(crate) const MAX_WORKSPACE_TERMINALS: usize =
 /// (`app/close_confirm.rs`). One constant because the three are the same
 /// scrub - they previously read 64, 64 and 48.
 pub(crate) const MAX_UNTRUSTED_LABEL_CHARS: usize = 64;
+
+/// Clamp then scrub one untrusted label, in that ORDER.
+///
+/// The order is load-bearing and was triplicated across the three sinks named
+/// above. Clamping first bounds the work the scrub does; scrubbing first would
+/// let a title padded with [`MAX_UNTRUSTED_LABEL_CHARS`] zero-width characters
+/// keep its visible tail, and clamping a scrubbed string would mean the cap no
+/// longer describes anything the caller can reason about. A title that IS
+/// nothing but padding renders empty, which is the intended outcome: it had no
+/// visible content to show.
+pub(crate) fn clamp_untrusted_label(raw: &str) -> String {
+    crate::markdown::strip_bidi_zero_width(raw.chars().take(MAX_UNTRUSTED_LABEL_CHARS).collect())
+}

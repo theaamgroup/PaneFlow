@@ -101,16 +101,20 @@ fn waiting_pane_in_workspace(
 /// [`MAX_CLOSED_PANE_SCROLLBACK_BYTES`] of captured scrollback across all of
 /// them. A tab entry counts every leaf of its captured tree.
 pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: ClosedRecord) {
-    if let ClosedRecord::Pane(ClosedPaneRecord {
-        surface:
-            ClosedSurfaceRecord::Terminal {
-                scrollback: Some(scrollback),
-                ..
-            },
-        ..
-    }) = &mut record
-    {
-        scrollback.shrink_to_fit();
+    match &mut record {
+        ClosedRecord::Pane(ClosedPaneRecord {
+            surface:
+                ClosedSurfaceRecord::Terminal {
+                    scrollback: Some(scrollback),
+                    ..
+                },
+            ..
+        }) => scrollback.shrink_to_fit(),
+        // A tab record is where the multi-megabyte strings actually live - it
+        // can hold up to [`crate::layout::MAX_PANES`] leaves, each with its own
+        // extract - and it was the half that never shrank.
+        ClosedRecord::Tab(tab) => shrink_layout_scrollback(&mut tab.layout),
+        ClosedRecord::Pane(_) => {}
     }
     if records.len() >= MAX_CLOSED_PANES {
         records.remove(0);
@@ -118,6 +122,15 @@ pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: Cl
     records.push(record);
     enforce_closed_pane_scrollback_budget(records, MAX_CLOSED_PANE_SCROLLBACK_BYTES);
 }
+
+/// History rows captured per leaf into an undo-close record.
+///
+/// A quarter of [`crate::limits::MAX_SCROLLBACK_EXTRACT_LINES`]. Undo replays
+/// this as inert text into a brand-new PTY - nothing reads it back, nothing
+/// scrolls above it - and the record budget releases most of it almost
+/// immediately, so the rows past this bound cost a walk under the terminal
+/// mutex on the GPUI thread and buy nothing.
+pub(crate) const UNDO_SCROLLBACK_LINES: usize = 1000;
 
 /// Drop every undo record belonging to a workspace that is going away.
 ///
@@ -178,6 +191,28 @@ fn release_record_scrollback(record: &mut ClosedRecord, total: &mut usize, budge
             }
         }
         ClosedRecord::Tab(tab) => release_layout_scrollback(&mut tab.layout, total, budget),
+    }
+}
+
+/// Release a serialized tree's spare scrollback capacity, leaf by leaf.
+///
+/// `extract_scrollback` builds each string through `join`, so the allocation
+/// can overshoot its content; the pane half of [`push_closed_record`] has
+/// always shrunk for that reason and the tab half never did.
+fn shrink_layout_scrollback(node: &mut paneflow_config::schema::LayoutNode) {
+    match node {
+        paneflow_config::schema::LayoutNode::Pane { surfaces } => {
+            for surface in surfaces.iter_mut() {
+                if let Some(scrollback) = surface.scrollback.as_mut() {
+                    scrollback.shrink_to_fit();
+                }
+            }
+        }
+        paneflow_config::schema::LayoutNode::Split { children, .. } => {
+            for child in children.iter_mut() {
+                shrink_layout_scrollback(child);
+            }
+        }
     }
 }
 
@@ -365,6 +400,13 @@ pub(crate) fn capture_closed_pane_record(
 /// text. No process is captured and none is resumed: restore spawns brand-new
 /// PTYs at the recorded cwds.
 ///
+/// Bounded to [`UNDO_SCROLLBACK_LINES`] rows per leaf rather than the full
+/// 4000: this runs synchronously on the GPUI thread, once per leaf, under each
+/// terminal's mutex, and `enforce_closed_pane_scrollback_budget` strips the
+/// result back to [`MAX_CLOSED_PANE_SCROLLBACK_BYTES`] milliseconds later
+/// anyway. A `Cmd+W` on a [`crate::layout::MAX_PANES`]-leaf tab was taking 32
+/// locks and materializing ~128 000 rows to throw most of it away.
+///
 /// A leaf holding a Diff surface serializes with an empty surface list and is
 /// pruned out here, matching `capture_closed_pane_record`'s refusal to record
 /// a diff pane at all. Nothing in this record round-trips a Diff view.
@@ -375,7 +417,8 @@ fn capture_closed_tab_record(
     cx: &App,
 ) -> Option<crate::ClosedTabRecord> {
     let tree = tab.saved_layout.as_ref().or(tab.root.as_ref())?;
-    let layout = prune_unrestorable(tree.serialize(cx))?;
+    let layout =
+        prune_unrestorable(tree.serialize_with_scrollback_limit(cx, UNDO_SCROLLBACK_LINES))?;
     Some(crate::ClosedTabRecord {
         workspace_id,
         title: tab.title.clone(),
@@ -390,6 +433,26 @@ fn capture_closed_tab_record(
 /// stable `Workspace.id`. `None` means that workspace is gone.
 fn workspace_index_for_undo(ids: &[u64], record_id: u64) -> Option<usize> {
     ids.iter().position(|&id| id == record_id)
+}
+
+/// Whether a tab restore has to refuse for want of room.
+///
+/// `open_tab` fills an empty workspace's placeholder instead of pushing past
+/// it, so a placeholder-only workspace always has room even though
+/// `can_open_tab` reasons about the raw count. Lifted out so the `&&` is
+/// assertable at all: inverting it to `||` in place moved nothing in the
+/// suite, and it is the placeholder case that would break.
+fn tab_restore_is_refused(can_open_tab: bool, is_empty_shell: bool) -> bool {
+    !can_open_tab && !is_empty_shell
+}
+
+/// The slot a restored tab slides back into: the index it held, clamped to the
+/// workspace's new last index.
+///
+/// `open_tab` appends, so the newcomer starts at `last`; tabs closed since the
+/// record was captured can leave the recorded index past the end.
+fn restored_tab_slot(recorded_index: usize, last_index: usize) -> usize {
+    recorded_index.min(last_index)
 }
 
 /// After `workspaces.remove(removed_idx)`, map the previous `active_idx` onto
@@ -1147,6 +1210,15 @@ impl PaneFlowApp {
     /// every leaf and `from_layout_node` never reads it, so there is no
     /// recorded per-pane focus to honour.
     ///
+    /// Undoing SEVERAL tab closes does not reconstruct the original order, and
+    /// cannot: the stack is LIFO but each record carries the ABSOLUTE index it
+    /// held, and every restore re-inserts against a row that has already
+    /// shifted. Closing tabs 2, 3 and 4 of `[T1..T5]` and undoing all three
+    /// yields `[T1, T2, T3, T5, T4]`. Each tab does come back, in its own
+    /// recorded slot as it existed at that moment; only their relative order
+    /// is not preserved. Fixing it needs relative anchors on the record, which
+    /// is a schema change, not a clamp.
+    ///
     /// Every TRANSIENT refusal pushes `record` back onto the undo stack and
     /// toasts: [`Self::handle_undo_close_pane`] pops before it dispatches, so
     /// simply returning would consume the record and lose the tab for good.
@@ -1175,10 +1247,10 @@ impl PaneFlowApp {
             self.show_toast("Workspace no longer exists", cx);
             return;
         };
-        // `open_tab` fills an empty workspace's placeholder instead of pushing
-        // past it, so a placeholder-only workspace always has room even though
-        // `can_open_tab` reasons about the raw count.
-        if !self.workspaces[ws_idx].can_open_tab() && !self.workspaces[ws_idx].is_empty_shell() {
+        if tab_restore_is_refused(
+            self.workspaces[ws_idx].can_open_tab(),
+            self.workspaces[ws_idx].is_empty_shell(),
+        ) {
             push_closed_record(&mut self.closed_items, ClosedRecord::Tab(record));
             self.show_toast("Tab limit reached", cx);
             return;
@@ -1246,7 +1318,7 @@ impl PaneFlowApp {
         // back to the slot it held. `reorder_tab` re-resolves the active tab
         // by id, so the restored tab stays the visible one.
         let last = ws.tab_count().saturating_sub(1);
-        ws.reorder_tab(last, index.min(last));
+        ws.reorder_tab(last, restored_tab_slot(index, last));
         let tab_idx = ws.active_tab_idx();
         self.focus_workspace_tab(ws_idx, tab_idx, window, cx);
         cx.notify();
@@ -2307,7 +2379,7 @@ mod tests {
             .and_then(|rest| rest.split("\n}").next())
             .expect("capture_closed_tab_record body");
         assert!(
-            body.contains("prune_unrestorable(tree.serialize(cx))"),
+            body.contains("prune_unrestorable(tree.serialize_with_scrollback_limit("),
             "capture must prune the serialized tree before storing it"
         );
     }
@@ -2525,7 +2597,8 @@ mod tests {
             assert_eq!(
                 pushes + orphan_drops,
                 toasts,
-                "{start}: every refusal toast must be paired with a re-push, except the one                  orphan drop"
+                "{start}: every refusal toast must be paired with a re-push, except the one \
+                 orphan drop"
             );
         }
     }
@@ -2560,7 +2633,8 @@ mod tests {
             .expect("the close must remove the workspace");
         assert!(
             prune_at < remove_at && stand_down_at < remove_at,
-            "both read the workspace being destroyed, so both have to run before it is              dropped: {body}"
+            "both read the workspace being destroyed, so both have to run before it is \
+             dropped: {body}"
         );
     }
 
@@ -2609,12 +2683,48 @@ mod tests {
         assert_eq!(
             record_workspace_ids(&records),
             vec![1, 3],
-            "every record for the destroyed workspace goes, and only those - the survivors keep              their stack order, so undo still walks newest-first"
+            "every record for the destroyed workspace goes, and only those - the survivors \
+             keep their stack order, so undo still walks newest-first"
         );
 
         // A workspace with nothing on the stack is a clean no-op.
         drop_closed_records_for_workspace(&mut records, 99);
         assert_eq!(record_workspace_ids(&records), vec![1, 3]);
+    }
+
+    /// The gate that decides whether an undo has room for the tab it is
+    /// restoring. The `&&` is the whole content: an `||` here would refuse to
+    /// restore into a placeholder-only workspace, which is the ONE case
+    /// `open_tab` handles by filling rather than pushing.
+    #[test]
+    fn tab_restore_is_refused_only_when_the_workspace_is_full_and_not_a_placeholder() {
+        assert!(
+            tab_restore_is_refused(false, false),
+            "a full workspace with real tabs has no room"
+        );
+        assert!(!tab_restore_is_refused(true, false), "room to spare");
+        assert!(
+            !tab_restore_is_refused(false, true),
+            "a placeholder-only workspace always has room - `open_tab` fills the placeholder \
+             rather than pushing past it, even though `can_open_tab` reasons about the raw count"
+        );
+        assert!(!tab_restore_is_refused(true, true));
+    }
+
+    /// The restored tab slides from the end back to the slot it held, clamped:
+    /// tabs closed since the record was captured can leave that index past the
+    /// workspace's new end.
+    #[test]
+    fn restored_tab_slot_clamps_to_the_new_last_index() {
+        assert_eq!(restored_tab_slot(0, 3), 0);
+        assert_eq!(restored_tab_slot(2, 3), 2);
+        assert_eq!(restored_tab_slot(3, 3), 3);
+        assert_eq!(
+            restored_tab_slot(9, 3),
+            3,
+            "an index past the end lands on the last slot, never out of bounds"
+        );
+        assert_eq!(restored_tab_slot(0, 0), 0, "a single-tab workspace");
     }
 
     /// The record cap counts whole entries regardless of kind: a stack of

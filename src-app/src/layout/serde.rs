@@ -17,10 +17,13 @@ use super::tree::{LayoutChild, LayoutTree, SplitDirection};
 
 #[derive(Clone, Copy)]
 enum ScrollbackCapture {
-    /// Full history extract. Kept for [`LayoutTree::serialize`]; IPC
+    /// History extract, bounded to the newest `max_lines` grid rows. IPC
     /// `workspace.current` and session persistence use [`Self::Omit`] so the
-    /// GPUI tick does not walk 4000 lines per pane (issue #29).
-    Inline,
+    /// GPUI tick does not walk 4000 lines per pane (issue #29); the undo-close
+    /// record cannot omit it, so it lowers the bound instead.
+    Inline {
+        max_lines: usize,
+    },
     Omit,
 }
 
@@ -37,7 +40,27 @@ impl LayoutTree {
     /// Not used by `workspace.current` (issue #29); the inline extract is the
     /// snapshot-with-scrollback path, taken by the undo-close-tab record.
     pub fn serialize(&self, cx: &App) -> LayoutNode {
-        self.serialize_with(cx, ScrollbackCapture::Inline)
+        self.serialize_with(
+            cx,
+            ScrollbackCapture::Inline {
+                max_lines: crate::limits::MAX_SCROLLBACK_EXTRACT_LINES,
+            },
+        )
+    }
+
+    /// [`Self::serialize`] with the per-leaf history extract bounded to
+    /// `max_lines` rows.
+    ///
+    /// For the undo-close-tab record (issue #83), which runs this
+    /// synchronously on the GPUI thread once per leaf, under each terminal's
+    /// mutex - and then hands the result to
+    /// `enforce_closed_pane_scrollback_budget`, which strips most of it back
+    /// milliseconds later. The called code has twice been moved OFF this
+    /// thread on purpose (this module's own note above, and
+    /// `pty_session.rs`'s `extract_scrollback_from`); capturing less is the
+    /// version of that which needs no threading.
+    pub fn serialize_with_scrollback_limit(&self, cx: &App, max_lines: usize) -> LayoutNode {
+        self.serialize_with(cx, ScrollbackCapture::Inline { max_lines })
     }
 
     /// Serialize session metadata without carrying terminal output into the
@@ -68,7 +91,9 @@ impl LayoutTree {
                                 tv_ref.terminal.cwd_now().map(|p| p.display().to_string())
                             });
                             let scrollback = match capture {
-                                ScrollbackCapture::Inline => tv_ref.terminal.extract_scrollback(),
+                                ScrollbackCapture::Inline { max_lines } => {
+                                    tv_ref.terminal.extract_scrollback_capped(max_lines)
+                                }
                                 ScrollbackCapture::Omit => None,
                             };
                             SurfaceDefinition {

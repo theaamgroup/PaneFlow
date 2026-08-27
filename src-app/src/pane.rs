@@ -221,11 +221,15 @@ pub enum PaneEvent {
     /// has exactly one surface, so this is what closing the last tab of a pane
     /// used to do, and no empty pane is ever left behind.
     Remove,
-    /// The USER asked to close this pane - the pane header's `x`, or the
-    /// sidebar pane context menu's "Close Pane". Distinct from [`Self::Remove`]
-    /// so the parent can record an undo entry first: `Remove` is also what a
-    /// terminal re-emits when its child process exits on its own, and there is
-    /// nothing to undo about a shell that already quit (issue #83).
+    /// The USER asked to close this pane - the pane header's `x`, and nothing
+    /// else. The sidebar pane context menu's "Close Pane" was repointed
+    /// straight at `request_close_pane(.., Modal, ..)` by issue #83 and no
+    /// longer emits this.
+    ///
+    /// Distinct from [`Self::Remove`] so the parent can record an undo entry
+    /// first: `Remove` is also what a terminal re-emits when its child process
+    /// exits on its own, and there is nothing to undo about a shell that
+    /// already quit.
     CloseRequested,
     /// Request a split in the given direction from this pane.
     Split(crate::layout::SplitDirection),

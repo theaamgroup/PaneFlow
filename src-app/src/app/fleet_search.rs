@@ -135,13 +135,9 @@ impl PaneFlowApp {
                             .filter(|s| !s.is_empty())
                             .unwrap_or_else(|| r.terminal.title.clone());
                         // OSC titles are untrusted - same scrub as the
-                        // EP-005 conflict tooltip (bidi strip + clamp).
-                        let name = crate::markdown::strip_bidi_zero_width(
-                            raw_name
-                                .chars()
-                                .take(crate::limits::MAX_UNTRUSTED_LABEL_CHARS)
-                                .collect(),
-                        );
+                        // EP-005 conflict tooltip and the issue #83 close
+                        // confirmation, and now literally the same function.
+                        let name = crate::limits::clamp_untrusted_label(&raw_name);
                         targets.push((
                             t.entity_id().as_u64(),
                             name,

@@ -1305,7 +1305,10 @@ impl PaneFlowApp {
         // tabs, their panes and their terminals in one move - the same teardown
         // a pane close runs - so no PTY is orphaned. It closes without
         // confirmation, at parity with the row's context menu and with
-        // `Ctrl+Shift+Q`.
+        // `Ctrl+Shift+Q`. That is a DEFERRAL, not an oversight: issue #83
+        // guarded the tab and pane closes and deliberately left this one out,
+        // because guarding it needs a whole-workspace undo record. See
+        // `workspace_ops::PaneFlowApp::close_workspace_at_inner`.
         body = body.child(
             sidebar_hover_actions(group_name.clone())
                 .child(

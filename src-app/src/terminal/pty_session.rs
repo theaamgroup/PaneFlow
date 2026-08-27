@@ -2354,6 +2354,19 @@ impl TerminalState {
         Self::extract_scrollback_from(&self.term)
     }
 
+    /// [`Self::extract_scrollback`] bounded to the newest `lines` rows.
+    ///
+    /// The undo-close record (issue #83) takes this instead of the full
+    /// extract. It runs synchronously on the GPUI thread, once per leaf,
+    /// under the term mutex - a `Cmd+W` on a full tab would otherwise take 32
+    /// locks and materialize ~128 000 rows - and
+    /// `enforce_closed_pane_scrollback_budget` strips most of the result back
+    /// to 2 MiB milliseconds later anyway. Undo replays this as inert text
+    /// into a brand-new PTY, so the rows past the cap buy nothing.
+    pub(crate) fn extract_scrollback_capped(&self, lines: usize) -> Option<String> {
+        Self::extract_scrollback_from_capped(&self.term, lines)
+    }
+
     /// Windowed history extract for `surface.read` (issue #29).
     ///
     /// `offset` skips lines from the newest end; `lines` is the window size.
@@ -2376,8 +2389,14 @@ impl TerminalState {
     /// keeps the lock bounded to the most-recent [`MAX_SCROLLBACK_EXTRACT_LINES`]
     /// rows. The 400k-char cap stays on this persistence path only.
     fn extract_scrollback_from(term: &SharedTerm) -> Option<String> {
-        let (mut result, returned, _, _) =
-            Self::extract_scrollback_window_from(term, MAX_SCROLLBACK_EXTRACT_LINES, 0);
+        Self::extract_scrollback_from_capped(term, MAX_SCROLLBACK_EXTRACT_LINES)
+    }
+
+    /// Row-bounded body of [`Self::extract_scrollback_from`]. The 400k-char
+    /// cap still applies on top; `lines` bounds how many grid rows are read
+    /// and joined in the first place.
+    fn extract_scrollback_from_capped(term: &SharedTerm, lines: usize) -> Option<String> {
+        let (mut result, returned, _, _) = Self::extract_scrollback_window_from(term, lines, 0);
         if returned == 0 {
             return None;
         }
@@ -4542,6 +4561,35 @@ mod tests {
         assert!(
             text.ends_with(last),
             "offset 0 must end on the newest history line {last:?}; got {text:?}"
+        );
+    }
+
+    /// Issue #83: the undo-close record bounds its per-leaf extract rather
+    /// than walking the full 4000-row history on the GPUI thread and handing
+    /// most of it straight to the record budget to release.
+    #[test]
+    fn extract_scrollback_capped_returns_only_the_newest_lines() {
+        let state = seed_numbered_history(4, 40, 500);
+        let full = state.extract_scrollback().expect("history");
+        let capped = state.extract_scrollback_capped(100).expect("history");
+
+        assert!(
+            full.lines().count() > 100,
+            "the fixture must have more history than the cap"
+        );
+        assert_eq!(
+            capped.lines().count(),
+            100,
+            "the cap bounds how many rows are read and joined, not just the result"
+        );
+        assert!(
+            full.ends_with(&capped),
+            "undo replays the tail, so the rows kept must be the NEWEST ones"
+        );
+        // A cap above the available history is the full extract.
+        assert_eq!(
+            state.extract_scrollback_capped(crate::limits::MAX_SCROLLBACK_EXTRACT_LINES),
+            Some(full)
         );
     }
 

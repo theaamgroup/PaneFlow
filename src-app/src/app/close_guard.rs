@@ -5,9 +5,9 @@
 //! This module is intentionally standalone: no GPUI rendering, no IPC, no
 //! process signaling. Everything here is a plain data → plain data function
 //! so it can be unit-tested without a window, a PTY, or a real agent CLI.
-//! The wiring lives next door in [`crate::app::close_confirm`] (the modal and
-//! the request/confirm/cancel entry points); the inline arm-then-confirm
-//! buttons land in a later task.
+//! The wiring lives next door in [`crate::app::close_confirm`]: the modal, the
+//! request/confirm/cancel entry points, and the inline arm-then-confirm
+//! buttons.
 
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,11 @@ pub(crate) struct SurfaceCloseState {
     /// `crate::app::event_handlers::terminal_identity_is_scannable`, the same
     /// admission test the scan deposit applies, so a surface the scan refuses
     /// to touch cannot report a live agent forever.
+    ///
+    /// That reuse is a coupling, not just a convenience: this guard's safety
+    /// now moves with the scan's admission test, so anyone loosening
+    /// `terminal_identity_is_scannable` for scan reasons is also deciding
+    /// which closes stop to ask.
     pub(crate) child_is_live: bool,
 }
 
@@ -94,7 +99,13 @@ pub(crate) enum CloseTarget {
     /// Resolved by stable ids, never by index - rows reorder under a drag.
     Tab { workspace_id: u64, tab_id: u64 },
     Pane {
-        pane: gpui::Entity<crate::pane::Pane>,
+        /// WEAK, like every sibling overlay that parks a pane target
+        /// (`composer.rs`, `launch_pad.rs`, `pane_palette.rs`): a pending
+        /// close must not be the thing keeping a pane - and therefore its PTY
+        /// and its unreaped child - alive. The render stand-down clears a dead
+        /// target, but it is render-gated, and an IPC `workspace.close`
+        /// against a minimised window may produce no frame for a long time.
+        pane: gpui::WeakEntity<crate::pane::Pane>,
     },
 }
 
@@ -142,8 +153,25 @@ impl PendingClose {
 
     /// True when `self` is the pending close for this exact pane, so a
     /// button can render its armed state.
+    ///
+    /// Compared by entity id rather than by handle: the stored target is weak
+    /// and the caller's is strong, and an id is stable for as long as the
+    /// entity lives - which is longer than this comparison needs.
     pub(crate) fn targets_pane(&self, pane: &gpui::Entity<crate::pane::Pane>) -> bool {
-        matches!(&self.target, CloseTarget::Pane { pane: p } if p == pane)
+        matches!(
+            &self.target,
+            CloseTarget::Pane { pane: p } if p.entity_id() == pane.entity_id()
+        )
+    }
+
+    /// [`Self::targets_pane`] for a handle that is already weak - what the two
+    /// click sites hold, having built a [`CloseTarget`] from the pane they
+    /// were clicked on.
+    fn targets_weak_pane(&self, pane: &gpui::WeakEntity<crate::pane::Pane>) -> bool {
+        matches!(
+            &self.target,
+            CloseTarget::Pane { pane: p } if p.entity_id() == pane.entity_id()
+        )
     }
 }
 
@@ -204,7 +232,7 @@ pub(crate) fn click_outcome(
             workspace_id,
             tab_id,
         } => pending.targets_tab(*workspace_id, *tab_id),
-        CloseTarget::Pane { pane } => pending.targets_pane(pane),
+        CloseTarget::Pane { pane } => pending.targets_weak_pane(pane),
     };
     // A second click inside [`ARM_SETTLE`] is a double-click, not a decision:
     // the armed state was painted for one frame the user could not perceive.
@@ -372,26 +400,32 @@ mod tests {
         );
     }
 
+    fn pane_target(pane: &gpui::Entity<crate::pane::Pane>) -> CloseTarget {
+        CloseTarget::Pane {
+            pane: pane.downgrade(),
+        }
+    }
+
     #[gpui::test]
     fn click_outcome_discriminates_pane_targets_by_entity(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
         let a = test_pane(cx, 1);
         let b = test_pane(cx, 1);
 
-        let pending = inline_pending(CloseTarget::Pane { pane: a.clone() });
+        let pending = inline_pending(pane_target(&a));
         let now = settled(&pending);
         assert_eq!(
-            click_outcome(Some(&pending), &CloseTarget::Pane { pane: a.clone() }, now),
+            click_outcome(Some(&pending), &pane_target(&a), now),
             ClickOutcome::Confirm
         );
         assert_eq!(
-            click_outcome(Some(&pending), &CloseTarget::Pane { pane: b }, now),
+            click_outcome(Some(&pending), &pane_target(&b), now),
             ClickOutcome::Arm
         );
         // A pane click never confirms a pending TAB close, and vice versa.
         let tab_pending = inline_pending(tab_target(1, 2));
         assert_eq!(
-            click_outcome(Some(&tab_pending), &CloseTarget::Pane { pane: a }, now),
+            click_outcome(Some(&tab_pending), &pane_target(&a), now),
             ClickOutcome::Arm
         );
         assert_eq!(
@@ -580,7 +614,7 @@ mod tests {
         let b = test_pane(cx, 1);
 
         let pane_pending = PendingClose {
-            target: CloseTarget::Pane { pane: a.clone() },
+            target: pane_target(&a),
             style: ConfirmStyle::Inline,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,

@@ -5,9 +5,8 @@
 //! asking: the request/confirm/cancel entry points every modal close path
 //! funnels through, and the modal itself.
 //!
-//! Split out of `close_guard.rs` so the predicate stays free of GPUI and
-//! `close_guard.rs` stays near the repo's ~280-LOC module convention (see
-//! `layout/close.rs`).
+//! Split out of `close_guard.rs` so the predicate stays free of GPUI: the
+//! guard is drivable with plain data, this half needs a window.
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement,
@@ -30,14 +29,23 @@ use crate::{ClosedRecord, PaneFlowApp};
 /// The pane label can be an OSC title: a bidi override there could visually
 /// reverse the `Close "…"?` around it and make the modal name a different
 /// surface than the one about to die. Same scrub the port-conflict tooltip and
-/// the fleet-search target list apply to the same source, and now literally
-/// the same cap: [`crate::limits::MAX_UNTRUSTED_LABEL_CHARS`].
+/// the fleet-search target list apply to the same source, and literally the
+/// same cap: [`crate::limits::MAX_UNTRUSTED_LABEL_CHARS`].
+///
+/// Two characters beyond that scrub, because this sink QUOTES the label rather
+/// than merely printing it. [`close_confirm_title`] wraps it in curly double
+/// quotes, which `strip_bidi_zero_width` leaves alone, so a label carrying one
+/// closes the quoted region early and lets the rest of the payload read as the
+/// sentence's own words. Control characters go for the same reason, and
+/// because `sanitize_pane_name` (`app/ipc_handler.rs`) - upstream of the
+/// `surface.rename` route that reaches here, and one that is NOT
+/// scripting-gated - already strips them: a sink laxer than its own source is
+/// the wrong way round.
 fn confirm_label(raw: &str) -> String {
-    crate::markdown::strip_bidi_zero_width(
-        raw.chars()
-            .take(crate::limits::MAX_UNTRUSTED_LABEL_CHARS)
-            .collect(),
-    )
+    crate::limits::clamp_untrusted_label(raw)
+        .chars()
+        .filter(|c| !matches!(c, '\u{201c}' | '\u{201d}') && !c.is_control())
+        .collect()
 }
 
 /// Title line for the close confirmation.
@@ -121,7 +129,7 @@ fn inline_armed_pane(pending: Option<&PendingClose>) -> Option<Entity<Pane>> {
             target: CloseTarget::Pane { pane },
             style: ConfirmStyle::Inline,
             ..
-        }) => Some(pane.clone()),
+        }) => pane.upgrade(),
         _ => None,
     }
 }
@@ -141,7 +149,7 @@ fn sync_close_armed(current: Option<&PendingClose>, next: Option<&PendingClose>,
         Some(PendingClose {
             target: CloseTarget::Pane { pane },
             ..
-        }) => Some(pane.clone()),
+        }) => pane.upgrade(),
         _ => None,
     };
     let incoming = inline_armed_pane(next);
@@ -216,7 +224,9 @@ impl PaneFlowApp {
             .collect()
     }
 
-    /// The one entry point every user-initiated tab close goes through.
+    /// The one entry point every user-initiated tab close GESTURE goes
+    /// through. `pane_palette.rs` closes a tab directly and on purpose - a
+    /// picker escape is a dismissal, not a close request.
     ///
     /// No live agent means today's behaviour, unchanged: close immediately.
     /// Otherwise the target is remembered by stable id (never by index - rows
@@ -265,8 +275,8 @@ impl PaneFlowApp {
     /// Arm a confirmation for `pane` when closing it would kill a live agent.
     /// `true` means one is now pending and the caller must NOT close.
     ///
-    /// Deliberately `Window`-free: the inline half of this (Task 4) is reached
-    /// from `handle_pane_event`, which has no `&mut Window` - all five pane
+    /// Deliberately `Window`-free: the inline half is reached from
+    /// `handle_pane_event`, which has no `&mut Window` - all five pane
     /// subscriptions are plain `cx.subscribe`, and converting them is a
     /// five-site blast radius for no gain.
     pub(crate) fn arm_pending_close_pane(
@@ -283,7 +293,9 @@ impl PaneFlowApp {
         let label = Pane::surface_title(&pane.read(cx).surface, cx);
         self.set_pending_close(
             Some(PendingClose {
-                target: CloseTarget::Pane { pane: pane.clone() },
+                target: CloseTarget::Pane {
+                    pane: pane.downgrade(),
+                },
                 style,
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
@@ -296,7 +308,7 @@ impl PaneFlowApp {
     }
 
     /// Confirm-or-close for a pane close that has no window-dependent close of
-    /// its own (the sidebar pane context menu; Task 4's header `x`).
+    /// its own (the sidebar pane context menu; the pane header `x`).
     /// `Window`-free for the same reason [`Self::arm_pending_close_pane`] is.
     pub(crate) fn request_close_pane(
         &mut self,
@@ -344,18 +356,28 @@ impl PaneFlowApp {
                     workspace_id,
                     tab_id,
                 },
+            style,
             ..
         }) = self.pending_close.clone()
         else {
             return;
         };
+        // Only the MODAL took focus, so only the modal hands it back. This
+        // method has two callers, and the other is the sidebar's inline x,
+        // where nothing was focused: re-focusing there would move focus to the
+        // ACTIVE workspace's first pane, out from under whatever the user is
+        // typing. Same rule as the root Escape handler (`set_pending_close`,
+        // not `cancel_pending_close`), and the one the PANE half of this guard
+        // already follows.
+        let restores_focus = style == ConfirmStyle::Modal;
         self.set_pending_close(None, cx);
         let Some((ws_idx, tab_idx)) =
             pending_close_tab_indices(&self.workspace_tab_ids(), workspace_id, tab_id)
         else {
-            // The target went away under the modal. Close nothing, but still
-            // hand focus back - the modal was holding it.
-            self.restore_focus_after_close_confirm(window, cx);
+            // The target went away underneath the confirmation. Close nothing.
+            if restores_focus {
+                self.restore_focus_after_close_confirm(window, cx);
+            }
             return;
         };
         self.close_workspace_tab(ws_idx, tab_idx, window, cx);
@@ -363,11 +385,13 @@ impl PaneFlowApp {
         // `ws_idx == self.active_idx`, and a background workspace's expanded
         // tab row right-click reaches here with a non-active `ws_idx`. The
         // modal was holding focus, so without this the window would name an
-        // unmounted handle (issue #108). Unconditional rather than gated on
-        // the same test: it also covers the early `close_tab(..).is_none()`
-        // return inside the close, and on the active branch it re-focuses the
-        // pane the close just focused, which is a no-op.
-        self.restore_focus_after_close_confirm(window, cx);
+        // unmounted handle (issue #108). Unconditional WITHIN the modal branch
+        // rather than gated on the same test: it also covers the early
+        // `close_tab(..).is_none()` return inside the close, and on the active
+        // branch it re-focuses the pane the close just focused, a no-op.
+        if restores_focus {
+            self.restore_focus_after_close_confirm(window, cx);
+        }
     }
 
     /// Confirm a pending PANE close. `Window`-free by design - see
@@ -395,7 +419,13 @@ impl PaneFlowApp {
         match self.pending_close.as_ref().map(|p| p.target.clone()) {
             Some(CloseTarget::Tab { .. }) => self.confirm_pending_close_tab(window, cx),
             Some(CloseTarget::Pane { pane }) => {
-                self.confirm_pending_close_pane(pane, cx);
+                match pane.upgrade() {
+                    Some(pane) => self.confirm_pending_close_pane(pane, cx),
+                    // The pane was dropped underneath the modal: nothing left
+                    // to close, but the slot still has to be cleared through
+                    // the single writer so no button is left lit.
+                    None => self.set_pending_close(None, cx),
+                }
                 // The `Window`-free half cannot hand focus back, and this
                 // caller has a `Window`, so do it here: the modal was the
                 // focused element and dropping it silently is the issue #108
@@ -448,7 +478,9 @@ impl PaneFlowApp {
         };
         match &pending.target {
             CloseTarget::Tab { workspace_id, .. } => ws.id == *workspace_id,
-            CloseTarget::Pane { pane } => ws.tab_index_containing_pane(pane).is_some(),
+            CloseTarget::Pane { pane } => pane
+                .upgrade()
+                .is_some_and(|pane| ws.tab_index_containing_pane(&pane).is_some()),
         }
     }
 
@@ -470,10 +502,11 @@ impl PaneFlowApp {
                 .iter()
                 .find(|ws| ws.id == *workspace_id)
                 .is_some_and(|ws| ws.tabs().iter().any(|tab| tab.id == *tab_id)),
-            CloseTarget::Pane { pane } => self
-                .workspaces
-                .iter()
-                .any(|ws| ws.tab_index_containing_pane(pane).is_some()),
+            CloseTarget::Pane { pane } => pane.upgrade().is_some_and(|pane| {
+                self.workspaces
+                    .iter()
+                    .any(|ws| ws.tab_index_containing_pane(&pane).is_some())
+            }),
         }
     }
 
@@ -615,6 +648,43 @@ impl PaneFlowApp {
 mod tests {
     use super::*;
 
+    /// Every `.rs` file under `src-app/src`, read off disk at test time.
+    ///
+    /// The scans below used to enumerate files by hand, which is a guard that
+    /// goes stale in silence: the deferral scan was blind to 13 deferral
+    /// sites, and the single-writer scan to every file nobody remembered to
+    /// add. `env!` resolves at compile time, so the walk does not depend on
+    /// the working directory the suite is run from.
+    fn rust_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            let mut paths: Vec<std::path::PathBuf> =
+                entries.flatten().map(|entry| entry.path()).collect();
+            paths.sort();
+            for path in paths {
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && let Ok(src) = std::fs::read_to_string(&path)
+                {
+                    out.push((path.display().to_string(), src));
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        walk(&root, &mut out);
+        assert!(
+            out.len() > 100,
+            "the source walk found {} files - a walk that reads nothing passes every scan \
+             built on it",
+            out.len()
+        );
+        out
+    }
+
     #[test]
     fn close_confirm_body_names_the_agent_and_both_consequences() {
         let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"));
@@ -712,6 +782,46 @@ mod tests {
         assert_eq!(confirm_label(&long).chars().count(), cap);
     }
 
+    /// The label is QUOTED, not merely printed, so a curly double quote inside
+    /// it terminates the quoted region early and the rest reads as the
+    /// sentence's own words. `strip_bidi_zero_width` does not touch those, and
+    /// the OSC channel is not the only way in: IPC `surface.rename` sets
+    /// `custom_name` and is not scripting-gated.
+    #[test]
+    fn confirm_label_strips_the_quotes_the_title_wraps_it_in() {
+        let spoof = format!(
+            "sh{}\u{201d} - idle, safe {}\u{201c}",
+            '\u{201d}', '\u{201c}'
+        );
+        let cleaned = confirm_label(&spoof);
+        for quote in ['\u{201c}', '\u{201d}'] {
+            assert!(
+                !cleaned.contains(quote),
+                "a curly quote in the label re-opens the title's own quoting: {cleaned}"
+            );
+        }
+        let title = close_confirm_title(false, &cleaned);
+        assert_eq!(
+            title.matches('\u{201c}').count(),
+            1,
+            "exactly one opening quote, the title's own: {title}"
+        );
+        assert_eq!(
+            title.matches('\u{201d}').count(),
+            1,
+            "exactly one closing quote, the title's own: {title}"
+        );
+
+        // Control characters too - `sanitize_pane_name`, upstream of the
+        // `surface.rename` route into this sink, already strips them, and a
+        // sink laxer than its own source is the wrong way round.
+        let noisy = confirm_label("claude\u{7}\n\u{1b}[31m");
+        assert!(
+            !noisy.chars().any(char::is_control),
+            "control characters must not reach the modal copy: {noisy:?}"
+        );
+    }
+
     /// Issue #83 mandates the guard on all four MODAL close paths, and the
     /// style is CARRIED to the pending close, never inferred from the call
     /// site. There is no `PaneFlowApp` to call these on (`PaneFlowApp::new`
@@ -737,9 +847,10 @@ mod tests {
 
         let menu_src = include_str!("sidebar/context_menu.rs");
         // Bounded on `into_any_element()`, not on `));`: this item's chain
-        // ends `))` with no semicolon, so a `));` delimiter is not found until
-        // 37 lines into `render_pane_context_menu` and the assertions below
-        // would pass over the wrong region.
+        // ends `))` with no semicolon, so the next `));` is 37 lines further
+        // on - by which point the region has run 17 lines into
+        // `render_pane_context_menu`, and the assertions below would be
+        // reading the wrong menu item.
         let tab_menu = menu_src
             .split("\"tab-context-close\".into()")
             .nth(1)
@@ -867,7 +978,8 @@ mod tests {
         ] {
             assert!(
                 body.contains("click_count >= 2"),
-                "{label} must drop the second click of a double-click, or it arms and confirms                  in one gesture: {body}"
+                "{label} must drop the second click of a double-click, or it arms and \
+                 confirms in one gesture: {body}"
             );
         }
     }
@@ -929,7 +1041,10 @@ mod tests {
     #[test]
     fn the_close_confirmation_defers_above_every_overlay_it_can_share_a_frame_with() {
         // Built rather than written out, so the scan does not match itself.
-        let needle = format!("with_priority{}", '(');
+        // The bare `priority` stem, not `with_priority`: GPUI exposes BOTH
+        // spellings and `diff/view/review.rs` uses `deferred(menu).priority(8)`,
+        // which the narrower needle could not see at all.
+        let needle = format!("priority{}", '(');
         let max_priority = |src: &str| -> u32 {
             src.match_indices(needle.as_str())
                 .filter_map(|(idx, _)| {
@@ -946,42 +1061,38 @@ mod tests {
             ours > 0,
             "the confirmation must defer at an explicit priority"
         );
-        // Every overlay that defers at 6 or above; the rest sit at 4 or lower.
-        for (label, src) in [
-            ("about_dialog.rs", include_str!("about_dialog.rs")),
-            (
-                "../diff/view/render.rs",
-                include_str!("../diff/view/render.rs"),
-            ),
-            (
-                "custom_buttons_modal.rs",
-                include_str!("custom_buttons_modal.rs"),
-            ),
-            ("launch_pad.rs", include_str!("launch_pad.rs")),
-            ("attention_queue.rs", include_str!("attention_queue.rs")),
-            ("fleet_search.rs", include_str!("fleet_search.rs")),
-            ("theme_picker.rs", include_str!("theme_picker.rs")),
-            ("broadcast.rs", include_str!("broadcast.rs")),
-        ] {
-            let theirs = max_priority(src);
+        // Every source file, not a hand-kept list of the overlays someone
+        // remembered: a new overlay deferring above this one is exactly the
+        // regression, and it would arrive in a file no list mentions.
+        for (path, src) in rust_sources() {
+            if path.ends_with("close_confirm.rs") {
+                continue;
+            }
+            let theirs = max_priority(&src);
             assert!(
                 ours > theirs,
-                "{label} defers at {theirs} and the close confirmation at {ours}: an occluded \
+                "{path} defers at {theirs} and the close confirmation at {ours}: an occluded \
                  confirmation still holds focus and still kills a process group on Enter"
             );
         }
     }
 
-    /// Issue #108's stranding class, on the confirm path.
+    /// Issue #108's stranding class, on the confirm path - and its opposite
+    /// on the inline one.
     ///
     /// `close_workspace_tab` re-focuses only when the closed tab belonged to
     /// the ACTIVE workspace, and a background workspace's expanded tab row
     /// right-click reaches this path with `ws_idx != self.active_idx`. The
-    /// modal was the focused element, so dropping it there without a restore
+    /// MODAL was the focused element, so dropping it there without a restore
     /// leaves the window naming an unmounted focus handle - exactly the state
     /// the four commits before this branch each fixed.
+    ///
+    /// The sidebar's inline x calls the very same method, and there nothing
+    /// took focus: restoring would move focus to the ACTIVE workspace's first
+    /// pane, out from under whatever the user is typing. So both restores are
+    /// gated on the style, and neither may be reachable without the gate.
     #[test]
-    fn confirming_a_tab_close_always_hands_focus_back() {
+    fn confirming_a_modal_tab_close_hands_focus_back_and_an_inline_one_does_not() {
         let src = include_str!("close_confirm.rs");
         let body = src
             .split("pub(crate) fn confirm_pending_close_tab(")
@@ -998,6 +1109,18 @@ mod tests {
             restores_at > closes_at,
             "the modal held focus, and the close it delegates to only re-focuses for the ACTIVE \
              workspace - so the restore has to run AFTER the close, on every path: {body}"
+        );
+        assert!(
+            body.contains("style == ConfirmStyle::Modal"),
+            "the restore has to be decided from the pending close's own style, not from the \
+             call site: {body}"
+        );
+        assert_eq!(
+            body.matches("self.restore_focus_after_close_confirm(")
+                .count(),
+            body.matches("if restores_focus {").count(),
+            "every restore on this path must sit behind the modal-only gate, or the sidebar's \
+             inline x yanks the caret out of whatever is typing: {body}"
         );
 
         // The premise this rests on. If the gate below ever goes away, the
@@ -1037,22 +1160,39 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n            }").next())
             .expect("PaneEvent::Remove arm");
-        for forbidden in [
-            "request_close_pane",
-            "arm_pending_close_pane",
-            "close_pane_undoably",
+        // The arm itself is eight lines - this branch moved its body into
+        // `remove_pane_from_tree` - so scanning only the arm would sail past a
+        // `push_closed_record` added one call deeper. Follow the call.
+        let removal = handlers
+            .split("pub(crate) fn remove_pane_from_tree(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    pub(crate) fn handle_pane_event(").next())
+            .expect("remove_pane_from_tree body");
+        for (label, body) in [
+            ("the PaneEvent::Remove arm", remove_arm),
+            ("remove_pane_from_tree, which it delegates to", removal),
         ] {
-            assert!(
-                !remove_arm.contains(forbidden),
-                "an auto-close after the child exited must never confirm and must never push an \
-                 undo record (`{forbidden}` found): {remove_arm}"
-            );
+            for forbidden in [
+                "request_close_pane",
+                "arm_pending_close_pane",
+                "close_pane_undoably",
+                "push_closed_record",
+                "capture_closed_pane_record",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "an auto-close after the child exited must never confirm and must never \
+                     push an undo record (`{forbidden}` found in {label}): {body}"
+                );
+            }
         }
     }
 
     fn inline_pane_pending(pane: &Entity<Pane>) -> PendingClose {
         PendingClose {
-            target: CloseTarget::Pane { pane: pane.clone() },
+            target: CloseTarget::Pane {
+                pane: pane.downgrade(),
+            },
             style: ConfirmStyle::Inline,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
@@ -1121,9 +1261,49 @@ mod tests {
         assert!(!armed(cx, &b));
     }
 
+    /// A pending close must not be the thing keeping a pane - and therefore
+    /// its PTY and its unreaped child - alive.
+    ///
+    /// Every sibling overlay that parks a pane target holds it weakly for the
+    /// same reason (`composer.rs`, `launch_pad.rs`, `pane_palette.rs`). The
+    /// render stand-down that clears a dead target is render-GATED, so an IPC
+    /// `workspace.close` against a minimised window can leave the frame that
+    /// would run it arbitrarily far away.
+    #[gpui::test]
+    fn a_pending_close_does_not_keep_its_target_pane_alive(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        let pane = cx.new(|cx| Pane::new(terminal, 1, cx));
+        let pending = inline_pane_pending(&pane);
+        let CloseTarget::Pane { pane: target } = &pending.target else {
+            panic!("a pane pending close");
+        };
+        assert!(
+            target.upgrade().is_some(),
+            "the target resolves while the pane is alive"
+        );
+
+        drop(pane);
+
+        assert!(
+            target.upgrade().is_none(),
+            "the pane died with its last real owner; a pending close that outlived it would \
+             hold the PTY open with nothing on screen to close"
+        );
+    }
+
     /// Re-stating the SAME pending close must not flicker the armed pane off
-    /// and on: a modal that re-arms its own target would otherwise repaint the
-    /// button twice per gesture.
+    /// and on: a re-arm of the target already in the slot would otherwise
+    /// repaint the button twice per gesture.
+    ///
+    /// The final boolean cannot show that - it is `true` either way, which is
+    /// why this counts REPAINTS instead. Dropping `sync_close_armed`'s "skip a
+    /// target that is staying" filter turns one silent re-arm into
+    /// `set_close_armed` false-then-true; `set_close_armed` notifies only on a
+    /// real change, so the flicker shows up as a repaint where there should be
+    /// none at all (GPUI coalesces the pair within one update).
     #[gpui::test]
     fn re_arming_the_same_pane_leaves_it_armed(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
@@ -1136,9 +1316,24 @@ mod tests {
         cx.update(|_, cx| sync_close_armed(None, pending.as_ref(), cx));
         assert!(cx.update(|_, cx| a.read(cx).close_armed()));
 
+        let repaints = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let subscription = cx.update(|_, cx| {
+            let repaints = repaints.clone();
+            cx.observe(&a, move |_, _| repaints.set(repaints.get() + 1))
+        });
+
         let again = Some(inline_pane_pending(&a));
         cx.update(|_, cx| sync_close_armed(pending.as_ref(), again.as_ref(), cx));
+        cx.update(|_, _| {});
+
         assert!(cx.update(|_, cx| a.read(cx).close_armed()));
+        assert_eq!(
+            repaints.get(),
+            0,
+            "re-arming the target already in the slot must not disarm it first: the button \
+             would blink off and on inside one gesture"
+        );
+        drop(subscription);
     }
 
     /// A MODAL pane close must not light the inline X: the modal is already
@@ -1166,11 +1361,21 @@ mod tests {
     #[test]
     fn set_pending_close_is_the_only_writer_of_pending_close() {
         // Built rather than written out, so this scan does not match its own
-        // source line.
+        // source lines. Five forms, not one: a plain assignment is the obvious
+        // way to bypass the setter, but `.take()`, `.replace(..)` and - the
+        // realistic one - an `.as_mut()` followed by a field write all leave a
+        // pane lit with nothing pending, which is a single-click kill.
         let eq = '=';
-        let forms = [format!("pending_close {eq}"), format!("pending_close{eq}")];
-        let self_src = include_str!("close_confirm.rs");
+        let dot = '.';
+        let forms = [
+            format!("pending_close {eq}"),
+            format!("pending_close{eq}"),
+            format!("pending_close{dot}take()"),
+            format!("pending_close{dot}replace("),
+            format!("pending_close{dot}as_mut()"),
+        ];
         // The one legitimate write lives inside `set_pending_close` itself.
+        let self_src = include_str!("close_confirm.rs");
         let (before, after) = self_src
             .split_once("pub(crate) fn set_pending_close(")
             .expect("set_pending_close");
@@ -1180,22 +1385,19 @@ mod tests {
             "set_pending_close must push the armed flag onto the panes: {setter}"
         );
 
-        for (label, src) in [
-            ("close_confirm.rs (outside the setter)", before),
-            ("close_confirm.rs (outside the setter)", rest),
-            ("close_guard.rs", include_str!("close_guard.rs")),
-            ("../main.rs", include_str!("../main.rs")),
-            ("bootstrap.rs", include_str!("bootstrap.rs")),
-            ("workspace_ops/mod.rs", include_str!("workspace_ops/mod.rs")),
-            ("workspace_ops/tab.rs", include_str!("workspace_ops/tab.rs")),
-            ("event_handlers.rs", include_str!("event_handlers.rs")),
-            ("sidebar/mod.rs", include_str!("sidebar/mod.rs")),
-            (
-                "sidebar/context_menu.rs",
-                include_str!("sidebar/context_menu.rs"),
-            ),
-            ("../pane.rs", include_str!("../pane.rs")),
-        ] {
+        // The whole tree, not a hand-kept list: the slot is a crate-wide
+        // field, so the file that bypasses the setter next is by definition
+        // one nobody thought to enumerate.
+        let mut sources: Vec<(String, String)> = rust_sources()
+            .into_iter()
+            .filter(|(path, _)| !path.ends_with("close_confirm.rs"))
+            .collect();
+        sources.push((
+            "close_confirm.rs (outside the setter)".to_string(),
+            format!("{before}{rest}"),
+        ));
+
+        for (label, src) in sources {
             for line in src.lines() {
                 let line = line.trim();
                 let writes = forms.iter().any(|form| {
