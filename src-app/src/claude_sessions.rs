@@ -92,17 +92,10 @@ struct FirstLineEnvelope {
 /// Convert an absolute path into the slug Claude Code uses as the directory
 /// name under `$CLAUDE_CONFIG_DIR/projects/` (default `~/.claude/projects/`).
 /// Algorithm (matches Claude Code's own encoder): every character that is
-/// **not** ASCII alphanumeric becomes `-`. That covers `/`, `\`, the Windows
-/// drive `:` (so `C:\dev\paneflow` → `C--dev-paneflow`, NOT `C:-dev-paneflow`),
-/// spaces (`C:\Program Files\..` → `C--Program-Files-..`), and `.` (so
-/// `/home/u/.claude` → `-home-u--claude`, the dir Claude Code actually
-/// writes). Runs of separators are NOT collapsed - `C:\` produces the literal
-/// `C--`. No percent-encoding or hashing.
-///
-/// The previous encoder only replaced `/` and `\`, leaving the drive `:`
-/// intact: on Windows it produced `C:-dev-paneflow` while the on-disk dir is
-/// `C--dev-paneflow`, so `read_dir` opened a path that never existed and the
-/// sessions sidebar came up empty.
+/// **not** ASCII alphanumeric becomes `-`. That covers `/`, spaces, and `.`
+/// (so `/home/u/.claude` → `-home-u--claude`, the dir Claude Code actually
+/// writes). Runs of separators are NOT collapsed - `/` produces the literal
+/// `-`. No percent-encoding or hashing.
 ///
 /// A "truncate to 200 + hash" encoder appears in some Claude Code issue
 /// reports but was not reproduced (Claude still `ENAMETOOLONG`s at 255 as of
@@ -175,17 +168,12 @@ fn is_usable_project_dir_name(name: &OsStr) -> bool {
     matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
 }
 
-/// Strip trailing path separators, unless that would reduce `cwd` to a bare
-/// root. `/` is all separator and `C:\` is a drive root: trimming those
-/// changes the slug (`-` → ``, `C--` → `C-`) instead of normalizing it, and
-/// Claude keeps them intact.
+/// Strip trailing `/`, unless that would reduce `cwd` to the filesystem
+/// root. `/` is all separator: trimming it would change the slug (`-` → ``)
+/// instead of normalizing it, and Claude keeps it intact.
 fn normalize_cwd_for_slug(cwd: &str) -> &str {
-    let trimmed = cwd.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() || trimmed.ends_with(':') {
-        cwd
-    } else {
-        trimmed
-    }
+    let trimmed = cwd.trim_end_matches('/');
+    if trimmed.is_empty() { cwd } else { trimmed }
 }
 
 fn project_snapshot_mtime(project_dir: &Path) -> Option<SystemTime> {
@@ -218,10 +206,9 @@ fn max_mtime(current: Option<SystemTime>, candidate: Option<SystemTime>) -> Opti
 /// Read all Claude Code session metadata for the given working directory.
 /// Sessions are sorted by timestamp descending (most recent first) and only
 /// those whose first-line `cwd` matches `cwd` (via
-/// [`cwd_matches`](crate::agent_sessions::cwd_matches): exact on Unix,
-/// case/separator-insensitive on Windows) are kept - dedupes the rare slug
-/// collision where two distinct paths produce the same directory name
-/// (`/a/b-c` and `/a/b/c` both slug to `-a-b-c`).
+/// [`cwd_matches`](crate::agent_sessions::cwd_matches)) are kept - dedupes
+/// the rare slug collision where two distinct paths produce the same
+/// directory name (`/a/b-c` and `/a/b/c` both slug to `-a-b-c`).
 ///
 /// **Blocking I/O** - call from inside `smol::unblock` or
 /// `cx.background_executor`. Never invoke on the GPUI main thread.
@@ -636,8 +623,8 @@ mod tests {
     #[test]
     fn slug_replaces_spaces() {
         // Spaces are non-alphanumeric, so they become `-` like every other
-        // separator (real example: `C:\Program Files\PaneFlow` →
-        // `C--Program-Files-PaneFlow`).
+        // separator (real example: `/home/alice/my project` →
+        // `-home-alice-my-project`).
         assert_eq!(
             slug_for_cwd("/home/alice/my project"),
             "-home-alice-my-project"
@@ -650,24 +637,6 @@ mod tests {
         // dotfile dir produces a double dash (`/home/arthur/.claude` →
         // `-home-arthur--claude`, the dir Claude Code writes on Linux).
         assert_eq!(slug_for_cwd("/home/alice/.config"), "-home-alice--config");
-    }
-
-    #[test]
-    fn slug_windows_path_replaces_drive_colon() {
-        // Regression guard: the drive `:` MUST become `-`. The old encoder left
-        // it as `C:-Users-alice-myapp`, which never matched the on-disk
-        // `C--Users-alice-myapp` and emptied the sidebar on Windows.
-        assert_eq!(
-            slug_for_cwd("C:\\Users\\alice\\myapp"),
-            "C--Users-alice-myapp"
-        );
-    }
-
-    #[test]
-    fn slug_matches_real_windows_project_dir() {
-        // Verified against a real install: Claude Code stores `C:\dev\paneflow`
-        // sessions under `~/.claude/projects/C--dev-paneflow/`.
-        assert_eq!(slug_for_cwd("C:\\dev\\paneflow"), "C--dev-paneflow");
     }
 
     #[test]
@@ -694,19 +663,8 @@ mod tests {
             expected,
         );
         assert_eq!(
-            project_dir_for_cwd_from("/home/alice/myapp///", home.clone(), None, None),
+            project_dir_for_cwd_from("/home/alice/myapp///", home, None, None),
             expected,
-        );
-        let win_expected = Some(PathBuf::from(
-            "/home/alice/.claude/projects/C--dev-paneflow",
-        ));
-        assert_eq!(
-            project_dir_for_cwd_from("C:\\dev\\paneflow\\", home.clone(), None, None),
-            win_expected,
-        );
-        assert_eq!(
-            project_dir_for_cwd_from("C:\\dev\\paneflow", home, None, None),
-            win_expected,
         );
     }
 
@@ -715,9 +673,7 @@ mod tests {
         // All-separator paths are not normalized: trimming would change the
         // slug rather than canonicalize it.
         assert_eq!(normalize_cwd_for_slug("/"), "/");
-        assert_eq!(normalize_cwd_for_slug("C:\\"), "C:\\");
         assert_eq!(slug_for_cwd(normalize_cwd_for_slug("/")), "-");
-        assert_eq!(slug_for_cwd(normalize_cwd_for_slug("C:\\")), "C--");
     }
 
     #[test]

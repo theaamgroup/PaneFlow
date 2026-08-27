@@ -53,9 +53,8 @@ pub(crate) fn detect_tool_from_stem(stem: &str) -> Option<&'static str> {
 // PATH walk - find the real AI binary, excluding the shim's own directory
 // ---------------------------------------------------------------------------
 
-/// Candidate executable names to probe in each `$PATH` entry. Unix looks for
-/// a bare filename; Windows tries `.exe` first, then `.cmd` (covers both
-/// native AI builds and Node-shipped wrappers like `claude.cmd`).
+/// Candidate executable names to probe in each `$PATH` entry: the bare
+/// tool filename in each directory.
 #[cfg(unix)]
 pub(crate) fn candidate_names(tool: &str) -> Vec<String> {
     vec![tool.to_owned()]
@@ -147,9 +146,8 @@ where
 }
 
 /// US-017 (cli-hardening-followup-2026-Q3): capture a file's
-/// cross-platform identity. `same_file::Handle` uses the native
-/// file identity on Unix and Windows, so hardlinks compare equal
-/// without relying on unstable standard-library APIs.
+/// identity. `same_file::Handle` uses inode + device, so hardlinks
+/// compare equal without relying on unstable standard-library APIs.
 ///
 /// Returns `None` when the path cannot be opened, in which case
 /// the comparison degrades to a no-op and the dir-canonicalize

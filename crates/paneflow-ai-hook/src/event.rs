@@ -400,7 +400,7 @@ mod tests {
                 test_context(),
                 json!({"exit_code": -1_073_741_510_i32}),
             )
-            .expect("Windows NTSTATUS fits i32"),
+            .expect("signed i32 exit code is accepted"),
         );
         assert_eq!(frame["params"]["exit_code"], -1_073_741_510_i64);
     }

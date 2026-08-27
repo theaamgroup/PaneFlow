@@ -17,6 +17,10 @@ Companion documents:
 This file holds only: where the work stands, what is next, and the rules the
 session learned the hard way.
 
+v0.9.0 adoption of issues **#87–#103** is on `main`, except the remaining
+human work already listed below (#10 Cmd+Tab, #11 unsigned-DMG Gatekeeper,
+#13 TCC/Notifications, #14 close/undo-close chords, #15 PATH-shim idle).
+
 ## Identity
 
 | | |

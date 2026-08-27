@@ -99,6 +99,16 @@ TERMS=$(grep -rnE --include='*.rs' \
   '/proc/|/sys/|XDG_[A-Z]|\.desktop\b|AppImage|appimage|dpkg|\brpm\b|apt-get|\bdnf\b|zypper|pkexec|polkit|flatpak|Flatpak|\bsnap\b|Snapd|zsync|systemd|wayland|Wayland|X11|dbus|DBus|notify-rust|ostree|gtk|Gtk' \
   . 2>/dev/null | grep -v '^\./target/' | nocomment)
 
+# UNGATED PLATFORM STRINGS (issue #103).
+# A STAGE 2c ZERO-CONDITION of 0 is cfg-predicates only and is blind to this
+# class: Windows executable-suffix / PowerShell / AppData path handling that
+# arrives with no #[cfg] at all. Reported separately; not added to the
+# zero-condition integer. Suffixes use a trailing word boundary so `.execute`
+# is not counted as `.exe`.
+UNGATED_STR=$(grep -rn --include='*.rs' -E \
+  'powershell|\.exe\b|\.cmd\b|\.bat\b|\.ps1\b|\\\\\?\\|%APPDATA%' \
+  . 2>/dev/null | grep -v '^\./target/' | nocomment)
+
 # ORPHAN CHECK: a .rs file on disk that no `mod` declaration reaches is
 # invisible to every cfg scan precisely because it no longer compiles.
 ORPHANS=$(python3 - <<'PYEOF'
@@ -154,6 +164,9 @@ echo "files touched ................ $(printf '%s\n' "$ATTR" "$MACRO" | grep . |
 echo "---"
 TOTAL=$(( $(n "$ATTR") + $(n "$MACRO") + $(n "$TOML") + $(n "$STRCHK") + $(n "$MULTILINE") + $(n "$BANGCFG") ))
 echo "STAGE 2c ZERO-CONDITION: $TOTAL   (must reach 0)"
+echo
+echo "── UNGATED PLATFORM STRINGS ──"
+echo "issue #103 (not in STAGE 2c integer) ... $(n "$UNGATED_STR")"
 fi
 
 if [ "${1:-}" = "--list" ]; then
@@ -164,6 +177,7 @@ if [ "${1:-}" = "--list" ]; then
   echo; echo "=== triple string checks ==="; printf '%s\n' "$STRCHK"
   echo; echo "=== multi-line cfg ==="; printf '%s\n' "$MULTILINE"
   echo; echo "=== orphans ==="; printf '%s\n' "$ORPHANS"
+  echo; echo "=== ungated platform strings ==="; printf '%s\n' "$UNGATED_STR"
 fi
 if [ "${1:-}" = "--files" ]; then
   printf '%s\n' "$ATTR" "$MACRO" | grep . | cut -d: -f1 | sort | uniq -c | sort -rn

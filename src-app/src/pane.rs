@@ -926,10 +926,6 @@ impl Pane {
 
     fn agent_title_from_terminal_title(title: &str) -> Option<&'static str> {
         let first = title.split_whitespace().next()?.trim();
-        let first = first
-            .strip_suffix(".exe")
-            .or_else(|| first.strip_suffix(".EXE"))
-            .unwrap_or(first);
         if let Some(agent) = crate::agent_launcher::TerminalAgent::from_binary(first) {
             return Some(agent.display_name());
         }
@@ -2087,10 +2083,6 @@ mod tests {
     fn agent_title_detection_uses_exact_command_token() {
         assert_eq!(
             super::Pane::agent_title_from_terminal_title("codex"),
-            Some("Codex")
-        );
-        assert_eq!(
-            super::Pane::agent_title_from_terminal_title("codex.exe"),
             Some("Codex")
         );
         assert_eq!(

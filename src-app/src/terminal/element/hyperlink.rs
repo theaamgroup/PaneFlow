@@ -202,9 +202,6 @@ fn is_windows_absolute(path_str: &str) -> bool {
     {
         return true;
     }
-    if path_str.starts_with("\\\\?\\") || path_str.starts_with("\\\\.\\") {
-        return true;
-    }
     if path_str.starts_with("\\\\") || path_str.starts_with("//") {
         let normalized = path_str.replace('\\', "/");
         let mut parts = normalized.trim_start_matches('/').split('/');
@@ -775,12 +772,11 @@ mod tests {
     }
 
     /// Resolve `p` to a display string that stays readable in test output.
-    /// Windows canonicalization may prepend `\\?\`; stripping it keeps tests
-    /// independent from the host's verbatim-path formatting.
     fn canonical_display(p: &Path) -> String {
-        let canonical = p.canonicalize().expect("canonicalize");
-        let s = canonical.to_string_lossy().into_owned();
-        s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
+        p.canonicalize()
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[cfg(unix)]
@@ -817,7 +813,6 @@ mod tests {
         assert!(is_windows_absolute("C:\\Users\\arthur\\doc.md"));
         assert!(is_windows_absolute("D:/repo/README.md"));
         assert!(is_windows_absolute(r"\\server\share\README.md"));
-        assert!(is_windows_absolute(r"\\?\C:\repo\README.md"));
         assert!(!is_windows_absolute("/etc/foo.md"));
         assert!(!is_windows_absolute("foo.md"));
         assert!(!is_windows_absolute("C:foo"));
@@ -947,9 +942,8 @@ mod tests {
         // whether or not the cell carries an OSC 8 hyperlink.
         let tmp = tempfile::tempdir().expect("tempdir");
         let md_path = write_md(tmp.path(), "doc.md");
-        // `canonical_display` resolves Windows 8.3 short names + strips the
-        // `\\?\` UNC prefix so the file-path regex character class accepts
-        // every byte. On Unix it's a thin wrapper around canonicalize.
+        // `canonical_display` is a thin wrapper around canonicalize so the
+        // file-path regex character class accepts every byte.
         let display = canonical_display(&md_path);
         let line_text = format!("file {display}");
         let map = ascii_map(&line_text);
