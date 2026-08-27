@@ -23,6 +23,33 @@ CI/test hygiene set #66–#71, and triaged #73–#85 against 925e21ce (comments
 on each; #75 closed as superseded; #74/#77/#80/#82 retitled to their
 residuals). What still needs a human is listed below.
 
+The 2026-08-27 keyboard-correctness cluster closed **#108**, **#79** and the
+focus-routing half of **#78** across five commits
+(`ea09225c`, `2f5a1f00`, `66b2ca0b`, `bb938ae6`, `30809b70`). Test count
+1900 -> 1913, name-diffed at every landing; all six gates green on each.
+All three were re-verified as live defects in code before any work started,
+and both `CHANGES REQUESTED` review loops (#108, #79) were closed.
+
+Two things that pass gates but are **not** end-to-end verified, and one
+follow-up:
+
+- **No live GUI smoke was possible.** Plain keystrokes deliver via
+  `CGEventPostToPid`, but modified chords never fire an action, and
+  `NSRunningApplication.activate` is blocked on macOS 26 (`AXFrontmost`
+  works instead). Details and the working recipe are in the
+  `paneflow-live-keystroke-smoke` memory and in issue #109's
+  "Verifying this" section. Rename and the zero-pane chords still want one
+  human pass before release.
+- **`F2` as a rename-START gesture is structurally dead** and documented as
+  such at both sites: a sidebar row only joins the dispatch path once its
+  rename is already live, but the `f2` branch only runs when it is not.
+  Fixing it needs per-row focus handles.
+- **Issue #110** tracks a `Window::on_focus_lost` fallback, which would
+  retire this whole class of bug — including the residual leg where hiding
+  the sidebar unmounts the renamed row, and the `Window`-less
+  `activate_workspace_without_window` / `enter_diff_mode` paths. Do not
+  schedule it concurrently with **#109**; both rewrite `src-app/src/main.rs`.
+
 ## Identity
 
 | | |
