@@ -960,8 +960,13 @@ mod tests {
                 "an unknown command and two shells are all idle"
             );
 
-            // Same workspace, one field changed. The LAST tab, so a walk that
-            // stopped at the visible tab would still report idle.
+            // Same workspace, one field changed. This is the LAST tab, which
+            // `open_tab` also makes the ACTIVE one - so it does not by itself
+            // prove the walk reaches backgrounded tabs. That property is
+            // pinned by `one_busy_terminal_beside_a_shell_makes_the_workspace_active`,
+            // whose `busy_first` case leaves the busy tab behind the active one.
+            // What this half proves is the direction: the answer follows the
+            // terminals' cached command rather than being a constant.
             let last_pane = ws
                 .collect_panes()
                 .last()
