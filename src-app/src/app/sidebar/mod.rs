@@ -281,6 +281,19 @@ fn sidebar_action_button(
     icon_size: f32,
     ui: crate::theme::UiColors,
 ) -> gpui::Stateful<gpui::Div> {
+    sidebar_action_button_tinted(id, icon, icon_size, ui.muted)
+}
+
+/// [`sidebar_action_button`] with an explicit glyph tint, for the one button
+/// that has to leave the resting `ui.muted`: the armed tab `x` (issue #83),
+/// which paints `ui.vc_deleted` so "one more click kills a live agent" is
+/// visible rather than silent. There is no `ui.danger` field.
+fn sidebar_action_button_tinted(
+    id: SharedString,
+    icon: &'static str,
+    icon_size: f32,
+    tint: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
     // The row underneath is already at the hover tint when this button is
     // reachable, so the button hovers into the active tint - one step further,
     // or it would be invisible against its own row.
@@ -293,14 +306,14 @@ fn sidebar_action_button(
         .items_center()
         .justify_center()
         .rounded(px(6.))
-        .text_color(ui.muted)
+        .text_color(tint)
         .hover(move |style| style.bg(active_bg))
         .child(
             svg()
                 .size(px(icon_size))
                 .flex_none()
                 .path(icon)
-                .text_color(ui.muted),
+                .text_color(tint),
         )
 }
 
@@ -1552,16 +1565,38 @@ impl PaneFlowApp {
         // its panes and their terminals. Closing the last tab of a workspace
         // leaves an empty tab behind and never closes the workspace (FR-01) -
         // the folder row's own `x` is what closes that.
+        //
+        // Issue #83: this `x` is the INLINE half of the close guard. The first
+        // click on a tab running a live agent arms it - red glyph, changed
+        // tooltip, and permanently revealed - and only the second click closes.
+        // A tab with nothing live still closes on one click, exactly as before.
+        let close_armed = self.pending_close.as_ref().is_some_and(|pending| {
+            pending.style == crate::app::close_guard::ConfirmStyle::Inline
+                && pending.targets_tab(ws_id, tab_id)
+        });
+        let close_actions = sidebar_hover_actions(tab_group.clone());
+        // An armed button that is only painted while the row is hovered is not
+        // painted at all the moment the pointer leaves: the user would be left
+        // with a tab that closes on one click and no sign of why.
+        let close_actions = if close_armed {
+            close_actions.visible()
+        } else {
+            close_actions
+        };
         title_row = title_row.child(
-            sidebar_hover_actions(tab_group.clone()).child(
-                sidebar_action_button(
+            close_actions.child(
+                sidebar_action_button_tinted(
                     SharedString::from(format!("tab-close-{tab_id}")),
                     "icons/close.svg",
                     12.,
-                    ui,
+                    if close_armed { ui.vc_deleted } else { ui.muted },
                 )
                 .delayed_tooltip({
-                    let label = SharedString::from("Close tab");
+                    let label = SharedString::from(if close_armed {
+                        "Click again to close"
+                    } else {
+                        "Close tab"
+                    });
                     move |_w, cx| {
                         cx.new(|_| SidebarTooltip {
                             label: label.clone(),
@@ -1585,7 +1620,30 @@ impl PaneFlowApp {
                         })
                     {
                         this.commit_inline_rename(window, cx);
-                        this.close_workspace_tab(at_ws, at_tab, window, cx);
+                        let target = crate::app::close_guard::CloseTarget::Tab {
+                            workspace_id: ws_id,
+                            tab_id,
+                        };
+                        match crate::app::close_guard::click_outcome(
+                            this.pending_close.as_ref(),
+                            &target,
+                        ) {
+                            // Re-resolves the stable ids itself, so a tab that
+                            // moved between the two clicks still closes the
+                            // right one.
+                            crate::app::close_guard::ClickOutcome::Confirm => {
+                                this.confirm_pending_close_tab(window, cx);
+                            }
+                            crate::app::close_guard::ClickOutcome::Arm => {
+                                this.request_close_workspace_tab(
+                                    at_ws,
+                                    at_tab,
+                                    crate::app::close_guard::ConfirmStyle::Inline,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        }
                     }
                     cx.stop_propagation();
                 })),

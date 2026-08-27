@@ -159,6 +159,11 @@ const CLOSE_GLYPH_SIZE: f32 = 9.0;
 /// Resting / hover fill alpha of the close chip, over `ui.text`.
 const CLOSE_BASE_ALPHA: f32 = 0.16;
 const CLOSE_HOVER_ALPHA: f32 = 0.92;
+/// Resting fill alpha of an ARMED close chip, over `ui.vc_deleted` (issue #83).
+/// Far above the neutral resting alpha on purpose: the armed chip has to read
+/// as red without the pointer on it, because the pointer is what reveals the
+/// unarmed one.
+const CLOSE_ARMED_BASE_ALPHA: f32 = 0.72;
 
 /// Hover group of the pane header. Scopes the close button's reveal; GPUI
 /// resolves a group against the nearest ancestor that declared it, so every
@@ -388,6 +393,11 @@ pub struct Pane {
     /// `PaneFlowApp::sync_broadcast_stripes`. The stripe is a DISTINCT element
     /// from the attention border below - the pane border slot stays the glow's.
     broadcast_stripe: Option<usize>,
+    /// Issue #83: `true` while this pane's header `x` is armed - one click has
+    /// landed, a live agent would die, and the next click closes for real.
+    /// Pushed by `PaneFlowApp::set_pending_close`, which owns the single
+    /// pending-close slot and disarms whichever pane is leaving it.
+    close_armed: bool,
     /// Ghostty-style unfocused dim: `true` when this pane is NOT the focused
     /// one in a multi-pane workspace. Pushed idempotently by
     /// [`crate::layout::LayoutTree::sync_unfocused_dim`] - never mutated
@@ -451,6 +461,7 @@ impl Pane {
             composer_slot: None,
             pending_prefill: false,
             broadcast_stripe: None,
+            close_armed: false,
             dimmed: false,
             dim_from: 0.0,
             dim_alpha: Rc::new(Cell::new(0.0)),
@@ -533,6 +544,23 @@ impl Pane {
             self.broadcast_stripe = color_idx;
             cx.notify();
         }
+    }
+
+    /// Issue #83: light this pane's header `x` up as "one more click closes
+    /// me". Same idempotent push contract as [`Pane::set_broadcast_stripe`],
+    /// driven from `PaneFlowApp::set_pending_close` - the app owns the single
+    /// pending-close slot, so a pane can never arm itself and can never be
+    /// left lit after another target takes the slot.
+    pub fn set_close_armed(&mut self, armed: bool, cx: &mut Context<Self>) {
+        if self.close_armed != armed {
+            self.close_armed = armed;
+            cx.notify();
+        }
+    }
+
+    /// Whether this pane's header `x` is currently armed.
+    pub fn close_armed(&self) -> bool {
+        self.close_armed
     }
 
     /// EP-001 US-001/US-003: the Composer overlay - a bottom-anchored prompt
@@ -1174,14 +1202,30 @@ impl Pane {
     /// glyph that merely brightened. The glyph is rebuilt here rather than
     /// passed in because `svg()` is a mask with no inherited color: it has to
     /// carry its own tint on every frame.
-    fn close_chip_frame(visual: gpui::Div, progress: f32, ui: crate::theme::UiColors) -> gpui::Div {
-        let alpha = CLOSE_BASE_ALPHA + (CLOSE_HOVER_ALPHA - CLOSE_BASE_ALPHA) * progress;
-        visual.bg(with_alpha(ui.text, alpha)).child(
+    ///
+    /// Issue #83: `armed` swaps the neutral tint for `ui.vc_deleted` (there is
+    /// no `ui.danger`). An armed chip that looked like a resting one would be
+    /// worse than no guard at all - the first click would appear to do nothing
+    /// and the second would kill a live agent's whole process group.
+    fn close_chip_frame(
+        visual: gpui::Div,
+        progress: f32,
+        armed: bool,
+        ui: crate::theme::UiColors,
+    ) -> gpui::Div {
+        let tint = if armed { ui.vc_deleted } else { ui.text };
+        let base_alpha = if armed {
+            CLOSE_ARMED_BASE_ALPHA
+        } else {
+            CLOSE_BASE_ALPHA
+        };
+        let alpha = base_alpha + (CLOSE_HOVER_ALPHA - base_alpha) * progress;
+        visual.bg(with_alpha(tint, alpha)).child(
             svg()
                 .size(px(CLOSE_GLYPH_SIZE))
                 .flex_none()
                 .path("icons/close.svg")
-                .text_color(ui.text.blend(ui.base.opacity(progress))),
+                .text_color(tint.blend(ui.base.opacity(progress))),
         )
     }
 
@@ -1192,6 +1236,7 @@ impl Pane {
     /// hover resumes from where it was instead of snapping.
     fn render_close_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = pane_colors();
+        let armed = self.close_armed();
         let id = SharedString::from("pane-btn-close");
         let (live_progress, from, target, epoch) = self.hover_motion_snapshot(&id);
 
@@ -1212,7 +1257,7 @@ impl Pane {
         let distance = (target - from).abs();
         let visual = if epoch == 0 || distance <= f32::EPSILON {
             live_progress.set(target);
-            Self::close_chip_frame(visual, target, ui).into_any_element()
+            Self::close_chip_frame(visual, target, armed, ui).into_any_element()
         } else {
             let duration = Duration::from_secs_f32(
                 Duration::from_millis(HEADER_HOVER_MS).as_secs_f32() * distance,
@@ -1225,7 +1270,7 @@ impl Pane {
                     move |visual, delta| {
                         let progress = (from + (target - from) * delta).clamp(0.0, 1.0);
                         animated_progress.set(progress);
-                        Self::close_chip_frame(visual, progress, ui)
+                        Self::close_chip_frame(visual, progress, armed, ui)
                     },
                 )
                 .into_any_element()
@@ -1481,22 +1526,34 @@ impl Pane {
         //
         // The tooltip quotes the *live* binding: a user who remapped
         // `close_pane` in Settings reads their own key here, not the default.
-        let close_tooltip = format!(
-            "Close pane ({})",
-            crate::keybindings::format_keystroke(
-                self.cached_config
-                    .shortcuts
-                    .iter()
-                    .find(|(_, action)| action.as_str() == "close_pane")
-                    .map(|(key, _)| key.as_str())
-                    .unwrap_or("secondary-shift-w"),
+        //
+        // Issue #83: while the `x` is ARMED the tooltip says what the next
+        // click does instead of naming the keybinding, and the slot drops its
+        // hover gate. An armed control that is only painted under the pointer
+        // is not painted at all once the pointer leaves - the user would be
+        // left with a pane that closes on one click and no sign of why.
+        let close_tooltip = if self.close_armed() {
+            "Click again to close".to_string()
+        } else {
+            format!(
+                "Close pane ({})",
+                crate::keybindings::format_keystroke(
+                    self.cached_config
+                        .shortcuts
+                        .iter()
+                        .find(|(_, action)| action.as_str() == "close_pane")
+                        .map(|(key, _)| key.as_str())
+                        .unwrap_or("secondary-shift-w"),
+                )
             )
-        );
+        };
         let close_button = div()
             .id("pane-btn-close-slot")
             .flex_none()
-            .invisible()
-            .group_hover(HEADER_GROUP, |style| style.visible())
+            .when(!self.close_armed(), |slot| {
+                slot.invisible()
+                    .group_hover(HEADER_GROUP, |style| style.visible())
+            })
             .delayed_tooltip(crate::ui_primitives::text_tooltip(close_tooltip))
             .child(self.render_close_button(cx));
 
@@ -2027,6 +2084,46 @@ mod tests {
 
         let material = pane_card_background(&theme, true, true);
         assert_eq!(material, theme.background);
+    }
+
+    /// Issue #83, R1/R3: the armed close chip is pushed in from the app
+    /// (`set_close_armed`, modelled on the seven existing `set_*` pushes) and
+    /// is painted with `ui.vc_deleted` - there is no `ui.danger`, and inline
+    /// hex is banned in render code. A pane must never arm itself: the app
+    /// owns the single pending-close slot, and a pane that could set its own
+    /// flag could be left lit after another target took that slot.
+    #[test]
+    fn the_armed_close_chip_is_pushed_in_and_paints_the_danger_token() {
+        let src = include_str!("pane.rs");
+
+        let chip = src
+            .split("fn close_chip_frame(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("close_chip_frame body");
+        assert!(
+            chip.contains("ui.vc_deleted"),
+            "the armed chip must use the theme's danger token: {chip}"
+        );
+        assert!(
+            !chip.contains("rgb(0x") && !chip.contains("rgba(0x"),
+            "no inline hex in render code: {chip}"
+        );
+
+        // The flag is a push, never a local mutation: only the setter assigns
+        // it, and only the app calls the setter.
+        let eq = '=';
+        let write = format!("self.close_armed {eq}");
+        let writers: Vec<&str> = src
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(write.as_str()))
+            .collect();
+        assert_eq!(
+            writers.len(),
+            1,
+            "`close_armed` must have exactly one writer, `set_close_armed`: {writers:?}"
+        );
     }
 
     /// Issue #83: the two `PaneEvent` emit sites must not converge again.

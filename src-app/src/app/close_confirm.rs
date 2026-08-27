@@ -110,11 +110,58 @@ pub(crate) fn pending_close_tab_indices(
     Some((ws_idx, tab_idx))
 }
 
+/// The pane an inline arm should light up, if this pending close is one.
+///
+/// A `Modal` pane close deliberately does not arm the button: the modal is
+/// already asking, and a red `x` behind it would read as a second, different
+/// question.
+fn inline_armed_pane(pending: Option<&PendingClose>) -> Option<Entity<Pane>> {
+    match pending {
+        Some(PendingClose {
+            target: CloseTarget::Pane { pane },
+            style: ConfirmStyle::Inline,
+            ..
+        }) => Some(pane.clone()),
+        _ => None,
+    }
+}
+
+/// Move the armed flag from the outgoing pending close to the incoming one.
+///
+/// The correctness property this exists for: `pending_close` holds exactly ONE
+/// target, so arming a second pane has to disarm the first. A pane left
+/// visually armed after another target took the slot would close on a SINGLE
+/// click with no confirmation - the exact kill issue #83 is about.
+///
+/// A free function rather than a method because `PaneFlowApp::new` binds a real
+/// Unix socket and cannot be constructed in a test; this half is drivable with
+/// nothing but two `Pane` entities.
+fn sync_close_armed(current: Option<&PendingClose>, next: Option<&PendingClose>, cx: &mut App) {
+    let outgoing = match current {
+        Some(PendingClose {
+            target: CloseTarget::Pane { pane },
+            ..
+        }) => Some(pane.clone()),
+        _ => None,
+    };
+    let incoming = inline_armed_pane(next);
+    // Re-stating the same pending close must not flicker the button off and
+    // on, so the disarm skips a target that is staying.
+    if let Some(pane) = outgoing.filter(|pane| Some(pane) != incoming.as_ref()) {
+        pane.update(cx, |pane, cx| pane.set_close_armed(false, cx));
+    }
+    if let Some(pane) = incoming {
+        pane.update(cx, |pane, cx| pane.set_close_armed(true, cx));
+    }
+}
+
 impl PaneFlowApp {
     /// The single writer of `pending_close` (R9): every arm, disarm, and
-    /// confirm goes through here, so Task 4 only has to add the
-    /// "disarm the OUTGOING target" body in one place.
+    /// confirm goes through here, so the "disarm the OUTGOING target" body
+    /// lives in exactly one place.
+    /// `set_pending_close_is_the_only_writer_of_pending_close` pins that.
     pub(crate) fn set_pending_close(&mut self, next: Option<PendingClose>, cx: &mut Context<Self>) {
+        sync_close_armed(self.pending_close.as_ref(), next.as_ref(), cx);
         // A modal can be armed from a `Window`-less path (`handle_pane_event`
         // subscribes with plain `cx.subscribe`), so the next render claims
         // focus for it - the `fleet_search_pending_focus` pattern.
@@ -681,6 +728,99 @@ mod tests {
         );
     }
 
+    /// The two INLINE paths (R4), and nothing else. Both have to route the
+    /// click decision through the shared pure helper rather than re-deriving
+    /// "is this the second click?" locally, and neither may keep a direct
+    /// unguarded route into the close.
+    #[test]
+    fn both_inline_close_paths_route_through_the_click_helper() {
+        let sidebar = include_str!("sidebar/mod.rs");
+        let tab_x = sidebar
+            .split("let close_armed = self.pending_close")
+            .nth(1)
+            .and_then(|rest| rest.split("let row_shell =").next())
+            .expect("sidebar tab close button");
+        assert!(
+            tab_x.contains("click_outcome(") && tab_x.contains("ConfirmStyle::Inline"),
+            "the sidebar tab x must arm inline through the shared helper: {tab_x}"
+        );
+        assert!(
+            tab_x.contains("confirm_pending_close_tab"),
+            "a second click on the same tab's x must confirm: {tab_x}"
+        );
+        assert!(
+            !tab_x.contains("this.close_workspace_tab("),
+            "the sidebar tab x must not keep a second, unguarded route into the close: {tab_x}"
+        );
+        // R3: arming has to be visible, and without an inline hex.
+        assert!(
+            tab_x.contains("ui.vc_deleted") && tab_x.contains("Click again to close"),
+            "an armed x that looks and reads like an unarmed one is worse than no guard, because \
+             the first click silently does nothing: {tab_x}"
+        );
+
+        let handlers = include_str!("event_handlers.rs");
+        let close_requested = handlers
+            .split("pane::PaneEvent::CloseRequested => {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n            }").next())
+            .expect("PaneEvent::CloseRequested arm");
+        assert!(
+            close_requested.contains("click_outcome(")
+                && close_requested.contains("ConfirmStyle::Inline"),
+            "the pane header x must arm inline through the shared helper: {close_requested}"
+        );
+        assert!(
+            close_requested.contains("confirm_pending_close_pane"),
+            "the second click arrives with no `&mut Window`, so it must use the Window-free \
+             confirm: {close_requested}"
+        );
+        assert!(
+            !close_requested.contains("close_pane_undoably"),
+            "closing straight from the arm would bypass the guard entirely: {close_requested}"
+        );
+    }
+
+    /// R6: Escape stands an inline arm down, through the one mutator, without
+    /// swallowing the key and without touching focus. All three matter: a
+    /// swallowed Escape costs vim a keystroke, `cancel_pending_close` would
+    /// re-focus the first pane out from under whatever is typing, and a write
+    /// that skipped the mutator would leave the pane lit.
+    #[test]
+    fn escape_stands_an_inline_arm_down_without_eating_the_key() {
+        let src = include_str!("../main.rs");
+        let capture = src
+            .split(".capture_key_down(cx.listener(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n            }))").next())
+            .expect("root capture_key_down body");
+        assert!(
+            capture.contains("ConfirmStyle::Inline") && capture.contains("set_pending_close(None"),
+            "the root Escape capture must stand an inline arm down: {capture}"
+        );
+        assert!(
+            !capture.contains("cancel_pending_close"),
+            "an inline arm never took focus, so standing it down must not re-focus: {capture}"
+        );
+        // The only `stop_propagation` in this handler belongs to the drag
+        // branch, which returns before the close-arm branch is reached.
+        assert_eq!(
+            capture.matches("cx.stop_propagation()").count(),
+            1,
+            "only the drag branch may swallow Escape: {capture}"
+        );
+        let stop_at = capture
+            .find("cx.stop_propagation()")
+            .expect("the drag branch's stop_propagation");
+        let inline_at = capture
+            .find("ConfirmStyle::Inline")
+            .expect("the close-arm branch");
+        assert!(
+            stop_at < inline_at,
+            "standing an inline arm down must let Escape through to the terminal: {capture}"
+        );
+    }
+
     /// The two paths that must NEVER raise a modal.
     #[test]
     fn the_unguarded_close_paths_stay_unguarded() {
@@ -714,6 +854,167 @@ mod tests {
                 "an auto-close after the child exited must never confirm and must never push an \
                  undo record (`{forbidden}` found): {remove_arm}"
             );
+        }
+    }
+
+    fn inline_pane_pending(pane: &Entity<Pane>) -> PendingClose {
+        PendingClose {
+            target: CloseTarget::Pane { pane: pane.clone() },
+            style: ConfirmStyle::Inline,
+            agent: TerminalAgent::ClaudeCode,
+            extra_agents: 0,
+            label: String::new(),
+        }
+    }
+
+    /// The single most important property of the inline affordance: arming a
+    /// SECOND target has to disarm the first. `pending_close` holds exactly one
+    /// target, so a pane left visually armed after another one takes over would
+    /// close on ONE click with no confirmation - the exact kill this feature
+    /// exists to prevent.
+    ///
+    /// `PaneFlowApp::new` binds a real Unix socket, so `set_pending_close`
+    /// itself is unconstructable here; this drives the arm/disarm half it
+    /// delegates to, in the same order, and
+    /// `set_pending_close_is_the_only_writer_of_pending_close` pins the
+    /// delegation.
+    #[gpui::test]
+    fn arming_a_second_pane_disarms_the_first(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let cx = cx.add_empty_window();
+        let new_pane = |cx: &mut gpui::VisualTestContext| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| Pane::new(terminal, 1, cx))
+        };
+        let a = new_pane(cx);
+        let b = new_pane(cx);
+        let armed = |cx: &mut gpui::VisualTestContext, pane: &Entity<Pane>| {
+            cx.update(|_, cx| pane.read(cx).close_armed())
+        };
+
+        // Nothing pending: neither X is lit.
+        assert!(!armed(cx, &a));
+        assert!(!armed(cx, &b));
+
+        // First click on A's X.
+        let mut pending: Option<PendingClose> = None;
+        let next = Some(inline_pane_pending(&a));
+        cx.update(|_, cx| sync_close_armed(pending.as_ref(), next.as_ref(), cx));
+        pending = next;
+        assert!(armed(cx, &a), "A's X must light up once it is pending");
+        assert!(!armed(cx, &b));
+
+        // First click on B's X, while A is still armed.
+        let next = Some(inline_pane_pending(&b));
+        cx.update(|_, cx| sync_close_armed(pending.as_ref(), next.as_ref(), cx));
+        pending = next;
+        assert!(
+            !armed(cx, &a),
+            "A must be disarmed the instant B takes the single pending slot, or A's next single \
+             click closes it with no confirmation"
+        );
+        assert!(armed(cx, &b));
+        assert!(
+            pending.as_ref().is_some_and(|p| p.targets_pane(&b)),
+            "only B is pending"
+        );
+        assert!(!pending.as_ref().is_some_and(|p| p.targets_pane(&a)));
+
+        // Esc / cancel / confirm all clear the slot the same way.
+        cx.update(|_, cx| sync_close_armed(pending.as_ref(), None, cx));
+        assert!(!armed(cx, &a));
+        assert!(!armed(cx, &b));
+    }
+
+    /// Re-stating the SAME pending close must not flicker the armed pane off
+    /// and on: a modal that re-arms its own target would otherwise repaint the
+    /// button twice per gesture.
+    #[gpui::test]
+    fn re_arming_the_same_pane_leaves_it_armed(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        let a = cx.new(|cx| Pane::new(terminal, 1, cx));
+
+        let pending = Some(inline_pane_pending(&a));
+        cx.update(|_, cx| sync_close_armed(None, pending.as_ref(), cx));
+        assert!(cx.update(|_, cx| a.read(cx).close_armed()));
+
+        let again = Some(inline_pane_pending(&a));
+        cx.update(|_, cx| sync_close_armed(pending.as_ref(), again.as_ref(), cx));
+        assert!(cx.update(|_, cx| a.read(cx).close_armed()));
+    }
+
+    /// A MODAL pane close must not light the inline X: the modal is already
+    /// asking, and a red X behind it would read as a second, different
+    /// question.
+    #[gpui::test]
+    fn a_modal_pane_close_never_arms_the_inline_button(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        let a = cx.new(|cx| Pane::new(terminal, 1, cx));
+
+        let mut pending = inline_pane_pending(&a);
+        pending.style = ConfirmStyle::Modal;
+        let pending = Some(pending);
+        cx.update(|_, cx| sync_close_armed(None, pending.as_ref(), cx));
+        assert!(!cx.update(|_, cx| a.read(cx).close_armed()));
+    }
+
+    /// R2: the pending-close slot has exactly one writer, so the disarm can
+    /// never be bypassed. A direct assignment to the field anywhere else
+    /// reintroduces the stuck-armed pane this whole helper exists to prevent,
+    /// and it compiles silently.
+    #[test]
+    fn set_pending_close_is_the_only_writer_of_pending_close() {
+        // Built rather than written out, so this scan does not match its own
+        // source line.
+        let eq = '=';
+        let forms = [format!("pending_close {eq}"), format!("pending_close{eq}")];
+        let self_src = include_str!("close_confirm.rs");
+        // The one legitimate write lives inside `set_pending_close` itself.
+        let (before, after) = self_src
+            .split_once("pub(crate) fn set_pending_close(")
+            .expect("set_pending_close");
+        let (setter, rest) = after.split_once("\n    }").expect("set_pending_close body");
+        assert!(
+            setter.contains("sync_close_armed("),
+            "set_pending_close must push the armed flag onto the panes: {setter}"
+        );
+
+        for (label, src) in [
+            ("close_confirm.rs (outside the setter)", before),
+            ("close_confirm.rs (outside the setter)", rest),
+            ("close_guard.rs", include_str!("close_guard.rs")),
+            ("../main.rs", include_str!("../main.rs")),
+            ("bootstrap.rs", include_str!("bootstrap.rs")),
+            ("workspace_ops/mod.rs", include_str!("workspace_ops/mod.rs")),
+            ("workspace_ops/tab.rs", include_str!("workspace_ops/tab.rs")),
+            ("event_handlers.rs", include_str!("event_handlers.rs")),
+            ("sidebar/mod.rs", include_str!("sidebar/mod.rs")),
+            (
+                "sidebar/context_menu.rs",
+                include_str!("sidebar/context_menu.rs"),
+            ),
+            ("../pane.rs", include_str!("../pane.rs")),
+        ] {
+            for line in src.lines() {
+                let line = line.trim();
+                let writes = forms.iter().any(|form| {
+                    line.find(form.as_str())
+                        // `==` is a comparison, not a write.
+                        .is_some_and(|idx| !line[idx + form.len()..].starts_with(eq))
+                });
+                assert!(
+                    !writes,
+                    "{label}: every write to the pending-close slot must go through \
+                     `set_pending_close`, which disarms the outgoing pane: {line}"
+                );
+            }
         }
     }
 

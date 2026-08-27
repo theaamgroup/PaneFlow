@@ -11,6 +11,7 @@ use gpui::{App, AppContext, Context, Entity};
 use notify::Watcher;
 use paneflow_config::schema::TerminalSurfaceProfile;
 
+use crate::app::close_guard::{ClickOutcome, CloseTarget, ConfirmStyle, click_outcome};
 use crate::layout::{LayoutTree, MAX_PANES};
 use crate::pane::{self, Pane};
 use crate::pane_drag::DropEdge;
@@ -554,7 +555,21 @@ impl PaneFlowApp {
                 // `request_close_pane` so it can raise the issue #83 modal
                 // (an inline affordance would be a dead menu item, the menu
                 // having already dismissed itself).
-                self.close_pane_undoably(&pane, cx);
+                //
+                // Issue #83: the header `x` is the INLINE half - the first
+                // click on an agent-bearing pane arms the button, the second
+                // click on that same button closes. `request_close_pane`
+                // still closes instantly when nothing live would die, so a
+                // plain shell keeps today's one-click behaviour.
+                let target = CloseTarget::Pane { pane: pane.clone() };
+                match click_outcome(self.pending_close.as_ref(), &target) {
+                    // `confirm_pending_close_pane` is the `Window`-free half
+                    // on purpose: this subscription has no `&mut Window`.
+                    ClickOutcome::Confirm => self.confirm_pending_close_pane(pane, cx),
+                    ClickOutcome::Arm => {
+                        self.request_close_pane(pane, ConfirmStyle::Inline, cx);
+                    }
+                }
             }
             pane::PaneEvent::ToggleAgentSessions => {
                 // Toggle: clicking the icon again with the sidebar open closes it.

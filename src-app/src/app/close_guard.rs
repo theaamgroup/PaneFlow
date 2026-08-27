@@ -106,9 +106,6 @@ pub(crate) enum CloseTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfirmStyle {
     Modal,
-    // Constructed by the inline arm-then-confirm X buttons landing in the next
-    // task; only the tests reach it today.
-    #[allow(dead_code)]
     Inline,
 }
 
@@ -130,9 +127,6 @@ pub(crate) struct PendingClose {
 impl PendingClose {
     /// True when `self` is the pending close for this exact tab, so a
     /// button can render its armed state.
-    // Consumed by the inline tab-X armed state landing in the next task; only
-    // the tests reach it today, and `cfg(test)` use does not satisfy the lint.
-    #[allow(dead_code)]
     pub(crate) fn targets_tab(&self, workspace_id: u64, tab_id: u64) -> bool {
         matches!(
             &self.target,
@@ -150,11 +144,146 @@ impl PendingClose {
     }
 }
 
+/// What one click on an inline arm-then-confirm close button should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClickOutcome {
+    /// First click: remember the target and light the button up.
+    Arm,
+    /// Second click on the same armed target: actually close.
+    Confirm,
+}
+
+/// Decide whether a click on the X for `this_target` arms a confirmation or
+/// confirms the one already pending.
+///
+/// Pure on purpose - the two call sites (the sidebar rail row's X and the pane
+/// header's X) are both deep inside GPUI closures where nothing is testable,
+/// so the whole decision lives here instead.
+///
+/// A pending close in [`ConfirmStyle::Modal`] never confirms from here: the
+/// modal owns its own Confirm button and its own `Enter`, and a click that
+/// lands on the X behind it is a fresh gesture. Re-arming just re-states the
+/// same pending close, which is indistinguishable from "nothing happened" -
+/// strictly safer than letting a stray click kill a process group through a
+/// dialog that is still asking the question.
+pub(crate) fn click_outcome(
+    pending: Option<&PendingClose>,
+    this_target: &CloseTarget,
+) -> ClickOutcome {
+    let Some(pending) = pending else {
+        return ClickOutcome::Arm;
+    };
+    if pending.style != ConfirmStyle::Inline {
+        return ClickOutcome::Arm;
+    }
+    let same_target = match this_target {
+        CloseTarget::Tab {
+            workspace_id,
+            tab_id,
+        } => pending.targets_tab(*workspace_id, *tab_id),
+        CloseTarget::Pane { pane } => pending.targets_pane(pane),
+    };
+    if same_target {
+        ClickOutcome::Confirm
+    } else {
+        ClickOutcome::Arm
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    fn tab_target(workspace_id: u64, tab_id: u64) -> CloseTarget {
+        CloseTarget::Tab {
+            workspace_id,
+            tab_id,
+        }
+    }
+
+    fn inline_pending(target: CloseTarget) -> PendingClose {
+        PendingClose {
+            target,
+            style: ConfirmStyle::Inline,
+            agent: TerminalAgent::ClaudeCode,
+            extra_agents: 0,
+            label: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_click_with_nothing_pending_arms() {
+        assert_eq!(click_outcome(None, &tab_target(1, 2)), ClickOutcome::Arm);
+    }
+
+    #[test]
+    fn a_second_click_on_the_same_inline_target_confirms() {
+        let pending = inline_pending(tab_target(1, 2));
+        assert_eq!(
+            click_outcome(Some(&pending), &tab_target(1, 2)),
+            ClickOutcome::Confirm
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_different_inline_target_re_arms_instead_of_confirming() {
+        let pending = inline_pending(tab_target(1, 2));
+        // Same workspace, different tab.
+        assert_eq!(
+            click_outcome(Some(&pending), &tab_target(1, 3)),
+            ClickOutcome::Arm
+        );
+        // Same tab id, different workspace.
+        assert_eq!(
+            click_outcome(Some(&pending), &tab_target(9, 2)),
+            ClickOutcome::Arm
+        );
+    }
+
+    #[test]
+    fn a_click_under_a_modal_on_the_same_target_arms_rather_than_confirming() {
+        // The modal owns its own Confirm button and its own Enter key, so a
+        // click on the X behind it is a fresh gesture, not the second half of
+        // an inline arm. Arming re-states the same pending close, which is a
+        // no-op the user cannot tell from "nothing happened" - strictly safer
+        // than letting a stray click confirm a kill through a dialog that is
+        // still asking the question.
+        let mut pending = inline_pending(tab_target(1, 2));
+        pending.style = ConfirmStyle::Modal;
+        assert_eq!(
+            click_outcome(Some(&pending), &tab_target(1, 2)),
+            ClickOutcome::Arm
+        );
+    }
+
+    #[gpui::test]
+    fn click_outcome_discriminates_pane_targets_by_entity(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let a = test_pane(cx, 1);
+        let b = test_pane(cx, 1);
+
+        let pending = inline_pending(CloseTarget::Pane { pane: a.clone() });
+        assert_eq!(
+            click_outcome(Some(&pending), &CloseTarget::Pane { pane: a.clone() }),
+            ClickOutcome::Confirm
+        );
+        assert_eq!(
+            click_outcome(Some(&pending), &CloseTarget::Pane { pane: b }),
+            ClickOutcome::Arm
+        );
+        // A pane click never confirms a pending TAB close, and vice versa.
+        let tab_pending = inline_pending(tab_target(1, 2));
+        assert_eq!(
+            click_outcome(Some(&tab_pending), &CloseTarget::Pane { pane: a }),
+            ClickOutcome::Arm
+        );
+        assert_eq!(
+            click_outcome(Some(&pending), &tab_target(1, 2)),
+            ClickOutcome::Arm
+        );
+    }
 
     fn state(
         detected_agent: Option<TerminalAgent>,

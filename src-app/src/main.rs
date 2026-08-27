@@ -1939,10 +1939,31 @@ impl Render for PaneFlowApp {
             // terminal Escape behaviour is unaffected. Drop-outside-target is
             // handled by GPUI itself (it clears the active drag on mouse-up
             // over a non-target), so no extra wiring is needed there.
-            .capture_key_down(cx.listener(|_this, e: &gpui::KeyDownEvent, window, cx| {
-                if cx.has_active_drag() && e.keystroke.key == "escape" {
+            //
+            // Issue #83: the same capture also stands an INLINE close arm
+            // down. Unlike the drag, the key is deliberately NOT swallowed -
+            // an armed `x` can sit there while the user goes back to typing,
+            // and eating that Escape would cost a keystroke vim or a readline
+            // prompt was waiting for. `set_pending_close` rather than
+            // `cancel_pending_close` for the same reason: nothing took focus
+            // for an inline arm, so re-focusing would yank the caret out of
+            // whatever is typing. A MODAL pending close is left alone here -
+            // it holds focus and owns its own Escape.
+            .capture_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
+                if e.keystroke.key != "escape" {
+                    return;
+                }
+                if cx.has_active_drag() {
                     cx.stop_active_drag(window);
                     cx.stop_propagation();
+                    return;
+                }
+                if this
+                    .pending_close
+                    .as_ref()
+                    .is_some_and(|p| p.style == app::close_guard::ConfirmStyle::Inline)
+                {
+                    this.set_pending_close(None, cx);
                 }
             }))
             .on_mouse_move(|_e, _, cx| cx.stop_propagation())
@@ -2332,20 +2353,26 @@ impl Render for PaneFlowApp {
         // Issue #83: close confirmation. Deliberately NOT mode-gated - it
         // guards a `kill(-pid, …)` on a whole process group, so it stays
         // dismissible wherever the user ends up.
-        if let Some(pending) = self
-            .pending_close
-            .clone()
-            .filter(|p| p.style == app::close_guard::ConfirmStyle::Modal)
-        {
-            if self.pending_close_target_is_live(&pending) {
+        if let Some(pending) = self.pending_close.clone() {
+            let is_modal = pending.style == app::close_guard::ConfirmStyle::Modal;
+            if !self.pending_close_target_is_live(&pending) {
+                // The tab or pane went away underneath the pending close.
+                // Stand down: a `CloseTarget::Pane` holds a strong
+                // `Entity<Pane>`, so keeping a dead one would keep its PTY
+                // alive. Only the modal was holding focus, so only the modal
+                // hands it back - `cancel_pending_close` re-focuses, and doing
+                // that for a silent inline arm would yank focus out from under
+                // whatever the user was typing into.
+                if is_modal {
+                    self.cancel_pending_close(window, cx);
+                } else {
+                    self.set_pending_close(None, cx);
+                }
+            } else if is_modal {
                 if std::mem::take(&mut self.pending_close_focus_claim) {
                     self.pending_close_focus.focus(window, cx);
                 }
                 app_content = app_content.child(self.render_close_confirm_dialog(&pending, cx));
-            } else {
-                // The tab or pane went away underneath the modal. Stand down
-                // here, where there IS a `Window` to hand focus back with.
-                self.cancel_pending_close(window, cx);
             }
         }
 
