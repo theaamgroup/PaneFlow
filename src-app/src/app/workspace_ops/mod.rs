@@ -132,6 +132,13 @@ pub(crate) fn push_closed_record(records: &mut Vec<ClosedRecord>, mut record: Cl
 /// mutex on the GPUI thread and buy nothing.
 pub(crate) const UNDO_SCROLLBACK_LINES: usize = 1000;
 
+// Undo capture must stay strictly below the live-read cap it was carved out
+// of, or raising this constant alone silently re-widens the walk this bound
+// exists to shrink. A future edit that pushes `UNDO_SCROLLBACK_LINES` up to
+// (or past) `MAX_SCROLLBACK_EXTRACT_LINES` fails the build here instead of
+// quietly regressing at runtime.
+const _: () = assert!(UNDO_SCROLLBACK_LINES < crate::limits::MAX_SCROLLBACK_EXTRACT_LINES);
+
 /// Drop every undo record belonging to a workspace that is going away.
 ///
 /// `NEXT_WORKSPACE_ID` is a monotonic `fetch_add`, so a closed workspace's id
@@ -1181,10 +1188,9 @@ impl PaneFlowApp {
             // Unreachable: `idx` indexes `self.workspaces` and the entity lease
             // stops it changing under this body. Kept as a fail-safe rather
             // than a panic - and it re-pushes, because the pop already
-            // happened. Returning silently here would satisfy
-            // `every_refused_restore_pushes_the_record_back` (which only
-            // proves `toasts == pushes`) while losing the pane for good, which
-            // is the hole the tab path next door had.
+            // happened. Returning silently here would satisfy the toast/push
+            // count guard while losing the pane for good, which is the hole
+            // the tab path next door had.
             log::warn!("undo close pane: the workspace vanished mid-restore");
             push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
             self.show_toast("Could not restore the pane", cx);
@@ -2599,6 +2605,30 @@ mod tests {
                 toasts,
                 "{start}: every refusal toast must be paired with a re-push, except the one \
                  orphan drop"
+            );
+            // The counts above prove SOME arm drops and SOME arm toasts the
+            // right message - not that they are the SAME arm. Swapping which
+            // refusal drops and which re-pushes leaves every count above
+            // unchanged, so pin the orphan arm's own body: slice from the
+            // lookup to its `return;` and check that slice, not the whole
+            // function, carries the toast and carries no push.
+            let orphan_at = body
+                .find("workspace_index_for_undo(")
+                .unwrap_or_else(|| panic!("{start}: expected a workspace_index_for_undo( call"));
+            let orphan_arm_end = body[orphan_at..]
+                .find("return;")
+                .map(|offset| orphan_at + offset + "return;".len())
+                .unwrap_or_else(|| panic!("{start}: the orphan lookup arm must return"));
+            let orphan_arm = &body[orphan_at..orphan_arm_end];
+            assert!(
+                orphan_arm.contains("show_toast(\"Workspace no longer exists\""),
+                "{start}: the orphan-drop arm must be the one that toasts the workspace is \
+                 gone: {orphan_arm}"
+            );
+            assert!(
+                !orphan_arm.contains("push_closed_record("),
+                "{start}: the orphan-drop arm must not re-push the record - its workspace id \
+                 can never be reissued, so re-pushing would wedge the stack forever: {orphan_arm}"
             );
         }
     }

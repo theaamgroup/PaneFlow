@@ -430,6 +430,22 @@ impl PaneFlowApp {
                 // caller has a `Window`, so do it here: the modal was the
                 // focused element and dropping it silently is the issue #108
                 // stranding class.
+                //
+                // Unconditional, unlike the tab half a few lines up in
+                // `confirm_pending_close_tab`, which only restores focus when
+                // `style == ConfirmStyle::Modal`. This arm gets away with
+                // skipping that check only because `confirm_pending_close`
+                // itself is wired exclusively from `render_close_confirm_dialog`'s
+                // own key handler and buttons, and that dialog's one mount
+                // site is gated on `is_modal` in `main.rs` - so every call
+                // that reaches here already IS a modal confirm. The
+                // invariant therefore holds by CALL-SITE STRUCTURE, not by
+                // data read off `self.pending_close.style`. A future caller
+                // of `confirm_pending_close_pane` reached from a non-modal
+                // path (an inline arm-then-confirm, say) would restore focus
+                // after a click nothing focused, yanking it out from under
+                // whatever the user was typing - the exact class `style ==
+                // ConfirmStyle::Modal` guards against on the tab side.
                 self.restore_focus_after_close_confirm(window, cx);
             }
             None => {}
@@ -447,6 +463,16 @@ impl PaneFlowApp {
             return;
         }
         self.set_pending_close(None, cx);
+        // Unconditional for the same reason as the pane arm of
+        // `confirm_pending_close` above: this is reached only through the
+        // modal's own Escape handler and backdrop click, both wired inside
+        // `render_close_confirm_dialog`, whose sole mount site is gated on
+        // `is_modal` in `main.rs` - never from the inline arm-then-confirm
+        // path, which stands down through `set_pending_close` directly
+        // instead. That is a call-site guarantee, not one read from
+        // `self.pending_close.style`; a future non-modal caller of
+        // `cancel_pending_close` would restore focus nothing gave away,
+        // stranding it the same way issue #108 did.
         self.restore_focus_after_close_confirm(window, cx);
     }
 
@@ -1361,10 +1387,13 @@ mod tests {
     #[test]
     fn set_pending_close_is_the_only_writer_of_pending_close() {
         // Built rather than written out, so this scan does not match its own
-        // source lines. Five forms, not one: a plain assignment is the obvious
-        // way to bypass the setter, but `.take()`, `.replace(..)` and - the
-        // realistic one - an `.as_mut()` followed by a field write all leave a
-        // pane lit with nothing pending, which is a single-click kill.
+        // source lines. Seven forms, not one: a plain assignment is the
+        // obvious way to bypass the setter, `.take()`, `.replace(..)` and -
+        // the realistic one - an `.as_mut()` followed by a field write all
+        // leave a pane lit with nothing pending, and taking a mutable borrow
+        // of the field directly (through either receiver name it is ever
+        // read through in this file) hands out the same bypass without even
+        // needing a named method - a single-click kill either way.
         let eq = '=';
         let dot = '.';
         let forms = [
@@ -1373,6 +1402,8 @@ mod tests {
             format!("pending_close{dot}take()"),
             format!("pending_close{dot}replace("),
             format!("pending_close{dot}as_mut()"),
+            format!("mut self{dot}pending_close"),
+            format!("mut this{dot}pending_close"),
         ];
         // The one legitimate write lives inside `set_pending_close` itself.
         let self_src = include_str!("close_confirm.rs");
@@ -1401,9 +1432,20 @@ mod tests {
             for line in src.lines() {
                 let line = line.trim();
                 let writes = forms.iter().any(|form| {
-                    line.find(form.as_str())
-                        // `==` is a comparison, not a write.
-                        .is_some_and(|idx| !line[idx + form.len()..].starts_with(eq))
+                    line.find(form.as_str()).is_some_and(|idx| {
+                        let after = &line[idx + form.len()..];
+                        if form.starts_with("mut ") {
+                            // A borrow form has no fixed suffix, so the
+                            // boundary has to be checked instead: without it
+                            // this form would also match inside the sibling
+                            // field `pending_close_focus_claim`, which merely
+                            // shares the same prefix and is not the slot.
+                            !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                        } else {
+                            // `==` is a comparison, not a write.
+                            !after.starts_with(eq)
+                        }
+                    })
                 });
                 assert!(
                     !writes,

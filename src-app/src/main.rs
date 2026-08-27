@@ -2377,7 +2377,7 @@ impl Render for PaneFlowApp {
         //
         // Borrowed, not cloned: this runs on every frame the modal is up while
         // the terminal underneath repaints on a 4 ms coalescing loop, and a
-        // `PendingClose` carries an `Entity<Pane>` and a label `String`.
+        // `PendingClose` carries a `WeakEntity<Pane>` and a label `String`.
         if let Some(pending) = self.pending_close.as_ref() {
             let is_modal = pending.style == app::close_guard::ConfirmStyle::Modal;
             if !self.pending_close_target_is_live(pending) {
