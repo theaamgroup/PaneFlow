@@ -30,6 +30,38 @@ focus-routing half of **#78** across five commits
 All three were re-verified as live defects in code before any work started,
 and both `CHANGES REQUESTED` review loops (#108, #79) were closed.
 
+The 2026-08-27 tab-close cluster closed **#83** across nine commits
+(`508f7904`, `79d6b821`, `2ac394ff`, `028d47ab`, `1b6bfc47`, `ae0b800f`,
+`6d20ce0e`, `dacce668`, `b6b70729`). Closing a tab running an agent now asks
+first, and every user-initiated tab or pane close is undoable with
+`Cmd+Shift+T`. Test count 1913 -> 1975, name-diffed at every landing; all six
+gates green on each.
+
+Three findings in that cluster are worth carrying forward, because each was a
+*correct-looking* design that a review falsified:
+
+- **Arm-then-confirm without a debounce is not a confirmation.** A double-click
+  on an inline `x` fired both the arm and the confirm, so the process group died
+  behind a state painted for one frame. GPUI dispatches every click listener on
+  each mouse-up, and this repo already relies on that (`sidebar/mod.rs`
+  double-click-to-rename). Any future arm-then-confirm needs a settle delay;
+  `ARM_SETTLE` in `app/close_guard.rs` is the one to copy.
+- **"Put the record back on any refusal" bricks an undo stack.**
+  `handle_undo_close_pane` pops NEWEST and `push_closed_record` appends to
+  NEWEST, and `next_workspace_id` is a monotonic `fetch_add` - so re-pushing a
+  record whose workspace is gone re-promotes it forever and buries every record
+  beneath it. Re-push only on TRANSIENT refusals; drop on permanent ones.
+- **`close_workspace_tab`'s re-focus is gated on `ws_idx == self.active_idx`.**
+  A background workspace's tab row is right-clickable, so any `Window`-holding
+  path that closes a background tab must hand focus back itself or it strands
+  the window - the issue #108 class again.
+
+Still unguarded, deliberately: **workspace-scope close**
+(`Cmd+Shift+Q`, the sidebar folder row's `x`, the workspace context menu, and
+IPC `workspace.close`) drops every tab and PTY with no confirmation and no undo
+record. Guarding it needs a whole-workspace undo record, which is a separate
+feature; the deferral is recorded in code at `app/workspace_ops/mod.rs`.
+
 Two things that pass gates but are **not** end-to-end verified, and one
 follow-up:
 
@@ -107,7 +139,7 @@ the only workflow here, so this is the most likely source of confusion.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1900 passed, 0 failed, 2 ignored (2026-08-27)
+cargo test --workspace                       # 1975 passed, 0 failed, 2 ignored (2026-08-27)
 cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
