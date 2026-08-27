@@ -20,6 +20,7 @@
 //! IPC endpoint. Without this, clients can point at one socket while the
 //! server keeps binding the default one.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// macOS `sockaddr_un.sun_path` is `[c_char; 104]`.
@@ -92,10 +93,17 @@ impl IpcSocketPath {
 ///
 /// Returns `None` only if every layer fails (neither TMPDIR nor a cache dir).
 /// Callers should `log::warn!` and disable IPC rather than panic.
+///
+/// `env` is the process-env seam: production passes `std::env::var_os`,
+/// tests pass a closure over a fixed table so they never mutate the
+/// process-global `$TMPDIR` that every `tempfile` caller in the test binary
+/// reads concurrently (#66).
 #[cfg(unix)]
-fn runtime_dir() -> Option<PathBuf> {
-    std::env::var("TMPDIR")
-        .ok()
+fn runtime_dir_from(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    env("TMPDIR")
+        // Same acceptance as the former `std::env::var(..).ok()`: a
+        // non-UTF-8 value is treated as unset and falls through.
+        .and_then(|raw| raw.into_string().ok())
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| dirs::cache_dir().map(|d| d.join("run")))
@@ -109,13 +117,21 @@ fn runtime_dir() -> Option<PathBuf> {
 /// can see why IPC is disabled.
 #[cfg(unix)]
 pub(crate) fn socket_path_spec() -> Option<IpcSocketPath> {
-    if let Some(path) = socket_path_from_env(std::env::var_os("PANEFLOW_SOCKET_PATH")) {
+    socket_path_spec_from(&|key| std::env::var_os(key))
+}
+
+/// [`socket_path_spec`] over an explicit env lookup (see [`runtime_dir_from`]).
+#[cfg(unix)]
+fn socket_path_spec_from(env: &impl Fn(&str) -> Option<OsString>) -> Option<IpcSocketPath> {
+    if let Some(path) = socket_path_from_env(env("PANEFLOW_SOCKET_PATH")) {
         return check_sun_path_fits(&path).then_some(IpcSocketPath {
             path,
             owned_parent: false,
         });
     }
-    let path = runtime_dir()?.join(PANEFLOW_SUBDIR).join(SOCKET_FILE);
+    let path = runtime_dir_from(env)?
+        .join(PANEFLOW_SUBDIR)
+        .join(SOCKET_FILE);
     check_sun_path_fits(&path).then_some(IpcSocketPath {
         path,
         owned_parent: true,
@@ -130,7 +146,7 @@ pub(crate) fn shell_integration_dir() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("shell"))
 }
 
-fn socket_path_from_env(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
+fn socket_path_from_env(raw: Option<OsString>) -> Option<PathBuf> {
     let path = PathBuf::from(raw?);
     path.is_absolute().then_some(path)
 }
@@ -371,11 +387,11 @@ mod socket_env_tests {
     fn socket_path_env_helper_requires_absolute_path() {
         let absolute = "/tmp/paneflow-test.sock";
         assert_eq!(
-            socket_path_from_env(Some(std::ffi::OsString::from(absolute))),
+            socket_path_from_env(Some(OsString::from(absolute))),
             Some(PathBuf::from(absolute))
         );
         assert_eq!(
-            socket_path_from_env(Some(std::ffi::OsString::from("relative-paneflow.sock"))),
+            socket_path_from_env(Some(OsString::from("relative-paneflow.sock"))),
             None
         );
         assert_eq!(socket_path_from_env(None), None);
@@ -384,77 +400,39 @@ mod socket_env_tests {
 
 // US-009 - these tests assert Unix socket path composition and sun_path
 // length limits, so they are structurally Unix-only.
+//
+// Every test here drives the resolver through the `_from` seam with a fixed
+// lookup table. None of them touches `std::env`, so they cannot race the
+// `tempfile` readers of `$TMPDIR` that run concurrently in this binary (#66)
+// and they need no lock.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global; tests that mutate them must be serialised.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        socket: Option<String>,
-        xdg: Option<String>,
-        tmp: Option<String>,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl EnvGuard {
-        fn take() -> Self {
-            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            Self {
-                socket: std::env::var("PANEFLOW_SOCKET_PATH").ok(),
-                xdg: std::env::var("XDG_RUNTIME_DIR").ok(),
-                tmp: std::env::var("TMPDIR").ok(),
-                _guard: guard,
-            }
-        }
-
-        fn clear(&self) {
-            // SAFETY: serialised by ENV_LOCK; no other test or production
-            // thread mutates these vars during the test window.
-            unsafe {
-                std::env::remove_var("PANEFLOW_SOCKET_PATH");
-                std::env::remove_var("XDG_RUNTIME_DIR");
-                std::env::remove_var("TMPDIR");
-            }
+    /// Env lookup over a fixed table; anything not listed reads as unset.
+    fn fake_env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| OsString::from(v))
         }
     }
 
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialised by ENV_LOCK (still held via _guard).
-            unsafe {
-                match &self.socket {
-                    Some(v) => std::env::set_var("PANEFLOW_SOCKET_PATH", v),
-                    None => std::env::remove_var("PANEFLOW_SOCKET_PATH"),
-                }
-                match &self.xdg {
-                    Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                    None => std::env::remove_var("XDG_RUNTIME_DIR"),
-                }
-                match &self.tmp {
-                    Some(v) => std::env::set_var("TMPDIR", v),
-                    None => std::env::remove_var("TMPDIR"),
-                }
-            }
-        }
+    fn socket_path_with(vars: &[(&str, &str)]) -> Option<PathBuf> {
+        socket_path_spec_from(&fake_env(vars)).map(|spec| spec.path)
     }
 
     #[test]
     fn paneflow_socket_path_env_wins_when_absolute() {
-        let g = EnvGuard::take();
-        g.clear();
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::set_var("PANEFLOW_SOCKET_PATH", "/tmp/paneflow-isolated.sock");
-            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
-        }
+        let env = [
+            ("PANEFLOW_SOCKET_PATH", "/tmp/paneflow-isolated.sock"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ];
         assert_eq!(
-            socket_path(),
+            socket_path_with(&env),
             Some(PathBuf::from("/tmp/paneflow-isolated.sock"))
         );
-        let spec = socket_path_spec().expect("env socket path resolves");
+        let spec = socket_path_spec_from(&fake_env(&env)).expect("env socket path resolves");
         assert_eq!(spec.path(), Path::new("/tmp/paneflow-isolated.sock"));
         assert!(
             !spec.owned_parent(),
@@ -463,15 +441,27 @@ mod tests {
     }
 
     #[test]
+    fn relative_socket_path_override_falls_through_to_tmpdir() {
+        let env = [
+            ("PANEFLOW_SOCKET_PATH", "relative-paneflow.sock"),
+            ("TMPDIR", "/tmp/macos-stub"),
+        ];
+        assert_eq!(
+            socket_path_with(&env),
+            Some(PathBuf::from(format!(
+                "/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}"
+            ))),
+            "a non-absolute override is ignored, not honoured"
+        );
+    }
+
+    #[test]
     fn xdg_runtime_dir_is_ignored_when_tmpdir_is_set() {
-        let g = EnvGuard::take();
-        g.clear();
-        // SAFETY: ENV_LOCK held.
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
-            std::env::set_var("TMPDIR", "/tmp/macos-stub");
-        }
-        let p = socket_path().expect("runtime dir must resolve");
+        let env = [
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("TMPDIR", "/tmp/macos-stub"),
+        ];
+        let p = socket_path_with(&env).expect("runtime dir must resolve");
         assert_eq!(
             p,
             PathBuf::from(format!("/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}")),
@@ -483,18 +473,17 @@ mod tests {
             p.display()
         );
         assert!(
-            socket_path_spec().expect("socket spec").owned_parent(),
+            socket_path_spec_from(&fake_env(&env))
+                .expect("socket spec")
+                .owned_parent(),
             "default runtime-dir socket is Paneflow-owned"
         );
     }
 
     #[test]
     fn xdg_runtime_dir_is_not_used_when_tmpdir_is_unset() {
-        let g = EnvGuard::take();
-        g.clear();
-        // SAFETY: ENV_LOCK held.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000") };
-        let p = socket_path().expect("cache dir must resolve");
+        let env = [("XDG_RUNTIME_DIR", "/run/user/1000")];
+        let p = socket_path_with(&env).expect("cache dir must resolve");
         assert!(
             !p.starts_with("/run/user/1000"),
             "must not fall back to $XDG_RUNTIME_DIR; got {}",
@@ -508,12 +497,20 @@ mod tests {
     }
 
     #[test]
+    fn empty_tmpdir_falls_back_to_cache_dir() {
+        let env = [("TMPDIR", "")];
+        let p = socket_path_with(&env).expect("cache dir must resolve");
+        assert!(
+            p.ends_with(format!("Library/Caches/run/{APP_SUBDIR}/{SOCKET_FILE}")),
+            "an empty $TMPDIR is treated as unset; got {}",
+            p.display()
+        );
+    }
+
+    #[test]
     fn tmpdir_used_when_set() {
-        let g = EnvGuard::take();
-        g.clear();
-        // SAFETY: ENV_LOCK held.
-        unsafe { std::env::set_var("TMPDIR", "/tmp/macos-stub") };
-        let p = socket_path().expect("TMPDIR must resolve");
+        let env = [("TMPDIR", "/tmp/macos-stub")];
+        let p = socket_path_with(&env).expect("TMPDIR must resolve");
         assert_eq!(
             p,
             PathBuf::from(format!("/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}"))
@@ -522,15 +519,33 @@ mod tests {
 
     #[test]
     fn overlong_path_returns_none() {
-        let g = EnvGuard::take();
-        g.clear();
-        // 120-byte TMPDIR → joined path blows past 104.
+        // 120-byte TMPDIR → joined path blows past 104. The value never
+        // touches the filesystem, so it does not need to exist.
         let long = "/".to_string() + &"x".repeat(119);
-        // SAFETY: ENV_LOCK held.
-        unsafe { std::env::set_var("TMPDIR", &long) };
+        assert_eq!(long.len(), 120);
+        let env = [("TMPDIR", long.as_str())];
         assert!(
-            socket_path().is_none(),
+            socket_path_with(&env).is_none(),
             "AC6: over-long sun_path must return None rather than a bind-time error"
+        );
+    }
+
+    #[test]
+    fn sun_path_ceiling_is_exclusive() {
+        // `bind()` needs the trailing NUL inside `sun_path`, so a path of
+        // exactly `MAX_SOCKET_PATH_BYTES` does not fit; one byte shorter does.
+        let at_limit = "/".to_string() + &"x".repeat(MAX_SOCKET_PATH_BYTES - 1);
+        assert_eq!(at_limit.len(), MAX_SOCKET_PATH_BYTES);
+        assert!(
+            socket_path_with(&[("PANEFLOW_SOCKET_PATH", at_limit.as_str())]).is_none(),
+            "{MAX_SOCKET_PATH_BYTES} bytes leaves no room for the NUL terminator"
+        );
+
+        let under_limit = "/".to_string() + &"x".repeat(MAX_SOCKET_PATH_BYTES - 2);
+        assert_eq!(under_limit.len(), MAX_SOCKET_PATH_BYTES - 1);
+        assert_eq!(
+            socket_path_with(&[("PANEFLOW_SOCKET_PATH", under_limit.as_str())]),
+            Some(PathBuf::from(&under_limit))
         );
     }
 }
