@@ -14,14 +14,15 @@ rename was dropped). Version **0.1.0**. Origin `theaamgroup/paneflow` on
 `main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The in-app updater is **deleted**; Apple DMG
-signing remains. First signed GitHub Release is **v0.1.0**. Remaining
-human work: Cmd+Tab, unsigned-DMG Gatekeeper open, TCC/Notifications on a
-fresh bundle-id machine, close/undo-close chords, PATH-shim idle
-transition. Tracked as GitHub issues **#10, #11, #13–#15**.
+signing remains. First signed GitHub Release is **v0.1.0** (Developer ID
+signed, notarized, stapled; #11 closed with `spctl` evidence). Remaining
+human work: a physical Cmd+Tab press (#10) and the Notifications prompt on
+a machine that has never run the bundle id (#13). #14 and #15 were closed
+on 2026-08-27 by IPC-verified smokes.
 
 ## Verify before claiming
 
-Run all five, before and after any pass, and quote the actual output:
+Run all six, before and after any pass, and quote the actual output:
 
 ```bash
 cargo build                                # exit 0
@@ -29,7 +30,14 @@ cargo test --workspace                     # diff test names against the last la
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
 ./target/debug/paneflow --version          # paneflow 0.1.0
+cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
+
+`cargo deny` needs a one-time `cargo install cargo-deny --locked --version '^0.19'`
+and network access (it fetches the RustSec DB), and it can go red with **no code
+change** (a RustSec DB older than `maximum-db-staleness`, or a `deny.toml`
+`ignore` entry that no longer matches any crate), which is why it belongs in the
+local set and not only in CI.
 
 If the test count moves, **diff test names** against the last landing, never trust the integer:
 
@@ -436,7 +444,7 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **Every `US-NNN` comment in the Rust source is a dangling breadcrumb.** They point at PRD files that lived under `tasks/`, were gitignored upstream, never committed, and `tasks/` is now deleted. Same for every `prd-*.md` and `EP-NNN` reference in a comment. Roughly 2,200 such comments across ~190 files: treat them as historical noise, do not go looking for the document, and do not add new ones.
 - **Tests + CI exist**: run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`. UI changes still need manual verification.
 - **A note that used to live here was wrong, and the correction is worth keeping.** It said the in-app updater's `update/macos/dmg.rs` two `#[cfg(all(test, not(target_os = "macos")))]` items should be un-gated rather than deleted. They could not be: they were the second half of a complementary pair — the real `cp -R` vs a test-host shim — so un-gating the second one is a duplicate definition, `error[E0428]`. Stage 2c deleted the shim; leftover-removal then deleted the whole updater (`src-app/src/update/` is gone). Before acting on a claim like that, check whether the two gates are complementary definitions of ONE item.
-- **The binary-size budget is Mach-O now.** `src-app/build.rs` measures the three embedded helpers under `--profile release-min` on `aarch64-apple-darwin`: shim 438_784 + ai-hook 336_432 + mcp **403_008** B = **1_211_840 B** (J8 deferred). Cap is `EMBED_SIZE_LIMIT_BYTES = 1_400_000` (~20% headroom), quoted from `src-app/build.rs`. Nested staging always uses `release-min`, so a debug outer build still embeds those sizes. Per-binary caps were dropped with the CI matrix (issue #3); do not re-derive a Linux ELF number.
+- **The binary-size budget is Mach-O now.** `src-app/build.rs` measures the three embedded helpers under `--profile release-min` on `aarch64-apple-darwin`: shim 472_368 + ai-hook 336_464 + mcp **403_008** B = **1_211_840 B** (J8 deferred; measured 2026-08-27). Cap is `EMBED_SIZE_LIMIT_BYTES = 1_400_000`, which is total + 15.5% (slack 188_160 B = 13.4% of the cap), quoted from `src-app/build.rs`; a `--release` build prints the measured total as a `cargo:warning`. Nested staging always uses `release-min`, so a debug outer build still embeds those sizes. Per-binary caps were dropped with the CI matrix (issue #3); do not re-derive a Linux ELF number.
 - **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
 - **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
 - **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`terminal/backend_corpus.rs`).
@@ -470,7 +478,7 @@ This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacr
 
 - Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, no Ghostty backend.
 - **`#[cfg(unix)]` is not Linux-only.** It appears **137 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears **71** times. Both are live arms and both stay. Counted by `./scripts/linux-census.sh` negative control (`cfg(unix)` / `cfg(macos)` live sites).
-- **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:239`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition; it prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. A zero cfg census is also blind to ungated Windows strings (`powershell` / `.exe` / `.cmd` / `.bat` / `.ps1` / `\\?\` / `%APPDATA%`); that class is a separate reported check in the same script (issue #103) and is **not** part of the STAGE 2c integer.
+- **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:239`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition: it exits 1 with a `FAIL:` line when the STAGE 2c total is non-zero or the negative control reads 0, and `run_tests.yml::platform_census` runs it (and `win-census.sh`) on every push and PR. It prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. A zero cfg census is also blind to ungated Windows strings (`powershell` / `.exe` / `.cmd` / `.bat` / `.ps1` / `\\?\` / `%APPDATA%`); that class is a separate reported check in the same script (issue #103) and is **not** part of the STAGE 2c integer.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.
 - Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
 - **The in-app updater is deleted; Apple DMG signing remains.** There is no feed, no minisign client, no title-bar update pill. `scripts/{bundle,sign,notarize}-macos.sh` and `create-dmg.sh` still produce the signed `.app` / `.dmg`. Do not create `GPG_*`, `AZURE_*`, or `POSTHOG_API_KEY`. `APPLE_DEVELOPER_CERT_P` is a **false hit**: the real secret is `APPLE_DEVELOPER_CERT_P12` (PKCS#12), plus `APPLE_DEVELOPER_CERT_PASSWORD`.

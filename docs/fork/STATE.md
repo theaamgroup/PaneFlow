@@ -8,7 +8,7 @@ Companion documents:
   execution plan** (schema, telemetry, identity, CI). Leftover-removal
   buckets 1–4 (2026-08-26) superseded its self-update “disable the feed”
   decision: the in-app updater is deleted. Remaining human work is GitHub
-  issues #7, #9–#11, #13–#15.
+  issues #10 (physical Cmd+Tab) and #13 (fresh-machine Notifications prompt).
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
   **leak register**, and a **16-item traps register**. Read it before touching
   platform code or the config schema. The in-app updater is gone.
@@ -17,9 +17,11 @@ Companion documents:
 This file holds only: where the work stands, what is next, and the rules the
 session learned the hard way.
 
-v0.9.0 adoption of issues **#87–#103** is on `main`, except the remaining
-human work already listed below (#10 Cmd+Tab, #11 unsigned-DMG Gatekeeper,
-#13 TCC/Notifications, #14 close/undo-close chords, #15 PATH-shim idle).
+v0.9.0 adoption of issues **#87–#103** is on `main` and pushed. The 2026-08-27
+post-adoption pass closed #11, #14, #15 (evidence on the issues), landed the
+CI/test hygiene set #66–#71, and triaged #73–#85 against 925e21ce (comments
+on each; #75 closed as superseded; #74/#77/#80/#82 retitled to their
+residuals). What still needs a human is listed below.
 
 ## Identity
 
@@ -78,13 +80,14 @@ the only workflow here, so this is the most likely source of confusion.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1769 passed, 0 failed, 2 ignored (2026-08-26)
+cargo test --workspace                       # 1899 passed, 0 failed, 2 ignored (2026-08-27)
+cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.1.0
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
-                                             # negative control: cfg(unix) 151, cfg(macos) 77
+                                             # negative control: cfg(unix) 137, cfg(macos) 71
 ```
 
 The census negative control is not decoration. Read it every time: a census
@@ -272,8 +275,8 @@ before writing another one:
 What those passes proved, kept because the next platform-shaped pass will
 need it:
 
-- `#[cfg(unix)]` now appears **151 times** and macOS needs nearly all of it.
-  `#[cfg(target_os = "macos")]` appears **77 times**. Both are live arms; both
+- `#[cfg(unix)]` now appears **137 times** and macOS needs nearly all of it.
+  `#[cfg(target_os = "macos")]` appears **71 times**. Both are live arms; both
   stay. This was the highest-risk distinction in 2c and no batch got it wrong -
   because every brief opened with the same four lines, verbatim:
 
@@ -313,8 +316,9 @@ need it:
   side effect. They did not need separate handling and did not survive to 2c.
 - `TerminalBackendConfig::Ghostty` is gone from the published schema and the
   Rust enum. `"ghostty"` still parses to Alacritty so old config files load.
-- Embed size cap is Mach-O `release-min` (2026-08-25): 1,161,424 B measured,
-  `EMBED_SIZE_LIMIT_BYTES = 1_400_000`.
+- Embed size cap is Mach-O `release-min` (2026-08-27): 1,211,840 B measured
+  (shim 472,368 + ai-hook 336,464 + mcp 403,008), `EMBED_SIZE_LIMIT_BYTES =
+  1_400_000` = total + 15.5% (slack 188,160 B = 13.4% of the cap).
 
 ## Biggest remaining liability
 
@@ -322,17 +326,29 @@ need it:
 https://github.com/theaamgroup/paneflow/releases/tag/v0.1.0
 (`v0.1.0` on `44150ff`, DMG + `.sha256`). #7 and #9 are closed.
 
-What still needs a human, filed as GitHub issues assigned to
-`evilchinesefood`:
+What still needs a human (2026-08-27 smoke results are on each issue):
 
-- #10 Cmd+Tab next-workspace (physical keypress; synthetic does not answer)
-- #11 unsigned `.dmg` Gatekeeper open
-  (`dist/paneflow-0.1.0-aarch64-apple-darwin.dmg`)
-- #13 TCC / Notifications on a machine that has never seen
-  `com.theaamgroup.paneflow` (signed app launched here; prefs already existed)
-- #14 close / undo-close chords (split layout via IPC is proven; W/T are not)
-- #15 PATH-shim idle transition after a tool-using turn (thinking + `Bash`
-  hooked=true is proven)
+- #10 Cmd+Tab next-workspace: **physical keypress only.** Synthetic
+  System Events Cmd+Tab (both `keystroke tab` and `key code 48`) moved
+  frontmost to another app and left the workspace index unchanged, while
+  Cmd+1 / Cmd+2 through the same path switched workspaces. Expect the
+  switcher; the follow-up is the replacement chord in the issue body.
+- #13 Notifications prompt on a machine that has never run
+  `com.theaamgroup.paneflow`. Only Notifications is in play: no
+  `*UsageDescription` keys, entitlements are apple-events + JIT only, so
+  Accessibility / Automation / FDA prompts cannot fire.
+
+Closed by machine evidence on 2026-08-27:
+
+- #11: the shipped v0.1.0 dmg is Developer ID signed (K7X6VGPFR8),
+  notarized and stapled; `spctl -a -t exec` on a quarantined copy →
+  `accepted, source=Notarized Developer ID`. The local `dist/` dmg is a
+  different, adhoc build; do not smoke with it.
+- #14: Cmd+Shift+D / E / W / T each moved `paneflow ls` pane counts
+  3→4→5→4→5 on a debug instance with an isolated socket.
+- #15: `which claude` in a pane → the paneflow-dev shim dir first on
+  PATH; `status`/`ps`/`watch` tracked idle → thinking(Bash/Read) →
+  finished → idle across a real `claude -p` turn.
 
 #8 (minisign keypair) is obsolete. #12 (no GitHub Releases request) is
 automatic now that the updater is deleted. #16–#19 are closed.

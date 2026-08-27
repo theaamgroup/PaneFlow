@@ -49,18 +49,22 @@ use std::process::Command;
 /// Hard cap on the total bytes staged under `target/embed/bin/<target>/`.
 /// Enforced to keep the main PaneFlow binary slim.
 ///
-/// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-08-25):
+/// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-08-27):
 ///
 /// ```text
-///   paneflow-shim      438_784 B
-///   paneflow-ai-hook   336_432 B
-///   paneflow-mcp       386_208 B
+///   paneflow-shim      472_368 B
+///   paneflow-ai-hook   336_464 B
+///   paneflow-mcp       403_008 B
 ///   ----------------------------
-///   total            1_161_424 B
+///   total            1_211_840 B
 /// ```
 ///
-/// Cap is that total plus ~20% headroom (1_400_000 B, 20.5%) so a real
+/// Cap 1_400_000 B = total + 15.5% (headroom relative to the total);
+/// slack 188_160 B = 13.4% of the cap. Two denominators, two readings:
+/// name the one you mean when you re-baseline. The cap exists so a real
 /// bloat regression fails the build, while strip/LTO jitter does not.
+/// Release builds print the measured total as a `cargo:warning` so the
+/// figures above can be checked against build output, not trusted.
 /// Nested staging always uses `--profile release-min`, so a debug outer
 /// build still embeds these Mach-O sizes, not debug binaries.
 const EMBED_SIZE_LIMIT_BYTES: u64 = 1_400_000;
@@ -251,6 +255,15 @@ fn enforce_embed_size_budget(embed_dir: &Path) {
             total = total.saturating_add(size);
             per_file.insert(entry.file_name().to_string_lossy().into_owned(), size);
         }
+    }
+
+    // Release builds only: surface the measured total so the figures in the
+    // `EMBED_SIZE_LIMIT_BYTES` doc comment can be checked against build
+    // output. Debug builds and clippy stay at their known warning count.
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        println!(
+            "cargo:warning=embedded helpers total {total} B of the {EMBED_SIZE_LIMIT_BYTES} B cap"
+        );
     }
 
     if total > EMBED_SIZE_LIMIT_BYTES {
