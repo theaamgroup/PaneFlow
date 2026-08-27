@@ -28,10 +28,12 @@ enum ScrollbackCapture {
 impl LayoutTree {
     /// Serialize the layout tree to a `LayoutNode` (config schema type).
     ///
-    /// Each leaf produces a `LayoutNode::Pane` with one `SurfaceDefinition` per
-    /// tab, capturing the terminal's CWD and OSC title. The active tab is marked
-    /// with `focus: true`. Each container produces a `LayoutNode::Split` with
-    /// per-child `ratios` and recursive children.
+    /// Each leaf produces a `LayoutNode::Pane` with one `SurfaceDefinition` for
+    /// its single surface, capturing the terminal's CWD and OSC title. That
+    /// surface is marked with `focus: true`. Legacy multi-surface leaves are
+    /// demoted to one surface per pane by the v1→v2 session migration. Each
+    /// container produces a `LayoutNode::Split` with per-child `ratios` and
+    /// recursive children.
     ///
     /// Not used by `workspace.current` (issue #29); the inline extract is the
     /// snapshot-with-scrollback path.
@@ -52,12 +54,12 @@ impl LayoutTree {
         match self {
             LayoutTree::Leaf(pane) => {
                 let pane_ref = pane.read(cx);
-                let surfaces: Vec<SurfaceDefinition> = pane_ref
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, tab)| match tab {
-                        crate::pane::TabContent::Terminal(tv) => {
+                // EP-002 US-004: a pane holds exactly one surface, so the
+                // serialized list has at most one entry and it is always the
+                // focused one.
+                let surfaces: Vec<SurfaceDefinition> = std::iter::once(&pane_ref.surface)
+                    .map(|tab| match tab {
+                        crate::pane::PaneSurface::Terminal(tv) => {
                             let tv_ref = tv.read(cx);
                             let name = if tv_ref.terminal.title.is_empty() {
                                 None
@@ -80,13 +82,13 @@ impl LayoutTree {
                                 cwd,
                                 path: None,
                                 env: None,
-                                focus: (i == pane_ref.selected_idx).then_some(true),
+                                focus: Some(true),
                                 scrollback,
                                 agent: tv_ref.terminal.detected_agent.map(|a| a.tag().to_string()),
                                 font_size: tv_ref.terminal.font_size_override,
                             }
                         }
-                        crate::pane::TabContent::Markdown(markdown) => {
+                        crate::pane::PaneSurface::Markdown(markdown) => {
                             let path = markdown.read(cx).path.display().to_string();
                             SurfaceDefinition {
                                 surface_type: Some("markdown".to_string()),
@@ -97,13 +99,13 @@ impl LayoutTree {
                                 cwd: None,
                                 path: Some(path),
                                 env: None,
-                                focus: (i == pane_ref.selected_idx).then_some(true),
+                                focus: Some(true),
                                 scrollback: None,
                                 agent: None,
                                 font_size: None,
                             }
                         }
-                        crate::pane::TabContent::Diff(_) => SurfaceDefinition {
+                        crate::pane::PaneSurface::Diff(_) => SurfaceDefinition {
                             surface_type: Some("diff".to_string()),
                             name: None,
                             custom_name: None,
@@ -225,12 +227,13 @@ mod tests {
 
     use crate::pane::Pane;
     use crate::terminal::TerminalView;
+    use crate::workspace::{Tab, Workspace};
 
-    use super::*;
+    use super::super::tree::{LayoutTree, SplitDirection};
 
-    fn test_pane(cx: &mut impl AppContext, workspace_id: u64) -> Entity<Pane> {
-        let terminal = cx.new(|cx| TerminalView::display_only_for_test(workspace_id, cx));
-        cx.new(|cx| Pane::new(terminal, workspace_id, cx))
+    fn test_pane(cx: &mut impl AppContext) -> Entity<Pane> {
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        cx.new(|cx| Pane::new(terminal, 1, cx))
     }
 
     fn surface(custom_name: &str, cwd: &str) -> SurfaceDefinition {
@@ -279,7 +282,7 @@ mod tests {
         let mut spawned: Vec<LayoutNode> = Vec::new();
         let tree = LayoutTree::from_layout_node(&layout, &mut panes, &mut |node| {
             spawned.push(node.clone());
-            test_pane(cx, 1)
+            test_pane(cx)
         });
 
         assert_eq!(tree.leaf_count(), 2);
@@ -290,7 +293,7 @@ mod tests {
         );
         match &spawned[0] {
             LayoutNode::Pane { surfaces } => {
-                assert_eq!(surfaces.len(), 2, "leaf 0 keeps both tabs");
+                assert_eq!(surfaces.len(), 2, "leaf 0 keeps both surfaces");
                 assert_eq!(surfaces[0].custom_name.as_deref(), Some("agent"));
                 assert_eq!(surfaces[0].cwd.as_deref(), Some("/tmp/agent"));
                 assert_eq!(
@@ -316,13 +319,13 @@ mod tests {
     #[gpui::test]
     fn from_layout_node_reuses_leftmost_leaf_without_spawn(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
-        let existing = test_pane(cx, 1);
+        let existing = test_pane(cx);
         let layout = two_pane_layout_with_first_pane_metadata();
         let mut panes = VecDeque::from([existing.clone()]);
         let mut spawned: Vec<LayoutNode> = Vec::new();
         let tree = LayoutTree::from_layout_node(&layout, &mut panes, &mut |node| {
             spawned.push(node.clone());
-            test_pane(cx, 1)
+            test_pane(cx)
         });
 
         assert_eq!(tree.leaf_count(), 2);
@@ -338,5 +341,79 @@ mod tests {
             }
             LayoutNode::Split { .. } => panic!("the leftover spawn is the second pane"),
         }
+    }
+
+    fn pane_leaf_count(node: &LayoutNode) -> usize {
+        match node {
+            LayoutNode::Pane { .. } => 1,
+            LayoutNode::Split { children, .. } => children.iter().map(pane_leaf_count).sum(),
+        }
+    }
+
+    /// US-002 (prd-cli-tab-hierarchy): serialization emits one `LayoutNode` per
+    /// tab, the zoomed tab contributes its *saved* (un-zoomed) arrangement, and
+    /// the tree survives a round-trip through `from_layout_node`. Switching the
+    /// visible tab must not disturb either tab's zoom state.
+    #[gpui::test]
+    fn two_tab_workspace_with_one_zoomed_round_trips(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (a, b, c, d) = (test_pane(cx), test_pane(cx), test_pane(cx), test_pane(cx));
+
+        let flat = LayoutTree::new_split(
+            SplitDirection::Vertical,
+            LayoutTree::Leaf(a.clone()),
+            LayoutTree::Leaf(b.clone()),
+        );
+        let mut ws = Workspace::with_layout_and_id(1, "ws", std::path::PathBuf::new(), flat);
+
+        // Second tab, zoomed on `c`: root holds the single zoomed leaf while
+        // `saved_layout` keeps the full arrangement.
+        let mut zoomed = Tab::new("zoomed", Some(LayoutTree::Leaf(c.clone())));
+        zoomed.saved_layout = Some(LayoutTree::new_split(
+            SplitDirection::Horizontal,
+            LayoutTree::Leaf(c.clone()),
+            LayoutTree::Leaf(d.clone()),
+        ));
+        assert!(ws.open_tab(zoomed), "opening the second tab must succeed");
+        assert_eq!(ws.active_tab_idx(), 1);
+        assert!(ws.is_zoomed(), "the active tab is the zoomed one");
+
+        // Per-tab serialization: the flat tab yields its two leaves, the zoomed
+        // one yields the saved arrangement (two leaves), not the single leaf
+        // `root` currently displays.
+        let nodes: Vec<LayoutNode> = cx.update(|_, cx| {
+            ws.tabs()
+                .iter()
+                .map(|tab| tab.serialize(cx).expect("every tab has a layout"))
+                .collect()
+        });
+        assert_eq!(nodes.len(), 2, "one LayoutNode per tab");
+        assert_eq!(pane_leaf_count(&nodes[0]), 2);
+        assert_eq!(
+            pane_leaf_count(&nodes[1]),
+            2,
+            "zoomed tab serializes its saved layout, not the zoomed leaf"
+        );
+
+        // Round-trip the zoomed tab's node back into a tree with the same panes.
+        let mut panes: VecDeque<Entity<Pane>> = VecDeque::from(vec![c.clone(), d.clone()]);
+        let restored = LayoutTree::from_layout_node(&nodes[1], &mut panes, &mut |_| {
+            panic!("round-trip must not need to spawn a pane")
+        });
+        assert_eq!(
+            leaf_ids(&restored),
+            vec![c.entity_id(), d.entity_id()],
+            "round-trip preserves the saved arrangement"
+        );
+
+        // Zoom is per tab and survives switching the visible tab.
+        ws.set_active_tab(0);
+        assert!(!ws.is_zoomed(), "the flat tab is not zoomed");
+        ws.set_active_tab(1);
+        assert!(ws.is_zoomed(), "the zoomed tab is still zoomed");
+        assert_eq!(
+            cx.update(|_, cx| ws.serialize_layout(cx).map(|n| pane_leaf_count(&n))),
+            Some(2)
+        );
     }
 }

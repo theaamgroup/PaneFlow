@@ -404,6 +404,11 @@ fn validate_node(node: &mut LayoutNode, leaf_budget: &mut usize) {
     }
 }
 
+pub(crate) fn default_layout_pane() -> LayoutNode {
+    LayoutNode::Pane {
+        surfaces: vec![SurfaceDefinition::default()],
+    }
+}
 /// A surface within a pane (terminal, browser, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SurfaceDefinition {

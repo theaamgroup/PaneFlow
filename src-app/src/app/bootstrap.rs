@@ -746,6 +746,7 @@ impl PaneFlowApp {
             workspaces,
             active_idx,
             renaming_idx: None,
+            renaming_tab: None,
             rename_text: String::new(),
             pending_config,
             save_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -787,13 +788,6 @@ impl PaneFlowApp {
             mcp_status: None,
             mcp_install: None,
             mcp_busy: false,
-            // US-040: `$HOME` is unset by default on Windows (canonical home is
-            // `%USERPROFILE%`), so the raw `var("HOME")` produced an empty
-            // string and the sidebar never collapsed any cwd to `~`. `dirs`
-            // resolves the home dir on all three platforms.
-            home_dir: dirs::home_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
             sidebar_scroll: gpui::ScrollHandle::new(),
             effective_shortcuts,
             recording_shortcut_idx: None,
@@ -804,6 +798,7 @@ impl PaneFlowApp {
             theme_mode,
             workspace_menu_open: None,
             tab_menu_open: None,
+            pane_menu_open: None,
             pending_pane_focus: None,
             profile_menu_open: None,
             agent_sessions: crate::AgentSessionsState {
@@ -865,6 +860,9 @@ impl PaneFlowApp {
             fleet_search_pending_focus: false,
             launch_pad: None,
             launch_pad_focus: cx.focus_handle(),
+            pane_palette: None,
+            pane_palette_focus: cx.focus_handle(),
+            pending_palette_focus: false,
             custom_buttons_modal: None,
             custom_buttons_modal_focus: cx.focus_handle(),
             // US-006: shared signal flipped by the theme watcher's debounce
@@ -1029,22 +1027,6 @@ impl PaneFlowApp {
         )
         .detach();
 
-        // Custom-button propagation runs once on the active workspace so
-        // user-defined tab-bar buttons surface immediately after restore.
-        cx.spawn(
-            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                smol::Timer::after(std::time::Duration::from_millis(1)).await;
-                let _ = cx.update(|cx| {
-                    this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
-                        let active = app.active_idx;
-                        if let Some(ws) = app.workspaces.get_mut(active) {
-                            ws.propagate_custom_buttons(cx);
-                        }
-                    })
-                });
-            },
-        )
-        .detach();
         app
     }
 }

@@ -1,7 +1,7 @@
 //! Manage-custom-buttons modal - opened from the workspace card context
 //! menu in the sidebar. Lets the user add / edit / delete user-defined
-//! command buttons that appear in the workspace's tab bar, to the right
-//! of the built-in defaults (Claude / Codex).
+//! command buttons that appear in the workspace's New pane palette, next
+//! to the built-in defaults (Claude / Codex).
 //!
 //! Modal overlay pattern follows the theme picker (`app/theme_picker.rs`):
 //! `deferred()` backdrop + centered card + focus-handled key input.
@@ -206,7 +206,6 @@ impl PaneFlowApp {
         };
         let ws = &mut self.workspaces[idx];
         ws.custom_buttons.retain(|b| b.id != button_id);
-        ws.propagate_custom_buttons(cx);
         self.save_session(cx);
         cx.notify();
     }
@@ -262,7 +261,6 @@ impl PaneFlowApp {
                 });
             }
         }
-        ws.propagate_custom_buttons(cx);
         self.save_session(cx);
 
         // Return to the list so the user sees the result of their action.

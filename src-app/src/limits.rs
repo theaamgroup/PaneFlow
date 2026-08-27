@@ -11,12 +11,15 @@
 //!
 //! - **`MAX_PANES`** (32) - [`crate::layout::MAX_PANES`]. Live UI create cap
 //!   (split / drop-to-split / IPC `surface.split` / `workspace.create`) ↔ read
-//!   cap in [`paneflow_config::loader::validate_layout`] (US-011) and at session
-//!   restore (US-009). This is a **leaf** cap, not a PTY cap (issue #30).
-//! - **`MAX_PANE_SURFACES`** (64) - `paneflow_config::loader::MAX_PANE_SURFACES`.
-//!   Live `Pane::add_tab` / `add_markdown_tab` write cap ↔ per-pane truncate
-//!   in `validate_layout` and session restore (issue #30). The config crate
-//!   owns the value because it is a leaf crate; this module re-exports it.
+//!   cap in [`paneflow_config::schema::validate_layout`] (US-011) and at session
+//!   restore (US-009). With the tab hierarchy it bounds a *tab*, not a
+//!   workspace: every create site counts the targeted tab's leaves, and a
+//!   workspace's total pane count is the sum over its tabs. This is a **leaf**
+//!   cap, not a PTY cap (issue #30).
+//! - **`MAX_TABS_PER_WORKSPACE`** (32) - [`crate::workspace::MAX_TABS_PER_WORKSPACE`].
+//!   Live tab create cap ↔ `restore_workspaces` truncates a session's tab list,
+//!   and [`paneflow_config::schema::MAX_SESSION_TABS`] applies the same bound to
+//!   the v1 -> v2 migration (US-018); surplus is logged, not silent.
 //! - **`MAX_WORKSPACES`** (20) - [`crate::workspace::MAX_WORKSPACES`]. Live
 //!   `workspace.create` cap ↔ `restore_workspaces` cap (US-009).
 //! - **`MAX_CONFIG_SIZE_BYTES`** (1 MiB) - `paneflow_config::loader`. Read cap
@@ -69,16 +72,10 @@ pub(crate) const MAX_SESSION_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 /// maliciously oversized local file must not be read whole before JSON parse.
 pub(crate) const MAX_MARKDOWN_STATE_SIZE_BYTES: u64 = 1024 * 1024;
 
-/// Per-pane tab/surface cap (issue #30). Re-export of
-/// [`paneflow_config::loader::MAX_PANE_SURFACES`] so live `add_tab` and
-/// session restore cannot drift from `validate_layout`'s logged truncate.
-/// Includes markdown: the restore cap is surfaces, not terminals-only.
-pub(crate) const MAX_PANE_SURFACES: usize = paneflow_config::loader::MAX_PANE_SURFACES;
-
-/// Workspace-level restore cap on PTY-spawning (non-markdown) surfaces.
-/// Matches the live write envelope: [`crate::layout::MAX_PANES`] leaves ×
-/// [`MAX_PANE_SURFACES`] tabs. `validated_layout_within_cap` counts
-/// terminals, not layout leaves, so a single leaf with 64 terminals is
-/// accepted while a hostile tree that would spawn more PTYs than this is
-/// discarded rather than restored.
-pub(crate) const MAX_WORKSPACE_TERMINALS: usize = crate::layout::MAX_PANES * MAX_PANE_SURFACES;
+/// Workspace-level restore cap on PTY-spawning surfaces. Sized from the live
+/// write envelope: MAX_TABS_PER_WORKSPACE tabs × MAX_PANES leaves per tab
+/// (issue #30). The read-side count is surfaces per layout (a restored pane
+/// spawns one PTY), so the ceiling is conservative: a hostile multi-surface
+/// leaf still consumes budget before the v2 demotion / mono-surface spawn.
+pub(crate) const MAX_WORKSPACE_TERMINALS: usize =
+    crate::workspace::MAX_TABS_PER_WORKSPACE * crate::layout::MAX_PANES;

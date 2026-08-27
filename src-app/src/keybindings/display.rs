@@ -224,6 +224,37 @@ mod tests {
         );
     }
 
+    /// US-020: the two tab-cycling shortcuts show up in Settings -> Shortcuts
+    /// with their default chord, and a user override replaces it there too.
+    #[test]
+    fn effective_shortcuts_expose_tab_cycling() {
+        let entries = effective_shortcuts(&HashMap::new());
+        let row = |action: &str| {
+            entries
+                .iter()
+                .find(|e| e.action_name == action)
+                .unwrap_or_else(|| panic!("{action} must be listed in Settings -> Shortcuts"))
+        };
+        assert_eq!(row("next_tab").description, "Next tab");
+        assert_eq!(row("previous_tab").description, "Previous tab");
+        assert!(
+            !row("next_tab").key.is_empty(),
+            "the default chord is shown"
+        );
+
+        let mut overrides = HashMap::new();
+        overrides.insert("ctrl-alt-n".to_string(), "next_tab".to_string());
+        let overridden = effective_shortcuts(&overrides);
+        let next_tab = overridden
+            .iter()
+            .find(|e| e.action_name == "next_tab")
+            .expect("next_tab stays listed once overridden");
+        assert_eq!(
+            next_tab.key, "\u{2303}\u{2325}N",
+            "macOS Settings rows render ctrl-alt as ⌃⌥ glyphs"
+        );
+    }
+
     #[test]
     fn effective_shortcuts_carry_matching_action_name() {
         // US-021: every row knows the action it rebinds. The editor keys off

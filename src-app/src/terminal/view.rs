@@ -298,13 +298,6 @@ impl TerminalView {
         self.terminal.restore_scrollback(text);
     }
 
-    pub(crate) fn set_terminal_material_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        if self.terminal_material_active != active {
-            self.terminal_material_active = active;
-            cx.notify();
-        }
-    }
-
     pub(crate) fn set_integrated_glyphs_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.integrated_glyphs_enabled != enabled {
             self.integrated_glyphs_enabled = enabled;
