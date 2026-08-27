@@ -900,6 +900,11 @@ impl Pane {
             return custom.clone();
         }
         let raw = &view.terminal.title;
+        if view.terminal.detected_agent.is_some()
+            && let Some(title) = Self::agent_osc_title(raw)
+        {
+            return title;
+        }
         if let Some(agent) = view.terminal.detected_agent {
             return agent.display_name().into();
         }
@@ -934,6 +939,11 @@ impl Pane {
             return custom.clone();
         }
         let raw = &view.terminal.title;
+        if view.terminal.detected_agent.is_some()
+            && let Some(title) = Self::agent_osc_title(raw)
+        {
+            return title;
+        }
         if let Some(agent) = view.terminal.detected_agent {
             return agent.display_name().into();
         }
@@ -957,6 +967,11 @@ impl Pane {
         } else {
             raw.clone()
         }
+    }
+
+    fn agent_osc_title(title: &str) -> Option<String> {
+        crate::sidebar_title::clean_sidebar_title(title)
+            .filter(|title| !Self::is_default_terminal_title(title))
     }
 
     fn is_default_terminal_title(title: &str) -> bool {
@@ -2271,5 +2286,49 @@ mod tests {
             None,
             "repo names must not be mistaken for agent processes"
         );
+    }
+
+    #[test]
+    fn agent_osc_titles_are_cleaned_and_default_titles_are_ignored() {
+        assert_eq!(
+            super::Pane::agent_osc_title("⠋ Refactor terminal titles\n"),
+            Some("Refactor terminal titles".into())
+        );
+        assert_eq!(super::Pane::agent_osc_title("Terminal"), None);
+        assert_eq!(super::Pane::agent_osc_title(" ● \u{200B}"), None);
+    }
+
+    #[test]
+    fn agent_osc_title_precedes_detected_agent_fallback() {
+        let src = include_str!("pane.rs");
+
+        for (function, next_function) in [
+            (
+                "fn terminal_surface_title(",
+                "fn terminal_surface_full_title(",
+            ),
+            (
+                "fn terminal_surface_full_title(",
+                "fn is_default_terminal_title(",
+            ),
+        ] {
+            let body = src
+                .split(function)
+                .nth(1)
+                .and_then(|rest| rest.split(next_function).next())
+                .expect("terminal title resolver body");
+            let custom = body.find("custom_name").expect("custom title branch");
+            let osc = body
+                .find("agent_osc_title(raw)")
+                .expect("cleaned OSC title branch");
+            let detected = body
+                .find("if let Some(agent) = view.terminal.detected_agent")
+                .expect("detected agent fallback");
+
+            assert!(
+                custom < osc && osc < detected,
+                "custom title must win, followed by OSC title, then the detected-agent fallback"
+            );
+        }
     }
 }
