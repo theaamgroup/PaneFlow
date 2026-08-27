@@ -146,7 +146,7 @@ cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.1.0
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
-                                             # negative control: cfg(unix) 137, cfg(macos) 71
+                                             # negative control: cfg(unix) 138, cfg(macos) 71
 ```
 
 The census negative control is not decoration. Read it every time: a census
@@ -334,7 +334,7 @@ before writing another one:
 What those passes proved, kept because the next platform-shaped pass will
 need it:
 
-- `#[cfg(unix)]` now appears **137 times** and macOS needs nearly all of it.
+- `#[cfg(unix)]` now appears **138 times** and macOS needs nearly all of it.
   `#[cfg(target_os = "macos")]` appears **71 times**. Both are live arms; both
   stay. This was the highest-risk distinction in 2c and no batch got it wrong -
   because every brief opened with the same four lines, verbatim:
