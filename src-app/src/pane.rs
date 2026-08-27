@@ -223,11 +223,6 @@ pub enum PaneEvent {
     /// binds this pane, and spawns the per-agent scans; no anchor is needed
     /// since the sidebar docks in the root layout rather than floating.
     ToggleAgentSessions,
-    /// Toggle the docked Files sidebar for the active workspace's folder
-    /// (PRD `prd-files-tree-sidebar-2026-Q3`, EP-001). Payload-free: the parent
-    /// resolves the active workspace's `cwd` to the tree root and enforces
-    /// mutual exclusion with the sessions sidebar.
-    ToggleFilesSidebar,
     /// Toggle the right-docked git diff on this pane's workspace folder. The
     /// parent resolves the folder from the pane's workspace id.
     ToggleDiffDock,
@@ -1737,20 +1732,6 @@ impl Pane {
                 }),
                 cx,
             ))
-            // Toggle the docked Files sidebar (PRD files-tree EP-001): a tree
-            // of the active workspace's folder, replacing the former native
-            // markdown picker. Markdown rows there are click-to-open into the
-            // active pane (and drag-to-pane in EP-003). The Cmd/Ctrl-click `.md`
-            // hyperlink path (`TerminalEvent::OpenMarkdownPath`) is untouched.
-            .child(self.action_button(
-                "pane-btn-files",
-                "icons/folder.svg",
-                cx.listener(|_this, _e: &ClickEvent, _window, cx| {
-                    cx.emit(PaneEvent::ToggleFilesSidebar);
-                    cx.stop_propagation();
-                }),
-                cx,
-            ))
             // Agent session history for the active terminal's cwd. The cwd
             // lookup + filesystem scan happens in
             // `PaneFlowApp::handle_pane_event`; this button just toggles the
@@ -1770,11 +1751,12 @@ impl Pane {
                     cx,
                 ))
             })
-            // Right-docked git diff for this pane's workspace folder. Trails
+            // Right side dock for this pane's workspace folder: the git diff, a
+            // shell, or an open file, picked on the dock's first open. Trails
             // the cluster so the two splits keep their leading slots.
             .child(self.action_button(
                 "pane-btn-diff-dock",
-                "icons/git-pull-request.svg",
+                "icons/layout-sidebar-right.svg",
                 cx.listener(|_this, _e: &ClickEvent, _window, cx| {
                     cx.emit(PaneEvent::ToggleDiffDock);
                     cx.stop_propagation();

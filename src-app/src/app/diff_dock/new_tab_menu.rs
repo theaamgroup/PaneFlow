@@ -60,11 +60,12 @@ pub(super) fn render_diff_new_tab_menu(
                 "agents-diff-new-tab-file",
                 "icons/file-text.svg",
                 "File",
-                "Ctrl+G",
+                "secondary-g",
                 ui,
             )
-            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.close_diff_new_tab_menu(cx);
+                this.open_diff_file_picker(window, cx);
             })),
         )
         .child(
@@ -72,7 +73,7 @@ pub(super) fn render_diff_new_tab_menu(
                 "agents-diff-new-tab-terminal",
                 "icons/terminal.svg",
                 "Terminal",
-                "Ctrl+J",
+                "secondary-j",
                 ui,
             )
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -95,6 +96,10 @@ pub(super) fn render_diff_new_tab_menu(
 
 /// One surface row: icon, label, then the shortcut hint pinned right. The
 /// caller attaches the click, so each row states for itself what it opens.
+/// `shortcut` is the binding as `keybindings::defaults` declares it, not a
+/// pre-rendered label: `secondary-` resolves to Ctrl on Linux and Windows and
+/// to Cmd on macOS, so the row has to be formatted here or it advertises a
+/// chord that does not exist on one of the three platforms.
 fn menu_row(
     id: &'static str,
     icon: &'static str,
@@ -127,6 +132,6 @@ fn menu_row(
                 .whitespace_nowrap()
                 .text_size(px(12.))
                 .text_color(ui.muted)
-                .child(shortcut),
+                .child(crate::keybindings::format_keystroke(shortcut)),
         )
 }

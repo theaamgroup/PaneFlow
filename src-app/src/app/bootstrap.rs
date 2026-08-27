@@ -704,6 +704,15 @@ impl PaneFlowApp {
             cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Search threads", cx));
         cx.observe(&agents_filter_input, |_, _, cx| cx.notify())
             .detach();
+        // US-020: the Files sidebar type-to-filter field - same pattern.
+        let files_filter_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter files", cx));
+        cx.observe(&files_filter_input, |app: &mut PaneFlowApp, _, cx| {
+            // A new needle rebuilds the list, so the old index means nothing.
+            app.files_selected = 0;
+            cx.notify();
+        })
+        .detach();
         // Codex settings nav search field - same pattern: a real single-line
         // TextInput, observed so each keystroke re-renders the nav to re-filter.
         let settings_search_input =
@@ -822,6 +831,7 @@ impl PaneFlowApp {
             files_tree: crate::app::files_tree::FilesTreeState::default(),
             files_tree_scroll: gpui::ScrollHandle::new(),
             files_selected: 0,
+            files_filter_input,
             files_focus: cx.focus_handle(),
             files_surface_id: None,
             files_watcher: None,
@@ -936,10 +946,15 @@ impl PaneFlowApp {
                 diff_options_menu_open: false,
                 diff_layout_submenu_open: false,
                 diff_new_tab_menu_open: false,
-                diff_tabs: vec![crate::app::agents_diff::DiffDockTab::Changes],
+                diff_dock_picker: false,
+                diff_dock_picked: false,
+                diff_dock_owner: None,
+                diff_dock_parked: std::collections::HashMap::new(),
+                diff_tabs: vec![crate::app::diff_dock::DiffDockTab::Changes],
                 diff_active_tab: 0,
+                diff_tab_close_armed: None,
                 diff_branch_menu: None,
-                agents_diff_width: crate::app::agents_diff::AGENTS_DIFF_PANEL_WIDTH,
+                agents_diff_width: crate::app::diff_dock::AGENTS_DIFF_PANEL_WIDTH,
                 agents_diff_resize: None,
                 agents_diff_h_scroll_drag: None,
                 agents_diff_h_offsets: std::rc::Rc::new(Vec::new()),

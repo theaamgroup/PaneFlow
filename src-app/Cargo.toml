@@ -215,6 +215,21 @@ base64 = "0.22"
 # at the Agents panel. `notify-rust` 4.x uses NSUserNotificationCenter.
 notify-rust = "4"
 
+# US-001 (prd-file-editor-2026-Q3): the rope backing `CodeDocument`
+# (`app/diff_dock/code/document.rs`). An edit in the middle of a large file
+# is O(log n) instead of the O(n) memmove a flat `String` would pay, and the
+# rope maintains its own line counters so byte <-> line conversions never
+# rescan. `chunks_at_byte` feeds tree-sitter's `Parser::parse_with` callback
+# directly (US-004), so no full-text copy is materialized per reparse.
+#
+# `default-features = false` deliberately drops `unicode_lines` and `cr_lines`:
+# with neither, ropey counts ONLY `\n` as a line break, which is exactly how
+# `str::lines()` (and therefore `diff/highlighter.rs`) segments text. Keeping
+# the defaults would make a lone `\r`, `\u{2028}` or `\u{0085}` split a line
+# in the editor but not in the diff - the one divergence US-004 forbids. `simd`
+# is re-enabled explicitly because it is a default we do want.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
+
 # macOS: libproc powers detect_ports() (US-006) - walks per-PID socket FDs
 # via proc_pidinfo/proc_pidfdinfo wrappers. The macOS-only gate keeps it
 # out of the Linux dep closure entirely.

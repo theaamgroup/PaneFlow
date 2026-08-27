@@ -21,11 +21,15 @@
 //! open/refresh/collapse lifecycle, the panel + body render, and the body click.
 
 mod branch;
+// prd-file-editor-2026-Q3, EP-001: the editable-document layer behind the
+// dock's `File` tabs (US-017).
+pub(crate) mod code;
 mod git;
 mod model;
 mod new_tab_menu;
 mod options_menu;
 mod render;
+mod surface_picker;
 mod tabs;
 
 pub(crate) use branch::DiffBranchMenuState;
@@ -43,9 +47,10 @@ use self::branch::render_diff_branch_chip;
 use self::git::build_agents_diff;
 use self::model::{AGENTS_DIFF_PANEL_MAX_WIDTH, AGENTS_DIFF_PANEL_MIN_WIDTH, DiffChrome};
 use self::render::{
-    diff_panel_centered, render_diff_files_toolbar, render_diff_resize_handle,
-    render_diff_tab_strip,
+    diff_file_header_path, diff_panel_centered, render_diff_file_header, render_diff_files_toolbar,
+    render_diff_resize_handle, render_diff_tab_strip,
 };
+use self::surface_picker::{render_diff_picker_header, render_diff_surface_picker};
 use crate::PaneFlowApp;
 use crate::diff::{
     DiffBody, DiffElement, H_SCROLLBAR_TRACK_HEIGHT, HScrollbarSegment, RowKind, SplitRow,
@@ -61,6 +66,10 @@ impl PaneFlowApp {
     /// snapshot so a large hidden dock cannot keep old rows alive.
     pub(crate) fn open_agents_diff_panel(&mut self, cwd: String, cx: &mut Context<Self>) {
         let cwd = cwd.trim().to_string();
+        // The single door to an open dock, so the single place that records
+        // which workspace owns it - `sync_diff_dock_workspace` would otherwise
+        // read the open as a drift and park it on the next frame.
+        self.agents_view.diff_dock_owner = self.active_workspace().map(|ws| ws.id);
         let split = self.agents_view.agents_diff_split;
         let has_current_snapshot = self.agents_view.agents_diff.as_ref().is_some_and(|data| {
             data.cwd == cwd
@@ -300,6 +309,15 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // First open of the session: the dock asks what to show instead of
+        // dropping into the diff. Gated on `Cli` because the flag is set by the
+        // pane-header toggle - the Agents dock is opened from its own chrome,
+        // already on a chosen surface, and must never inherit the question.
+        if self.agents_view.diff_dock_picker
+            && matches!(self.mode, paneflow_config::schema::AppMode::Cli)
+        {
+            return self.render_diff_dock_picker(ui, cx);
+        }
         self.refresh_agents_diff_if_theme_changed(cx);
         let data = self.agents_view.agents_diff.clone();
         let cwd = data.as_ref().map(|d| d.cwd.clone()).unwrap_or_default();
@@ -311,6 +329,7 @@ impl PaneFlowApp {
         let header = render_diff_tab_strip(
             &tabs,
             active,
+            self.agents_view.diff_tab_close_armed,
             self.agents_view.diff_new_tab_menu_open,
             ui,
             cx,
@@ -320,6 +339,33 @@ impl PaneFlowApp {
         // about a shell.
         let (toolbar, body) = match tabs.get(active) {
             Some(DiffDockTab::Terminal(terminal)) => (None, terminal.clone().into_any_element()),
+            // No toolbar either: the file header describes an open document,
+            // and this tab is the one that has none yet.
+            Some(DiffDockTab::PendingFile) => (None, render::render_pending_file_body(ui)),
+            // A file tab swaps the diff's files toolbar for its own header
+            // (US-018): same 36 px band, describing the open document instead
+            // of the working tree.
+            Some(DiffDockTab::File(view)) => {
+                let (icon, path, line, column) = {
+                    let view = view.read(cx);
+                    let path = view.path().to_path_buf();
+                    let (line, column) = view.cursor_line_column();
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    (
+                        render::file_tab_icon(&name),
+                        diff_file_header_path(&cwd, &path),
+                        line,
+                        column,
+                    )
+                };
+                (
+                    Some(render_diff_file_header(icon, path, line, column, ui)),
+                    view.clone().into_any_element(),
+                )
+            }
             _ => (
                 Some(self.render_diff_toolbar(&cwd, &data, ui, cx)),
                 self.render_agents_diff_body(&data, ui, cx),
@@ -344,6 +390,31 @@ impl PaneFlowApp {
             .child(header)
             .children(toolbar)
             .child(body)
+            .child(squircle_border(radius, px(1.), ui.border))
+            .into_any_element()
+    }
+
+    /// The dock drawn on its surface picker: same card silhouette, same resize
+    /// handle, but the tab strip and the body are replaced by the question. The
+    /// panel is rebuilt here rather than branched inside the main renderer so
+    /// the picker never pays for the diff snapshot it is not showing.
+    fn render_diff_dock_picker(
+        &mut self,
+        ui: crate::theme::UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let radius = crate::app::constants::PANE_CARD_RADIUS;
+        div()
+            .relative()
+            .w(px(self.agents_view.agents_diff_width))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(squircle_fill(radius, ui.base))
+            .child(render_diff_resize_handle(ui, cx))
+            .child(render_diff_picker_header(ui, cx))
+            .child(render_diff_surface_picker(ui, cx))
             .child(squircle_border(radius, px(1.), ui.border))
             .into_any_element()
     }

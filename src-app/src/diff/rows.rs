@@ -342,6 +342,11 @@ pub struct RowPalette {
     pub gutter_bg: Hsla,
     pub add_gutter_bg: Hsla,
     pub del_gutter_bg: Hsla,
+    /// EP-003 US-009: wash behind the code editor's current line. Derived from
+    /// `ui.text` at low alpha rather than added as a theme slot, so the six
+    /// bundled theme files keep their current shape and a user theme cannot
+    /// forget to define it.
+    pub cursor_line_bg: Hsla,
 }
 
 fn content_row(
@@ -470,8 +475,10 @@ where
     }
 }
 
-/// File extension (lowercased) used to pick a `syntect` grammar.
-fn file_ext(path: &str) -> String {
+/// File extension (lowercased) used to pick a tree-sitter grammar. Shared with
+/// the file editor's highlight driver (prd-file-editor-2026-Q3, US-004) so both
+/// surfaces resolve the same grammar for the same path.
+pub(crate) fn file_ext(path: &str) -> String {
     std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -517,7 +524,7 @@ pub fn build_file_row_caches(files: &[FileDiff], syntax: Option<&DiffSyntax>) ->
 
 /// Resolve a [`RowPalette`] from the active theme's UI colors. The single color
 /// source for [`super::element::DiffElement`], shared by the Review view
-/// ([`super::view`]) and the Agents diff dock ([`crate::app::agents_diff`]) so
+/// ([`super::view`]) and the Agents diff dock ([`crate::app::diff_dock`]) so
 /// both render with identical washes.
 pub fn palette(ui: crate::theme::UiColors) -> RowPalette {
     let diff = ui.diff_colors();
@@ -556,6 +563,11 @@ pub fn palette(ui: crate::theme::UiColors) -> RowPalette {
         gutter_bg: ui.base,
         add_gutter_bg: diff.added_gutter_background,
         del_gutter_bg: diff.deleted_gutter_background,
+        // EP-003 US-009: the current-line wash has to survive both themes with
+        // one alpha. 0.05 of the foreground reads as a lift on dark and as a
+        // shade on light, and stays under every diff wash so a changed line
+        // keeps its status color when the caret sits on it.
+        cursor_line_bg: ui.text.opacity(0.05),
     }
 }
 
@@ -1119,7 +1131,7 @@ pub fn build_split_rows_with_caches(
 /// only its header row, an expanded file keeps its full segment. `anchors` maps
 /// each file path to its header row index (file order). Returns the filtered
 /// rows plus rebuilt anchors (header index in the output). Shared by the Review
-/// view ([`super::view`]) and the Agents diff dock ([`crate::app::agents_diff`]).
+/// view ([`super::view`]) and the Agents diff dock ([`crate::app::diff_dock`]).
 pub fn apply_collapse_unified(
     rows: &[DisplayRow],
     anchors: &[(String, usize)],
