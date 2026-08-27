@@ -650,12 +650,15 @@ fn pane_spec_requires_orchestration(spec: &serde_json::Value) -> bool {
         || string_param_is_nonempty(spec.get("prompt"))
         || string_param_is_nonempty(spec.get("context"))
         || env_param_has_strings(spec.get("env"))
+        || spec
+            .get("managed_worktree")
+            .is_some_and(|value| !value.is_null())
 }
 
 fn orchestration_disabled_error(method: &str) -> JsonRpcError {
     JsonRpcError::method_not_enabled(format!(
         "{method} orchestration disabled; set PANEFLOW_IPC_ORCHESTRATION=1 \
-         or PANEFLOW_IPC_SCRIPTING=1 to enable command, prompt, context, or env"
+         or PANEFLOW_IPC_SCRIPTING=1 to enable command, prompt, context, env, or managed worktree ownership"
     ))
 }
 
@@ -879,6 +882,23 @@ fn parse_managed_worktree(
     let branch = mw.get("branch").and_then(|b| b.as_str()).unwrap_or("");
     let teardown = mw.get("teardown").and_then(|t| t.as_str()).unwrap_or("");
     crate::workspace::worktree::managed_worktree_from_record(path, repo_root, branch, teardown)
+}
+
+/// Exclusive lifecycle ownership check over canonical worktree paths.
+/// `target_workspace` permits a split to reuse a record already owned by the
+/// workspace it extends, but every other live, undo, or retiring owner is a
+/// conflict.
+fn managed_worktree_path_conflicts(
+    path: &std::path::Path,
+    target_workspace: Option<usize>,
+    live: &[(usize, PathBuf)],
+    closed: &[PathBuf],
+    pending: &[PathBuf],
+) -> bool {
+    live.iter()
+        .any(|(index, owned)| owned == path && Some(*index) != target_workspace)
+        || closed.iter().any(|owned| owned == path)
+        || pending.iter().any(|owned| owned == path)
 }
 
 /// Where a surface lives: workspace, owning workspace tab, pane, and the
@@ -1792,6 +1812,42 @@ impl PaneFlowApp {
         Ok(terminal)
     }
 
+    fn managed_worktree_conflicts(
+        &self,
+        path: &std::path::Path,
+        target_workspace: Option<usize>,
+    ) -> bool {
+        let live: Vec<_> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(index, workspace)| {
+                workspace
+                    .managed_worktrees
+                    .iter()
+                    .map(move |worktree| (index, worktree.path.clone()))
+            })
+            .collect();
+        let closed: Vec<_> = self
+            .closed_items
+            .iter()
+            .flat_map(|record| match record {
+                crate::ClosedRecord::Workspace(workspace) => workspace
+                    .managed_worktrees
+                    .iter()
+                    .map(|worktree| worktree.path.clone())
+                    .collect::<Vec<_>>(),
+                crate::ClosedRecord::Pane(_) | crate::ClosedRecord::Tab(_) => Vec::new(),
+            })
+            .collect();
+        let pending: Vec<_> = self
+            .pending_worktree_teardowns
+            .iter()
+            .map(|worktree| worktree.path.clone())
+            .collect();
+        managed_worktree_path_conflicts(path, target_workspace, &live, &closed, &pending)
+    }
+
     /// `workspace.up` - materialize a declarative multi-pane agent workspace in
     /// one call (US-008/US-009/US-010, prd-cli-agent-orchestration). Unlike
     /// `workspace.create` + `layout`, this honors a per-pane cwd / launch
@@ -1845,13 +1901,49 @@ impl PaneFlowApp {
         // these panes - the workspace records ownership so close tears them
         // down (US-009) and session restore keeps the record across a crash.
         let mut managed_worktrees: Vec<crate::workspace::worktree::ManagedWorktree> = Vec::new();
+        let mut managed_paths = std::collections::HashSet::new();
         let mut planned: Vec<PlannedPane> = Vec::with_capacity(pane_specs.len());
         for (i, spec) in pane_specs.iter().enumerate() {
-            if let Some(mw) = parse_managed_worktree(spec.get("managed_worktree")) {
-                managed_worktrees.push(mw);
-            }
+            let managed_value = spec
+                .get("managed_worktree")
+                .filter(|value| !value.is_null());
+            let managed_worktree = match managed_value {
+                Some(_) => match parse_managed_worktree(managed_value) {
+                    Some(worktree) => Some(worktree),
+                    None => {
+                        return JsonRpcError::invalid_params(format!(
+                            "pane {i}: invalid managed_worktree ownership record"
+                        ))
+                        .into_value();
+                    }
+                },
+                None => None,
+            };
             match parse_workspace_pane_plan(spec) {
-                Ok(plan) => planned.push(plan),
+                Ok(plan) => {
+                    if let Some(worktree) = managed_worktree {
+                        if plan.cwd.as_deref() != Some(worktree.path.as_path()) {
+                            return JsonRpcError::invalid_params(format!(
+                                "pane {i}: managed_worktree path must match cwd"
+                            ))
+                            .into_value();
+                        }
+                        if self.managed_worktree_conflicts(&worktree.path, None) {
+                            return JsonRpcError::invalid_params(format!(
+                                "pane {i}: managed worktree is already owned by another workspace"
+                            ))
+                            .into_value();
+                        }
+                        if !managed_paths.insert(worktree.path.clone()) {
+                            return JsonRpcError::invalid_params(format!(
+                                "pane {i}: managed worktree is repeated in this workspace"
+                            ))
+                            .into_value();
+                        }
+                        managed_worktrees.push(worktree);
+                    }
+                    planned.push(plan);
+                }
                 Err(err) => {
                     return JsonRpcError::invalid_params(format!("pane {i}: {}", err.message))
                         .into_value();
@@ -2613,6 +2705,9 @@ impl PaneFlowApp {
                 }
             }
             "workspace.close" => {
+                if !ipc_orchestration_enabled() {
+                    return orchestration_disabled_error(method).into_value();
+                }
                 if self.workspaces.len() <= 1 {
                     serde_json::json!({"error": "Cannot close last workspace"})
                 } else {
@@ -3098,6 +3193,27 @@ impl PaneFlowApp {
                     },
                     None => None,
                 };
+                let managed_value = params
+                    .get("managed_worktree")
+                    .filter(|value| !value.is_null());
+                let spawn_managed_worktree = match managed_value {
+                    Some(_) => match parse_managed_worktree(managed_value) {
+                        Some(worktree) => Some(worktree),
+                        None => {
+                            return JsonRpcError::invalid_params(
+                                "invalid managed_worktree ownership record",
+                            )
+                            .into_value();
+                        }
+                    },
+                    None => None,
+                };
+                if let Some(worktree) = &spawn_managed_worktree
+                    && spawn_cwd.as_deref() != Some(worktree.path.as_path())
+                {
+                    return JsonRpcError::invalid_params("managed_worktree path must match cwd")
+                        .into_value();
+                }
                 let spawn_command = params
                     .get("command")
                     .and_then(|c| c.as_str())
@@ -3142,6 +3258,14 @@ impl PaneFlowApp {
                 let Some(ws) = self.workspaces.get(ws_idx) else {
                     return JsonRpcError::invalid_params("No active workspace").into_value();
                 };
+                if let Some(worktree) = &spawn_managed_worktree
+                    && self.managed_worktree_conflicts(&worktree.path, Some(ws_idx))
+                {
+                    return JsonRpcError::invalid_params(
+                        "managed worktree is already owned by another workspace",
+                    )
+                    .into_value();
+                }
                 let ws_id = ws.id;
                 let Some(tab) = ws.tabs().get(tab_idx) else {
                     return JsonRpcError::invalid_params("Workspace has no root").into_value();
@@ -3201,8 +3325,13 @@ impl PaneFlowApp {
                     }
                     None => root.split_first_leaf(direction, new_pane),
                 }
-                if let Some(mw) = parse_managed_worktree(params.get("managed_worktree")) {
-                    self.workspaces[ws_idx].managed_worktrees.push(mw);
+                if let Some(worktree) = spawn_managed_worktree
+                    && !self.workspaces[ws_idx]
+                        .managed_worktrees
+                        .iter()
+                        .any(|owned| owned.path == worktree.path)
+                {
+                    self.workspaces[ws_idx].managed_worktrees.push(worktree);
                 }
                 if let Some(cmd) = spawn_command {
                     Self::schedule_launch_command(&new_terminal, cmd, spawn_prompt, usize::MAX, cx);
@@ -4149,6 +4278,11 @@ mod tests {
             "workspace.close must reuse the UI guard before the shared closer"
         );
         assert!(
+            close_arm.contains("!ipc_orchestration_enabled()")
+                && close_arm.contains("orchestration_disabled_error(method)"),
+            "workspace lifecycle mutation must require the orchestration opt-in"
+        );
+        assert!(
             close_arm.contains("Cannot close last workspace"),
             "last-workspace refusal stays on the IPC path"
         );
@@ -4536,6 +4670,63 @@ mod tests {
         ));
         assert!(!super::pane_spec_requires_orchestration(
             &serde_json::json!({"env": {"IGNORED": 7}})
+        ));
+        assert!(super::pane_spec_requires_orchestration(
+            &serde_json::json!({"managed_worktree": {
+                "path": "/tmp/repo.worktrees/feature",
+                "repo_root": "/tmp/repo",
+                "branch": "feature",
+                "teardown": "auto"
+            }})
+        ));
+    }
+
+    #[test]
+    fn managed_worktree_path_allows_only_one_workspace_owner() {
+        use std::path::{Path, PathBuf};
+
+        let path = Path::new("/tmp/repo.worktrees/feature");
+        let live = vec![
+            (0, PathBuf::from("/tmp/repo.worktrees/feature")),
+            (1, PathBuf::from("/tmp/repo.worktrees/other")),
+        ];
+
+        assert!(super::managed_worktree_path_conflicts(
+            path,
+            None,
+            &live,
+            &[],
+            &[],
+        ));
+        assert!(
+            !super::managed_worktree_path_conflicts(path, Some(0), &live, &[], &[]),
+            "a split may reuse ownership already held by its target workspace"
+        );
+        assert!(super::managed_worktree_path_conflicts(
+            path,
+            Some(0),
+            &live,
+            &[PathBuf::from("/tmp/repo.worktrees/feature")],
+            &[],
+        ));
+        assert!(super::managed_worktree_path_conflicts(
+            path,
+            Some(0),
+            &live,
+            &[],
+            &[PathBuf::from("/tmp/repo.worktrees/feature")],
+        ));
+
+        let duplicate_live = vec![
+            (0, PathBuf::from("/tmp/repo.worktrees/feature")),
+            (1, PathBuf::from("/tmp/repo.worktrees/feature")),
+        ];
+        assert!(super::managed_worktree_path_conflicts(
+            path,
+            Some(0),
+            &duplicate_live,
+            &[],
+            &[],
         ));
     }
 

@@ -35,9 +35,11 @@
 //! below carry different blast radii once connected:
 //!
 //! - `system.*`: read-only health checks. Safe.
-//! - `workspace.list` / `workspace.current` / `workspace.select` /
-//!   `workspace.close`: navigation + workspace lifecycle. Visible
-//!   side effects on the UI; no file/system mutation.
+//! - `workspace.list` / `workspace.current` / `workspace.select`: navigation
+//!   with visible UI side effects and no file/system mutation.
+//! - `workspace.close`: process/workspace lifecycle and possible managed-
+//!   worktree retirement. Gated behind the orchestration opt-in and still
+//!   routed through the visible close confirmation.
 //! - `workspace.create`: spawns a PTY at `cwd`. `cwd` is
 //!   canonicalised (US-014) and rejected if not a directory.
 //! - `surface.split`: layout mutation, bounded by `MAX_PANES` on the tab
@@ -45,7 +47,7 @@
 //!   splits are navigation-level; spawn fields are gated like `workspace.up`.
 //! - `workspace.up`: multi-pane creation. Navigation-only pane specs are
 //!   allowed for same-UID clients, but `command`, `prompt`, `context`, and
-//!   non-empty `env` are orchestration primitives gated behind
+//!   non-empty `env` and `managed_worktree` ownership are orchestration primitives gated behind
 //!   `PANEFLOW_IPC_ORCHESTRATION=1`. `PANEFLOW_IPC_SCRIPTING=1` also enables
 //!   them as a broader legacy opt-in.
 //! - **`surface.send_text` / `surface.send_keystroke`: same-UID RCE
@@ -68,8 +70,8 @@
 //!
 //! - `system.ping` / `system.capabilities` / `system.identify` - stateless
 //!   health checks handled directly on the socket thread.
-//! - `workspace.list` / `workspace.current` / `workspace.select` /
-//!   `workspace.close` - workspace navigation.
+//! - `workspace.list` / `workspace.current` / `workspace.select` - workspace
+//!   navigation; `workspace.close` is an orchestration-gated lifecycle action.
 //! - `workspace.create` - accepts `name` (string, default "Terminal"),
 //!   `cwd` (string path, optional) and `layout` (optional `LayoutNode`
 //!   JSON, US-001). When `layout` is present, the new workspace's pane

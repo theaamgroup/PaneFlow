@@ -116,6 +116,10 @@ impl PaneFlowApp {
                     pinned: ws.pinned,
                 })
                 .collect(),
+            pending_worktree_teardowns: persisted_pending_worktree_teardowns(
+                &self.pending_worktree_teardowns,
+                &self.closed_items,
+            ),
             // Persist the live UI mode so the restore branch reopens
             // Paneflow in the same screen the user left.
             mode: self.mode,
@@ -212,17 +216,11 @@ impl PaneFlowApp {
     /// the message is visible instead of racing the process exit.
     pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
         if self.save_session_blocking(cx) {
-            // Closed-workspace undo records are intentionally not persisted.
-            // Once the durable session proves those workspaces absent, retire
-            // their managed worktrees and wait for every already-started FIFO
-            // eviction batch before allowing the process to exit.
-            let worktrees =
-                crate::app::workspace_ops::take_all_closed_record_worktrees(&mut self.closed_items);
-            self.quit_after_worktree_teardowns = true;
-            self.spawn_worktree_teardown(worktrees, cx);
-            if self.worktree_teardowns_in_flight == 0 {
-                cx.quit();
-            }
+            // `build_session_state` journals every closed-record worktree as a
+            // pending retirement. Quit immediately after that atomic write:
+            // no event/IPC action can interleave after the final save, and a
+            // slow or interrupted cleanup resumes on the next launch.
+            cx.quit();
             return;
         }
         self.push_toast(
@@ -233,16 +231,7 @@ impl PaneFlowApp {
         let delay_ms = TOAST_ENTER_MS + TOAST_HOLD_MS * 2 + TOAST_EXIT_MS;
         cx.spawn(async move |this, cx| {
             smol::Timer::after(std::time::Duration::from_millis(delay_ms)).await;
-            let _ = this.update(cx, |app, cx| {
-                // Preserve closed-record ownership after a failed final save:
-                // the older on-disk session may still restore that workspace,
-                // so deleting its cwd would corrupt recovery. We still wait
-                // for any unrelated FIFO retirement already in progress.
-                app.quit_after_worktree_teardowns = true;
-                if app.worktree_teardowns_in_flight == 0 {
-                    cx.quit();
-                }
-            });
+            let _ = this.update(cx, |_app, cx| cx.quit());
         })
         .detach();
     }
@@ -408,7 +397,9 @@ impl PaneFlowApp {
         session: &paneflow_config::schema::SessionState,
         cx: &mut Context<Self>,
     ) -> (Vec<Workspace>, usize) {
-        let mut workspaces = Vec::new();
+        let mut workspaces: Vec<Workspace> = Vec::new();
+        let mut worktree_owners: std::collections::HashMap<std::path::PathBuf, usize> =
+            std::collections::HashMap::new();
 
         // U-016: cap restored workspaces. Each layout's pane count is bounded by
         // `validate_layout` (US-011) below, so this is the only remaining
@@ -493,11 +484,33 @@ impl PaneFlowApp {
             workspace.pinned = ws_session.pinned;
             // EP-002 (orchestration-v2): rehydrate worktree ownership so the
             // close-time teardown still applies after a restart.
-            workspace.managed_worktrees = ws_session
+            let mut restored_worktrees: Vec<_> = ws_session
                 .managed_worktrees
                 .iter()
+                .take(MAX_PANES)
                 .filter_map(rehydrate_managed_worktree)
                 .collect();
+            restored_worktrees.sort_by(|left, right| left.path.cmp(&right.path));
+            restored_worktrees.dedup_by(|left, right| left.path == right.path);
+            for worktree in &mut restored_worktrees {
+                if let Some(&first_owner) = worktree_owners.get(&worktree.path) {
+                    // Sessions written before exclusive ownership validation
+                    // may name one checkout from multiple workspaces. Keep the
+                    // checkout for both rather than letting either owner delete
+                    // the other's live cwd.
+                    worktree.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+                    if let Some(first_workspace) = workspaces.get_mut(first_owner) {
+                        for first in &mut first_workspace.managed_worktrees {
+                            if first.path == worktree.path {
+                                first.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+                            }
+                        }
+                    }
+                } else {
+                    worktree_owners.insert(worktree.path.clone(), workspaces.len());
+                }
+            }
+            workspace.managed_worktrees = restored_worktrees;
             // US-007: rehydrate expanded dirs as absolute paths under this
             // workspace's cwd. Paths that no longer resolve to a directory are
             // dropped lazily later (by the tree's `hydrated` filter on open),
@@ -903,7 +916,7 @@ fn rehydrate_expanded_path(cwd: &str, rel: &str) -> Option<PathBuf> {
     Some(abs)
 }
 
-fn rehydrate_managed_worktree(
+pub(super) fn rehydrate_managed_worktree(
     def: &paneflow_config::schema::ManagedWorktreeDef,
 ) -> Option<crate::workspace::worktree::ManagedWorktree> {
     crate::workspace::worktree::managed_worktree_from_record(
@@ -912,6 +925,37 @@ fn rehydrate_managed_worktree(
         &def.branch,
         &def.teardown,
     )
+}
+
+fn managed_worktree_def(
+    worktree: &crate::workspace::worktree::ManagedWorktree,
+) -> paneflow_config::schema::ManagedWorktreeDef {
+    paneflow_config::schema::ManagedWorktreeDef {
+        path: worktree.path.to_string_lossy().into_owned(),
+        repo_root: worktree.repo_root.to_string_lossy().into_owned(),
+        branch: worktree.branch.clone(),
+        teardown: worktree.teardown.as_str().to_string(),
+    }
+}
+
+/// Persist both retirement already in progress and ownership held by the
+/// process-local undo stack. Closed records are not restored after restart,
+/// so their worktrees become pending cleanup in the next process.
+fn persisted_pending_worktree_teardowns(
+    pending: &[crate::workspace::worktree::ManagedWorktree],
+    closed: &[crate::ClosedRecord],
+) -> Vec<paneflow_config::schema::ManagedWorktreeDef> {
+    let mut worktrees: Vec<_> = pending
+        .iter()
+        .chain(closed.iter().flat_map(|record| match record {
+            crate::ClosedRecord::Workspace(workspace) => workspace.managed_worktrees.iter(),
+            crate::ClosedRecord::Pane(_) | crate::ClosedRecord::Tab(_) => [].iter(),
+        }))
+        .cloned()
+        .collect();
+    worktrees.sort_by(|left, right| left.path.cmp(&right.path));
+    worktrees.dedup_by(|left, right| left.path == right.path);
+    worktrees.iter().map(managed_worktree_def).collect()
 }
 
 fn persisted_expanded_paths(cwd: &str, expanded: &[PathBuf]) -> Vec<String> {
@@ -1700,6 +1744,7 @@ mod tests {
     fn restored_managed_worktree_must_match_paneflow_worktree_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
         let branch = "feat/session-hardening";
         let owned_path = crate::workspace::worktree::worktree_dir(&repo_root, branch);
         std::fs::create_dir_all(&owned_path).expect("owned worktree dir");
@@ -1716,7 +1761,10 @@ mod tests {
         };
 
         let restored = rehydrate_managed_worktree(&valid).expect("valid owned worktree restores");
-        assert_eq!(restored.path, owned_path);
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&owned_path).expect("canonical path")
+        );
         assert_eq!(
             restored.teardown,
             crate::workspace::worktree::TeardownPolicy::Auto
@@ -1749,6 +1797,7 @@ mod tests {
             version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
             active_workspace: 0,
             workspaces: Vec::new(),
+            pending_worktree_teardowns: Vec::new(),
             mode: Default::default(),
             diff_scope: None,
             primary_sidebar_collapsed: false,
@@ -1855,14 +1904,45 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("return;").next())
             .expect("successful-save branch");
-        assert!(success.contains("take_all_closed_record_worktrees"));
-        assert!(success.contains("quit_after_worktree_teardowns = true"));
+        assert!(success.contains("cx.quit()"));
+        assert!(!success.contains("spawn_persisted_worktree_teardown"));
 
         let failure = quit.split("return;").nth(1).expect("failed-save branch");
         assert!(
-            !failure.contains("take_all_closed_record_worktrees"),
+            !failure.contains("teardown_all"),
             "an older session may still restore the cwd after a failed final save: {failure}"
         );
+    }
+
+    #[test]
+    fn session_journal_includes_closed_workspace_ownership_and_deduplicates_it() {
+        let worktree = crate::workspace::worktree::ManagedWorktree {
+            path: PathBuf::from("/tmp/repo.worktrees/feature"),
+            repo_root: PathBuf::from("/tmp/repo"),
+            branch: "feature".to_string(),
+            teardown: crate::workspace::worktree::TeardownPolicy::Auto,
+        };
+        let closed = vec![crate::ClosedRecord::Workspace(
+            crate::ClosedWorkspaceRecord {
+                workspace_id: 7,
+                title: "closed".to_string(),
+                cwd: "/tmp/repo.worktrees/feature".to_string(),
+                index: 0,
+                active_tab: 0,
+                tabs: Vec::new(),
+                custom_buttons: Vec::new(),
+                files_expanded: Vec::new(),
+                sidebar_expanded: true,
+                pinned: false,
+                managed_worktrees: vec![worktree.clone()],
+            },
+        )];
+
+        let journal = persisted_pending_worktree_teardowns(&[worktree], &closed);
+
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].path, "/tmp/repo.worktrees/feature");
+        assert_eq!(journal[0].teardown, "auto");
     }
 
     /// EP-002 US-005: a legacy pane listing several surfaces restores the

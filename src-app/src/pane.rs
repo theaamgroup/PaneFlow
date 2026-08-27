@@ -899,9 +899,12 @@ impl Pane {
         if let Some(custom) = view.terminal.custom_name.as_ref().filter(|c| !c.is_empty()) {
             return custom.clone();
         }
-        let raw = &view.terminal.title;
+        // OSC titles are terminal-controlled input. Normalize them before any
+        // resolver branch can return text to the compact header, drag label,
+        // close dialog, or full-title tooltip.
+        let raw = Self::sanitized_terminal_osc_title(&view.terminal.title);
         if view.terminal.detected_agent.is_some()
-            && let Some(title) = Self::agent_osc_title(raw)
+            && let Some(title) = Self::agent_osc_title(&raw)
         {
             return title;
         }
@@ -910,14 +913,14 @@ impl Pane {
         }
         // For shell titles like "user@host: /path/to/dir", extract the last path component
         if let Some(path_title) =
-            Self::shell_path_title(raw).and_then(|path| Self::cwd_label(&path))
+            Self::shell_path_title(&raw).and_then(|path| Self::cwd_label(&path))
         {
             return path_title;
         }
-        if let Some(agent_title) = Self::agent_title_from_terminal_title(raw) {
+        if let Some(agent_title) = Self::agent_title_from_terminal_title(&raw) {
             return agent_title.into();
         }
-        if Self::is_default_terminal_title(raw)
+        if Self::is_default_terminal_title(&raw)
             && let Some(cwd) = view.terminal.current_cwd.as_deref()
             && let Some(label) = Self::cwd_label(cwd)
         {
@@ -938,22 +941,24 @@ impl Pane {
         if let Some(custom) = view.terminal.custom_name.as_ref().filter(|c| !c.is_empty()) {
             return custom.clone();
         }
-        let raw = &view.terminal.title;
+        // The full title feeds the pane-header tooltip, so it gets the same
+        // OSC-input normalization as the compact title path above.
+        let raw = Self::sanitized_terminal_osc_title(&view.terminal.title);
         if view.terminal.detected_agent.is_some()
-            && let Some(title) = Self::agent_osc_title(raw)
+            && let Some(title) = Self::agent_osc_title(&raw)
         {
             return title;
         }
         if let Some(agent) = view.terminal.detected_agent {
             return agent.display_name().into();
         }
-        if let Some(path_title) = Self::shell_path_title(raw) {
+        if let Some(path_title) = Self::shell_path_title(&raw) {
             return path_title;
         }
-        if let Some(agent_title) = Self::agent_title_from_terminal_title(raw) {
+        if let Some(agent_title) = Self::agent_title_from_terminal_title(&raw) {
             return agent_title.into();
         }
-        if Self::is_default_terminal_title(raw)
+        if Self::is_default_terminal_title(&raw)
             && let Some(cwd) = view
                 .terminal
                 .current_cwd
@@ -969,9 +974,20 @@ impl Pane {
         }
     }
 
+    fn sanitized_terminal_osc_title(title: &str) -> String {
+        crate::sidebar_title::clean_sidebar_title(title).unwrap_or_default()
+    }
+
     fn agent_osc_title(title: &str) -> Option<String> {
-        crate::sidebar_title::clean_sidebar_title(title)
-            .filter(|title| !Self::is_default_terminal_title(title))
+        let title = crate::sidebar_title::clean_sidebar_title(title)?;
+        if Self::is_default_terminal_title(&title)
+            || Self::shell_path_title(&title).is_some()
+            || Self::agent_title_from_terminal_title(&title).is_some()
+        {
+            None
+        } else {
+            Some(title)
+        }
     }
 
     fn is_default_terminal_title(title: &str) -> bool {
@@ -2312,7 +2328,57 @@ mod tests {
             Some("Refactor terminal titles".into())
         );
         assert_eq!(super::Pane::agent_osc_title("Terminal"), None);
+        assert_eq!(super::Pane::agent_osc_title("codex"), None);
         assert_eq!(super::Pane::agent_osc_title(" ● \u{200B}"), None);
+        assert_eq!(
+            super::Pane::agent_osc_title("user@host: /repo"),
+            None,
+            "an ordinary shell cwd title must not replace the detected-agent identity"
+        );
+        assert_eq!(
+            super::Pane::agent_osc_title("/repo"),
+            None,
+            "a bare cwd title must not replace the detected-agent identity"
+        );
+    }
+
+    #[test]
+    fn terminal_osc_titles_are_sanitized_before_header_and_tooltip_sinks() {
+        let raw = format!("\u{202E}safe\n\u{0007}{}", "界".repeat(30));
+        let cleaned = super::Pane::sanitized_terminal_osc_title(&raw);
+
+        assert!(!cleaned.contains('\u{202E}'));
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\u{0007}'));
+        assert_eq!(cleaned, format!("safe {}", "界".repeat(30)));
+
+        let compact = super::truncate_surface_title(&cleaned);
+        assert_eq!(compact.chars().count(), super::MAX_SURFACE_TITLE_LEN);
+        assert!(compact.ends_with('…'));
+
+        let src = include_str!("pane.rs");
+        for (function, next_function) in [
+            (
+                "fn terminal_surface_title(",
+                "fn terminal_surface_full_title(",
+            ),
+            ("fn terminal_surface_full_title(", "fn agent_osc_title("),
+        ] {
+            let body = src
+                .split(function)
+                .nth(1)
+                .and_then(|rest| rest.split(next_function).next())
+                .expect("terminal title resolver body");
+
+            assert!(
+                body.contains("Self::sanitized_terminal_osc_title(&view.terminal.title)"),
+                "every OSC-derived title must be sanitized before a header or tooltip sink: {body}"
+            );
+            assert!(
+                !body.contains("let raw = &view.terminal.title"),
+                "raw terminal-controlled text must not reach title sinks: {body}"
+            );
+        }
     }
 
     #[test]
@@ -2336,7 +2402,7 @@ mod tests {
                 .expect("terminal title resolver body");
             let custom = body.find("custom_name").expect("custom title branch");
             let osc = body
-                .find("agent_osc_title(raw)")
+                .find("agent_osc_title(&raw)")
                 .expect("cleaned OSC title branch");
             let detected = body
                 .find("if let Some(agent) = view.terminal.detected_agent")

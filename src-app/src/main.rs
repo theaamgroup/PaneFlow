@@ -1320,11 +1320,10 @@ struct PaneFlowApp {
     /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
     /// `Cmd+Shift+T` restores whichever kind was closed most recently.
     closed_items: Vec<ClosedRecord>,
-    /// Number of worktree retirement batches currently executing off-thread.
-    /// A graceful quit waits for these so an evicted undo record cannot lose
-    /// the only remaining ownership of a PaneFlow-managed checkout.
-    worktree_teardowns_in_flight: usize,
-    quit_after_worktree_teardowns: bool,
+    /// Durable retirement journal for undo records already evicted from
+    /// `closed_items`. A batch is persisted before teardown starts and removed
+    /// only after the worker finishes, so a crash resumes cleanup safely.
+    pending_worktree_teardowns: Vec<crate::workspace::worktree::ManagedWorktree>,
     /// Whether the "About PaneFlow" dialog is visible.
     show_about_dialog: bool,
     /// Whether the command-palette-style theme picker is visible.

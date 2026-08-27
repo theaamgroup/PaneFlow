@@ -45,33 +45,40 @@ impl LayoutTree {
             ScrollbackCapture::Inline {
                 max_lines: crate::limits::MAX_SCROLLBACK_EXTRACT_LINES,
             },
+            None,
         )
     }
 
-    /// [`Self::serialize`] with the per-leaf history extract bounded to
-    /// `max_lines` rows.
-    ///
-    /// For the undo-close-tab record (issue #83), which runs this
-    /// synchronously on the GPUI thread once per leaf, under each terminal's
-    /// mutex - and then hands the result to
-    /// `enforce_closed_pane_scrollback_budget`, which strips most of it back
-    /// milliseconds later. The called code has twice been moved OFF this
-    /// thread on purpose (this module's own note above, and
-    /// `pty_session.rs`'s `extract_scrollback_from`); capturing less is the
-    /// version of that which needs no threading.
-    pub fn serialize_with_scrollback_limit(&self, cx: &App, max_lines: usize) -> LayoutNode {
-        self.serialize_with(cx, ScrollbackCapture::Inline { max_lines })
+    /// Serialize undo metadata while sharing one byte budget across every leaf
+    /// and, when the caller reuses `remaining_bytes`, across multiple tabs.
+    /// Once exhausted, later terminal leaves skip the history lock entirely.
+    pub fn serialize_with_scrollback_budget(
+        &self,
+        cx: &App,
+        max_lines: usize,
+        remaining_bytes: &Cell<usize>,
+    ) -> LayoutNode {
+        self.serialize_with(
+            cx,
+            ScrollbackCapture::Inline { max_lines },
+            Some(remaining_bytes),
+        )
     }
 
     /// Serialize session metadata without carrying terminal output into the
     /// next process. The schema field remains present as `None` for backward
     /// compatibility with existing session files.
     pub fn serialize_without_scrollback(&self, cx: &App) -> LayoutNode {
-        self.serialize_with(cx, ScrollbackCapture::Omit)
+        self.serialize_with(cx, ScrollbackCapture::Omit, None)
     }
 
     /// Inner serializer parametrised by the [`ScrollbackCapture`] strategy.
-    fn serialize_with(&self, cx: &App, capture: ScrollbackCapture) -> LayoutNode {
+    fn serialize_with(
+        &self,
+        cx: &App,
+        capture: ScrollbackCapture,
+        remaining_bytes: Option<&Cell<usize>>,
+    ) -> LayoutNode {
         match self {
             LayoutTree::Leaf(pane) => {
                 let pane_ref = pane.read(cx);
@@ -92,7 +99,32 @@ impl LayoutTree {
                             });
                             let scrollback = match capture {
                                 ScrollbackCapture::Inline { max_lines } => {
-                                    tv_ref.terminal.extract_scrollback_capped(max_lines)
+                                    if remaining_bytes.is_some_and(|remaining| remaining.get() == 0)
+                                    {
+                                        None
+                                    } else {
+                                        let mut scrollback =
+                                            tv_ref.terminal.extract_scrollback_capped(max_lines);
+                                        if let (Some(remaining), Some(text)) =
+                                            (remaining_bytes, scrollback.as_mut())
+                                        {
+                                            let budget = remaining.get();
+                                            if text.len() > budget {
+                                                let mut boundary = budget.min(text.len());
+                                                while boundary > 0
+                                                    && !text.is_char_boundary(boundary)
+                                                {
+                                                    boundary -= 1;
+                                                }
+                                                text.truncate(boundary);
+                                            }
+                                            remaining.set(budget.saturating_sub(text.len()));
+                                            if text.is_empty() {
+                                                scrollback = None;
+                                            }
+                                        }
+                                        scrollback
+                                    }
                                 }
                                 ScrollbackCapture::Omit => None,
                             };
@@ -159,7 +191,7 @@ impl LayoutTree {
                 let ratios: Vec<f64> = children.iter().map(|c| c.ratio.get() as f64).collect();
                 let mut child_nodes: Vec<LayoutNode> = Vec::with_capacity(children.len());
                 for c in children.iter() {
-                    child_nodes.push(c.node.serialize_with(cx, capture));
+                    child_nodes.push(c.node.serialize_with(cx, capture, remaining_bytes));
                 }
                 LayoutNode::Split {
                     direction: dir_str.to_string(),

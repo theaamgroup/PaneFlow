@@ -158,6 +158,15 @@ impl PaneFlowApp {
         // the rail *starts* in - never as an animation.
         let (restored_primary_sidebar_visible, restored_primary_sidebar_animation) =
             restored_primary_sidebar(saved_session.as_ref());
+        let mut restored_pending_worktree_teardowns: Vec<_> = saved_session
+            .as_ref()
+            .into_iter()
+            .flat_map(|session| session.pending_worktree_teardowns.iter())
+            .take(crate::workspace::MAX_WORKSPACES * crate::layout::MAX_PANES)
+            .filter_map(super::session::rehydrate_managed_worktree)
+            .collect();
+        restored_pending_worktree_teardowns.sort_by(|left, right| left.path.cmp(&right.path));
+        restored_pending_worktree_teardowns.dedup_by(|left, right| left.path == right.path);
 
         let (workspaces, active_idx) = match saved_session {
             Some(session) => {
@@ -178,6 +187,17 @@ impl PaneFlowApp {
             }
             None => (vec![Self::default_workspace(cx)], 0),
         };
+        let live_worktree_paths: std::collections::HashSet<_> = workspaces
+            .iter()
+            .flat_map(|workspace| {
+                workspace
+                    .managed_worktrees
+                    .iter()
+                    .map(|worktree| worktree.path.clone())
+            })
+            .collect();
+        restored_pending_worktree_teardowns
+            .retain(|worktree| !live_worktree_paths.contains(&worktree.path));
 
         // Setup notify file watcher for .git directories
         let (git_event_tx, git_event_rx) = std::sync::mpsc::channel();
@@ -754,8 +774,7 @@ impl PaneFlowApp {
             jump_cursor: None,
             swap_source: None,
             closed_items: Vec::new(),
-            worktree_teardowns_in_flight: 0,
-            quit_after_worktree_teardowns: false,
+            pending_worktree_teardowns: restored_pending_worktree_teardowns,
             show_about_dialog: false,
             show_theme_picker: false,
             theme_picker_query: String::new(),
@@ -874,6 +893,11 @@ impl PaneFlowApp {
         // Hydrate the motion switch from the config: it gates the
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
+
+        // The journal was durable before the prior process attempted cleanup.
+        // Resume it only after the full app exists so completion can remove the
+        // entries and persist the cleared journal.
+        app.resume_pending_worktree_teardowns(cx);
 
         app
     }
@@ -1114,6 +1138,7 @@ mod tests {
             version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
             active_workspace: 0,
             workspaces: Vec::new(),
+            pending_worktree_teardowns: Vec::new(),
             mode: Default::default(),
             diff_scope: None,
             primary_sidebar_collapsed: collapsed,

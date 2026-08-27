@@ -85,6 +85,12 @@ pub struct SessionState {
     pub active_workspace: usize,
     /// Ordered list of workspace snapshots.
     pub workspaces: Vec<WorkspaceSession>,
+    /// Managed worktrees whose owning workspace is no longer part of the
+    /// durable session. This is a tiny retirement journal: it is written
+    /// before destructive cleanup begins and replayed after a crash/restart.
+    /// Additive on v2; older sessions deserialize to an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_worktree_teardowns: Vec<ManagedWorktreeDef>,
     /// Last UI mode the user was in, restored on boot.
     #[serde(default)]
     pub mode: AppMode,

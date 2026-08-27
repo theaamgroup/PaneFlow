@@ -37,6 +37,7 @@ fn test_session_roundtrip_single_workspace() {
                 surfaces: vec![make_surface("/home/user/project")],
             })],
         )],
+        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         diff_scope: None,
         primary_sidebar_collapsed: false,
@@ -44,6 +45,29 @@ fn test_session_roundtrip_single_workspace() {
     let json = serde_json::to_string_pretty(&state).unwrap();
     let restored: SessionState = serde_json::from_str(&json).unwrap();
     assert_eq!(state, restored);
+}
+
+#[test]
+fn pending_worktree_retirement_survives_a_session_roundtrip() {
+    let mut state = SessionState {
+        version: SESSION_SCHEMA_VERSION,
+        active_workspace: 0,
+        workspaces: vec![],
+        mode: AppMode::default(),
+        diff_scope: None,
+        primary_sidebar_collapsed: false,
+        pending_worktree_teardowns: vec![],
+    };
+    state.pending_worktree_teardowns.push(ManagedWorktreeDef {
+        path: "/tmp/repo.worktrees/feature".to_string(),
+        repo_root: "/tmp/repo".to_string(),
+        branch: "feature".to_string(),
+        teardown: "auto".to_string(),
+    });
+
+    let json = serde_json::to_string(&state).unwrap();
+    let restored: SessionState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, state);
 }
 
 #[test]
@@ -69,6 +93,7 @@ fn test_session_roundtrip_multiple_workspaces() {
             // An empty folder: one tab, no pane (v2 needs no `empty` marker).
             make_workspace("devops", "/home/user/infra", vec![TabSession::empty()]),
         ],
+        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         diff_scope: None,
         primary_sidebar_collapsed: false,
@@ -112,6 +137,7 @@ fn test_session_roundtrip_nested_splits() {
                 ],
             })],
         )],
+        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         diff_scope: None,
         primary_sidebar_collapsed: false,
@@ -141,6 +167,7 @@ fn test_session_roundtrip_with_scrollback() {
                 }],
             })],
         )],
+        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         diff_scope: None,
         primary_sidebar_collapsed: false,
@@ -475,6 +502,7 @@ fn test_session_roundtrip_primary_sidebar_collapsed() {
         version: SESSION_SCHEMA_VERSION,
         active_workspace: 0,
         workspaces: vec![make_workspace("main", "/tmp", vec![TabSession::empty()])],
+        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         diff_scope: None,
         primary_sidebar_collapsed: true,
@@ -509,6 +537,7 @@ fn test_session_without_primary_sidebar_key_restores_visible() {
         version: SESSION_SCHEMA_VERSION,
         active_workspace: 0,
         workspaces: vec![],
+        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         diff_scope: None,
         primary_sidebar_collapsed: false,

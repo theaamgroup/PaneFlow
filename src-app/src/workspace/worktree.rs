@@ -118,6 +118,30 @@ pub fn managed_worktree_from_record(
         );
         return None;
     }
+    // Ownership identity is the canonical checkout directory, never an IPC-
+    // supplied spelling. This collapses symlink/`..` aliases before the app's
+    // exclusive-owner checks and retirement journal compare paths.
+    let path = match std::fs::canonicalize(&path) {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!("managed worktree: cannot canonicalize path: {error}");
+            return None;
+        }
+    };
+    let repo_root = match std::fs::canonicalize(&repo_root) {
+        Ok(repo_root) => repo_root,
+        Err(error) => {
+            log::warn!("managed worktree: cannot canonicalize repo root: {error}");
+            return None;
+        }
+    };
+    if !is_paneflow_worktree_dir(&repo_root, branch, &path) {
+        log::warn!(
+            "managed worktree: canonical path escapes Paneflow worktree dir: {}",
+            path.display()
+        );
+        return None;
+    }
     let teardown = match teardown_raw {
         "auto" => TeardownPolicy::Auto,
         "keep" => TeardownPolicy::Keep,
@@ -485,6 +509,7 @@ mod tests {
     fn managed_worktree_record_requires_marker_and_generated_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
         let branch = "feat/hardening";
         let path = worktree_dir(&repo_root, branch);
         std::fs::create_dir_all(&path).expect("worktree dir");
@@ -508,7 +533,10 @@ mod tests {
             "delete",
         )
         .expect("marker-backed record restores");
-        assert_eq!(restored.path, path);
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
         assert_eq!(restored.teardown, TeardownPolicy::Keep);
 
         let outside = tmp.path().join("external");
@@ -524,12 +552,27 @@ mod tests {
             .is_none(),
             "marker cannot bless a path outside the deterministic Paneflow dir"
         );
+
+        let alias_branch = "feat/alias";
+        let alias_path = worktree_dir(&repo_root, alias_branch);
+        std::os::unix::fs::symlink(&outside, &alias_path).expect("worktree alias");
+        assert!(
+            managed_worktree_from_record(
+                &alias_path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                alias_branch,
+                "auto",
+            )
+            .is_none(),
+            "a deterministic-looking symlink must not transfer ownership of an external path"
+        );
     }
 
     #[test]
     fn managed_worktree_record_accepts_hashed_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
         let branch = "feat/a-b";
         let path = worktree_dir_hashed(&repo_root, branch);
         std::fs::create_dir_all(&path).expect("worktree dir");
@@ -543,7 +586,10 @@ mod tests {
         )
         .expect("hashed path restores");
 
-        assert_eq!(restored.path, path);
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
         assert_eq!(restored.branch, branch);
     }
 
