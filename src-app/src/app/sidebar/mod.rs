@@ -1886,8 +1886,17 @@ impl PaneFlowApp {
 
         // Issue #79: same gate as the folder row - the tab being renamed is the
         // one row that puts the shared handle on the dispatch path.
+        // Issue #80: that row also owns the click-outside commit. Keeping the
+        // listener on the live editor only avoids installing one capture-phase
+        // listener per tab while preserving the typed buffer before another
+        // surface takes focus.
         let row_shell = if is_renaming {
-            row_shell.track_focus(&self.sidebar_rename_focus)
+            row_shell
+                .track_focus(&self.sidebar_rename_focus)
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.commit_inline_rename(window, cx);
+                    cx.notify();
+                }))
         } else {
             row_shell
         };
@@ -3273,6 +3282,42 @@ mod tests {
                 "{label} must claim the rename focus handle, or the editor it opens is drawn but receives no keys"
             );
         }
+    }
+
+    #[test]
+    fn tab_rename_uses_the_visible_title_and_commits_on_click_outside() {
+        // Issue #80: an unnamed tab displays "Tab N", so seeding the editor
+        // from the raw empty `Tab::title` opens as a bare cursor. The same
+        // editor must also settle when the next mouse press lands elsewhere;
+        // otherwise the typed buffer remains stranded on an unfocused row.
+        let tab_ops = include_str!("../workspace_ops/tab.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the tab-ops module");
+        let begin_tab_rename = tab_ops
+            .split("fn begin_tab_rename(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("begin_tab_rename body");
+        assert!(
+            begin_tab_rename.contains("tab_display_title(tab, tab_idx)"),
+            "the rename buffer must seed from the title the sidebar actually displays"
+        );
+
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the sidebar module");
+        let tab_row = production
+            .split("fn render_tab_row(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("fn render_workspace_meta_row(\n").next())
+            .expect("tab row renderer");
+        assert!(
+            tab_row.contains("on_mouse_down_out(cx.listener(|this, _, window, cx|")
+                && tab_row.contains("this.commit_inline_rename(window, cx);"),
+            "a mouse press outside the renamed tab row must commit the typed buffer"
+        );
     }
 
     #[test]

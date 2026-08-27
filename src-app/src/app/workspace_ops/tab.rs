@@ -316,7 +316,7 @@ impl PaneFlowApp {
             .workspaces
             .get(ws_idx)
             .and_then(|ws| ws.tabs().get(tab_idx))
-            .map(|tab| tab.title.clone())
+            .map(|tab| crate::app::sidebar::tab_display_title(tab, tab_idx))
         else {
             return;
         };
