@@ -34,21 +34,25 @@ entry.
     `status`/`ps`/`watch` as idle → thinking (Bash/Read) → finished → idle,
     `hooked:false` at the end. The sidebar pixels themselves were not viewed.
 
-- [ ] **Task 12 — bundle-id permission re-grant**
-  - Commit: (pending)
+- [x] **Task 12 — bundle-id permission re-grant**
+  - Commit: `4afb5a42` (`v0.1.1`)
   - Steps: on a Mac or user account that has never run
-    `com.theaamgroup.paneflow`, install v0.1.0 from the release dmg, launch
+    `com.theaamgroup.paneflow`, install v0.1.1 from the release dmg, launch
     it, and trigger one agent notification.
-  - Expected: a Notifications allow/deny prompt appears once, and the
-    notification posts after Allow. Nothing else prompts: `assets/Info.plist`
-    has no `*UsageDescription` keys and the entitlements are apple-events +
-    JIT only, so Accessibility / Automation / Full Disk Access cannot fire.
+  - Expected: a Notifications allow/deny prompt may appear on the first agent
+    alert, and notifications post after Allow. Nothing else prompts:
+    `assets/Info.plist` has no relevant `*UsageDescription` keys and the app
+    has no Accessibility, Apple Events, or Full Disk Access request path.
   - Failure implicates: the new CFBundleIdentifier / usernoted mapping.
-  - Agent observed (2026-08-27, issue #13): this Mac is not fresh for the new
-    id; TCC.db and the usernoted store are unreadable without Full Disk
-    Access. The installed `/Applications/PaneFlow.app` is upstream 0.8.2
-    under `io.github.arthurdev44.paneflow` (different team), so its grants
-    are orphaned, not migrated.
+  - Completed (2026-08-28, issue #13): the user confirmed the clean v0.1.1
+    build is installed and running. The installed app reports bundle id
+    `com.theaamgroup.paneflow` and version `0.1.1`; `codesign --verify` passes,
+    `spctl` accepts it as Notarized Developer ID, and `stapler validate`
+    succeeds. Live IPC returned three surfaces. With notifications configured
+    for `PrimaryScreen`, the shipped v0.1.1 hook delivered a synthetic
+    permission notification to the app: `paneflow ps` showed its isolated
+    session as `waiting_for_input`, and the matching `SessionEnd` removed it
+    without changing the real agent sessions.
 
 - [ ] **Task 11 — no in-app updater (deleted 2026-08-26)**
   - Commit: updater removal on `issue-63` (bucket 3). The feed, minisign

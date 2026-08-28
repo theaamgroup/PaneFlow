@@ -15,10 +15,10 @@ rename was dropped). Version **0.1.1**. Origin `theaamgroup/paneflow` on
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The in-app updater is **deleted**; Apple DMG
 signing remains. First signed GitHub Release is **v0.1.0** (Developer ID
-signed, notarized, stapled; #11 closed with `spctl` evidence). Remaining
-human work: the Notifications prompt on a machine that has never run the
-bundle id (#13). #10 was closed by rebinding next-workspace to `Ctrl+Tab`;
-#14 and #15 were closed on 2026-08-27 by IPC-verified smokes.
+signed, notarized, stapled; #11 closed with `spctl` evidence). #13 closed on
+2026-08-28 after an installed v0.1.1 signed/notarized live-app and notification
+hook smoke. #10 was closed by rebinding next-workspace to `Ctrl+Tab`; #14 and
+#15 were closed on 2026-08-27 by IPC-verified smokes.
 
 ## Verify before claiming
 

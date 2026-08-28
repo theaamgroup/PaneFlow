@@ -267,9 +267,11 @@ a flag in the workflow that was never there.
 > **Bundle identifier.** `assets/Info.plist` `CFBundleIdentifier` is
 > `com.theaamgroup.paneflow`. Changing the bundle id orphans existing TCC
 > grants, LaunchServices registration, and the defaults domain on any machine
-> that previously ran a build under the old identifier. macOS will re-prompt
-> for Accessibility / Automation / Full Disk Access on first launch. That
-> re-prompt is expected, not a regression.
+> that previously ran a build under the old identifier. PaneFlow does not
+> request Accessibility, send Apple Events, or access Full Disk Access-scoped
+> paths, so those prompts do not appear on first launch. The only current
+> consent surface is Notifications, and its allow/deny prompt may appear when
+> the first agent alert is delivered rather than when the app launches.
 
 ---
 

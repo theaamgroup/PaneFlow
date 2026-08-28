@@ -48,8 +48,8 @@ Companion documents:
 - `docs/fork/2026-08-25-post-2c-plan.md` is the **historical 2026-08-25
   execution plan** (schema, telemetry, identity, CI). Leftover-removal
   buckets 1–4 (2026-08-26) superseded its self-update “disable the feed”
-  decision: the in-app updater is deleted. Remaining human work is GitHub
-  issue #13 (fresh-machine Notifications prompt).
+  decision: the in-app updater is deleted. GitHub issue #13's bundle-id and
+  Notifications smoke was completed on the installed v0.1.1 app on 2026-08-28.
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
   **leak register**, and a **16-item traps register**. Read it before touching
   platform code or the config schema. The in-app updater is gone.
@@ -62,7 +62,8 @@ v0.9.0 adoption of issues **#87–#103** is on `main` and pushed. The 2026-08-27
 post-adoption pass closed #11, #14, #15 (evidence on the issues), landed the
 CI/test hygiene set #66–#71, and triaged #73–#85 against 925e21ce (comments
 on each; #75 closed as superseded; #74/#77/#80/#82 retitled to their
-residuals). What still needs a human is listed below.
+residuals). Remaining standing visual/runtime checks are in
+`MANUAL-CHECKLIST.md`.
 
 The 2026-08-27 keyboard-correctness cluster closed **#108**, **#79** and the
 focus-routing half of **#78** across five commits
@@ -456,14 +457,16 @@ need it:
 https://github.com/theaamgroup/paneflow/releases/tag/v0.1.0
 (`v0.1.0` on `44150ff`, DMG + `.sha256`). #7 and #9 are closed.
 
-What still needs a human (2026-08-27 smoke results are on each issue):
+Closed by machine evidence:
 
-- #13 Notifications prompt on a machine that has never run
-  `com.theaamgroup.paneflow`. Only Notifications is in play: no
-  `*UsageDescription` keys, entitlements are apple-events + JIT only, so
-  Accessibility / Automation / FDA prompts cannot fire.
-
-Closed by machine evidence on 2026-08-27:
+- #13 (2026-08-28): the user confirmed the clean v0.1.1 build is installed
+  and running. The installed `com.theaamgroup.paneflow` app passes
+  `codesign --verify`, Gatekeeper accepts it as Notarized Developer ID, its
+  stapled ticket validates, and live IPC returned three surfaces. A synthetic
+  permission notification sent through the shipped v0.1.1 hook reached the
+  app as an isolated `waiting_for_input` session; `SessionEnd` then removed
+  the test row without changing the real sessions. Accessibility, Automation,
+  and FDA are not request surfaces; only Notifications is in play.
 
 - #10: next-workspace rebound from `secondary-tab` (Cmd+Tab, eaten by the
   macOS app switcher; synthetic Cmd+Tab moved focus to another app while
