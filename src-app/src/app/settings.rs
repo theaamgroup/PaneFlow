@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use gpui::{Context, KeyDownEvent, ScrollHandle, Window};
+use gpui::{Context, KeyDownEvent, Keystroke, ScrollHandle, Window};
 
 use crate::{PaneFlowApp, SettingsSection, config_writer, keybindings};
 
@@ -313,7 +313,7 @@ impl PaneFlowApp {
         };
 
         // Format keystroke to a GPUI string (e.g. "ctrl-shift-d") and save it.
-        let new_key = event.keystroke.to_string();
+        let new_key = recorded_shortcut_key(&event.keystroke);
         if !config_writer::save_shortcut_checked(&new_key, action_name) {
             self.recording_shortcut_idx = None;
             self.show_toast("Could not save shortcut", cx);
@@ -332,4 +332,60 @@ impl PaneFlowApp {
 
 fn normalized_shell_setting(shell: Option<&str>) -> &str {
     shell.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("")
+}
+
+/// Serialize a captured keystroke into the chord syntax that `paneflow.json` and
+/// [`crate::keybindings::apply`] expect.
+///
+/// MUST be `unparse()`, never `to_string()`: GPUI's `Display` renders macOS HIG
+/// glyphs (`^`, `⌥`, `⌘`), so `to_string()` recorded Cmd+Shift+D as the literal
+/// `"⌘⇧D"`. Nothing validates this string on the way to disk, and `apply.rs`
+/// suppresses the matching default by ACTION NAME - so the override registered a
+/// chord no event can ever produce, the real default was dropped, and the action
+/// went permanently dead while Settings still rendered the row as bound.
+///
+/// Extracted from [`PaneFlowApp::handle_shortcut_recording`] so the round trip is
+/// testable without a `Window`.
+pub(crate) fn recorded_shortcut_key(keystroke: &Keystroke) -> String {
+    keystroke.unparse()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recorded_shortcut_key;
+    use gpui::Keystroke;
+
+    #[test]
+    fn recorded_shortcut_key_round_trips_through_keystroke_parse() {
+        for chord in [
+            "cmd-shift-d",
+            "ctrl-shift-f",
+            "alt-left",
+            "cmd-1",
+            "cmd-alt-t",
+            "f2",
+        ] {
+            let original = Keystroke::parse(chord).expect("chord parses");
+            let recorded = recorded_shortcut_key(&original);
+
+            // `to_string()` would emit HIG glyphs (`⌘`, `⌥`, `^`) here, which are
+            // non-ASCII and which `Keystroke::parse` cannot read back.
+            assert!(
+                recorded.is_ascii(),
+                "`{chord}` was recorded as `{recorded}`, which is not ASCII chord \
+                 syntax - `paneflow.json` would receive an unparseable key"
+            );
+
+            let reparsed = Keystroke::parse(&recorded)
+                .unwrap_or_else(|_| panic!("recorded chord `{recorded}` must re-parse"));
+            assert_eq!(
+                reparsed.modifiers, original.modifiers,
+                "`{chord}` lost modifiers through the record -> parse round trip (`{recorded}`)"
+            );
+            assert_eq!(
+                reparsed.key, original.key,
+                "`{chord}` lost its key through the record -> parse round trip (`{recorded}`)"
+            );
+        }
+    }
 }
