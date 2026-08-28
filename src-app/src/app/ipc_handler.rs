@@ -1090,6 +1090,24 @@ fn requested_workspace_id(params: &serde_json::Value) -> Result<Option<u64>, Jso
     })
 }
 
+/// Extract an optional workspace `index` param, distinguishing ABSENT from
+/// MALFORMED.
+///
+/// `as_u64()` returns `None` for a string `"2"`, a float `2.0`, a negative, or
+/// `null`. Coercing all of those to a default silently retargeted the call at
+/// the active workspace *and still reported success*, so one quoting mistake in
+/// an orchestration script closed the wrong workspace - every pane, PTY and
+/// managed worktree it owned. Mirrors [`requested_workspace_id`].
+fn requested_index(params: &serde_json::Value) -> Result<Option<usize>, JsonRpcError> {
+    let Some(value) = params.get("index") else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .map(|index| Some(index as usize))
+        .ok_or_else(|| JsonRpcError::invalid_params("'index' must be a non-negative integer"))
+}
+
 fn surface_matches_workspace(surface: &SurfaceMeta, workspace_id: Option<u64>) -> bool {
     workspace_id.is_none_or(|expected| surface.workspace_id == Some(expected))
 }
@@ -2569,7 +2587,15 @@ impl PaneFlowApp {
                     .map(|t| t.entity_id().as_u64());
                 // EP-002 US-004: one surface per pane, so the per-pane
                 // subset degenerates to a single lookup.
-                let attention = sid.and_then(|sid| waiting.get(&sid).cloned()).flatten();
+                // A waiting agent whose notification carried no message text is
+                // `Some(None)` here. `.flatten()` collapsed that to `None` - the
+                // exact value a pane with NO agent gets - so the attention ring,
+                // header dot and peek overlay never painted for it, while
+                // `Cmd+Shift+J` and the Attention Queue still listed it.
+                // `Pane::attention`'s contract is "empty when none was captured".
+                let attention = sid
+                    .and_then(|sid| waiting.get(&sid).cloned())
+                    .map(|message| message.unwrap_or_default());
                 let is_errored = sid.is_some_and(|sid| errored.contains(&sid));
                 pane.update(cx, |p, cx| {
                     p.set_attention(attention, cx);
@@ -2723,7 +2749,10 @@ impl PaneFlowApp {
                 // Deliberately a storage index: `workspace.list` exposes the
                 // same stable indices to automation, independent of how the
                 // sidebar is visually grouped or sorted.
-                let idx = params.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let idx = match requested_index(params) {
+                    Ok(index) => index.unwrap_or(0),
+                    Err(error) => return error.into_value(),
+                };
                 if idx < self.workspaces.len() {
                     self.activate_workspace_without_window(idx, cx);
                     serde_json::json!({"selected": idx})
@@ -2738,11 +2767,10 @@ impl PaneFlowApp {
                 if self.workspaces.len() <= 1 {
                     serde_json::json!({"error": "Cannot close last workspace"})
                 } else {
-                    let idx = params
-                        .get("index")
-                        .and_then(|i| i.as_u64())
-                        .map(|i| i as usize)
-                        .unwrap_or(self.active_idx);
+                    let idx = match requested_index(params) {
+                        Ok(index) => index.unwrap_or(self.active_idx),
+                        Err(error) => return error.into_value(),
+                    };
                     match self.request_close_workspace_without_window(
                         idx,
                         crate::app::close_guard::ConfirmStyle::Modal,
@@ -4281,6 +4309,39 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
+
+    #[test]
+    fn requested_index_absent_is_none() {
+        assert_eq!(requested_index(&serde_json::json!({})).unwrap(), None);
+    }
+
+    #[test]
+    fn requested_index_accepts_a_non_negative_integer() {
+        assert_eq!(
+            requested_index(&serde_json::json!({"index": 2})).unwrap(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn requested_index_rejects_malformed_instead_of_retargeting_the_active_workspace() {
+        // Each of these used to fall through `unwrap_or(self.active_idx)` and
+        // report success, so one quoting mistake in an orchestration script
+        // closed the WRONG workspace - every pane, PTY and managed worktree it
+        // owned. Absent must stay distinguishable from malformed.
+        for malformed in [
+            serde_json::json!({"index": "2"}),
+            serde_json::json!({"index": 2.5}),
+            serde_json::json!({"index": -1}),
+            serde_json::json!({"index": null}),
+            serde_json::json!({"index": []}),
+        ] {
+            assert!(
+                requested_index(&malformed).is_err(),
+                "{malformed} must be rejected, not coerced to a default"
+            );
+        }
+    }
 
     fn test_ipc_request(method: &str, cancelled: bool) -> crate::ipc::IpcRequest {
         let (response_tx, _response_rx) = mpsc::channel();
