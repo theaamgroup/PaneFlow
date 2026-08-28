@@ -1,7 +1,48 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-08-27, through the workspace-close,
+Living handoff record. Updated 2026-08-28, through the five-agent deep
+review and the `v0.1.1` cut. The prior entry covered the workspace-close,
 managed-worktree, and terminal-session hardening in PR #114.
+
+**2026-08-28 deep review.** Five parallel agents (correctness, security,
+architecture, performance, reality-check) swept the whole repo. Findings and
+the 48 that remain open are in
+`docs/fork/2026-08-28-deep-review-findings.md`; read it before planning a
+pass. Twelve landed here, all gates green, test list name-diffed
+2075 -> 2079 with zero removed:
+
+- `Tab::pane_count` ignored `saved_layout`, so a pane added while zoomed was
+  destroyed by `exit_zoom` along with its PTY and agent.
+- IPC coerced a malformed `index` to the ACTIVE workspace and reported
+  success - a quoting mistake closed the wrong workspace.
+- Opening the find bar replaced the whole `Terminal` key context (GPUI's
+  `key_context` assigns, it does not merge), killing all 15 Terminal
+  bindings including the `Ctrl+Shift+F` that opened it.
+- `sync_attention`'s `.flatten()` erased the `Some(None)` "waiting, no
+  message" case, so a blocked agent painted no ring, dot or badge.
+- The Settings shortcut recorder wrote macOS HIG glyphs (`to_string()`
+  yields `⌘⇧D`), which nothing validates - so every rebind registered an
+  unproducible chord AND dropped the real default. Mutation-verified.
+- Copy/paste had no focus guard, so Edit > Paste executed the clipboard in
+  the shell while the find bar was focused.
+
+**Three method rules this review paid for:**
+
+- **A doc claim is a liability, not a record.** The review falsified
+  `PANEFLOW_ALLOW_MULTIPLE` (documented presence-gated; it is value-gated
+  and was fixed in `1cfee6c7`), issue #39 (documented open; fixed with a
+  regression test), the census counts, the GPUI remote in `AGENTS.md`, and
+  `.mcp.json`'s existence. Each traces to a doc that recorded a BUG and was
+  never updated when the bug was fixed. Closing an issue must include
+  grepping `CLAUDE.md` / `STATE.md` / `AGENTS.md` for its number.
+- **Verify the agent, not just the code.** Two agent-reported site counts
+  were wrong (the IPC index pattern has 2 live sites, not 5), and one of my
+  own mutation checks was invalid (`--lib` on a binary crate exits 101 for
+  the wrong reason). Re-read the source before acting on any finding.
+- **A test that pins a property is not a test that pins the call site.** The
+  first shortcut test asserted `unparse()` round-trips - true regardless of
+  what production called. Extracting `recorded_shortcut_key()` made the call
+  site itself testable without a `Window`.
 
 Companion documents:
 - `docs/fork/2026-08-25-post-2c-plan.md` is the **historical 2026-08-25
@@ -96,7 +137,7 @@ Two things that pass gates but are **not** end-to-end verified:
 | `origin` | `github.com/theaamgroup/paneflow` (private). Renamed from `panescli` on 2026-08-25 when the PanesCLI rebrand was dropped; GitHub keeps redirects. |
 | `upstream` | `github.com/arthjean/paneflow` (read-only, kept for cherry-picks) |
 | Fork point | v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a` |
-| gpui backup | `github.com/theaamgroup/zed`, holds pinned rev `3aaba57b`. `Cargo.toml` still points at `arthjean/zed` deliberately. |
+| gpui backup | `github.com/theaamgroup/zed`, holds pinned rev `3aaba57b`. `Cargo.toml` points at **`zed-industries/zed`** rev `fecc3273`; do not reintroduce an `arthjean/zed` pin (CLAUDE.md forbids it). |
 | License | GPL-3.0-or-later. Keep `LICENSE` and the single attribution line in `README.md`. |
 
 ## Naming, confirmed and locked
@@ -138,17 +179,17 @@ the only workflow here, so this is the most likely source of confusion.
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.1.0.** First release tag `v0.1.0` is on `44150ff` (2026-08-26). GitHub Release: DMG + `.sha256` only. `upstream-fork-point` remains. |
+| Version | **0.1.1.** First release tag `v0.1.0` is on `44150ff` (2026-08-26); `v0.1.1` cuts the 2026-08-28 deep-review fixes. GitHub Release: DMG + `.sha256` only. `upstream-fork-point` remains. The 80 inherited upstream tags were deleted locally on 2026-08-28 (recover with `git fetch upstream --tags`); local tags now match origin exactly, which is what freed the `v0.1.1` name - it previously pointed at upstream commit `c19a55ba`, off our history. |
 
 ## Verified green, and how to reproduce it
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 1975 passed, 0 failed, 2 ignored (2026-08-27)
+cargo test --workspace                       # 2079 passed, 0 failed, 2 ignored (2026-08-28)
 cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
-./target/debug/paneflow --version            # paneflow 0.1.0
+./target/debug/paneflow --version            # paneflow 0.1.1
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
                                              # negative control: cfg(unix) 138, cfg(macos) 71
