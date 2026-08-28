@@ -59,6 +59,26 @@ pub struct PaneFlowConfig {
     /// storage-order.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub workspace_auto_sort: Option<bool>,
+    /// Show the built-in "Open in Zed" workspace context-menu row.
+    /// Explicit booleans override; `None` shows it only when the `zed` CLI is
+    /// installed. This affects menu chrome only, not the global keybinding.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub workspace_zed_menu_visible: Option<bool>,
+    /// Show the built-in "Open in Cursor" workspace context-menu row.
+    /// Explicit booleans override; `None` shows it only when the `cursor` CLI
+    /// is installed. This affects menu chrome only, not the global keybinding.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub workspace_cursor_menu_visible: Option<bool>,
+    /// Show the built-in "Open in VS Code" workspace context-menu row.
+    /// Explicit booleans override; `None` shows it only when the `code` CLI is
+    /// installed. This affects menu chrome only, not the global keybinding.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub workspace_vscode_menu_visible: Option<bool>,
+    /// Show the built-in "Open in Windsurf" workspace context-menu row.
+    /// Explicit booleans override; `None` shows it only when the `windsurf`
+    /// CLI is installed. This affects menu chrome only, not the global keybinding.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub workspace_windsurf_menu_visible: Option<bool>,
     /// Terminal line height multiplier (default: 1.2, valid range: 1.0-2.5).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub line_height: Option<f32>,

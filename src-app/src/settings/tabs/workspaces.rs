@@ -21,11 +21,12 @@ use crate::app::ipc_handler::{
     build_up_layout, canonicalize_workspace_cwd, dedupe_planned_pane_labels,
     parse_workspace_pane_plan, stage_planned_pane_env,
 };
+use crate::editor::WorkspaceEditor;
 use crate::layout::MAX_PANES;
 use crate::settings::components::{
     SETTINGS_CONTROL_CORNER_RADIUS, card_color, card_tint, deferred_select_menu, hairline,
-    section_header, section_header_with_action, select_chevron, select_item, select_menu,
-    select_trigger, setting_card, toggle_row, with_alpha,
+    render_logo, section_header, section_header_with_action, select_chevron, select_item,
+    select_menu, select_trigger, setting_card, toggle_row, with_alpha,
 };
 use crate::terminal::TerminalView;
 use crate::ui_primitives::{AnimatedHover, AnimatedHoverExt};
@@ -76,6 +77,30 @@ impl PaneFlowApp {
             }
         }
 
+        let mut editors_card = setting_card(ui);
+        for (idx, editor) in WorkspaceEditor::ALL.into_iter().enumerate() {
+            if idx > 0 {
+                editors_card = editors_card.child(hairline(ui));
+            }
+            let icon = crate::settings::tabs::general::editor_icon(editor.command())
+                .map(|logo| render_logo(logo, ui));
+            editors_card = editors_card.child(toggle_row(
+                match editor {
+                    WorkspaceEditor::Zed => "row-workspace-zed-visible",
+                    WorkspaceEditor::Cursor => "row-workspace-cursor-visible",
+                    WorkspaceEditor::VsCode => "row-workspace-vscode-visible",
+                    WorkspaceEditor::Windsurf => "row-workspace-windsurf-visible",
+                },
+                editor.title(),
+                editor.settings_description(),
+                icon,
+                editor.is_visible(&self.cached_config),
+                editor.config_key(),
+                ui,
+                cx,
+            ));
+        }
+
         div()
             .flex()
             .flex_col()
@@ -95,6 +120,8 @@ impl PaneFlowApp {
                 ui,
                 cx,
             )))
+            .child(section_header(ui, "Editors"))
+            .child(editors_card)
             .child(section_header_with_action(
                 ui,
                 "Workspace templates",

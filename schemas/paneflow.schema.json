@@ -100,6 +100,26 @@
       "description": "Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. Default false (manual, drag-ordered).",
       "default": false
     },
+    "workspace_zed_menu_visible": {
+      "type": ["boolean", "null"],
+      "description": "Show the 'Open in Zed' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the Zed CLI is installed. This does not affect keybindings.",
+      "default": null
+    },
+    "workspace_cursor_menu_visible": {
+      "type": ["boolean", "null"],
+      "description": "Show the 'Open in Cursor' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the Cursor CLI is installed. This does not affect keybindings.",
+      "default": null
+    },
+    "workspace_vscode_menu_visible": {
+      "type": ["boolean", "null"],
+      "description": "Show the 'Open in VS Code' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the VS Code CLI is installed. This does not affect keybindings.",
+      "default": null
+    },
+    "workspace_windsurf_menu_visible": {
+      "type": ["boolean", "null"],
+      "description": "Show the 'Open in Windsurf' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the Windsurf CLI is installed. This does not affect keybindings.",
+      "default": null
+    },
     "window_decorations": {
       "type": ["string", "null"],
       "description": "Window decoration mode. 'client' = client-side decorations (custom title bar). 'server' = server-side decorations (compositor-drawn). Read once at startup; changes require a restart.",

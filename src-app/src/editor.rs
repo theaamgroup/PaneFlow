@@ -22,8 +22,133 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use paneflow_process::spawn_detached;
+
+/// The fixed set of editors offered by a workspace row's context menu.
+///
+/// Visibility is tri-state: an explicit config boolean always wins, while an
+/// omitted value follows the installation snapshot captured before GPUI starts.
+/// Hiding a row never disables its global action/keybinding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub(crate) enum WorkspaceEditor {
+    Zed,
+    Cursor,
+    VsCode,
+    Windsurf,
+}
+
+impl WorkspaceEditor {
+    pub(crate) const ALL: [Self; 4] = [Self::Zed, Self::Cursor, Self::VsCode, Self::Windsurf];
+
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::Zed => "zed",
+            Self::Cursor => "cursor",
+            Self::VsCode => "vscode",
+            Self::Windsurf => "windsurf",
+        }
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Zed => "Zed",
+            Self::Cursor => "Cursor",
+            Self::VsCode => "VS Code",
+            Self::Windsurf => "Windsurf",
+        }
+    }
+
+    pub(crate) fn menu_label(self) -> &'static str {
+        match self {
+            Self::Zed => "Open in Zed",
+            Self::Cursor => "Open in Cursor",
+            Self::VsCode => "Open in VS Code",
+            Self::Windsurf => "Open in Windsurf",
+        }
+    }
+
+    pub(crate) fn settings_description(self) -> &'static str {
+        match self {
+            Self::Zed => "Show Zed in each workspace folder's context menu.",
+            Self::Cursor => "Show Cursor in each workspace folder's context menu.",
+            Self::VsCode => "Show VS Code in each workspace folder's context menu.",
+            Self::Windsurf => "Show Windsurf in each workspace folder's context menu.",
+        }
+    }
+
+    pub(crate) fn command(self) -> &'static str {
+        match self {
+            Self::Zed => "zed",
+            Self::Cursor => "cursor",
+            Self::VsCode => "code",
+            Self::Windsurf => "windsurf",
+        }
+    }
+
+    pub(crate) fn shortcut_action(self) -> &'static str {
+        match self {
+            Self::Zed => "open_workspace_in_zed",
+            Self::Cursor => "open_workspace_in_cursor",
+            Self::VsCode => "open_workspace_in_vscode",
+            Self::Windsurf => "open_workspace_in_windsurf",
+        }
+    }
+
+    pub(crate) fn config_key(self) -> &'static str {
+        match self {
+            Self::Zed => "workspace_zed_menu_visible",
+            Self::Cursor => "workspace_cursor_menu_visible",
+            Self::VsCode => "workspace_vscode_menu_visible",
+            Self::Windsurf => "workspace_windsurf_menu_visible",
+        }
+    }
+
+    fn explicit_visibility(self, config: &paneflow_config::schema::PaneFlowConfig) -> Option<bool> {
+        match self {
+            Self::Zed => config.workspace_zed_menu_visible,
+            Self::Cursor => config.workspace_cursor_menu_visible,
+            Self::VsCode => config.workspace_vscode_menu_visible,
+            Self::Windsurf => config.workspace_windsurf_menu_visible,
+        }
+    }
+
+    pub(crate) fn is_visible(self, config: &paneflow_config::schema::PaneFlowConfig) -> bool {
+        self.is_visible_with(config, workspace_editor_is_installed)
+    }
+
+    fn is_visible_with(
+        self,
+        config: &paneflow_config::schema::PaneFlowConfig,
+        installed: impl FnOnce(Self) -> bool,
+    ) -> bool {
+        self.explicit_visibility(config)
+            .unwrap_or_else(|| installed(self))
+    }
+}
+
+static INSTALLED_WORKSPACE_EDITORS: OnceLock<[bool; WorkspaceEditor::ALL.len()]> = OnceLock::new();
+
+/// Capture installed editors before GPUI starts. The actual `which` work is
+/// intentionally synchronous here, after login-shell PATH adoption but before
+/// any render can open a workspace menu.
+pub(crate) fn initialize_workspace_editor_installation_cache() {
+    INSTALLED_WORKSPACE_EDITORS.get_or_init(|| {
+        probe_workspace_editors_with(crate::app::workspace_ops::editor_binary_is_installed)
+    });
+}
+
+fn workspace_editor_is_installed(editor: WorkspaceEditor) -> bool {
+    INSTALLED_WORKSPACE_EDITORS
+        .get()
+        .is_some_and(|installed| installed[editor as usize])
+}
+
+fn probe_workspace_editors_with(mut probe: impl FnMut(&str) -> bool) -> [bool; 4] {
+    WorkspaceEditor::ALL.map(|editor| probe(editor.command()))
+}
 
 /// Family of recognised editor binaries, each with a distinct argv shape
 /// for "open at line and column".
@@ -265,6 +390,53 @@ mod tests {
 
     fn p(s: &str) -> &Path {
         Path::new(s)
+    }
+
+    #[test]
+    fn workspace_editor_visibility_is_tri_state() {
+        let mut config = paneflow_config::schema::PaneFlowConfig::default();
+
+        assert!(WorkspaceEditor::Zed.is_visible_with(&config, |_| true));
+        assert!(!WorkspaceEditor::Zed.is_visible_with(&config, |_| false));
+
+        config.workspace_zed_menu_visible = Some(true);
+        assert!(WorkspaceEditor::Zed.is_visible_with(&config, |_| false));
+
+        config.workspace_zed_menu_visible = Some(false);
+        assert!(!WorkspaceEditor::Zed.is_visible_with(&config, |_| true));
+
+        config.workspace_cursor_menu_visible = Some(true);
+        config.workspace_vscode_menu_visible = Some(false);
+        config.workspace_windsurf_menu_visible = Some(true);
+        assert_eq!(
+            WorkspaceEditor::ALL.map(|editor| editor.is_visible_with(&config, |_| false)),
+            [false, true, false, true]
+        );
+    }
+
+    #[test]
+    fn workspace_editor_config_keys_are_context_specific() {
+        assert_eq!(
+            WorkspaceEditor::ALL.map(WorkspaceEditor::config_key),
+            [
+                "workspace_zed_menu_visible",
+                "workspace_cursor_menu_visible",
+                "workspace_vscode_menu_visible",
+                "workspace_windsurf_menu_visible",
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_editor_probe_checks_each_known_command_once() {
+        let mut probed = Vec::new();
+        let installed = probe_workspace_editors_with(|command| {
+            probed.push(command.to_string());
+            matches!(command, "zed" | "code")
+        });
+
+        assert_eq!(probed, vec!["zed", "cursor", "code", "windsurf"]);
+        assert_eq!(installed, [true, false, true, false]);
     }
 
     #[test]

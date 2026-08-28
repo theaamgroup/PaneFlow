@@ -2574,6 +2574,11 @@ fn main() {
     // invocation never mutates paneflow.json.
     config_writer::migrate_agent_button_visibility_defaults();
 
+    // Issue #115: snapshot installed workspace editors after the login shell's
+    // PATH has been adopted but before GPUI starts. Workspace-menu rendering
+    // reads this cache only; it never executes `which` on the render thread.
+    editor::initialize_workspace_editor_installation_cache();
+
     #[cfg(target_os = "macos")]
     warn_if_rosetta_translated();
 

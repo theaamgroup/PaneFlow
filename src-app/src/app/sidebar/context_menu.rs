@@ -13,32 +13,11 @@ use gpui::{
 };
 
 use crate::app::files_tree;
+use crate::editor::WorkspaceEditor;
 use crate::pane::PaneSurface;
 use crate::settings::components::{menu_divider_color, select_item, select_menu, with_alpha};
 use crate::ui_primitives::AnimatedHoverExt;
 use crate::{PaneContextMenu, PaneFlowApp, TabContextMenu, WorkspaceContextMenu};
-
-pub(crate) const EDITOR_CONTEXT_MENU_ITEMS: &[(&str, &str, &str, &str)] = &[
-    ("zed", "Open in Zed", "zed", "open_workspace_in_zed"),
-    (
-        "cursor",
-        "Open in Cursor",
-        "cursor",
-        "open_workspace_in_cursor",
-    ),
-    (
-        "vscode",
-        "Open in VS Code",
-        "code",
-        "open_workspace_in_vscode",
-    ),
-    (
-        "windsurf",
-        "Open in Windsurf",
-        "windsurf",
-        "open_workspace_in_windsurf",
-    ),
-];
 
 fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
     div()
@@ -46,6 +25,19 @@ fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
         .my(px(4.))
         .h(px(1.))
         .bg(menu_divider_color(ui))
+}
+
+/// Fixed rows are pin/unpin, reveal, copy path, manage custom buttons, and
+/// close. The divider before Reveal only exists when an editor section does;
+/// otherwise the earlier workflow/service divider already separates groups.
+fn workspace_context_menu_counts(
+    visible_editor_rows: usize,
+    workflow_rows: usize,
+    service_rows: usize,
+) -> (usize, usize) {
+    let menu_rows = visible_editor_rows + 5 + workflow_rows + service_rows;
+    let separator_rows = 2 + usize::from(service_rows > 0) + usize::from(visible_editor_rows > 0);
+    (menu_rows, separator_rows)
 }
 
 pub(crate) fn clamped_context_menu_position(
@@ -202,11 +194,12 @@ impl PaneFlowApp {
         let is_pinned = self.workspaces.get(idx).is_some_and(|ws| ws.pinned);
         let workflow_rows = usize::from(workflow_template.is_some());
         let service_rows = services.len();
-        let separator_rows = 3 + usize::from(service_rows > 0);
-        // Fixed rows: pin/unpin, reveal, copy path, manage custom buttons,
-        // close. Renaming is not one of them - it stays on the row's
-        // double-click.
-        let menu_rows = EDITOR_CONTEXT_MENU_ITEMS.len() + 5 + workflow_rows + service_rows;
+        let visible_editors: Vec<_> = WorkspaceEditor::ALL
+            .into_iter()
+            .filter(|editor| editor.is_visible(&self.cached_config))
+            .collect();
+        let (menu_rows, separator_rows) =
+            workspace_context_menu_counts(visible_editors.len(), workflow_rows, service_rows);
         let menu_height = px(8. + menu_rows as f32 * 28. + separator_rows as f32 * 9.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
@@ -291,15 +284,15 @@ impl PaneFlowApp {
             context_menu = context_menu.child(context_menu_divider(ui));
         }
 
-        for &(id, label, command, shortcut_action) in EDITOR_CONTEXT_MENU_ITEMS {
+        for editor in &visible_editors {
             let shortcut = self
-                .shortcut_for_action(shortcut_action)
+                .shortcut_for_action(editor.shortcut_action())
                 .map(|s| SharedString::from(s.to_string()));
-            let command = command.to_string();
-            let label_owned = label.to_string();
+            let command = editor.command().to_string();
+            let label_owned = editor.menu_label().to_string();
             context_menu = context_menu.child(self.render_select_menu_item(
-                SharedString::from(format!("workspace-context-{id}")),
-                label,
+                SharedString::from(format!("workspace-context-{}", editor.id())),
+                editor.menu_label(),
                 shortcut,
                 ui,
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -309,7 +302,9 @@ impl PaneFlowApp {
             ));
         }
 
-        context_menu = context_menu.child(context_menu_divider(ui));
+        if !visible_editors.is_empty() {
+            context_menu = context_menu.child(context_menu_divider(ui));
+        }
 
         // Reveal in file manager
         let reveal_shortcut = self
@@ -673,5 +668,23 @@ impl PaneFlowApp {
             PaneSurface::Markdown(markdown) => Some(markdown.read(cx).path.clone()),
             PaneSurface::Diff(diff) => diff.read(cx).column_paths().into_iter().next(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_context_menu_counts;
+
+    #[test]
+    fn workspace_menu_geometry_uses_filtered_editor_rows() {
+        assert_eq!(workspace_context_menu_counts(4, 0, 0), (9, 3));
+        assert_eq!(workspace_context_menu_counts(2, 1, 0), (8, 3));
+        assert_eq!(workspace_context_menu_counts(0, 0, 0), (5, 2));
+    }
+
+    #[test]
+    fn workspace_menu_geometry_counts_service_and_editor_dividers_independently() {
+        assert_eq!(workspace_context_menu_counts(4, 0, 2), (11, 4));
+        assert_eq!(workspace_context_menu_counts(0, 0, 2), (7, 3));
     }
 }

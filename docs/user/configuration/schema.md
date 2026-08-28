@@ -43,6 +43,10 @@ That strictness is an editor-side aid only; it never affects loading.
 | `unfocused_pane_opacity` | number or null | `0.7` | Opacity of panes without focus when a workspace has more than one pane, range `0.15` to `1.0`. `1.0` disables the dim. Values outside the range are clamped with a warning; non-finite values fall back to the default. |
 | `reduce_motion` | boolean or null | `false` | Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. |
 | `workspace_auto_sort` | boolean or null | `false` | Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. |
+| `workspace_zed_menu_visible` | boolean or null | installed detection | Show the **Open in Zed** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Zed CLI is installed. |
+| `workspace_cursor_menu_visible` | boolean or null | installed detection | Show the **Open in Cursor** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Cursor CLI is installed. |
+| `workspace_vscode_menu_visible` | boolean or null | installed detection | Show the **Open in VS Code** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the VS Code CLI is installed. |
+| `workspace_windsurf_menu_visible` | boolean or null | installed detection | Show the **Open in Windsurf** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Windsurf CLI is installed. |
 | `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material across the whole window shell: the primary rail, panel inset, and pane gutters. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
@@ -82,6 +86,13 @@ the published schema.
 `opaque`, `off`, and `transparent` also silently switch off
 `macos_chrome_material`, whatever that key is set to. If the whole-shell
 material disappears after a backdrop change, this is why.
+
+## Workspace context-menu rows
+
+The four `workspace_*_menu_visible` controls live under **Settings >
+Workspaces**. They change only whether the matching editor row is rendered in
+a workspace context menu. Editor keybindings remain available and behave the
+same way regardless of these visibility settings.
 
 ## Agent buttons
 
@@ -280,6 +291,10 @@ test fixture leaves it unset.
   "unfocused_pane_opacity": 0.7,
   "reduce_motion": false,
   "workspace_auto_sort": false,
+  "workspace_zed_menu_visible": null,
+  "workspace_cursor_menu_visible": null,
+  "workspace_vscode_menu_visible": null,
+  "workspace_windsurf_menu_visible": null,
   "window_decorations": "client",
   "window_backdrop": "auto",
   "macos_chrome_material": true,

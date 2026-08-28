@@ -2443,6 +2443,14 @@ pub(crate) fn resolve_editor_binary(command: &str) -> std::path::PathBuf {
     resolve_editor_binary_in(command, &editor_search_paths())
 }
 
+/// Whether an editor command resolves through the same PATH + fallback search
+/// used by [`resolve_editor_binary`]. Unlike that launch resolver, this does
+/// not return the bare command on a miss, so callers can distinguish an
+/// installed editor from the deliberate post-click `NotFound` fallback.
+pub(crate) fn editor_binary_is_installed(command: &str) -> bool {
+    find_editor_binary_in(command, &editor_search_paths()).is_some()
+}
+
 pub(crate) fn editor_toast_label(label: &str) -> &str {
     label.strip_prefix("Open in ").unwrap_or(label)
 }
@@ -2454,19 +2462,30 @@ fn resolve_editor_binary_in(
     command: &str,
     fallback_paths: &[std::path::PathBuf],
 ) -> std::path::PathBuf {
+    find_editor_binary_in(command, fallback_paths)
+        .unwrap_or_else(|| std::path::PathBuf::from(command))
+}
+
+/// Optional half of the editor resolver. Keeping the miss as `None` is what
+/// makes it suitable for an installed predicate; the public launch path wraps
+/// it with the historical bare-command fallback above.
+fn find_editor_binary_in(
+    command: &str,
+    fallback_paths: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
     if let Ok(path) = which::which(command)
         && let Some(path) = normalize_editor_candidate(path)
     {
-        return path;
+        return Some(path);
     }
     if !fallback_paths.is_empty()
         && let Ok(joined) = std::env::join_paths(fallback_paths)
         && let Ok(path) = which::which_in(command, Some(&joined), ".")
         && let Some(path) = normalize_editor_candidate(path)
     {
-        return path;
+        return Some(path);
     }
-    std::path::PathBuf::from(command)
+    None
 }
 
 fn normalize_editor_candidate(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
@@ -2754,6 +2773,26 @@ mod tests {
             resolved.display(),
             expected.display()
         );
+    }
+
+    #[test]
+    fn installation_probe_picks_up_binary_from_fallback_dir() {
+        let stub = "paneflow_install_probe_stub_pflw_42";
+        let dir = tempfile::TempDir::new().unwrap();
+        let expected = make_stub_binary(dir.path(), stub);
+
+        let found = find_editor_binary_in(stub, &[dir.path().to_path_buf()])
+            .expect("fallback binary should be detected");
+
+        assert_eq!(
+            std::fs::canonicalize(found).ok(),
+            std::fs::canonicalize(expected).ok()
+        );
+    }
+
+    #[test]
+    fn installation_probe_returns_none_when_command_is_missing() {
+        assert!(find_editor_binary_in("paneflow_no_editor_probe_zzz_99", &[]).is_none());
     }
 
     #[test]
