@@ -207,6 +207,31 @@ pub(crate) enum ClickOutcome {
 /// staying under a deliberate second click.
 pub(crate) const ARM_SETTLE: Duration = Duration::from_millis(350);
 
+/// How long an inline arm stays live before it stands itself down.
+///
+/// [`ARM_SETTLE`] is a floor - it stops a double-click confirming through an
+/// armed state the user never saw. This is the matching ceiling, and without
+/// one an arm is immortal: the X paints red and stays primed until something
+/// else happens to clear it, so a click abandoned mid-decision leaves a live
+/// kill switch on screen for the rest of the session.
+///
+/// 5 s is long enough to move the pointer and click deliberately, short enough
+/// that walking away always disarms. The asymmetry is deliberate: expiring on
+/// someone who meant it costs one extra click, while never expiring costs an
+/// agent.
+pub(crate) const ARM_EXPIRY: Duration = Duration::from_secs(5);
+
+/// Whether an inline arm has aged out, so it must neither confirm a close nor
+/// keep painting its button red.
+///
+/// Only ever true for [`ConfirmStyle::Inline`]. A modal holds focus and dims
+/// the window behind it, so it cannot be forgotten about the way a small red
+/// button can, and timing one out under a user who is still reading it would
+/// be its own bug.
+pub(crate) fn arm_has_expired(pending: &PendingClose, now: Instant) -> bool {
+    pending.style == ConfirmStyle::Inline && now.duration_since(pending.armed_at) >= ARM_EXPIRY
+}
+
 /// Decide whether a click on the X for `this_target` arms a confirmation or
 /// confirms the one already pending.
 ///
@@ -248,6 +273,14 @@ pub(crate) fn click_outcome(
         } => pending.targets_tab(*workspace_id, *tab_id),
         CloseTarget::Pane { pane } => pending.targets_weak_pane(pane),
     };
+    // An arm past [`ARM_EXPIRY`] is not a decision waiting to be finished, it
+    // is a decision the user walked away from. Re-arm instead, so a click on a
+    // stale red X costs a second click rather than an agent. The sweep in
+    // `close_confirm` normally clears these before a click can land; this is
+    // the guarantee that does not depend on a timer having fired.
+    if same_target && arm_has_expired(pending, now) {
+        return ClickOutcome::Arm;
+    }
     // A second click inside [`ARM_SETTLE`] is a double-click, not a decision:
     // the armed state was painted for one frame the user could not perceive.
     // Re-arming refreshes `armed_at`, so a burst of clicks never accumulates
@@ -309,6 +342,42 @@ mod tests {
     /// the tests that are about something other than the delay itself.
     fn settled(pending: &PendingClose) -> Instant {
         pending.armed_at + ARM_SETTLE
+    }
+
+    #[test]
+    fn an_arm_expires_and_a_click_on_the_stale_button_re_arms_instead_of_closing() {
+        let pending = inline_pending(tab_target(1, 2));
+        let stale = pending.armed_at + ARM_EXPIRY;
+        assert!(arm_has_expired(&pending, stale));
+        assert_eq!(
+            click_outcome(Some(&pending), &tab_target(1, 2), stale),
+            ClickOutcome::Arm,
+            "an arm the user walked away from must cost a second click, not an agent"
+        );
+    }
+
+    /// The window between the two bounds is the only one that confirms, so
+    /// both edges are pinned: shorten `ARM_EXPIRY` past `ARM_SETTLE` and
+    /// confirming becomes impossible, which no other test would catch.
+    #[test]
+    fn a_click_inside_the_live_window_still_confirms() {
+        let pending = inline_pending(tab_target(1, 2));
+        assert!(ARM_SETTLE < ARM_EXPIRY, "the live window must be non-empty");
+        let live = pending.armed_at + ARM_EXPIRY - Duration::from_millis(1);
+        assert!(!arm_has_expired(&pending, live));
+        assert_eq!(
+            click_outcome(Some(&pending), &tab_target(1, 2), live),
+            ClickOutcome::Confirm
+        );
+    }
+
+    /// A modal is read, not glanced at: it holds focus and dims the window, so
+    /// ageing one out under a user who is still deciding would be its own bug.
+    #[test]
+    fn a_modal_never_expires() {
+        let mut modal = inline_pending(tab_target(1, 2));
+        modal.style = ConfirmStyle::Modal;
+        assert!(!arm_has_expired(&modal, modal.armed_at + ARM_EXPIRY * 1000));
     }
 
     /// Both halves of the Escape trade. Consuming unconditionally would eat a

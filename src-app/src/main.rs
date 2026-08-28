@@ -1837,6 +1837,14 @@ impl Render for PaneFlowApp {
             // untouched, so vim and a readline prompt still get the key.
             .capture_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
                 if e.keystroke.key != "escape" {
+                    // Any other key means the user went back to work, and an
+                    // armed close is a destructive control they are no longer
+                    // looking at. Stand it down - but forward the key
+                    // untouched, unlike the Escape branch below: this is not a
+                    // gesture aimed at the button, it is a keystroke aimed at
+                    // whatever has focus, and swallowing it would drop a
+                    // character out of a terminal.
+                    this.dismiss_inline_close_arm(cx);
                     return;
                 }
                 if cx.has_active_drag() {

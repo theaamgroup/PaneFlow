@@ -244,10 +244,40 @@ impl PaneFlowApp {
             self.diff_dock.diff_tab_close_armed,
         ) {
             self.diff_dock.diff_tab_close_armed = Some(index);
+            self.schedule_diff_tab_arm_expiry(index, cx);
             cx.notify();
             return;
         }
         self.close_diff_tab(index, cx);
+    }
+
+    /// Stand a modified-file tab's close arm down after
+    /// [`crate::app::close_guard::ARM_EXPIRY`], matching the pane and tab X.
+    ///
+    /// Keyed on the armed INDEX rather than a timestamp, because
+    /// `diff_tab_close_armed` is a bare `Option<usize>` with nowhere to put
+    /// one. That is weaker than the pane path in one specific way: there, a
+    /// click landing on a stale arm is rejected by `click_outcome` even if the
+    /// timer never ran, whereas here the timer is the only mechanism. It is
+    /// enough because arming the same index twice is unreachable -
+    /// `close_arms_first` returns false once a tab is armed, so the second
+    /// press closes - and every other value in the slot means a different arm
+    /// already owns it.
+    fn schedule_diff_tab_arm_expiry(&mut self, index: usize, cx: &mut Context<Self>) {
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                smol::Timer::after(crate::app::close_guard::ARM_EXPIRY).await;
+                let _ = cx.update(|cx| {
+                    this.update(cx, |app: &mut Self, cx| {
+                        if app.diff_dock.diff_tab_close_armed == Some(index) {
+                            app.diff_dock.diff_tab_close_armed = None;
+                            cx.notify();
+                        }
+                    })
+                });
+            },
+        )
+        .detach();
     }
 
     /// Close the tab at `index`. Index 0 (`Changes`) is permanent, so the call

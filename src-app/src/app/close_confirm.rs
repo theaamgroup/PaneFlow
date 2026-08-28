@@ -16,8 +16,8 @@ use gpui::{
 
 use crate::agent_launcher::TerminalAgent;
 use crate::app::close_guard::{
-    CloseTarget, ConfirmStyle, PendingClose, SurfaceCloseState, agent_needing_confirmation,
-    agents_needing_confirmation_count,
+    ARM_EXPIRY, CloseTarget, ConfirmStyle, PendingClose, SurfaceCloseState,
+    agent_needing_confirmation, agents_needing_confirmation_count,
 };
 use crate::app::workspace_ops::capture_closed_pane_record;
 use crate::pane::Pane;
@@ -212,8 +212,66 @@ impl PaneFlowApp {
         self.pending_close_focus_claim = next
             .as_ref()
             .is_some_and(|p| p.style == ConfirmStyle::Modal);
+        let expires = next
+            .as_ref()
+            .map(|p| (p.style, p.armed_at))
+            .filter(|(style, _)| *style == ConfirmStyle::Inline);
         self.pending_close = next;
+        if let Some((_, armed_at)) = expires {
+            self.schedule_inline_arm_expiry(armed_at, cx);
+        }
         cx.notify();
+    }
+
+    /// Stand a live inline arm down, leaving a modal alone.
+    ///
+    /// The navigation and keystroke disarms all want exactly this: forget an
+    /// abandoned red X, but never dismiss a modal the user is reading. A modal
+    /// holds focus and has its own Cancel, so tearing it down from a
+    /// navigation path would be a silent refusal of a question the user was
+    /// still answering.
+    pub(crate) fn dismiss_inline_close_arm(&mut self, cx: &mut Context<Self>) {
+        if self
+            .pending_close
+            .as_ref()
+            .is_some_and(|p| p.style == ConfirmStyle::Inline)
+        {
+            self.set_pending_close(None, cx);
+        }
+    }
+
+    /// Stand an inline arm down once [`ARM_EXPIRY`] has passed.
+    ///
+    /// A timer rather than a render-time check, because nothing else would
+    /// repaint: an idle window produces no frames, so an expiry that were only
+    /// evaluated during render would leave the button red until the user
+    /// happened to cause a frame - which is the bug this fixes, one step later.
+    ///
+    /// Keyed on `armed_at` rather than a cancellation handle: a re-arm writes a
+    /// fresh timestamp, so an older timer finding a newer arm simply does
+    /// nothing and lets that arm's own timer settle it. That makes overlapping
+    /// timers harmless and needs no bookkeeping to cancel them.
+    fn schedule_inline_arm_expiry(&mut self, armed_at: std::time::Instant, cx: &mut Context<Self>) {
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                smol::Timer::after(ARM_EXPIRY).await;
+                let _ = cx.update(|cx| {
+                    this.update(cx, |app: &mut Self, cx| {
+                        // Only clear the arm this timer was started for. Anything
+                        // else - a re-arm, a confirm, a different target - already
+                        // owns the slot.
+                        let still_mine = app
+                            .pending_close
+                            .as_ref()
+                            .is_some_and(|p| p.armed_at == armed_at);
+                        if still_mine {
+                            app.set_pending_close(None, cx);
+                        }
+                    })
+                });
+            },
+        )
+        .detach();
     }
 
     /// Copy the guard state out of every terminal surface in `panes`, on the

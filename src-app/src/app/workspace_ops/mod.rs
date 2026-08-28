@@ -1025,6 +1025,11 @@ impl PaneFlowApp {
 
         let changed = idx != self.active_idx;
         self.dismiss_transient_surfaces();
+        // Same rule as the tab switch: an armed close does not follow the user
+        // to another workspace. Unconditional rather than gated on `changed` -
+        // re-activating the workspace you are already on is still a gesture
+        // that was not the second click on that X.
+        self.dismiss_inline_close_arm(cx);
         self.active_idx = idx;
 
         match focus_target {
@@ -1107,6 +1112,11 @@ impl PaneFlowApp {
 
         let changed = idx != self.active_idx;
         self.dismiss_transient_surfaces();
+        // Same rule as the tab switch: an armed close does not follow the user
+        // to another workspace. Unconditional rather than gated on `changed` -
+        // re-activating the workspace you are already on is still a gesture
+        // that was not the second click on that X.
+        self.dismiss_inline_close_arm(cx);
         self.active_idx = idx;
         self.reroot_files_tree(cx);
         if self.agent_sessions.sessions_sidebar_open {

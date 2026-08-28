@@ -181,6 +181,12 @@ impl PaneFlowApp {
         }
         self.commit_rename(cx);
         self.dismiss_transient_surfaces();
+        // Navigating away abandons an armed close: the red X left behind
+        // belongs to a tab the user is no longer looking at.
+        // `dismiss_transient_surfaces` would be the natural home for this, but
+        // it takes no `cx` and all sixteen of its callers would have to grow
+        // one.
+        self.dismiss_inline_close_arm(cx);
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
             ws.agent_completion_notification.acknowledge();
         }
