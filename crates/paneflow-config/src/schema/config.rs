@@ -35,8 +35,8 @@ pub struct PaneFlowConfig {
     /// `"mica"` and `"acrylic"` strings still load.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub window_backdrop: Option<String>,
-    /// When enabled (default), the primary sidebar card reveals AppKit's
-    /// native Sidebar material.
+    /// When enabled (default), AppKit's native Sidebar material reads across
+    /// the whole window shell: the primary rail, panel inset, and pane gutters.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub macos_chrome_material: Option<bool>,
     /// Opacity of panes that do not hold focus, when the workspace holds more
@@ -189,69 +189,75 @@ pub struct PaneFlowConfig {
     /// non-boolean value resolves to `None` (fence ON) with a warn.
     #[serde(default, deserialize_with = "lenient_opt_bool")]
     pub ai_injection_fence: Option<bool>,
+    /// One-time issue #85 compatibility marker. `Some(true)` records that an
+    /// existing config's installed, previously auto-visible agent launchers
+    /// were promoted to explicit `true` values before the default allowlist
+    /// changed. Runtime visibility does not otherwise consult this field.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub agent_button_visibility_defaults_migrated: Option<bool>,
     /// Show the built-in "Claude Code" command button in the tab bar.
     /// `Some(true)` always renders the button, `Some(false)` hides it, and
-    /// `None` (default) renders it only when the CLI binary is installed.
+    /// `None` (default) renders it only when its CLI binary is installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub claude_code_button_visible: Option<bool>,
     /// Show the built-in "Codex" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Same allowlisted defaults as `claude_code_button_visible`.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub codex_button_visible: Option<bool>,
     /// Show the built-in "Opencode" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub opencode_button_visible: Option<bool>,
     /// Show the built-in "Pi" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub pi_button_visible: Option<bool>,
     /// Show the built-in "Hermes Agent" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub hermes_agent_button_visible: Option<bool>,
     /// Show the built-in "Grok" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Same allowlisted defaults as `claude_code_button_visible`.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub grok_button_visible: Option<bool>,
     /// Show the built-in "Amp" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub amp_button_visible: Option<bool>,
     /// Show the built-in "Cursor" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub cursor_button_visible: Option<bool>,
     /// Show the built-in "Gemini" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub gemini_button_visible: Option<bool>,
     /// Show the built-in "Kiro" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub kiro_button_visible: Option<bool>,
     /// Show the built-in "Antigravity" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub antigravity_button_visible: Option<bool>,
     /// Show the built-in "Copilot" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub copilot_button_visible: Option<bool>,
     /// Show the built-in "CodeBuddy" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub codebuddy_button_visible: Option<bool>,
     /// Show the built-in "Factory" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub factory_button_visible: Option<bool>,
     /// Show the built-in "Qoder" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub qoder_button_visible: Option<bool>,
     /// Show the built-in "Openclaw" command button in the tab bar.
-    /// Same semantics as `claude_code_button_visible`.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub openclaw_button_visible: Option<bool>,
     /// Terminal-scoped settings block for renderer and PTY behavior.

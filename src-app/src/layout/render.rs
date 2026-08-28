@@ -46,6 +46,10 @@ fn available_main_axis_px(container_px: f32, child_count: usize) -> f32 {
     (container_px - divider_px).max(0.0)
 }
 
+fn divider_hit_margin_px() -> f32 {
+    (DIVIDER_PX - DIVIDER_HIT_PX) / 2.0
+}
+
 #[cfg(test)]
 fn with_debug_selector_for_test(div: gpui::Div, selector: String) -> gpui::Div {
     div.debug_selector(move || selector.clone())
@@ -82,8 +86,9 @@ impl LayoutTree {
                             .min_h(px(MIN_PANE_SIZE))
                             .overflow_hidden()
                     };
-                    // Inert gap: the real divider only exists once the split
-                    // does, but the spacing must already match.
+                    // Inert, unpainted gap: the real resize hitband only exists
+                    // once the split does, but the shell-revealing spacing must
+                    // already match.
                     let gap = match dir {
                         SplitDirection::Horizontal => {
                             div().h(px(DIVIDER_PX)).w_full().flex_shrink_0()
@@ -235,36 +240,25 @@ impl LayoutTree {
                         let ratio_before = children[divider_idx].ratio.clone();
                         let ratio_after = child.ratio.clone();
 
-                        let divider_hit_margin = (DIVIDER_PX - DIVIDER_HIT_PX) / 2.0;
+                        // This band paints nothing: panes are cards and the gap
+                        // between them exposes the window shell. It still
+                        // reserves DIVIDER_PX on the main axis. The 7px resize
+                        // hitband is centered by splitting the unused width
+                        // evenly across its two margins.
+                        let divider_hit_margin = divider_hit_margin_px();
                         let divider = match dir {
                             SplitDirection::Horizontal => div()
                                 .h(px(DIVIDER_HIT_PX))
                                 .w_full()
                                 .my(px(divider_hit_margin))
                                 .flex_shrink_0()
-                                .cursor_row_resize()
-                                .flex()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .h(px(DIVIDER_PX))
-                                        .w_full()
-                                        .bg(crate::theme::ui_colors().border),
-                                ),
+                                .cursor_row_resize(),
                             SplitDirection::Vertical => div()
                                 .w(px(DIVIDER_HIT_PX))
                                 .h_full()
                                 .mx(px(divider_hit_margin))
                                 .flex_shrink_0()
-                                .cursor_col_resize()
-                                .flex()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .w(px(DIVIDER_PX))
-                                        .h_full()
-                                        .bg(crate::theme::ui_colors().border),
-                                ),
+                                .cursor_col_resize(),
                         };
 
                         #[cfg(test)]
@@ -444,10 +438,10 @@ mod tests {
             .expect("child-2 not painted");
         let divider0 = cx
             .debug_bounds("layout-divider-0")
-            .expect("divider-0 not painted");
+            .expect("divider-0 hitband not laid out");
         let divider1 = cx
             .debug_bounds("layout-divider-1")
-            .expect("divider-1 not painted");
+            .expect("divider-1 hitband not laid out");
 
         assert!(b0.size.width > px(80.), "child-0 below visible minimum");
         assert!(b1.size.width > px(80.), "child-1 below visible minimum");
@@ -597,7 +591,21 @@ mod tests {
 
     #[test]
     fn available_main_axis_excludes_fixed_dividers() {
-        assert!((available_main_axis_px(500.0, 3) - 492.0).abs() < f32::EPSILON);
+        assert!(
+            (available_main_axis_px(500.0, 3) - (500.0 - 2.0 * DIVIDER_PX)).abs() < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn divider_hitband_is_centered_inside_the_unpainted_gap() {
+        let gap = std::hint::black_box(DIVIDER_PX);
+        let hitband = std::hint::black_box(DIVIDER_HIT_PX);
+        let margin = std::hint::black_box(divider_hit_margin_px());
+
+        assert_eq!(gap, 8.0);
+        assert_eq!(hitband, 7.0);
+        assert!(margin >= 0.0, "the hitband must stay inside the gap");
+        assert!((2.0 * margin + hitband - gap).abs() < f32::EPSILON);
     }
 
     #[test]

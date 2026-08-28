@@ -41,6 +41,7 @@ fn test_serialization_roundtrip() {
         claude_code_bypass_permissions: None,
         ai_unrestricted: None,
         ai_injection_fence: None,
+        agent_button_visibility_defaults_migrated: None,
         claude_code_button_visible: None,
         codex_button_visible: None,
         opencode_button_visible: None,

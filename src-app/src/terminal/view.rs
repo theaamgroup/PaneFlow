@@ -196,9 +196,6 @@ pub struct TerminalView {
     /// effect on the next new terminal, consistent with the other terminal
     /// settings here.
     pub(super) scroll_multiplier: f32,
-    /// Platform appearance switch: default terminal backgrounds become
-    /// transparent so the native window material can show through.
-    pub(super) terminal_material_active: bool,
     /// Renderer switch: block elements use Paneflow's built-in quad renderer
     /// instead of font glyphs.
     pub(super) integrated_glyphs_enabled: bool,
@@ -724,7 +721,6 @@ impl TerminalView {
             default_cursor_shape,
             cursor_color_override,
             scroll_multiplier,
-            terminal_material_active: false,
             integrated_glyphs_enabled,
             color_emoji_enabled,
             copy_mode_active: false,
@@ -1431,7 +1427,6 @@ impl Render for TerminalView {
             search_rail_lines,
             self.default_cursor_shape,
             self.cursor_color_override,
-            self.terminal_material_active,
             self.integrated_glyphs_enabled,
             self.color_emoji_enabled,
             frame_metrics,

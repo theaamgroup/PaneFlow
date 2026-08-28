@@ -250,7 +250,8 @@ fn test_imprecise_sum(cx: &mut TestAppContext) {
 // including dividers between children and deeply nested containers.
 // ===========================================================================
 
-const DIVIDER_PX: f32 = 4.0;
+/// Production's unpainted gap between sibling pane cards.
+const DIVIDER_PX: f32 = 8.0;
 
 /// Helper: build a child pane div matching the render wrapper's layout inputs.
 fn pane_div(ratio: f32, selector: &'static str) -> gpui::Div {
@@ -265,17 +266,17 @@ fn pane_div(ratio: f32, selector: &'static str) -> gpui::Div {
         .debug_selector(|| selector.into())
 }
 
-/// Helper: build a vertical divider with the same visible width as render.rs.
+/// Helper: reserve the same vertical, unpainted gap as render.rs.
 fn v_divider() -> gpui::Div {
     div().w(px(DIVIDER_PX)).h_full().flex_shrink_0()
 }
 
-/// Helper: build a horizontal divider with the same visible width as render.rs.
+/// Helper: reserve the same horizontal, unpainted gap as render.rs.
 fn h_divider() -> gpui::Div {
     div().h(px(DIVIDER_PX)).w_full().flex_shrink_0()
 }
 
-/// AC-4: A 3-child container with ratios [0.33, 0.33, 0.34] and 4px dividers
+/// AC-4: A 3-child container with ratios [0.33, 0.33, 0.34] and 8px gaps
 /// between each pair - all three panes visible with roughly equal size.
 /// This replicates the render.rs flex shape with test-only debug selectors.
 #[gpui::test]
@@ -315,7 +316,8 @@ fn test_three_children_with_dividers(cx: &mut TestAppContext) {
     assert!(b1.size.width > px(0.), "child-1 has zero width");
     assert!(b2.size.width > px(0.), "child-2 has zero width");
 
-    // Available space = container - 2 dividers = 900 - 8 = 892px
+    // Available space follows production's formula: container minus one
+    // DIVIDER_PX gap for each adjacent pair.
     let available = container_w - 2.0 * DIVIDER_PX;
     let total_pane_width = b0.size.width + b1.size.width + b2.size.width;
     assert_px_eq(

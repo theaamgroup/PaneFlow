@@ -336,7 +336,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 - `LayoutTree::Leaf(Entity<Pane>)` | `LayoutTree::Container { direction, children: Vec<LayoutChild>, drag, container_size }`
 - Each `LayoutChild` carries `node` plus `ratio: Rc<Cell<f32>>`.
 - `SplitDirection::Horizontal` = **horizontal divider, panes stacked top/bottom** (`flex_col`). `Vertical` = panes side by side (`flex_row`). Counterintuitive but consistent throughout the codebase.
-- Layout uses GPUI flex divs with `flex_basis(relative(ratio))`. `MIN_PANE_SIZE = 80.0`, `DIVIDER_PX = 4.0`, `DIVIDER_HIT_PX = 7.0` (`layout/tree.rs:59-62`): the hitbox is wider than the visible bar and is centered on it.
+- Layout uses GPUI flex divs with `flex_basis(relative(ratio))`. `MIN_PANE_SIZE = 80.0`, `DIVIDER_PX = 8.0`, `DIVIDER_HIT_PX = 7.0` (`layout/tree.rs`): the divider is an unpainted shell-revealing gap with a narrower resize hitband centered inside it.
 - `MAX_PANES = 32` (`layout/mod.rs:32`), `MAX_WORKSPACES = 20` (`workspace/mod.rs:24`). Both are enforced on the live create path *and* at session restore and config load; `limits.rs` documents the read/write cap pairs.
 - Drag-to-resize is pixel-accurate: `Container::container_size` captures the real main-axis pixel size each frame via a `canvas()` prepaint, so there is no hardcoded container estimate (the old `split.rs` 800px guess is gone).
 - Presets in `layout/presets.rs`: `from_panes_equal` (even horizontal / even vertical), `main_vertical`, `tiled`.

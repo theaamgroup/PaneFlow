@@ -692,8 +692,6 @@ impl PaneFlowApp {
             title_bar,
             primary_sidebar_visible: restored_primary_sidebar_visible,
             primary_sidebar_animation: restored_primary_sidebar_animation,
-            title_bar_files_menu_open: None,
-            title_bar_help_menu_open: None,
             git_watcher,
             git_event_rx,
             git_watch_counts,
@@ -1064,9 +1062,9 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
 
     cx.on_action(|_: &OpenHelp, cx| {
         with_active_paneflow_window(cx, |app, _window, cx| {
-            if let Err(e) =
-                crate::external_open::open_url("https://github.com/theaamgroup/paneflow#readme")
-            {
+            if let Err(e) = crate::external_open::open_http_url(
+                "https://github.com/theaamgroup/paneflow#readme",
+            ) {
                 log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 app.show_toast(format!("Could not open help: {e}"), cx);
             }

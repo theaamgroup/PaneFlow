@@ -97,6 +97,7 @@ mod tests {
             claude_code_bypass_permissions: Some(false),
             ai_unrestricted: Some(true),
             ai_injection_fence: Some(false),
+            agent_button_visibility_defaults_migrated: Some(true),
             claude_code_button_visible: Some(true),
             codex_button_visible: Some(true),
             opencode_button_visible: Some(true),

@@ -21,8 +21,6 @@ pub struct TitleBar {
     /// zero independently, while title-bar controls remain stationary and
     /// align with the open rail in CLI, Diff, and Settings.
     pub left_rail_width: f32,
-    pub files_menu_open: bool,
-    pub help_menu_open: bool,
     pub ipc_state: crate::ipc::IpcState,
     /// Cockpit chrome: paint the rail `#141414` and drop the bottom divider so
     /// the title bar + sidebar read as one continuous surface. PUSHED by
@@ -47,8 +45,6 @@ impl TitleBar {
             workspace_name: None,
             sidebar_visible: true,
             left_rail_width: SIDEBAR_WIDTH,
-            files_menu_open: false,
-            help_menu_open: false,
             ipc_state: crate::ipc::IpcState::Online,
             cockpit: false,
             cockpit_material_active: true,
@@ -60,8 +56,6 @@ impl TitleBar {
 pub enum TitleBarEvent {
     CloseRequested,
     ToggleSidebar,
-    ToggleFilesMenu(gpui::Point<gpui::Pixels>),
-    ToggleHelpMenu(gpui::Point<gpui::Pixels>),
 }
 
 impl EventEmitter<TitleBarEvent> for TitleBar {}
@@ -85,9 +79,9 @@ impl Render for TitleBar {
         // opt-in; e.g. KDE Plasma) the compositor draws its own caption bar AND
         // this custom bar renders below it - they double up. We can't simply
         // drop this bar under SSD: it carries app chrome the compositor caption
-        // does NOT (sidebar toggle, Files/Help menus, workspace tabs). The
+        // does NOT (the sidebar toggle and workspace breadcrumb). The
         // min/max/close pill IS gated on `is_csd` below so those don't double;
-        // the brand/menus row is best-effort under SSD. The default `client`
+        // the app-chrome row is best-effort under SSD. The default `client`
         // (CSD) path - which PaneFlow uses everywhere it can - avoids this
         // entirely, which is why it is the default.
 
@@ -165,33 +159,11 @@ impl Render for TitleBar {
             TITLE_BAR_EDGE_INSET
         };
         let toggle_sidebar_handle = cx.entity().downgrade();
-        let toggle_files_menu_handle = cx.entity().downgrade();
-        let toggle_help_menu_handle = cx.entity().downgrade();
         let control_hover_bg = crate::app::constants::sidebar_tab_active_background();
         let toggle_sidebar_resting_bg = if self.sidebar_visible {
             control_hover_bg.opacity(0.0)
         } else {
             control_hover_bg
-        };
-        let files_menu_resting_bg = if self.files_menu_open {
-            control_hover_bg
-        } else {
-            control_hover_bg.opacity(0.0)
-        };
-        let files_menu_resting_text = if self.files_menu_open {
-            ui.text
-        } else {
-            ui.muted
-        };
-        let help_menu_resting_bg = if self.help_menu_open {
-            control_hover_bg
-        } else {
-            control_hover_bg.opacity(0.0)
-        };
-        let help_menu_resting_text = if self.help_menu_open {
-            ui.text
-        } else {
-            ui.muted
         };
         let sidebar_tooltip: gpui::SharedString = if self.sidebar_visible {
             "Hide sidebar"
@@ -244,62 +216,6 @@ impl Render for TitleBar {
                             .path("icons/sidebar.svg")
                             .text_color(ui.muted),
                     ),
-            )
-            .child(
-                div()
-                    .id("title-bar-files-menu-trigger")
-                    .flex_none()
-                    .h(TITLE_BAR_CONTROL_SIZE)
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(8.))
-                    .text_size(px(12.))
-                    .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(files_menu_resting_text)
-                    .animated_hover(move |style, delta| {
-                        style
-                            .bg(lerp_color(files_menu_resting_bg, control_hover_bg, delta))
-                            .text_color(lerp_color(files_menu_resting_text, ui.text, delta));
-                    })
-                    .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                        cx.stop_propagation();
-                        if let Some(entity) = toggle_files_menu_handle.upgrade() {
-                            let anchor = gpui::point(event.position.x, height);
-                            entity.update(cx, |_this, cx| {
-                                cx.emit(TitleBarEvent::ToggleFilesMenu(anchor));
-                            });
-                        }
-                    })
-                    .child("Files"),
-            )
-            .child(
-                div()
-                    .id("title-bar-help-menu-trigger")
-                    .flex_none()
-                    .h(TITLE_BAR_CONTROL_SIZE)
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(8.))
-                    .text_size(px(12.))
-                    .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(help_menu_resting_text)
-                    .animated_hover(move |style, delta| {
-                        style
-                            .bg(lerp_color(help_menu_resting_bg, control_hover_bg, delta))
-                            .text_color(lerp_color(help_menu_resting_text, ui.text, delta));
-                    })
-                    .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                        cx.stop_propagation();
-                        if let Some(entity) = toggle_help_menu_handle.upgrade() {
-                            let anchor = gpui::point(event.position.x, height);
-                            entity.update(cx, |_this, cx| {
-                                cx.emit(TitleBarEvent::ToggleHelpMenu(anchor));
-                            });
-                        }
-                    })
-                    .child("Help"),
             );
         let left_rail = div()
             .flex_none()
@@ -454,5 +370,66 @@ impl Render for TitleBar {
                         .bg(ui.border),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn title_bar_files_and_help_popovers_are_removed_end_to_end() {
+        let title_bar = include_str!("title_bar.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production title bar source");
+        for removed in [
+            "files_menu_open",
+            "help_menu_open",
+            "ToggleFilesMenu",
+            "ToggleHelpMenu",
+            "title-bar-files-menu-trigger",
+            "title-bar-help-menu-trigger",
+        ] {
+            assert!(
+                !title_bar.contains(removed),
+                "custom title bar still contains removed menu surface `{removed}`"
+            );
+        }
+
+        let event_handlers = include_str!("../app/event_handlers.rs");
+        let profile_menu = include_str!("../app/profile_menu.rs");
+        let bootstrap = include_str!("../app/bootstrap.rs");
+        let workspace_ops = include_str!("../app/workspace_ops/mod.rs");
+        let main = include_str!("../main.rs");
+        for (path, source) in [
+            ("event_handlers.rs", event_handlers),
+            ("profile_menu.rs", profile_menu),
+            ("bootstrap.rs", bootstrap),
+            ("workspace_ops/mod.rs", workspace_ops),
+            ("main.rs", main),
+        ] {
+            for removed in [
+                "title_bar_files_menu_open",
+                "title_bar_help_menu_open",
+                "render_title_bar_files_menu",
+                "render_title_bar_help_menu",
+            ] {
+                assert!(
+                    !source.contains(removed),
+                    "{path} still contains removed custom title-menu state `{removed}`"
+                );
+            }
+        }
+
+        for native_item in [
+            "MenuItem::action(\"About PaneFlow\", About)",
+            "MenuItem::action(\"New Workspace\", NewWorkspace)",
+            "Menu::new(\"Help\")",
+            "MenuItem::action(\"PaneFlow Help\", OpenHelp)",
+        ] {
+            assert!(
+                bootstrap.contains(native_item),
+                "removing custom popovers must preserve native macOS item `{native_item}`"
+            );
+        }
     }
 }

@@ -253,11 +253,21 @@ impl TerminalAgent {
     /// Tri-state on the `*_button_visible` config key:
     /// - `Some(true)`  - user explicitly enabled it: always shown.
     /// - `Some(false)` - user explicitly disabled it: always hidden.
-    /// - `None` (key absent, the default) - shown only if the agent's CLI
-    ///   binary is installed ([`Self::is_installed`]), so a fresh config
-    ///   surfaces exactly the agents present on the machine. The user can
-    ///   still force-show an uninstalled agent by toggling it on.
+    /// - `None` (key absent, the default) - Claude Code, Codex, and Grok are
+    ///   shown when their CLI binary is installed; every other agent stays
+    ///   hidden. The user can still force-show any uninstalled or non-default
+    ///   agent by toggling it on.
     pub fn is_visible(self, config: &PaneFlowConfig) -> bool {
+        self.is_visible_with(config, TerminalAgent::is_installed)
+    }
+
+    /// Visibility resolution with install detection injected so the allowlist
+    /// contract is testable without depending on the test host's `PATH`.
+    fn is_visible_with(
+        self,
+        config: &PaneFlowConfig,
+        is_installed: impl FnOnce(TerminalAgent) -> bool,
+    ) -> bool {
         let explicit: Option<bool> = match self {
             TerminalAgent::ClaudeCode => config.claude_code_button_visible,
             TerminalAgent::Codex => config.codex_button_visible,
@@ -276,7 +286,39 @@ impl TerminalAgent {
             TerminalAgent::Qoder => config.qoder_button_visible,
             TerminalAgent::Openclaw => config.openclaw_button_visible,
         };
-        explicit.unwrap_or_else(|| self.is_installed())
+        explicit.unwrap_or_else(|| self.is_default_enabled() && is_installed(self))
+    }
+
+    /// Fresh-config allowlist. Upgrade compatibility is handled once on the
+    /// raw config by `config_writer::migrate_agent_button_visibility_defaults`.
+    fn is_default_enabled(self) -> bool {
+        matches!(
+            self,
+            TerminalAgent::ClaudeCode | TerminalAgent::Codex | TerminalAgent::Grok
+        )
+    }
+
+    /// Raw JSON key used by Settings persistence and the one-time legacy
+    /// visibility migration.
+    pub(crate) fn button_visibility_key(self) -> &'static str {
+        match self {
+            TerminalAgent::ClaudeCode => "claude_code_button_visible",
+            TerminalAgent::Codex => "codex_button_visible",
+            TerminalAgent::OpenCode => "opencode_button_visible",
+            TerminalAgent::Pi => "pi_button_visible",
+            TerminalAgent::Hermes => "hermes_agent_button_visible",
+            TerminalAgent::Grok => "grok_button_visible",
+            TerminalAgent::Amp => "amp_button_visible",
+            TerminalAgent::Cursor => "cursor_button_visible",
+            TerminalAgent::Gemini => "gemini_button_visible",
+            TerminalAgent::Kiro => "kiro_button_visible",
+            TerminalAgent::Antigravity => "antigravity_button_visible",
+            TerminalAgent::Copilot => "copilot_button_visible",
+            TerminalAgent::CodeBuddy => "codebuddy_button_visible",
+            TerminalAgent::Factory => "factory_button_visible",
+            TerminalAgent::Qoder => "qoder_button_visible",
+            TerminalAgent::Openclaw => "openclaw_button_visible",
+        }
     }
 
     /// The CLI executable looked up on `PATH` to decide default visibility;
@@ -781,6 +823,47 @@ mod tests {
             ..Default::default()
         };
         assert!(!TerminalAgent::Gemini.is_visible(&hidden));
+    }
+
+    #[test]
+    fn absent_visibility_uses_default_allowlist_and_install_detection() {
+        let config = PaneFlowConfig::default();
+        for agent in TerminalAgent::ALL {
+            let allowlisted = matches!(
+                agent,
+                TerminalAgent::ClaudeCode | TerminalAgent::Codex | TerminalAgent::Grok
+            );
+            assert_eq!(
+                agent.is_visible_with(&config, |_| true),
+                allowlisted,
+                "{} must follow the fresh-config allowlist when installed",
+                agent.display_name()
+            );
+            assert!(
+                !agent.is_visible_with(&config, |_| false),
+                "{} must stay hidden when it is not installed",
+                agent.display_name()
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_visibility_does_not_consult_install_detection() {
+        let shown = PaneFlowConfig {
+            amp_button_visible: Some(true),
+            ..Default::default()
+        };
+        assert!(TerminalAgent::Amp.is_visible_with(&shown, |_| {
+            unreachable!("explicit true must short-circuit install detection")
+        }));
+
+        let hidden = PaneFlowConfig {
+            claude_code_button_visible: Some(false),
+            ..Default::default()
+        };
+        assert!(!TerminalAgent::ClaudeCode.is_visible_with(&hidden, |_| {
+            unreachable!("explicit false must short-circuit install detection")
+        }));
     }
 
     #[test]

@@ -21,21 +21,15 @@ pub(crate) const TITLE_BAR_CONTROL_SPACING: Pixels = px(12.);
 pub(crate) const TITLE_BAR_CONTROL_SIZE: Pixels = px(20.);
 /// Minimum title-bar height preserving an 8px inset around compact controls.
 pub(crate) const TITLE_BAR_MIN_HEIGHT: Pixels = px(36.);
-/// Inset between the window shell and the primary navigation card.
-pub(crate) const SIDEBAR_CARD_INSET: f32 = 4.;
-/// The primary navigation rails share the main panel's structural corner language.
-pub(crate) const SIDEBAR_CARD_CORNER_RADIUS: Pixels = WINDOW_CORNER_RADIUS;
+/// Inset between the window shell and the main panel.
+pub(crate) const PANEL_INSET: f32 = 4.;
+/// The main panel's structural corner language.
+pub(crate) const PANEL_CORNER_RADIUS: Pixels = WINDOW_CORNER_RADIUS;
 /// Corner radius of a single CLI pane card.
 pub(crate) const PANE_CARD_RADIUS: Pixels = px(20.);
 /// Inner CLI content inset. Combined with the pane's reserved 1px border,
 /// this places the header row and terminal cells 4px from the main panel edge.
 pub(crate) const PANE_CONTENT_INSET: f32 = 3.;
-/// macOS Sidebar material already supplies theme-aware tints.
-/// The card remains fully transparent there so the material stays perceptible;
-/// its border still defines the inset surface.
-#[cfg(target_os = "macos")]
-const SIDEBAR_CARD_MATERIAL_OPACITY: f32 = 0.;
-
 /// Selected rows carry a stronger lift than hover rows so current navigation
 /// remains legible without a separate indicator. macOS keeps its native material.
 const DARK_SIDEBAR_TAB_TINT: u32 = 0xffffff;
@@ -136,19 +130,6 @@ pub(crate) fn cockpit_chrome_background(
 ) -> Hsla {
     let _ = (background, is_window_active, material_active);
     gpui::transparent_black()
-}
-
-/// Fill for the inset primary navigation card.
-///
-/// macOS exposes its raw native material, with the same opaque fallback when
-/// the material is off.
-pub(crate) fn primary_sidebar_card_background(surface: Hsla, material_active: bool) -> Hsla {
-    let opaque_surface = Hsla { a: 1.0, ..surface };
-    if !material_active {
-        opaque_surface
-    } else {
-        opaque_surface.opacity(SIDEBAR_CARD_MATERIAL_OPACITY)
-    }
 }
 
 /// Window-level backdrop behind the application chrome.
@@ -280,14 +261,5 @@ mod material_tests {
             cockpit_backdrop_background(background, true, false),
             background
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn native_sidebar_card_exposes_raw_material() {
-        let surface = Hsla::from(gpui::rgb(0x212122));
-        let card = primary_sidebar_card_background(surface, true);
-
-        assert_eq!(card.a, 0., "the sidebar must not veil native material");
     }
 }

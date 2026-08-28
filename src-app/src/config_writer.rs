@@ -2,6 +2,8 @@
 //!
 //! All functions operate on raw JSON to preserve unknown fields and formatting.
 
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -25,6 +27,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// a restart, and is self-healed by the next write or external reload.
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Typed `paneflow.json` marker for issue #85's one-time compatibility pass.
+/// Once true, install detection is never allowed to promote a launcher again.
+const AGENT_BUTTON_VISIBILITY_MIGRATION_KEY: &str = "agent_button_visibility_defaults_migrated";
+
 /// Acquire the config-write lock, recovering from a poisoned mutex (the guarded
 /// value is `()`, so a prior panic-while-held left nothing to corrupt). Avoids
 /// an `.unwrap()` on the lock per the repo's prod-unwrap lint.
@@ -39,9 +45,9 @@ fn config_write_guard() -> MutexGuard<'static, ()> {
 /// Missing file means a fresh empty object. Existing but unreadable, oversized,
 /// non-regular, or syntactically invalid files are rejected so a settings write
 /// cannot overwrite the user's recoverable `paneflow.json` with `{}`.
-fn load_raw_config(path: &Path) -> Result<serde_json::Value, ()> {
+fn load_raw_config_with_source(path: &Path) -> Result<(serde_json::Value, Option<String>), ()> {
     match paneflow_config::loader::read_config_string(path) {
-        Ok(None) => Ok(serde_json::json!({})),
+        Ok(None) => Ok((serde_json::json!({}), None)),
         Err(error) => {
             log::warn!("config: {error}; refusing to overwrite");
             Err(())
@@ -54,7 +60,7 @@ fn load_raw_config(path: &Path) -> Result<serde_json::Value, ()> {
                 );
             })?;
             if value.is_object() {
-                Ok(value)
+                Ok((value, Some(contents)))
             } else {
                 log::warn!(
                     "config: root at {} is not a JSON object; refusing to overwrite",
@@ -66,11 +72,55 @@ fn load_raw_config(path: &Path) -> Result<serde_json::Value, ()> {
     }
 }
 
+fn load_raw_config(path: &Path) -> Result<serde_json::Value, ()> {
+    load_raw_config_with_source(path).map(|(value, _source)| value)
+}
+
+#[derive(Clone, Copy)]
+enum ConfigWritePrecondition<'a> {
+    Any,
+    Missing,
+    Contents(&'a str),
+}
+
+/// Resolve an existing symlink to its managed target so an atomic replacement
+/// updates the target without silently breaking a dotfile-manager link. A
+/// dangling link is refused: replacing it would change the user's path policy.
+fn config_write_target(path: &Path) -> Result<PathBuf, std::io::Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path),
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Write a JSON value back to the config file, creating parent dirs if needed.
 /// Returns `true` on success, `false` otherwise (serialization or I/O error -
 /// logged at WARN in both cases).
-fn write_config_checked(path: &PathBuf, value: &serde_json::Value) -> bool {
-    if let Some(parent) = path.parent() {
+fn write_config_checked(path: &Path, value: &serde_json::Value) -> bool {
+    write_config_checked_with_precondition(path, value, ConfigWritePrecondition::Any)
+}
+
+/// Atomically publish `value`, optionally refusing the write if the source has
+/// changed since the caller read it. This protects automatic migrations from
+/// racing an editor or a second PaneFlow process.
+fn write_config_checked_with_precondition(
+    path: &Path,
+    value: &serde_json::Value,
+    precondition: ConfigWritePrecondition<'_>,
+) -> bool {
+    let write_target = match config_write_target(path) {
+        Ok(target) => target,
+        Err(error) => {
+            log::warn!(
+                "config: cannot resolve write target {}: {error}",
+                path.display()
+            );
+            return false;
+        }
+    };
+    if let Some(parent) = write_target.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let json_str = match serde_json::to_string_pretty(value) {
@@ -81,38 +131,160 @@ fn write_config_checked(path: &PathBuf, value: &serde_json::Value) -> bool {
         }
     };
 
-    // US-031: write atomically (tmp + rename) so a crash mid-write can't
+    // US-031: write atomically (exclusive random tmp + rename) so a crash
+    // mid-write can't
     // truncate `paneflow.json`. A truncated file parses as invalid JSON, which
     // `load_raw_config` silently swallows as an empty object - discarding the
-    // user's entire config. The temp file is PID-suffixed and lives in the
-    // target's own directory so the rename stays on one filesystem (a
-    // cross-FS rename is neither atomic nor, on some platforms, permitted).
-    // `std::fs::rename` replaces the destination atomically on all three OSes.
-    let Some(parent) = path.parent() else {
-        // No parent component (not expected for a real config path): fall back
-        // to a best-effort direct write rather than refusing outright.
-        return std::fs::write(path, &json_str)
-            .inspect_err(|e| log::warn!("config: failed to write: {e}"))
-            .is_ok();
+    // user's entire config. The temp file lives in the target's own directory
+    // so the rename stays on one filesystem. `NamedTempFile` creates a random,
+    // exclusive 0600 file, preventing a planted symlink from being followed.
+    let Some(parent) = write_target.parent() else {
+        log::warn!(
+            "config: write target {} has no parent; refusing a non-atomic write",
+            write_target.display()
+        );
+        return false;
     };
-    let file_name = path
+    let file_name = write_target
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("paneflow.json");
-    let tmp = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp, &json_str) {
-        log::warn!("config: failed to write temp file: {e}");
-        let _ = std::fs::remove_file(&tmp);
+    let mut tmp = match tempfile::Builder::new()
+        .prefix(&format!(".{file_name}.tmp."))
+        .tempfile_in(parent)
+    {
+        Ok(tmp) => tmp,
+        Err(error) => {
+            log::warn!("config: failed to create temp file: {error}");
+            return false;
+        }
+    };
+    if let Err(error) = tmp.write_all(json_str.as_bytes()) {
+        log::warn!("config: failed to write temp file: {error}");
         return false;
     }
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!("config: failed to promote temp file: {e}");
-            let _ = std::fs::remove_file(&tmp);
+    if let Err(error) = tmp.as_file().sync_all() {
+        log::warn!("config: failed to sync temp file: {error}");
+        return false;
+    }
+
+    let permissions = std::fs::metadata(&write_target)
+        .map(|metadata| metadata.permissions())
+        .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
+    if let Err(error) = tmp.as_file().set_permissions(permissions) {
+        log::warn!("config: failed to preserve permissions: {error}");
+        return false;
+    }
+
+    let current = match precondition {
+        ConfigWritePrecondition::Any => None,
+        ConfigWritePrecondition::Missing | ConfigWritePrecondition::Contents(_) => {
+            match paneflow_config::loader::read_config_string(&write_target) {
+                Ok(contents) => Some(contents),
+                Err(error) => {
+                    log::warn!("config: source changed or became unreadable: {error}");
+                    return false;
+                }
+            }
+        }
+    };
+    let precondition_holds = match (precondition, current.as_ref()) {
+        (ConfigWritePrecondition::Any, _) => true,
+        (ConfigWritePrecondition::Missing, Some(None)) => true,
+        (ConfigWritePrecondition::Contents(expected), Some(Some(actual))) => actual == expected,
+        _ => false,
+    };
+    if !precondition_holds {
+        log::warn!(
+            "config: {} changed while it was being migrated; refusing to overwrite",
+            write_target.display()
+        );
+        return false;
+    }
+
+    match tmp.persist(&write_target) {
+        Ok(_file) => true,
+        Err(error) => {
+            log::warn!("config: failed to promote temp file: {}", error.error);
             false
         }
     }
+}
+
+/// Preserve the old "every installed CLI is visible" behavior for configs
+/// that existed before the fresh-config allowlist was introduced.
+///
+/// `path` and install detection are injected for tests. The caller must invoke
+/// this only after the GUI process has adopted the login shell's `PATH`, or a
+/// Dock launch could miss Homebrew/version-manager agents. Missing files are
+/// fresh installs: they receive only the marker and retain the new defaults.
+/// Existing valid objects promote installed agents whose raw key is absent,
+/// null, or malformed; explicit booleans and unknown keys are preserved. The
+/// promoted values and marker are committed by one atomic temp-file rename.
+fn migrate_agent_button_visibility_at(
+    path: &Path,
+    mut is_installed: impl FnMut(crate::agent_launcher::TerminalAgent) -> bool,
+) -> bool {
+    use crate::agent_launcher::TerminalAgent;
+
+    let _guard = config_write_guard();
+    let write_target = match config_write_target(path) {
+        Ok(target) => target,
+        Err(error) => {
+            log::warn!(
+                "config: cannot resolve {} for agent visibility migration: {error}",
+                path.display()
+            );
+            return false;
+        }
+    };
+    let Ok((mut json, source)) = load_raw_config_with_source(&write_target) else {
+        return false;
+    };
+    let Some(root) = json.as_object_mut() else {
+        return false;
+    };
+
+    if root
+        .get(AGENT_BUTTON_VISIBILITY_MIGRATION_KEY)
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+
+    if source.is_some() {
+        for agent in TerminalAgent::ALL {
+            let key = agent.button_visibility_key();
+            let has_explicit_bool = root.get(key).is_some_and(serde_json::Value::is_boolean);
+            if !has_explicit_bool && is_installed(agent) {
+                root.insert(key.to_string(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+
+    root.insert(
+        AGENT_BUTTON_VISIBILITY_MIGRATION_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    let precondition = match source.as_deref() {
+        Some(contents) => ConfigWritePrecondition::Contents(contents),
+        None => ConfigWritePrecondition::Missing,
+    };
+    write_config_checked_with_precondition(&write_target, &json, precondition)
+}
+
+/// Run issue #85's one-time agent-button compatibility migration against the
+/// real config file. Call this from startup immediately after login-shell
+/// `PATH` adoption and before loading [`paneflow_config::schema::PaneFlowConfig`].
+/// Returns `false` only when the path cannot be resolved or the existing config
+/// is unsafe to overwrite / cannot be written.
+pub fn migrate_agent_button_visibility_defaults() -> bool {
+    let Some(path) = paneflow_config::loader::config_path() else {
+        log::warn!("config: cannot determine config path for agent visibility migration");
+        return false;
+    };
+    migrate_agent_button_visibility_at(&path, |agent| agent.is_installed())
 }
 
 /// Save a top-level config field, returning `true` on success and `false`
@@ -225,7 +397,7 @@ fn apply_reset_shortcuts(json: &mut serde_json::Value) {
 
 /// Remove all user shortcut overrides from `path`, restoring defaults.
 /// Returns `false` when the file cannot be loaded or the write fails.
-fn reset_shortcuts_at(path: &PathBuf) -> bool {
+fn reset_shortcuts_at(path: &Path) -> bool {
     let _guard = config_write_guard();
     let Ok(mut json) = load_raw_config(path) else {
         return false;
@@ -397,10 +569,120 @@ pub fn save_commands_checked(commands: Vec<paneflow_config::schema::CommandDefin
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_agent_panel_field, apply_reset_shortcuts, apply_terminal_field, load_raw_config,
-        merge_shortcut, reset_shortcuts_at, write_config_checked,
+        AGENT_BUTTON_VISIBILITY_MIGRATION_KEY, ConfigWritePrecondition, apply_agent_panel_field,
+        apply_reset_shortcuts, apply_terminal_field, load_raw_config, merge_shortcut,
+        migrate_agent_button_visibility_at, reset_shortcuts_at, write_config_checked,
+        write_config_checked_with_precondition,
     };
+    use crate::agent_launcher::TerminalAgent;
     use serde_json::{Value, json};
+    use std::collections::HashSet;
+
+    #[test]
+    fn agent_visibility_migration_marks_missing_config_without_promoting_agents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+
+        assert!(migrate_agent_button_visibility_at(&path, |_| true));
+        let got: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(got, json!({(AGENT_BUTTON_VISIBILITY_MIGRATION_KEY): true}));
+
+        assert!(migrate_agent_button_visibility_at(&path, |_| {
+            unreachable!("completed migration must not probe PATH again")
+        }));
+        let second: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(second, got, "migration must be idempotent");
+    }
+
+    #[test]
+    fn agent_visibility_migration_promotes_installed_legacy_defaults_atomically() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        let original = json!({
+            "theme": "Custom",
+            "unknown_extension": {"keep": true},
+            "codex_button_visible": false,
+            "grok_button_visible": true,
+            "pi_button_visible": null,
+            "hermes_agent_button_visible": "malformed",
+            "amp_button_visible": null
+        });
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let installed = HashSet::from([
+            TerminalAgent::Codex,
+            TerminalAgent::OpenCode,
+            TerminalAgent::Pi,
+            TerminalAgent::Hermes,
+            TerminalAgent::Grok,
+        ]);
+
+        assert!(migrate_agent_button_visibility_at(&path, |agent| {
+            installed.contains(&agent)
+        }));
+
+        let got: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(got[AGENT_BUTTON_VISIBILITY_MIGRATION_KEY], true);
+        assert_eq!(got["codex_button_visible"], false, "explicit false wins");
+        assert_eq!(got["grok_button_visible"], true, "explicit true wins");
+        assert_eq!(got["opencode_button_visible"], true, "absent is promoted");
+        assert_eq!(got["pi_button_visible"], true, "null is promoted");
+        assert_eq!(
+            got["hermes_agent_button_visible"], true,
+            "malformed legacy value is promoted"
+        );
+        assert_eq!(
+            got["amp_button_visible"],
+            Value::Null,
+            "uninstalled values stay untouched"
+        );
+        assert_eq!(got["theme"], original["theme"]);
+        assert_eq!(got["unknown_extension"], original["unknown_extension"]);
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(
+            leftovers, 0,
+            "marker and promoted values use one atomic write"
+        );
+    }
+
+    #[test]
+    fn agent_visibility_migration_leaves_invalid_config_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        std::fs::write(&path, "{").unwrap();
+
+        assert!(!migrate_agent_button_visibility_at(&path, |_| true));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
+    }
+
+    #[test]
+    fn agent_visibility_migration_preserves_a_symlinked_config() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("managed-paneflow.json");
+        let path = dir.path().join("paneflow.json");
+        std::fs::write(&target, r#"{"theme":"Custom"}"#).unwrap();
+        symlink(&target, &path).unwrap();
+
+        assert!(migrate_agent_button_visibility_at(&path, |agent| {
+            agent == TerminalAgent::OpenCode
+        }));
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "migration must update the managed target without replacing its symlink"
+        );
+        let got: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(got["opencode_button_visible"], true);
+        assert_eq!(got[AGENT_BUTTON_VISIBILITY_MIGRATION_KEY], true);
+    }
 
     #[test]
     fn write_config_is_atomic_and_leaves_no_temp() {
@@ -420,6 +702,51 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .count();
         assert_eq!(leftovers, 0, "the temp file must be renamed away");
+    }
+
+    #[test]
+    fn write_config_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        std::fs::write(&path, r#"{"theme":"Before"}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        assert!(write_config_checked(&path, &json!({"theme": "After"})));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
+    #[test]
+    fn write_config_ignores_a_preplanted_legacy_temp_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        let planted = dir
+            .path()
+            .join(format!(".paneflow.json.tmp.{}", std::process::id()));
+        std::fs::write(&planted, b"do not touch").unwrap();
+
+        assert!(write_config_checked(&path, &json!({"safe": true})));
+        assert_eq!(std::fs::read(&planted).unwrap(), b"do not touch");
+    }
+
+    #[test]
+    fn conditional_write_refuses_a_stale_source_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        let old = r#"{"theme":"Before"}"#;
+        let edited = r#"{"theme":"Edited"}"#;
+        std::fs::write(&path, edited).unwrap();
+
+        assert!(!write_config_checked_with_precondition(
+            &path,
+            &json!({"theme": "Migrated"}),
+            ConfigWritePrecondition::Contents(old),
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     }
 
     #[test]

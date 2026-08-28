@@ -28,121 +28,107 @@ struct AgentToggleRow {
     title: &'static str,
     description: &'static str,
     agent: TerminalAgent,
-    config_key: &'static str,
 }
 
-const AGENT_TOGGLE_ROWS: &[AgentToggleRow] = &[
+/// Settings-only order. This deliberately differs from the frozen launcher
+/// order in [`TerminalAgent::ALL`]: Grok sits directly after Codex here, while
+/// tab bars, Launch Pad, and status surfaces retain their established order.
+const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
     AgentToggleRow {
         id: "row-claude-visible",
         title: "Claude Code",
         description: "Show the Claude Code launcher button in every tab bar.",
         agent: TerminalAgent::ClaudeCode,
-        config_key: "claude_code_button_visible",
     },
     AgentToggleRow {
         id: "row-codex-visible",
         title: "Codex",
         description: "Show the Codex launcher button in every tab bar.",
         agent: TerminalAgent::Codex,
-        config_key: "codex_button_visible",
-    },
-    AgentToggleRow {
-        id: "row-opencode-visible",
-        title: "Opencode",
-        description: "Show the Opencode launcher button in every tab bar.",
-        agent: TerminalAgent::OpenCode,
-        config_key: "opencode_button_visible",
-    },
-    AgentToggleRow {
-        id: "row-pi-visible",
-        title: "Pi",
-        description: "Show the Pi launcher button in every tab bar.",
-        agent: TerminalAgent::Pi,
-        config_key: "pi_button_visible",
-    },
-    AgentToggleRow {
-        id: "row-hermes-agent-visible",
-        title: "Hermes Agent",
-        description: "Show the Hermes Agent launcher button in every tab bar.",
-        agent: TerminalAgent::Hermes,
-        config_key: "hermes_agent_button_visible",
     },
     AgentToggleRow {
         id: "row-grok-visible",
         title: "Grok",
         description: "Show the Grok launcher button in every tab bar.",
         agent: TerminalAgent::Grok,
-        config_key: "grok_button_visible",
+    },
+    AgentToggleRow {
+        id: "row-opencode-visible",
+        title: "Opencode",
+        description: "Show the Opencode launcher button in every tab bar.",
+        agent: TerminalAgent::OpenCode,
+    },
+    AgentToggleRow {
+        id: "row-pi-visible",
+        title: "Pi",
+        description: "Show the Pi launcher button in every tab bar.",
+        agent: TerminalAgent::Pi,
+    },
+    AgentToggleRow {
+        id: "row-hermes-agent-visible",
+        title: "Hermes Agent",
+        description: "Show the Hermes Agent launcher button in every tab bar.",
+        agent: TerminalAgent::Hermes,
     },
     AgentToggleRow {
         id: "row-amp-visible",
         title: "Amp",
         description: "Show the Amp launcher button in every tab bar.",
         agent: TerminalAgent::Amp,
-        config_key: "amp_button_visible",
     },
     AgentToggleRow {
         id: "row-cursor-visible",
         title: "Cursor",
         description: "Show the Cursor launcher button in every tab bar.",
         agent: TerminalAgent::Cursor,
-        config_key: "cursor_button_visible",
     },
     AgentToggleRow {
         id: "row-gemini-visible",
         title: "Gemini",
         description: "Show the Gemini launcher button in every tab bar.",
         agent: TerminalAgent::Gemini,
-        config_key: "gemini_button_visible",
     },
     AgentToggleRow {
         id: "row-kiro-visible",
         title: "Kiro",
         description: "Show the Kiro launcher button in every tab bar.",
         agent: TerminalAgent::Kiro,
-        config_key: "kiro_button_visible",
     },
     AgentToggleRow {
         id: "row-antigravity-visible",
         title: "Antigravity",
         description: "Show the Antigravity launcher button in every tab bar.",
         agent: TerminalAgent::Antigravity,
-        config_key: "antigravity_button_visible",
     },
     AgentToggleRow {
         id: "row-copilot-visible",
         title: "Copilot",
         description: "Show the Copilot launcher button in every tab bar.",
         agent: TerminalAgent::Copilot,
-        config_key: "copilot_button_visible",
     },
     AgentToggleRow {
         id: "row-codebuddy-visible",
         title: "CodeBuddy",
         description: "Show the CodeBuddy launcher button in every tab bar.",
         agent: TerminalAgent::CodeBuddy,
-        config_key: "codebuddy_button_visible",
     },
     AgentToggleRow {
         id: "row-factory-visible",
         title: "Factory",
         description: "Show the Factory launcher button in every tab bar.",
         agent: TerminalAgent::Factory,
-        config_key: "factory_button_visible",
     },
     AgentToggleRow {
         id: "row-qoder-visible",
         title: "Qoder",
         description: "Show the Qoder launcher button in every tab bar.",
         agent: TerminalAgent::Qoder,
-        config_key: "qoder_button_visible",
     },
     AgentToggleRow {
         id: "row-openclaw-visible",
         title: "Openclaw",
         description: "Show the Openclaw launcher button in every tab bar.",
         agent: TerminalAgent::Openclaw,
-        config_key: "openclaw_button_visible",
     },
 ];
 
@@ -153,21 +139,20 @@ impl PaneFlowApp {
         let ui = crate::theme::ui_colors();
 
         let mut buttons_card = setting_card(ui);
-        for (idx, row) in AGENT_TOGGLE_ROWS.iter().enumerate() {
+        for (idx, row) in SETTINGS_AGENT_ORDER.iter().enumerate() {
             if idx > 0 {
                 buttons_card = buttons_card.child(hairline(ui));
             }
-            // Effective state, not the raw key: an absent key defaults to
-            // "shown only if the agent's CLI is installed" (see
-            // `TerminalAgent::is_visible`). Toggling writes an explicit
-            // `Some(..)` that pins the choice regardless of install state.
+            // Effective state, not the raw key: absent keys use the
+            // Claude/Codex/Grok-and-installed allowlist (see
+            // `TerminalAgent::is_visible`). Toggling pins an explicit choice.
             buttons_card = buttons_card.child(toggle_row(
                 row.id,
                 row.title,
                 row.description,
                 Some(agent_icon_el(row.agent, ui)),
                 row.agent.is_visible(config),
-                row.config_key,
+                row.agent.button_visibility_key(),
                 ui,
                 cx,
             ));
@@ -203,5 +188,39 @@ fn agent_icon_el(agent: TerminalAgent, ui: crate::theme::UiColors) -> AnyElement
             .path(path)
             .text_color(tint)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn settings_agent_order_is_a_permutation_with_grok_after_codex() {
+        assert_eq!(SETTINGS_AGENT_ORDER.len(), TerminalAgent::ALL.len());
+        assert_eq!(
+            SETTINGS_AGENT_ORDER
+                .iter()
+                .map(|row| row.agent)
+                .collect::<HashSet<_>>(),
+            TerminalAgent::ALL.into_iter().collect::<HashSet<_>>(),
+            "Settings order must contain every TerminalAgent exactly once"
+        );
+
+        let codex = SETTINGS_AGENT_ORDER
+            .iter()
+            .position(|row| row.agent == TerminalAgent::Codex)
+            .expect("Codex in Settings order");
+        assert_eq!(
+            SETTINGS_AGENT_ORDER.get(codex + 1).map(|row| row.agent),
+            Some(TerminalAgent::Grok),
+            "Grok must appear directly after Codex in Settings only"
+        );
+        assert_eq!(
+            TerminalAgent::ALL[2],
+            TerminalAgent::OpenCode,
+            "TerminalAgent::ALL stays frozen for launcher surfaces"
+        );
     }
 }

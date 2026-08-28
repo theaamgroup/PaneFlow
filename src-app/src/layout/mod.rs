@@ -32,7 +32,7 @@ pub use tree::{LayoutTree, SplitDirection};
 /// split/insert site - split handlers, IPC `surface.split`, layout presets).
 pub(crate) const MAX_PANES: usize = 32;
 
-/// Outer gutter around the pane grid. Same width as the split divider so the
-/// outermost panes sit the same distance from the window chrome as they do
-/// from each other.
+/// Outer padding around the pane grid, matching the unpainted gap between two
+/// sibling panes so every card sits at the same distance from its neighbors
+/// and from the panel edge.
 pub(crate) const PANE_GUTTER_PX: f32 = tree::DIVIDER_PX;

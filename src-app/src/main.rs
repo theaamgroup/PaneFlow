@@ -349,18 +349,6 @@ impl StartupSplashView {
     }
 }
 
-fn native_backdrop_material_active(
-    mode: paneflow_config::schema::AppMode,
-    settings_open: bool,
-    terminal_material_active: bool,
-    chrome_material_active: bool,
-) -> bool {
-    chrome_material_active
-        || (!settings_open
-            && matches!(mode, paneflow_config::schema::AppMode::Cli)
-            && terminal_material_active)
-}
-
 fn should_load_login_shell_env_for_startup(
     is_mcp_subcommand: bool,
     is_cli_subcommand: bool,
@@ -437,49 +425,12 @@ fn global_help_text() -> String {
 #[cfg(test)]
 mod native_material_tests {
     use super::{
-        native_backdrop_material_active, should_extract_mcp_bridge_for_cli,
-        should_load_login_shell_env_for_startup, should_setup_hooks_for_cli,
+        should_extract_mcp_bridge_for_cli, should_load_login_shell_env_for_startup,
+        should_setup_hooks_for_cli,
     };
-    use paneflow_config::schema::AppMode;
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_string()).collect()
-    }
-
-    #[test]
-    fn terminal_material_can_activate_backdrop_without_chrome_material() {
-        assert!(native_backdrop_material_active(
-            AppMode::Cli,
-            false,
-            true,
-            false
-        ));
-    }
-
-    #[test]
-    fn terminal_material_only_applies_to_visible_cli_terminal() {
-        assert!(!native_backdrop_material_active(
-            AppMode::Cli,
-            true,
-            true,
-            false
-        ));
-        assert!(!native_backdrop_material_active(
-            AppMode::Diff,
-            false,
-            true,
-            false
-        ));
-    }
-
-    #[test]
-    fn chrome_material_activates_backdrop_independently() {
-        assert!(native_backdrop_material_active(
-            AppMode::Diff,
-            true,
-            false,
-            true
-        ));
     }
 
     #[test]
@@ -655,135 +606,6 @@ fn panel_corner_mask(corner: PanelCorner, background: gpui::Hsla) -> impl IntoEl
         },
     )
     .size_full()
-}
-
-/// Paints the opaque window shell around the one inset card that is allowed to
-/// reveal native material. Windows DWM backdrops and macOS AppKit effect views
-/// span the host window, so the card is isolated by covering every pixel
-/// outside its rounded contour.
-fn sidebar_card_backdrop_mask(
-    sidebar_width: f32,
-    card_horizontal_inset: f32,
-    card_width: f32,
-    card_vertical_inset: f32,
-    title_bar_height: Pixels,
-    background: gpui::Hsla,
-    preserve_terminal_material: bool,
-) -> impl IntoElement {
-    let card_right = card_horizontal_inset + card_width;
-    let sidebar_right_gap = (sidebar_width - card_right).max(0.);
-
-    div()
-        .absolute()
-        .left_0()
-        .right_0()
-        .top_0()
-        .bottom_0()
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .bottom_0()
-                .w(px(card_horizontal_inset))
-                .bg(background),
-        )
-        .when(card_width > 0., |mask| {
-            mask.child(
-                div()
-                    .absolute()
-                    .left(px(card_horizontal_inset))
-                    .top_0()
-                    .w(px(card_width))
-                    .h(px(card_vertical_inset))
-                    .bg(background),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(card_horizontal_inset))
-                    .bottom_0()
-                    .w(px(card_width))
-                    .h(px(card_vertical_inset))
-                    .bg(background),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(card_horizontal_inset))
-                    .top(px(card_vertical_inset))
-                    .bottom(px(card_vertical_inset))
-                    .w(px(card_width))
-                    .child(
-                        div()
-                            .relative()
-                            .size_full()
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top_0()
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
-                                    .child(panel_corner_mask(PanelCorner::TopLeft, background)),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right_0()
-                                    .top_0()
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
-                                    .child(panel_corner_mask(PanelCorner::TopRight, background)),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .bottom_0()
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
-                                    .child(panel_corner_mask(PanelCorner::BottomLeft, background)),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right_0()
-                                    .bottom_0()
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
-                                    .child(panel_corner_mask(PanelCorner::BottomRight, background)),
-                            ),
-                    ),
-            )
-        })
-        .when(preserve_terminal_material, |mask| {
-            mask.child(
-                div()
-                    .absolute()
-                    .left(px(card_right))
-                    .top_0()
-                    .right_0()
-                    .h(title_bar_height)
-                    .bg(background),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(card_right))
-                    .top_0()
-                    .bottom_0()
-                    .w(px(sidebar_right_gap))
-                    .bg(background),
-            )
-        })
-        .when(!preserve_terminal_material, |mask| {
-            mask.child(
-                div()
-                    .absolute()
-                    .left(px(card_right))
-                    .top_0()
-                    .right_0()
-                    .bottom_0()
-                    .bg(background),
-            )
-        })
 }
 
 fn startup_splash_letter(
@@ -1180,10 +1002,6 @@ struct PaneFlowApp {
     /// the target state; this keeps the rail mounted while its layout width
     /// eases open or closed.
     primary_sidebar_animation: Option<SidebarWidthAnimation>,
-    /// Anchor for the `Files` menu in the custom title bar.
-    title_bar_files_menu_open: Option<Point<Pixels>>,
-    /// Anchor for the `Help` menu in the custom title bar.
-    title_bar_help_menu_open: Option<Point<Pixels>>,
     /// File watcher for `.git/HEAD` and `.git/index` across all workspaces.
     /// `None` if the OS watcher could not be created (graceful degradation).
     git_watcher: Option<notify::RecommendedWatcher>,
@@ -1534,9 +1352,8 @@ impl PaneFlowApp {
     }
 
     /// Toggle the primary rail and settle the chrome around it: collapsing it
-    /// takes every transient surface with it (popovers and menus anchor to the
-    /// rail that is going away), while expanding only clears the two title-bar
-    /// menus so the returning rail is not left overlapped by one.
+    /// takes every transient surface with it because those popovers anchor to
+    /// the rail that is going away. Expanding needs no dismissal work.
     ///
     /// The single entry point for both routes to the rail - the title-bar
     /// button (`TitleBarEvent::ToggleSidebar`) and the `TogglePrimarySidebar`
@@ -1550,9 +1367,6 @@ impl PaneFlowApp {
         self.toggle_primary_sidebar(cx);
         if !self.primary_sidebar_visible {
             self.dismiss_transient_surfaces();
-        } else {
-            self.title_bar_files_menu_open = None;
-            self.title_bar_help_menu_open = None;
         }
     }
 
@@ -1668,7 +1482,6 @@ impl Render for PaneFlowApp {
         let files_sidebar_opacity = (files_sidebar_width
             / crate::app::files_sidebar::FILES_SIDEBAR_WIDTH.max(1.))
         .clamp(0., 1.);
-        let secondary_sidebar_open = sessions_sidebar_mounted || files_sidebar_mounted;
         // Every mode now renders the right area as ONE top-rounded clipped panel
         // (`panel_bg` fill + 16px rail-side top radius + 5px inset), replacing the
         // old Cli/Diff corner-mask trick. GPUI clips the panel's bg fill to the
@@ -1676,32 +1489,15 @@ impl Render for PaneFlowApp {
         // radius on macOS, where a solid mask would read as a square patch. The
         // 5px inset keeps opaque content (terminal cells, diff rows, settings
         // cards) off the arc, since GPUI does NOT clip children to the radius.
-        // The Cli pane grid keeps the terminal background. Diff / Agents /
-        // Settings use the #181818 surface.
-        let terminal_material_active = false;
+        // The Cli pane grid keeps the terminal background on each pane card.
+        // Diff and Settings use the opaque application surface.
         let chrome_material_active = self.cached_config.cockpit_chrome_material_enabled();
-        let terminal_surface_mounted = self
-            .active_workspace()
-            .is_some_and(|ws| ws.active_tab().root.is_some());
-        let terminal_material_visible = !settings_open
-            && matches!(self.mode, paneflow_config::schema::AppMode::Cli)
-            && terminal_surface_mounted
-            && terminal_material_active;
-        let native_material_active = native_backdrop_material_active(
-            self.mode,
-            settings_open,
-            terminal_material_active,
-            chrome_material_active,
-        );
+        let native_material_active = chrome_material_active;
         let is_window_active = window.is_window_active();
         let shell_color = if is_window_active {
             theme.title_bar_background
         } else {
             theme.title_bar_inactive_background
-        };
-        let opaque_shell_bg = gpui::Hsla {
-            a: 1.,
-            ..shell_color
         };
         let app_backdrop_bg = crate::app::constants::cockpit_backdrop_background(
             shell_color,
@@ -1712,10 +1508,10 @@ impl Render for PaneFlowApp {
             ui.base
         } else {
             match self.mode {
-                paneflow_config::schema::AppMode::Cli if terminal_material_visible => {
-                    gpui::transparent_black()
-                }
-                paneflow_config::schema::AppMode::Cli => theme.background,
+                // CLI panes are self-contained cards carrying their own fill,
+                // so the panel behind them stays empty and lets the native
+                // window shell read through the gutters between them.
+                paneflow_config::schema::AppMode::Cli => gpui::transparent_black(),
                 paneflow_config::schema::AppMode::Diff => ui.base,
             }
         };
@@ -1735,30 +1531,14 @@ impl Render for PaneFlowApp {
         } else {
             (primary_sidebar_width / self.primary_sidebar_expanded_width().max(1.)).clamp(0., 1.)
         };
-        // Every primary rail, including Settings, uses the same inset card.
-        let primary_sidebar_card_mounted = primary_sidebar_mounted;
-        let primary_sidebar_card_horizontal_inset =
-            crate::app::constants::SIDEBAR_CARD_INSET.min(primary_sidebar_width / 2.);
-        let main_panel_left_inset = if primary_sidebar_card_mounted {
-            crate::app::constants::SIDEBAR_CARD_INSET - primary_sidebar_card_horizontal_inset
-        } else {
-            crate::app::constants::SIDEBAR_CARD_INSET
-        };
-        let primary_sidebar_card_width =
-            (primary_sidebar_width - primary_sidebar_card_horizontal_inset * 2.).max(0.);
-        let primary_sidebar_card_bg = crate::app::constants::primary_sidebar_card_background(
-            ui.surface,
-            chrome_material_active,
-        );
-        let isolate_primary_sidebar_material = chrome_material_active;
-        // Native sidebar material is isolated by an opaque shell mask. Reuse
-        // that shell color for the main panel's corner wedges: transparent
-        // paint cannot cover rectangular child backgrounds on Windows/macOS.
-        let main_panel_corner_mask_bg = if isolate_primary_sidebar_material {
-            opaque_shell_bg
-        } else {
-            panel_corner_mask_bg
-        };
+        // The primary rail is a flat region of the window shell: no inset
+        // card, border, or isolating mask. Native material therefore spans it
+        // like the rest of the chrome. The panel inset and pane gutter fade
+        // back in as the rail closes, avoiding redundant air while it is open.
+        let panel_edge_share = 1. - primary_sidebar_opacity;
+        let main_panel_left_inset = crate::app::constants::PANEL_INSET * panel_edge_share;
+        let pane_grid_left_gutter = crate::layout::PANE_GUTTER_PX * panel_edge_share;
+        let main_panel_corner_mask_bg = panel_corner_mask_bg;
 
         // EP-003 US-009: focus the pane created by a drop-to-split. Deferred
         // here from the `DropSplit` subscription handler (no `Window` there).
@@ -1799,7 +1579,7 @@ impl Render for PaneFlowApp {
                 let outer = div()
                     .flex()
                     .size_full()
-                    .pl(px(crate::layout::PANE_GUTTER_PX))
+                    .pl(px(pane_grid_left_gutter))
                     .pr(px(crate::layout::PANE_GUTTER_PX))
                     .pt(px(crate::layout::PANE_GUTTER_PX))
                     .pb(px(crate::layout::PANE_GUTTER_PX));
@@ -1836,7 +1616,7 @@ impl Render for PaneFlowApp {
                 div()
                     .flex()
                     .size_full()
-                    .pl(px(crate::layout::PANE_GUTTER_PX))
+                    .pl(px(pane_grid_left_gutter))
                     .pr(px(crate::layout::PANE_GUTTER_PX))
                     .pt(px(crate::layout::PANE_GUTTER_PX))
                     .pb(px(crate::layout::PANE_GUTTER_PX))
@@ -1916,8 +1696,6 @@ impl Render for PaneFlowApp {
             tb.workspace_name = ws_name;
             tb.sidebar_visible = self.primary_sidebar_visible;
             tb.left_rail_width = title_bar_rail_width;
-            tb.files_menu_open = self.title_bar_files_menu_open.is_some();
-            tb.help_menu_open = self.title_bar_help_menu_open.is_some();
             tb.ipc_state = self.ipc_status.state();
             // Cockpit chrome (#141414 + no divider) for both Cli and Diff.
             tb.cockpit = true;
@@ -2016,9 +1794,9 @@ impl Render for PaneFlowApp {
                 cx.dispatch_action(&TerminalSelectAll);
             }))
             .on_action(cx.listener(|_this: &mut Self, _: &OpenHelp, _window, _cx| {
-                if let Err(e) =
-                    crate::external_open::open_url("https://github.com/theaamgroup/paneflow#readme")
-                {
+                if let Err(e) = crate::external_open::open_http_url(
+                    "https://github.com/theaamgroup/paneflow#readme",
+                ) {
                     log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 }
             }))
@@ -2093,77 +1871,6 @@ impl Render for PaneFlowApp {
                     // this row transparent is load-bearing: GPUI clips child
                     // overflow to a rectangle, so a row fill would repaint the
                     // transparent pixels outside the surface's corner radius.
-                    // Sidebar content fades during width animations. Keep a
-                    // stable chrome fill behind it so terminal-only material
-                    // never exposes unblurred desktop pixels in the rail area.
-                    .when(
-                        terminal_material_visible && primary_sidebar_mounted,
-                        |row| {
-                            row.child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top_0()
-                                    .bottom_0()
-                                    .w(px(primary_sidebar_width))
-                                    .bg(panel_corner_mask_bg),
-                            )
-                        },
-                    )
-                    .when(terminal_material_visible && secondary_sidebar_open, |row| {
-                        row.child(
-                            div()
-                                .absolute()
-                                .right_0()
-                                .top_0()
-                                .bottom_0()
-                                .w(px(if sessions_sidebar_mounted {
-                                    sessions_sidebar_width
-                                } else {
-                                    files_sidebar_width
-                                }))
-                                .bg(if isolate_primary_sidebar_material {
-                                    opaque_shell_bg
-                                } else {
-                                    panel_corner_mask_bg
-                                }),
-                        )
-                    })
-                    // Native sidebar material belongs visually to the inset
-                    // navigation card only. The platform backdrop still spans
-                    // the host window, so this opaque mask covers the rest of
-                    // the shell. A separately enabled Windows terminal material
-                    // keeps its transparent panel while the chrome stays opaque.
-                    .when(isolate_primary_sidebar_material, |row| {
-                        row.child(sidebar_card_backdrop_mask(
-                            primary_sidebar_width,
-                            primary_sidebar_card_horizontal_inset,
-                            primary_sidebar_card_width,
-                            crate::app::constants::SIDEBAR_CARD_INSET,
-                            title_bar_h,
-                            opaque_shell_bg,
-                            terminal_material_visible,
-                        ))
-                    })
-                    // One childless decorative layer spans every primary rail
-                    // and the title-bar overlay. Keeping it absolute preserves
-                    // each mode's reflow width and follows the existing
-                    // open/close animation without a second layout path.
-                    .when(primary_sidebar_card_mounted, |row| {
-                        row.child(
-                            div()
-                                .absolute()
-                                .left(px(primary_sidebar_card_horizontal_inset))
-                                .top(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                .bottom(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                .w(px(primary_sidebar_card_width))
-                                .rounded(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
-                                .bg(primary_sidebar_card_bg)
-                                .border_1()
-                                .border_color(ui.border)
-                                .opacity(primary_sidebar_opacity),
-                        )
-                    })
                     // While settings is open the left rail becomes the Codex
                     // settings nav (kept visible even if the user had hidden the
                     // primary rail, so the back button is always reachable).
@@ -2225,10 +1932,10 @@ impl Render for PaneFlowApp {
                             .flex()
                             .flex_col()
                             // Every mode renders the right area with the same
-                            // 10px corner language and 4px side/bottom inset as
-                            // the CLI sidebar card. The content remains flush at
-                            // the top; corner masks below preserve all four arcs
-                            // because GPUI does not clip children to the radius.
+                            // 10px corner language and 4px side/bottom inset.
+                            // The content remains flush at the top; corner masks
+                            // below preserve all four arcs because GPUI does not
+                            // clip children to the radius.
                             .child(div().h(title_bar_h).flex_none())
                             .child(
                                 div()
@@ -2240,9 +1947,9 @@ impl Render for PaneFlowApp {
                                     .overflow_hidden()
                                     .bg(panel_bg)
                                     .ml(px(main_panel_left_inset))
-                                    .mr(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                    .mb(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                    .rounded(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
+                                    .mr(px(crate::app::constants::PANEL_INSET))
+                                    .mb(px(crate::app::constants::PANEL_INSET))
+                                    .rounded(crate::app::constants::PANEL_CORNER_RADIUS)
                                     .capture_any_mouse_down(cx.listener(
                                         |this, event: &gpui::MouseDownEvent, _window, cx| {
                                             if event.button == gpui::MouseButton::Left
@@ -2265,41 +1972,6 @@ impl Render for PaneFlowApp {
                                     ))
                                     .child(main_content),
                             )
-                            // Windows Acrylic spans the host window. Cover the
-                            // panel's outer insets so native material cannot
-                            // continue past the four rounded corner wedges.
-                            .when(terminal_material_visible, |panel_shell| {
-                                panel_shell
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .right_0()
-                                            .top(panel_top)
-                                            .bottom_0()
-                                            .w(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                            .bg(opaque_shell_bg),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .right_0()
-                                            .bottom_0()
-                                            .h(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                            .bg(opaque_shell_bg),
-                                    )
-                                    .when(main_panel_left_inset > 0., |panel_shell| {
-                                        panel_shell.child(
-                                            div()
-                                                .absolute()
-                                                .left_0()
-                                                .top(panel_top)
-                                                .bottom_0()
-                                                .w(px(main_panel_left_inset))
-                                                .bg(opaque_shell_bg),
-                                        )
-                                    })
-                            })
                             // GPUI clips overflow with a rectangular content
                             // mask, so rounded panel children can still paint
                             // square backgrounds in the corners. These masks
@@ -2309,7 +1981,7 @@ impl Render for PaneFlowApp {
                                     .absolute()
                                     .left(px(main_panel_left_inset))
                                     .top(panel_top)
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
+                                    .size(crate::app::constants::PANEL_CORNER_RADIUS)
                                     .child(panel_corner_mask(
                                         PanelCorner::TopLeft,
                                         main_panel_corner_mask_bg,
@@ -2318,9 +1990,9 @@ impl Render for PaneFlowApp {
                             .child(
                                 div()
                                     .absolute()
-                                    .right(px(crate::app::constants::SIDEBAR_CARD_INSET))
+                                    .right(px(crate::app::constants::PANEL_INSET))
                                     .top(panel_top)
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
+                                    .size(crate::app::constants::PANEL_CORNER_RADIUS)
                                     .child(panel_corner_mask(
                                         PanelCorner::TopRight,
                                         main_panel_corner_mask_bg,
@@ -2330,8 +2002,8 @@ impl Render for PaneFlowApp {
                                 div()
                                     .absolute()
                                     .left(px(main_panel_left_inset))
-                                    .bottom(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
+                                    .bottom(px(crate::app::constants::PANEL_INSET))
+                                    .size(crate::app::constants::PANEL_CORNER_RADIUS)
                                     .child(panel_corner_mask(
                                         PanelCorner::BottomLeft,
                                         main_panel_corner_mask_bg,
@@ -2340,9 +2012,9 @@ impl Render for PaneFlowApp {
                             .child(
                                 div()
                                     .absolute()
-                                    .right(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                    .bottom(px(crate::app::constants::SIDEBAR_CARD_INSET))
-                                    .size(crate::app::constants::SIDEBAR_CARD_CORNER_RADIUS)
+                                    .right(px(crate::app::constants::PANEL_INSET))
+                                    .bottom(px(crate::app::constants::PANEL_INSET))
+                                    .size(crate::app::constants::PANEL_CORNER_RADIUS)
                                     .child(panel_corner_mask(
                                         PanelCorner::BottomRight,
                                         main_panel_corner_mask_bg,
@@ -2411,14 +2083,6 @@ impl Render for PaneFlowApp {
 
         if let Some(toast) = &self.toast {
             app_content = app_content.child(self.render_toast(toast, ui));
-        }
-
-        if let Some(anchor) = self.title_bar_files_menu_open {
-            app_content = app_content.child(self.render_title_bar_files_menu(anchor, window, cx));
-        }
-
-        if let Some(anchor) = self.title_bar_help_menu_open {
-            app_content = app_content.child(self.render_title_bar_help_menu(anchor, window, cx));
         }
 
         if let Some(anchor) = self.profile_menu_open {
@@ -2525,11 +2189,7 @@ impl Render for PaneFlowApp {
             app_content,
             window,
             app_backdrop_bg,
-            if terminal_material_visible {
-                gpui::transparent_black()
-            } else {
-                ui.border
-            },
+            ui.border,
         )
     }
 }
@@ -2898,6 +2558,14 @@ fn main() {
         eprintln!("paneflow: unknown verb '{verb}'; see `paneflow --help` for the verb list");
         std::process::exit(2);
     }
+
+    // Issue #85: preserve every agent launcher that an existing installation
+    // would have shown under the old PATH-only default, then let fresh configs
+    // use the Claude/Codex/Grok allowlist. This is deliberately after login-
+    // shell and static PATH adoption, and only after every CLI path has exited,
+    // so the one-time probe sees the GUI's complete PATH and a read-only CLI
+    // invocation never mutates paneflow.json.
+    config_writer::migrate_agent_button_visibility_defaults();
 
     #[cfg(target_os = "macos")]
     warn_if_rosetta_translated();

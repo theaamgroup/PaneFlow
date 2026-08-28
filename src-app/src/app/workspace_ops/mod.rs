@@ -938,7 +938,7 @@ impl PaneFlowApp {
     }
 
     /// Close every open popover. Menus and only menus, deliberately: not one
-    /// of these seven fields tracks focus, which is why this needs no `Window`
+    /// of these five fields tracks focus, which is why this needs no `Window`
     /// and why its ~17 call sites - several of which have no `Window` to give
     /// it - are safe by construction.
     ///
@@ -947,7 +947,7 @@ impl PaneFlowApp {
     /// The renamed sidebar row is the ONLY element that tracks
     /// `sidebar_rename_focus`, and it stops tracking it the instant that state
     /// clears; clearing it from a caller with no `Window` (the title-bar
-    /// sidebar-collapse and menu toggles, the IPC/CLI `workspace.select` path)
+    /// sidebar-collapse or the IPC/CLI `workspace.select` path)
     /// leaves the window with nothing focused at all. That is exactly the
     /// issue #108 state - the dispatch path collapses to the tree root and
     /// every global `context: None` binding matches but finds no handler - and
@@ -966,8 +966,6 @@ impl PaneFlowApp {
     /// `empty_workspace_focus` - which would cover every stranding route at
     /// once. Neither belongs inside a menu dismisser.
     pub(crate) fn dismiss_transient_surfaces(&mut self) {
-        self.title_bar_files_menu_open = None;
-        self.title_bar_help_menu_open = None;
         self.workspace_menu_open = None;
         self.tab_menu_open = None;
         self.pane_menu_open = None;

@@ -99,18 +99,7 @@ fn pane_colors() -> crate::theme::UiColors {
 /// header, the content region and the terminal element are all transparent, so
 /// this single rounded quad is what the corners clip cleanly (GPUI does not
 /// clip a child's own background to its parent's radius).
-///
-/// Windows terminal material stays scoped to terminal surfaces: there the card
-/// itself goes transparent so the Mica backdrop reads through the pane.
-fn pane_card_background(
-    theme: &crate::theme::TerminalTheme,
-    terminal_material_active: bool,
-    terminal_selected: bool,
-) -> Hsla {
-    if !terminal_material_active || !terminal_selected {
-        return theme.background;
-    }
-
+fn pane_card_background(theme: &crate::theme::TerminalTheme) -> Hsla {
     theme.background
 }
 
@@ -1821,14 +1810,13 @@ impl Focusable for Pane {
 
 impl Render for Pane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let terminal_selected = matches!(self.surface, PaneSurface::Terminal(_));
         let body = match &self.surface {
             PaneSurface::Terminal(t) => t.clone().into_any_element(),
             PaneSurface::Markdown(m) => m.clone().into_any_element(),
             PaneSurface::Diff(d) => d.clone().into_any_element(),
         };
         let theme = crate::theme::active_theme();
-        let card_background = pane_card_background(&theme, false, terminal_selected);
+        let card_background = pane_card_background(&theme);
 
         // Unfocused-pane dim (Ghostty `unfocused-split-opacity`, rebuilt as a
         // single layer instead of one per apprt): a plain compositing quad over
@@ -2141,14 +2129,10 @@ mod tests {
     };
 
     #[test]
-    fn terminal_material_scopes_the_card_to_terminal_surfaces() {
+    fn pane_card_uses_the_terminal_theme_background() {
         let theme = crate::theme::paneflow_dark();
 
-        assert_eq!(pane_card_background(&theme, true, false), theme.background);
-        assert_eq!(pane_card_background(&theme, false, true), theme.background);
-
-        let material = pane_card_background(&theme, true, true);
-        assert_eq!(material, theme.background);
+        assert_eq!(pane_card_background(&theme), theme.background);
     }
 
     /// Issue #83, R1/R3: the armed close chip is pushed in from the app

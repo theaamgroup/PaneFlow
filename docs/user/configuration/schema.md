@@ -45,7 +45,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `workspace_auto_sort` | boolean or null | `false` | Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. |
 | `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
-| `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material in the primary navigation card. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
+| `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material across the whole window shell: the primary rail, panel inset, and pane gutters. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
 | `option_as_meta` | boolean or null | `false` | Option produces Unicode input by default. Set to `true` to send Option/Alt as an ESC prefix. |
 | `shell_integration` | boolean or null | enabled | Master switch for shell rc injection: OSC 7 CWD reporting and OSC 133 command marks. |
 | `agent_stall_detection` | boolean or null | `true` | Enables stalled-agent detection. |
@@ -59,6 +59,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `claude_code_bypass_permissions` | boolean or null | `false` | Adds Claude Code `--permission-mode bypassPermissions` when launching from PaneFlow. |
 | `ai_unrestricted` | boolean or null | `false` | Allows trusted automation to submit via IPC without `PANEFLOW_IPC_SCRIPTING=1`. |
 | `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI conductors. |
+| `agent_button_visibility_defaults_migrated` | boolean or null | `null` | Internal one-time marker recording that a pre-allowlist config preserved its installed launcher buttons as explicit values. Runtime visibility does not otherwise consult it. |
 | `agent_panel` | object or null | defaults below | Agents-view display, profiles, and notification settings. |
 | `tool_permissions` | object | `{}` | Per-tool always-allow and always-deny input patterns. |
 
@@ -78,33 +79,41 @@ the published schema.
 | `opaque`, `off` | Opaque |
 
 `opaque`, `off`, and `transparent` also silently switch off
-`macos_chrome_material`, whatever that key is set to. If the sidebar
+`macos_chrome_material`, whatever that key is set to. If the whole-shell
 material disappears after a backdrop change, this is why.
 
 ## Agent buttons
 
 Each button visibility key is `boolean or null`. `true` always shows the
-button, `false` hides it, and `null` or an omitted key auto-detects the
-CLI binary.
+button and `false` always hides it. For a fresh config, `null` or an omitted
+key shows Claude Code, Codex, or Grok only when that CLI is installed; the
+other 13 agents default off even when installed.
 
-| Key | Agent |
-|---|---|
-| `claude_code_button_visible` | Claude Code |
-| `codex_button_visible` | Codex |
-| `opencode_button_visible` | Opencode |
-| `pi_button_visible` | Pi |
-| `hermes_agent_button_visible` | Hermes Agent |
-| `grok_button_visible` | Grok |
-| `amp_button_visible` | Amp |
-| `cursor_button_visible` | Cursor |
-| `gemini_button_visible` | Gemini |
-| `kiro_button_visible` | Kiro |
-| `antigravity_button_visible` | Antigravity |
-| `copilot_button_visible` | Copilot |
-| `codebuddy_button_visible` | CodeBuddy |
-| `factory_button_visible` | Factory |
-| `qoder_button_visible` | Qoder |
-| `openclaw_button_visible` | Openclaw |
+On the first launch after upgrading from the old all-installed default,
+PaneFlow preserves an existing valid config by writing explicit `true` values
+for its installed agents and setting `agent_button_visibility_defaults_migrated`
+in the same atomic write. A missing file gets only the marker, so a genuinely
+fresh config uses the new allowlist. Explicit booleans and unknown keys are
+preserved; an invalid config is left untouched.
+
+| Key | Agent | Fresh null/omitted default |
+|---|---|---|
+| `claude_code_button_visible` | Claude Code | On if installed |
+| `codex_button_visible` | Codex | On if installed |
+| `grok_button_visible` | Grok | On if installed |
+| `opencode_button_visible` | Opencode | Off |
+| `pi_button_visible` | Pi | Off |
+| `hermes_agent_button_visible` | Hermes Agent | Off |
+| `amp_button_visible` | Amp | Off |
+| `cursor_button_visible` | Cursor | Off |
+| `gemini_button_visible` | Gemini | Off |
+| `kiro_button_visible` | Kiro | Off |
+| `antigravity_button_visible` | Antigravity | Off |
+| `copilot_button_visible` | Copilot | Off |
+| `codebuddy_button_visible` | CodeBuddy | Off |
+| `factory_button_visible` | Factory | Off |
+| `qoder_button_visible` | Qoder | Off |
+| `openclaw_button_visible` | Openclaw | Off |
 
 ## Terminal block
 
@@ -304,6 +313,7 @@ test fixture leaves it unset.
   "claude_code_bypass_permissions": false,
   "ai_unrestricted": false,
   "ai_injection_fence": true,
+  "agent_button_visibility_defaults_migrated": null,
   "claude_code_button_visible": null,
   "codex_button_visible": null,
   "opencode_button_visible": null,

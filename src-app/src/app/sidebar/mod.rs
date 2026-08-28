@@ -94,6 +94,36 @@ struct SidebarServiceSummary {
     overflow: usize,
 }
 
+/// Visual strength of the workspace text that may be quieted when the
+/// workspace has no foreground work. Kept separate from the row shell and
+/// agent badge so neither can accidentally inherit the idle treatment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SidebarWorkspaceTone {
+    title_opacity: f32,
+    meta_opacity: f32,
+}
+
+/// Match the Files tree's established quiet step, but apply it only to a
+/// workspace's title and service metadata. The row shell, action buttons, and
+/// agent badge stay at full strength.
+const IDLE_WORKSPACE_TEXT_OPACITY: f32 = 0.55;
+
+fn sidebar_workspace_tone(
+    is_selected: bool,
+    is_idle: bool,
+    is_waiting_for_input: bool,
+) -> SidebarWorkspaceTone {
+    let opacity = if is_idle && !is_selected && !is_waiting_for_input {
+        IDLE_WORKSPACE_TEXT_OPACITY
+    } else {
+        1.0
+    };
+    SidebarWorkspaceTone {
+        title_opacity: opacity,
+        meta_opacity: opacity,
+    }
+}
+
 pub(crate) const SIDEBAR_ROW_MARGIN_X: f32 = 8.0;
 pub(crate) const SIDEBAR_ROW_PADDING_X: f32 = 8.0;
 pub(crate) const SIDEBAR_ROW_PADDING_Y: f32 = 6.0;
@@ -1298,12 +1328,23 @@ impl PaneFlowApp {
             folder_sessions(),
             ws.agent_completion_notification.is_unread(),
         );
+        // Issue #76: a waiting hook is authoritative even if the process scan
+        // has not caught up yet. Use the whole workspace here rather than the
+        // folder badge's filtered session set: when the folder is expanded,
+        // an attributed waiting session moves to its tab badge but must still
+        // prevent a contradictory dim on the folder title.
+        let is_waiting_for_input = ws
+            .agent_sessions
+            .values()
+            .any(|session| session.state == ai_types::AgentState::WaitingForInput);
+        let tone =
+            sidebar_workspace_tone(i == self.active_idx, ws.is_idle(cx), is_waiting_for_input);
         let title_el = if self.renaming_idx == Some(i) {
             div()
                 .flex_1()
                 .min_w_0()
                 .overflow_x_hidden()
-                .text_color(ui.text)
+                .text_color(ui.text.opacity(tone.title_opacity))
                 .text_sm()
                 .line_height(px(SIDEBAR_ROW_LINE_HEIGHT))
                 .font_weight(FontWeight::MEDIUM)
@@ -1318,7 +1359,7 @@ impl PaneFlowApp {
                 .overflow_x_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_color(ui.text)
+                .text_color(ui.text.opacity(tone.title_opacity))
                 .text_sm()
                 .line_height(px(SIDEBAR_ROW_LINE_HEIGHT))
                 .font_weight(FontWeight::MEDIUM)
@@ -1394,7 +1435,7 @@ impl PaneFlowApp {
             .gap(px(SIDEBAR_ROW_GAP))
             .child(title_row);
 
-        if let Some(meta_row) = self.render_workspace_meta_row(ws, ui, cx) {
+        if let Some(meta_row) = self.render_workspace_meta_row(ws, tone.meta_opacity, ui, cx) {
             body = body.child(meta_row);
         }
 
@@ -1916,6 +1957,7 @@ impl PaneFlowApp {
     fn render_workspace_meta_row(
         &self,
         ws: &Workspace,
+        opacity: f32,
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -1934,6 +1976,7 @@ impl PaneFlowApp {
             .overflow_x_hidden()
             .whitespace_nowrap()
             .text_xs()
+            .opacity(opacity)
             .text_color(ui.muted);
 
         let port = service.primary;
@@ -2508,7 +2551,8 @@ mod tests {
         SidebarAgentSummary, SidebarDropSlot, SidebarRow, SidebarServiceSummary, WorkspaceOrderKey,
         compute_auto_order, folder_row_sessions, rename_key_action, reorder_target,
         sidebar_agent_summary, sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary,
-        tab_display_title, tab_icon_cluster_split, tab_row_sessions, visible_service_ports,
+        sidebar_workspace_tone, tab_display_title, tab_icon_cluster_split, tab_row_sessions,
+        visible_service_ports,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
@@ -2522,6 +2566,52 @@ mod tests {
 
     fn session(state: AgentState) -> AgentSession {
         AgentSession::new(TerminalAgent::ClaudeCode, state)
+    }
+
+    #[test]
+    fn idle_unselected_workspace_quiets_only_its_text_content() {
+        let tone = sidebar_workspace_tone(false, true, false);
+        assert!(tone.title_opacity < 1.0);
+        assert!(tone.meta_opacity < 1.0);
+    }
+
+    #[test]
+    fn selected_busy_and_waiting_workspaces_stay_full_strength() {
+        for tone in [
+            sidebar_workspace_tone(true, true, false),
+            sidebar_workspace_tone(false, false, false),
+            sidebar_workspace_tone(false, true, true),
+        ] {
+            assert_eq!(tone.title_opacity, 1.0);
+            assert_eq!(tone.meta_opacity, 1.0);
+        }
+    }
+
+    #[test]
+    fn idle_workspace_tone_never_dims_the_row_shell_or_agent_badge() {
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production sidebar source");
+        let workspace_row = production
+            .split("fn render_workspace_row(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("fn render_tab_row(\n").next())
+            .expect("workspace row renderer");
+
+        assert!(
+            workspace_row.contains("text_color(ui.text.opacity(tone.title_opacity))"),
+            "idle tone must be applied directly to title text"
+        );
+        assert!(
+            !workspace_row.contains(".opacity(tone.title_opacity)\n"),
+            "idle tone on a parent would also fade the row chrome or agent badge"
+        );
+        assert!(
+            workspace_row
+                .contains("render_workspace_agent_summary(\n                row_agent_status,"),
+            "the agent badge must remain an independent full-strength element"
+        );
     }
 
     #[test]

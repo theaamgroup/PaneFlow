@@ -25,7 +25,7 @@
 //!   output is the user's own shell talking to them.
 //!
 //! `validate_link_url` is the production gate for untrusted URLs handed to
-//! `open::that` (Help-menu links via `external_open::open_http_url`).
+//! `open::that` (the native Help URL via `external_open::open_http_url`).
 //! Image refs still have no load path: the parser emits a `[image: <url>]`
 //! placeholder (`parser.rs`). Markdown link spans are styled but not
 //! clickable (`view.rs::build_styled_text`); when click hit-testing is
