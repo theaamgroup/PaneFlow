@@ -290,12 +290,66 @@ fn read_jsonc_source(path: &Path) -> Result<String> {
 /// Codex's parent table for MCP servers.
 pub(crate) const CODEX_TABLE: &str = "mcp_servers";
 
+/// Paneflow pane identity that Codex must explicitly forward to stdio MCP
+/// servers. Codex otherwise launches the bridge without the workspace scope
+/// and socket selected by the Paneflow PTY.
+pub(crate) const CODEX_ENV_VARS: &[&str] = &["PANEFLOW_SOCKET_PATH", "PANEFLOW_WORKSPACE_ID"];
+
+fn ensure_codex_env_vars(doc: &mut toml_edit::DocumentMut) -> Result<()> {
+    use toml_edit::{value, Array, Item, Value};
+
+    let entry = doc
+        .get_mut(CODEX_TABLE)
+        .and_then(Item::as_table_mut)
+        .and_then(|parent| parent.get_mut(ENTRY))
+        .and_then(Item::as_table_like_mut)
+        .context("managed Codex MCP entry is not a TOML table")?;
+
+    let valid_array = entry
+        .get("env_vars")
+        .and_then(Item::as_array)
+        .is_some_and(|array| array.iter().all(|item| item.as_str().is_some()));
+
+    if valid_array {
+        let array = entry
+            .get_mut("env_vars")
+            .and_then(Item::as_array_mut)
+            .context("validated Codex env_vars array became unavailable")?;
+        for required in CODEX_ENV_VARS {
+            if !array.iter().any(|item| item.as_str() == Some(*required)) {
+                array.push(Value::from(*required));
+            }
+        }
+    } else {
+        let mut array = Array::new();
+        for required in CODEX_ENV_VARS {
+            array.push(Value::from(*required));
+        }
+        entry.insert("env_vars", value(array));
+    }
+
+    Ok(())
+}
+
+fn codex_env_vars_ok(entry: &toml_edit::Item) -> bool {
+    entry
+        .get("env_vars")
+        .and_then(toml_edit::Item::as_array)
+        .is_some_and(|array| {
+            CODEX_ENV_VARS
+                .iter()
+                .all(|required| array.iter().any(|item| item.as_str() == Some(*required)))
+        })
+}
+
 pub(crate) fn toml_install(path: &Path, command: &str) -> Result<InstallOutcome> {
     io::with_config_lock(path, || {
         let mut doc = merge::read_toml_or_default(path)?;
         let had_prior = doc.get(CODEX_TABLE).and_then(|t| t.get(ENTRY)).is_some();
-        let changed = merge::upsert_toml_entry(&mut doc, CODEX_TABLE, ENTRY, command, &[])?;
-        if !changed {
+        let before = doc.to_string();
+        merge::upsert_toml_entry(&mut doc, CODEX_TABLE, ENTRY, command, &[])?;
+        ensure_codex_env_vars(&mut doc)?;
+        if doc.to_string() == before {
             return Ok(InstallOutcome::AlreadyCurrent);
         }
         io::write_if_changed_unlocked(path, &merge::toml_to_bytes(&doc))?;
@@ -344,12 +398,12 @@ pub(crate) fn toml_status(path: &Path, expected: Option<&Path>) -> Result<Status
         .get("enabled")
         .and_then(|e| e.as_bool())
         .unwrap_or(true);
-    let shape_ok = args_ok && enabled_ok;
+    let shape_ok = args_ok && enabled_ok && codex_env_vars_ok(entry);
     Ok(classify_entry(
         found,
         expected,
         shape_ok,
-        "Codex MCP entry must have empty args and must not be disabled",
+        "Codex MCP entry must have empty args, forward Paneflow's socket/workspace variables, and must not be disabled",
     ))
 }
 

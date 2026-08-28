@@ -140,7 +140,14 @@ impl AgentConfigWriter for Codex {
             }
         }
 
-        support::toml_install(path, &bridge_s)
+        let fallback = support::toml_install(path, &bridge_s)?;
+        Ok(match fallback {
+            InstallOutcome::AlreadyCurrent => InstallOutcome::AlreadyCurrent,
+            InstallOutcome::Installed | InstallOutcome::Updated if had_prior => {
+                InstallOutcome::Updated
+            }
+            InstallOutcome::Installed | InstallOutcome::Updated => InstallOutcome::Installed,
+        })
     }
 
     fn uninstall(&self) -> Result<UninstallOutcome> {
@@ -222,6 +229,15 @@ mod tests {
             doc["mcp_servers"]["paneflow"]["command"].as_str(),
             Some("/data/paneflow-mcp")
         );
+        let env_vars = doc["mcp_servers"]["paneflow"]["env_vars"]
+            .as_array()
+            .unwrap();
+        assert!(env_vars
+            .iter()
+            .any(|value| value.as_str() == Some("PANEFLOW_SOCKET_PATH")));
+        assert!(env_vars
+            .iter()
+            .any(|value| value.as_str() == Some("PANEFLOW_WORKSPACE_ID")));
     }
 
     #[test]
@@ -271,6 +287,51 @@ mod tests {
         assert!(matches!(
             w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
             StatusOutcome::NeedsRepair { .. }
+        ));
+    }
+
+    #[test]
+    fn install_repairs_missing_env_forwards_and_preserves_custom_ones() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "[mcp_servers.paneflow]\ncommand = \"/data/paneflow-mcp\"\nargs = []\nenv_vars = [\"CUSTOM_VAR\"]\n",
+        )
+        .unwrap();
+        let w = test_writer(p.clone());
+
+        assert!(matches!(
+            w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
+            StatusOutcome::NeedsRepair { .. }
+        ));
+        assert_eq!(
+            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
+            InstallOutcome::Updated
+        );
+
+        let doc = std::fs::read_to_string(&p)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        let env_vars = doc["mcp_servers"]["paneflow"]["env_vars"]
+            .as_array()
+            .unwrap();
+        for expected in [
+            "CUSTOM_VAR",
+            "PANEFLOW_SOCKET_PATH",
+            "PANEFLOW_WORKSPACE_ID",
+        ] {
+            assert!(
+                env_vars
+                    .iter()
+                    .any(|value| value.as_str() == Some(expected)),
+                "missing {expected} in {env_vars:?}"
+            );
+        }
+        assert!(matches!(
+            w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
+            StatusOutcome::Installed { .. }
         ));
     }
 
@@ -331,6 +392,9 @@ mod tests {
             doc["mcp_servers"]["paneflow"]["command"].as_str(),
             Some("/data/paneflow-mcp")
         );
+        assert!(doc["mcp_servers"]["paneflow"]["env_vars"]
+            .as_array()
+            .is_some_and(|env_vars| env_vars.len() == 2));
     }
 
     #[test]
