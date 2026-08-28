@@ -72,7 +72,17 @@ impl Tab {
     }
 
     pub fn pane_count(&self) -> usize {
-        self.root.as_ref().map_or(0, |r| r.leaf_count())
+        // Mirror `serialize`'s precedence, and `contains_pane` / `any_pane`, which
+        // both already consult BOTH trees. Under zoom the real layout lives in
+        // `saved_layout` and `root` holds only the zoomed pane, so reading `root`
+        // alone reported 1 - making `can_add_pane()` effectively unconditional.
+        // Every pane added while zoomed was then silently discarded by
+        // `exit_zoom`'s `self.root = Some(saved)`, taking its PTY and any running
+        // agent with it.
+        self.saved_layout
+            .as_ref()
+            .or(self.root.as_ref())
+            .map_or(0, |r| r.leaf_count())
     }
 
     /// Whether this tab can take one more pane.
