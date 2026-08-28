@@ -26,6 +26,46 @@ pass. Twelve landed here, all gates green, test list name-diffed
 - Copy/paste had no focus guard, so Edit > Paste executed the clipboard in
   the shell while the find bar was focused.
 
+**2026-08-28 UI cluster (six items, from a single issue list).** Landed on
+top of the deep review, in three file-disjoint batches:
+
+- **About dialog** (`app/about_dialog.rs`) grew a retro CRT credit plate and a
+  dashed, deliberately inert "Add Contributors Here" placeholder; copyright is
+  now `© 2026 AAM USA, Inc. All rights reserved.`, and the dialog's own
+  "Paneflow" spellings were corrected to "PaneFlow". `VT323-Regular.ttf` +
+  its OFL are in `src-app/assets/fonts/` and need no code change to ship
+  (`Assets::load_fonts` iterates the embed registry).
+- **Inactive-workspace dim** reaches sidebar tab rows, on a *second* axis from
+  the existing idle tone. Foreground only, one shared quiet step
+  (`IDLE_WORKSPACE_TEXT_OPACITY`), guarded by a source-scraping test.
+- **Inline rename opens selected.** `rename_seeded` on `PaneFlowApp`; the
+  first printable key or backspace spends the whole seeded value.
+- **A tab label is now DERIVED**, never stored: manual `Tab::title`, else the
+  first pane's `Pane::surface_title` (which already ranks custom name > OSC >
+  agent name), else `Tab N`. Nothing is written to `session.json`.
+- **The sidebar footer gear is gone**, finishing issue #105. Settings is the
+  menu bar and the profile menu, and nothing else.
+- **`review_enabled`** (default `true`) gates the Review surface; off, the
+  whole mode strip stops rendering.
+
+**Three traps this cluster hit, all worth carrying:**
+
+- **GPUI at this rev has `linear_gradient`, inset `BoxShadow` and
+  `border_dashed`, but NO `text_shadow`.** A neon *text* halo is not
+  reproducible; glow must come from the box. Do not try to fake it with
+  layered offset text.
+- **A shared blink phase does not blink an idle window.** Only `TerminalView`
+  observes `BlinkPhaseGlobal`, so a caret painted off it freezes in its
+  last-painted state - half the time hidden. `PaneFlowApp` now observes it too
+  but repaints ONLY while the About dialog is open; an unconditional notify
+  would wake the whole app every 530 ms for a decoration nobody is watching.
+- **Deriving a display label breaks any equality check written against the
+  stored one.** `tab_rename_should_persist` used to rebuild `"Tab N"` from
+  `Tab::title`; once the label could also come from a pane, that
+  reconstruction stopped matching what the editor was seeded with, and
+  pressing Enter on an untouched agent-derived label would have frozen it into
+  `Tab::title`. It now takes the displayed string from its caller.
+
 **Three method rules this review paid for:**
 
 - **A doc claim is a liability, not a record.** The review falsified
