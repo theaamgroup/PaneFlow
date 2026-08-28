@@ -1358,11 +1358,15 @@ impl PaneFlowApp {
     /// [`Self::has_unscanned_surface`], so they cannot outlive the first
     /// successful deposit.
     fn schedule_port_scan(&mut self, ws_idx: usize, cx: &mut Context<Self>) {
-        let unscanned = self.has_unscanned_surface(ws_idx, cx);
-        let ws = &mut self.workspaces[ws_idx];
-        if ws.port_scan_pending {
+        // The `port_scan_pending` guard has to come FIRST. `has_unscanned_surface`
+        // walks every pane of the workspace, and a ladder is in flight for ~8.5s at
+        // a time, so computing it above this early return threw the walk away on
+        // the overwhelming majority of calls (one per `ActivityBurst`, per pane).
+        if self.workspaces[ws_idx].port_scan_pending {
             return;
         }
+        let unscanned = self.has_unscanned_surface(ws_idx, cx);
+        let ws = &mut self.workspaces[ws_idx];
         ws.port_scan_pending = true;
         ws.port_scan_generation += 1;
         let generation = ws.port_scan_generation;
