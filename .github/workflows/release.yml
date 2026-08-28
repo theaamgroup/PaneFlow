@@ -93,8 +93,10 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      # `--all-targets` to match run_tests.yml and the local gate in CLAUDE.md;
+      # without it test-only modules are never linted.
       - name: cargo clippy
-        run: cargo clippy --workspace --locked --target "$TARGET" -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --target "$TARGET" -- -D warnings
 
       # Workspace suite BEFORE the release build so a failing test aborts
       # the run before the bundle / sign / notarize spend (issue #71). Same

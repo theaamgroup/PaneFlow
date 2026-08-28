@@ -424,8 +424,12 @@ jobs:
       # type-checks platform-gated modules (runtime_paths.rs macOS arm,
       # install_method::AppBundle, update_checker::AssetFormat::Dmg,
       # etc.).
+      # `--all-targets` is REQUIRED: without it clippy never sees test-only
+      # modules, so a lint in a `#[cfg(test)]` block passes CI and fails the
+      # local gate that CLAUDE.md prescribes. Neither form is a superset of
+      # the other, so the two must not drift.
       - name: cargo clippy (aarch64-apple-darwin)
-        run: cargo clippy --workspace --locked --target aarch64-apple-darwin -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
 
       # cargo test on the workspace. `--target` pins compilation to
       # aarch64-apple-darwin so test binaries are native Mach-O and
