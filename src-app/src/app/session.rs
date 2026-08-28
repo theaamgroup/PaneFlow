@@ -109,6 +109,10 @@ impl PaneFlowApp {
                             repo_root: wt.repo_root.to_string_lossy().into_owned(),
                             branch: wt.branch.clone(),
                             teardown: wt.teardown.as_str().to_string(),
+                            directory_identity: wt
+                                .identity
+                                .as_ref()
+                                .map(|identity| identity.as_str().to_string()),
                         })
                         .collect(),
                     // Issue #107: the sidebar pin is a choice about a project,
@@ -484,14 +488,8 @@ impl PaneFlowApp {
             workspace.pinned = ws_session.pinned;
             // EP-002 (orchestration-v2): rehydrate worktree ownership so the
             // close-time teardown still applies after a restart.
-            let mut restored_worktrees: Vec<_> = ws_session
-                .managed_worktrees
-                .iter()
-                .take(MAX_PANES)
-                .filter_map(rehydrate_managed_worktree)
-                .collect();
-            restored_worktrees.sort_by(|left, right| left.path.cmp(&right.path));
-            restored_worktrees.dedup_by(|left, right| left.path == right.path);
+            let mut restored_worktrees =
+                rehydrate_managed_worktree_records(&ws_session.managed_worktrees);
             for worktree in &mut restored_worktrees {
                 if let Some(&first_owner) = worktree_owners.get(&worktree.path) {
                     // Sessions written before exclusive ownership validation
@@ -919,11 +917,32 @@ fn rehydrate_expanded_path(cwd: &str, rel: &str) -> Option<PathBuf> {
 pub(super) fn rehydrate_managed_worktree(
     def: &paneflow_config::schema::ManagedWorktreeDef,
 ) -> Option<crate::workspace::worktree::ManagedWorktree> {
-    crate::workspace::worktree::managed_worktree_from_record(
+    crate::workspace::worktree::managed_worktree_from_persisted_record(
         &def.path,
         &def.repo_root,
         &def.branch,
         &def.teardown,
+        def.directory_identity.as_deref(),
+    )
+}
+
+fn rehydrate_managed_worktree_records(
+    defs: &[paneflow_config::schema::ManagedWorktreeDef],
+) -> Vec<crate::workspace::worktree::ManagedWorktree> {
+    crate::workspace::worktree::merge_managed_worktree_records(
+        defs.iter().filter_map(rehydrate_managed_worktree).collect(),
+    )
+}
+
+pub(super) fn rehydrate_pending_managed_worktree(
+    def: &paneflow_config::schema::ManagedWorktreeDef,
+) -> Option<crate::workspace::worktree::ManagedWorktree> {
+    crate::workspace::worktree::pending_managed_worktree_from_persisted_record(
+        &def.path,
+        &def.repo_root,
+        &def.branch,
+        &def.teardown,
+        def.directory_identity.as_deref(),
     )
 }
 
@@ -935,6 +954,10 @@ fn managed_worktree_def(
         repo_root: worktree.repo_root.to_string_lossy().into_owned(),
         branch: worktree.branch.clone(),
         teardown: worktree.teardown.as_str().to_string(),
+        directory_identity: worktree
+            .identity
+            .as_ref()
+            .map(|identity| identity.as_str().to_string()),
     }
 }
 
@@ -945,7 +968,7 @@ fn persisted_pending_worktree_teardowns(
     pending: &[crate::workspace::worktree::ManagedWorktree],
     closed: &[crate::ClosedRecord],
 ) -> Vec<paneflow_config::schema::ManagedWorktreeDef> {
-    let mut worktrees: Vec<_> = pending
+    let worktrees: Vec<_> = pending
         .iter()
         .chain(closed.iter().flat_map(|record| match record {
             crate::ClosedRecord::Workspace(workspace) => workspace.managed_worktrees.iter(),
@@ -953,8 +976,7 @@ fn persisted_pending_worktree_teardowns(
         }))
         .cloned()
         .collect();
-    worktrees.sort_by(|left, right| left.path.cmp(&right.path));
-    worktrees.dedup_by(|left, right| left.path == right.path);
+    let worktrees = crate::workspace::worktree::merge_managed_worktree_records(worktrees);
     worktrees.iter().map(managed_worktree_def).collect()
 }
 
@@ -1750,7 +1772,12 @@ mod tests {
         std::fs::create_dir_all(&owned_path).expect("owned worktree dir");
         std::fs::write(
             crate::workspace::worktree::owner_marker_path(&owned_path),
-            "owner=paneflow\n",
+            format!(
+                "owner=paneflow\nrepo_root={}\nbranch={branch}\n",
+                std::fs::canonicalize(&repo_root)
+                    .expect("canonical repo root")
+                    .display()
+            ),
         )
         .expect("owner marker");
         let valid = paneflow_config::schema::ManagedWorktreeDef {
@@ -1758,6 +1785,7 @@ mod tests {
             repo_root: repo_root.to_string_lossy().into_owned(),
             branch: branch.to_string(),
             teardown: "auto".to_string(),
+            directory_identity: None,
         };
 
         let restored = rehydrate_managed_worktree(&valid).expect("valid owned worktree restores");
@@ -1789,6 +1817,45 @@ mod tests {
             restored.teardown,
             crate::workspace::worktree::TeardownPolicy::Keep,
             "unknown restored policy must not become auto-remove"
+        );
+    }
+
+    #[test]
+    fn restored_managed_ownership_is_not_truncated_at_one_tab_pane_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let canonical_repo = std::fs::canonicalize(&repo_root).expect("canonical repo");
+        let defs: Vec<_> = (0..40)
+            .map(|index| {
+                let branch = format!("feature-{index}");
+                let path = crate::workspace::worktree::worktree_dir(&repo_root, &branch);
+                std::fs::create_dir_all(&path).expect("worktree dir");
+                std::fs::write(
+                    crate::workspace::worktree::owner_marker_path(&path),
+                    format!(
+                        "owner=paneflow\nrepo_root={}\nbranch={branch}\n",
+                        canonical_repo.display()
+                    ),
+                )
+                .expect("owner marker");
+                paneflow_config::schema::ManagedWorktreeDef {
+                    path: path.to_string_lossy().into_owned(),
+                    repo_root: repo_root.to_string_lossy().into_owned(),
+                    branch,
+                    teardown: "auto".to_string(),
+                    directory_identity: None,
+                }
+            })
+            .collect();
+        let json = serde_json::to_string(&defs).expect("serialize ownership records");
+        let restored_defs: Vec<paneflow_config::schema::ManagedWorktreeDef> =
+            serde_json::from_str(&json).expect("restore ownership records");
+
+        assert_eq!(
+            rehydrate_managed_worktree_records(&restored_defs).len(),
+            40,
+            "managed lifecycle evidence follows the workspace terminal envelope, not MAX_PANES"
         );
     }
 
@@ -1915,13 +1982,16 @@ mod tests {
     }
 
     #[test]
-    fn session_journal_includes_closed_workspace_ownership_and_deduplicates_it() {
+    fn session_journal_includes_closed_workspace_ownership_and_preserves_keep() {
         let worktree = crate::workspace::worktree::ManagedWorktree {
             path: PathBuf::from("/tmp/repo.worktrees/feature"),
             repo_root: PathBuf::from("/tmp/repo"),
             branch: "feature".to_string(),
             teardown: crate::workspace::worktree::TeardownPolicy::Auto,
+            identity: None,
         };
+        let mut closed_worktree = worktree.clone();
+        closed_worktree.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
         let closed = vec![crate::ClosedRecord::Workspace(
             crate::ClosedWorkspaceRecord {
                 workspace_id: 7,
@@ -1934,7 +2004,7 @@ mod tests {
                 files_expanded: Vec::new(),
                 sidebar_expanded: true,
                 pinned: false,
-                managed_worktrees: vec![worktree.clone()],
+                managed_worktrees: vec![closed_worktree],
             },
         )];
 
@@ -1942,7 +2012,7 @@ mod tests {
 
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].path, "/tmp/repo.worktrees/feature");
-        assert_eq!(journal[0].teardown, "auto");
+        assert_eq!(journal[0].teardown, "keep");
     }
 
     /// EP-002 US-005: a legacy pane listing several surfaces restores the

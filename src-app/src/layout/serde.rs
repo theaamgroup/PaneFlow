@@ -89,11 +89,8 @@ impl LayoutTree {
                     .map(|tab| match tab {
                         crate::pane::PaneSurface::Terminal(tv) => {
                             let tv_ref = tv.read(cx);
-                            let name = if tv_ref.terminal.title.is_empty() {
-                                None
-                            } else {
-                                Some(tv_ref.terminal.title.clone())
-                            };
+                            let name =
+                                crate::sidebar_title::clean_sidebar_title(&tv_ref.terminal.title);
                             let cwd = tv_ref.terminal.current_cwd.clone().or_else(|| {
                                 tv_ref.terminal.cwd_now().map(|p| p.display().to_string())
                             });
@@ -396,6 +393,29 @@ mod tests {
             }
             LayoutNode::Split { .. } => panic!("the leftover spawn is the second pane"),
         }
+    }
+
+    #[gpui::test]
+    fn serialized_terminal_name_is_scrubbed_and_bounded(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let hostile = format!("\u{202e}\u{200b}{}", "x".repeat(400));
+        terminal.update(cx, |view, _cx| view.terminal.title = hostile);
+        let pane = cx.new(|cx| Pane::new(terminal, 1, cx));
+        let tree = LayoutTree::Leaf(pane);
+
+        let serialized = cx.update(|_, cx| tree.serialize_without_scrollback(cx));
+        let LayoutNode::Pane { surfaces } = serialized else {
+            panic!("a leaf must serialize as a pane")
+        };
+        let name = surfaces[0]
+            .name
+            .as_deref()
+            .expect("meaningful title survives scrubbing");
+        assert!(!name.contains('\u{202e}'));
+        assert!(!name.contains('\u{200b}'));
+        assert!(name.chars().count() <= 241, "{name}");
+        assert!(name.ends_with('…'), "{name}");
     }
 
     fn pane_leaf_count(node: &LayoutNode) -> usize {

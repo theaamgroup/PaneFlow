@@ -155,6 +155,14 @@ enum BuiltModeRows {
     },
 }
 
+fn review_column_belongs_to_workspace(
+    column_workspace_id: Option<u64>,
+    workspace_id: u64,
+    include_every_column: bool,
+) -> bool {
+    include_every_column || column_workspace_id == Some(workspace_id)
+}
+
 #[cfg(test)]
 fn build_rows_for_mode(
     files: &[super::git::FileDiff],
@@ -852,6 +860,83 @@ impl DiffView {
             .collect()
     }
 
+    /// Live CWDs of embedded Review terminals, including terminals in cached
+    /// or hidden columns. App-level worktree retirement uses this because these
+    /// entities are not panes in any workspace layout.
+    pub(crate) fn review_terminal_cwds(&self, cx: &App) -> Vec<PathBuf> {
+        let mut cwds = Vec::new();
+        for column in &self.columns {
+            for review in &column.review_terminals {
+                let terminal = review.terminal.read(cx);
+                if let Some(cwd) = terminal.terminal.cwd_now() {
+                    cwds.push(cwd);
+                }
+                if let Some(cwd) = terminal.terminal.current_cwd.as_deref() {
+                    cwds.push(PathBuf::from(cwd));
+                }
+            }
+        }
+        cwds
+    }
+
+    pub(crate) fn review_terminals(&self) -> Vec<Entity<crate::terminal::TerminalView>> {
+        self.columns
+            .iter()
+            .flat_map(|column| {
+                column
+                    .review_terminals
+                    .iter()
+                    .map(|review| review.terminal.clone())
+            })
+            .collect()
+    }
+
+    /// Review terminals destroyed by closing `workspace_id`. When this is the
+    /// repo's last workspace, every column is included: cached columns can
+    /// retain the ID of an earlier workspace incarnation for the same repo.
+    pub(crate) fn review_terminals_for_workspace(
+        &self,
+        workspace_id: u64,
+        include_every_column: bool,
+    ) -> Vec<Entity<crate::terminal::TerminalView>> {
+        self.columns
+            .iter()
+            .filter(|column| {
+                review_column_belongs_to_workspace(
+                    column.workspace_id,
+                    workspace_id,
+                    include_every_column,
+                )
+            })
+            .flat_map(|column| {
+                column
+                    .review_terminals
+                    .iter()
+                    .map(|review| review.terminal.clone())
+            })
+            .collect()
+    }
+
+    pub(crate) fn drop_review_terminals_for_workspace(
+        &mut self,
+        workspace_id: u64,
+        include_every_column: bool,
+    ) {
+        for column in &mut self.columns {
+            if review_column_belongs_to_workspace(
+                column.workspace_id,
+                workspace_id,
+                include_every_column,
+            ) {
+                column.drop_review_terminals();
+            }
+        }
+    }
+
+    pub(crate) fn repo_root(&self) -> &std::path::Path {
+        &self.repo_root
+    }
+
     /// Resolve the base ref + branch list off the main thread, then kick off the
     /// per-column diffs and the live-refresh watcher. Doing the git subprocesses
     /// AND the (recursive, ~20k-dir) inotify registration walk off the GPUI
@@ -1343,6 +1428,23 @@ mod tests {
             removed,
             is_binary: file.is_binary,
         }
+    }
+
+    #[test]
+    fn last_repo_workspace_includes_review_columns_with_stale_workspace_ids() {
+        let current_workspace_id = 22;
+        let stale_workspace_id = Some(11);
+
+        assert!(review_column_belongs_to_workspace(
+            stale_workspace_id,
+            current_workspace_id,
+            true,
+        ));
+        assert!(!review_column_belongs_to_workspace(
+            stale_workspace_id,
+            current_workspace_id,
+            false,
+        ));
     }
 
     fn loaded_column_with_both_modes() -> Column {

@@ -47,6 +47,93 @@ pub(crate) enum WorkspaceFocusTarget {
     },
 }
 
+/// True when an existing candidate path resolves to the managed worktree or a
+/// descendant. The canonical fallback catches UI/session paths that preserve a
+/// symlink spelling while managed ownership always stores a canonical path.
+fn path_is_within_worktree(candidate: &std::path::Path, worktree: &std::path::Path) -> bool {
+    if candidate.starts_with(worktree) {
+        return true;
+    }
+    let Some(resolved_candidate) = candidate.canonicalize().ok() else {
+        return false;
+    };
+    let resolved_worktree = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    resolved_candidate.starts_with(resolved_worktree)
+}
+
+fn preserve_pending_policy_for_live_owners(
+    live: &mut [crate::workspace::worktree::ManagedWorktree],
+    pending: &[crate::workspace::worktree::ManagedWorktree],
+) {
+    for live_record in live {
+        let Some(pending_record) = pending
+            .iter()
+            .find(|pending_record| pending_record.path == live_record.path)
+        else {
+            continue;
+        };
+        if pending_record.teardown == crate::workspace::worktree::TeardownPolicy::Keep
+            || pending_record.repo_root != live_record.repo_root
+            || pending_record.branch != live_record.branch
+            || pending_record.identity != live_record.identity
+        {
+            live_record.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+        }
+    }
+}
+
+fn layout_uses_worktree(
+    layout: &LayoutNode,
+    fallback_cwd: Option<&std::path::Path>,
+    worktree: &std::path::Path,
+) -> bool {
+    match layout {
+        LayoutNode::Pane { surfaces } => surfaces.iter().any(|surface| {
+            if matches!(
+                surface.surface_type.as_deref(),
+                Some("markdown") | Some("diff")
+            ) {
+                return false;
+            }
+            surface
+                .cwd
+                .as_deref()
+                .map(std::path::Path::new)
+                .or(fallback_cwd)
+                .is_some_and(|cwd| path_is_within_worktree(cwd, worktree))
+        }),
+        LayoutNode::Split { children, .. } => children
+            .iter()
+            .any(|child| layout_uses_worktree(child, fallback_cwd, worktree)),
+    }
+}
+
+fn closed_record_uses_worktree(record: &ClosedRecord, worktree: &std::path::Path) -> bool {
+    match record {
+        ClosedRecord::Pane(record) => match &record.surface {
+            ClosedSurfaceRecord::Terminal { cwd, .. } => cwd
+                .as_deref()
+                .is_some_and(|cwd| path_is_within_worktree(cwd, worktree)),
+            ClosedSurfaceRecord::Markdown { .. } => false,
+        },
+        ClosedRecord::Tab(record) => layout_uses_worktree(&record.layout, None, worktree),
+        ClosedRecord::Workspace(record) => {
+            let fallback = std::path::Path::new(&record.cwd);
+            path_is_within_worktree(fallback, worktree)
+                || record.managed_worktrees.iter().any(|owned| {
+                    owned.path.starts_with(worktree) || worktree.starts_with(&owned.path)
+                })
+                || record.tabs.iter().any(|tab| {
+                    tab.layout.as_ref().is_some_and(|layout| {
+                        layout_uses_worktree(layout, Some(fallback), worktree)
+                    })
+                })
+        }
+    }
+}
+
 /// Issue #78: the pane in `ws` whose agent session is
 /// [`crate::ai_types::AgentState::WaitingForInput`], as
 /// `(tab index, pane, surface id)`.
@@ -648,6 +735,161 @@ fn restore_closed_surface_record(
 }
 
 impl PaneFlowApp {
+    pub(crate) fn diff_review_terminals_for_workspace(
+        &self,
+        workspace_id: u64,
+        cx: &App,
+    ) -> Vec<Entity<TerminalView>> {
+        let target_repo = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .and_then(|workspace| workspace.repo_root.as_deref());
+        let unowned_repo = target_repo.filter(|repo| {
+            !self.workspaces.iter().any(|workspace| {
+                workspace.id != workspace_id && workspace.repo_root.as_deref() == Some(*repo)
+            })
+        });
+        let mut terminals = Vec::new();
+        for view in self.diff_mode.diff_view_cache.values() {
+            let view = view.read(cx);
+            let include_every_column = unowned_repo.is_some_and(|repo| view.repo_root() == repo);
+            terminals
+                .extend(view.review_terminals_for_workspace(workspace_id, include_every_column));
+        }
+        if let Some(view) = &self.diff_mode.diff_view {
+            let view = view.read(cx);
+            let include_every_column = unowned_repo.is_some_and(|repo| view.repo_root() == repo);
+            terminals
+                .extend(view.review_terminals_for_workspace(workspace_id, include_every_column));
+        }
+        if let Some(view) = &self.diff_mode.multi_diff_view {
+            terminals.extend(view.read(cx).review_terminals_for_workspace(
+                workspace_id,
+                unowned_repo,
+                cx,
+            ));
+        }
+        if let Some((_, view)) = &self.diff_mode.multi_diff_view_retained {
+            terminals.extend(view.read(cx).review_terminals_for_workspace(
+                workspace_id,
+                unowned_repo,
+                cx,
+            ));
+        }
+        terminals.sort_by_key(|terminal| terminal.entity_id());
+        terminals.dedup();
+        terminals
+    }
+
+    /// Drop the exact Review terminals that die with a workspace close even
+    /// when Diff mode is not mounted. Cache pruning/rebuild is mode-dependent;
+    /// terminal lifecycle is not.
+    fn drop_diff_review_terminals_for_workspace(
+        &mut self,
+        workspace_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let target_repo = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .and_then(|workspace| workspace.repo_root.clone());
+        let unowned_repo = target_repo.as_deref().filter(|repo| {
+            !self.workspaces.iter().any(|workspace| {
+                workspace.id != workspace_id && workspace.repo_root.as_deref() == Some(*repo)
+            })
+        });
+
+        let mut views: Vec<_> = self.diff_mode.diff_view_cache.values().cloned().collect();
+        views.extend(self.diff_mode.diff_view.clone());
+        views.sort_by_key(|view| view.entity_id());
+        views.dedup();
+        for view in views {
+            let include_every_column = {
+                let view = view.read(cx);
+                unowned_repo.is_some_and(|repo| view.repo_root() == repo)
+            };
+            view.update(cx, |view, _| {
+                view.drop_review_terminals_for_workspace(workspace_id, include_every_column);
+            });
+        }
+
+        if let Some(view) = self.diff_mode.multi_diff_view.clone() {
+            view.update(cx, |view, cx| {
+                view.drop_review_terminals_for_workspace(workspace_id, unowned_repo, cx);
+            });
+        }
+        if let Some((_, view)) = self.diff_mode.multi_diff_view_retained.clone() {
+            view.update(cx, |view, cx| {
+                view.drop_review_terminals_for_workspace(workspace_id, unowned_repo, cx);
+            });
+        }
+    }
+
+    fn diff_review_terminal_cwds(&self, cx: &App) -> Vec<std::path::PathBuf> {
+        let mut cwds = Vec::new();
+        for view in self.diff_mode.diff_view_cache.values() {
+            cwds.extend(view.read(cx).review_terminal_cwds(cx));
+        }
+        if let Some(view) = &self.diff_mode.diff_view {
+            cwds.extend(view.read(cx).review_terminal_cwds(cx));
+        }
+        if let Some(view) = &self.diff_mode.multi_diff_view {
+            cwds.extend(view.read(cx).review_terminal_cwds(cx));
+        }
+        if let Some((_, view)) = &self.diff_mode.multi_diff_view_retained {
+            cwds.extend(view.read(cx).review_terminal_cwds(cx));
+        }
+        cwds
+    }
+
+    fn all_diff_review_terminals(&self, cx: &App) -> Vec<Entity<TerminalView>> {
+        let mut terminals = Vec::new();
+        for view in self.diff_mode.diff_view_cache.values() {
+            terminals.extend(view.read(cx).review_terminals());
+        }
+        if let Some(view) = &self.diff_mode.diff_view {
+            terminals.extend(view.read(cx).review_terminals());
+        }
+        if let Some(view) = &self.diff_mode.multi_diff_view {
+            terminals.extend(view.read(cx).review_terminals(cx));
+        }
+        if let Some((_, view)) = &self.diff_mode.multi_diff_view_retained {
+            terminals.extend(view.read(cx).review_terminals(cx));
+        }
+        terminals.sort_by_key(|terminal| terminal.entity_id());
+        terminals.dedup();
+        terminals
+    }
+
+    /// PTY session IDs whose members can independently `cd` after the UI-side
+    /// retirement sample. The background worker uses these plus PaneFlow's
+    /// current descendant tree for its final process-CWD safety check.
+    fn live_terminal_session_ids(&self, cx: &App) -> Vec<u32> {
+        let mut terminals: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.collect_panes())
+            .flat_map(|pane| pane.read(cx).terminals().cloned().collect::<Vec<_>>())
+            .collect();
+        terminals.extend(self.all_diff_dock_terminals());
+        terminals.extend(self.all_diff_review_terminals(cx));
+        terminals.sort_by_key(|terminal| terminal.entity_id());
+        terminals.dedup();
+
+        let mut session_ids: Vec<_> = terminals
+            .into_iter()
+            .filter_map(|terminal| {
+                let terminal = terminal.read(cx);
+                (terminal.terminal.child_pid > 1).then_some(terminal.terminal.child_pid)
+            })
+            .collect();
+        session_ids.sort_unstable();
+        session_ids.dedup();
+        session_ids
+    }
+
     /// Fold a freshly probed git state (branch, repo-ness, diff stats) into
     /// every workspace rooted at `cwd`. Returns whether anything actually
     /// changed, so the caller only repaints on a real delta.
@@ -878,10 +1120,82 @@ impl PaneFlowApp {
         changed
     }
 
+    /// Whether any live workspace or terminal currently uses `worktree_path`.
+    ///
+    /// The terminal walk is load-bearing: a navigation-only split may point at
+    /// a managed checkout without changing `Workspace::cwd` or taking lifecycle
+    /// ownership. `ignored_workspace` lets an IPC split reuse ownership already
+    /// held by its target workspace, while retirement always passes `None`.
+    pub(crate) fn live_workspace_uses_worktree(
+        &self,
+        worktree_path: &std::path::Path,
+        ignored_workspace: Option<usize>,
+        cx: &App,
+    ) -> bool {
+        path_is_within_worktree(&crate::launch_cwd::implicit_launch_cwd(), worktree_path)
+            || self
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| Some(*index) != ignored_workspace)
+                .any(|(_, workspace)| {
+                    path_is_within_worktree(std::path::Path::new(&workspace.cwd), worktree_path)
+                        || workspace.managed_worktrees.iter().any(|owned| {
+                            owned.path.starts_with(worktree_path)
+                                || worktree_path.starts_with(&owned.path)
+                        })
+                        || workspace.collect_panes().into_iter().any(|pane| {
+                            pane.read(cx).terminals().any(|terminal| {
+                                let terminal = terminal.read(cx);
+                                terminal.terminal.current_cwd.as_deref().is_some_and(|cwd| {
+                                    path_is_within_worktree(
+                                        std::path::Path::new(cwd),
+                                        worktree_path,
+                                    )
+                                }) || terminal
+                                    .terminal
+                                    .cwd_now()
+                                    .is_some_and(|cwd| path_is_within_worktree(&cwd, worktree_path))
+                            })
+                        })
+                })
+            || self
+                .closed_items
+                .iter()
+                .any(|record| closed_record_uses_worktree(record, worktree_path))
+            || self
+                .diff_dock_terminal_cwds(cx)
+                .iter()
+                .any(|cwd| path_is_within_worktree(cwd, worktree_path))
+            || self
+                .diff_review_terminal_cwds(cx)
+                .iter()
+                .any(|cwd| path_is_within_worktree(cwd, worktree_path))
+    }
+
+    /// Whether a candidate CWD is inside a checkout whose asynchronous
+    /// retirement is durably journaled. Every app-controlled workspace/pane
+    /// ingress consults this before opening the path.
+    pub(crate) fn pending_worktree_teardown_conflicts(&self, candidate: &std::path::Path) -> bool {
+        self.pending_worktree_teardowns
+            .iter()
+            .any(|worktree| path_is_within_worktree(candidate, &worktree.path))
+    }
+
+    pub(crate) fn publish_pending_worktree_teardowns(&self) {
+        crate::workspace::set_retiring_worktree_paths(
+            self.pending_worktree_teardowns
+                .iter()
+                .map(|worktree| worktree.path.clone())
+                .collect(),
+        );
+    }
+
     /// Start teardown for a batch already present in the durable retirement
-    /// journal. Completion removes only this batch and persists the new journal
-    /// state; a crash before then simply replays it on the next launch.
-    fn spawn_persisted_worktree_teardown(
+    /// journal. The journal gates later workspace/pane opens while blocking git
+    /// commands run off the GPUI thread. Completion clears only this batch and
+    /// persists the new journal; a crash before then replays it next launch.
+    pub(crate) fn spawn_persisted_worktree_teardown(
         &mut self,
         worktrees: Vec<crate::workspace::worktree::ManagedWorktree>,
         cx: &mut Context<Self>,
@@ -893,12 +1207,32 @@ impl PaneFlowApp {
             .iter()
             .map(|worktree| worktree.path.clone())
             .collect();
+        let completed_worktrees = worktrees.clone();
+        let protected_session_ids = self.live_terminal_session_ids(cx);
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            smol::unblock(move || crate::workspace::worktree::teardown_all(worktrees)).await;
+            smol::unblock(move || {
+                crate::workspace::worktree::teardown_all(worktrees, protected_session_ids)
+            })
+            .await;
             let _ = this.update(cx, |app, cx| {
                 app.pending_worktree_teardowns
                     .retain(|worktree| !completed_paths.contains(&worktree.path));
-                app.save_session(cx);
+                app.publish_pending_worktree_teardowns();
+                // Do not admit a replacement owner until the cleared journal
+                // is durable. A debounced save leaves a crash window where the
+                // old on-disk pending record could replay against that owner.
+                if !app.save_session_blocking(cx) {
+                    app.pending_worktree_teardowns
+                        .extend(completed_worktrees);
+                    app.pending_worktree_teardowns =
+                        crate::workspace::worktree::merge_managed_worktree_records(
+                            std::mem::take(&mut app.pending_worktree_teardowns),
+                        );
+                    app.publish_pending_worktree_teardowns();
+                    log::warn!(
+                        "managed worktree retirement journal could not be cleared; ownership remains reserved"
+                    );
+                }
             });
         })
         .detach();
@@ -906,6 +1240,38 @@ impl PaneFlowApp {
 
     /// Resume the retirement journal loaded from `session.json`.
     pub(crate) fn resume_pending_worktree_teardowns(&mut self, cx: &mut Context<Self>) {
+        self.publish_pending_worktree_teardowns();
+        let original_pending = self.pending_worktree_teardowns.clone();
+        let live_paths: std::collections::HashSet<_> = original_pending
+            .iter()
+            .filter(|worktree| self.live_workspace_uses_worktree(&worktree.path, None, cx))
+            .map(|worktree| worktree.path.clone())
+            .collect();
+        if !live_paths.is_empty() {
+            for workspace in &mut self.workspaces {
+                preserve_pending_policy_for_live_owners(
+                    &mut workspace.managed_worktrees,
+                    &original_pending,
+                );
+            }
+            self.pending_worktree_teardowns
+                .retain(|worktree| !live_paths.contains(&worktree.path));
+            self.publish_pending_worktree_teardowns();
+            if !self.save_session_blocking(cx) {
+                self.pending_worktree_teardowns = original_pending;
+                self.publish_pending_worktree_teardowns();
+                log::warn!(
+                    "managed worktree retirement deferred: live ownership cancellation could not be saved"
+                );
+                return;
+            }
+            for path in &live_paths {
+                log::warn!(
+                    "managed worktree retirement cancelled because a live terminal uses {}",
+                    path.display()
+                );
+            }
+        }
         self.spawn_persisted_worktree_teardown(self.pending_worktree_teardowns.clone(), cx);
     }
 
@@ -915,21 +1281,31 @@ impl PaneFlowApp {
     /// mutation occurs; a later successful save/quit can preserve it.
     fn retire_worktrees_after_durable_save(
         &mut self,
-        mut worktrees: Vec<crate::workspace::worktree::ManagedWorktree>,
+        worktrees: Vec<crate::workspace::worktree::ManagedWorktree>,
         cx: &mut Context<Self>,
     ) {
-        worktrees.sort_by(|left, right| left.path.cmp(&right.path));
-        worktrees.dedup_by(|left, right| left.path == right.path);
+        let mut worktrees = crate::workspace::worktree::merge_managed_worktree_records(worktrees);
         let already_pending: std::collections::HashSet<_> = self
             .pending_worktree_teardowns
             .iter()
             .map(|worktree| worktree.path.clone())
             .collect();
         worktrees.retain(|worktree| !already_pending.contains(&worktree.path));
+        worktrees.retain(|worktree| {
+            let live = self.live_workspace_uses_worktree(&worktree.path, None, cx);
+            if live {
+                log::warn!(
+                    "managed worktree retirement cancelled because a live terminal uses {}",
+                    worktree.path.display()
+                );
+            }
+            !live
+        });
         if worktrees.is_empty() {
             return;
         }
         self.pending_worktree_teardowns.extend(worktrees.clone());
+        self.publish_pending_worktree_teardowns();
         if self.save_session_blocking(cx) {
             self.spawn_persisted_worktree_teardown(worktrees, cx);
         } else {
@@ -969,13 +1345,14 @@ impl PaneFlowApp {
         if self.workspaces.len() >= MAX_WORKSPACES {
             return;
         }
+        let cwd = crate::launch_cwd::implicit_launch_cwd();
+        if self.pending_worktree_teardown_conflicts(&cwd) {
+            self.show_toast("Workspace is still being retired", cx);
+            return;
+        }
         let n = self.workspaces.len() + 1;
         let ws_id = next_workspace_id();
-        let ws = Workspace::empty_with_cwd_and_id(
-            ws_id,
-            format!("Terminal {n}"),
-            crate::launch_cwd::implicit_launch_cwd(),
-        );
+        let ws = Workspace::empty_with_cwd_and_id(ws_id, format!("Terminal {n}"), cwd);
         // US-013: deferred git-stats probe off the render thread.
         Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
         self.watch_git_dir(&ws);
@@ -1006,6 +1383,10 @@ impl PaneFlowApp {
             // directory check is what keeps a stray file out of the rail. The
             // picker is already restricted to directories and passes through.
             if !path.is_dir() {
+                continue;
+            }
+            if self.pending_worktree_teardown_conflicts(path) {
+                self.show_toast("Workspace is still being retired", cx);
                 continue;
             }
             let cwd = path.display().to_string();
@@ -1168,9 +1549,15 @@ impl PaneFlowApp {
             .read(cx)
             .active_terminal_opt()
             .and_then(|tv| tv.read(cx).terminal.cwd_now());
-        let source_cwd = self.new_terminal_cwd(source_cwd);
-        let new_terminal =
-            cx.new(|cx| TerminalView::with_cwd_and_profile(ws_id, source_cwd, None, profile, cx));
+        let source_cwd = self
+            .new_terminal_cwd(source_cwd)
+            .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+        if self.pending_worktree_teardown_conflicts(&source_cwd) {
+            return Err("Worktree is still being retired".to_string());
+        }
+        let new_terminal = cx.new(|cx| {
+            TerminalView::with_cwd_and_profile(ws_id, Some(source_cwd), None, profile, cx)
+        });
         let new_pane = self.create_pane(new_terminal.clone(), ws_id, cx);
         let inserted = if let Some(ws) = self.active_workspace_mut()
             && let Some(root) = &mut ws.active_tab_mut().root
@@ -1314,6 +1701,15 @@ impl PaneFlowApp {
             self.show_toast("Nothing to restore", cx);
             return; // The undo stack is empty
         };
+        if self
+            .pending_worktree_teardowns
+            .iter()
+            .any(|worktree| closed_record_uses_worktree(&record, &worktree.path))
+        {
+            self.closed_items.push(record);
+            self.show_toast("Worktree is still being retired", cx);
+            return;
+        }
         match record {
             ClosedRecord::Pane(record) => self.restore_closed_pane(record, window, cx),
             ClosedRecord::Tab(record) => self.restore_closed_tab_record(record, window, cx),
@@ -1679,6 +2075,8 @@ impl PaneFlowApp {
         // workspace itself had been restored.
         let closed_record = capture_closed_workspace_record(&self.workspaces[idx], idx, cx);
         let closed_id = self.workspaces[idx].id;
+        self.drop_diff_dock_for_workspace(closed_id, cx);
+        self.drop_diff_review_terminals_for_workspace(closed_id, cx);
         let retired_worktrees =
             drop_closed_records_for_workspace(&mut self.closed_items, closed_id);
         self.retire_worktrees_after_durable_save(retired_worktrees, cx);
@@ -2093,6 +2491,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_keep_dominates_a_matching_live_auto_owner() {
+        let mut live = vec![crate::workspace::worktree::ManagedWorktree {
+            path: std::path::PathBuf::from("/tmp/repo.worktrees/feature"),
+            repo_root: std::path::PathBuf::from("/tmp/repo"),
+            branch: "feature".to_string(),
+            teardown: crate::workspace::worktree::TeardownPolicy::Auto,
+            identity: None,
+        }];
+        let mut pending = live[0].clone();
+        pending.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+
+        preserve_pending_policy_for_live_owners(&mut live, &[pending]);
+
+        assert_eq!(
+            live[0].teardown,
+            crate::workspace::worktree::TeardownPolicy::Keep
+        );
+    }
+
+    #[test]
     fn workspace_shortcuts_follow_display_order() {
         let display_order = [2, 1, 0];
 
@@ -2407,6 +2825,7 @@ mod tests {
             repo_root: std::path::PathBuf::from("/tmp/repo"),
             branch: "feature".to_string(),
             teardown: crate::workspace::worktree::TeardownPolicy::Keep,
+            identity: None,
         }
     }
 
@@ -3198,6 +3617,130 @@ mod tests {
         assert!(capture.contains("capture_closed_tab_layout_with_budget"));
     }
 
+    #[test]
+    fn completed_worktree_retirement_clears_its_journal_durably() {
+        let src = include_str!("mod.rs");
+        let completion = src
+            .split("fn spawn_persisted_worktree_teardown(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Resume the retirement journal").next())
+            .expect("worktree completion path");
+        let remove_at = completion
+            .find(".retain(|worktree| !completed_paths.contains(&worktree.path))")
+            .expect("remove completed ownership");
+        let save_at = completion
+            .find("save_session_blocking(cx)")
+            .expect("blocking journal clear");
+        let restore_at = completion
+            .find(".extend(completed_worktrees)")
+            .expect("failed-save ownership restore");
+        assert!(remove_at < save_at && save_at < restore_at, "{completion}");
+        assert!(
+            !completion.contains("app.save_session(cx)"),
+            "a debounced save would reopen the stale-journal crash window: {completion}"
+        );
+        assert!(completion.contains("cx.spawn"), "{completion}");
+        assert!(completion.contains("smol::unblock"), "{completion}");
+    }
+
+    #[test]
+    fn live_worktree_scan_includes_every_pane_terminal_cwd() {
+        let src = include_str!("mod.rs");
+        let scan = src
+            .split("pub(crate) fn live_workspace_uses_worktree(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Tear down a batch").next())
+            .expect("live worktree scan");
+        assert!(scan.contains("workspace.collect_panes()"), "{scan}");
+        assert!(scan.contains(".terminals()"), "{scan}");
+        assert!(scan.contains("current_cwd"), "{scan}");
+        assert!(scan.contains("cwd_now()"), "{scan}");
+    }
+
+    #[test]
+    fn worker_cwd_gate_captures_every_terminal_host_before_spawn() {
+        let src = include_str!("mod.rs");
+        let capture = src
+            .split("fn live_terminal_session_ids(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Whether any live workspace").next())
+            .expect("terminal session capture");
+        for required in [
+            "self.workspaces",
+            "all_diff_dock_terminals",
+            "all_diff_review_terminals",
+            "child_pid",
+        ] {
+            assert!(capture.contains(required), "missing {required}: {capture}");
+        }
+
+        let teardown = src
+            .split("fn spawn_persisted_worktree_teardown(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Resume the retirement journal").next())
+            .expect("worker teardown handoff");
+        let sessions = teardown
+            .find("live_terminal_session_ids(cx)")
+            .expect("PTY session capture");
+        let spawn = teardown.find("cx.spawn").expect("background worker spawn");
+        assert!(sessions < spawn, "{teardown}");
+        assert!(teardown.contains("teardown_all(worktrees, protected_session_ids)"));
+    }
+
+    #[test]
+    fn live_worktree_path_check_resolves_symlinked_cwds() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let worktree = temp.path().join("managed");
+        let child = worktree.join("src");
+        std::fs::create_dir_all(&child).expect("managed child");
+        let alias = temp.path().join("alias");
+        symlink(&worktree, &alias).expect("symlink");
+
+        assert!(path_is_within_worktree(&alias.join("src"), &worktree));
+        assert!(!path_is_within_worktree(temp.path(), &worktree));
+    }
+
+    #[test]
+    fn closed_terminal_cwd_suppresses_worktree_retirement() {
+        let worktree = std::path::Path::new("/tmp/repo.worktrees/feature");
+        let record = ClosedRecord::Pane(ClosedPaneRecord {
+            surface: ClosedSurfaceRecord::Terminal {
+                cwd: Some(worktree.join("src")),
+                scrollback: None,
+                custom_name: None,
+                font_size: None,
+            },
+            workspace_id: 7,
+        });
+        assert!(closed_record_uses_worktree(&record, worktree));
+        assert!(!closed_record_uses_worktree(
+            &record,
+            std::path::Path::new("/tmp/repo.worktrees/other")
+        ));
+    }
+
+    #[test]
+    fn dynamic_ui_split_checks_pending_before_terminal_spawn() {
+        let src = include_str!("mod.rs");
+        let split = src
+            .split("pub(crate) fn split_with_target(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn split_pane").next())
+            .expect("targeted split body");
+        let gate = split
+            .find("pending_worktree_teardown_conflicts")
+            .expect("pending retirement gate");
+        let spawn = split
+            .find("TerminalView::with_cwd_and_profile")
+            .expect("terminal spawn");
+        assert!(
+            gate < spawn,
+            "pending paths must be refused before spawn: {split}"
+        );
+    }
+
     /// A tab record can hold far more scrollback than the whole budget, so the
     /// sweep has to release its leaves one at a time and stop as soon as it is
     /// back under. Clearing the record wholesale would hand the user back a
@@ -3257,6 +3800,8 @@ mod tests {
             .and_then(|rest| rest.split("fn reorder_workspace").next())
             .expect("shared closer");
         for helper in [
+            "drop_diff_dock_for_workspace",
+            "drop_diff_review_terminals_for_workspace",
             "refresh_composer_slot",
             "sync_broadcast_stripes",
             "flush_pending_prefill",

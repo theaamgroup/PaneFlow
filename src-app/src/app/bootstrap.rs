@@ -158,15 +158,16 @@ impl PaneFlowApp {
         // the rail *starts* in - never as an animation.
         let (restored_primary_sidebar_visible, restored_primary_sidebar_animation) =
             restored_primary_sidebar(saved_session.as_ref());
-        let mut restored_pending_worktree_teardowns: Vec<_> = saved_session
+        let restored_pending_worktree_teardowns: Vec<_> = saved_session
             .as_ref()
             .into_iter()
             .flat_map(|session| session.pending_worktree_teardowns.iter())
-            .take(crate::workspace::MAX_WORKSPACES * crate::layout::MAX_PANES)
-            .filter_map(super::session::rehydrate_managed_worktree)
+            .filter_map(super::session::rehydrate_pending_managed_worktree)
             .collect();
-        restored_pending_worktree_teardowns.sort_by(|left, right| left.path.cmp(&right.path));
-        restored_pending_worktree_teardowns.dedup_by(|left, right| left.path == right.path);
+        let restored_pending_worktree_teardowns =
+            crate::workspace::worktree::merge_managed_worktree_records(
+                restored_pending_worktree_teardowns,
+            );
 
         let (workspaces, active_idx) = match saved_session {
             Some(session) => {
@@ -187,18 +188,6 @@ impl PaneFlowApp {
             }
             None => (vec![Self::default_workspace(cx)], 0),
         };
-        let live_worktree_paths: std::collections::HashSet<_> = workspaces
-            .iter()
-            .flat_map(|workspace| {
-                workspace
-                    .managed_worktrees
-                    .iter()
-                    .map(|worktree| worktree.path.clone())
-            })
-            .collect();
-        restored_pending_worktree_teardowns
-            .retain(|worktree| !live_worktree_paths.contains(&worktree.path));
-
         // Setup notify file watcher for .git directories
         let (git_event_tx, git_event_rx) = std::sync::mpsc::channel();
         let mut git_watcher = match notify::recommended_watcher(git_event_tx) {

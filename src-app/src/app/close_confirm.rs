@@ -70,10 +70,11 @@ pub(crate) fn close_confirm_title(noun: &str, label: &str) -> String {
 /// Body copy for the close confirmation.
 ///
 /// Pure so the two facts issue #83 insists on can be asserted without a
-/// window: closing stops the agent **and everything it started** (the kill is
-/// `kill(-pid, …)` on the whole process group), and undo brings the surface
-/// back but does **not** resume the agent (restore spawns a brand-new PTY and
-/// replays scrollback as inert text).
+/// window: closing stops the agent and every process still in its PTY session,
+/// and undo brings the surface back but does **not** resume the agent (restore
+/// spawns a brand-new PTY and replays scrollback as inert text). Workspace
+/// closes that also destroy off-tree dock/Review terminals use explicit
+/// narrower Undo copy.
 ///
 /// `undo_shortcut` is `None` when the user has unassigned the undo binding;
 /// the phrase then names the action instead of printing a key that is not
@@ -82,6 +83,7 @@ pub(crate) fn close_confirm_body(
     agent: TerminalAgent,
     extra_agents: usize,
     undo_shortcut: Option<&str>,
+    loses_off_tree_sessions: bool,
 ) -> String {
     let name = agent.display_name();
     let subject = match extra_agents {
@@ -92,10 +94,10 @@ pub(crate) fn close_confirm_body(
     // Singular vs plural: the guard names one agent but the close kills every
     // qualifying surface in the target, so the consequence clauses have to
     // agree with the count, not with the name.
-    let (object, doer, back, their, agents) = if extra_agents == 0 {
-        ("it", "it", "it", "its", "the agent")
+    let (object, back, their, sessions, agents) = if extra_agents == 0 {
+        ("it", "it", "its", "session", "the agent")
     } else {
-        ("them", "they", "them", "their", "the agents")
+        ("them", "them", "their", "sessions", "the agents")
     };
     let opener = match undo_shortcut {
         Some(key) => key.to_string(),
@@ -103,10 +105,18 @@ pub(crate) fn close_confirm_body(
         // the user cannot press.
         None => "Undo close".to_string(),
     };
-    format!(
-        "{subject}. Closing stops {object} and everything {doer} started. \
-         {opener} brings {back} back with {their} scrollback, but does not resume {agents}."
-    )
+    if loses_off_tree_sessions {
+        format!(
+            "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
+             {opener} restores only saved workspace panes and their scrollback; dock and Review \
+             sessions are not restored, and no agent is resumed."
+        )
+    } else {
+        format!(
+            "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
+             {opener} brings {back} back with {their} scrollback, but does not resume {agents}."
+        )
+    }
 }
 
 /// Resolve a pending close's stable `(workspace_id, tab_id)` back to live
@@ -172,6 +182,24 @@ fn sync_close_armed(current: Option<&PendingClose>, next: Option<&PendingClose>,
 }
 
 impl PaneFlowApp {
+    fn terminal_close_states(
+        terminals: impl IntoIterator<Item = Entity<crate::terminal::TerminalView>>,
+        cx: &App,
+    ) -> Vec<SurfaceCloseState> {
+        terminals
+            .into_iter()
+            .map(|tv| {
+                let t = &tv.read(cx).terminal;
+                SurfaceCloseState {
+                    detected_agent: t.detected_agent,
+                    agent_confirmed: t.agent_confirmed,
+                    agent_declared_until: t.agent_declared_until,
+                    child_is_live: crate::app::event_handlers::terminal_identity_is_scannable(t),
+                }
+            })
+            .collect()
+    }
+
     /// The single writer of `pending_close` (R9): every arm, disarm, and
     /// confirm goes through here, so the "disarm the OUTGOING target" body
     /// lives in exactly one place.
@@ -191,25 +219,10 @@ impl PaneFlowApp {
     /// Copy the guard state out of every terminal surface in `panes`, on the
     /// GPUI thread, so the predicate itself stays pure.
     fn surface_close_states(panes: &[Entity<Pane>], cx: &App) -> Vec<SurfaceCloseState> {
-        let mut states = Vec::new();
-        for pane in panes {
-            let terminals: Vec<Entity<crate::terminal::TerminalView>> =
-                pane.read(cx).terminals().cloned().collect();
-            for tv in terminals {
-                let t = &tv.read(cx).terminal;
-                states.push(SurfaceCloseState {
-                    detected_agent: t.detected_agent,
-                    agent_confirmed: t.agent_confirmed,
-                    agent_declared_until: t.agent_declared_until,
-                    // Reuse the scan's own admission test rather than invent a
-                    // third liveness rule: anything it rejects is never
-                    // deposited and never re-confirmed, so `!exited` alone
-                    // would report a live agent for a dead one forever.
-                    child_is_live: crate::app::event_handlers::terminal_identity_is_scannable(t),
-                });
-            }
-        }
-        states
+        let terminals = panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).terminals().cloned().collect::<Vec<_>>());
+        Self::terminal_close_states(terminals, cx)
     }
 
     fn tab_close_states(&self, ws_idx: usize, tab_idx: usize, cx: &App) -> Vec<SurfaceCloseState> {
@@ -224,10 +237,24 @@ impl PaneFlowApp {
     }
 
     fn workspace_close_states(&self, ws_idx: usize, cx: &App) -> Vec<SurfaceCloseState> {
-        self.workspaces
-            .get(ws_idx)
-            .map(|ws| Self::surface_close_states(&ws.collect_panes(), cx))
-            .unwrap_or_default()
+        let Some(workspace) = self.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let mut states = Self::surface_close_states(&workspace.collect_panes(), cx);
+        states.extend(self.workspace_off_tree_close_states(workspace.id, cx));
+        states
+    }
+
+    fn workspace_off_tree_close_states(
+        &self,
+        workspace_id: u64,
+        cx: &App,
+    ) -> Vec<SurfaceCloseState> {
+        let mut off_tree = self.diff_dock_terminals_for_workspace(workspace_id);
+        off_tree.extend(self.diff_review_terminals_for_workspace(workspace_id, cx));
+        off_tree.sort_by_key(|terminal| terminal.entity_id());
+        off_tree.dedup();
+        Self::terminal_close_states(off_tree, cx)
     }
 
     /// `(workspace id, that workspace's tab ids in order)`, the input
@@ -256,12 +283,18 @@ impl PaneFlowApp {
         let Some(agent) = agent_needing_confirmation(&states, now) else {
             return Some(false);
         };
+        let loses_off_tree_sessions = agent_needing_confirmation(
+            &self.workspace_off_tree_close_states(workspace_id, cx),
+            now,
+        )
+        .is_some();
         self.set_pending_close(
             Some(PendingClose {
                 target: CloseTarget::Workspace { workspace_id },
                 style,
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                loses_off_tree_sessions,
                 label,
                 armed_at: now,
             }),
@@ -348,6 +381,7 @@ impl PaneFlowApp {
                 style,
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                loses_off_tree_sessions: false,
                 label: confirm_label(&label),
                 armed_at: now,
             }),
@@ -382,6 +416,7 @@ impl PaneFlowApp {
                 style,
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                loses_off_tree_sessions: false,
                 label: confirm_label(&label),
                 armed_at: now,
             }),
@@ -685,6 +720,7 @@ impl PaneFlowApp {
             pending.agent,
             pending.extra_agents,
             self.shortcut_for_action("undo_close_pane"),
+            pending.loses_off_tree_sessions,
         );
         let cancel_resting = ui.subtle;
         let cancel_hover = ui.surface;
@@ -831,15 +867,14 @@ mod tests {
 
     #[test]
     fn close_confirm_body_names_the_agent_and_both_consequences() {
-        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"));
+        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"), false);
         assert!(
             body.contains("Claude Code"),
             "the copy must name the agent it is about to kill: {body}"
         );
         assert!(
-            body.contains("everything it started"),
-            "the kill is `kill(-pid, …)` on the whole process group, and the copy has to say \
-             so: {body}"
+            body.contains("every process still in its terminal session"),
+            "the teardown covers every authenticated group in the PTY session: {body}"
         );
         assert!(
             body.contains("Cmd+Shift+T"),
@@ -854,13 +889,13 @@ mod tests {
 
     #[test]
     fn close_confirm_body_counts_the_agents_it_does_not_name() {
-        let one = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"));
+        let one = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"), false);
         assert!(
             one.contains("1 other agent") && !one.contains("1 other agents"),
             "singular form for exactly one unnamed agent: {one}"
         );
         assert!(
-            one.contains("everything they started"),
+            one.contains("every process still in their terminal sessions"),
             "more than one agent dies, so the consequence clause is plural: {one}"
         );
         assert!(
@@ -868,7 +903,7 @@ mod tests {
             "the undo clause is plural too: {one}"
         );
 
-        let many = close_confirm_body(TerminalAgent::Codex, 3, Some("Cmd+Shift+T"));
+        let many = close_confirm_body(TerminalAgent::Codex, 3, Some("Cmd+Shift+T"), false);
         assert!(
             many.contains("3 other agents"),
             "plural form for more than one unnamed agent: {many}"
@@ -877,7 +912,7 @@ mod tests {
 
     #[test]
     fn close_confirm_body_omits_an_unbound_undo_shortcut() {
-        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, None);
+        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, None, false);
         // Pinned whole, not by absent substrings: `shortcut_for_action`
         // returns Apple HIG glyphs on macOS (`keybindings/display.rs` formats
         // `secondary-shift-t` as `⌘⇧T`), which contains neither "Cmd" nor
@@ -885,13 +920,29 @@ mod tests {
         // shortcut had leaked into the `None` case.
         assert_eq!(
             body,
-            "Claude Code is still running here. Closing stops it and everything it started. \
+            "Claude Code is still running here. Closing stops it and every process still in its terminal session. \
              Undo close brings it back with its scrollback, but does not resume the agent."
         );
         assert!(
             !body.contains('\u{2318}'),
             "with undo unassigned the copy must not print a keystroke at all: {body}"
         );
+    }
+
+    #[test]
+    fn workspace_close_copy_does_not_promise_off_tree_undo() {
+        let body = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"), true);
+
+        assert!(
+            body.contains("restores only saved workspace panes"),
+            "{body}"
+        );
+        assert!(
+            body.contains("dock and Review sessions are not restored"),
+            "{body}"
+        );
+        assert!(body.contains("no agent is resumed"), "{body}");
+        assert!(!body.contains("brings them back"), "{body}");
     }
 
     #[test]
@@ -1036,6 +1087,28 @@ mod tests {
                 && close_pane.contains("ConfirmStyle::Modal"),
             "Cmd+Shift+W must ask too: two adjacent close gestures with opposite safety \
              behaviour is worse than either alone: {close_pane}"
+        );
+    }
+
+    #[test]
+    fn workspace_guard_includes_off_tree_terminal_owners() {
+        let src = include_str!("close_confirm.rs");
+        let states = src
+            .split("fn workspace_close_states(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// `(workspace id").next())
+            .expect("workspace close-state collector");
+        assert!(
+            states.contains("diff_dock_terminals_for_workspace"),
+            "diff-dock agents die with their workspace and must arm confirmation: {states}"
+        );
+        assert!(
+            states.contains("diff_review_terminals_for_workspace"),
+            "Diff Review agents die with their host repo and must arm confirmation: {states}"
+        );
+        assert!(
+            states.contains("terminal_close_states(off_tree"),
+            "off-tree terminals must use the same live-agent predicate: {states}"
         );
     }
 
@@ -1434,6 +1507,7 @@ mod tests {
             style: ConfirmStyle::Inline,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
+            loses_off_tree_sessions: false,
             label: String::new(),
             armed_at: std::time::Instant::now(),
         }

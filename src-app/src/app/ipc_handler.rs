@@ -895,10 +895,14 @@ fn managed_worktree_path_conflicts(
     closed: &[PathBuf],
     pending: &[PathBuf],
 ) -> bool {
-    live.iter()
-        .any(|(index, owned)| owned == path && Some(*index) != target_workspace)
-        || closed.iter().any(|owned| owned == path)
-        || pending.iter().any(|owned| owned == path)
+    live.iter().any(|(index, owned)| {
+        (owned.starts_with(path) || path.starts_with(owned)) && Some(*index) != target_workspace
+    }) || closed
+        .iter()
+        .any(|owned| owned.starts_with(path) || path.starts_with(owned))
+        || pending
+            .iter()
+            .any(|owned| owned.starts_with(path) || path.starts_with(owned))
 }
 
 /// Where a surface lives: workspace, owning workspace tab, pane, and the
@@ -1040,7 +1044,7 @@ fn surface_entry_for(
         let ts = &view.terminal;
         (
             ts.custom_name.as_deref().and_then(sanitize_pane_name),
-            ts.title.clone(),
+            exported_surface_title(&ts.title),
             ts.current_cwd.clone(),
             ts.foreground_command(),
         )
@@ -1054,6 +1058,10 @@ fn surface_entry_for(
         workspace_idx,
         tab,
     }
+}
+
+fn exported_surface_title(raw: &str) -> String {
+    crate::sidebar_title::clean_sidebar_title(raw).unwrap_or_default()
 }
 
 fn surface_meta_value(s: SurfaceMeta) -> serde_json::Value {
@@ -1812,12 +1820,13 @@ impl PaneFlowApp {
         Ok(terminal)
     }
 
-    fn managed_worktree_conflicts(
+    pub(crate) fn managed_worktree_conflicts(
         &self,
         path: &std::path::Path,
         target_workspace: Option<usize>,
+        cx: &App,
     ) -> bool {
-        let live: Vec<_> = self
+        let owned: Vec<_> = self
             .workspaces
             .iter()
             .enumerate()
@@ -1845,7 +1854,8 @@ impl PaneFlowApp {
             .iter()
             .map(|worktree| worktree.path.clone())
             .collect();
-        managed_worktree_path_conflicts(path, target_workspace, &live, &closed, &pending)
+        self.live_workspace_uses_worktree(path, target_workspace, cx)
+            || managed_worktree_path_conflicts(path, target_workspace, &owned, &closed, &pending)
     }
 
     /// `workspace.up` - materialize a declarative multi-pane agent workspace in
@@ -1921,6 +1931,16 @@ impl PaneFlowApp {
             };
             match parse_workspace_pane_plan(spec) {
                 Ok(plan) => {
+                    let effective_cwd = plan
+                        .cwd
+                        .clone()
+                        .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+                    if self.pending_worktree_teardown_conflicts(&effective_cwd) {
+                        return JsonRpcError::invalid_params(format!(
+                            "pane {i}: cwd is inside a worktree being retired"
+                        ))
+                        .into_value();
+                    }
                     if let Some(worktree) = managed_worktree {
                         if plan.cwd.as_deref() != Some(worktree.path.as_path()) {
                             return JsonRpcError::invalid_params(format!(
@@ -1928,7 +1948,7 @@ impl PaneFlowApp {
                             ))
                             .into_value();
                         }
-                        if self.managed_worktree_conflicts(&worktree.path, None) {
+                        if self.managed_worktree_conflicts(&worktree.path, None, cx) {
                             return JsonRpcError::invalid_params(format!(
                                 "pane {i}: managed worktree is already owned by another workspace"
                             ))
@@ -2635,6 +2655,13 @@ impl PaneFlowApp {
                     },
                     None => None,
                 };
+                let effective_cwd = cwd
+                    .clone()
+                    .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+                if self.pending_worktree_teardown_conflicts(&effective_cwd) {
+                    return JsonRpcError::invalid_params("cwd is inside a worktree being retired")
+                        .into_value();
+                }
                 let ws_id = next_workspace_id();
                 // Issue #44: do not pre-spawn a default terminal when a layout
                 // is present. `apply_layout_from_json` reuses existing leaves
@@ -3193,6 +3220,14 @@ impl PaneFlowApp {
                     },
                     None => None,
                 };
+                let spawn_cwd =
+                    Some(spawn_cwd.unwrap_or_else(crate::launch_cwd::implicit_launch_cwd));
+                if self.pending_worktree_teardown_conflicts(
+                    spawn_cwd.as_deref().expect("effective split cwd"),
+                ) {
+                    return JsonRpcError::invalid_params("cwd is inside a worktree being retired")
+                        .into_value();
+                }
                 let managed_value = params
                     .get("managed_worktree")
                     .filter(|value| !value.is_null());
@@ -3259,7 +3294,7 @@ impl PaneFlowApp {
                     return JsonRpcError::invalid_params("No active workspace").into_value();
                 };
                 if let Some(worktree) = &spawn_managed_worktree
-                    && self.managed_worktree_conflicts(&worktree.path, Some(ws_idx))
+                    && self.managed_worktree_conflicts(&worktree.path, Some(ws_idx), cx)
                 {
                     return JsonRpcError::invalid_params(
                         "managed worktree is already owned by another workspace",
@@ -4698,6 +4733,13 @@ mod tests {
             &[],
             &[],
         ));
+        assert!(super::managed_worktree_path_conflicts(
+            path,
+            None,
+            &[(1, PathBuf::from("/tmp/repo.worktrees/feature/src"))],
+            &[],
+            &[],
+        ));
         assert!(
             !super::managed_worktree_path_conflicts(path, Some(0), &live, &[], &[]),
             "a split may reuse ownership already held by its target workspace"
@@ -5145,6 +5187,29 @@ mod tests {
         // US-019: tab identity is exported, never a positional tab index.
         assert_eq!(workspace["tab_id"], 11);
         assert_eq!(workspace["tab_title"], "build");
+    }
+
+    #[test]
+    fn ipc_surface_title_is_scrubbed_and_bounded() {
+        let raw = format!("\u{202e}\u{200b}{}", "x".repeat(400));
+        let title = super::exported_surface_title(&raw);
+        let value = super::surface_meta_value(super::SurfaceMeta {
+            surface_id: 7,
+            name: "shell".to_string(),
+            title,
+            cwd: None,
+            cmd: None,
+            workspace: Some(0),
+            workspace_id: Some(42),
+            scope: "workspace",
+            tab_id: Some(3),
+            tab_title: None,
+        });
+        let exported = value["title"].as_str().expect("title string");
+        assert!(!exported.contains('\u{202e}'));
+        assert!(!exported.contains('\u{200b}'));
+        assert!(exported.chars().count() <= 241, "{exported}");
+        assert!(exported.ends_with('…'), "{exported}");
     }
 
     #[test]

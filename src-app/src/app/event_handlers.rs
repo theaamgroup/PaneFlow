@@ -60,8 +60,9 @@ fn split_pane_at_edge(
 pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
     use libproc::libproc::bsd_info::BSDInfo;
     use libproc::libproc::proc_pid::pidinfo;
-    // EPERM (SIP-protected targets) and dead-pid races degrade to None -
-    // the caller keeps the conservative liveness-only check.
+    // EPERM (SIP-protected targets) and dead-pid races degrade to None.
+    // Read-only session/UI callers apply their documented conservative rule;
+    // destructive process-group signaling separately fails closed on None.
     let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
     Some(
         info.pbi_start_tvsec
@@ -87,7 +88,9 @@ fn pid_matches(pid: u32, pinned_start: Option<u64>) -> bool {
 ///
 /// Unpinned sessions (`None`) stay conservative so a transient probe miss
 /// before the first pin does not drop the row. Once pinned, a missing or
-/// different current start is not the original process.
+/// different current start is not the original process. This predicate is for
+/// read-only UI/session retention only; destructive signaling must require two
+/// present, equal start times via `parent_guard::may_signal_group`.
 pub(crate) fn same_process(pinned_start: Option<u64>, current_start: Option<u64>) -> bool {
     match (pinned_start, current_start) {
         (Some(pinned), Some(current)) => pinned == current,
@@ -692,11 +695,19 @@ impl PaneFlowApp {
                 }
 
                 let ws_id = self.workspaces[ws_idx].id;
-                let cwd_path = (!cwd.is_empty()).then(|| std::path::PathBuf::from(&cwd));
+                let cwd_path = if cwd.is_empty() {
+                    crate::launch_cwd::implicit_launch_cwd()
+                } else {
+                    std::path::PathBuf::from(&cwd)
+                };
+                if self.pending_worktree_teardown_conflicts(&cwd_path) {
+                    self.show_toast("Worktree is still being retired", cx);
+                    return;
+                }
                 let term = cx.new(|cx| {
                     TerminalView::with_cwd_and_profile(
                         ws_id,
-                        cwd_path,
+                        Some(cwd_path),
                         None,
                         TerminalSurfaceProfile::Agent,
                         cx,
