@@ -5,8 +5,9 @@
 //! `<repo>.worktrees/<branch-slug>`, or `<branch-slug>-<hash>` on slug
 //! collision - copies the top-level gitignored `.env*` files, optionally runs
 //! a `setup` command, and the pane spawns with the worktree as its cwd. The
-//! app side records ownership ([`ManagedWorktree`]) so closing the workspace
-//! tears the worktree down - IF it is clean.
+//! app side records ownership ([`ManagedWorktree`]). Closing transfers that
+//! ownership to the undo record; retirement happens when the record is evicted
+//! or on final quit, and removes the worktree only IF it is clean.
 //!
 //! Invariants (US-006/US-009):
 //! - a branch is NEVER deleted, only the worktree directory;
@@ -30,10 +31,11 @@ const GIT_DEADLINE: Duration = Duration::from_secs(10);
 const ADD_DEADLINE: Duration = Duration::from_secs(120);
 const STDOUT_CAP: u64 = 256 * 1024;
 const OWNER_MARKER_FILE: &str = ".paneflow-worktree";
+const MAX_OWNER_MARKER_BYTES: u64 = 8 * 1024;
 
 /// Teardown policy for a managed worktree (US-009). `Auto` removes the
-/// worktree at workspace close when it has no uncommitted changes; `Keep`
-/// opts out entirely.
+/// worktree when its lifecycle ownership is finally retired and it has no
+/// uncommitted changes; `Keep` opts out entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeardownPolicy {
     #[default]
@@ -52,7 +54,8 @@ impl TeardownPolicy {
 
 /// A worktree Paneflow created for a pane and therefore owns the lifecycle of.
 /// Carried by `Workspace`, persisted in `session.json` (so a crash does not
-/// orphan the ownership record), torn down at workspace close.
+/// orphan the ownership record), transferred through workspace undo, and torn
+/// down only when that ownership is finally retired.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedWorktree {
     /// Worktree checkout directory (`<repo>.worktrees/<slug>`).
@@ -63,25 +66,255 @@ pub struct ManagedWorktree {
     /// teardown never touches the branch.
     pub branch: String,
     pub teardown: TeardownPolicy,
+    /// Stable identity of the checkout directory. New/live records always
+    /// carry it; `None` is accepted only long enough to upgrade legacy records
+    /// that still have a valid owner marker.
+    pub(crate) identity: Option<WorktreeIdentity>,
+}
+
+/// macOS directory identity persisted across marker unlink but changed by a
+/// remove/recreate at the same path. Birth time supplements dev/inode so an
+/// immediately reused inode cannot transfer lifecycle ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeIdentity(String);
+
+impl WorktreeIdentity {
+    fn from_path(path: &Path) -> Result<Self, String> {
+        use std::os::macos::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| format!("cannot inspect worktree identity: {error}"))?;
+        if !metadata.is_dir() {
+            return Err(format!("worktree {} is not a directory", path.display()));
+        }
+        Ok(Self(format!(
+            "{}:{}:{}:{}",
+            metadata.st_dev(),
+            metadata.st_ino(),
+            metadata.st_birthtime(),
+            metadata.st_birthtime_nsec()
+        )))
+    }
+
+    fn from_persisted(raw: &str) -> Option<Self> {
+        let mut fields = raw.split(':');
+        fields.next()?.parse::<u64>().ok()?;
+        fields.next()?.parse::<u64>().ok()?;
+        fields.next()?.parse::<i64>().ok()?;
+        fields.next()?.parse::<i64>().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        Some(Self(raw.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub(crate) fn worktree_identity(path: &Path) -> Result<WorktreeIdentity, String> {
+    WorktreeIdentity::from_path(path)
+}
+
+/// Coalesce canonical ownership records without weakening teardown policy.
+/// Session files written by older/manual clients can contain duplicates; an
+/// explicit `Keep` on any duplicate must win over `Auto` before one record is
+/// discarded. Inconsistent identity metadata also fails closed to `Keep`.
+pub(crate) fn merge_managed_worktree_records(
+    mut worktrees: Vec<ManagedWorktree>,
+) -> Vec<ManagedWorktree> {
+    worktrees.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut merged: Vec<ManagedWorktree> = Vec::with_capacity(worktrees.len());
+    for worktree in worktrees {
+        let Some(previous) = merged.last_mut().filter(|last| last.path == worktree.path) else {
+            merged.push(worktree);
+            continue;
+        };
+        if previous.repo_root != worktree.repo_root || previous.branch != worktree.branch {
+            log::warn!(
+                "managed worktree: conflicting ownership metadata for {}; keeping checkout",
+                previous.path.display()
+            );
+            previous.teardown = TeardownPolicy::Keep;
+        } else if worktree.teardown == TeardownPolicy::Keep {
+            previous.teardown = TeardownPolicy::Keep;
+        }
+        match (&previous.identity, &worktree.identity) {
+            (Some(left), Some(right)) if left != right => {
+                log::warn!(
+                    "managed worktree: conflicting directory identity for {}; keeping checkout",
+                    previous.path.display()
+                );
+                previous.teardown = TeardownPolicy::Keep;
+            }
+            (None, Some(identity)) => previous.identity = Some(identity.clone()),
+            _ => {}
+        }
+    }
+    merged
 }
 
 pub fn owner_marker_path(worktree_path: &Path) -> PathBuf {
     worktree_path.join(OWNER_MARKER_FILE)
 }
 
-pub fn has_owner_marker(worktree_path: &Path) -> bool {
-    owner_marker_path(worktree_path).is_file()
+fn owner_marker_contents(repo_root: &Path, branch: &str) -> Result<Vec<u8>, String> {
+    let repo_root = std::fs::canonicalize(repo_root)
+        .map_err(|error| format!("cannot canonicalize repo root: {error}"))?;
+    let repo_root = repo_root.to_string_lossy();
+    if repo_root.contains(['\n', '\r']) || branch.contains(['\n', '\r']) {
+        return Err("repo root and branch must not contain line breaks".to_string());
+    }
+    Ok(format!("owner=paneflow\nrepo_root={repo_root}\nbranch={branch}\n").into_bytes())
 }
 
 fn write_owner_marker(worktree_path: &Path, repo_root: &Path, branch: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    write_owner_marker_with(worktree_path, repo_root, branch, |file, contents| {
+        file.write_all(contents)
+    })
+}
+
+fn write_owner_marker_with(
+    worktree_path: &Path,
+    repo_root: &Path,
+    branch: &str,
+    write_contents: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
+    use std::io::Write;
+
     let marker = owner_marker_path(worktree_path);
-    let contents = format!(
-        "owner=paneflow\nrepo_root={}\nbranch={}\n",
-        repo_root.display(),
-        branch
-    );
-    std::fs::write(&marker, contents)
-        .map_err(|e| format!("cannot write owner marker {}: {e}", marker.display()))
+    let contents = owner_marker_contents(repo_root, branch)?;
+    let parent = worktree_path
+        .parent()
+        .ok_or_else(|| format!("worktree {} has no parent", worktree_path.display()))?;
+    // Build the complete marker outside the checkout. A short/failed write can
+    // therefore never leave a malformed reserved marker that neither normal
+    // ownership validation nor pending-journal recovery can recognize.
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".paneflow-owner-")
+        .tempfile_in(parent)
+        .map_err(|error| format!("cannot stage owner marker {}: {error}", marker.display()))?;
+    write_contents(temporary.as_file_mut(), &contents)
+        .map_err(|error| format!("cannot write owner marker {}: {error}", marker.display()))?;
+    temporary
+        .as_file_mut()
+        .flush()
+        .map_err(|error| format!("cannot flush owner marker {}: {error}", marker.display()))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("cannot sync owner marker {}: {error}", marker.display()))?;
+    // hard_link creates the destination atomically and never replaces an
+    // existing file, symlink, FIFO, or tracked path. The temporary name is
+    // removed by Drop after the complete inode has been published.
+    std::fs::hard_link(temporary.path(), &marker)
+        .map_err(|error| format!("cannot create owner marker {}: {error}", marker.display()))
+}
+
+fn validated_owner_marker(
+    worktree_path: &Path,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    let marker = owner_marker_path(worktree_path);
+    let link_metadata = std::fs::symlink_metadata(&marker)
+        .map_err(|error| format!("cannot inspect owner marker {}: {error}", marker.display()))?;
+    if !link_metadata.file_type().is_file() {
+        return Err(format!(
+            "owner marker {} is not a regular file",
+            marker.display()
+        ));
+    }
+    if link_metadata.len() > MAX_OWNER_MARKER_BYTES {
+        return Err(format!(
+            "owner marker {} exceeds {MAX_OWNER_MARKER_BYTES} bytes",
+            marker.display()
+        ));
+    }
+    let file = std::fs::File::open(&marker)
+        .map_err(|error| format!("cannot read owner marker {}: {error}", marker.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect owner marker {}: {error}", marker.display()))?;
+    if !metadata.is_file() || metadata.len() > MAX_OWNER_MARKER_BYTES {
+        return Err(format!(
+            "owner marker {} is not a small regular file",
+            marker.display()
+        ));
+    }
+    let mut contents = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_OWNER_MARKER_BYTES + 1)
+        .read_to_end(&mut contents)
+        .map_err(|error| format!("cannot read owner marker {}: {error}", marker.display()))?;
+    if contents.len() as u64 > MAX_OWNER_MARKER_BYTES {
+        return Err(format!(
+            "owner marker {} grew beyond {MAX_OWNER_MARKER_BYTES} bytes",
+            marker.display()
+        ));
+    }
+    let text = std::str::from_utf8(&contents)
+        .map_err(|_| format!("owner marker {} is not UTF-8", marker.display()))?;
+    let Some(body) = text.strip_suffix('\n') else {
+        return Err(format!(
+            "owner marker {} is missing its final newline",
+            marker.display()
+        ));
+    };
+    let mut lines = body.split('\n');
+    if lines.next() != Some("owner=paneflow") {
+        return Err(format!(
+            "owner marker {} has the wrong owner",
+            marker.display()
+        ));
+    }
+    let marker_repo_root = lines
+        .next()
+        .and_then(|line| line.strip_prefix("repo_root="))
+        .ok_or_else(|| format!("owner marker {} has no repo root", marker.display()))?;
+    let marker_branch = lines
+        .next()
+        .and_then(|line| line.strip_prefix("branch="))
+        .ok_or_else(|| format!("owner marker {} has no branch", marker.display()))?;
+    if lines.next().is_some() {
+        return Err(format!(
+            "owner marker {} has unexpected fields",
+            marker.display()
+        ));
+    }
+
+    let expected = owner_marker_contents(repo_root, branch)?;
+    let expected_text = std::str::from_utf8(&expected)
+        .map_err(|_| "generated owner marker is not UTF-8".to_string())?;
+    let mut expected_lines = expected_text.lines();
+    let _owner = expected_lines.next();
+    let expected_repo_root = expected_lines
+        .next()
+        .and_then(|line| line.strip_prefix("repo_root="))
+        .unwrap_or_default();
+    if marker_repo_root != expected_repo_root {
+        return Err(format!(
+            "owner marker {} names a different repo root",
+            marker.display()
+        ));
+    }
+    if marker_branch != branch {
+        return Err(format!(
+            "owner marker {} names a different branch",
+            marker.display()
+        ));
+    }
+    if contents != expected {
+        return Err(format!(
+            "owner marker {} does not match the expected schema",
+            marker.display()
+        ));
+    }
+    Ok(contents)
 }
 
 /// Rehydrate a persisted or IPC-provided ownership record. The record is only
@@ -92,6 +325,16 @@ pub fn managed_worktree_from_record(
     repo_root_raw: &str,
     branch_raw: &str,
     teardown_raw: &str,
+) -> Option<ManagedWorktree> {
+    managed_worktree_from_persisted_record(path_raw, repo_root_raw, branch_raw, teardown_raw, None)
+}
+
+pub(crate) fn managed_worktree_from_persisted_record(
+    path_raw: &str,
+    repo_root_raw: &str,
+    branch_raw: &str,
+    teardown_raw: &str,
+    identity_raw: Option<&str>,
 ) -> Option<ManagedWorktree> {
     let path = PathBuf::from(path_raw);
     let repo_root = PathBuf::from(repo_root_raw);
@@ -107,13 +350,6 @@ pub fn managed_worktree_from_record(
     if !is_paneflow_worktree_dir(&repo_root, branch, &path) {
         log::warn!(
             "managed worktree: dropping record outside Paneflow worktree dir: {}",
-            path.display()
-        );
-        return None;
-    }
-    if !has_owner_marker(&path) {
-        log::warn!(
-            "managed worktree: dropping record without owner marker: {}",
             path.display()
         );
         return None;
@@ -142,6 +378,28 @@ pub fn managed_worktree_from_record(
         );
         return None;
     }
+    let identity = match identity_raw {
+        Some(raw) => {
+            let expected = WorktreeIdentity::from_persisted(raw)?;
+            let actual = WorktreeIdentity::from_path(&path).ok()?;
+            if actual != expected {
+                log::warn!(
+                    "managed worktree: directory identity changed for {}",
+                    path.display()
+                );
+                return None;
+            }
+            actual
+        }
+        None => WorktreeIdentity::from_path(&path).ok()?,
+    };
+    if let Err(error) = validated_owner_marker(&path, &repo_root, branch) {
+        log::warn!(
+            "managed worktree: dropping record with invalid owner marker in {}: {error}",
+            path.display()
+        );
+        return None;
+    }
     let teardown = match teardown_raw {
         "auto" => TeardownPolicy::Auto,
         "keep" => TeardownPolicy::Keep,
@@ -155,7 +413,108 @@ pub fn managed_worktree_from_record(
         repo_root,
         branch: branch.to_string(),
         teardown,
+        identity: Some(identity),
     })
+}
+
+/// Rehydrate an entry from the durable retirement journal. In addition to the
+/// normal strict path, this recovers the one crash window in managed teardown:
+/// the owner marker was unlinked but `git worktree remove` had not completed.
+/// Recovery is deliberately unavailable to live workspace records and only
+/// recreates a missing marker for the exact deterministic checkout/branch
+/// still registered by the canonical repository.
+#[cfg(test)]
+fn pending_managed_worktree_from_record(
+    path_raw: &str,
+    repo_root_raw: &str,
+    branch_raw: &str,
+    teardown_raw: &str,
+) -> Option<ManagedWorktree> {
+    pending_managed_worktree_from_persisted_record(
+        path_raw,
+        repo_root_raw,
+        branch_raw,
+        teardown_raw,
+        None,
+    )
+}
+
+pub(crate) fn pending_managed_worktree_from_persisted_record(
+    path_raw: &str,
+    repo_root_raw: &str,
+    branch_raw: &str,
+    teardown_raw: &str,
+    identity_raw: Option<&str>,
+) -> Option<ManagedWorktree> {
+    if let Some(worktree) = managed_worktree_from_persisted_record(
+        path_raw,
+        repo_root_raw,
+        branch_raw,
+        teardown_raw,
+        identity_raw,
+    ) {
+        return Some(worktree);
+    }
+    // Only Auto teardown unlinks this marker. Keep (including an unknown
+    // policy that fails closed to Keep) cannot represent the interrupted
+    // removal window and must never mint ownership metadata.
+    if teardown_raw != "auto" {
+        return None;
+    }
+
+    let raw_path = PathBuf::from(path_raw);
+    let raw_repo_root = PathBuf::from(repo_root_raw);
+    let branch = branch_raw.trim();
+    if !raw_path.is_absolute()
+        || !raw_repo_root.is_absolute()
+        || branch.is_empty()
+        || branch_slug(branch).is_empty()
+        || !is_paneflow_worktree_dir(&raw_repo_root, branch, &raw_path)
+    {
+        return None;
+    }
+    let path = std::fs::canonicalize(&raw_path).ok()?;
+    let repo_root = std::fs::canonicalize(&raw_repo_root).ok()?;
+    if !is_paneflow_worktree_dir(&repo_root, branch, &path) {
+        return None;
+    }
+    let expected_identity = WorktreeIdentity::from_persisted(identity_raw?)?;
+    if WorktreeIdentity::from_path(&path).ok()? != expected_identity {
+        log::warn!(
+            "managed worktree: refusing marker recovery after directory replacement in {}",
+            path.display()
+        );
+        return None;
+    }
+
+    let marker = owner_marker_path(&path);
+    match std::fs::symlink_metadata(&marker) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        // A malformed file, symlink, FIFO, or racing replacement is evidence
+        // we must not overwrite. A valid marker already returned above.
+        _ => return None,
+    }
+    let registered = list_worktrees(&repo_root).ok()?.into_iter().any(|entry| {
+        entry.branch.as_deref() == Some(branch)
+            && std::fs::canonicalize(entry.path).ok().as_ref() == Some(&path)
+    });
+    if !registered {
+        return None;
+    }
+    if let Err(error) = write_owner_marker(&path, &repo_root, branch) {
+        log::warn!(
+            "managed worktree: cannot recover interrupted teardown marker in {}: {error}",
+            path.display()
+        );
+        return None;
+    }
+    managed_worktree_from_persisted_record(
+        &path.to_string_lossy(),
+        &repo_root.to_string_lossy(),
+        branch,
+        teardown_raw,
+        Some(expected_identity.as_str()),
+    )
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -325,17 +684,46 @@ pub fn add_worktree(
     args.push(branch);
     run_git(repo_root, &args, ADD_DEADLINE)?;
     if let Err(e) = write_owner_marker(path, repo_root, branch) {
-        let _ = remove_worktree(repo_root, path);
-        return Err(e);
+        return Err(add_worktree_marker_failure(
+            e,
+            remove_worktree(repo_root, path),
+        ));
     }
     Ok(())
 }
 
-/// True when the worktree has no uncommitted changes (`status --porcelain`
-/// empty). An error (worktree gone, git missing) is NOT "clean" - the caller
-/// must keep its hands off when it cannot prove cleanliness.
+fn add_worktree_marker_failure(marker_error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => marker_error,
+        Err(rollback_error) => format!(
+            "{marker_error}; worktree rollback failed and the checkout may remain: {rollback_error}"
+        ),
+    }
+}
+
+/// True when the worktree has no uncommitted changes, untracked files, or
+/// ignored files. The sole exception is Paneflow's own root owner marker,
+/// which is teardown metadata rather than user data. An error (worktree gone,
+/// git missing) is NOT "clean" - the caller must keep its hands off when it
+/// cannot prove cleanliness.
 pub fn is_clean(worktree_path: &Path) -> Result<bool, String> {
-    run_git(worktree_path, &["status", "--porcelain"], GIT_DEADLINE).map(|out| out.is_empty())
+    run_git(
+        worktree_path,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+        GIT_DEADLINE,
+    )
+    .map(|out| managed_status_is_clean(&out))
+}
+
+fn managed_status_is_clean(status: &str) -> bool {
+    status
+        .lines()
+        .all(|line| matches!(line, "?? .paneflow-worktree" | "!! .paneflow-worktree"))
 }
 
 /// `git worktree remove <path>`. Refuses dirty worktrees by itself too (git
@@ -344,6 +732,465 @@ pub fn is_clean(worktree_path: &Path) -> Result<bool, String> {
 pub fn remove_worktree(repo_root: &Path, path: &Path) -> Result<(), String> {
     let path_s = path.to_string_lossy();
     run_git(repo_root, &["worktree", "remove", &path_s], GIT_DEADLINE).map(|_| ())
+}
+
+fn validated_worktree_identity(worktree: &ManagedWorktree) -> Result<(), String> {
+    let expected = worktree
+        .identity
+        .as_ref()
+        .ok_or_else(|| "managed worktree has no persisted directory identity".to_string())?;
+    let actual = WorktreeIdentity::from_path(&worktree.path)?;
+    if &actual != expected {
+        return Err(format!(
+            "managed worktree directory identity changed for {}",
+            worktree.path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Remove Paneflow's untracked/ignored ownership marker before asking git to
+/// remove an otherwise-clean managed worktree. `git worktree remove` refuses
+/// even a checkout whose only untracked file is our marker. If user data
+/// appears after the status check, git still refuses removal; losing only our
+/// marker in that race is safer than forcing removal or overwriting a file
+/// that appeared at the marker path.
+fn remove_managed_worktree(
+    worktree: &ManagedWorktree,
+    protected_session_ids: &[u32],
+) -> Result<(), String> {
+    if worktree_has_live_process_cwd(&worktree.path, protected_session_ids)? {
+        return Err("a live process uses the checkout as its cwd".to_string());
+    }
+    // Revalidate ownership after the process scan and immediately before the
+    // unlink. A replacement marker must never be deleted on stale evidence.
+    validated_worktree_identity(worktree)?;
+    let marker_contents =
+        validated_owner_marker(&worktree.path, &worktree.repo_root, &worktree.branch)?;
+    remove_validated_managed_worktree_with(worktree, &marker_contents, || {
+        remove_worktree(&worktree.repo_root, &worktree.path)
+    })
+}
+
+fn restore_owner_marker(marker: &Path, contents: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+        .map_err(|error| format!("cannot restore owner marker {}: {error}", marker.display()))?;
+    file.write_all(contents)
+        .map_err(|error| format!("cannot restore owner marker {}: {error}", marker.display()))
+}
+
+#[cfg(test)]
+fn remove_managed_worktree_with(
+    worktree: &ManagedWorktree,
+    remove: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    validated_worktree_identity(worktree)?;
+    let marker_contents =
+        validated_owner_marker(&worktree.path, &worktree.repo_root, &worktree.branch)?;
+    remove_validated_managed_worktree_with(worktree, &marker_contents, remove)
+}
+
+fn remove_validated_managed_worktree_with(
+    worktree: &ManagedWorktree,
+    marker_contents: &[u8],
+    remove: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let marker = owner_marker_path(&worktree.path);
+    std::fs::remove_file(&marker)
+        .map_err(|error| format!("cannot remove owner marker {}: {error}", marker.display()))?;
+    match remove() {
+        Ok(()) => Ok(()),
+        Err(remove_error) => match validated_worktree_identity(worktree)
+            .and_then(|()| restore_owner_marker(&marker, marker_contents))
+        {
+            Ok(()) => Err(remove_error),
+            Err(restore_error) => Err(format!("{remove_error}; {restore_error}")),
+        },
+    }
+}
+
+/// Resolve one process CWD through macOS libproc. This is intentionally local
+/// instead of `libproc::pidcwd`, which is not implemented on macOS.
+#[derive(Debug)]
+struct ProcessCwdError {
+    message: String,
+    errno: Option<i32>,
+}
+
+impl std::fmt::Display for ProcessCwdError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl ProcessCwdError {
+    fn proves_process_gone(&self) -> bool {
+        self.errno == Some(libc::ESRCH)
+    }
+}
+
+fn process_cwd(pid: i32) -> Result<PathBuf, ProcessCwdError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let info_size =
+        i32::try_from(std::mem::size_of::<libc::proc_vnodepathinfo>()).map_err(|_| {
+            ProcessCwdError {
+                message: "proc_vnodepathinfo size does not fit c_int".to_string(),
+                errno: None,
+            }
+        })?;
+    // SAFETY: `info` points to an exactly-sized writable structure and
+    // PROC_PIDVNODEPATHINFO initializes it on a full-size success.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            info_size,
+        )
+    };
+    if read != info_size {
+        let error = std::io::Error::last_os_error();
+        return Err(ProcessCwdError {
+            message: format!("cannot inspect cwd for pid {pid}: {error}"),
+            // A short positive read is malformed but may leave a stale errno;
+            // only the syscall's failure return can prove an ESRCH race.
+            errno: (read <= 0).then(|| error.raw_os_error()).flatten(),
+        });
+    }
+    // SAFETY: a full-size proc_pidinfo result initialized the structure.
+    let info = unsafe { info.assume_init() };
+    let path_storage = &info.pvi_cdir.vip_path;
+    // SAFETY: `vip_path` is an inline MAXPATHLEN byte array represented by
+    // libc as nested fixed arrays; flattening it preserves the exact bounds.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            path_storage.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(path_storage),
+        )
+    };
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| ProcessCwdError {
+            message: format!("cwd for pid {pid} is not NUL-terminated"),
+            errno: None,
+        })?;
+    if end == 0 {
+        return Err(ProcessCwdError {
+            message: format!("cwd for pid {pid} is empty"),
+            errno: None,
+        });
+    }
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
+}
+
+fn process_probe_proves_gone(result: i32, errno: Option<i32>) -> bool {
+    result != 0 && errno == Some(libc::ESRCH)
+}
+
+fn process_is_gone(pid: i32) -> bool {
+    // SAFETY: signal 0 performs an existence/permission probe.
+    let result = unsafe { libc::kill(pid, 0) };
+    let errno = (result != 0)
+        .then(|| std::io::Error::last_os_error().raw_os_error())
+        .flatten();
+    process_probe_proves_gone(result, errno)
+}
+
+fn direct_child_pids(parent: u32) -> Result<Vec<u32>, String> {
+    let parent = i32::try_from(parent).map_err(|_| "parent PID does not fit pid_t".to_string())?;
+    // `libproc`'s safe wrapper treats Darwin's zero-byte "no children" result
+    // as an errno failure. Call the dedicated API directly so an empty leaf is
+    // distinguishable from a real enumeration error.
+    // SAFETY: the first call is the documented size query with a null buffer.
+    let required = unsafe { libc::proc_listchildpids(parent, std::ptr::null_mut(), 0) };
+    if required < 0 {
+        return Err(format!(
+            "cannot size child-process scan for {parent}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if required == 0 {
+        return Ok(Vec::new());
+    }
+    let item_size = std::mem::size_of::<u32>();
+    let capacity = (required as usize / item_size).saturating_add(32);
+    let mut children = vec![0u32; capacity];
+    let buffer_size = i32::try_from(children.len().saturating_mul(item_size))
+        .map_err(|_| "child-process buffer exceeds c_int".to_string())?;
+    // SAFETY: `children` owns `buffer_size` writable bytes.
+    let read =
+        unsafe { libc::proc_listchildpids(parent, children.as_mut_ptr().cast(), buffer_size) };
+    if read < 0 {
+        return Err(format!(
+            "cannot enumerate child processes for {parent}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    children.truncate(read as usize / item_size);
+    children.retain(|pid| *pid > 1);
+    Ok(children)
+}
+
+fn collect_descendant_pids(
+    owner_pid: u32,
+    relevant: &mut std::collections::HashSet<u32>,
+) -> Result<(), String> {
+    use std::collections::VecDeque;
+
+    let mut queue = VecDeque::from([owner_pid]);
+    while let Some(parent) = queue.pop_front() {
+        for child in direct_child_pids(parent)? {
+            if relevant.insert(child) {
+                if relevant.len() > 8192 {
+                    return Err("PaneFlow descendant scan exceeded 8192 processes".to_string());
+                }
+                queue.push_back(child);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn protected_session_contains(
+    session_id: i32,
+    protected_sessions: &std::collections::HashSet<u32>,
+) -> bool {
+    session_id > 1 && protected_sessions.contains(&(session_id as u32))
+}
+
+const MAX_PROCESS_CWD_SCAN: usize = 65_536;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessCwdProbe {
+    Required,
+    BestEffort,
+    Skip,
+}
+
+fn process_cwd_probe(
+    session_id: i32,
+    effective_uid: u32,
+    current_uid: u32,
+    is_paneflow_descendant: bool,
+    protected_sessions: &std::collections::HashSet<u32>,
+) -> ProcessCwdProbe {
+    if is_paneflow_descendant || protected_session_contains(session_id, protected_sessions) {
+        ProcessCwdProbe::Required
+    } else if effective_uid == current_uid {
+        ProcessCwdProbe::BestEffort
+    } else {
+        ProcessCwdProbe::Skip
+    }
+}
+
+/// A failed query for a previously relevant process may be ignored only when
+/// the PID is proven gone or a protected-session PID is proven to have moved
+/// to a different session. PaneFlow descendants remain required regardless of
+/// session changes.
+fn process_still_requires_cwd_probe(
+    pid: i32,
+    is_paneflow_descendant: bool,
+    was_in_protected_session: bool,
+    protected_sessions: &std::collections::HashSet<u32>,
+) -> bool {
+    if process_is_gone(pid) {
+        return false;
+    }
+    if is_paneflow_descendant {
+        return true;
+    }
+    if was_in_protected_session {
+        // SAFETY: getsid is a read-only process query.
+        let current_session = unsafe { libc::getsid(pid) };
+        if current_session < 0 {
+            return !process_is_gone(pid);
+        }
+        return protected_session_contains(current_session, protected_sessions);
+    }
+    false
+}
+
+/// Final destructive-operation gate for PaneFlow's process tree, known PTY
+/// sessions, and accessible same-UID survivors. An existing shell can `cd`
+/// after the GPUI-side live-terminal sample, and retirement can outlive the
+/// terminal entity entirely, so the background worker independently scans all
+/// processes. CWD failures are fatal only for authenticated session members or
+/// PaneFlow descendants; unrelated inaccessible processes are ignored.
+fn worktree_has_live_process_cwd(
+    worktree_path: &Path,
+    protected_session_ids: &[u32],
+) -> Result<bool, String> {
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::proc_pid::pidinfo;
+    use libproc::processes::{ProcFilter, pids_by_type};
+    use std::collections::{HashMap, HashSet};
+
+    let worktree_path = worktree_path
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize worktree before cwd scan: {error}"))?;
+    let owner_pid = std::process::id();
+    let mut relevant = HashSet::from([owner_pid]);
+    collect_descendant_pids(owner_pid, &mut relevant)?;
+    let protected_sessions: HashSet<_> = protected_session_ids
+        .iter()
+        .copied()
+        .filter(|session_id| *session_id > 1 && *session_id <= i32::MAX as u32)
+        .collect();
+    // SAFETY: geteuid has no preconditions or side effects.
+    let current_uid = unsafe { libc::geteuid() };
+    let pids = pids_by_type(ProcFilter::All)
+        .map_err(|error| format!("cannot enumerate processes before worktree removal: {error}"))?;
+    if pids.len() > MAX_PROCESS_CWD_SCAN {
+        return Err(format!(
+            "process CWD scan exceeded {MAX_PROCESS_CWD_SCAN} processes"
+        ));
+    }
+    let mut parents = HashMap::with_capacity(pids.len());
+    let mut protected_processes = HashSet::new();
+    let mut same_uid_candidates = HashSet::new();
+    for pid in &pids {
+        let pid = *pid;
+        if pid <= 1 {
+            continue;
+        }
+        let Ok(pid_i32) = i32::try_from(pid) else {
+            continue;
+        };
+        // Resolve session membership before BSDInfo: a protected foreground
+        // member's PID normally differs from its session ID, and unreadable
+        // BSD metadata must not make that member disappear from the gate.
+        // SAFETY: getsid is a read-only process query.
+        let session_id = unsafe { libc::getsid(pid_i32) };
+        if session_id < 0 {
+            let session_error = std::io::Error::last_os_error();
+            if session_error.raw_os_error() == Some(libc::ESRCH) {
+                // The enumerated PID exited before its session query. This
+                // syscall's own errno is the proof; a follow-up kill(0) can
+                // still observe a zombie or an immediately reused PID.
+                continue;
+            }
+            if relevant.contains(&pid) && !process_is_gone(pid_i32) {
+                return Err(format!(
+                    "cannot identify PaneFlow process session for pid {pid}: {session_error}"
+                ));
+            }
+            continue;
+        }
+        let in_protected_session = protected_session_contains(session_id, &protected_sessions);
+        if in_protected_session {
+            protected_processes.insert(pid);
+        }
+        match pidinfo::<BSDInfo>(pid_i32, 0) {
+            Ok(info) => {
+                parents.insert(pid, info.pbi_ppid);
+                match process_cwd_probe(
+                    session_id,
+                    info.pbi_uid,
+                    current_uid,
+                    relevant.contains(&pid),
+                    &protected_sessions,
+                ) {
+                    ProcessCwdProbe::Required => {}
+                    ProcessCwdProbe::BestEffort => {
+                        same_uid_candidates.insert(pid);
+                    }
+                    ProcessCwdProbe::Skip => {}
+                }
+            }
+            Err(error)
+                if process_still_requires_cwd_probe(
+                    pid_i32,
+                    relevant.contains(&pid),
+                    in_protected_session,
+                    &protected_sessions,
+                ) =>
+            {
+                return Err(format!("cannot identify PaneFlow process {pid}: {error}"));
+            }
+            Err(_) => continue,
+        }
+    }
+
+    for pid in parents.keys().copied() {
+        let mut cursor = pid;
+        for _ in 0..256 {
+            let Some(parent) = parents.get(&cursor).copied() else {
+                break;
+            };
+            if parent == owner_pid {
+                relevant.insert(pid);
+                break;
+            }
+            if parent <= 1 || parent == cursor {
+                break;
+            }
+            cursor = parent;
+        }
+    }
+    // Close the window for children spawned while the same-UID snapshot was
+    // being inspected. These PIDs are queried below even if BSDInfo was not
+    // readable or they were absent from the earlier snapshot.
+    collect_descendant_pids(owner_pid, &mut relevant)?;
+
+    let mut candidates = same_uid_candidates;
+    candidates.extend(relevant.iter().copied());
+    candidates.extend(protected_processes.iter().copied());
+    for pid in candidates {
+        let Ok(pid) = i32::try_from(pid) else {
+            continue;
+        };
+        let pid_u32 = pid as u32;
+        let is_paneflow_descendant = relevant.contains(&pid_u32);
+        let was_in_protected_session = protected_processes.contains(&pid_u32);
+        let required = is_paneflow_descendant || was_in_protected_session;
+        match process_cwd(pid) {
+            Ok(cwd) => {
+                let cwd = match cwd.canonicalize() {
+                    Ok(cwd) => cwd,
+                    Err(error)
+                        if required
+                            && process_still_requires_cwd_probe(
+                                pid,
+                                is_paneflow_descendant,
+                                was_in_protected_session,
+                                &protected_sessions,
+                            ) =>
+                    {
+                        return Err(format!(
+                            "cannot canonicalize cwd for live pid {pid}: {error}"
+                        ));
+                    }
+                    Err(_) => continue,
+                };
+                if cwd.starts_with(&worktree_path) {
+                    return Ok(true);
+                }
+            }
+            Err(error) => {
+                if !error.proves_process_gone()
+                    && required
+                    && process_still_requires_cwd_probe(
+                        pid,
+                        is_paneflow_descendant,
+                        was_in_protected_session,
+                        &protected_sessions,
+                    )
+                {
+                    return Err(error.to_string());
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// `git worktree prune` - drops references whose directory no longer exists.
@@ -388,7 +1235,7 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
 /// on the app side). Per entry: `Keep` policy → skip; dirty or unverifiable →
 /// keep + warn (NEVER remove what might hold work); clean → remove. The
 /// branch is never touched.
-pub fn teardown_all(worktrees: Vec<ManagedWorktree>) {
+pub fn teardown_all(worktrees: Vec<ManagedWorktree>, protected_session_ids: Vec<u32>) {
     for wt in worktrees {
         if wt.teardown == TeardownPolicy::Keep {
             continue;
@@ -398,15 +1245,22 @@ pub fn teardown_all(worktrees: Vec<ManagedWorktree>) {
             let _ = prune(&wt.repo_root);
             continue;
         }
-        if !has_owner_marker(&wt.path) {
+        if let Err(error) = validated_worktree_identity(&wt) {
             log::warn!(
-                "worktree kept: missing Paneflow owner marker in {}",
-                wt.path.display()
+                "worktree kept: invalid directory identity in {}: {error}",
+                wt.path.display(),
+            );
+            continue;
+        }
+        if let Err(error) = validated_owner_marker(&wt.path, &wt.repo_root, &wt.branch) {
+            log::warn!(
+                "worktree kept: invalid Paneflow owner marker in {}: {error}",
+                wt.path.display(),
             );
             continue;
         }
         match is_clean(&wt.path) {
-            Ok(true) => match remove_worktree(&wt.repo_root, &wt.path) {
+            Ok(true) => match remove_managed_worktree(&wt, &protected_session_ids) {
                 Ok(()) => log::info!("worktree removed: {}", wt.path.display()),
                 Err(e) => log::warn!("worktree kept ({}): {e}", wt.path.display()),
             },
@@ -425,6 +1279,133 @@ pub fn teardown_all(worktrees: Vec<ManagedWorktree>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_workspace_duplicate_records_preserve_keep_policy() {
+        let record = ManagedWorktree {
+            path: PathBuf::from("/tmp/repo.worktrees/feature"),
+            repo_root: PathBuf::from("/tmp/repo"),
+            branch: "feature".to_string(),
+            teardown: TeardownPolicy::Auto,
+            identity: None,
+        };
+        let mut keep = record.clone();
+        keep.teardown = TeardownPolicy::Keep;
+
+        let merged = merge_managed_worktree_records(vec![record, keep]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].teardown, TeardownPolicy::Keep);
+    }
+
+    #[test]
+    fn merge_preserves_more_than_the_layout_pane_cap() {
+        let records: Vec<_> = (0..40)
+            .map(|index| ManagedWorktree {
+                path: PathBuf::from(format!("/tmp/repo.worktrees/feature-{index}")),
+                repo_root: PathBuf::from("/tmp/repo"),
+                branch: format!("feature-{index}"),
+                teardown: TeardownPolicy::Auto,
+                identity: None,
+            })
+            .collect();
+
+        assert_eq!(merge_managed_worktree_records(records).len(), 40);
+    }
+
+    #[test]
+    fn only_esrch_proves_an_unreadable_process_is_gone() {
+        assert!(process_probe_proves_gone(-1, Some(libc::ESRCH)));
+        assert!(!process_probe_proves_gone(-1, Some(libc::EPERM)));
+        assert!(!process_probe_proves_gone(0, None));
+    }
+
+    #[test]
+    fn nonleader_pid_is_protected_by_its_session_identity() {
+        let member_pid = 200;
+        let session_id = 100;
+        assert_ne!(member_pid, session_id);
+        assert!(protected_session_contains(
+            session_id,
+            &std::collections::HashSet::from([session_id as u32]),
+        ));
+    }
+
+    #[test]
+    fn protected_session_pid_is_selected_regardless_of_uid() {
+        let protected_sessions = std::collections::HashSet::from([100]);
+
+        assert_eq!(
+            process_cwd_probe(100, 0, 501, false, &protected_sessions),
+            ProcessCwdProbe::Required,
+            "a setuid/sudo session member must not be filtered out by effective UID"
+        );
+        assert_eq!(
+            process_cwd_probe(200, 501, 501, false, &protected_sessions),
+            ProcessCwdProbe::BestEffort,
+            "same-UID survivors remain accessible-CWD candidates without a terminal entity"
+        );
+        assert_eq!(
+            process_cwd_probe(200, 0, 501, false, &protected_sessions),
+            ProcessCwdProbe::Skip,
+            "an unrelated different-UID process must not be probed"
+        );
+    }
+
+    #[test]
+    fn cwd_scan_finds_same_uid_survivor_after_terminal_entity_is_gone() {
+        use libproc::libproc::bsd_info::BSDInfo;
+        use libproc::libproc::proc_pid::pidinfo;
+        use std::io::BufRead;
+        use std::process::Stdio;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut launcher = Command::new("/bin/sh")
+            .args(["-c", "/bin/sleep 30 </dev/null >/dev/null 2>&1 & echo $!"])
+            .current_dir(tmp.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn terminal launcher fixture");
+        let launcher_pid = launcher.id();
+        let mut pid_line = String::new();
+        std::io::BufReader::new(launcher.stdout.take().expect("launcher stdout"))
+            .read_line(&mut pid_line)
+            .expect("read survivor pid");
+        let survivor_pid: i32 = pid_line.trim().parse().expect("numeric survivor pid");
+        assert!(launcher.wait().expect("reap launcher").success());
+
+        struct ProcessCleanup(i32);
+        impl Drop for ProcessCleanup {
+            fn drop(&mut self) {
+                // SAFETY: the fixture PID is positive and SIGKILL is used only
+                // to ensure a failed assertion cannot leak the test process.
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+        let _cleanup = ProcessCleanup(survivor_pid);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let info = pidinfo::<BSDInfo>(survivor_pid, 0).expect("survivor identity");
+            if info.pbi_ppid != launcher_pid {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "survivor was not reparented after its terminal entity disappeared"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            worktree_has_live_process_cwd(tmp.path(), &[]),
+            Ok(true),
+            "an accessible same-UID survivor must block retirement even after its terminal entity is gone"
+        );
+    }
 
     #[test]
     fn branch_slug_is_filesystem_safe() {
@@ -506,6 +1487,399 @@ mod tests {
     }
 
     #[test]
+    fn managed_status_exempts_only_the_owner_marker() {
+        assert!(managed_status_is_clean(""));
+        assert!(managed_status_is_clean("?? .paneflow-worktree"));
+        assert!(managed_status_is_clean("!! .paneflow-worktree"));
+
+        for dirty in [
+            "?? notes.txt",
+            "!! .env",
+            " M tracked.txt",
+            " M .paneflow-worktree",
+            "?? .paneflow-worktree\n?? notes.txt",
+            "!! .paneflow-worktree\n!! .env",
+        ] {
+            assert!(
+                !managed_status_is_clean(dirty),
+                "every non-marker status entry must fail closed: {dirty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn teardown_removes_marker_only_worktree_but_keeps_ignored_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        std::fs::write(repo_root.join(".gitignore"), ".env\n").expect("ignore file");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let branch = "feat/managed-cleanup";
+        let path = worktree_dir(&repo_root, branch);
+        add_worktree(&repo_root, &path, branch, true).expect("add managed worktree");
+        let managed = ManagedWorktree {
+            path: path.clone(),
+            repo_root: repo_root.clone(),
+            branch: branch.to_string(),
+            teardown: TeardownPolicy::Auto,
+            identity: worktree_identity(&path).ok(),
+        };
+
+        let valid_marker = std::fs::read(owner_marker_path(&path)).expect("valid owner marker");
+        let valid_marker_text = String::from_utf8(valid_marker.clone()).expect("UTF-8 marker");
+        let repo_line = valid_marker_text
+            .lines()
+            .find(|line| line.starts_with("repo_root="))
+            .expect("repo-root marker field");
+        let invalid_markers = [
+            valid_marker_text.replacen("owner=paneflow", "owner=somebody-else", 1),
+            valid_marker_text.replacen(repo_line, "repo_root=/wrong", 1),
+            valid_marker_text.replacen(
+                "branch=feat/managed-cleanup",
+                "branch=feat/somebody-else",
+                1,
+            ),
+            "owner=paneflow\nmalformed\n".to_string(),
+            "x".repeat(MAX_OWNER_MARKER_BYTES as usize + 1),
+        ];
+        for invalid in &invalid_markers {
+            std::fs::write(owner_marker_path(&path), invalid).expect("invalid marker fixture");
+            teardown_all(vec![managed.clone()], Vec::new());
+            assert!(
+                path.exists(),
+                "an invalid marker must block teardown: {invalid:?}"
+            );
+            assert_eq!(
+                std::fs::read(owner_marker_path(&path)).expect("preserved invalid marker"),
+                invalid.as_bytes(),
+                "a rejected marker must survive byte-for-byte"
+            );
+        }
+        std::fs::write(owner_marker_path(&path), valid_marker).expect("restore valid marker");
+
+        std::fs::write(path.join(".env"), "SECRET=test\n").expect("ignored env file");
+        assert!(
+            !is_clean(&path).expect("status with ignored file"),
+            "an ignored file must make managed teardown fail closed"
+        );
+        teardown_all(vec![managed.clone()], Vec::new());
+        assert!(path.exists(), "ignored user data must keep the worktree");
+        assert!(path.join(".env").exists(), "ignored user data must survive");
+
+        std::fs::remove_file(path.join(".env")).expect("remove ignored fixture");
+        assert!(
+            is_clean(&path).expect("marker-only status"),
+            "the sole Paneflow marker is teardown metadata, not user data"
+        );
+        teardown_all(vec![managed], Vec::new());
+        assert!(
+            !path.exists(),
+            "marker removal must let git worktree remove actually succeed"
+        );
+        assert!(
+            branch_exists(&repo_root, branch),
+            "managed teardown must never delete the branch"
+        );
+    }
+
+    #[test]
+    fn teardown_rechecks_live_process_cwd_immediately_before_removal() {
+        use std::io::BufRead;
+        use std::process::Stdio;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let branch = "feat/live-cwd";
+        let path = worktree_dir(&repo_root, branch);
+        add_worktree(&repo_root, &path, branch, true).expect("add managed worktree");
+        let managed = ManagedWorktree {
+            path: path.clone(),
+            repo_root,
+            branch: branch.to_string(),
+            teardown: TeardownPolicy::Auto,
+            identity: worktree_identity(&path).ok(),
+        };
+
+        struct ChildCleanup(std::process::Child);
+        impl Drop for ChildCleanup {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Command::new("/bin/sh")
+            .args(["-c", "echo ready; exec sleep 30"])
+            .current_dir(&path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn process in managed worktree");
+        let mut child = ChildCleanup(child);
+        let mut ready = String::new();
+        std::io::BufReader::new(child.0.stdout.take().expect("child stdout"))
+            .read_line(&mut ready)
+            .expect("read child readiness");
+        assert_eq!(ready.trim_end(), "ready");
+
+        teardown_all(vec![managed.clone()], Vec::new());
+        assert!(
+            path.exists(),
+            "worker-side CWD revalidation must keep a checkout entered after the UI sample"
+        );
+        child.0.kill().expect("stop live-cwd fixture");
+        child.0.wait().expect("reap live-cwd fixture");
+
+        let final_scan = worktree_has_live_process_cwd(&path, &[]);
+        assert_eq!(
+            final_scan,
+            Ok(false),
+            "fixture exit should clear the worker-side CWD gate"
+        );
+        teardown_all(vec![managed], Vec::new());
+        assert!(
+            !path.exists(),
+            "the same clean checkout is removable after its live CWD user exits"
+        );
+    }
+
+    #[test]
+    fn failed_worktree_removal_restores_exact_owner_marker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir(&repo_root).expect("repo root");
+        let path = tmp.path().join("managed-worktree");
+        std::fs::create_dir(&path).expect("worktree path");
+        let marker = owner_marker_path(&path);
+        write_owner_marker(&path, &repo_root, "feat/exact").expect("owner marker");
+        let marker_bytes = std::fs::read(&marker).expect("exact owner marker bytes");
+        let managed = ManagedWorktree {
+            path: path.clone(),
+            // This directory exists (so marker validation succeeds) but is not
+            // a git repository, forcing removal to fail after marker unlink.
+            repo_root,
+            branch: "feat/exact".to_string(),
+            teardown: TeardownPolicy::Auto,
+            identity: worktree_identity(&path).ok(),
+        };
+
+        assert!(remove_managed_worktree(&managed, &[]).is_err());
+        assert_eq!(
+            std::fs::read(marker).expect("restored owner marker"),
+            marker_bytes,
+            "a failed git removal must preserve ownership evidence byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn failed_removal_never_overwrites_a_replacement_marker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir(&repo_root).expect("repo root");
+        let path = tmp.path().join("managed-worktree");
+        std::fs::create_dir(&path).expect("worktree path");
+        let marker = owner_marker_path(&path);
+        write_owner_marker(&path, &repo_root, "feat/race").expect("owner marker");
+        let managed = ManagedWorktree {
+            path: path.clone(),
+            repo_root,
+            branch: "feat/race".to_string(),
+            teardown: TeardownPolicy::Auto,
+            identity: worktree_identity(&path).ok(),
+        };
+        let replacement = b"replacement-created-during-removal";
+
+        let error = remove_managed_worktree_with(&managed, || {
+            std::fs::write(&marker, replacement).expect("replacement marker");
+            Err("forced git removal failure".to_string())
+        })
+        .expect_err("forced removal must fail");
+
+        assert!(error.contains("forced git removal failure"));
+        assert!(error.contains("cannot restore owner marker"));
+        assert_eq!(
+            std::fs::read(marker).expect("replacement marker survives"),
+            replacement,
+            "restoration must never overwrite a marker created during the removal window"
+        );
+    }
+
+    #[test]
+    fn tracked_owner_marker_survives_failed_add_and_rollback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        let user_marker = b"user-owned marker content\n";
+        std::fs::write(owner_marker_path(&repo_root), user_marker).expect("tracked marker");
+        run_git(&repo_root, &["add", OWNER_MARKER_FILE], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let branch = "feat/tracked-marker";
+        let path = worktree_dir(&repo_root, branch);
+        assert!(
+            add_worktree(&repo_root, &path, branch, true).is_err(),
+            "Paneflow must not overwrite a tracked marker in the new checkout"
+        );
+        assert!(
+            !path.exists(),
+            "failed marker creation must roll back the linked worktree"
+        );
+        assert_eq!(
+            std::fs::read(owner_marker_path(&repo_root)).expect("main marker survives"),
+            user_marker
+        );
+        assert_eq!(
+            run_git(
+                &repo_root,
+                &["show", &format!("{branch}:{OWNER_MARKER_FILE}")],
+                GIT_DEADLINE,
+            )
+            .expect("branch marker blob"),
+            "user-owned marker content",
+            "rollback must leave the tracked branch content untouched"
+        );
+    }
+
+    #[test]
+    fn failed_marker_and_failed_rollback_report_that_checkout_may_remain() {
+        let error = add_worktree_marker_failure(
+            "owner marker creation failed".to_string(),
+            Err("git worktree remove timed out".to_string()),
+        );
+
+        assert!(error.contains("owner marker creation failed"));
+        assert!(error.contains("rollback failed"));
+        assert!(error.contains("checkout may remain"));
+        assert!(error.contains("git worktree remove timed out"));
+    }
+
+    #[test]
+    fn owner_marker_creation_does_not_follow_symlinks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir(&repo_root).expect("repo root");
+        std::fs::create_dir(&worktree).expect("worktree");
+        let target = tmp.path().join("user-owned-target");
+        let original = b"do not overwrite\n";
+        std::fs::write(&target, original).expect("symlink target");
+        std::os::unix::fs::symlink(&target, owner_marker_path(&worktree)).expect("marker symlink");
+
+        assert!(write_owner_marker(&worktree, &repo_root, "feat/symlink").is_err());
+        assert_eq!(std::fs::read(&target).expect("target survives"), original);
+        assert!(
+            std::fs::symlink_metadata(owner_marker_path(&worktree))
+                .expect("marker link survives")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn partial_marker_write_never_publishes_or_claims_a_markerless_checkout() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let branch = "feat/partial-marker";
+        let path = worktree_dir(&repo_root, branch);
+        let path_text = path.to_string_lossy();
+        run_git(
+            &repo_root,
+            &["worktree", "add", &path_text, "-b", branch],
+            GIT_DEADLINE,
+        )
+        .expect("registered markerless checkout");
+
+        let error = write_owner_marker_with(&path, &repo_root, branch, |file, contents| {
+            file.write_all(&contents[..5])?;
+            Err(std::io::Error::other("injected short write"))
+        })
+        .expect_err("injected marker write must fail");
+        assert!(error.contains("injected short write"));
+        assert!(
+            !owner_marker_path(&path).exists(),
+            "a partial inode must remain staged outside the checkout and never reach the marker path"
+        );
+
+        assert!(
+            pending_managed_worktree_from_record(
+                &path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                branch,
+                "auto",
+            )
+            .is_none(),
+            "a pre-creation reservation without directory identity must not claim a markerless checkout"
+        );
+        remove_worktree(&repo_root, &path).expect("fixture cleanup");
+    }
+
+    #[test]
     fn managed_worktree_record_requires_marker_and_generated_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
@@ -525,7 +1899,7 @@ mod tests {
             "a matching path without owner marker is not enough"
         );
 
-        std::fs::write(owner_marker_path(&path), "owner=paneflow\n").expect("marker");
+        write_owner_marker(&path, &repo_root, branch).expect("marker");
         let restored = managed_worktree_from_record(
             &path.to_string_lossy(),
             &repo_root.to_string_lossy(),
@@ -569,6 +1943,131 @@ mod tests {
     }
 
     #[test]
+    fn pending_record_recovers_only_the_interrupted_marker_unlink_window() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let branch = "feat/pending-marker-recovery";
+        let path = worktree_dir(&repo_root, branch);
+        add_worktree(&repo_root, &path, branch, true).expect("add managed worktree");
+        let identity = worktree_identity(&path).expect("created checkout identity");
+        std::fs::remove_file(owner_marker_path(&path)).expect("simulate crash after marker unlink");
+
+        assert!(
+            managed_worktree_from_record(
+                &path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                branch,
+                "auto",
+            )
+            .is_none(),
+            "a live workspace record must never claim a markerless checkout"
+        );
+        for policy in ["keep", "delete"] {
+            assert!(
+                pending_managed_worktree_from_record(
+                    &path.to_string_lossy(),
+                    &repo_root.to_string_lossy(),
+                    branch,
+                    policy,
+                )
+                .is_none(),
+                "a {policy:?} record cannot come from Auto teardown's marker-unlink window"
+            );
+            assert!(
+                !owner_marker_path(&path).exists(),
+                "a non-Auto pending record must not recreate the marker"
+            );
+        }
+        let recovered = pending_managed_worktree_from_persisted_record(
+            &path.to_string_lossy(),
+            &repo_root.to_string_lossy(),
+            branch,
+            "auto",
+            Some(identity.as_str()),
+        )
+        .expect("the durable pending record recovers its exact registered checkout");
+        validated_owner_marker(&path, &repo_root, branch).expect("marker recreated exactly");
+
+        remove_managed_worktree_with(&recovered, || remove_worktree(&repo_root, &path))
+            .expect("recovered retirement completes");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn pending_marker_recovery_refuses_same_path_branch_replacement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let branch = "feat/replaced-checkout";
+        let path = worktree_dir(&repo_root, branch);
+        add_worktree(&repo_root, &path, branch, true).expect("original managed checkout");
+        let original_identity = worktree_identity(&path).expect("original identity");
+        std::fs::remove_file(owner_marker_path(&path)).expect("interrupted teardown unlink");
+        remove_worktree(&repo_root, &path).expect("original checkout removed");
+        let path_text = path.to_string_lossy();
+        run_git(
+            &repo_root,
+            &["worktree", "add", &path_text, branch],
+            GIT_DEADLINE,
+        )
+        .expect("external same-path same-branch replacement");
+        assert_ne!(
+            worktree_identity(&path).expect("replacement identity"),
+            original_identity,
+            "replacement fixture must have a distinct directory identity"
+        );
+
+        assert!(
+            pending_managed_worktree_from_persisted_record(
+                &path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                branch,
+                "auto",
+                Some(original_identity.as_str()),
+            )
+            .is_none(),
+            "the old journal must never mint a marker into a replacement checkout"
+        );
+        assert!(!owner_marker_path(&path).exists());
+        remove_worktree(&repo_root, &path).expect("replacement fixture cleanup");
+    }
+
+    #[test]
     fn managed_worktree_record_accepts_hashed_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
@@ -576,7 +2075,7 @@ mod tests {
         let branch = "feat/a-b";
         let path = worktree_dir_hashed(&repo_root, branch);
         std::fs::create_dir_all(&path).expect("worktree dir");
-        std::fs::write(owner_marker_path(&path), "owner=paneflow\n").expect("marker");
+        write_owner_marker(&path, &repo_root, branch).expect("marker");
 
         let restored = managed_worktree_from_record(
             &path.to_string_lossy(),

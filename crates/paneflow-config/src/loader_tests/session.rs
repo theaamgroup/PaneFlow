@@ -63,6 +63,7 @@ fn pending_worktree_retirement_survives_a_session_roundtrip() {
         repo_root: "/tmp/repo".to_string(),
         branch: "feature".to_string(),
         teardown: "auto".to_string(),
+        directory_identity: Some("1:2:3:4".to_string()),
     });
 
     let json = serde_json::to_string(&state).unwrap();
