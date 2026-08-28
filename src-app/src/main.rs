@@ -949,6 +949,13 @@ struct PaneFlowApp {
     /// can be live at a time, and `commit_rename` settles whichever is.
     renaming_tab: Option<(usize, usize)>,
     rename_text: String,
+    /// `rename_text` still holds exactly the value the rename was seeded with,
+    /// so the editor paints it as a selection and the next printable key (or
+    /// backspace) replaces the whole thing instead of appending to it. Cleared
+    /// by the first edit, and reset wherever the rest of the rename state is
+    /// torn down - `commit_rename` and `cancel_inline_rename` in particular,
+    /// or a later rename would open already "typed into".
+    rename_seeded: bool,
     /// Shared slot for config changes from the background `ConfigWatcher` thread.
     /// The watcher writes `Some((config, persist_gen))` on every successful
     /// reload, stamping `persist_gen` from [`Self::config_last_persist_gen`] at

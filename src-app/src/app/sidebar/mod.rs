@@ -124,6 +124,69 @@ fn sidebar_workspace_tone(
     }
 }
 
+/// Quiet step for a tab row's title, on a second axis entirely:
+/// [`sidebar_workspace_tone`] asks "is this workspace doing anything", this
+/// asks "is this workspace the one on screen". They are independent - a busy
+/// background workspace keeps its folder title bright and still recedes as a
+/// tree - so the two must not be folded into one predicate.
+///
+/// Reuses [`IDLE_WORKSPACE_TEXT_OPACITY`] on purpose: the rail has one quiet
+/// step, not two, or the two dims would read as a ranking.
+fn sidebar_tab_title_opacity(is_active_workspace: bool) -> f32 {
+    if is_active_workspace {
+        1.0
+    } else {
+        IDLE_WORKSPACE_TEXT_OPACITY
+    }
+}
+
+/// Wash standing in for a text selection behind a still-seeded rename buffer.
+///
+/// `UiColors` carries no selection slot, so `accent` - the "highlighted items"
+/// token - is the honest choice. The alpha is deliberately heavier than the
+/// 0.15 the app uses for a resting/active row fill: at that strength selected
+/// text reads as merely hovered, and the whole point of the seeded state is
+/// that the next keystroke destroys the value.
+const RENAME_SELECTION_ALPHA: f32 = 0.3;
+
+/// Background and body text of the inline rename editor.
+///
+/// Seeded (nothing typed yet) the whole value reads as selected - accent wash,
+/// and no trailing caret, because there is no insertion point to mark. Once
+/// the user has typed, it is the ordinary editor: overlay fill and a caret at
+/// the end of the buffer.
+///
+/// One definition for both row shells. They already share `rename_text`, and a
+/// selection only one of them painted would make the same gesture look like
+/// two different modes.
+fn rename_editor_skin(
+    text: &str,
+    seeded: bool,
+    ui: crate::theme::UiColors,
+) -> (gpui::Hsla, String) {
+    if seeded {
+        (ui.accent.opacity(RENAME_SELECTION_ALPHA), text.to_string())
+    } else {
+        (ui.overlay, format!("{text}|"))
+    }
+}
+
+/// Consume a still-seeded rename buffer before the keystroke that lands on it.
+///
+/// A rename opens with its seeded value selected, so the first printable key
+/// replaces the whole value instead of appending to it, and the first
+/// backspace clears it instead of shaving one character off a name the user
+/// never typed. Returns whether the selection was the thing consumed, which is
+/// what tells backspace not to also `pop()`.
+fn take_rename_selection(text: &mut String, seeded: &mut bool) -> bool {
+    if std::mem::take(seeded) {
+        text.clear();
+        true
+    } else {
+        false
+    }
+}
+
 pub(crate) const SIDEBAR_ROW_MARGIN_X: f32 = 8.0;
 pub(crate) const SIDEBAR_ROW_PADDING_X: f32 = 8.0;
 pub(crate) const SIDEBAR_ROW_PADDING_Y: f32 = 6.0;
@@ -574,6 +637,41 @@ pub(crate) fn tab_display_title(tab: &Tab, tab_idx: usize) -> String {
     }
 }
 
+/// The label a tab row actually paints, derived at render time.
+///
+/// Precedence: a manual rename wins; failing that the tab borrows its FIRST
+/// pane's resolved title; failing that the positional fallback above.
+///
+/// The middle branch is the whole point. Agents rewrite their terminal title
+/// through OSC 0/2 as they work, that lands in `terminal.title`, and
+/// `Pane::surface_title` is the one resolver that already ranks a pane's
+/// custom name over that OSC title over the agent's display name. Reusing it
+/// here is what stops the rail from growing a second, drifting definition of
+/// "what is running in there".
+///
+/// Derived, never stored: nothing is written to `Tab::title` and nothing is
+/// saved. Persisting an agent-owned string as if the user had typed it would
+/// freeze the label at whatever the agent happened to be doing, and would
+/// dirty the session file on every OSC.
+pub(crate) fn tab_row_title(tab: &Tab, tab_idx: usize, cx: &gpui::App) -> String {
+    if !tab.title.trim().is_empty() {
+        return tab.title.clone();
+    }
+    // `root` and not `saved_layout`: under zoom `root` holds exactly the pane
+    // on screen, which is the one whose title the row should be speaking for.
+    let pane_title = tab
+        .root
+        .as_ref()
+        .and_then(|root| root.first_leaf())
+        .map(|pane| crate::pane::Pane::surface_title(&pane.read(cx).surface, cx))
+        .unwrap_or_default();
+    if pane_title.trim().is_empty() {
+        tab_display_title(tab, tab_idx)
+    } else {
+        pane_title
+    }
+}
+
 /// Index a remove-then-insert reorder must target so the moved item lands in
 /// the gap at `slot`. Both [`crate::workspace::Workspace::reorder_tab`] and
 /// `reorder_workspace` remove first, which slides everything after the source
@@ -814,6 +912,9 @@ impl PaneFlowApp {
             .map(|workspace| workspace.title.clone())
         {
             self.rename_text = title;
+            // Seeded, so the editor opens with the whole existing name
+            // selected. Set after `commit_rename`, which clears the flag.
+            self.rename_seeded = true;
             self.renaming_idx = Some(index);
             self.sidebar_rename_focus.focus(window, cx);
             cx.notify();
@@ -1288,16 +1389,20 @@ impl PaneFlowApp {
                     RenameKey::Cancel => {
                         this.renaming_idx = None;
                         this.rename_text.clear();
+                        this.rename_seeded = false;
                         this.restore_focus_after_rename(window, cx);
                         cx.stop_propagation();
                         cx.notify();
                     }
                     RenameKey::Backspace => {
-                        this.rename_text.pop();
+                        if !take_rename_selection(&mut this.rename_text, &mut this.rename_seeded) {
+                            this.rename_text.pop();
+                        }
                         cx.stop_propagation();
                         cx.notify();
                     }
                     RenameKey::Insert(ch) => {
+                        take_rename_selection(&mut this.rename_text, &mut this.rename_seeded);
                         this.rename_text.push_str(&ch);
                         cx.stop_propagation();
                         cx.notify();
@@ -1340,6 +1445,8 @@ impl PaneFlowApp {
         let tone =
             sidebar_workspace_tone(i == self.active_idx, ws.is_idle(cx), is_waiting_for_input);
         let title_el = if self.renaming_idx == Some(i) {
+            let (editor_bg, editor_body) =
+                rename_editor_skin(&self.rename_text, self.rename_seeded, ui);
             div()
                 .flex_1()
                 .min_w_0()
@@ -1348,10 +1455,10 @@ impl PaneFlowApp {
                 .text_sm()
                 .line_height(px(SIDEBAR_ROW_LINE_HEIGHT))
                 .font_weight(FontWeight::MEDIUM)
-                .bg(ui.overlay)
+                .bg(editor_bg)
                 .px_1()
                 .rounded_sm()
-                .child(format!("{}|", self.rename_text))
+                .child(editor_body)
         } else {
             div()
                 .flex_1()
@@ -1543,7 +1650,7 @@ impl PaneFlowApp {
         let ws_id = ws.id;
         let tab = &ws.tabs()[tab_idx];
         let tab_id = tab.id;
-        let title = tab_display_title(tab, tab_idx);
+        let title = tab_row_title(tab, tab_idx, cx);
         let is_active_tab = tab_idx == ws.active_tab_idx();
         let is_active_workspace = ws_idx == self.active_idx;
         let is_renaming = self.renaming_tab == Some((ws_idx, tab_idx));
@@ -1607,13 +1714,30 @@ impl PaneFlowApp {
         } else {
             (None, Some(hover_bg))
         };
-        // Every title in the rail carries the same weight, selected or not: the
-        // resting fill is what marks the visible tab now (US-009 AC3's dimmed
-        // title is retired), and a muted title on top of it read as a disabled
-        // row rather than an unselected one.
-        let text_color = ui.text;
+        // Two rules meet on this line, and they are NOT the same rule.
+        //
+        // Dimming by *tab* stays retired: inside the workspace on screen every
+        // title carries the same weight, selected or not. The resting fill is
+        // what marks the visible tab (that is what replaced US-009 AC3), and a
+        // muted title on top of that fill read as a disabled row rather than
+        // an unselected one.
+        //
+        // Dimming by *workspace* is a different question and survives: a tab
+        // of a workspace that is not on screen is not competing with its
+        // siblings for the eye, it is background, and at full strength an
+        // expanded rail reads as one flat list of equals. It takes the same
+        // quiet step an idle workspace title takes, so the rail has one dim.
+        //
+        // Foreground only, deliberately: the resting/hover fills below stay
+        // untouched, or a background workspace's rows would also stop looking
+        // clickable.
+        let text_color = ui
+            .text
+            .opacity(sidebar_tab_title_opacity(is_active_workspace));
 
         let title_el = if is_renaming {
+            let (editor_bg, editor_body) =
+                rename_editor_skin(&self.rename_text, self.rename_seeded, ui);
             div()
                 .flex_1()
                 .min_w_0()
@@ -1621,10 +1745,10 @@ impl PaneFlowApp {
                 .text_color(ui.text)
                 .text_sm()
                 .line_height(px(SIDEBAR_ROW_LINE_HEIGHT))
-                .bg(ui.overlay)
+                .bg(editor_bg)
                 .px_1()
                 .rounded_sm()
-                .child(format!("{}|", self.rename_text))
+                .child(editor_body)
         } else {
             div()
                 .flex_1()
@@ -1907,16 +2031,20 @@ impl PaneFlowApp {
                     RenameKey::Cancel => {
                         this.renaming_tab = None;
                         this.rename_text.clear();
+                        this.rename_seeded = false;
                         this.restore_focus_after_rename(window, cx);
                         cx.stop_propagation();
                         cx.notify();
                     }
                     RenameKey::Backspace => {
-                        this.rename_text.pop();
+                        if !take_rename_selection(&mut this.rename_text, &mut this.rename_seeded) {
+                            this.rename_text.pop();
+                        }
                         cx.stop_propagation();
                         cx.notify();
                     }
                     RenameKey::Insert(ch) => {
+                        take_rename_selection(&mut this.rename_text, &mut this.rename_seeded);
                         this.rename_text.push_str(&ch);
                         cx.stop_propagation();
                         cx.notify();
@@ -2542,25 +2670,26 @@ impl Render for SidebarTooltip {
 #[cfg(test)]
 mod tests {
     use super::{
-        PaneFlowApp, ROW_RADIUS, RenameKey, SIDEBAR_ACTION_BUTTON_GAP, SIDEBAR_ACTION_BUTTON_SIZE,
-        SIDEBAR_ACTION_LANE_WIDTH, SIDEBAR_DROP_BAND_REACH, SIDEBAR_DROP_LINE_PX,
-        SIDEBAR_FOLDER_ICON_WIDTH, SIDEBAR_ROW_LINE_HEIGHT, SIDEBAR_ROW_MARGIN_X,
-        SIDEBAR_ROW_PADDING_Y, SIDEBAR_ROW_SPACING, SIDEBAR_TAB_CARD_HEIGHT,
+        IDLE_WORKSPACE_TEXT_OPACITY, PaneFlowApp, ROW_RADIUS, RenameKey, SIDEBAR_ACTION_BUTTON_GAP,
+        SIDEBAR_ACTION_BUTTON_SIZE, SIDEBAR_ACTION_LANE_WIDTH, SIDEBAR_DROP_BAND_REACH,
+        SIDEBAR_DROP_LINE_PX, SIDEBAR_FOLDER_ICON_WIDTH, SIDEBAR_ROW_LINE_HEIGHT,
+        SIDEBAR_ROW_MARGIN_X, SIDEBAR_ROW_PADDING_Y, SIDEBAR_ROW_SPACING, SIDEBAR_TAB_CARD_HEIGHT,
         SIDEBAR_TAB_CARD_ICON_SIZE, SIDEBAR_TAB_CARD_WIDTH, SIDEBAR_TAB_ICON_CAP,
         SIDEBAR_TAB_ICON_SIZE, SIDEBAR_TITLE_ROW_GAP, SIDEBAR_WIDTH, SidebarAgentState,
         SidebarAgentSummary, SidebarDropSlot, SidebarRow, SidebarServiceSummary, WorkspaceOrderKey,
-        compute_auto_order, folder_row_sessions, rename_key_action, reorder_target,
-        sidebar_agent_summary, sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary,
-        sidebar_workspace_tone, tab_display_title, tab_icon_cluster_split, tab_row_sessions,
-        visible_service_ports,
+        compute_auto_order, folder_row_sessions, rename_editor_skin, rename_key_action,
+        reorder_target, sidebar_agent_summary, sidebar_drop_slots, sidebar_row_shell,
+        sidebar_service_summary, sidebar_tab_title_opacity, sidebar_workspace_tone,
+        tab_display_title, tab_icon_cluster_split, tab_row_sessions, tab_row_title,
+        take_rename_selection, visible_service_ports,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
     use crate::terminal::ServiceInfo;
     use crate::workspace::Tab;
     use gpui::{
-        AvailableSpace, InteractiveElement, Modifiers, ParentElement, Styled, TestAppContext, div,
-        point, px, size,
+        AppContext, AvailableSpace, InteractiveElement, Modifiers, ParentElement, Styled,
+        TestAppContext, div, point, px, size,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -3024,6 +3153,166 @@ mod tests {
         assert_eq!(tab_display_title(&named, 3), "build");
     }
 
+    #[gpui::test]
+    fn a_manual_tab_title_outranks_the_pane_it_holds(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = titled_test_pane(cx, "claude");
+        let tab = Tab::new(
+            "build".to_string(),
+            Some(crate::layout::LayoutTree::Leaf(pane)),
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                tab_row_title(&tab, 0, cx),
+                "build",
+                "a name the user typed must survive whatever the agent renames its terminal to"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_unnamed_tab_borrows_its_first_panes_title(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = titled_test_pane(cx, "claude");
+        let tab = Tab::new(String::new(), Some(crate::layout::LayoutTree::Leaf(pane)));
+        cx.update(|_, cx| {
+            let cx: &gpui::App = cx;
+            // Asserted against the pane resolver rather than a literal: the
+            // OSC precedence is `pane.rs`'s contract, and the rule under test
+            // here is only that the rail defers to it instead of keeping a
+            // second copy.
+            let resolved = tab
+                .root
+                .as_ref()
+                .and_then(|root| root.first_leaf())
+                .map(|pane| crate::pane::Pane::surface_title(&pane.read(cx).surface, cx))
+                .expect("the tab holds one pane");
+            assert!(!resolved.is_empty(), "the resolver always names something");
+            assert_eq!(tab_row_title(&tab, 0, cx), resolved);
+            assert_ne!(
+                tab_row_title(&tab, 0, cx),
+                "Tab 1",
+                "the positional fallback is the LAST resort, not the default"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_paneless_tab_falls_back_to_its_position(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let tab = Tab::new(String::new(), None);
+        cx.update(|_, cx| {
+            assert_eq!(tab_row_title(&tab, 2, cx), "Tab 3");
+        });
+    }
+
+    /// A PTY-free pane whose terminal carries `title` the way an agent's
+    /// OSC 0/2 would have left it.
+    fn titled_test_pane(
+        cx: &mut gpui::VisualTestContext,
+        title: &str,
+    ) -> gpui::Entity<crate::pane::Pane> {
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        terminal.update(cx, |view, _| {
+            view.terminal.title = title.to_string();
+        });
+        cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+    }
+
+    #[test]
+    fn a_tab_of_a_background_workspace_quiets_its_title() {
+        assert_eq!(sidebar_tab_title_opacity(true), 1.0);
+        assert_eq!(
+            sidebar_tab_title_opacity(false),
+            IDLE_WORKSPACE_TEXT_OPACITY,
+            "the rail has one quiet step; a second value would read as a ranking"
+        );
+    }
+
+    #[test]
+    fn the_inactive_workspace_dim_never_reaches_the_tab_row_fill() {
+        // The workspace row has the same guard: the dim is a text treatment,
+        // and applied to the shell it would make a whole background workspace
+        // look disabled rather than backgrounded.
+        let tab_row = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .and_then(|production| production.split("fn render_tab_row(\n").nth(1))
+            .and_then(|rest| rest.split("fn render_workspace_meta_row(\n").next())
+            .expect("tab row renderer");
+        // Whitespace-stripped, because rustfmt is free to wrap a builder chain
+        // and the rule under test is about which binding the dim lands on, not
+        // about where the line breaks.
+        let compact: String = tab_row.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(
+                "lettext_color=ui.text.opacity(sidebar_tab_title_opacity(is_active_workspace));"
+            ),
+            "the inactive-workspace dim must land on the title foreground, alone"
+        );
+        assert!(
+            compact.contains("let(resting_bg,hovered_bg)=ifis_active_tab&&is_active_workspace{"),
+            "the resting/hover fills stay a function of selection alone"
+        );
+        assert!(
+            !compact.contains("hover_bg.opacity("),
+            "dimming the row fill would make a background workspace look unclickable"
+        );
+    }
+
+    #[test]
+    fn a_seeded_rename_is_replaced_by_the_first_key() {
+        let mut text = "Tab 1".to_string();
+        let mut seeded = true;
+        assert!(take_rename_selection(&mut text, &mut seeded));
+        text.push('b');
+        assert_eq!(text, "b");
+        assert!(!seeded, "one edit spends the selection");
+
+        // The second key appends, like any editor.
+        assert!(!take_rename_selection(&mut text, &mut seeded));
+        text.push_str("uild");
+        assert_eq!(text, "build");
+    }
+
+    #[test]
+    fn a_seeded_rename_paints_a_selection_and_no_caret() {
+        let theme = crate::theme::theme_by_name(crate::theme::DEFAULT_THEME)
+            .expect("the default theme is bundled");
+        let ui = crate::theme::ui_colors_with(&theme);
+
+        let (seeded_bg, seeded_body) = rename_editor_skin("build", true, ui);
+        assert_eq!(
+            seeded_body, "build",
+            "a selected value has no insertion point to mark"
+        );
+        assert_ne!(
+            seeded_bg, ui.overlay,
+            "the selection must be visibly distinct from the resting editor fill"
+        );
+
+        let (typed_bg, typed_body) = rename_editor_skin("build", false, ui);
+        assert_eq!(typed_body, "build|");
+        assert_eq!(typed_bg, ui.overlay);
+    }
+
+    #[test]
+    fn backspace_on_a_seeded_rename_clears_the_whole_value() {
+        let mut text = "claude".to_string();
+        let mut seeded = true;
+        // The caller only pops when the selection was NOT what it consumed;
+        // popping as well would leave "claud" behind.
+        assert!(take_rename_selection(&mut text, &mut seeded));
+        assert_eq!(text, "");
+        assert!(!seeded);
+
+        let mut typed = "build".to_string();
+        let mut plain = false;
+        assert!(!take_rename_selection(&mut typed, &mut plain));
+        typed.pop();
+        assert_eq!(typed, "buil");
+    }
+
     /// US-012: a session bound to a terminal of the tab, one bound elsewhere,
     /// one never resolved. Only the first may reach the tab row.
     fn attributed_sessions() -> [AgentSession; 3] {
@@ -3390,8 +3679,9 @@ mod tests {
             .and_then(|rest| rest.split("\n    }").next())
             .expect("begin_tab_rename body");
         assert!(
-            begin_tab_rename.contains("tab_display_title(tab, tab_idx)"),
-            "the rename buffer must seed from the title the sidebar actually displays"
+            begin_tab_rename.contains("tab_row_title(tab, tab_idx, cx)"),
+            "the rename buffer must seed from the title the sidebar actually displays - which is \
+             the DERIVED row label, not the raw `Tab::title`"
         );
 
         let production = include_str!("mod.rs")

@@ -677,6 +677,7 @@ impl PaneFlowApp {
             renaming_idx: None,
             renaming_tab: None,
             rename_text: String::new(),
+            rename_seeded: false,
             pending_config,
             save_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_corruption,

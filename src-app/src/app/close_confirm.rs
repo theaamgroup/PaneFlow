@@ -363,10 +363,14 @@ impl PaneFlowApp {
         };
         let Some((workspace_id, tab_id, label)) = self.workspaces.get(ws_idx).and_then(|ws| {
             ws.tabs().get(tab_idx).map(|tab| {
+                // The same derived label the sidebar row is showing, not the
+                // stored `Tab::title`: a confirmation that says "Tab 1" while
+                // the row it points at says "claude" is asking about a
+                // different tab as far as the user can tell.
                 (
                     ws.id,
                     tab.id,
-                    crate::app::sidebar::tab_display_title(tab, tab_idx),
+                    crate::app::sidebar::tab_row_title(tab, tab_idx, cx),
                 )
             })
         }) else {

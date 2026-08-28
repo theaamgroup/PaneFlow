@@ -296,7 +296,11 @@ impl PaneFlowApp {
 
     /// Start the inline rename of a sidebar tab row. Mirrors
     /// `begin_workspace_rename`: any live rename commits first, and the input
-    /// seeds with the tab's current title.
+    /// seeds with the label the row currently shows - which since the label
+    /// became derived may be a pane's title rather than `Tab::title`. That is
+    /// the point: renaming starts from what the user is looking at. Committing
+    /// it unedited still writes nothing, because `commit_rename` compares the
+    /// proposal against that same derived label.
     ///
     /// Issue #79: takes a `Window` so it can claim `sidebar_rename_focus`.
     /// Drawing the editor is not enough - until the renamed row is on the
@@ -316,11 +320,14 @@ impl PaneFlowApp {
             .workspaces
             .get(ws_idx)
             .and_then(|ws| ws.tabs().get(tab_idx))
-            .map(|tab| crate::app::sidebar::tab_display_title(tab, tab_idx))
+            .map(|tab| crate::app::sidebar::tab_row_title(tab, tab_idx, cx))
         else {
             return;
         };
         self.rename_text = title;
+        // Seeded, so the editor opens with the whole displayed label selected.
+        // Set after `commit_rename`, which clears the flag.
+        self.rename_seeded = true;
         self.renaming_tab = Some((ws_idx, tab_idx));
         self.sidebar_rename_focus.focus(window, cx);
         cx.notify();
@@ -424,6 +431,7 @@ impl PaneFlowApp {
         self.workspaces[dest_ws_idx].reorder_tab(last, insert_idx.min(last));
         self.renaming_tab = None;
         self.rename_text.clear();
+        self.rename_seeded = false;
         self.workspaces[dest_ws_idx].sidebar_expanded = true;
         let dest_tab_idx = self.workspaces[dest_ws_idx].active_tab_idx();
         self.focus_workspace_tab(dest_ws_idx, dest_tab_idx, window, cx);

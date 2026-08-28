@@ -646,16 +646,15 @@ fn workspace_index_for_undo(ids: &[u64], record_id: u64) -> Option<usize> {
     ids.iter().position(|&id| id == record_id)
 }
 
-fn tab_rename_should_persist(current_title: &str, tab_idx: usize, proposed: &str) -> bool {
-    if proposed.is_empty() {
-        return false;
-    }
-    let displayed = if current_title.trim().is_empty() {
-        format!("Tab {}", tab_idx + 1)
-    } else {
-        current_title.to_string()
-    };
-    proposed != displayed
+/// Whether an inline tab rename is worth writing to `Tab::title`.
+///
+/// `displayed` is the label the sidebar row was actually showing, passed in
+/// rather than reconstructed: that label is derived (a manual title, else the
+/// first pane's resolved title, else "Tab N"), so rebuilding it from
+/// `Tab::title` alone would no longer recognise an untouched value and would
+/// persist an agent-owned string as a manual rename.
+fn tab_rename_should_persist(displayed: &str, proposed: &str) -> bool {
+    !proposed.is_empty() && proposed != displayed
 }
 
 /// Whether a tab restore has to refuse for want of room.
@@ -987,6 +986,7 @@ impl PaneFlowApp {
         self.renaming_idx = None;
         self.renaming_tab = None;
         self.rename_text.clear();
+        self.rename_seeded = false;
         self.restore_focus_after_rename(window, cx);
         cx.notify();
     }
@@ -2243,6 +2243,9 @@ impl PaneFlowApp {
     }
 
     pub(crate) fn commit_rename(&mut self, cx: &App) {
+        // Whatever this settles, the buffer is spent - the next rename seeds
+        // its own selection.
+        self.rename_seeded = false;
         if let Some(idx) = self.renaming_idx.take() {
             let text = std::mem::take(&mut self.rename_text);
             if !text.is_empty()
@@ -2260,7 +2263,15 @@ impl PaneFlowApp {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.tabs().get(tab_idx))
-                .is_some_and(|tab| tab_rename_should_persist(&tab.title, tab_idx, &text));
+                .is_some_and(|tab| {
+                    // Compare against the label the row was SHOWING, which is
+                    // also what seeded the editor. Recomputing "Tab N" here
+                    // instead would make an untouched agent-derived label
+                    // ("claude") look like a deliberate rename the moment the
+                    // user pressed Enter, freezing it into `Tab::title`.
+                    let displayed = crate::app::sidebar::tab_row_title(tab, tab_idx, cx);
+                    tab_rename_should_persist(&displayed, &text)
+                });
             if should_persist
                 && let Some(tab) = self
                     .workspaces
@@ -3597,10 +3608,15 @@ mod tests {
 
     #[test]
     fn untouched_generated_tab_title_is_not_persisted() {
-        assert!(!tab_rename_should_persist("", 2, "Tab 3"));
-        assert!(!tab_rename_should_persist("build", 2, "build"));
-        assert!(tab_rename_should_persist("", 2, "tests"));
-        assert!(tab_rename_should_persist("build", 2, "tests"));
+        // The displayed label is the caller's, so the positional fallback and
+        // the agent-derived label are the same case here: committing either
+        // one unedited must write nothing.
+        assert!(!tab_rename_should_persist("Tab 3", "Tab 3"));
+        assert!(!tab_rename_should_persist("claude", "claude"));
+        assert!(!tab_rename_should_persist("build", "build"));
+        assert!(!tab_rename_should_persist("build", ""));
+        assert!(tab_rename_should_persist("Tab 3", "tests"));
+        assert!(tab_rename_should_persist("build", "tests"));
     }
 
     #[test]
