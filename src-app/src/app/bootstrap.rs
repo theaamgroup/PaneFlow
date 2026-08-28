@@ -861,15 +861,22 @@ impl PaneFlowApp {
         // for the restored scope; otherwise collapse to CLI so the window never
         // opens onto an empty diff.
         if matches!(app.mode, paneflow_config::schema::AppMode::Diff) {
-            let viable = match app.diff_mode.diff_scope {
-                crate::diff::DiffScope::MultiProject => {
-                    app.workspaces.iter().any(|ws| ws.repo_root.is_some())
-                }
-                _ => app
-                    .workspaces
-                    .get(app.active_idx)
-                    .is_some_and(|ws| ws.repo_root.is_some()),
-            };
+            // A session saved before Review was switched off is the one path
+            // that can reach Diff mode without going through
+            // `enter_diff_mode`'s gate, and the footer tab that would let the
+            // user back out is not rendered while it is off. Fold the switch
+            // into the existing viability test so it collapses to CLI the same
+            // way an unreconstructable diff already does.
+            let viable = app.cached_config.review_view_enabled()
+                && match app.diff_mode.diff_scope {
+                    crate::diff::DiffScope::MultiProject => {
+                        app.workspaces.iter().any(|ws| ws.repo_root.is_some())
+                    }
+                    _ => app
+                        .workspaces
+                        .get(app.active_idx)
+                        .is_some_and(|ws| ws.repo_root.is_some()),
+                };
             if viable {
                 app.rebuild_diff_view(cx);
             } else {

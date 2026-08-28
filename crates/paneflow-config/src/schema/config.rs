@@ -108,6 +108,16 @@ pub struct PaneFlowConfig {
     /// effective detection latency is threshold + up to 30 s.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub agent_stall_threshold_secs: Option<u64>,
+    /// Master switch for the Review surface. `None`/`true` = enabled
+    /// (default): the git review view, its sidebar rail, and the
+    /// `OpenDiffView` chord all work. `false` = the mode is unreachable -
+    /// the footer's mode strip stops rendering entirely (one reachable mode
+    /// is not a choice, so a lone always-active segment would be dead
+    /// chrome), the chord is a silent no-op, and a session saved in Review
+    /// mode restores into the terminal view instead of stranding the user in
+    /// a surface with no way back.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub review_enabled: Option<bool>,
     /// EP-003 US-011 (review redesign): delay in milliseconds
     /// before the Review view pre-fills a freshly-launched review CLI's input
     /// (tmux send-keys style). `None` resolves to 2000 ms; values are clamped to
@@ -399,6 +409,14 @@ impl PaneFlowConfig {
             );
         }
         clamped
+    }
+
+    /// Resolve the Review master switch. Absent means enabled, matching
+    /// every other `None`-is-on switch here (`shell_integration`,
+    /// `agent_stall_detection`): an upgrade must not make a surface the user
+    /// was already using disappear.
+    pub fn review_view_enabled(&self) -> bool {
+        self.review_enabled.unwrap_or(true)
     }
 
     /// EP-003 US-011: resolve `review_prefill_delay_ms`: default 2000, clamped to

@@ -138,6 +138,11 @@
       "maximum": 86400,
       "default": 60
     },
+    "review_enabled": {
+      "type": ["boolean", "null"],
+      "description": "Master switch for the Review surface. null/true = enabled (default). false = the Review view and its sidebar tab are hidden, the Review keyboard shortcut does nothing, and a session saved in Review mode reopens in the terminal view. With Review off the footer's mode strip disappears entirely.",
+      "default": true
+    },
     "review_prefill_delay_ms": {
       "type": ["integer", "null"],
       "description": "Delay in milliseconds before the Review view types the review prompt into a freshly launched CLI. The prompt is always copied to the clipboard as a fallback, so raise this only if a slow-starting CLI keeps missing the auto-fill. Out-of-range values are clamped.",

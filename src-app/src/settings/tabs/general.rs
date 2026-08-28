@@ -145,7 +145,54 @@ impl PaneFlowApp {
             .child(self.render_permissions_section(ui, cx))
             .child(self.render_ai_access_section(ui, cx))
             .child(div().mt(px(24.)).child(defaults_section))
+            .child(self.render_interface_section(ui, cx))
             .child(self.render_notifications_section(ui, cx))
+    }
+
+    /// Interface: which optional surfaces the rail offers. Review is the only
+    /// one left after the Agents view was deleted, so this is a one-row card
+    /// today - kept as its own section rather than folded into Defaults
+    /// because it governs what the window contains, not what a new terminal
+    /// starts with.
+    fn render_interface_section(
+        &self,
+        ui: crate::theme::UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .mt(px(24.))
+            .flex()
+            .flex_col()
+            .child(section_header(ui, "Interface"))
+            .child(
+                setting_card(ui).child(toggle_row_with(
+                    "Review view",
+                    "Show the git review surface and its tab in the sidebar footer. \
+                 With this off the footer's mode tabs disappear entirely, since \
+                 the terminal view is then the only one.",
+                    None,
+                    ui,
+                    div()
+                        .id("row-review-enabled")
+                        .flex_shrink_0()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            let target = !this.cached_config.review_view_enabled();
+                            this.persist_setting(false, "review_enabled", Value::Bool(target), cx);
+                            // Settings is an overlay, not a mode: switching Review
+                            // off while it is the live mode would drop the user
+                            // back into a surface whose only exit tab has just
+                            // stopped rendering. Leave for the terminal view first.
+                            if !target {
+                                this.enter_cli_mode(window, cx);
+                            }
+                        }))
+                        .child(crate::settings::components::toggle_pill(
+                            self.cached_config.review_view_enabled(),
+                            ui,
+                        )),
+                )),
+            )
+            .into_any_element()
     }
 
     /// Notifications: OS-native agent alerts. One toggle, flattened off its own

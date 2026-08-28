@@ -1655,6 +1655,10 @@ impl PaneFlowApp {
                 // Hot-reload the motion switch (GPUI refreshes the windows itself
                 // when the value actually changes).
                 crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
+                // A hand edit that switches Review off while it is the live
+                // mode has to demote here: the footer tab that would let the
+                // user out stops rendering on the very next frame.
+                self.leave_review_if_disabled(cx);
                 if default_shell_changed {
                     self.handle_default_shell_changed(cx);
                 }

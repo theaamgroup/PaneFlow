@@ -123,10 +123,38 @@ impl PaneFlowApp {
     /// active workspace's repo. Keeps the two non-CLI surfaces mutually
     /// exclusive.
     pub(crate) fn enter_diff_mode(&mut self, cx: &mut Context<Self>) {
+        // Single chokepoint for the `review_enabled` kill switch: the footer
+        // tab, the `OpenDiffView` chord and session restore all funnel through
+        // here, so gating it once means no caller can strand the user in a
+        // surface whose only exit affordance is not rendered.
+        if !self.cached_config.review_view_enabled() {
+            return;
+        }
         self.mode = AppMode::Diff;
         // `rebuild_diff_view` mounts the entity and calls `cx.notify()`.
         self.rebuild_diff_view(cx);
         self.save_session(cx);
+    }
+
+    /// Demote out of Review when a config reload turned `review_enabled` off
+    /// under a live Review session. The Settings toggle has its own path (it
+    /// runs `enter_cli_mode` with a real `Window`, so focus lands back on a
+    /// terminal); this covers the other writer - a hand edit to
+    /// `paneflow.json`, applied on the automation tick, which has no `Window`.
+    /// Without it the mode strip stops rendering while the mode is still Diff
+    /// and the only exit left is a restart.
+    ///
+    /// Focus is deliberately not moved here: `Window::on_focus_lost` (issue
+    /// #110) already re-homes an unmounted focus target, and reaching a window
+    /// from the tick would mean carrying one on `PaneFlowApp` just for this.
+    pub(crate) fn leave_review_if_disabled(&mut self, cx: &mut Context<Self>) {
+        if self.mode != AppMode::Diff || self.cached_config.review_view_enabled() {
+            return;
+        }
+        self.park_displayed_diff(cx);
+        self.mode = AppMode::Cli;
+        self.save_session(cx);
+        cx.notify();
     }
 
     /// (Re)point the mounted diff host to the active workspace's `repo_root` and
@@ -618,4 +646,36 @@ fn norm_path(p: &std::path::Path) -> String {
     let resolved = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let s = resolved.to_string_lossy().into_owned();
     s.to_lowercase()
+}
+
+#[cfg(test)]
+mod review_switch_tests {
+    use paneflow_config::schema::PaneFlowConfig;
+
+    /// Absent means on. Every other `None`-is-on switch in this config behaves
+    /// the same way, and an upgrade must not make a surface the user was
+    /// already using vanish.
+    #[test]
+    fn review_defaults_to_enabled_when_the_key_is_absent() {
+        let cfg = PaneFlowConfig::default();
+        assert!(cfg.review_enabled.is_none());
+        assert!(cfg.review_view_enabled());
+    }
+
+    /// The kill switch has to be explicit. `enter_diff_mode` reads exactly this
+    /// predicate, so a `Some(false)` that resolved to `true` would let the
+    /// chord open a surface whose exit tab is not rendered.
+    #[test]
+    fn review_is_disabled_only_by_an_explicit_false() {
+        let on = PaneFlowConfig {
+            review_enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(on.review_view_enabled());
+        let off = PaneFlowConfig {
+            review_enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.review_view_enabled());
+    }
 }
