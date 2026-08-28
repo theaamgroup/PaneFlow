@@ -1,8 +1,9 @@
-//! About Paneflow modal, styled as a compact native application dialog.
+//! About PaneFlow modal, styled as a compact native application dialog.
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton, ObjectFit,
-    ParentElement, Styled, deferred, div, hsla, img, prelude::*, px, rgb, svg,
+    ParentElement, Styled, deferred, div, hsla, img, linear_color_stop, linear_gradient,
+    prelude::*, px, rgb, svg,
 };
 
 use crate::{
@@ -15,6 +16,20 @@ impl PaneFlowApp {
         let ui = crate::theme::ui_colors();
         let version = env!("CARGO_PKG_VERSION");
         let button_hover_bg = gpui::Hsla::from(rgb(0x3a3a3a));
+
+        // The credit plate's block caret rides the app-wide 530 ms blink phase
+        // (`terminal/blink.rs`) instead of owning a timer: a decorative caret
+        // does not justify a second ticker, and borrowing the shared phase puts
+        // it in step with every terminal cursor already on screen. `try_global`
+        // rather than `global` because a render pass must never panic - if the
+        // phase was never installed the caret simply stays lit. The phase only
+        // advances the drawing when something else marks the window dirty, so on
+        // a fully idle window the caret holds whatever state it was last painted
+        // in; that degrades to a static block rather than to a wrong one.
+        let blink_phase = cx
+            .try_global::<crate::terminal::blink::BlinkPhaseGlobal>()
+            .map(|global| global.0.clone());
+        let cursor_lit = blink_phase.is_none_or(|phase| phase.read(cx).visible);
 
         let close_x = div()
             .id("about-close-x")
@@ -75,14 +90,139 @@ impl PaneFlowApp {
                             .text_size(px(12.))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(ui.text)
-                            .child("About Paneflow"),
+                            .child("About PaneFlow"),
                     ),
             )
             .child(close_x);
 
+        // Retro CRT credit plate. Radius, padding, border, text color and the
+        // four-layer shadow stack are transcribed from the original CSS; two
+        // details could not cross over. GPUI's `linear_gradient` carries exactly
+        // two stops, so the CSS midpoint (#062a10 at 50%) is dropped - it lands
+        // within two 8-bit steps of the straight interpolation between the
+        // endpoints, so nothing is visually lost. And this GPUI rev has no
+        // text-shadow, so the phosphor halo has to come from the outer box
+        // shadow alone rather than from the glyphs.
+        let credit_border = gpui::Hsla::from(rgb(0x2d8c4a));
+        let credit_border_hover = gpui::Hsla::from(rgb(0x5cff8a));
+        let credit_green = gpui::Hsla::from(rgb(0x5cff8a));
+
+        let credit = div()
+            .id("about-credit")
+            .flex_none()
+            .mt(px(18.))
+            // Fixed height (8px padding + a 20px line + 8px padding) so this
+            // plate and the contributors plate below it are the same box even
+            // if VT323's metrics resolve differently from the fallback font.
+            .h(px(36.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.))
+            .px(px(14.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(credit_border)
+            .bg(linear_gradient(
+                180.,
+                linear_color_stop(rgb(0x0e3d1a), 0.),
+                linear_color_stop(rgb(0x021608), 1.),
+            ))
+            .shadow(vec![
+                // Lit top edge of the bevel.
+                gpui::BoxShadow::new(px(0.), px(1.), gpui::rgba(0x8cffaa99).into()).inset(),
+                // Inner bottom shade, sinking the face into the frame.
+                gpui::BoxShadow::new(px(0.), px(-2.), gpui::rgba(0x00000099).into())
+                    .blur_radius(px(4.))
+                    .inset(),
+                // Drop shadow lifting the whole plate off the dialog.
+                gpui::BoxShadow::new(px(0.), px(4.), gpui::rgba(0x00000080).into())
+                    .blur_radius(px(14.)),
+                // Phosphor bloom - the only glow available without text-shadow.
+                gpui::BoxShadow::new(px(0.), px(0.), gpui::rgba(0x5cff8a33).into())
+                    .blur_radius(px(18.)),
+            ])
+            .cursor_pointer()
+            // Hover brightens the frame rather than the fill: animating `bg`
+            // here would replace the gradient with a flat color mid-transition.
+            .animated_hover(move |style, delta| {
+                style.border_color(lerp_color(credit_border, credit_border_hover, delta));
+            })
+            .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
+                if let Err(e) =
+                    crate::external_open::open_http_url("https://github.com/evilchinesefood")
+                {
+                    log::warn!("About: could not open the author's page: {e}");
+                }
+                // Deliberately leaves `show_about_dialog` alone: this is a
+                // credit, not a dismiss control.
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .font_family("VT323")
+                    .text_size(px(16.))
+                    .text_color(credit_green)
+                    .child("> made with"),
+            )
+            // The heart is its own span for two reasons: it is the one glyph
+            // that is not phosphor green, and VT323 has no ❤ - leaving the
+            // family unset lets it fall back to a font that does.
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(13.))
+                    .text_color(rgb(0xff5c5c))
+                    .child("❤"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family("VT323")
+                    .text_size(px(16.))
+                    .text_color(credit_green)
+                    .child("by david ayers"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(7.))
+                    .h(px(14.))
+                    .rounded(px(1.))
+                    // Blinks by alpha, not by removal, so the line never
+                    // reflows underneath the caret.
+                    .bg(if cursor_lit {
+                        credit_green
+                    } else {
+                        credit_green.opacity(0.0)
+                    }),
+            );
+
+        // Deliberately inert - no id, no hover, no cursor change. Its whole job
+        // is to invite the next person into this file to add their own plate.
+        let contributors = div()
+            .flex_none()
+            .mt(px(10.))
+            .h(px(36.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(14.))
+            .rounded(px(8.))
+            .border_1()
+            .border_dashed()
+            .border_color(ui.muted.opacity(0.4))
+            .text_size(px(11.))
+            .text_color(ui.muted.opacity(0.6))
+            .child("Add Contributors Here");
+
         let body = div()
             .w_full()
-            .h(px(225.))
+            // Grown from 225 to seat the two plates under the copyright while
+            // the whole stack stays optically centered. Fixed, not auto, to
+            // keep the dialog a constant size like the rest of this chrome.
+            .h(px(320.))
             .flex()
             .flex_col()
             .items_center()
@@ -100,7 +240,7 @@ impl PaneFlowApp {
                     .text_color(ui.text)
                     .text_size(px(16.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Paneflow"),
+                    .child("PaneFlow"),
             )
             .child(
                 div()
@@ -114,8 +254,10 @@ impl PaneFlowApp {
                     .mt(px(14.))
                     .text_color(ui.muted)
                     .text_size(px(12.))
-                    .child("© The AAM Group"),
-            );
+                    .child("© 2026 AAM USA, Inc. All rights reserved."),
+            )
+            .child(credit)
+            .child(contributors);
 
         let ok_button = div()
             .id("about-ok")

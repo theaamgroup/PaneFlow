@@ -617,6 +617,22 @@ impl PaneFlowApp {
             cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter files…", cx));
         cx.observe(&diff_file_filter, |_, _, cx| cx.notify())
             .detach();
+        // The About dialog's credit plate paints a block caret off the shared
+        // blink phase. Only `TerminalView` observes that entity, so on an idle
+        // window nothing would mark the app dirty and the caret would freeze
+        // in whatever state it was last painted in - half the time, hidden.
+        // Observe it here too, but repaint ONLY while the dialog is up: an
+        // unconditional `notify` would wake the whole app every 530 ms forever
+        // for a decoration nobody is looking at.
+        {
+            let blink_phase = cx.global::<BlinkPhaseGlobal>().0.clone();
+            cx.observe(&blink_phase, |this: &mut Self, _, cx| {
+                if this.show_about_dialog {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         // The sidebar search field (same pattern): a real single-line
         // TextInput, observed so each keystroke re-renders the sidebar to
         // re-filter (the TextInput only notifies itself).
