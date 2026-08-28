@@ -190,7 +190,7 @@ fn take_rename_selection(text: &mut String, seeded: &mut bool) -> bool {
 pub(crate) const SIDEBAR_ROW_MARGIN_X: f32 = 8.0;
 pub(crate) const SIDEBAR_ROW_PADDING_X: f32 = 8.0;
 pub(crate) const SIDEBAR_ROW_PADDING_Y: f32 = 6.0;
-/// Separates a row's title line from its meta line (a detected service).
+/// Separates a row's title line from its meta line (branch / service).
 const SIDEBAR_ROW_GAP: f32 = 4.0;
 /// Height of a row's title line, and with it the height of a single-line row:
 /// `SIDEBAR_ROW_LINE_HEIGHT + 2 * SIDEBAR_ROW_PADDING_Y`.
@@ -1018,6 +1018,10 @@ impl PaneFlowApp {
             .flex()
             .flex_col();
 
+        let new_workspace_tooltip = self.shortcut_for_action("new_workspace").map_or_else(
+            || "New workspace".to_string(),
+            |key| format!("New workspace  {key}"),
+        );
         sidebar = sidebar.child(
             div()
                 // Tight enough that the header reads as the list's first line
@@ -1037,7 +1041,42 @@ impl PaneFlowApp {
                         .text_size(px(13.))
                         .text_color(ui.muted)
                         .child("Workspaces"),
-                ),
+                )
+                .child({
+                    // Always-visible rail action: same hover tint and continuous
+                    // corner as a folder row, so it reads as part of the list it
+                    // heads. Opens the folder picker used by Cmd+Shift+N /
+                    // Window ▸ New Workspace.
+                    let hover_bg = crate::app::constants::sidebar_tab_hover_background();
+                    squircle_skin(
+                        div()
+                            .id("sidebar-new-workspace")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center(),
+                        "sidebar-new-workspace-group",
+                        ROW_RADIUS,
+                        None,
+                        Some(hover_bg),
+                    )
+                    .delayed_tooltip(move |_w, cx| {
+                        cx.new(|_| SidebarTooltip {
+                            label: new_workspace_tooltip.clone().into(),
+                        })
+                        .into()
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.create_workspace_with_picker(window, cx);
+                    }))
+                    .child(
+                        svg()
+                            .size(px(SIDEBAR_FOLDER_ICON_WIDTH))
+                            .flex_none()
+                            .path("icons/folder-plus.svg")
+                            .text_color(ui.muted),
+                    )
+                }),
         );
 
         // Workspace list - scrollable area. Wheel-scroll comes from
@@ -2089,10 +2128,16 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        // Detected services only. Neither the git branch nor a diffstat is
-        // rendered in the rail: both crowded the row for little signal, and the
-        // Diff view is where change counts belong.
-        let service = sidebar_service_summary(&ws.active_ports, &ws.service_labels)?;
+        // Branch + detected services on one clipped line. Diffstat stays out of
+        // the rail (Diff view owns change counts); the branch is the identity
+        // cue that makes sibling worktrees distinguishable at a glance.
+        let has_branch = !ws.git_branch.is_empty();
+        let service = sidebar_service_summary(&ws.active_ports, &ws.service_labels);
+        let has_ports = service.is_some();
+        if !has_branch && !has_ports {
+            return None;
+        }
+
         let mut meta_row = div()
             .flex()
             .flex_row()
@@ -2107,32 +2152,24 @@ impl PaneFlowApp {
             .opacity(opacity)
             .text_color(ui.muted);
 
-        let port = service.primary;
-        let workspace_id = ws.id;
-        let info = ws.service_labels.get(&port);
-        let is_frontend = info.is_some_and(|service| service.is_frontend);
-        let service_name = info
-            .and_then(|service| service.label.clone())
-            .unwrap_or_else(|| "Local service".to_string());
-        let service_tooltip: SharedString = format!("{service_name}  :{port}").into();
-
-        if is_frontend {
-            let url = info
-                .and_then(|service| service.url.clone())
-                .unwrap_or_else(|| format!("http://localhost:{port}"));
+        if has_branch {
+            let branch_width = if has_ports {
+                126.0
+            } else {
+                SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH
+            };
             meta_row = meta_row.child(
                 div()
-                    .id(SharedString::from(format!("port-{workspace_id}-{port}")))
+                    .id(SharedString::from(format!("branch-{}", ws.id)))
+                    .min_w_0()
+                    .max_w(px(branch_width))
+                    .overflow_x_hidden()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(2.))
-                    .text_size(px(10.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(ui.muted)
-                    .hover(move |style| style.text_color(ui.text))
+                    .gap(px(4.))
                     .delayed_tooltip({
-                        let label = service_tooltip.clone();
+                        let label: SharedString = ws.git_branch.clone().into();
                         move |_w, cx| {
                             cx.new(|_| SidebarTooltip {
                                 label: label.clone(),
@@ -2140,60 +2177,118 @@ impl PaneFlowApp {
                             .into()
                         }
                     })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.open_workspace_service_url(&url, cx);
-                        cx.stop_propagation();
-                    }))
                     .child(
                         svg()
                             .size(px(10.))
                             .flex_none()
-                            .path("icons/world.svg")
+                            .path("icons/git-branch-sidebar.svg")
                             .text_color(ui.muted),
                     )
-                    .child(format!(":{port}")),
-            );
-        } else {
-            meta_row = meta_row.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "port-{workspace_id}-{port}-info"
-                    )))
-                    .text_size(px(10.))
-                    .text_color(ui.muted)
-                    .delayed_tooltip({
-                        let label = service_tooltip.clone();
-                        move |_w, cx| {
-                            cx.new(|_| SidebarTooltip {
-                                label: label.clone(),
-                            })
-                            .into()
-                        }
-                    })
-                    .child(format!(":{port}")),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_x_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(ws.git_branch.clone()),
+                    ),
             );
         }
 
-        if service.overflow > 0 {
-            let overflow = service.overflow;
-            meta_row = meta_row.child(
-                div()
-                    .id(SharedString::from(format!("ports-{workspace_id}-overflow")))
-                    .flex_none()
-                    .text_size(px(10.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(ui.muted)
-                    .delayed_tooltip(move |_w, cx| {
-                        cx.new(|_| SidebarTooltip {
-                            label: format!(
-                                "{overflow} more services · Right-click workspace to view"
-                            )
-                            .into(),
+        if has_branch && has_ports {
+            meta_row = meta_row.child(div().flex_none().text_color(ui.muted).child("·"));
+        }
+
+        if let Some(service) = service {
+            let port = service.primary;
+            let workspace_id = ws.id;
+            let info = ws.service_labels.get(&port);
+            let is_frontend = info.is_some_and(|service| service.is_frontend);
+            let service_name = info
+                .and_then(|service| service.label.clone())
+                .unwrap_or_else(|| "Local service".to_string());
+            let service_tooltip: SharedString = format!("{service_name}  :{port}").into();
+
+            if is_frontend {
+                let url = info
+                    .and_then(|service| service.url.clone())
+                    .unwrap_or_else(|| format!("http://localhost:{port}"));
+                meta_row = meta_row.child(
+                    div()
+                        .id(SharedString::from(format!("port-{workspace_id}-{port}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.))
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ui.muted)
+                        .hover(move |style| style.text_color(ui.text))
+                        .delayed_tooltip({
+                            let label = service_tooltip.clone();
+                            move |_w, cx| {
+                                cx.new(|_| SidebarTooltip {
+                                    label: label.clone(),
+                                })
+                                .into()
+                            }
                         })
-                        .into()
-                    })
-                    .child(format!("+{overflow}")),
-            );
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.open_workspace_service_url(&url, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            svg()
+                                .size(px(10.))
+                                .flex_none()
+                                .path("icons/world.svg")
+                                .text_color(ui.muted),
+                        )
+                        .child(format!(":{port}")),
+                );
+            } else {
+                meta_row = meta_row.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "port-{workspace_id}-{port}-info"
+                        )))
+                        .text_size(px(10.))
+                        .text_color(ui.muted)
+                        .delayed_tooltip({
+                            let label = service_tooltip.clone();
+                            move |_w, cx| {
+                                cx.new(|_| SidebarTooltip {
+                                    label: label.clone(),
+                                })
+                                .into()
+                            }
+                        })
+                        .child(format!(":{port}")),
+                );
+            }
+
+            if service.overflow > 0 {
+                let overflow = service.overflow;
+                meta_row = meta_row.child(
+                    div()
+                        .id(SharedString::from(format!("ports-{workspace_id}-overflow")))
+                        .flex_none()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ui.muted)
+                        .delayed_tooltip(move |_w, cx| {
+                            cx.new(|_| SidebarTooltip {
+                                label: format!(
+                                    "{overflow} more services · Right-click workspace to view"
+                                )
+                                .into(),
+                            })
+                            .into()
+                        })
+                        .child(format!("+{overflow}")),
+                );
+            }
         }
 
         Some(meta_row.into_any_element())
@@ -3597,28 +3692,61 @@ mod tests {
         }
     }
 
-    /// Issue #105: the "Workspaces" header no longer carries a `+`. Creating
-    /// a workspace already has four other entry points (`Cmd+Shift+N`, the
-    /// Window menu, the profile menu, and the empty-state "Open folder"
-    /// button), and the header glyph was the redundant fifth. Read from
-    /// source because `PaneFlowApp` cannot be built in a unit test (bootstrap
-    /// opens a window and does real I/O), so the rendered element tree is
-    /// unreachable from here.
+    /// The "Workspaces" header carries a folder-plus that opens the same
+    /// folder picker as `Cmd+Shift+N` / Window ▸ New Workspace. Issue #105
+    /// removed it as redundant; without a visible chrome affordance the app
+    /// is hard to use once you already have a workspace (empty-state "Open
+    /// folder" only shows when the list is empty). Read from source because
+    /// `PaneFlowApp` cannot be built in a unit test.
     #[test]
-    fn the_workspaces_header_carries_no_new_workspace_button() {
+    fn the_workspaces_header_carries_a_new_workspace_button() {
         let production = include_str!("mod.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the module");
         assert!(
-            !production.contains("sidebar-new-workspace"),
-            "the sidebar `+` button is back; issue #105 removed it"
+            production.contains("sidebar-new-workspace"),
+            "the sidebar new-workspace button is missing from the Workspaces header"
+        );
+        assert!(
+            production.contains("create_workspace_with_picker"),
+            "the header button must call create_workspace_with_picker"
         );
         // The empty-state open-folder button is a different affordance on a
-        // different surface, and deliberately stays.
+        // different surface, and stays alongside the header control.
         assert!(
             production.contains("empty-new-ws"),
-            "the empty-state open-folder button must survive the `+` removal"
+            "the empty-state open-folder button must survive beside the header +"
+        );
+    }
+
+    /// Workspace folder rows show the detected git branch under the title.
+    /// Issue #88's tab-level redesign dropped it as "crowding"; without it,
+    /// sibling worktrees of one repo are hard to tell apart in the rail.
+    #[test]
+    fn the_workspace_meta_row_renders_the_git_branch() {
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let meta = production
+            .split("fn render_workspace_meta_row(")
+            .nth(1)
+            .expect("render_workspace_meta_row")
+            .split("\n    pub(crate) fn ")
+            .next()
+            .expect("meta row body");
+        assert!(
+            meta.contains("icons/git-branch-sidebar.svg"),
+            "workspace meta row must paint the git branch icon"
+        );
+        assert!(
+            meta.contains("ws.git_branch"),
+            "workspace meta row must read Workspace::git_branch"
+        );
+        assert!(
+            !meta.contains("Neither the git branch nor a diffstat"),
+            "stale comment still claims the branch was dropped from the rail"
         );
     }
 
