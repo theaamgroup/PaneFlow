@@ -15,7 +15,7 @@ Run all commands from the repository root.
 - `cargo clippy --workspace -- -D warnings` treats lint warnings as errors.
 - `cargo fmt --check` verifies formatting.
 
-GPUI and the Alacritty VT crate are **not** local path dependencies. GPUI and its five sibling Zed crates (`gpui_platform`, `collections`, `markdown`, `theme`, `ui`) are git dependencies pinned by exact `rev` to `arthjean/zed` (`src-app/Cargo.toml:39-59`, plus a test-support `gpui` in `[dev-dependencies]` at `:255`), and `alacritty_terminal` comes from crates.io (`src-app/Cargo.toml:62`). Cargo fetches both automatically, so no checkout has to be kept on disk. Never swap the Zed git deps for crates.io versions: GPUI is not published there.
+GPUI and the Alacritty VT crate are **not** local path dependencies. GPUI and `gpui_platform` are git dependencies pinned by exact `rev` to `zed-industries/zed` (`src-app/Cargo.toml:39-40`, plus a test-support `gpui` in `[dev-dependencies]` at `:253`) - three git deps in total, and there are no `collections` / `markdown` / `theme` / `ui` dependencies. Never reintroduce an `arthjean/zed` pin, and `alacritty_terminal` comes from crates.io (`src-app/Cargo.toml:62`). Cargo fetches both automatically, so no checkout has to be kept on disk. Never swap the Zed git deps for crates.io versions: GPUI is not published there.
 
 Build prerequisites (Rust 1.96.1, full Xcode, and the separately downloaded Metal toolchain) are documented in `CLAUDE.md`. They are non-obvious and a missing one fails the build in a confusing way.
 

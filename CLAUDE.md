@@ -10,7 +10,7 @@ output, and the method rules this project has already paid for. Read it before
 planning a pass so you do not redo finished work or repeat a falsified finding.
 
 **Where this fork stands (2026-08-25):** product is PaneFlow (the PanesCLI
-rename was dropped). Version **0.1.0**. Origin `theaamgroup/paneflow` on
+rename was dropped). Version **0.1.1**. Origin `theaamgroup/paneflow` on
 `main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The in-app updater is **deleted**; Apple DMG
@@ -29,7 +29,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.1.0
+./target/debug/paneflow --version          # paneflow 0.1.1
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 
@@ -132,8 +132,10 @@ config, data, cache, and the default IPC socket (`paneflow-dev.sock`). A
 `/Applications/PaneFlow.app`. A **release-profile** local binary
 (`cargo run --release`, `./target/release/paneflow`) uses the real
 `paneflow` namespace and **will** collide with the installed app's
-socket. Isolation is also incomplete: debug builds still write
-`window-state.json` into the release config dir (issue #39).
+socket. (Issue #39 is **fixed**: `window_state.rs:157-161` resolves
+`window-state.json` under the same `APP_SUBDIR` as `paneflow.json`, so a
+debug build writes it to `paneflow-dev`. A regression test at `:195`
+pins that.)
 
 If the singleton guard refuses to start, the installed app is holding
 `paneflow.sock`. Override with both:
@@ -142,9 +144,12 @@ If the singleton guard refuses to start, the installed app is holding
 PANEFLOW_ALLOW_MULTIPLE=1 PANEFLOW_SOCKET_PATH=/tmp/paneflow-head-smoke.sock cargo run -p paneflow-app
 ```
 
-`PANEFLOW_ALLOW_MULTIPLE` is **presence-gated** (`var_os` is `Some`), not
-value-gated: `=0` still skips the guard (issue #53). `open -a PaneFlow`
-drops shell env; use `open --env VAR=1`.
+`PANEFLOW_ALLOW_MULTIPLE` is **value-gated**: `allow_multiple_from`
+(`src-app/src/ipc.rs:274`) is `matches!(value, Some("1"))`, so only `=1`
+skips the guard and `=0` correctly keeps it. Issue #53 reported the
+opposite (presence-gating) and was fixed in `1cfee6c7`; do not
+re-transcribe the bug title as behaviour. `open -a PaneFlow` drops shell
+env; use `open --env VAR=1`.
 
 ### Fork-pin maintenance (Zed Markdown widget)
 
@@ -460,7 +465,7 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 
 `crates/paneflow-mcp/` is a stdio MCP server letting CLI agents (Claude Code, Codex, Gemini, opencode) read other panes' terminal output via the existing IPC socket. Read-only (`list_panes` / `read_pane` / `search_pane`).
 
-**Distribution (`paneflow mcp install`).** The bridge ships embedded in the `paneflow` binary (staged by `build.rs`, extracted at launch to a stable, non-versioned path under `data_dir()/paneflow/bin/` that survives updates: `runtime_paths::bridge_binary_path()`). `paneflow mcp install | uninstall | status` (intercepted in `main.rs` before GUI init) registers, removes, or inspects the `paneflow` MCP entry across every detected agent. The engine is the GPU-free `crates/paneflow-mcp-install/` crate (idempotent, no-clobber, backup + atomic write; `toml_edit` kept out of the embedded bridge per budget). Per-agent shapes: Claude Code `~/.claude.json` `mcpServers` (prefers `claude mcp add`), Codex `~/.codex/config.toml` `[mcp_servers.*]` (prefers `codex mcp add`), Gemini `~/.gemini/settings.json` `mcpServers` (`trust:true`), opencode `~/.config/opencode/opencode.json` key `mcp` (`command` array, `type:local`). The repo's `.mcp.json` still auto-wires Claude Code inside this project. Full setup and per-agent config: `docs/mcp-bridge.md`. There is also a Settings → AI Agent → "MCP bridge" button that runs the same install off the render thread (state-aware label: Install / Repair / Reinstall).
+**Distribution (`paneflow mcp install`).** The bridge ships embedded in the `paneflow` binary (staged by `build.rs`, extracted at launch to a stable, non-versioned path under `data_dir()/paneflow/bin/` that survives updates: `runtime_paths::bridge_binary_path()`). `paneflow mcp install | uninstall | status` (intercepted in `main.rs` before GUI init) registers, removes, or inspects the `paneflow` MCP entry across every detected agent. The engine is the GPU-free `crates/paneflow-mcp-install/` crate (idempotent, no-clobber, backup + atomic write; `toml_edit` kept out of the embedded bridge per budget). Per-agent shapes: Claude Code `~/.claude.json` `mcpServers` (prefers `claude mcp add`), Codex `~/.codex/config.toml` `[mcp_servers.*]` (prefers `codex mcp add`), Gemini `~/.gemini/settings.json` `mcpServers` (`trust:true`), opencode `~/.config/opencode/opencode.json` key `mcp` (`command` array, `type:local`). There is **no** `.mcp.json` in this repo (dropped in `3e8a8464`), so working inside this project does *not* auto-wire Claude Code - run `paneflow mcp install` like anywhere else. Full setup and per-agent config: `docs/mcp-bridge.md`. There is also a Settings → AI Agent → "MCP bridge" button that runs the same install off the render thread (state-aware label: Install / Repair / Reinstall).
 
 ## Commit convention
 
@@ -481,7 +486,7 @@ Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork):
 This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`.
 
 - Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, no Ghostty backend.
-- **`#[cfg(unix)]` is not Linux-only.** It appears **138 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears **71** times. Both are live arms and both stay. Counted by `./scripts/linux-census.sh` negative control (`cfg(unix)` / `cfg(macos)` live sites).
+- **`#[cfg(unix)]` is not Linux-only.** It appears **150 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears **94** times. Both are live arms and both stay. Counted by the `./scripts/linux-census.sh` negative control (`cfg(unix)` / `cfg(macos)` live sites) - **re-run it before quoting these numbers**, since they drift with every pass and four different pairs are currently recorded across the fork docs.
 - **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:239`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition: it exits 1 with a `FAIL:` line when the STAGE 2c total is non-zero or the negative control reads 0, and `run_tests.yml::platform_census` runs it (and `win-census.sh`) on every push and PR. It prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. A zero cfg census is also blind to ungated Windows strings (`powershell` / `.exe` / `.cmd` / `.bat` / `.ps1` / `\\?\` / `%APPDATA%`); that class is a separate reported check in the same script (issue #103) and is **not** part of the STAGE 2c integer.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.
 - Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
