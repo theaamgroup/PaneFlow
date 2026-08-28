@@ -861,14 +861,11 @@ impl Pane {
     /// basename; terminal surfaces detect well-known programs from the OSC
     /// title.
     ///
-    /// Both variants are capped at 24 chars (Zed `MAX_SURFACE_TITLE_LEN`,
-    /// `crates/editor/src/items.rs:64`). The CSS truncation chain
-    /// (`min_w_0 + overflow_x_hidden + text_ellipsis`) on the title div
-    /// is a second layer that catches edge cases - but Zed's experience is
-    /// that flex layouts with `max_w` (no explicit `w`) sometimes fail to
-    /// propagate the constraint, so capping the string up front is
-    /// load-bearing for visual consistency. Without this, a long markdown
-    /// filename like `prd-opencode-sessions.md` overflows the header.
+    /// The full variant keeps meaningful title text for the flexible header
+    /// and tooltip while the render chain applies ellipsis at the available
+    /// width. OSC input is still scrubbed and hard-bounded before it reaches
+    /// this sink. [`Self::surface_title`] is the separate compact 24-character
+    /// variant used by drag labels and other fixed-width surfaces.
     fn surface_full_title(surface: &PaneSurface, cx: &App) -> String {
         match surface {
             PaneSurface::Markdown(md) => md.read(cx).title().to_string(),
@@ -982,6 +979,7 @@ impl Pane {
         let title = crate::sidebar_title::clean_sidebar_title(title)?;
         if Self::is_default_terminal_title(&title)
             || Self::shell_path_title(&title).is_some()
+            || Self::looks_like_shell_osc_title(&title)
             || Self::agent_title_from_terminal_title(&title).is_some()
         {
             None
@@ -992,6 +990,15 @@ impl Pane {
 
     fn is_default_terminal_title(title: &str) -> bool {
         title.trim().is_empty() || title.trim().eq_ignore_ascii_case("terminal")
+    }
+
+    fn looks_like_shell_osc_title(title: &str) -> bool {
+        if crate::workspace::surface_naming::is_shell_command(title) {
+            return true;
+        }
+        title
+            .rsplit_once(':')
+            .is_some_and(|(prompt, cwd)| prompt.contains('@') && !cwd.trim().is_empty())
     }
 
     fn agent_title_from_terminal_title(title: &str) -> Option<&'static str> {
@@ -2329,6 +2336,9 @@ mod tests {
         );
         assert_eq!(super::Pane::agent_osc_title("Terminal"), None);
         assert_eq!(super::Pane::agent_osc_title("codex"), None);
+        assert_eq!(super::Pane::agent_osc_title("zsh"), None);
+        assert_eq!(super::Pane::agent_osc_title("bash"), None);
+        assert_eq!(super::Pane::agent_osc_title("/bin/zsh -l"), None);
         assert_eq!(super::Pane::agent_osc_title(" ● \u{200B}"), None);
         assert_eq!(
             super::Pane::agent_osc_title("user@host: /repo"),
@@ -2339,6 +2349,11 @@ mod tests {
             super::Pane::agent_osc_title("/repo"),
             None,
             "a bare cwd title must not replace the detected-agent identity"
+        );
+        assert_eq!(
+            super::Pane::agent_osc_title("user@host: repo"),
+            None,
+            "a relative shell cwd title must not replace the detected-agent identity"
         );
     }
 

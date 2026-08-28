@@ -8,6 +8,10 @@
 
 /// Longest title a sidebar row keeps; the rest is elided with `…`.
 const MAX_SIDEBAR_TITLE_CHARS: usize = 240;
+/// Bound normalization work before allocating. OSC senders control this input;
+/// retaining or repeatedly walking an arbitrarily large title is a local
+/// memory/CPU denial of service even when the final label is capped.
+const MAX_RAW_SIDEBAR_TITLE_CHARS: usize = 1024;
 
 /// Strip leading decoration glyphs and invisible characters that CLI
 /// agents (Claude Code, Codex, OpenCode, Pi, Amp) bake into their
@@ -33,6 +37,7 @@ const MAX_SIDEBAR_TITLE_CHARS: usize = 240;
 pub fn clean_sidebar_title(raw: &str) -> Option<String> {
     let normalized: String = raw
         .chars()
+        .take(MAX_RAW_SIDEBAR_TITLE_CHARS)
         .map(|c| {
             if is_title_invisible_or_control(c) {
                 ' '
@@ -126,5 +131,18 @@ mod tests {
     #[test]
     fn pure_decoration_leaves_nothing() {
         assert_eq!(clean_sidebar_title("●  \u{200B}"), None);
+    }
+
+    #[test]
+    fn oversized_raw_title_has_bounded_normalization() {
+        let hostile = format!(
+            "{}meaningful",
+            "●".repeat(MAX_RAW_SIDEBAR_TITLE_CHARS + 10_000)
+        );
+        assert_eq!(
+            clean_sidebar_title(&hostile),
+            None,
+            "a meaningful suffix beyond the bounded OSC prefix must not force an unbounded scan"
+        );
     }
 }
