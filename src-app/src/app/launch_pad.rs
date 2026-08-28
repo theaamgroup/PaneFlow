@@ -64,6 +64,24 @@ struct LaunchPlan {
     prompt: String,
 }
 
+struct LaunchPadCreationFailure {
+    message: String,
+    checkout_may_remain: bool,
+}
+
+fn worktree_checkout_may_exist(repo_root: &std::path::Path, path: &std::path::Path) -> bool {
+    match path.try_exists() {
+        Ok(true) | Err(_) => return true,
+        Ok(false) => {}
+    }
+    match worktree::list_worktrees(repo_root) {
+        Ok(entries) => entries.into_iter().any(|entry| entry.path == path),
+        // Losing lifecycle evidence is worse than retaining a reservation
+        // when git cannot prove the failed creation left nothing behind.
+        Err(_) => true,
+    }
+}
+
 fn launch_pad_worktree_plan(
     repo_root: &std::path::Path,
     branch: &str,
@@ -238,7 +256,6 @@ impl PaneFlowApp {
             return;
         }
 
-        let worktree_path = worktree::worktree_dir(&repo_root, &branch);
         if let Some(lp) = self.launch_pad.as_mut() {
             lp.running = true;
             lp.error = None;
@@ -248,23 +265,93 @@ impl PaneFlowApp {
         let plan = LaunchPlan {
             ws_id,
             repo_root: repo_root.clone(),
-            worktree_path: worktree_path.clone(),
+            worktree_path: worktree::worktree_dir(&repo_root, &branch),
             branch: branch.clone(),
             agent,
             prompt,
         };
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                // The engine is synchronous (git subprocess, 120 s deadline)
-                // - run it on the blocking pool, never the render thread.
+                // Planning runs off-thread because it calls git, but creation
+                // starts only after the exact collision-resolved path is
+                // reserved back on the serialized GPUI thread.
+                let result =
+                    smol::unblock(move || launch_pad_worktree_plan(&repo_root, &branch)).await;
+                cx.update(|cx| {
+                    let _ = this.update(cx, |app, cx| {
+                        app.launch_pad_begin_creation(result, plan, cx);
+                    });
+                });
+            },
+        )
+        .detach();
+    }
+
+    /// Reserve the exact path selected by the off-thread planner before any
+    /// filesystem creation. The durable retirement journal doubles as the
+    /// in-flight ownership reservation: IPC and other launch paths already
+    /// gate on it, and a crash after `git worktree add` can safely replay it.
+    fn launch_pad_begin_creation(
+        &mut self,
+        result: Result<(std::path::PathBuf, bool), String>,
+        mut plan: LaunchPlan,
+        cx: &mut Context<Self>,
+    ) {
+        let (worktree_path, create_branch) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.launch_pad_set_error(error, cx);
+                return;
+            }
+        };
+        plan.worktree_path = worktree_path.clone();
+        if self.managed_worktree_conflicts(&worktree_path, None, cx) {
+            self.launch_pad_set_error("Worktree is already owned or being retired", cx);
+            return;
+        }
+
+        let reservation = ManagedWorktree {
+            path: worktree_path.clone(),
+            repo_root: plan.repo_root.clone(),
+            branch: plan.branch.clone(),
+            teardown: Default::default(),
+            identity: None,
+        };
+        self.pending_worktree_teardowns.push(reservation);
+        self.pending_worktree_teardowns = worktree::merge_managed_worktree_records(std::mem::take(
+            &mut self.pending_worktree_teardowns,
+        ));
+        self.publish_pending_worktree_teardowns();
+        if !self.save_session_blocking(cx) {
+            self.pending_worktree_teardowns
+                .retain(|worktree| worktree.path != worktree_path);
+            self.publish_pending_worktree_teardowns();
+            self.launch_pad_set_error(
+                "Could not persist the worktree ownership reservation; nothing was created",
+                cx,
+            );
+            return;
+        }
+
+        let repo_root = plan.repo_root.clone();
+        let branch = plan.branch.clone();
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let result = smol::unblock(move || {
-                    let (worktree_path, create_branch) =
-                        launch_pad_worktree_plan(&repo_root, &branch)?;
-                    worktree::add_worktree(&repo_root, &worktree_path, &branch, create_branch)?;
+                    if let Err(message) =
+                        worktree::add_worktree(&repo_root, &worktree_path, &branch, create_branch)
+                    {
+                        let checkout_may_remain =
+                            worktree_checkout_may_exist(&repo_root, &worktree_path);
+                        return Err(LaunchPadCreationFailure {
+                            message,
+                            checkout_may_remain,
+                        });
+                    }
                     // Best-effort by design (US-007 orchestration-v2): a
                     // partial copy is not a failure.
                     let _ = worktree::copy_env_files(&repo_root, &worktree_path);
-                    Ok::<std::path::PathBuf, String>(worktree_path)
+                    Ok::<std::path::PathBuf, LaunchPadCreationFailure>(worktree_path)
                 })
                 .await;
                 cx.update(|cx| {
@@ -282,54 +369,146 @@ impl PaneFlowApp {
     /// registration, then close.
     fn launch_pad_finish(
         &mut self,
-        result: Result<std::path::PathBuf, String>,
+        result: Result<std::path::PathBuf, LaunchPadCreationFailure>,
         mut plan: LaunchPlan,
         cx: &mut Context<Self>,
     ) {
         let worktree_path = match result {
             Ok(path) => path,
-            Err(e) => {
-                if self.launch_pad.is_some() {
-                    self.launch_pad_set_error(e, cx);
+            Err(failure) => {
+                if failure.checkout_may_remain {
+                    self.launch_pad_set_error(
+                        format!(
+                            "{}; ownership reservation retained because the checkout may remain at {}",
+                            failure.message,
+                            plan.worktree_path.display()
+                        ),
+                        cx,
+                    );
+                    return;
+                }
+                let reservation = self
+                    .pending_worktree_teardowns
+                    .iter()
+                    .position(|worktree| worktree.path == plan.worktree_path)
+                    .map(|index| self.pending_worktree_teardowns.remove(index));
+                self.publish_pending_worktree_teardowns();
+                let mut reservation_retained = false;
+                if !self.save_session_blocking(cx)
+                    && let Some(reservation) = reservation
+                {
+                    reservation_retained = true;
+                    self.pending_worktree_teardowns.push(reservation);
+                    self.pending_worktree_teardowns = worktree::merge_managed_worktree_records(
+                        std::mem::take(&mut self.pending_worktree_teardowns),
+                    );
+                    self.publish_pending_worktree_teardowns();
+                }
+                let message = if reservation_retained {
+                    format!(
+                        "{}; ownership reservation retained because its durable record could not be cleared",
+                        failure.message
+                    )
                 } else {
-                    self.show_toast(format!("Launch Pad: {e}"), cx);
+                    failure.message
+                };
+                if self.launch_pad.is_some() {
+                    self.launch_pad_set_error(message, cx);
+                } else {
+                    self.show_toast(format!("Launch Pad: {message}"), cx);
                 }
                 return;
             }
         };
         plan.worktree_path = worktree_path;
 
+        let identity = match worktree::worktree_identity(&plan.worktree_path) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.launch_pad_set_error(
+                    format!(
+                        "Could not authenticate created worktree {}; ownership reservation retained: {error}",
+                        plan.worktree_path.display()
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let Some(reservation_idx) = self
+            .pending_worktree_teardowns
+            .iter()
+            .position(|worktree| worktree.path == plan.worktree_path)
+        else {
+            self.launch_pad_set_error(
+                "Worktree ownership reservation disappeared during creation",
+                cx,
+            );
+            return;
+        };
+        self.pending_worktree_teardowns[reservation_idx].identity = Some(identity);
+
         let Some(ws_idx) = self.workspaces.iter().position(|w| w.id == plan.ws_id) else {
-            // Workspace closed during the run: the worktree exists on disk
-            // but there is nothing to attach it to. Surface it instead of
-            // silently leaking - `git worktree prune`/manual removal applies.
+            // The durable reservation already owns this checkout. If its
+            // target workspace vanished, retire it through the same guarded
+            // path as every other orphaned managed worktree.
+            let reserved: Vec<_> = self
+                .pending_worktree_teardowns
+                .iter()
+                .filter(|worktree| worktree.path == plan.worktree_path)
+                .cloned()
+                .collect();
             log::warn!(
-                "launch pad: workspace closed during worktree creation; {} left on disk",
+                "launch pad: workspace closed during worktree creation; retiring {}",
                 plan.worktree_path.display()
             );
             self.show_toast(
                 format!(
-                    "Workspace closed - worktree left at {}",
+                    "Workspace closed - cleaning up worktree at {}",
                     plan.worktree_path.display()
                 ),
                 cx,
             );
             self.launch_pad = None;
+            if self.save_session_blocking(cx) {
+                self.spawn_persisted_worktree_teardown(reserved, cx);
+            } else {
+                self.show_toast(
+                    "Workspace closed - worktree cleanup deferred until its ownership record can be saved",
+                    cx,
+                );
+            }
             cx.notify();
             return;
         };
 
-        // AC5: register ownership FIRST so teardown parity holds even if a
-        // later step fails - the workspace now owns this worktree exactly
-        // like a `paneflow up` one.
+        let reservation = self.pending_worktree_teardowns.remove(reservation_idx);
+        self.publish_pending_worktree_teardowns();
+        // Transfer ownership from the durable reservation to the workspace in
+        // one main-thread turn, then make that transfer durable before a pane
+        // can start using the checkout.
         self.workspaces[ws_idx]
             .managed_worktrees
-            .push(ManagedWorktree {
-                path: plan.worktree_path.clone(),
-                repo_root: plan.repo_root.clone(),
-                branch: plan.branch.clone(),
-                teardown: Default::default(),
-            });
+            .push(reservation.clone());
+        if !self.save_session_blocking(cx) {
+            self.workspaces[ws_idx]
+                .managed_worktrees
+                .retain(|worktree| worktree.path != plan.worktree_path);
+            self.pending_worktree_teardowns.push(reservation.clone());
+            self.pending_worktree_teardowns = worktree::merge_managed_worktree_records(
+                std::mem::take(&mut self.pending_worktree_teardowns),
+            );
+            self.publish_pending_worktree_teardowns();
+            self.launch_pad_set_error(
+                format!(
+                    "Could not persist worktree ownership; cleaning up {}",
+                    plan.worktree_path.display()
+                ),
+                cx,
+            );
+            self.spawn_persisted_worktree_teardown(vec![reservation], cx);
+            return;
+        }
 
         // Re-check the pane budget - it may have filled during the run.
         if self.workspaces[ws_idx].active_tab().root.is_none()
@@ -712,6 +891,105 @@ mod tests {
         let (path, create_branch) = launch_pad_worktree_plan(&repo_root, branch_b).expect("plan");
         assert_eq!(path, worktree::worktree_dir_hashed(&repo_root, branch_b));
         assert!(create_branch);
+    }
+
+    #[test]
+    fn exact_planned_path_is_reserved_before_creation_and_never_disarmed() {
+        let src = include_str!("launch_pad.rs");
+        let begin = src
+            .split("fn launch_pad_begin_creation(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Main-thread completion").next())
+            .expect("main-thread reservation stage");
+        let exact_path_at = begin
+            .find("plan.worktree_path = worktree_path.clone()")
+            .expect("exact collision-resolved path");
+        let reserve_at = begin
+            .find("self.pending_worktree_teardowns.push(reservation)")
+            .expect("in-flight reservation");
+        let persist_at = begin
+            .find("self.save_session_blocking(cx)")
+            .expect("durable reservation");
+        let create_at = begin.find("cx.spawn(").expect("creation worker");
+        assert!(
+            exact_path_at < reserve_at && reserve_at < persist_at && persist_at < create_at,
+            "the exact path must be durably reserved before worktree creation: {begin}"
+        );
+
+        let finish = src
+            .split("fn launch_pad_finish(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn handle_launch_pad_key_down")
+                    .next()
+            })
+            .expect("completion stage");
+        assert!(
+            !finish.contains("remove_file") && !finish.contains("owner_marker_path"),
+            "completion must never unlink a marker that another owner may have claimed: {finish}"
+        );
+    }
+
+    #[test]
+    fn failed_add_with_registered_markerless_checkout_keeps_reservation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir(&repo_root).expect("repo dir");
+        if !test_git(&repo_root, &["init"]) {
+            return;
+        }
+        std::fs::write(repo_root.join("README.md"), "init\n").expect("readme");
+        assert!(test_git(&repo_root, &["add", "README.md"]));
+        assert!(test_git(
+            &repo_root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "-m",
+                "init",
+            ],
+        ));
+        let branch = "feat/failed-marker-rollback";
+        let path = worktree::worktree_dir(&repo_root, branch);
+        std::fs::create_dir_all(path.parent().expect("worktree parent")).expect("parent dir");
+        assert!(test_git(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                path.to_str().expect("utf8 path"),
+                "-b",
+                branch,
+            ],
+        ));
+        assert!(
+            worktree_checkout_may_exist(&repo_root, &path),
+            "a failed rollback's registered markerless checkout must retain lifecycle evidence"
+        );
+
+        let src = include_str!("launch_pad.rs");
+        let finish = src
+            .split("fn launch_pad_finish(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn handle_launch_pad_key_down")
+                    .next()
+            })
+            .expect("completion stage");
+        let retain_at = finish
+            .find("if failure.checkout_may_remain")
+            .expect("may-remain failure arm");
+        let remove_at = finish
+            .find("self.pending_worktree_teardowns.remove(index)")
+            .expect("proven-absent release arm");
+        let retain_arm = &finish[retain_at..remove_at];
+        assert!(
+            retain_arm.contains("ownership reservation retained") && retain_arm.contains("return;"),
+            "a possibly registered checkout must return before clearing its reservation: {retain_arm}"
+        );
     }
 
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {

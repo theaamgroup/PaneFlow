@@ -19,10 +19,19 @@ use crate::app::close_guard::{
     CloseTarget, ConfirmStyle, PendingClose, SurfaceCloseState, agent_needing_confirmation,
     agents_needing_confirmation_count,
 };
-use crate::app::workspace_ops::{capture_closed_pane_record, push_closed_record};
+use crate::app::workspace_ops::capture_closed_pane_record;
 use crate::pane::Pane;
 use crate::ui_primitives::AnimatedHoverExt;
 use crate::{ClosedRecord, PaneFlowApp};
+
+/// Result returned to the window-less IPC path. A guarded request is not a
+/// close: it arms the same in-app modal the UI uses and reports that fact to
+/// the caller instead of pretending the workspace is already gone.
+pub(crate) enum WorkspaceCloseOutcome {
+    Closed,
+    ConfirmationRequired,
+    NotFound,
+}
 
 /// Scrub and clamp a label before it lands in the modal copy.
 ///
@@ -49,8 +58,7 @@ fn confirm_label(raw: &str) -> String {
 }
 
 /// Title line for the close confirmation.
-pub(crate) fn close_confirm_title(target_is_tab: bool, label: &str) -> String {
-    let noun = if target_is_tab { "tab" } else { "pane" };
+pub(crate) fn close_confirm_title(noun: &str, label: &str) -> String {
     let label = label.trim();
     if label.is_empty() {
         format!("Close this {noun}?")
@@ -62,10 +70,11 @@ pub(crate) fn close_confirm_title(target_is_tab: bool, label: &str) -> String {
 /// Body copy for the close confirmation.
 ///
 /// Pure so the two facts issue #83 insists on can be asserted without a
-/// window: closing stops the agent **and everything it started** (the kill is
-/// `kill(-pid, …)` on the whole process group), and undo brings the surface
-/// back but does **not** resume the agent (restore spawns a brand-new PTY and
-/// replays scrollback as inert text).
+/// window: closing stops the agent and every process still in its PTY session,
+/// and undo brings the surface back but does **not** resume the agent (restore
+/// spawns a brand-new PTY and replays scrollback as inert text). Workspace
+/// closes that also destroy off-tree dock/Review terminals use explicit
+/// narrower Undo copy.
 ///
 /// `undo_shortcut` is `None` when the user has unassigned the undo binding;
 /// the phrase then names the action instead of printing a key that is not
@@ -74,6 +83,7 @@ pub(crate) fn close_confirm_body(
     agent: TerminalAgent,
     extra_agents: usize,
     undo_shortcut: Option<&str>,
+    loses_off_tree_sessions: bool,
 ) -> String {
     let name = agent.display_name();
     let subject = match extra_agents {
@@ -84,10 +94,10 @@ pub(crate) fn close_confirm_body(
     // Singular vs plural: the guard names one agent but the close kills every
     // qualifying surface in the target, so the consequence clauses have to
     // agree with the count, not with the name.
-    let (object, doer, back, their, agents) = if extra_agents == 0 {
-        ("it", "it", "it", "its", "the agent")
+    let (object, back, their, sessions, agents) = if extra_agents == 0 {
+        ("it", "it", "its", "session", "the agent")
     } else {
-        ("them", "they", "them", "their", "the agents")
+        ("them", "them", "their", "sessions", "the agents")
     };
     let opener = match undo_shortcut {
         Some(key) => key.to_string(),
@@ -95,10 +105,18 @@ pub(crate) fn close_confirm_body(
         // the user cannot press.
         None => "Undo close".to_string(),
     };
-    format!(
-        "{subject}. Closing stops {object} and everything {doer} started. \
-         {opener} brings {back} back with {their} scrollback, but does not resume {agents}."
-    )
+    if loses_off_tree_sessions {
+        format!(
+            "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
+             {opener} restores only saved workspace panes and their scrollback; dock and Review \
+             sessions are not restored, and no agent is resumed."
+        )
+    } else {
+        format!(
+            "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
+             {opener} brings {back} back with {their} scrollback, but does not resume {agents}."
+        )
+    }
 }
 
 /// Resolve a pending close's stable `(workspace_id, tab_id)` back to live
@@ -164,6 +182,24 @@ fn sync_close_armed(current: Option<&PendingClose>, next: Option<&PendingClose>,
 }
 
 impl PaneFlowApp {
+    fn terminal_close_states(
+        terminals: impl IntoIterator<Item = Entity<crate::terminal::TerminalView>>,
+        cx: &App,
+    ) -> Vec<SurfaceCloseState> {
+        terminals
+            .into_iter()
+            .map(|tv| {
+                let t = &tv.read(cx).terminal;
+                SurfaceCloseState {
+                    detected_agent: t.detected_agent,
+                    agent_confirmed: t.agent_confirmed,
+                    agent_declared_until: t.agent_declared_until,
+                    child_is_live: crate::app::event_handlers::terminal_identity_is_scannable(t),
+                }
+            })
+            .collect()
+    }
+
     /// The single writer of `pending_close` (R9): every arm, disarm, and
     /// confirm goes through here, so the "disarm the OUTGOING target" body
     /// lives in exactly one place.
@@ -183,25 +219,10 @@ impl PaneFlowApp {
     /// Copy the guard state out of every terminal surface in `panes`, on the
     /// GPUI thread, so the predicate itself stays pure.
     fn surface_close_states(panes: &[Entity<Pane>], cx: &App) -> Vec<SurfaceCloseState> {
-        let mut states = Vec::new();
-        for pane in panes {
-            let terminals: Vec<Entity<crate::terminal::TerminalView>> =
-                pane.read(cx).terminals().cloned().collect();
-            for tv in terminals {
-                let t = &tv.read(cx).terminal;
-                states.push(SurfaceCloseState {
-                    detected_agent: t.detected_agent,
-                    agent_confirmed: t.agent_confirmed,
-                    agent_declared_until: t.agent_declared_until,
-                    // Reuse the scan's own admission test rather than invent a
-                    // third liveness rule: anything it rejects is never
-                    // deposited and never re-confirmed, so `!exited` alone
-                    // would report a live agent for a dead one forever.
-                    child_is_live: crate::app::event_handlers::terminal_identity_is_scannable(t),
-                });
-            }
-        }
-        states
+        let terminals = panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).terminals().cloned().collect::<Vec<_>>());
+        Self::terminal_close_states(terminals, cx)
     }
 
     fn tab_close_states(&self, ws_idx: usize, tab_idx: usize, cx: &App) -> Vec<SurfaceCloseState> {
@@ -215,6 +236,27 @@ impl PaneFlowApp {
         Self::surface_close_states(&tab.collect_panes(), cx)
     }
 
+    fn workspace_close_states(&self, ws_idx: usize, cx: &App) -> Vec<SurfaceCloseState> {
+        let Some(workspace) = self.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let mut states = Self::surface_close_states(&workspace.collect_panes(), cx);
+        states.extend(self.workspace_off_tree_close_states(workspace.id, cx));
+        states
+    }
+
+    fn workspace_off_tree_close_states(
+        &self,
+        workspace_id: u64,
+        cx: &App,
+    ) -> Vec<SurfaceCloseState> {
+        let mut off_tree = self.diff_dock_terminals_for_workspace(workspace_id);
+        off_tree.extend(self.diff_review_terminals_for_workspace(workspace_id, cx));
+        off_tree.sort_by_key(|terminal| terminal.entity_id());
+        off_tree.dedup();
+        Self::terminal_close_states(off_tree, cx)
+    }
+
     /// `(workspace id, that workspace's tab ids in order)`, the input
     /// [`pending_close_tab_indices`] resolves against.
     fn workspace_tab_ids(&self) -> Vec<(u64, Vec<u64>)> {
@@ -222,6 +264,80 @@ impl PaneFlowApp {
             .iter()
             .map(|ws| (ws.id, ws.tabs().iter().map(|tab| tab.id).collect()))
             .collect()
+    }
+
+    /// Arm a workspace close when any terminal in any tab holds a live agent.
+    /// `None` means the index was stale; `Some(false)` means no confirmation
+    /// was needed; `Some(true)` means the modal is now pending.
+    fn arm_pending_close_workspace(
+        &mut self,
+        ws_idx: usize,
+        style: ConfirmStyle,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let workspace = self.workspaces.get(ws_idx)?;
+        let workspace_id = workspace.id;
+        let label = confirm_label(&workspace.title);
+        let states = self.workspace_close_states(ws_idx, cx);
+        let now = std::time::Instant::now();
+        let Some(agent) = agent_needing_confirmation(&states, now) else {
+            return Some(false);
+        };
+        let loses_off_tree_sessions = agent_needing_confirmation(
+            &self.workspace_off_tree_close_states(workspace_id, cx),
+            now,
+        )
+        .is_some();
+        self.set_pending_close(
+            Some(PendingClose {
+                target: CloseTarget::Workspace { workspace_id },
+                style,
+                agent,
+                extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                loses_off_tree_sessions,
+                label,
+                armed_at: now,
+            }),
+            cx,
+        );
+        Some(true)
+    }
+
+    /// The single entry point for UI workspace-close gestures.
+    pub(crate) fn request_close_workspace(
+        &mut self,
+        ws_idx: usize,
+        style: ConfirmStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.arm_pending_close_workspace(ws_idx, style, cx) {
+            Some(true) | None => {}
+            Some(false) => {
+                self.close_workspace_at_inner(ws_idx, Some(window), cx);
+            }
+        }
+    }
+
+    /// Window-less sibling for `workspace.close`. It may arm the modal, but
+    /// only the app's visible confirmation can complete a guarded close.
+    pub(crate) fn request_close_workspace_without_window(
+        &mut self,
+        ws_idx: usize,
+        style: ConfirmStyle,
+        cx: &mut Context<Self>,
+    ) -> WorkspaceCloseOutcome {
+        match self.arm_pending_close_workspace(ws_idx, style, cx) {
+            None => WorkspaceCloseOutcome::NotFound,
+            Some(true) => WorkspaceCloseOutcome::ConfirmationRequired,
+            Some(false) => {
+                if self.close_workspace_at_inner(ws_idx, None, cx) {
+                    WorkspaceCloseOutcome::Closed
+                } else {
+                    WorkspaceCloseOutcome::NotFound
+                }
+            }
+        }
     }
 
     /// The one entry point every user-initiated tab close GESTURE goes
@@ -265,6 +381,7 @@ impl PaneFlowApp {
                 style,
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                loses_off_tree_sessions: false,
                 label: confirm_label(&label),
                 armed_at: now,
             }),
@@ -299,6 +416,7 @@ impl PaneFlowApp {
                 style,
                 agent,
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                loses_off_tree_sessions: false,
                 label: confirm_label(&label),
                 armed_at: now,
             }),
@@ -335,7 +453,7 @@ impl PaneFlowApp {
         {
             let workspace_id = ws.id;
             if let Some(record) = capture_closed_pane_record(pane, workspace_id, cx) {
-                push_closed_record(&mut self.closed_items, ClosedRecord::Pane(record));
+                self.push_closed_record(ClosedRecord::Pane(record), cx);
             }
         }
         // Saves the session and repaints.
@@ -394,6 +512,33 @@ impl PaneFlowApp {
         }
     }
 
+    /// Confirm a pending workspace close after re-resolving its stable id.
+    pub(crate) fn confirm_pending_close_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(PendingClose {
+            target: CloseTarget::Workspace { workspace_id },
+            ..
+        }) = self.pending_close.clone()
+        else {
+            return;
+        };
+        self.set_pending_close(None, cx);
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            self.restore_focus_after_close_confirm(window, cx);
+            return;
+        };
+        if !self.close_workspace_at_inner(ws_idx, Some(window), cx) {
+            self.restore_focus_after_close_confirm(window, cx);
+        }
+    }
+
     /// Confirm a pending PANE close. `Window`-free by design - see
     /// [`Self::arm_pending_close_pane`]; tree removal needs no `Window`, and
     /// the caller that HAS one restores focus afterwards.
@@ -417,6 +562,7 @@ impl PaneFlowApp {
     /// Modal Confirm button / Enter: route to whichever half the target needs.
     pub(crate) fn confirm_pending_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.pending_close.as_ref().map(|p| p.target.clone()) {
+            Some(CloseTarget::Workspace { .. }) => self.confirm_pending_close_workspace(window, cx),
             Some(CloseTarget::Tab { .. }) => self.confirm_pending_close_tab(window, cx),
             Some(CloseTarget::Pane { pane }) => {
                 match pane.upgrade() {
@@ -503,6 +649,7 @@ impl PaneFlowApp {
             return false;
         };
         match &pending.target {
+            CloseTarget::Workspace { workspace_id } => ws.id == *workspace_id,
             CloseTarget::Tab { workspace_id, .. } => ws.id == *workspace_id,
             CloseTarget::Pane { pane } => pane
                 .upgrade()
@@ -520,6 +667,10 @@ impl PaneFlowApp {
     /// `Vec<(u64, Vec<u64>)>` to produce.
     pub(crate) fn pending_close_target_is_live(&self, pending: &PendingClose) -> bool {
         match &pending.target {
+            CloseTarget::Workspace { workspace_id } => self
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == *workspace_id),
             CloseTarget::Tab {
                 workspace_id,
                 tab_id,
@@ -559,14 +710,17 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ui = crate::theme::ui_colors();
-        let title = close_confirm_title(
-            matches!(pending.target, CloseTarget::Tab { .. }),
-            &pending.label,
-        );
+        let noun = match pending.target {
+            CloseTarget::Workspace { .. } => "workspace",
+            CloseTarget::Tab { .. } => "tab",
+            CloseTarget::Pane { .. } => "pane",
+        };
+        let title = close_confirm_title(noun, &pending.label);
         let body = close_confirm_body(
             pending.agent,
             pending.extra_agents,
             self.shortcut_for_action("undo_close_pane"),
+            pending.loses_off_tree_sessions,
         );
         let cancel_resting = ui.subtle;
         let cancel_hover = ui.surface;
@@ -713,15 +867,14 @@ mod tests {
 
     #[test]
     fn close_confirm_body_names_the_agent_and_both_consequences() {
-        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"));
+        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"), false);
         assert!(
             body.contains("Claude Code"),
             "the copy must name the agent it is about to kill: {body}"
         );
         assert!(
-            body.contains("everything it started"),
-            "the kill is `kill(-pid, …)` on the whole process group, and the copy has to say \
-             so: {body}"
+            body.contains("every process still in its terminal session"),
+            "the teardown covers every authenticated group in the PTY session: {body}"
         );
         assert!(
             body.contains("Cmd+Shift+T"),
@@ -736,13 +889,13 @@ mod tests {
 
     #[test]
     fn close_confirm_body_counts_the_agents_it_does_not_name() {
-        let one = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"));
+        let one = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"), false);
         assert!(
             one.contains("1 other agent") && !one.contains("1 other agents"),
             "singular form for exactly one unnamed agent: {one}"
         );
         assert!(
-            one.contains("everything they started"),
+            one.contains("every process still in their terminal sessions"),
             "more than one agent dies, so the consequence clause is plural: {one}"
         );
         assert!(
@@ -750,7 +903,7 @@ mod tests {
             "the undo clause is plural too: {one}"
         );
 
-        let many = close_confirm_body(TerminalAgent::Codex, 3, Some("Cmd+Shift+T"));
+        let many = close_confirm_body(TerminalAgent::Codex, 3, Some("Cmd+Shift+T"), false);
         assert!(
             many.contains("3 other agents"),
             "plural form for more than one unnamed agent: {many}"
@@ -759,7 +912,7 @@ mod tests {
 
     #[test]
     fn close_confirm_body_omits_an_unbound_undo_shortcut() {
-        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, None);
+        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, None, false);
         // Pinned whole, not by absent substrings: `shortcut_for_action`
         // returns Apple HIG glyphs on macOS (`keybindings/display.rs` formats
         // `secondary-shift-t` as `⌘⇧T`), which contains neither "Cmd" nor
@@ -767,7 +920,7 @@ mod tests {
         // shortcut had leaked into the `None` case.
         assert_eq!(
             body,
-            "Claude Code is still running here. Closing stops it and everything it started. \
+            "Claude Code is still running here. Closing stops it and every process still in its terminal session. \
              Undo close brings it back with its scrollback, but does not resume the agent."
         );
         assert!(
@@ -777,21 +930,41 @@ mod tests {
     }
 
     #[test]
+    fn workspace_close_copy_does_not_promise_off_tree_undo() {
+        let body = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"), true);
+
+        assert!(
+            body.contains("restores only saved workspace panes"),
+            "{body}"
+        );
+        assert!(
+            body.contains("dock and Review sessions are not restored"),
+            "{body}"
+        );
+        assert!(body.contains("no agent is resumed"), "{body}");
+        assert!(!body.contains("brings them back"), "{body}");
+    }
+
+    #[test]
     fn close_confirm_title_quotes_the_label_and_names_the_target() {
         assert_eq!(
-            close_confirm_title(true, "Fix the bug"),
+            close_confirm_title("tab", "Fix the bug"),
             "Close tab \u{201c}Fix the bug\u{201d}?"
         );
         assert_eq!(
-            close_confirm_title(false, "claude"),
+            close_confirm_title("pane", "claude"),
             "Close pane \u{201c}claude\u{201d}?"
+        );
+        assert_eq!(
+            close_confirm_title("workspace", "Paneflow"),
+            "Close workspace \u{201c}Paneflow\u{201d}?"
         );
     }
 
     #[test]
     fn close_confirm_title_falls_back_when_the_label_is_blank() {
-        assert_eq!(close_confirm_title(true, ""), "Close this tab?");
-        assert_eq!(close_confirm_title(false, "   "), "Close this pane?");
+        assert_eq!(close_confirm_title("tab", ""), "Close this tab?");
+        assert_eq!(close_confirm_title("pane", "   "), "Close this pane?");
     }
 
     #[test]
@@ -826,7 +999,7 @@ mod tests {
                 "a curly quote in the label re-opens the title's own quoting: {cleaned}"
             );
         }
-        let title = close_confirm_title(false, &cleaned);
+        let title = close_confirm_title("pane", &cleaned);
         assert_eq!(
             title.matches('\u{201c}').count(),
             1,
@@ -914,6 +1087,118 @@ mod tests {
                 && close_pane.contains("ConfirmStyle::Modal"),
             "Cmd+Shift+W must ask too: two adjacent close gestures with opposite safety \
              behaviour is worse than either alone: {close_pane}"
+        );
+    }
+
+    #[test]
+    fn workspace_guard_includes_off_tree_terminal_owners() {
+        let src = include_str!("close_confirm.rs");
+        let states = src
+            .split("fn workspace_close_states(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// `(workspace id").next())
+            .expect("workspace close-state collector");
+        assert!(
+            states.contains("diff_dock_terminals_for_workspace"),
+            "diff-dock agents die with their workspace and must arm confirmation: {states}"
+        );
+        assert!(
+            states.contains("diff_review_terminals_for_workspace"),
+            "Diff Review agents die with their host repo and must arm confirmation: {states}"
+        );
+        assert!(
+            states.contains("terminal_close_states(off_tree"),
+            "off-tree terminals must use the same live-agent predicate: {states}"
+        );
+    }
+
+    /// Issue #111: a workspace close has the largest blast radius of any
+    /// close gesture, so all four entry points must share the same guard and
+    /// the destructive closer must capture one undo record before removal.
+    #[test]
+    fn every_workspace_close_path_requires_confirmation_and_captures_undo() {
+        let ops = include_str!("workspace_ops/mod.rs");
+        let shortcut = ops
+            .split("pub(crate) fn handle_close_workspace(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn handle_copy_workspace_path(")
+                    .next()
+            })
+            .expect("CloseWorkspace action handler");
+        assert!(
+            shortcut.contains("request_close_workspace")
+                && shortcut.contains("ConfirmStyle::Modal"),
+            "Cmd+Shift+Q must ask before closing a workspace: {shortcut}"
+        );
+        assert!(
+            !shortcut.contains("close_workspace_at("),
+            "the shortcut must not retain an unguarded route: {shortcut}"
+        );
+        let bootstrap = include_str!("bootstrap.rs");
+        let menu_fallback = bootstrap
+            .split("cx.on_action(|_: &CloseWorkspace")
+            .nth(1)
+            .and_then(|rest| rest.split("cx.on_action(|_: &NextWorkspace").next())
+            .expect("macOS CloseWorkspace action fallback");
+        assert!(
+            menu_fallback.contains("request_close_workspace")
+                && menu_fallback.contains("ConfirmStyle::Modal"),
+            "the macOS menu fallback for the same action must ask too: {menu_fallback}"
+        );
+        assert!(!menu_fallback.contains("close_workspace_at("));
+
+        let sidebar = include_str!("sidebar/mod.rs");
+        let row_x = sidebar
+            .split("ws-close-{ws_id}")
+            .nth(1)
+            .and_then(|rest| rest.split("let row =").next())
+            .expect("workspace row close button");
+        assert!(
+            row_x.contains("request_close_workspace") && row_x.contains("ConfirmStyle::Modal"),
+            "the workspace row x must ask before closing: {row_x}"
+        );
+        assert!(!row_x.contains("close_workspace_at("));
+
+        let menu = include_str!("sidebar/context_menu.rs");
+        let menu_close = menu
+            .split("workspace-context-close")
+            .nth(1)
+            .and_then(|rest| rest.split("into_any_element()").next())
+            .expect("workspace context menu close item");
+        assert!(
+            menu_close.contains("request_close_workspace")
+                && menu_close.contains("ConfirmStyle::Modal"),
+            "the workspace context menu must ask before closing: {menu_close}"
+        );
+        assert!(!menu_close.contains("close_workspace_at("));
+
+        let ipc = include_str!("ipc_handler.rs");
+        let ipc_close = ipc
+            .split("\"workspace.close\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"surface.list\"").next())
+            .expect("workspace.close IPC arm");
+        assert!(
+            ipc_close.contains("request_close_workspace_without_window"),
+            "IPC must ask in-app rather than closing agents remotely: {ipc_close}"
+        );
+        assert!(!ipc_close.contains("close_workspace_at_without_window"));
+
+        let closer = ops
+            .split("fn close_workspace_at_inner(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// Move a workspace").next())
+            .expect("workspace closer");
+        let capture_at = closer
+            .find("capture_closed_workspace_record(")
+            .expect("workspace close must capture an undo record");
+        let remove_at = closer
+            .find("self.workspaces.remove(idx)")
+            .expect("workspace close removes the workspace");
+        assert!(
+            capture_at < remove_at && closer.contains("ClosedRecord::Workspace"),
+            "the workspace undo record must be pushed before its panes are dropped: {closer}"
         );
     }
 
@@ -1222,6 +1507,7 @@ mod tests {
             style: ConfirmStyle::Inline,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
+            loses_off_tree_sessions: false,
             label: String::new(),
             armed_at: std::time::Instant::now(),
         }

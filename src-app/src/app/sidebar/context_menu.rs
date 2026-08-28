@@ -382,7 +382,12 @@ impl PaneFlowApp {
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     cx.stop_propagation();
                     if can_close {
-                        this.close_workspace_at(idx, window, cx);
+                        this.request_close_workspace(
+                            idx,
+                            crate::app::close_guard::ConfirmStyle::Modal,
+                            window,
+                            cx,
+                        );
                     } else {
                         this.workspace_menu_open = None;
                         cx.notify();

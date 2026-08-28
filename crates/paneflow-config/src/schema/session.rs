@@ -85,6 +85,12 @@ pub struct SessionState {
     pub active_workspace: usize,
     /// Ordered list of workspace snapshots.
     pub workspaces: Vec<WorkspaceSession>,
+    /// Managed worktrees whose owning workspace is no longer part of the
+    /// durable session. This is a tiny retirement journal: it is written
+    /// before destructive cleanup begins and replayed after a crash/restart.
+    /// Additive on v2; older sessions deserialize to an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_worktree_teardowns: Vec<ManagedWorktreeDef>,
     /// Last UI mode the user was in, restored on boot.
     #[serde(default)]
     pub mode: AppMode,
@@ -324,9 +330,14 @@ pub struct ManagedWorktreeDef {
     pub repo_root: String,
     /// Branch checked out in the worktree (diagnostics only - never deleted).
     pub branch: String,
-    /// Teardown policy: `"auto"` | `"keep"`. Unknown values read as `"auto"`;
-    /// the data-loss protection is the clean-check, not this flag.
+    /// Teardown policy: `"auto"` | `"keep"`. Unknown values fail closed to
+    /// `"keep"`; automatic removal additionally requires a clean checkout.
     pub teardown: String,
+    /// macOS checkout-directory identity (`dev:ino:birth_sec:birth_nsec`).
+    /// Additive on v2. Markerless crash recovery requires this exact value so
+    /// a replacement directory at the same path cannot inherit ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_identity: Option<String>,
 }
 
 /// A user-defined command button rendered in a workspace's tab bar.

@@ -109,6 +109,10 @@ impl PaneFlowApp {
                             repo_root: wt.repo_root.to_string_lossy().into_owned(),
                             branch: wt.branch.clone(),
                             teardown: wt.teardown.as_str().to_string(),
+                            directory_identity: wt
+                                .identity
+                                .as_ref()
+                                .map(|identity| identity.as_str().to_string()),
                         })
                         .collect(),
                     // Issue #107: the sidebar pin is a choice about a project,
@@ -116,6 +120,10 @@ impl PaneFlowApp {
                     pinned: ws.pinned,
                 })
                 .collect(),
+            pending_worktree_teardowns: persisted_pending_worktree_teardowns(
+                &self.pending_worktree_teardowns,
+                &self.closed_items,
+            ),
             // Persist the live UI mode so the restore branch reopens
             // Paneflow in the same screen the user left.
             mode: self.mode,
@@ -212,6 +220,10 @@ impl PaneFlowApp {
     /// the message is visible instead of racing the process exit.
     pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
         if self.save_session_blocking(cx) {
+            // `build_session_state` journals every closed-record worktree as a
+            // pending retirement. Quit immediately after that atomic write:
+            // no event/IPC action can interleave after the final save, and a
+            // slow or interrupted cleanup resumes on the next launch.
             cx.quit();
             return;
         }
@@ -389,7 +401,9 @@ impl PaneFlowApp {
         session: &paneflow_config::schema::SessionState,
         cx: &mut Context<Self>,
     ) -> (Vec<Workspace>, usize) {
-        let mut workspaces = Vec::new();
+        let mut workspaces: Vec<Workspace> = Vec::new();
+        let mut worktree_owners: std::collections::HashMap<std::path::PathBuf, usize> =
+            std::collections::HashMap::new();
 
         // U-016: cap restored workspaces. Each layout's pane count is bounded by
         // `validate_layout` (US-011) below, so this is the only remaining
@@ -474,11 +488,27 @@ impl PaneFlowApp {
             workspace.pinned = ws_session.pinned;
             // EP-002 (orchestration-v2): rehydrate worktree ownership so the
             // close-time teardown still applies after a restart.
-            workspace.managed_worktrees = ws_session
-                .managed_worktrees
-                .iter()
-                .filter_map(rehydrate_managed_worktree)
-                .collect();
+            let mut restored_worktrees =
+                rehydrate_managed_worktree_records(&ws_session.managed_worktrees);
+            for worktree in &mut restored_worktrees {
+                if let Some(&first_owner) = worktree_owners.get(&worktree.path) {
+                    // Sessions written before exclusive ownership validation
+                    // may name one checkout from multiple workspaces. Keep the
+                    // checkout for both rather than letting either owner delete
+                    // the other's live cwd.
+                    worktree.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+                    if let Some(first_workspace) = workspaces.get_mut(first_owner) {
+                        for first in &mut first_workspace.managed_worktrees {
+                            if first.path == worktree.path {
+                                first.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+                            }
+                        }
+                    }
+                } else {
+                    worktree_owners.insert(worktree.path.clone(), workspaces.len());
+                }
+            }
+            workspace.managed_worktrees = restored_worktrees;
             // US-007: rehydrate expanded dirs as absolute paths under this
             // workspace's cwd. Paths that no longer resolve to a directory are
             // dropped lazily later (by the tree's `hydrated` filter on open),
@@ -884,15 +914,70 @@ fn rehydrate_expanded_path(cwd: &str, rel: &str) -> Option<PathBuf> {
     Some(abs)
 }
 
-fn rehydrate_managed_worktree(
+pub(super) fn rehydrate_managed_worktree(
     def: &paneflow_config::schema::ManagedWorktreeDef,
 ) -> Option<crate::workspace::worktree::ManagedWorktree> {
-    crate::workspace::worktree::managed_worktree_from_record(
+    crate::workspace::worktree::managed_worktree_from_persisted_record(
         &def.path,
         &def.repo_root,
         &def.branch,
         &def.teardown,
+        def.directory_identity.as_deref(),
     )
+}
+
+fn rehydrate_managed_worktree_records(
+    defs: &[paneflow_config::schema::ManagedWorktreeDef],
+) -> Vec<crate::workspace::worktree::ManagedWorktree> {
+    crate::workspace::worktree::merge_managed_worktree_records(
+        defs.iter().filter_map(rehydrate_managed_worktree).collect(),
+    )
+}
+
+pub(super) fn rehydrate_pending_managed_worktree(
+    def: &paneflow_config::schema::ManagedWorktreeDef,
+) -> Option<crate::workspace::worktree::ManagedWorktree> {
+    crate::workspace::worktree::pending_managed_worktree_from_persisted_record(
+        &def.path,
+        &def.repo_root,
+        &def.branch,
+        &def.teardown,
+        def.directory_identity.as_deref(),
+    )
+}
+
+fn managed_worktree_def(
+    worktree: &crate::workspace::worktree::ManagedWorktree,
+) -> paneflow_config::schema::ManagedWorktreeDef {
+    paneflow_config::schema::ManagedWorktreeDef {
+        path: worktree.path.to_string_lossy().into_owned(),
+        repo_root: worktree.repo_root.to_string_lossy().into_owned(),
+        branch: worktree.branch.clone(),
+        teardown: worktree.teardown.as_str().to_string(),
+        directory_identity: worktree
+            .identity
+            .as_ref()
+            .map(|identity| identity.as_str().to_string()),
+    }
+}
+
+/// Persist both retirement already in progress and ownership held by the
+/// process-local undo stack. Closed records are not restored after restart,
+/// so their worktrees become pending cleanup in the next process.
+fn persisted_pending_worktree_teardowns(
+    pending: &[crate::workspace::worktree::ManagedWorktree],
+    closed: &[crate::ClosedRecord],
+) -> Vec<paneflow_config::schema::ManagedWorktreeDef> {
+    let worktrees: Vec<_> = pending
+        .iter()
+        .chain(closed.iter().flat_map(|record| match record {
+            crate::ClosedRecord::Workspace(workspace) => workspace.managed_worktrees.iter(),
+            crate::ClosedRecord::Pane(_) | crate::ClosedRecord::Tab(_) => [].iter(),
+        }))
+        .cloned()
+        .collect();
+    let worktrees = crate::workspace::worktree::merge_managed_worktree_records(worktrees);
+    worktrees.iter().map(managed_worktree_def).collect()
 }
 
 fn persisted_expanded_paths(cwd: &str, expanded: &[PathBuf]) -> Vec<String> {
@@ -1681,12 +1766,18 @@ mod tests {
     fn restored_managed_worktree_must_match_paneflow_worktree_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
         let branch = "feat/session-hardening";
         let owned_path = crate::workspace::worktree::worktree_dir(&repo_root, branch);
         std::fs::create_dir_all(&owned_path).expect("owned worktree dir");
         std::fs::write(
             crate::workspace::worktree::owner_marker_path(&owned_path),
-            "owner=paneflow\n",
+            format!(
+                "owner=paneflow\nrepo_root={}\nbranch={branch}\n",
+                std::fs::canonicalize(&repo_root)
+                    .expect("canonical repo root")
+                    .display()
+            ),
         )
         .expect("owner marker");
         let valid = paneflow_config::schema::ManagedWorktreeDef {
@@ -1694,10 +1785,14 @@ mod tests {
             repo_root: repo_root.to_string_lossy().into_owned(),
             branch: branch.to_string(),
             teardown: "auto".to_string(),
+            directory_identity: None,
         };
 
         let restored = rehydrate_managed_worktree(&valid).expect("valid owned worktree restores");
-        assert_eq!(restored.path, owned_path);
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&owned_path).expect("canonical path")
+        );
         assert_eq!(
             restored.teardown,
             crate::workspace::worktree::TeardownPolicy::Auto
@@ -1725,11 +1820,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn restored_managed_ownership_is_not_truncated_at_one_tab_pane_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let canonical_repo = std::fs::canonicalize(&repo_root).expect("canonical repo");
+        let defs: Vec<_> = (0..40)
+            .map(|index| {
+                let branch = format!("feature-{index}");
+                let path = crate::workspace::worktree::worktree_dir(&repo_root, &branch);
+                std::fs::create_dir_all(&path).expect("worktree dir");
+                std::fs::write(
+                    crate::workspace::worktree::owner_marker_path(&path),
+                    format!(
+                        "owner=paneflow\nrepo_root={}\nbranch={branch}\n",
+                        canonical_repo.display()
+                    ),
+                )
+                .expect("owner marker");
+                paneflow_config::schema::ManagedWorktreeDef {
+                    path: path.to_string_lossy().into_owned(),
+                    repo_root: repo_root.to_string_lossy().into_owned(),
+                    branch,
+                    teardown: "auto".to_string(),
+                    directory_identity: None,
+                }
+            })
+            .collect();
+        let json = serde_json::to_string(&defs).expect("serialize ownership records");
+        let restored_defs: Vec<paneflow_config::schema::ManagedWorktreeDef> =
+            serde_json::from_str(&json).expect("restore ownership records");
+
+        assert_eq!(
+            rehydrate_managed_worktree_records(&restored_defs).len(),
+            40,
+            "managed lifecycle evidence follows the workspace terminal envelope, not MAX_PANES"
+        );
+    }
+
     fn empty_session_state() -> paneflow_config::schema::SessionState {
         paneflow_config::schema::SessionState {
             version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
             active_workspace: 0,
             workspaces: Vec::new(),
+            pending_worktree_teardowns: Vec::new(),
             mode: Default::default(),
             diff_scope: None,
             primary_sidebar_collapsed: false,
@@ -1823,6 +1958,63 @@ mod tests {
         assert!(message.to_lowercase().contains("layout"));
     }
 
+    #[test]
+    fn graceful_quit_retires_closed_worktrees_only_after_a_durable_save() {
+        let src = include_str!("session.rs");
+        let quit = src
+            .split("fn quit_after_session_save(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Restore a saved session").next())
+            .expect("quit_after_session_save body");
+        let success = quit
+            .split("if self.save_session_blocking(cx) {")
+            .nth(1)
+            .and_then(|rest| rest.split("return;").next())
+            .expect("successful-save branch");
+        assert!(success.contains("cx.quit()"));
+        assert!(!success.contains("spawn_persisted_worktree_teardown"));
+
+        let failure = quit.split("return;").nth(1).expect("failed-save branch");
+        assert!(
+            !failure.contains("teardown_all"),
+            "an older session may still restore the cwd after a failed final save: {failure}"
+        );
+    }
+
+    #[test]
+    fn session_journal_includes_closed_workspace_ownership_and_preserves_keep() {
+        let worktree = crate::workspace::worktree::ManagedWorktree {
+            path: PathBuf::from("/tmp/repo.worktrees/feature"),
+            repo_root: PathBuf::from("/tmp/repo"),
+            branch: "feature".to_string(),
+            teardown: crate::workspace::worktree::TeardownPolicy::Auto,
+            identity: None,
+        };
+        let mut closed_worktree = worktree.clone();
+        closed_worktree.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+        let closed = vec![crate::ClosedRecord::Workspace(
+            crate::ClosedWorkspaceRecord {
+                workspace_id: 7,
+                title: "closed".to_string(),
+                cwd: "/tmp/repo.worktrees/feature".to_string(),
+                index: 0,
+                active_tab: 0,
+                tabs: Vec::new(),
+                custom_buttons: Vec::new(),
+                files_expanded: Vec::new(),
+                sidebar_expanded: true,
+                pinned: false,
+                managed_worktrees: vec![closed_worktree],
+            },
+        )];
+
+        let journal = persisted_pending_worktree_teardowns(&[worktree], &closed);
+
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].path, "/tmp/repo.worktrees/feature");
+        assert_eq!(journal[0].teardown, "keep");
+    }
+
     /// EP-002 US-005: a legacy pane listing several surfaces restores the
     /// focused one, and the caller stops at the first that materializes - so
     /// the discarded entries are never built (no PTY spawned then dropped).
@@ -1901,6 +2093,34 @@ mod tests {
                 .contains("primary_sidebar_collapsed: !self.primary_sidebar_visible,"),
             "build_session_state must persist the live rail intent, or the \
              Settings guarantee above protects a value nothing saves"
+        );
+    }
+
+    /// Issue #112: the Settings rail is force-shown, so toggling the persisted
+    /// sidebar intent behind it gives no rail-level feedback. The shared entry
+    /// point for both the shortcut and title-bar button must dismiss Settings
+    /// before it changes that intent, making the requested transition visible.
+    #[test]
+    fn toggling_sidebar_from_settings_closes_settings_before_changing_intent() {
+        let body = include_str!("../main.rs")
+            .split("pub(crate) fn toggle_primary_sidebar_with_chrome(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// Issue #106:").next())
+            .expect("toggle_primary_sidebar_with_chrome body");
+        let close_settings = body
+            .find("self.close_settings(cx);")
+            .expect("sidebar toggle must close Settings when it is open");
+        let toggle_sidebar = body
+            .find("self.toggle_primary_sidebar(cx);")
+            .expect("shared entry point must still toggle the sidebar");
+
+        assert!(
+            body[..close_settings].contains("self.settings_section.is_some()"),
+            "Settings must only be closed when it is open"
+        );
+        assert!(
+            close_settings < toggle_sidebar,
+            "Settings must close before the persisted sidebar intent changes"
         );
     }
 }

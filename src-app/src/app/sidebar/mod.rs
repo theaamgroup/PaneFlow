@@ -841,6 +841,27 @@ impl PaneFlowApp {
             .collect()
     }
 
+    /// Storage indices in the same order as the workspace folder rows in the
+    /// rail. Keyboard navigation uses this projection too, so "workspace N"
+    /// has one meaning even when grouping or Auto sorting diverges from
+    /// storage order.
+    pub(crate) fn workspace_display_order(&self, cx: &App) -> Vec<usize> {
+        let auto_sort = self.cached_config.workspace_auto_sort_enabled();
+        let keys = self.workspace_order_keys(cx);
+        let signature = Self::sidebar_order_signature(&keys, auto_sort);
+        if self.sidebar_order_cache.borrow().signature != Some(signature) {
+            let order = if auto_sort {
+                compute_auto_order(&keys)
+            } else {
+                Self::compute_display_order(&self.workspaces)
+            };
+            let mut cache = self.sidebar_order_cache.borrow_mut();
+            cache.order = order;
+            cache.signature = Some(signature);
+        }
+        self.sidebar_order_cache.borrow().order.clone()
+    }
+
     pub(crate) fn render_sidebar(
         &self,
         window: &mut Window,
@@ -961,22 +982,9 @@ impl PaneFlowApp {
     /// Flatten the rail into the rows it renders. Built once per frame because
     /// the drop dividers are defined by the gaps between these rows.
     fn sidebar_rows(&self, cx: &App) -> Vec<SidebarRow> {
-        let auto_sort = self.cached_config.workspace_auto_sort_enabled();
-        let keys = self.workspace_order_keys(cx);
-        let signature = Self::sidebar_order_signature(&keys, auto_sort);
-        if self.sidebar_order_cache.borrow().signature != Some(signature) {
-            let order = if auto_sort {
-                compute_auto_order(&keys)
-            } else {
-                Self::compute_display_order(&self.workspaces)
-            };
-            let mut cache = self.sidebar_order_cache.borrow_mut();
-            cache.order = order;
-            cache.signature = Some(signature);
-        }
-        let order_cache = self.sidebar_order_cache.borrow();
-        let mut rows = Vec::with_capacity(order_cache.order.len());
-        for &i in &order_cache.order {
+        let order = self.workspace_display_order(cx);
+        let mut rows = Vec::with_capacity(order.len());
+        for i in order {
             rows.push(SidebarRow::Folder(i));
             // US-009: the tabs of an expanded workspace follow their folder row
             // as sibling children of the scrolling list, so a long tab list
@@ -1399,14 +1407,9 @@ impl PaneFlowApp {
         // The `+` opens the « New pane » preset palette, which covers the
         // shell, the agents, and the workspace's custom commands.
         //
-        // The `x` closes the whole folder. Dropping the `Workspace` drops its
-        // tabs, their panes and their terminals in one move - the same teardown
-        // a pane close runs - so no PTY is orphaned. It closes without
-        // confirmation, at parity with the row's context menu and with
-        // `Ctrl+Shift+Q`. That is a DEFERRAL, not an oversight: issue #83
-        // guarded the tab and pane closes and deliberately left this one out,
-        // because guarding it needs a whole-workspace undo record. See
-        // `workspace_ops::PaneFlowApp::close_workspace_at_inner`.
+        // The `x` closes the whole folder. Issue #111 routes it through the
+        // workspace-wide guard because dropping the `Workspace` also drops
+        // every tab, pane, terminal, and live agent it contains.
         body = body.child(
             sidebar_hover_actions(group_name.clone())
                 .child(
@@ -1455,7 +1458,12 @@ impl PaneFlowApp {
                             // the wrong folder.
                             if let Some(at) = this.workspaces.iter().position(|ws| ws.id == ws_id) {
                                 this.commit_rename(cx);
-                                this.close_workspace_at(at, window, cx);
+                                this.request_close_workspace(
+                                    at,
+                                    crate::app::close_guard::ConfirmStyle::Modal,
+                                    window,
+                                    cx,
+                                );
                             }
                             cx.stop_propagation();
                         },
@@ -1878,8 +1886,17 @@ impl PaneFlowApp {
 
         // Issue #79: same gate as the folder row - the tab being renamed is the
         // one row that puts the shared handle on the dispatch path.
+        // Issue #80: that row also owns the click-outside commit. Keeping the
+        // listener on the live editor only avoids installing one capture-phase
+        // listener per tab while preserving the typed buffer before another
+        // surface takes focus.
         let row_shell = if is_renaming {
-            row_shell.track_focus(&self.sidebar_rename_focus)
+            row_shell
+                .track_focus(&self.sidebar_rename_focus)
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.commit_inline_rename(window, cx);
+                    cx.notify();
+                }))
         } else {
             row_shell
         };
@@ -3265,6 +3282,42 @@ mod tests {
                 "{label} must claim the rename focus handle, or the editor it opens is drawn but receives no keys"
             );
         }
+    }
+
+    #[test]
+    fn tab_rename_uses_the_visible_title_and_commits_on_click_outside() {
+        // Issue #80: an unnamed tab displays "Tab N", so seeding the editor
+        // from the raw empty `Tab::title` opens as a bare cursor. The same
+        // editor must also settle when the next mouse press lands elsewhere;
+        // otherwise the typed buffer remains stranded on an unfocused row.
+        let tab_ops = include_str!("../workspace_ops/tab.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the tab-ops module");
+        let begin_tab_rename = tab_ops
+            .split("fn begin_tab_rename(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("begin_tab_rename body");
+        assert!(
+            begin_tab_rename.contains("tab_display_title(tab, tab_idx)"),
+            "the rename buffer must seed from the title the sidebar actually displays"
+        );
+
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the sidebar module");
+        let tab_row = production
+            .split("fn render_tab_row(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("fn render_workspace_meta_row(\n").next())
+            .expect("tab row renderer");
+        assert!(
+            tab_row.contains("on_mouse_down_out(cx.listener(|this, _, window, cx|")
+                && tab_row.contains("this.commit_inline_rename(window, cx);"),
+            "a mouse press outside the renamed tab row must commit the typed buffer"
+        );
     }
 
     #[test]

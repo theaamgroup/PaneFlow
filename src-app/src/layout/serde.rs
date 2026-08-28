@@ -45,33 +45,40 @@ impl LayoutTree {
             ScrollbackCapture::Inline {
                 max_lines: crate::limits::MAX_SCROLLBACK_EXTRACT_LINES,
             },
+            None,
         )
     }
 
-    /// [`Self::serialize`] with the per-leaf history extract bounded to
-    /// `max_lines` rows.
-    ///
-    /// For the undo-close-tab record (issue #83), which runs this
-    /// synchronously on the GPUI thread once per leaf, under each terminal's
-    /// mutex - and then hands the result to
-    /// `enforce_closed_pane_scrollback_budget`, which strips most of it back
-    /// milliseconds later. The called code has twice been moved OFF this
-    /// thread on purpose (this module's own note above, and
-    /// `pty_session.rs`'s `extract_scrollback_from`); capturing less is the
-    /// version of that which needs no threading.
-    pub fn serialize_with_scrollback_limit(&self, cx: &App, max_lines: usize) -> LayoutNode {
-        self.serialize_with(cx, ScrollbackCapture::Inline { max_lines })
+    /// Serialize undo metadata while sharing one byte budget across every leaf
+    /// and, when the caller reuses `remaining_bytes`, across multiple tabs.
+    /// Once exhausted, later terminal leaves skip the history lock entirely.
+    pub fn serialize_with_scrollback_budget(
+        &self,
+        cx: &App,
+        max_lines: usize,
+        remaining_bytes: &Cell<usize>,
+    ) -> LayoutNode {
+        self.serialize_with(
+            cx,
+            ScrollbackCapture::Inline { max_lines },
+            Some(remaining_bytes),
+        )
     }
 
     /// Serialize session metadata without carrying terminal output into the
     /// next process. The schema field remains present as `None` for backward
     /// compatibility with existing session files.
     pub fn serialize_without_scrollback(&self, cx: &App) -> LayoutNode {
-        self.serialize_with(cx, ScrollbackCapture::Omit)
+        self.serialize_with(cx, ScrollbackCapture::Omit, None)
     }
 
     /// Inner serializer parametrised by the [`ScrollbackCapture`] strategy.
-    fn serialize_with(&self, cx: &App, capture: ScrollbackCapture) -> LayoutNode {
+    fn serialize_with(
+        &self,
+        cx: &App,
+        capture: ScrollbackCapture,
+        remaining_bytes: Option<&Cell<usize>>,
+    ) -> LayoutNode {
         match self {
             LayoutTree::Leaf(pane) => {
                 let pane_ref = pane.read(cx);
@@ -82,17 +89,39 @@ impl LayoutTree {
                     .map(|tab| match tab {
                         crate::pane::PaneSurface::Terminal(tv) => {
                             let tv_ref = tv.read(cx);
-                            let name = if tv_ref.terminal.title.is_empty() {
-                                None
-                            } else {
-                                Some(tv_ref.terminal.title.clone())
-                            };
+                            let name =
+                                crate::sidebar_title::clean_sidebar_title(&tv_ref.terminal.title);
                             let cwd = tv_ref.terminal.current_cwd.clone().or_else(|| {
                                 tv_ref.terminal.cwd_now().map(|p| p.display().to_string())
                             });
                             let scrollback = match capture {
                                 ScrollbackCapture::Inline { max_lines } => {
-                                    tv_ref.terminal.extract_scrollback_capped(max_lines)
+                                    if remaining_bytes.is_some_and(|remaining| remaining.get() == 0)
+                                    {
+                                        None
+                                    } else {
+                                        let mut scrollback =
+                                            tv_ref.terminal.extract_scrollback_capped(max_lines);
+                                        if let (Some(remaining), Some(text)) =
+                                            (remaining_bytes, scrollback.as_mut())
+                                        {
+                                            let budget = remaining.get();
+                                            if text.len() > budget {
+                                                let mut boundary = budget.min(text.len());
+                                                while boundary > 0
+                                                    && !text.is_char_boundary(boundary)
+                                                {
+                                                    boundary -= 1;
+                                                }
+                                                text.truncate(boundary);
+                                            }
+                                            remaining.set(budget.saturating_sub(text.len()));
+                                            if text.is_empty() {
+                                                scrollback = None;
+                                            }
+                                        }
+                                        scrollback
+                                    }
                                 }
                                 ScrollbackCapture::Omit => None,
                             };
@@ -159,7 +188,7 @@ impl LayoutTree {
                 let ratios: Vec<f64> = children.iter().map(|c| c.ratio.get() as f64).collect();
                 let mut child_nodes: Vec<LayoutNode> = Vec::with_capacity(children.len());
                 for c in children.iter() {
-                    child_nodes.push(c.node.serialize_with(cx, capture));
+                    child_nodes.push(c.node.serialize_with(cx, capture, remaining_bytes));
                 }
                 LayoutNode::Split {
                     direction: dir_str.to_string(),
@@ -364,6 +393,29 @@ mod tests {
             }
             LayoutNode::Split { .. } => panic!("the leftover spawn is the second pane"),
         }
+    }
+
+    #[gpui::test]
+    fn serialized_terminal_name_is_scrubbed_and_bounded(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let hostile = format!("\u{202e}\u{200b}{}", "x".repeat(400));
+        terminal.update(cx, |view, _cx| view.terminal.title = hostile);
+        let pane = cx.new(|cx| Pane::new(terminal, 1, cx));
+        let tree = LayoutTree::Leaf(pane);
+
+        let serialized = cx.update(|_, cx| tree.serialize_without_scrollback(cx));
+        let LayoutNode::Pane { surfaces } = serialized else {
+            panic!("a leaf must serialize as a pane")
+        };
+        let name = surfaces[0]
+            .name
+            .as_deref()
+            .expect("meaningful title survives scrubbing");
+        assert!(!name.contains('\u{202e}'));
+        assert!(!name.contains('\u{200b}'));
+        assert!(name.chars().count() <= 241, "{name}");
+        assert!(name.ends_with('…'), "{name}");
     }
 
     fn pane_leaf_count(node: &LayoutNode) -> usize {

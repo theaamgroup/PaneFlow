@@ -15,11 +15,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
-# Least-privilege default for GITHUB_TOKEN. Every job in this workflow
-# only reads the repo (checkout + cargo + cache). If a future job ever
-# needs write (push a tag, post a PR comment), it must elevate
-# explicitly via `permissions: contents: write` at the job level -
-# making the escalation visible in code review rather than implicit.
+# Least-privilege default for GITHUB_TOKEN. Every job reads repository contents
+# (checkout + cargo + cache); the path-filter job alone elevates to read the
+# PR's changed-file list. If a future job ever needs write (push a tag, post a
+# PR comment), it must elevate explicitly at the job level, making the
+# escalation visible in code review.
 permissions:
   contents: read
 
@@ -62,6 +62,9 @@ jobs:
   orchestrate:
     name: Detect changed paths
     runs-on: macos-15
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       rendering: ${{ steps.filter.outputs.rendering }}

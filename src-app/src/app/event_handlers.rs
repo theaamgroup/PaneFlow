@@ -60,8 +60,9 @@ fn split_pane_at_edge(
 pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
     use libproc::libproc::bsd_info::BSDInfo;
     use libproc::libproc::proc_pid::pidinfo;
-    // EPERM (SIP-protected targets) and dead-pid races degrade to None -
-    // the caller keeps the conservative liveness-only check.
+    // EPERM (SIP-protected targets) and dead-pid races degrade to None.
+    // Read-only session/UI callers apply their documented conservative rule;
+    // destructive process-group signaling separately fails closed on None.
     let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
     Some(
         info.pbi_start_tvsec
@@ -87,7 +88,9 @@ fn pid_matches(pid: u32, pinned_start: Option<u64>) -> bool {
 ///
 /// Unpinned sessions (`None`) stay conservative so a transient probe miss
 /// before the first pin does not drop the row. Once pinned, a missing or
-/// different current start is not the original process.
+/// different current start is not the original process. This predicate is for
+/// read-only UI/session retention only; destructive signaling must require two
+/// present, equal start times via `parent_guard::may_signal_group`.
 pub(crate) fn same_process(pinned_start: Option<u64>, current_start: Option<u64>) -> bool {
     match (pinned_start, current_start) {
         (Some(pinned), Some(current)) => pinned == current,
@@ -144,6 +147,34 @@ fn keep_session_after_surface_purge(
         return false;
     }
     session.surface_id.is_some() || pid > i32::MAX as u32 || pid_matches(pid, session.proc_start)
+}
+
+/// Retention rule after a fresh process scan reports an interactive shell as
+/// the surface's representative command.
+///
+/// [`crate::workspace::PaneScan::foreground_command`] is a descendant-selection
+/// heuristic, not a PTY foreground-process-group query. A live agent can launch
+/// a shell tool and make that heuristic say `bash`, so only an already-stalled
+/// badge is safe to reap from this weak signal. Active, waiting, finished, and
+/// sticky-error sessions require stronger lifecycle or OSC 133 evidence.
+fn keep_session_at_cached_shell(
+    shell_surface_id: u64,
+    foreground_command: &str,
+    session: &ai_types::AgentSession,
+) -> bool {
+    session.surface_id != Some(shell_surface_id)
+        || session.state != ai_types::AgentState::Stalled
+        || !crate::workspace::surface_naming::is_shell_command(foreground_command)
+}
+
+/// Focusing a pane acknowledges its stalled badge without disturbing active,
+/// waiting, or sticky-error sessions. Unbound sessions have no pane to
+/// acknowledge and therefore stay untouched.
+fn keep_session_after_surface_focus(
+    focused_surface_id: u64,
+    session: &ai_types::AgentSession,
+) -> bool {
+    session.surface_id != Some(focused_surface_id) || session.state != ai_types::AgentState::Stalled
 }
 
 /// Retention rule when a surface's shell comes back to its prompt.
@@ -664,11 +695,19 @@ impl PaneFlowApp {
                 }
 
                 let ws_id = self.workspaces[ws_idx].id;
-                let cwd_path = (!cwd.is_empty()).then(|| std::path::PathBuf::from(&cwd));
+                let cwd_path = if cwd.is_empty() {
+                    crate::launch_cwd::implicit_launch_cwd()
+                } else {
+                    std::path::PathBuf::from(&cwd)
+                };
+                if self.pending_worktree_teardown_conflicts(&cwd_path) {
+                    self.show_toast("Worktree is still being retired", cx);
+                    return;
+                }
                 let term = cx.new(|cx| {
                     TerminalView::with_cwd_and_profile(
                         ws_id,
-                        cwd_path,
+                        Some(cwd_path),
                         None,
                         TerminalSurfaceProfile::Agent,
                         cx,
@@ -1015,6 +1054,9 @@ impl PaneFlowApp {
                 // without hook integration at all).
                 self.reap_sessions_at_shell_prompt(terminal.entity_id().as_u64(), cx);
             }
+            terminal::TerminalEvent::FocusGained => {
+                self.acknowledge_stalled_sessions(terminal.entity_id().as_u64(), cx);
+            }
             terminal::TerminalEvent::ChildExited => {
                 // The Pane's own subscription closes the tab; here we drop
                 // the dying surface's agent sessions NOW instead of waiting
@@ -1101,6 +1143,49 @@ impl PaneFlowApp {
             if ws.agent_sessions.len() < before {
                 changed = true;
             }
+        }
+        if changed {
+            self.sync_attention(cx);
+            self.agent_sessions_changed(cx);
+            cx.notify();
+        }
+    }
+
+    /// Drop a stalled badge when a fresh process scan picks a shell as the
+    /// surface's representative descendant. This covers OSC-133-less shells
+    /// conservatively: the scan is not a foreground-process-group query, so
+    /// stronger active states remain until lifecycle or prompt evidence clears
+    /// them.
+    fn reap_sessions_at_cached_shell(
+        &mut self,
+        surface_id: u64,
+        foreground_command: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for ws in &mut self.workspaces {
+            let before = ws.agent_sessions.len();
+            ws.agent_sessions.retain(|_, session| {
+                keep_session_at_cached_shell(surface_id, foreground_command, session)
+            });
+            changed |= ws.agent_sessions.len() < before;
+        }
+        if changed {
+            self.sync_attention(cx);
+            self.agent_sessions_changed(cx);
+            cx.notify();
+        }
+    }
+
+    /// A focused pane has been acknowledged by the user. Remove only its
+    /// stalled sessions so they stop skewing workspace summaries.
+    fn acknowledge_stalled_sessions(&mut self, surface_id: u64, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for ws in &mut self.workspaces {
+            let before = ws.agent_sessions.len();
+            ws.agent_sessions
+                .retain(|_, session| keep_session_after_surface_focus(surface_id, session));
+            changed |= ws.agent_sessions.len() < before;
         }
         if changed {
             self.sync_attention(cx);
@@ -1511,6 +1596,7 @@ impl PaneFlowApp {
             }
         }
 
+        let mut cached_shells = Vec::new();
         for pane in &leaves {
             let terminals: Vec<gpui::Entity<crate::terminal::TerminalView>> =
                 pane.read(cx).terminals().cloned().collect();
@@ -1527,6 +1613,7 @@ impl PaneFlowApp {
                     .agents
                     .first()
                     .and_then(|b| crate::agent_launcher::TerminalAgent::from_binary(b));
+                let mut fresh_shell_command = None;
                 tv.update(cx, |view, _cx| {
                     let t = &mut view.terminal;
                     if !terminal_identity_is_scannable(t) {
@@ -1567,6 +1654,13 @@ impl PaneFlowApp {
                         t.cached_foreground_command = s.foreground_command.clone();
                         pane_changed = true;
                     }
+                    fresh_shell_command = s
+                        .foreground_command
+                        .as_deref()
+                        .filter(|command| {
+                            crate::workspace::surface_naming::is_shell_command(command)
+                        })
+                        .map(str::to_string);
                     let conflicts = announced_port_conflicts(
                         &t.announced_ports,
                         tid,
@@ -1579,6 +1673,9 @@ impl PaneFlowApp {
                         pane_changed = true;
                     }
                 });
+                if let Some(command) = fresh_shell_command {
+                    cached_shells.push((tid, command));
+                }
             }
             if pane_changed {
                 // The tab strip renders from the terminals' state - nudge
@@ -1590,6 +1687,9 @@ impl PaneFlowApp {
 
         if changed {
             cx.notify();
+        }
+        for (surface_id, command) in cached_shells {
+            self.reap_sessions_at_cached_shell(surface_id, &command, cx);
         }
     }
 
@@ -1732,7 +1832,8 @@ impl PaneFlowApp {
 mod tests {
     use super::{
         announced_port_conflicts, child_identity_is_live, declaration_survives_scan,
-        keep_session_after_surface_purge, keep_session_at_shell_prompt, merge_scan_workspace_state,
+        keep_session_after_surface_focus, keep_session_after_surface_purge,
+        keep_session_at_cached_shell, keep_session_at_shell_prompt, merge_scan_workspace_state,
         merge_service_label, port_ownership, same_process, stale_sweep_keeps_without_pid_probe,
         surface_awaits_scan,
     };
@@ -1803,6 +1904,49 @@ mod tests {
 
         assert!(!keep_session_after_surface_purge(7, u32::MAX, &session));
         assert!(keep_session_after_surface_purge(8, u32::MAX, &session));
+    }
+
+    #[test]
+    fn cached_shell_reaps_only_stalled_sessions() {
+        let mut stalled = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Stalled);
+        stalled.surface_id = Some(7);
+        assert!(!keep_session_at_cached_shell(7, "zsh", &stalled));
+        assert!(keep_session_at_cached_shell(7, "cargo test", &stalled));
+        assert!(keep_session_at_cached_shell(8, "/bin/zsh", &stalled));
+
+        let mut thinking = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Thinking);
+        thinking.surface_id = Some(7);
+        assert!(
+            keep_session_at_cached_shell(7, "/bin/zsh -l", &thinking),
+            "the process scan reports a representative descendant, not the PTY foreground group"
+        );
+
+        let mut waiting = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::WaitingForInput);
+        waiting.surface_id = Some(7);
+        assert!(keep_session_at_cached_shell(7, "bash", &waiting));
+
+        let mut errored = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Errored);
+        errored.surface_id = Some(7);
+        assert!(keep_session_at_cached_shell(7, "/bin/zsh -l", &errored));
+    }
+
+    #[test]
+    fn focusing_surface_acknowledges_only_its_stalled_sessions() {
+        let mut stalled = AgentSession::new(TerminalAgent::Codex, AgentState::Stalled);
+        stalled.surface_id = Some(7);
+        assert!(!keep_session_after_surface_focus(7, &stalled));
+        assert!(keep_session_after_surface_focus(8, &stalled));
+
+        let mut thinking = AgentSession::new(TerminalAgent::Codex, AgentState::Thinking);
+        thinking.surface_id = Some(7);
+        assert!(keep_session_after_surface_focus(7, &thinking));
+
+        let mut errored = AgentSession::new(TerminalAgent::Codex, AgentState::Errored);
+        errored.surface_id = Some(7);
+        assert!(keep_session_after_surface_focus(7, &errored));
+
+        let unbound = AgentSession::new(TerminalAgent::Codex, AgentState::Stalled);
+        assert!(keep_session_after_surface_focus(7, &unbound));
     }
 
     #[test]

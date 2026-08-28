@@ -1342,6 +1342,17 @@ impl PaneFlowApp {
                     .map_err(|err| format!("pane {idx}: {}", err.message))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        for (idx, plan) in planned.iter().enumerate() {
+            let cwd = plan
+                .cwd
+                .clone()
+                .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+            if self.pending_worktree_teardown_conflicts(&cwd) {
+                return Err(format!(
+                    "pane {idx}: cwd is inside a worktree being retired"
+                ));
+            }
+        }
         dedupe_planned_pane_labels(&mut planned);
 
         let ws_id = self.workspaces[target_idx].id;

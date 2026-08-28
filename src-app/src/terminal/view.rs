@@ -398,6 +398,11 @@ impl TerminalView {
             params.profile,
             params.shell_quoting,
         );
+        // Publish the resolved launch CWD before scheduling the background PTY
+        // open. Worktree retirement scans placeholders too; leaving this None
+        // creates a window where a pending spawn is invisible and its checkout
+        // can be removed before the child forks.
+        terminal.current_cwd = Some(params.cwd.to_string_lossy().into_owned());
         let requested_backend = paneflow_config::loader::load_config()
             .terminal
             .unwrap_or_default()
@@ -996,6 +1001,9 @@ pub enum TerminalEvent {
     /// PID sweep. Covers agents whose hooks never reported an exit, and agents
     /// launched with no hook integration at all.
     ShellPromptReady,
+    /// The user focused this terminal surface. `PaneFlowApp` treats that as
+    /// acknowledgement of a stalled agent badge on this pane.
+    FocusGained,
     /// Terminal output activity detected - triggers an OS port scan
     /// (`workspace::ports`; Linux `/proc/net/tcp`, macOS libproc, Windows IP Helper).
     /// Emitted alongside `ServiceDetected` during output scan ticks.
@@ -1323,6 +1331,7 @@ impl Render for TerminalView {
             let focus_handle = self.focus_handle.clone();
             let focus_in = cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
                 view.apply_terminal_focus(true);
+                cx.emit(TerminalEvent::FocusGained);
                 cx.notify();
             });
             let focus_out = cx.on_focus_out(&focus_handle, window, |view, _event, _window, cx| {
@@ -1602,6 +1611,21 @@ mod tests {
         let alacritty = TerminalBackendConfig::Alacritty;
         assert_ne!(format!("{auto:?}"), "");
         assert_eq!(format!("{alacritty:?}"), "Alacritty");
+    }
+
+    #[test]
+    fn pending_terminal_publishes_cwd_before_background_spawn() {
+        let src = include_str!("view.rs");
+        let constructor = src
+            .split("pub fn with_cwd_env_and_profile(")
+            .nth(1)
+            .and_then(|body| body.split("pub fn ").next())
+            .expect("terminal constructor");
+        let publish = constructor
+            .find("terminal.current_cwd = Some(params.cwd")
+            .expect("pending CWD publication");
+        let spawn = constructor.find("cx.spawn(").expect("background spawn");
+        assert!(publish < spawn, "{constructor}");
     }
 
     #[test]

@@ -77,6 +77,10 @@ impl DiffView {
             return;
         };
         let cwd = col.path.clone();
+        if crate::workspace::path_is_in_retiring_worktree(&cwd) {
+            self.set_flash("Worktree is still being retired".into(), cx);
+            return;
+        }
         let branch = col.branch.clone();
         let ws_id = col.workspace_id.unwrap_or(0);
         let base = col
@@ -237,6 +241,10 @@ impl DiffView {
             return;
         };
         let cwd = col.path.clone();
+        if crate::workspace::path_is_in_retiring_worktree(&cwd) {
+            self.set_flash("Worktree is still being retired".into(), cx);
+            return;
+        }
         let ws_id = col.workspace_id.unwrap_or(0);
         let term = cx.new(|cx| {
             crate::terminal::TerminalView::with_cwd_and_profile(

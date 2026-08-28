@@ -150,6 +150,7 @@ fn panes_need_orchestration(panes: &[PaneSpec]) -> bool {
 
 fn pane_needs_orchestration(pane: &PaneSpec) -> bool {
     pane.agent.is_some()
+        || pane.worktree.is_some()
         || pane
             .command
             .as_deref()
@@ -753,6 +754,10 @@ mod tests {
         let mut with_prompt = pane(None, None);
         with_prompt.prompt = Some("prefill".to_string());
         assert!(panes_need_orchestration(&[with_prompt]));
+
+        let mut with_worktree = pane(None, None);
+        with_worktree.worktree = Some("feature".to_string());
+        assert!(panes_need_orchestration(&[with_worktree]));
     }
 
     #[test]

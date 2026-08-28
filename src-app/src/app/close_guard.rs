@@ -96,6 +96,8 @@ pub(crate) fn agents_needing_confirmation_count(
 /// What a pending close confirmation is about to close.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CloseTarget {
+    /// Resolved by the stable workspace id, never by sidebar position.
+    Workspace { workspace_id: u64 },
     /// Resolved by stable ids, never by index - rows reorder under a drag.
     Tab { workspace_id: u64, tab_id: u64 },
     Pane {
@@ -131,6 +133,10 @@ pub(crate) struct PendingClose {
     /// armed so the copy can say "and 2 other agents" instead of naming one
     /// and killing three.
     pub(crate) extra_agents: usize,
+    /// A workspace close also destroys qualifying dock/Review terminals that
+    /// are not captured by workspace Undo. The modal must not promise those
+    /// sessions or their scrollback will return.
+    pub(crate) loses_off_tree_sessions: bool,
     /// Tab title (or pane title) shown in the modal copy. Empty is allowed.
     pub(crate) label: String,
     /// When this close was armed, so [`click_outcome`] can refuse to treat the
@@ -139,6 +145,13 @@ pub(crate) struct PendingClose {
 }
 
 impl PendingClose {
+    pub(crate) fn targets_workspace(&self, workspace_id: u64) -> bool {
+        matches!(
+            &self.target,
+            CloseTarget::Workspace { workspace_id: w } if *w == workspace_id
+        )
+    }
+
     /// True when `self` is the pending close for this exact tab, so a
     /// button can render its armed state.
     pub(crate) fn targets_tab(&self, workspace_id: u64, tab_id: u64) -> bool {
@@ -228,6 +241,7 @@ pub(crate) fn click_outcome(
         return ClickOutcome::Arm;
     }
     let same_target = match this_target {
+        CloseTarget::Workspace { workspace_id } => pending.targets_workspace(*workspace_id),
         CloseTarget::Tab {
             workspace_id,
             tab_id,
@@ -285,6 +299,7 @@ mod tests {
             style: ConfirmStyle::Inline,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
+            loses_off_tree_sessions: false,
             label: String::new(),
             armed_at,
         }
@@ -588,6 +603,7 @@ mod tests {
             style: ConfirmStyle::Modal,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
+            loses_off_tree_sessions: false,
             label: "Fix the bug".into(),
             armed_at: Instant::now(),
         };
@@ -618,6 +634,7 @@ mod tests {
             style: ConfirmStyle::Inline,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
+            loses_off_tree_sessions: false,
             label: String::new(),
             armed_at: Instant::now(),
         };
@@ -632,6 +649,7 @@ mod tests {
             style: ConfirmStyle::Modal,
             agent: TerminalAgent::ClaudeCode,
             extra_agents: 0,
+            loses_off_tree_sessions: false,
             label: String::new(),
             armed_at: Instant::now(),
         };

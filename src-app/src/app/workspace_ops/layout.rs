@@ -16,6 +16,30 @@ use crate::{
 };
 
 impl PaneFlowApp {
+    fn layout_uses_pending_worktree(
+        &self,
+        layout: &LayoutNode,
+        fallback_cwd: &std::path::Path,
+    ) -> bool {
+        match layout {
+            LayoutNode::Pane { surfaces } => surfaces.iter().any(|surface| {
+                if matches!(surface.surface_type.as_deref(), Some("markdown" | "diff")) {
+                    return false;
+                }
+                let candidate = surface
+                    .cwd
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_dir())
+                    .unwrap_or_else(|| fallback_cwd.to_path_buf());
+                self.pending_worktree_teardown_conflicts(&candidate)
+            }),
+            LayoutNode::Split { children, .. } => children
+                .iter()
+                .any(|child| self.layout_uses_pending_worktree(child, fallback_cwd)),
+        }
+    }
+
     pub(crate) fn handle_toggle_zoom(
         &mut self,
         _: &ToggleZoom,
@@ -100,6 +124,13 @@ impl PaneFlowApp {
         layout: &mut LayoutNode,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let fallback_cwd = self
+            .active_workspace()
+            .map(|workspace| PathBuf::from(&workspace.cwd))
+            .ok_or_else(|| "No active workspace".to_string())?;
+        if self.layout_uses_pending_worktree(layout, &fallback_cwd) {
+            return Err("Layout cwd is inside a worktree being retired".into());
+        }
         // Validate the layout (clamps ratios, pads children, etc.)
         paneflow_config::loader::validate_layout(layout);
 

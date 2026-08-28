@@ -15,6 +15,32 @@ pub mod surface_naming;
 mod tab;
 pub mod worktree;
 
+static RETIRING_WORKTREE_PATHS: std::sync::LazyLock<std::sync::RwLock<Vec<std::path::PathBuf>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+
+/// Publish the durable retirement journal to terminal-producing UI that does
+/// not own a `PaneFlowApp` reference (notably embedded Diff Review views).
+pub(crate) fn set_retiring_worktree_paths(paths: Vec<std::path::PathBuf>) {
+    match RETIRING_WORKTREE_PATHS.write() {
+        Ok(mut retiring) => *retiring = paths,
+        Err(poisoned) => *poisoned.into_inner() = paths,
+    }
+}
+
+/// Read-only ingress gate for off-tree terminal producers.
+pub(crate) fn path_is_in_retiring_worktree(path: &std::path::Path) -> bool {
+    let retiring = RETIRING_WORKTREE_PATHS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    retiring.iter().any(|root| {
+        path.starts_with(root)
+            || path
+                .canonicalize()
+                .ok()
+                .is_some_and(|resolved| resolved.starts_with(root))
+    })
+}
+
 pub use git::{GitDiffStats, detect_branch, find_git_dir, resolve_repo_root};
 #[cfg(test)]
 pub(crate) use ports::PortEntry;

@@ -1645,21 +1645,28 @@ impl TerminalState {
         let child_pid = pty.child().id();
         #[cfg(unix)]
         let child_proc_start = child_pid_start_time(child_pid);
-        #[cfg(all(unix, not(test)))]
-        let pty_guard = crate::agents::parent_guard::spawn_pty_guard(child_pid, child_proc_start);
+        #[cfg(target_os = "macos")]
+        let pty_master_raw_fd = {
+            use std::os::unix::io::AsRawFd;
+            pty.file().as_raw_fd()
+        };
+        #[cfg(all(target_os = "macos", not(test)))]
+        let pty_guard = crate::agents::parent_guard::spawn_pty_guard(
+            child_pid,
+            child_proc_start,
+            pty_master_raw_fd,
+        );
         #[cfg(target_os = "macos")]
         let pty_master_fd = {
-            use std::os::unix::io::AsRawFd;
             // US-034: `dup()` the master fd so we own a copy whose lifetime we
             // control (closed in `Drop`). The borrowed `pty.file().as_raw_fd()`
             // is closed when the EventLoop (which takes ownership of `pty`
             // below) tears the PTY down on child exit, and the OS may reuse
             // that fd number - `tcgetpgrp(stale_fd)` would then report an
             // unrelated process group, defeating the `p > 0` filter.
-            let raw = pty.file().as_raw_fd();
             // SAFETY: `raw` is a valid open fd for the PTY master; `dup`
             // returns a fresh owned fd or -1 on error (filtered out).
-            let dup = unsafe { libc::dup(raw) };
+            let dup = unsafe { libc::dup(pty_master_raw_fd) };
             (dup >= 0).then_some(dup)
         };
 
@@ -2049,7 +2056,11 @@ impl TerminalState {
                 }
             }
             AlacEvent::Title(t) => {
-                self.title = t;
+                // OSC 0/2 is terminal-controlled input and this retained field
+                // is cloned by view/event consumers. Scrub controls/bidi and
+                // cap it at ingestion so no later sink or clone observes the
+                // raw, potentially unbounded payload.
+                self.title = crate::sidebar_title::clean_sidebar_title(&t).unwrap_or_default();
             }
             AlacEvent::ResetTitle => {
                 self.title = String::from("Terminal");
@@ -2979,16 +2990,13 @@ fn assemble_pty_env(
     env
 }
 
-/// True when `pid` is still the leader of its own process group - i.e. the
-/// session we spawned. alacritty's `tty::new` calls `setsid()` on the child, so
-/// `child_pid` is both the PID and the PGID of the session leader and
-/// `getpgid(pid) == pid` holds for as long as that session lives. After the
-/// child exits the kernel can recycle `pid` onto an unrelated process that
-/// also called `setsid()`, so this leader check is not sufficient on its
-/// own: callers must also require the spawn-time start pin
-/// ([`crate::agents::parent_guard::may_signal_group`]).
-#[cfg(unix)]
-fn is_own_session_group(pid: i32) -> bool {
+/// True when `pid` is still the leader of its own process group. This holds
+/// both for the PTY session leader spawned by alacritty (`setsid()`) and for a
+/// foreground job-control group leader. After a leader exits the kernel can
+/// recycle `pid` onto an unrelated leader, so callers must also require the
+/// pinned process start ([`crate::agents::parent_guard::may_signal_group`]).
+#[cfg(all(unix, test))]
+fn is_process_group_leader(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
@@ -2998,21 +3006,35 @@ fn is_own_session_group(pid: i32) -> bool {
     unsafe { libc::getpgid(pid) == pid }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn may_signal_own_session(pid: i32, pinned_start: Option<u64>) -> bool {
     crate::agents::parent_guard::may_signal_group(
         pid,
         pinned_start,
         child_pid_start_time(pid as u32),
-        is_own_session_group(pid),
+        is_process_group_leader(pid),
     )
+}
+
+/// Resolve a distinct PTY foreground job-control group while the duplicated
+/// master fd is still open. `tcgetpgrp` alone is not ownership evidence: a
+/// stale/recycled PGID must also still belong to the shell's terminal session
+/// and have at least one live member whose process start we can pin. Pinning
+/// members rather than the numeric leader keeps ordinary pipelines killable
+/// after the process that originally supplied their PGID has exited.
+#[cfg(all(target_os = "macos", test))]
+fn foreground_process_group(
+    pty_master_fd: i32,
+    shell_pid: u32,
+) -> Option<crate::agents::parent_guard::PinnedProcessGroup> {
+    crate::agents::parent_guard::pin_foreground_process_group(pty_master_fd, shell_pid)
 }
 
 /// Send SIGTERM to the child's process group, guarded by leader + start-time
 /// identity so a dead or recycled `pid` is a harmless no-op. Returns true if
 /// SIGTERM was delivered. Factored out of `Drop` so the graceful-shutdown
 /// step is unit-testable.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn terminate_process_group(pid: i32, pinned_start: Option<u64>) -> bool {
     if !may_signal_own_session(pid, pinned_start) {
         return false;
@@ -3048,6 +3070,15 @@ fn format_signal(sig: i32) -> String {
 
 impl Drop for TerminalState {
     fn drop(&mut self) {
+        // Resolve every live process group in the authenticated PTY session
+        // before notifier shutdown can close the EventLoop's other master fd.
+        // Foreground, stopped, background, and disowned jobs may all use PGIDs
+        // distinct from `child_pid`.
+        #[cfg(target_os = "macos")]
+        let terminal_session_groups = self.pty_master_fd.map(|fd| {
+            crate::agents::parent_guard::pin_terminal_session_process_groups(fd, self.child_pid)
+        });
+
         self.notifier.0.shutdown();
 
         // US-034: close the dup'd PTY master fd we own (macOS). Done exactly
@@ -3066,53 +3097,68 @@ impl Drop for TerminalState {
         // master close signal (SIGHUP on Unix, ClosePseudoConsole on Windows),
         // force-kill it after 100ms.
         //
-        // Scheduling: prefer the GPUI `background_executor` (Zed parity:
-        // `crates/terminal/src/terminal.rs:2451-2457`) so the kill timer
-        // lives under the GPUI runtime and gets cleanly torn down with
-        // the app. Tests / display-only paths have no executor wired and
-        // fall back to a detached OS thread (safe but un-trackable).
+        // Scheduling: external per-group guards own a shutdown-proof ladder;
+        // the GPUI background executor (Zed parity) is a local fallback while
+        // the app remains alive. Tests / display-only paths have no executor
+        // wired and fall back to a detached OS thread.
         let executor = self.background_executor.clone();
 
         #[cfg(unix)]
         {
-            let pid = self.child_pid as i32;
-            let pinned_start = self.child_proc_start;
-            // Skip the kill ladder entirely once the child has exited.
-            // `child_pid` may have been reused by the OS by now, and signaling
-            // a reused PGID would terminate an unrelated process group - the
-            // synchronous SIGTERM below has the same PID-reuse window as the
-            // delayed SIGKILL. An already-exited child has nothing to kill.
-            if pid > 0 && self.exited.is_none() {
+            #[cfg(target_os = "macos")]
+            let groups = match terminal_session_groups {
+                Some(Some(groups)) => groups,
+                // The PTY existed but complete enumeration/authentication
+                // failed: do not mistake a partial set for safe coverage.
+                Some(None) => Vec::new(),
+                // If the PTY duplicate itself was unavailable, retain the
+                // strict original-leader fallback.
+                None => crate::agents::parent_guard::pin_session_process_group(
+                    self.child_pid,
+                    self.child_proc_start,
+                )
+                .into_iter()
+                .collect(),
+            };
+
+            if !groups.is_empty() {
+                // Start external watchers for every captured teardown group
+                // before sending TERM. The long-lived session guard performs
+                // the same complete refresh, while these short-lived guards
+                // make orderly teardown survive immediate application exit.
+                #[cfg(all(target_os = "macos", not(test)))]
+                let teardown_guards = groups
+                    .iter()
+                    .cloned()
+                    .filter_map(crate::agents::parent_guard::spawn_process_group_guard)
+                    .collect::<Vec<_>>();
+
                 // Graceful shutdown ladder - send SIGTERM to the group
                 // synchronously FIRST so agents/shells run their TERM handlers
                 // (state checkpoint, HISTFILE flush) before the 100ms-grace
                 // SIGKILL escalation below. Mirrors Zed's
                 // terminate_child_process() -> 100ms -> kill_child_process()
                 // (crates/terminal/src/terminal.rs:2697-2704, pty_info.rs:142-151).
-                terminate_process_group(pid, pinned_start);
+                for group in &groups {
+                    crate::agents::parent_guard::signal_pinned_process_group(group, libc::SIGTERM);
+                }
+
+                // Close each external guard's control pipe while Drop is still
+                // running. The local task remains a fallback for a guard that
+                // could not be spawned.
+                #[cfg(all(unix, not(test)))]
+                drop(self.pty_guard.take());
+                #[cfg(all(target_os = "macos", not(test)))]
+                drop(teardown_guards);
 
                 let kill = move || {
-                    // Target the entire process group (`-pid`) so any
-                    // sub-process the shell forked (cargo build, npm dev,
-                    // long-running scripts) dies with the shell instead of
-                    // becoming an orphan reparented to PID 1. alacritty's
-                    // `tty::new` calls `setsid()` on the child, so `child_pid`
-                    // is both the PID and the PGID of the session leader -
-                    // `kill(-pgid, sig)` is the canonical POSIX idiom to signal
-                    // every process in that group.
-                    //
-                    // Re-check identity at fire time: 100ms after the child
-                    // died the kernel may have recycled `pid` onto an unrelated
-                    // session leader (also `setsid()`), so require both
-                    // `getpgid(pid) == pid` and a matching spawn-time pin
-                    // before the SIGKILL.
-                    if may_signal_own_session(pid, pinned_start) {
-                        // SAFETY: kill(-pid, SIGKILL) signals every member of
-                        // the process group; FFI-safe with the positive `pid`
-                        // captured by value and just confirmed to be ours.
-                        unsafe {
-                            libc::kill(-pid, libc::SIGKILL);
-                        }
+                    // Re-check a live member's PID/start/PGID/session identity
+                    // for each target at fire time; PGID reuse fails closed.
+                    for group in groups {
+                        crate::agents::parent_guard::signal_pinned_process_group(
+                            &group,
+                            libc::SIGKILL,
+                        );
                     }
                 };
                 match executor {
@@ -3163,6 +3209,21 @@ mod tests {
             cell_height: 0,
         });
         s.shutdown();
+    }
+
+    #[test]
+    fn osc_title_is_scrubbed_and_bounded_at_ingestion() {
+        let mut state = TerminalState::new_display_only(24, 80);
+        let raw = format!("\u{202E}safe\n\u{0007}{}", "界".repeat(20_000));
+
+        state.process_event(AlacEvent::Title(raw));
+
+        assert!(state.title.starts_with("safe "));
+        assert!(state.title.chars().count() <= 241);
+        assert!(!state.title.contains('\u{202E}'));
+        assert!(!state.title.contains('\n'));
+        assert!(!state.title.contains('\u{0007}'));
+        assert!(state.title.ends_with('…'));
     }
 
     #[test]
@@ -3638,6 +3699,203 @@ mod tests {
     // US-001 - graceful teardown sends SIGTERM before SIGKILL.
     // -----------------------------------------------------------------
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn leaderless_foreground_group_is_discovered_and_force_killed() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::time::{Duration, Instant};
+
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        // SAFETY: openpty initializes both fd outputs; null termios/winsize ask
+        // the OS for defaults. The owned fds are closed below.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master_fd,
+                    &mut slave_fd,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "openpty"
+        );
+
+        // Build a real controlling-terminal session with a foreground process
+        // group whose numeric leader exits. This models a normal pipeline
+        // after its first command finishes while another command remains.
+        // Every child-side operation after fork is an async-signal-safe libc
+        // call; failures use `_exit` rather than touching Rust runtime state.
+        let shell_pid = unsafe { libc::fork() };
+        if shell_pid == 0 {
+            // SAFETY: this is the freshly forked child. Only raw syscalls run.
+            unsafe {
+                libc::close(master_fd);
+                if libc::setsid() < 0 || libc::ioctl(slave_fd, libc::TIOCSCTTY.into(), 0) < 0 {
+                    libc::_exit(120);
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+
+                let group_leader = libc::fork();
+                if group_leader < 0 {
+                    libc::_exit(121);
+                }
+                if group_leader == 0 {
+                    if libc::setpgid(0, 0) < 0 {
+                        libc::_exit(122);
+                    }
+                    libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+                    if libc::tcsetpgrp(slave_fd, libc::getpid()) < 0 {
+                        libc::_exit(123);
+                    }
+                    let worker = libc::fork();
+                    if worker < 0 {
+                        libc::_exit(124);
+                    }
+                    if worker == 0 {
+                        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                        const READY: &[u8] = b"__PANEFLOW_FG_READY__\n";
+                        let _ = libc::write(slave_fd, READY.as_ptr().cast(), READY.len());
+                        loop {
+                            libc::pause();
+                        }
+                    }
+                    libc::_exit(0);
+                }
+
+                // Reap the numeric process-group leader, then keep the shell
+                // session alive while its TERM/HUP-resistant foreground
+                // worker remains in the now-leaderless group.
+                let mut status = 0;
+                let _ = libc::waitpid(group_leader, &mut status, 0);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        assert!(shell_pid > 1, "fork session leader");
+        // SAFETY: parent owns these fds; it keeps only the master.
+        unsafe {
+            libc::close(slave_fd);
+        }
+        // SAFETY: master_fd is the one owned result from openpty.
+        let mut master = unsafe { std::fs::File::from_raw_fd(master_fd) };
+
+        struct JobControlCleanup {
+            shell_pid: i32,
+            master_fd: i32,
+        }
+        impl Drop for JobControlCleanup {
+            fn drop(&mut self) {
+                // Test-only best-effort cleanup for any assertion path.
+                // SAFETY: all targets were created by this fixture.
+                unsafe {
+                    let foreground = libc::tcgetpgrp(self.master_fd);
+                    if foreground > 1 && foreground != self.shell_pid {
+                        libc::kill(-foreground, libc::SIGKILL);
+                    }
+                    libc::kill(-self.shell_pid, libc::SIGKILL);
+                    let mut status = 0;
+                    let _ = libc::waitpid(self.shell_pid, &mut status, 0);
+                }
+            }
+        }
+        let cleanup = JobControlCleanup {
+            shell_pid,
+            master_fd: master.as_raw_fd(),
+        };
+
+        // Nonblocking reads keep a broken job-control setup from hanging CI.
+        // SAFETY: fcntl only changes flags on our owned PTY master.
+        unsafe {
+            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+            assert!(flags >= 0, "get master flags");
+            assert_eq!(
+                libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK),
+                0,
+                "set master nonblocking"
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !output
+            .windows(b"__PANEFLOW_FG_READY__".len())
+            .any(|window| window == b"__PANEFLOW_FG_READY__")
+        {
+            match master.read(&mut buffer) {
+                Ok(0) => panic!("job-control PTY closed before readiness"),
+                Ok(read) => output.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "job-control readiness timed out: {}",
+                        String::from_utf8_lossy(&output)
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("read job-control PTY: {error}"),
+            }
+        }
+
+        // The readiness write happens in the worker before its parent exits;
+        // wait until the session leader has reaped that numeric group leader.
+        let foreground_pgid = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
+        assert!(foreground_pgid > 1, "foreground PGID");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            // SAFETY: read-only query. ESRCH proves no process occupies the
+            // numeric leader PID while the worker keeps -PGID alive.
+            if unsafe { libc::getpgid(foreground_pgid) } < 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "foreground process-group leader did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: signal 0 proves the leaderless group still contains worker.
+        assert_eq!(unsafe { libc::kill(-foreground_pgid, 0) }, 0);
+
+        let foreground = foreground_process_group(master.as_raw_fd(), shell_pid as u32)
+            .expect("distinct owned foreground group");
+        assert_eq!(foreground.pgid, foreground_pgid as u32);
+        assert_ne!(foreground.pgid, shell_pid as u32);
+        assert!(
+            foreground
+                .members
+                .iter()
+                .all(|(pid, _)| *pid != foreground.pgid),
+            "authorization must not depend on the exited numeric leader"
+        );
+        assert!(
+            crate::agents::parent_guard::shutdown_pinned_process_group(&foreground),
+            "guarded TERM/KILL ladder must accept the pinned foreground group"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            // SAFETY: signal 0 is a read-only existence probe.
+            let alive = unsafe { libc::kill(-(foreground.pgid as i32), 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "TERM/HUP-resistant foreground group survived SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(cleanup);
+    }
+
     #[cfg(unix)]
     #[test]
     fn terminate_process_group_delivers_sigterm_and_is_honored() {
@@ -3674,6 +3932,7 @@ mod tests {
                 Ok(())
             });
         }
+
         let mut child = cmd.spawn().expect("spawn test child");
         let pid = child.id() as i32;
 

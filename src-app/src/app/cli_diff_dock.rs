@@ -14,8 +14,8 @@
 //! itself and answers the picker.
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, div,
-    px,
+    AnyElement, App, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
+    div, px,
 };
 
 use crate::PaneFlowApp;
@@ -48,6 +48,98 @@ impl DiffDockSlot {
 }
 
 impl PaneFlowApp {
+    pub(crate) fn all_diff_dock_terminals(
+        &self,
+    ) -> Vec<gpui::Entity<crate::terminal::TerminalView>> {
+        fn append(
+            tabs: &[DiffDockTab],
+            result: &mut Vec<gpui::Entity<crate::terminal::TerminalView>>,
+        ) {
+            result.extend(tabs.iter().filter_map(|tab| match tab {
+                DiffDockTab::Terminal(terminal) => Some(terminal.clone()),
+                _ => None,
+            }));
+        }
+
+        let mut result = Vec::new();
+        append(&self.diff_dock.diff_tabs, &mut result);
+        for slot in self.diff_dock.parked.values() {
+            append(&slot.tabs, &mut result);
+        }
+        result.sort_by_key(|terminal| terminal.entity_id());
+        result.dedup();
+        result
+    }
+
+    pub(crate) fn diff_dock_terminals_for_workspace(
+        &self,
+        workspace_id: u64,
+    ) -> Vec<gpui::Entity<crate::terminal::TerminalView>> {
+        fn terminals(tabs: &[DiffDockTab]) -> impl Iterator<Item = &DiffDockTab> {
+            tabs.iter()
+                .filter(|tab| matches!(tab, DiffDockTab::Terminal(_)))
+        }
+
+        let mut result = Vec::new();
+        if self.diff_dock.owner == Some(workspace_id) {
+            result.extend(
+                terminals(&self.diff_dock.diff_tabs).filter_map(|tab| match tab {
+                    DiffDockTab::Terminal(terminal) => Some(terminal.clone()),
+                    _ => None,
+                }),
+            );
+        }
+        if let Some(slot) = self.diff_dock.parked.get(&workspace_id) {
+            result.extend(terminals(&slot.tabs).filter_map(|tab| match tab {
+                DiffDockTab::Terminal(terminal) => Some(terminal.clone()),
+                _ => None,
+            }));
+        }
+        result
+    }
+
+    /// Drop both mounted and parked dock state owned by a workspace before
+    /// that workspace leaves the model. Render-time reconciliation is not
+    /// sufficient for a background workspace: the active owner does not
+    /// change, so `sync_diff_dock_workspace` can legitimately return early.
+    pub(crate) fn drop_diff_dock_for_workspace(
+        &mut self,
+        workspace_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.diff_dock.parked.remove(&workspace_id);
+        if self.diff_dock.owner == Some(workspace_id) {
+            self.diff_dock.owner = None;
+            self.park_live_diff_dock(None, cx);
+        }
+    }
+
+    /// Live CWDs of terminal tabs in both the mounted and parked diff docks.
+    /// These terminals are not represented by workspace panes.
+    pub(crate) fn diff_dock_terminal_cwds(&self, cx: &App) -> Vec<std::path::PathBuf> {
+        fn append(tabs: &[DiffDockTab], cx: &App, cwds: &mut Vec<std::path::PathBuf>) {
+            for tab in tabs {
+                let DiffDockTab::Terminal(terminal) = tab else {
+                    continue;
+                };
+                let terminal = terminal.read(cx);
+                if let Some(cwd) = terminal.terminal.cwd_now() {
+                    cwds.push(cwd);
+                }
+                if let Some(cwd) = terminal.terminal.current_cwd.as_deref() {
+                    cwds.push(std::path::PathBuf::from(cwd));
+                }
+            }
+        }
+
+        let mut cwds = Vec::new();
+        append(&self.diff_dock.diff_tabs, cx, &mut cwds);
+        for slot in self.diff_dock.parked.values() {
+            append(&slot.tabs, cx, &mut cwds);
+        }
+        cwds
+    }
+
     /// Keep the live dock attached to the active workspace.
     ///
     /// Called once per frame from [`Self::wrap_cli_diff_dock`] rather than from
@@ -265,6 +357,25 @@ mod tests {
         assert!(
             !slot(false, false, 2).is_idle(),
             "a terminal / file tab must not be dropped"
+        );
+    }
+
+    #[test]
+    fn workspace_close_has_an_explicit_parked_dock_teardown() {
+        let src = include_str!("cli_diff_dock.rs");
+        let helper = src
+            .split("fn drop_diff_dock_for_workspace(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Live CWDs").next())
+            .expect("dock teardown helper");
+        assert!(
+            helper.contains("parked.remove(&workspace_id)"),
+            "a background workspace's parked terminal tabs must be dropped immediately: {helper}"
+        );
+        assert!(
+            helper.contains("self.diff_dock.owner == Some(workspace_id)")
+                && helper.contains("park_live_diff_dock(None, cx)"),
+            "the same helper must tear down a mounted owner without re-parking it: {helper}"
         );
     }
 }

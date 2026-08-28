@@ -1,7 +1,7 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-08-26, after leftover-removal buckets
-1–4 (hygiene, Ghostty stubs, in-app updater deleted, docs match the tree).
+Living handoff record. Updated 2026-08-27, through the workspace-close,
+managed-worktree, and terminal-session hardening in PR #114.
 
 Companion documents:
 - `docs/fork/2026-08-25-post-2c-plan.md` is the **historical 2026-08-25
@@ -56,14 +56,24 @@ Three findings in that cluster are worth carrying forward, because each was a
   path that closes a background tab must hand focus back itself or it strands
   the window - the issue #108 class again.
 
-Still unguarded, deliberately: **workspace-scope close**
-(`Cmd+Shift+Q`, the sidebar folder row's `x`, the workspace context menu, and
-IPC `workspace.close`) drops every tab and PTY with no confirmation and no undo
-record. Guarding it needs a whole-workspace undo record, which is a separate
-feature; the deferral is recorded in code at `app/workspace_ops/mod.rs`.
+Workspace-scope close now shares the live-agent confirmation guard across
+`Cmd+Shift+Q`, the sidebar folder row, the workspace context menu, and IPC.
+It captures a whole-workspace undo record before removal; managed-worktree
+ownership follows that record until restore, FIFO eviction, or final quit.
+Cached Review and mounted/parked Diff Dock terminals are included in the same
+guard and are dropped with their workspace even while their UI is unmounted.
+Managed-worktree retirement is journaled before cleanup, reserves its paths
+against every workspace/pane ingress, and recovers the exact marker-unlink
+crash window only when the persisted macOS directory identity still matches,
+so a same-path/same-branch replacement cannot inherit teardown ownership.
+Terminal teardown pins every authenticated process group in the PTY session,
+including stopped/background groups, for both orderly close and parent death.
 
-Two things that pass gates but are **not** end-to-end verified, and one
-follow-up:
+Issue **#110** is implemented: the window-level focus-loss fallback commits or
+cancels transient editing state even when the focused row unmounts or a
+Window-less navigation path runs. It no longer belongs in the follow-up list.
+
+Two things that pass gates but are **not** end-to-end verified:
 
 - **No live GUI smoke was possible.** Plain keystrokes deliver via
   `CGEventPostToPid`, but modified chords never fire an action, and
@@ -76,11 +86,6 @@ follow-up:
   such at both sites: a sidebar row only joins the dispatch path once its
   rename is already live, but the `f2` branch only runs when it is not.
   Fixing it needs per-row focus handles.
-- **Issue #110** tracks a `Window::on_focus_lost` fallback, which would
-  retire this whole class of bug — including the residual leg where hiding
-  the sidebar unmounts the renamed row, and the `Window`-less
-  `activate_workspace_without_window` / `enter_diff_mode` paths. Do not
-  schedule it concurrently with **#109**; both rewrite `src-app/src/main.rs`.
 
 ## Identity
 

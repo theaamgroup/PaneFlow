@@ -30,8 +30,15 @@ impl PaneFlowApp {
             .filter(|cwd| !cwd.is_empty())
             .map(std::path::PathBuf::from);
         let cwd = self.new_terminal_cwd(cwd);
+        let effective_cwd = cwd
+            .clone()
+            .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+        if self.pending_worktree_teardown_conflicts(&effective_cwd) {
+            self.show_toast("Worktree is still being retired", cx);
+            return;
+        }
 
-        let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd, None, cx));
+        let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, Some(effective_cwd), None, cx));
         // Only the exit is wired: the dock terminal has no pane in the layout
         // tree, so the app-level CWD / port-scan / open-path handlers have
         // nothing to act on for it.

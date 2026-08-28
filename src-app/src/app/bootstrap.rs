@@ -158,6 +158,16 @@ impl PaneFlowApp {
         // the rail *starts* in - never as an animation.
         let (restored_primary_sidebar_visible, restored_primary_sidebar_animation) =
             restored_primary_sidebar(saved_session.as_ref());
+        let restored_pending_worktree_teardowns: Vec<_> = saved_session
+            .as_ref()
+            .into_iter()
+            .flat_map(|session| session.pending_worktree_teardowns.iter())
+            .filter_map(super::session::rehydrate_pending_managed_worktree)
+            .collect();
+        let restored_pending_worktree_teardowns =
+            crate::workspace::worktree::merge_managed_worktree_records(
+                restored_pending_worktree_teardowns,
+            );
 
         let (workspaces, active_idx) = match saved_session {
             Some(session) => {
@@ -178,7 +188,6 @@ impl PaneFlowApp {
             }
             None => (vec![Self::default_workspace(cx)], 0),
         };
-
         // Setup notify file watcher for .git directories
         let (git_event_tx, git_event_rx) = std::sync::mpsc::channel();
         let mut git_watcher = match notify::recommended_watcher(git_event_tx) {
@@ -754,6 +763,7 @@ impl PaneFlowApp {
             jump_cursor: None,
             swap_source: None,
             closed_items: Vec::new(),
+            pending_worktree_teardowns: restored_pending_worktree_teardowns,
             show_about_dialog: false,
             show_theme_picker: false,
             theme_picker_query: String::new(),
@@ -872,6 +882,11 @@ impl PaneFlowApp {
         // Hydrate the motion switch from the config: it gates the
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
+
+        // The journal was durable before the prior process attempted cleanup.
+        // Resume it only after the full app exists so completion can remove the
+        // entries and persist the cleared journal.
+        app.resume_pending_worktree_teardowns(cx);
 
         app
     }
@@ -1033,15 +1048,17 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     });
     cx.on_action(|_: &CloseWorkspace, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
-            app.close_workspace_at(app.active_idx, window, cx);
+            app.request_close_workspace(
+                app.active_idx,
+                crate::app::close_guard::ConfirmStyle::Modal,
+                window,
+                cx,
+            );
         });
     });
     cx.on_action(|_: &NextWorkspace, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
-            if !app.workspaces.is_empty() {
-                let next = (app.active_idx + 1) % app.workspaces.len();
-                app.select_workspace(next, window, cx);
-            }
+            app.handle_next_workspace(&NextWorkspace, window, cx);
         });
     });
 
@@ -1110,6 +1127,7 @@ mod tests {
             version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
             active_workspace: 0,
             workspaces: Vec::new(),
+            pending_worktree_teardowns: Vec::new(),
             mode: Default::default(),
             diff_scope: None,
             primary_sidebar_collapsed: collapsed,
@@ -1211,6 +1229,28 @@ mod tests {
                 "missing app-global menu fallback `{fallback}`; the item would grey out"
             );
         }
+    }
+
+    #[test]
+    fn the_macos_next_workspace_fallback_uses_display_order() {
+        let production = include_str!("bootstrap.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let fallback = production
+            .split("cx.on_action(|_: &NextWorkspace, cx|")
+            .nth(1)
+            .and_then(|rest| rest.split("cx.on_action(|_: &OpenHelp").next())
+            .expect("NextWorkspace app-global fallback");
+
+        assert!(
+            fallback.contains("app.handle_next_workspace(&NextWorkspace, window, cx);"),
+            "the menu fallback must share the display-order handler: {fallback}"
+        );
+        assert!(
+            !fallback.contains("active_idx + 1") && !fallback.contains("select_workspace("),
+            "storage-order arithmetic diverges from the rendered sidebar: {fallback}"
+        );
     }
 
     #[test]

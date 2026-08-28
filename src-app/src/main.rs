@@ -271,10 +271,38 @@ pub(crate) struct ClosedTabRecord {
     pub(crate) layout: paneflow_config::schema::LayoutNode,
 }
 
-/// One entry on the undo-close stack: a pane or a whole tab.
+/// One tab inside a closed-workspace undo record. Unlike [`ClosedTabRecord`],
+/// the layout is optional because an empty tab is still part of the workspace
+/// and must come back as empty rather than disappearing from the record.
+pub(crate) struct ClosedWorkspaceTabRecord {
+    pub(crate) title: String,
+    pub(crate) layout: Option<paneflow_config::schema::LayoutNode>,
+}
+
+/// Captured state of a closed workspace: identity, position, presentation
+/// state, and every tab's restorable pane tree.
+pub(crate) struct ClosedWorkspaceRecord {
+    pub(crate) workspace_id: u64,
+    pub(crate) title: String,
+    pub(crate) cwd: String,
+    pub(crate) index: usize,
+    pub(crate) active_tab: usize,
+    pub(crate) tabs: Vec<ClosedWorkspaceTabRecord>,
+    pub(crate) custom_buttons: Vec<paneflow_config::schema::ButtonCommand>,
+    pub(crate) files_expanded: Vec<std::path::PathBuf>,
+    pub(crate) sidebar_expanded: bool,
+    pub(crate) pinned: bool,
+    /// Lifecycle ownership held while the workspace is undoable. Destructive
+    /// teardown is deferred until this record leaves the undo stack; restoring
+    /// moves the records back onto the new runtime workspace.
+    pub(crate) managed_worktrees: Vec<crate::workspace::worktree::ManagedWorktree>,
+}
+
+/// One entry on the undo-close stack: a pane, a whole tab, or a workspace.
 pub(crate) enum ClosedRecord {
     Pane(ClosedPaneRecord),
     Tab(ClosedTabRecord),
+    Workspace(ClosedWorkspaceRecord),
 }
 
 impl ClosedRecord {
@@ -284,6 +312,7 @@ impl ClosedRecord {
         match self {
             ClosedRecord::Pane(record) => record.workspace_id,
             ClosedRecord::Tab(record) => record.workspace_id,
+            ClosedRecord::Workspace(record) => record.workspace_id,
         }
     }
 }
@@ -1288,9 +1317,13 @@ struct PaneFlowApp {
     /// Source pane for swap mode, or `None` if not in swap mode.
     swap_source: Option<Entity<crate::pane::Pane>>,
     /// LIFO stack of recently closed panes for undo-close (US-014).
-    /// Issue #83 widened it to whole tabs, so the newest entry can be either
-    /// and one `Cmd+Shift+T` pops whichever kind that is.
+    /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
+    /// `Cmd+Shift+T` restores whichever kind was closed most recently.
     closed_items: Vec<ClosedRecord>,
+    /// Durable retirement journal for undo records already evicted from
+    /// `closed_items`. A batch is persisted before teardown starts and removed
+    /// only after the worker finishes, so a crash resumes cleanup safely.
+    pending_worktree_teardowns: Vec<crate::workspace::worktree::ManagedWorktree>,
     /// Whether the "About PaneFlow" dialog is visible.
     show_about_dialog: bool,
     /// Whether the command-palette-style theme picker is visible.
@@ -1388,13 +1421,13 @@ struct PaneFlowApp {
     /// so the old per-frame `HashMap` + `Vec` rebuild was pure waste. Interior
     /// mutability because the render fn borrows `&self`.
     pub(crate) sidebar_order_cache: std::cell::RefCell<crate::app::sidebar::SidebarOrderCache>,
-    /// Issue #108: focus parking spot for a workspace with zero panes (and for
-    /// a zero-workspace app). GPUI dispatches a key event along the path of the
-    /// focused node; with nothing focused that path is only the dispatch tree's
-    /// root, and every `on_action` listener of this view is registered on the
-    /// `app_content` div, a descendant of it. Global `context: None` bindings
-    /// (Cmd+1..9, Ctrl+Tab, Cmd+Shift+N, Cmd+Alt+T) then match but find no
-    /// handler. Any focus handle mounted inside `app_content` restores the path.
+    /// Issue #108/#110: focus parking spot mounted on `app_content` itself.
+    /// GPUI dispatches a key event along the path of the focused node; with
+    /// nothing focused that path is only the dispatch tree's root, and every
+    /// `on_action` listener of this view is registered on `app_content`, a
+    /// descendant of it. Global `context: None` bindings (Cmd+1..9, Ctrl+Tab,
+    /// Cmd+Shift+N, Cmd+Alt+T) then match but find no handler. Mounting this
+    /// handle on `app_content` keeps the fallback available in every UI mode.
     empty_workspace_focus: FocusHandle,
     /// Issue #79: focus handle for the sidebar's inline rename editor, shared
     /// by the workspace-folder rows and their tab children. One handle is
@@ -1508,8 +1541,12 @@ impl PaneFlowApp {
     /// The single entry point for both routes to the rail - the title-bar
     /// button (`TitleBarEvent::ToggleSidebar`) and the `TogglePrimarySidebar`
     /// chord (issue #106) - so the two cannot drift into different dismissal
-    /// behaviour.
+    /// behaviour. Settings is dismissed first so changing the persisted rail
+    /// intent always has an immediate, visible effect (issue #112).
     pub(crate) fn toggle_primary_sidebar_with_chrome(&mut self, cx: &mut Context<Self>) {
+        if self.settings_section.is_some() {
+            self.close_settings(cx);
+        }
         self.toggle_primary_sidebar(cx);
         if !self.primary_sidebar_visible {
             self.dismiss_transient_surfaces();
@@ -1806,13 +1843,11 @@ impl Render for PaneFlowApp {
                     .child(self.render_pane_palette(cx))
                     .into_any_element()
             } else {
-                // Issue #108: focusable even though it is only a placeholder.
-                // A zero-pane workspace has nothing else to focus, and with an
-                // empty dispatch path every global `context: None` binding
-                // matches but reaches no handler.
+                // Issue #108: a zero-pane workspace has nothing else to focus.
+                // `app_content` carries `empty_workspace_focus` in every mode,
+                // including this placeholder.
                 div()
                     .id("empty-workspace")
-                    .track_focus(&self.empty_workspace_focus)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1822,11 +1857,10 @@ impl Render for PaneFlowApp {
             }
         } else {
             // Same reason as the zero-pane branch above: a zero-workspace app
-            // has no pane to focus, so the welcome card carries the handle that
-            // keeps global keybindings on the dispatch path.
+            // has no pane to focus, so the parent `app_content` fallback keeps
+            // global keybindings on the dispatch path.
             div()
                 .id("empty-app")
-                .track_focus(&self.empty_workspace_focus)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1896,6 +1930,7 @@ impl Render for PaneFlowApp {
         // monospace family from `paneflow.json#font_family`, so the
         // terminal output is unaffected.
         let mut app_content = div()
+            .track_focus(&self.empty_workspace_focus)
             .font_family("Geist")
             .relative()
             .flex()
@@ -2503,8 +2538,23 @@ impl Render for PaneFlowApp {
 // App entry point
 // ---------------------------------------------------------------------------
 
+fn register_focus_lost_fallback<T: 'static>(
+    window: &mut Window,
+    cx: &mut Context<T>,
+    fallback_focus: fn(&T) -> &FocusHandle,
+) {
+    cx.on_focus_lost(window, move |view, window, cx| {
+        let fallback_focus = fallback_focus(view).clone();
+        window.focus(&fallback_focus, cx);
+    })
+    .detach();
+}
+
 fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> {
     let view = window.replace_root(cx, |_, cx| PaneFlowApp::new(cx));
+    view.update(cx, |_, cx| {
+        register_focus_lost_fallback(window, cx, |app| &app.empty_workspace_focus);
+    });
     view.update(cx, |_, cx| {
         let subscription = cx.observe_window_bounds(window, |this, window, cx| {
             crate::window_state::record_windowed_size(window);
@@ -2571,6 +2621,95 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
         }
     });
     view
+}
+
+#[cfg(test)]
+mod focus_lost_fallback_tests {
+    use gpui::{
+        Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
+        TestAppContext, Window, div, prelude::FluentBuilder,
+    };
+
+    use super::register_focus_lost_fallback;
+
+    struct FocusFallbackHarness {
+        fallback_focus: FocusHandle,
+        legitimate_focus: FocusHandle,
+        transient_focus: FocusHandle,
+        mount_transient: bool,
+    }
+
+    impl Render for FocusFallbackHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .track_focus(&self.fallback_focus)
+                .child(div().track_focus(&self.legitimate_focus))
+                .when(self.mount_transient, |root| {
+                    root.child(div().track_focus(&self.transient_focus))
+                })
+        }
+    }
+
+    #[gpui::test]
+    fn focus_lost_fallback_parks_focus_when_the_focused_node_is_unmounted(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            register_focus_lost_fallback(window, cx, |view: &FocusFallbackHarness| {
+                &view.fallback_focus
+            });
+            FocusFallbackHarness {
+                fallback_focus: cx.focus_handle(),
+                legitimate_focus: cx.focus_handle(),
+                transient_focus: cx.focus_handle(),
+                mount_transient: true,
+            }
+        });
+
+        cx.update(|window, cx| {
+            let transient_focus = view.read(cx).transient_focus.clone();
+            window.focus(&transient_focus, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| view.read(cx).transient_focus.is_focused(window)),
+            "the transient node must hold focus before it is removed"
+        );
+
+        view.update(cx, |view, cx| {
+            view.mount_transient = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|window, cx| view.read(cx).fallback_focus.is_focused(window)),
+            "removing the focused node must park focus on the mounted fallback"
+        );
+
+        view.update(cx, |view, cx| {
+            view.mount_transient = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let transient_focus = view.read(cx).transient_focus.clone();
+            window.focus(&transient_focus, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let legitimate_focus = view.read(cx).legitimate_focus.clone();
+            window.focus(&legitimate_focus, cx);
+        });
+        view.update(cx, |view, cx| {
+            view.mount_transient = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|window, cx| view.read(cx).legitimate_focus.is_focused(window)),
+            "the fallback must not override a legitimate focus transfer"
+        );
+    }
 }
 
 fn main() {

@@ -850,6 +850,7 @@ impl Pane {
                 | TerminalEvent::OpenCodePath { .. }
                 | TerminalEvent::FontZoomChanged
                 | TerminalEvent::FleetSearchRequested { .. }
+                | TerminalEvent::FocusGained
                 | TerminalEvent::ShellPromptReady => {}
             }
         })
@@ -860,14 +861,11 @@ impl Pane {
     /// basename; terminal surfaces detect well-known programs from the OSC
     /// title.
     ///
-    /// Both variants are capped at 24 chars (Zed `MAX_SURFACE_TITLE_LEN`,
-    /// `crates/editor/src/items.rs:64`). The CSS truncation chain
-    /// (`min_w_0 + overflow_x_hidden + text_ellipsis`) on the title div
-    /// is a second layer that catches edge cases - but Zed's experience is
-    /// that flex layouts with `max_w` (no explicit `w`) sometimes fail to
-    /// propagate the constraint, so capping the string up front is
-    /// load-bearing for visual consistency. Without this, a long markdown
-    /// filename like `prd-opencode-sessions.md` overflows the header.
+    /// The full variant keeps meaningful title text for the flexible header
+    /// and tooltip while the render chain applies ellipsis at the available
+    /// width. OSC input is still scrubbed and hard-bounded before it reaches
+    /// this sink. [`Self::surface_title`] is the separate compact 24-character
+    /// variant used by drag labels and other fixed-width surfaces.
     fn surface_full_title(surface: &PaneSurface, cx: &App) -> String {
         match surface {
             PaneSurface::Markdown(md) => md.read(cx).title().to_string(),
@@ -898,20 +896,28 @@ impl Pane {
         if let Some(custom) = view.terminal.custom_name.as_ref().filter(|c| !c.is_empty()) {
             return custom.clone();
         }
-        let raw = &view.terminal.title;
+        // OSC titles are terminal-controlled input. Normalize them before any
+        // resolver branch can return text to the compact header, drag label,
+        // close dialog, or full-title tooltip.
+        let raw = Self::sanitized_terminal_osc_title(&view.terminal.title);
+        if view.terminal.detected_agent.is_some()
+            && let Some(title) = Self::agent_osc_title(&raw)
+        {
+            return title;
+        }
         if let Some(agent) = view.terminal.detected_agent {
             return agent.display_name().into();
         }
         // For shell titles like "user@host: /path/to/dir", extract the last path component
         if let Some(path_title) =
-            Self::shell_path_title(raw).and_then(|path| Self::cwd_label(&path))
+            Self::shell_path_title(&raw).and_then(|path| Self::cwd_label(&path))
         {
             return path_title;
         }
-        if let Some(agent_title) = Self::agent_title_from_terminal_title(raw) {
+        if let Some(agent_title) = Self::agent_title_from_terminal_title(&raw) {
             return agent_title.into();
         }
-        if Self::is_default_terminal_title(raw)
+        if Self::is_default_terminal_title(&raw)
             && let Some(cwd) = view.terminal.current_cwd.as_deref()
             && let Some(label) = Self::cwd_label(cwd)
         {
@@ -932,17 +938,24 @@ impl Pane {
         if let Some(custom) = view.terminal.custom_name.as_ref().filter(|c| !c.is_empty()) {
             return custom.clone();
         }
-        let raw = &view.terminal.title;
+        // The full title feeds the pane-header tooltip, so it gets the same
+        // OSC-input normalization as the compact title path above.
+        let raw = Self::sanitized_terminal_osc_title(&view.terminal.title);
+        if view.terminal.detected_agent.is_some()
+            && let Some(title) = Self::agent_osc_title(&raw)
+        {
+            return title;
+        }
         if let Some(agent) = view.terminal.detected_agent {
             return agent.display_name().into();
         }
-        if let Some(path_title) = Self::shell_path_title(raw) {
+        if let Some(path_title) = Self::shell_path_title(&raw) {
             return path_title;
         }
-        if let Some(agent_title) = Self::agent_title_from_terminal_title(raw) {
+        if let Some(agent_title) = Self::agent_title_from_terminal_title(&raw) {
             return agent_title.into();
         }
-        if Self::is_default_terminal_title(raw)
+        if Self::is_default_terminal_title(&raw)
             && let Some(cwd) = view
                 .terminal
                 .current_cwd
@@ -958,8 +971,34 @@ impl Pane {
         }
     }
 
+    fn sanitized_terminal_osc_title(title: &str) -> String {
+        crate::sidebar_title::clean_sidebar_title(title).unwrap_or_default()
+    }
+
+    fn agent_osc_title(title: &str) -> Option<String> {
+        let title = crate::sidebar_title::clean_sidebar_title(title)?;
+        if Self::is_default_terminal_title(&title)
+            || Self::shell_path_title(&title).is_some()
+            || Self::looks_like_shell_osc_title(&title)
+            || Self::agent_title_from_terminal_title(&title).is_some()
+        {
+            None
+        } else {
+            Some(title)
+        }
+    }
+
     fn is_default_terminal_title(title: &str) -> bool {
         title.trim().is_empty() || title.trim().eq_ignore_ascii_case("terminal")
+    }
+
+    fn looks_like_shell_osc_title(title: &str) -> bool {
+        if crate::workspace::surface_naming::is_shell_command(title) {
+            return true;
+        }
+        title
+            .rsplit_once(':')
+            .is_some_and(|(prompt, cwd)| prompt.contains('@') && !cwd.trim().is_empty())
     }
 
     fn agent_title_from_terminal_title(title: &str) -> Option<&'static str> {
@@ -1420,9 +1459,7 @@ impl Pane {
     /// a custom name.
     fn render_surface_title(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let full_title = Self::surface_full_title(&self.surface, cx);
-        let display_title = Self::surface_title(&self.surface, cx);
-        let show_tooltip = full_title != display_title
-            || full_title.chars().count() > SURFACE_TITLE_TOOLTIP_THRESHOLD;
+        let show_tooltip = full_title.chars().count() > SURFACE_TITLE_TOOLTIP_THRESHOLD;
         let mut title = div()
             .id("pane-header-title")
             .min_w_0()
@@ -1432,7 +1469,7 @@ impl Pane {
             .text_size(px(HEADER_TEXT_SIZE))
             .line_height(px(HEADER_TEXT_LINE_HEIGHT))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .child(display_title);
+            .child(full_title.clone());
         if show_tooltip {
             title = title.delayed_tooltip(crate::ui_primitives::text_tooltip(full_title));
         }
@@ -2250,6 +2287,25 @@ mod tests {
     }
 
     #[test]
+    fn pane_header_uses_full_title_to_fill_available_width() {
+        let src = include_str!("pane.rs");
+        let render_title = src
+            .split("fn render_surface_title(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("render_surface_title body");
+
+        assert!(
+            !render_title.contains("Self::surface_title"),
+            "the pane header must let CSS ellipsis use its actual width: {render_title}"
+        );
+        assert!(
+            render_title.contains(".child(full_title.clone())"),
+            "the pane header must render the uncapped title: {render_title}"
+        );
+    }
+
+    #[test]
     fn cwd_label_uses_last_path_component() {
         let cwd = std::env::temp_dir().join("paneflow-tab-title");
 
@@ -2270,5 +2326,107 @@ mod tests {
             None,
             "repo names must not be mistaken for agent processes"
         );
+    }
+
+    #[test]
+    fn agent_osc_titles_are_cleaned_and_default_titles_are_ignored() {
+        assert_eq!(
+            super::Pane::agent_osc_title("⠋ Refactor terminal titles\n"),
+            Some("Refactor terminal titles".into())
+        );
+        assert_eq!(super::Pane::agent_osc_title("Terminal"), None);
+        assert_eq!(super::Pane::agent_osc_title("codex"), None);
+        assert_eq!(super::Pane::agent_osc_title("zsh"), None);
+        assert_eq!(super::Pane::agent_osc_title("bash"), None);
+        assert_eq!(super::Pane::agent_osc_title("/bin/zsh -l"), None);
+        assert_eq!(super::Pane::agent_osc_title(" ● \u{200B}"), None);
+        assert_eq!(
+            super::Pane::agent_osc_title("user@host: /repo"),
+            None,
+            "an ordinary shell cwd title must not replace the detected-agent identity"
+        );
+        assert_eq!(
+            super::Pane::agent_osc_title("/repo"),
+            None,
+            "a bare cwd title must not replace the detected-agent identity"
+        );
+        assert_eq!(
+            super::Pane::agent_osc_title("user@host: repo"),
+            None,
+            "a relative shell cwd title must not replace the detected-agent identity"
+        );
+    }
+
+    #[test]
+    fn terminal_osc_titles_are_sanitized_before_header_and_tooltip_sinks() {
+        let raw = format!("\u{202E}safe\n\u{0007}{}", "界".repeat(30));
+        let cleaned = super::Pane::sanitized_terminal_osc_title(&raw);
+
+        assert!(!cleaned.contains('\u{202E}'));
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\u{0007}'));
+        assert_eq!(cleaned, format!("safe {}", "界".repeat(30)));
+
+        let compact = super::truncate_surface_title(&cleaned);
+        assert_eq!(compact.chars().count(), super::MAX_SURFACE_TITLE_LEN);
+        assert!(compact.ends_with('…'));
+
+        let src = include_str!("pane.rs");
+        for (function, next_function) in [
+            (
+                "fn terminal_surface_title(",
+                "fn terminal_surface_full_title(",
+            ),
+            ("fn terminal_surface_full_title(", "fn agent_osc_title("),
+        ] {
+            let body = src
+                .split(function)
+                .nth(1)
+                .and_then(|rest| rest.split(next_function).next())
+                .expect("terminal title resolver body");
+
+            assert!(
+                body.contains("Self::sanitized_terminal_osc_title(&view.terminal.title)"),
+                "every OSC-derived title must be sanitized before a header or tooltip sink: {body}"
+            );
+            assert!(
+                !body.contains("let raw = &view.terminal.title"),
+                "raw terminal-controlled text must not reach title sinks: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_osc_title_precedes_detected_agent_fallback() {
+        let src = include_str!("pane.rs");
+
+        for (function, next_function) in [
+            (
+                "fn terminal_surface_title(",
+                "fn terminal_surface_full_title(",
+            ),
+            (
+                "fn terminal_surface_full_title(",
+                "fn is_default_terminal_title(",
+            ),
+        ] {
+            let body = src
+                .split(function)
+                .nth(1)
+                .and_then(|rest| rest.split(next_function).next())
+                .expect("terminal title resolver body");
+            let custom = body.find("custom_name").expect("custom title branch");
+            let osc = body
+                .find("agent_osc_title(&raw)")
+                .expect("cleaned OSC title branch");
+            let detected = body
+                .find("if let Some(agent) = view.terminal.detected_agent")
+                .expect("detected agent fallback");
+
+            assert!(
+                custom < osc && osc < detected,
+                "custom title must win, followed by OSC title, then the detected-agent fallback"
+            );
+        }
     }
 }

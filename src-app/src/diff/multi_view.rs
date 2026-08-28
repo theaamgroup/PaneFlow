@@ -145,6 +145,65 @@ impl MultiRepoDiffView {
             .unwrap_or_default()
     }
 
+    pub(crate) fn review_terminal_cwds(&self, cx: &App) -> Vec<PathBuf> {
+        self.groups
+            .iter()
+            .filter_map(|group| group.view.as_ref())
+            .flat_map(|view| view.read(cx).review_terminal_cwds(cx))
+            .collect()
+    }
+
+    pub(crate) fn review_terminals(
+        &self,
+        cx: &App,
+    ) -> Vec<gpui::Entity<crate::terminal::TerminalView>> {
+        self.groups
+            .iter()
+            .filter_map(|group| group.view.as_ref())
+            .flat_map(|view| view.read(cx).review_terminals())
+            .collect()
+    }
+
+    pub(crate) fn review_terminals_for_workspace(
+        &self,
+        workspace_id: u64,
+        unowned_repo: Option<&std::path::Path>,
+        cx: &App,
+    ) -> Vec<gpui::Entity<crate::terminal::TerminalView>> {
+        self.groups
+            .iter()
+            .filter_map(|group| group.view.as_ref())
+            .flat_map(|view| {
+                let view = view.read(cx);
+                let include_every_column =
+                    unowned_repo.is_some_and(|repo| view.repo_root() == repo);
+                view.review_terminals_for_workspace(workspace_id, include_every_column)
+            })
+            .collect()
+    }
+
+    pub(crate) fn drop_review_terminals_for_workspace(
+        &mut self,
+        workspace_id: u64,
+        unowned_repo: Option<&std::path::Path>,
+        cx: &mut Context<Self>,
+    ) {
+        let views: Vec<_> = self
+            .groups
+            .iter()
+            .filter_map(|group| group.view.clone())
+            .collect();
+        for view in views {
+            let include_every_column = {
+                let view = view.read(cx);
+                unowned_repo.is_some_and(|repo| view.repo_root() == repo)
+            };
+            view.update(cx, |view, _| {
+                view.drop_review_terminals_for_workspace(workspace_id, include_every_column);
+            });
+        }
+    }
+
     /// Selected column index of the selected repo's `DiffView` (active-branch
     /// highlight in the sidebar).
     pub fn active_selected_column(&self, cx: &App) -> usize {
