@@ -1440,9 +1440,20 @@ impl Render for TerminalView {
         // Search overlay bar
         let search_active = self.search_active;
 
+        // GPUI's `key_context` ASSIGNS (`interactivity().key_context = Some(..)`),
+        // it does not merge - so layering a second `.key_context("Search")` further
+        // down replaced the whole `Terminal` context and killed all 15
+        // Terminal-scoped bindings (Cmd+C/Cmd+V, copy mode, prompt-mark jumps, font
+        // zoom, and Ctrl+Shift+F itself, which then could not close the bar it
+        // opened). Build one context and set it once, as `markdown/view.rs` does.
+        let mut key_ctx = self.dispatch_context();
+        if search_active {
+            key_ctx.add("Search");
+        }
+
         let mut el = div()
             .id("terminal-view")
-            .key_context(self.dispatch_context())
+            .key_context(key_ctx)
             .track_focus(&self.focus_handle)
             // US-010: hand cursor over a hovered link, text IBeam otherwise -
             // the universal "this is clickable" affordance (mirrors Zed
@@ -1543,8 +1554,9 @@ impl Render for TerminalView {
             .child(terminal_body);
 
         if search_active {
-            // Add "Search" key context for search-scoped bindings
-            el = el.key_context("Search");
+            // The "Search" key context is layered onto `key_ctx` above, before the
+            // single `.key_context(..)` call - re-setting it here would replace the
+            // Terminal context wholesale.
             el = el.child(self.render_search_overlay(cx));
         }
 

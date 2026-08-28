@@ -860,7 +860,14 @@ impl TerminalView {
 
     // --- Clipboard handlers ---
 
-    pub(super) fn handle_copy(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn handle_copy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Same hazard as `handle_select_all` below: the menu routes Copy/Paste
+        // app-globally and the find bar's `TextInput` is a DESCENDANT of the
+        // `terminal-view` div, so without this guard a menu Copy/Paste is handled
+        // by the terminal while a nested widget holds focus.
+        if !self.focus_handle(cx).is_focused(window) {
+            return;
+        }
         if let Some(text) = self.terminal.session_backend().selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -876,7 +883,13 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub(super) fn handle_paste(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn handle_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // See `handle_copy`. This one is the dangerous half: without bracketed
+        // paste, `write_paste_text` rewrites `\n` -> `\r`, so pasting into a
+        // focused find bar EXECUTED the clipboard's newlines in the shell.
+        if !self.focus_handle(cx).is_focused(window) {
+            return;
+        }
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
