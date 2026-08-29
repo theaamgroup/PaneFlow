@@ -80,13 +80,20 @@ use gpui::{
     Render, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled,
     UTF16Selection, WeakEntity, Window, actions, div, px, size,
 };
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecursiveMode, Watcher};
 
 /// The one link between the notify backend thread and the reload task.
 ///
 /// See [`CodeView::_watch_bridge`] for why the sender lives behind a lock
 /// rather than inside the watcher callback.
 type WatchBridge = Arc<Mutex<Option<mpsc::UnboundedSender<notify::Result<notify::Event>>>>>;
+
+/// OS watcher in production; `NullWatcher` under `cfg(test)` so GPUI's
+/// scheduler never sees the notify-rs fsevents thread.
+#[cfg(not(test))]
+type ConflictWatcher = notify::RecommendedWatcher;
+#[cfg(test)]
+type ConflictWatcher = notify::NullWatcher;
 
 use super::cursor::{self, CodeSelection};
 use super::document::{CodeDocument, ReadOnlyReason, normalize_newlines};
@@ -370,8 +377,9 @@ pub(crate) struct CodeView {
     /// A save is in flight; a second Ctrl+S is ignored rather than racing it.
     saving: bool,
     /// Parent-directory watcher (US-016). Held only to keep it alive: dropping
-    /// it unregisters the watch.
-    _watcher: Option<RecommendedWatcher>,
+    /// it unregisters the watch. Tests hold a `NullWatcher` so the seed write
+    /// cannot land on a live FSEvents thread and trip the GPUI scheduler.
+    _watcher: Option<ConflictWatcher>,
     /// The sender the watcher callback writes into, owned here rather than by
     /// the callback (US-016).
     ///
@@ -1641,7 +1649,7 @@ impl CodeView {
         let (tx, mut rx) = mpsc::unbounded::<notify::Result<notify::Event>>();
         let bridge: WatchBridge = Arc::new(Mutex::new(Some(tx)));
         let notify_side = Arc::clone(&bridge);
-        let watcher = RecommendedWatcher::new(
+        let watcher = ConflictWatcher::new(
             move |res| {
                 if let Ok(guard) = notify_side.lock()
                     && let Some(tx) = guard.as_ref()
@@ -2617,10 +2625,11 @@ mod tests {
     /// paths have something to stat. Returns the temp dir, which has to outlive
     /// the view.
     ///
-    /// `watch` stays off for every test that writes into the directory: a real
-    /// inotify watcher wakes the reload task from the notify thread, which the
-    /// deterministic test scheduler rightly calls non-determinism. Registration
-    /// is proven on its own, by a test that never writes.
+    /// `watch` stays off for every test that writes into the directory: a live
+    /// OS watcher wakes the reload task from the notify thread, which the
+    /// deterministic test scheduler rightly calls non-determinism. Under test
+    /// the handle is a `NullWatcher`, so the registration test never starts
+    /// FSEvents either.
     fn file_view<'a>(
         cx: &'a mut TestAppContext,
         text: &str,
