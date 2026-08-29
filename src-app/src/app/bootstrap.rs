@@ -961,7 +961,7 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
 
     use crate::{
         About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
-        OpenSettings, Paste, Quit, SelectAll, ShowThemes, ZoomWindow,
+        OpenSettings, Paste, Quit, SelectAll, ZoomWindow,
     };
 
     cx.set_menus(vec![
@@ -981,10 +981,6 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
             MenuItem::separator(),
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
         ]),
-        // Issue #105: the theme picker used to be reachable only from the
-        // title-bar profile menu. `View` is the conventional macOS slot for
-        // appearance, and sits between Edit and Window.
-        Menu::new("View").items(vec![MenuItem::action("Themes…", ShowThemes)]),
         Menu::new("Window").items(vec![
             MenuItem::action("Minimize", MinimizeWindow),
             MenuItem::action("Zoom", ZoomWindow),
@@ -1181,7 +1177,7 @@ unsafe fn set_menu_item_image_by_title(menu: cocoa::base::id, title: &str, image
 pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     use crate::{
         About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
-        OpenSettings, PaneFlowApp, Paste, Quit, SelectAll, ShowThemes, TerminalCopy, TerminalPaste,
+        OpenSettings, PaneFlowApp, Paste, Quit, SelectAll, TerminalCopy, TerminalPaste,
         TerminalSelectAll, ZoomWindow,
     };
 
@@ -1213,17 +1209,11 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
         });
     });
 
-    // Issue #105: both take a real `&mut Window`, which is exactly what
+    // Issue #105: takes a real `&mut Window`, which is exactly what
     // `with_active_paneflow_window` hands the closure.
     cx.on_action(|_: &OpenSettings, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
             app.open_settings_window(window, cx);
-        });
-    });
-
-    cx.on_action(|_: &ShowThemes, cx| {
-        with_active_paneflow_window(cx, |app, window, cx| {
-            app.open_theme_picker(window, cx);
         });
     });
 
@@ -1360,15 +1350,15 @@ mod tests {
         }
     }
 
-    /// Issue #105: Settings and Themes are reachable from the macOS menu bar,
-    /// not only from the sidebar footer and the title-bar profile menu.
-    /// `install_macos_menu_bar` hands a static tree to `cx.set_menus` on a
-    /// real `App`, which a unit test cannot build or dispatch against, so the
-    /// tree is pinned from source instead: `PaneFlow > Settings...` above the
-    /// separator that fences Quit off, and a `View` menu carrying `Themes...`
-    /// in the conventional slot between Edit and Window.
+    /// Issue #120: Settings stays on the macOS menu bar (`PaneFlow >
+    /// Settings...`); `View > Themes...` is gone because Settings →
+    /// Appearance already covers theme selection. `install_macos_menu_bar`
+    /// hands a static tree to `cx.set_menus` on a real `App`, which a unit
+    /// test cannot build or dispatch against, so the tree is pinned from
+    /// source: `PaneFlow > Settings...` above the separator that fences
+    /// Quit off, no `View` menu, and Edit sitting directly before Window.
     #[test]
-    fn the_macos_menu_bar_routes_settings_and_themes() {
+    fn the_macos_menu_bar_routes_settings_and_has_no_view_menu() {
         let production = include_str!("bootstrap.rs")
             .split("#[cfg(test)]")
             .next()
@@ -1394,23 +1384,19 @@ mod tests {
             "Settings... sits above the separator, beside About PaneFlow"
         );
 
-        let view_menu = menus
-            .split("Menu::new(\"View\")")
-            .nth(1)
-            .and_then(|rest| rest.split("Menu::new(\"Window\")").next())
-            .expect("a View menu between Edit and Window");
         assert!(
-            view_menu.contains("MenuItem::action(\"Themes…\", ShowThemes)"),
-            "View > Themes... must dispatch ShowThemes"
+            !menus.contains("Menu::new(\"View\")"),
+            "the View menu is gone; theme selection lives in Settings → Appearance"
         );
         let edit_at = menus.find("Menu::new(\"Edit\")").expect("the Edit menu");
-        let view_at = menus.find("Menu::new(\"View\")").expect("the View menu");
         let window_at = menus
             .find("Menu::new(\"Window\")")
             .expect("the Window menu");
+        assert!(edit_at < window_at, "Edit sits before Window");
+        let between = &menus[edit_at + "Menu::new(\"Edit\")".len()..window_at];
         assert!(
-            edit_at < view_at && view_at < window_at,
-            "View belongs between Edit and Window"
+            !between.contains("Menu::new("),
+            "Edit sits directly before Window; no menu in between"
         );
 
         let window_menu = menus
@@ -1451,7 +1437,6 @@ mod tests {
         // which is why every other menu action has one.
         for fallback in [
             "cx.on_action(|_: &OpenSettings, cx|",
-            "cx.on_action(|_: &ShowThemes, cx|",
             "cx.on_action(|_: &MinimizeWindow, cx|",
             "cx.on_action(|_: &ZoomWindow, cx|",
         ] {

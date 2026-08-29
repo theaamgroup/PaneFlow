@@ -1764,17 +1764,14 @@ impl Render for PaneFlowApp {
                 this.show_about_dialog = true;
                 cx.notify();
             }))
-            // Issue #105: `PaneFlow > Settings...` and `View > Themes...`.
-            // Both openers need a real `&mut Window` to move focus, so these
-            // two bind the window parameter rather than ignoring it.
+            // Issue #105: `PaneFlow > Settings...`. Needs a real `&mut Window`
+            // to move focus, so this binds the window parameter rather than
+            // ignoring it.
             .on_action(
                 cx.listener(|this: &mut Self, _: &OpenSettings, window, cx| {
                     this.open_settings_window(window, cx);
                 }),
             )
-            .on_action(cx.listener(|this: &mut Self, _: &ShowThemes, window, cx| {
-                this.open_theme_picker(window, cx);
-            }))
             .on_action(
                 cx.listener(|_this: &mut Self, _: &MinimizeWindow, window, _cx| {
                     window.minimize_window();
