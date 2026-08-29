@@ -135,6 +135,17 @@ pub(crate) struct PanePaletteState {
     pub(crate) scroll: ScrollHandle,
 }
 
+/// Whether a tab should have a `Tab` picker attached. Same emptiness guard
+/// as `open_tab_with_surface` (`root.is_none() && saved_layout.is_none()`),
+/// plus whether a picker already owns this tab.
+fn tab_needs_palette(
+    root_is_none: bool,
+    saved_layout_is_none: bool,
+    palette_targets_this_tab: bool,
+) -> bool {
+    root_is_none && saved_layout_is_none && !palette_targets_this_tab
+}
+
 impl PaneFlowApp {
     /// Build the picker catalogue for `ws_idx` (US-015): Terminal first, then
     /// the visible agents in `TerminalAgent::ALL` order, then the workspace's
@@ -277,6 +288,48 @@ impl PaneFlowApp {
             self.pane_palette = None;
             cx.notify();
         }
+    }
+
+    /// Attach a `Tab` picker to the active workspace's paneless tab when
+    /// nothing already owns it. Restored `"New pane"` tabs, a folder that
+    /// opened empty, and the substitute left by closing the last pane all
+    /// land here with no in-memory palette.
+    pub(crate) fn ensure_empty_tab_palette(&mut self, cx: &mut Context<Self>) {
+        let (ws_id, tab_id, root_is_none, saved_layout_is_none) = {
+            let Some(ws) = self.workspaces.get_mut(self.active_idx) else {
+                return;
+            };
+            if ws.tab_count() == 0 {
+                let _ = ws.open_tab(crate::workspace::Tab::new(PALETTE_TAB_TITLE, None));
+            }
+            let tab = ws.active_tab();
+            (
+                ws.id,
+                tab.id,
+                tab.root.is_none(),
+                tab.saved_layout.is_none(),
+            )
+        };
+        let palette_targets_this_tab = self.pane_palette.as_ref().is_some_and(|palette| {
+            palette.ws_id == ws_id
+                && matches!(
+                    palette.placement,
+                    PalettePlacement::Tab { tab_id: id } if id == tab_id
+                )
+        });
+        if !tab_needs_palette(root_is_none, saved_layout_is_none, palette_targets_this_tab) {
+            return;
+        }
+        self.pane_palette = Some(PanePaletteState {
+            ws_id,
+            placement: PalettePlacement::Tab { tab_id },
+            selected: 0,
+            error: None,
+            restore_focus: None,
+            scroll: ScrollHandle::new(),
+        });
+        self.pending_palette_focus = true;
+        cx.notify();
     }
 
     /// Target pane and direction of a pending split picker in the *active*
@@ -570,5 +623,34 @@ impl PaneFlowApp {
         }
 
         button.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_needs_palette_matches_the_open_tab_with_surface_guard() {
+        // Paneless, no picker: restore, new workspace, last pane closed.
+        assert!(tab_needs_palette(true, true, false));
+        // Live tree.
+        assert!(!tab_needs_palette(false, true, false));
+        // Zoomed: the real tree sits in `saved_layout`.
+        assert!(!tab_needs_palette(true, false, false));
+        // Picker already owns this tab.
+        assert!(!tab_needs_palette(true, true, true));
+        assert!(!tab_needs_palette(false, false, false));
+        assert!(!tab_needs_palette(false, false, true));
+    }
+
+    #[test]
+    fn main_rs_does_not_render_no_terminal_panes_open() {
+        let src = include_str!("../main.rs");
+        let forbidden = ["No terminal panes", "open"].join(" ");
+        assert!(
+            !src.contains(&forbidden),
+            "a paneless tab must render the picker, not a dead-end message"
+        );
     }
 }

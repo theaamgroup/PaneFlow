@@ -1558,6 +1558,7 @@ impl Render for PaneFlowApp {
             window.focus(&self.pane_palette_focus, cx);
         }
         self.prune_stale_split_palette(cx);
+        self.ensure_empty_tab_palette(cx);
         let main_content = if self.settings_section.is_some() {
             // Embedded settings take precedence over the mode screen: the left
             // rail becomes the settings nav (below) and this panel shows the
@@ -1611,15 +1612,10 @@ impl Render for PaneFlowApp {
                         preview.as_ref(),
                     ))
                     .into_any_element()
-            } else if self
-                .pane_palette
-                .as_ref()
-                .is_some_and(|palette| palette.ws_id == ws.id)
-            {
-                // EP-005 US-014: an empty tab opened by `New tab` / the
-                // sidebar `+` shows the preset palette as its surface, inside
-                // the same gutter the pane grid uses - it is a pane-sized card,
-                // not a floating menu.
+            } else {
+                // EP-005 US-014 / issue #122: every paneless tab is the
+                // preset picker. `ensure_empty_tab_palette` attached one
+                // when the tab was empty with no in-memory palette.
                 div()
                     .flex()
                     .size_full()
@@ -1629,23 +1625,11 @@ impl Render for PaneFlowApp {
                     .pb(px(crate::layout::PANE_GUTTER_PX))
                     .child(self.render_pane_palette(cx))
                     .into_any_element()
-            } else {
-                // Issue #108: a zero-pane workspace has nothing else to focus.
-                // `app_content` carries `empty_workspace_focus` in every mode,
-                // including this placeholder.
-                div()
-                    .id("empty-workspace")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size_full()
-                    .child(div().text_color(ui.text).child("No terminal panes open"))
-                    .into_any_element()
             }
         } else {
-            // Same reason as the zero-pane branch above: a zero-workspace app
-            // has no pane to focus, so the parent `app_content` fallback keeps
-            // global keybindings on the dispatch path.
+            // A zero-workspace app has no pane to focus, so the parent
+            // `app_content` fallback keeps global keybindings on the
+            // dispatch path.
             div()
                 .id("empty-app")
                 .flex()
