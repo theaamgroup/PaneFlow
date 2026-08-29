@@ -45,6 +45,10 @@ top of the deep review, in three file-disjoint batches:
   agent name), else `Tab N`. Nothing is written to `session.json`.
 - **The sidebar footer gear is gone**, finishing issue #105. Settings is the
   menu bar and the profile menu, and nothing else.
+- **`View ▸ Themes…` is gone** (issue #120). The View menu had only that
+  item, so the menu went with it. Theme selection is Settings → Appearance
+  plus the title-bar profile menu; the menu bar is PaneFlow / Edit / Window /
+  Help.
 - **`review_enabled`** (default `true`) gates the Review surface; off, the
   whole mode strip stops rendering.
 

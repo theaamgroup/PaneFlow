@@ -83,18 +83,16 @@ actions!(
         Paste,
         SelectAll,
         OpenHelp,
-        // Issue #105: Settings and the theme picker are reachable from the
-        // menu bar (PaneFlow > Settings..., View > Themes...), not only from
-        // the sidebar footer and the title-bar profile menu. Both are
-        // deliberately absent from `keybindings::registry::ACTIONS`, exactly
-        // like `About` and `OpenHelp`: a menu-only action with no default
-        // chord would otherwise show up as a permanently `Unassigned` row in
-        // Settings > Keyboard Shortcuts. `Cmd+,` is NOT bound - a global
-        // default there would swallow the comma from every focused terminal.
+        // Issue #105: Settings is reachable from the menu bar (PaneFlow >
+        // Settings...), not only from the title-bar profile menu. Deliberately
+        // absent from `keybindings::registry::ACTIONS`, exactly like `About`
+        // and `OpenHelp`: a menu-only action with no default chord would
+        // otherwise show up as a permanently `Unassigned` row in Settings >
+        // Keyboard Shortcuts. `Cmd+,` is NOT bound - a global default there
+        // would swallow the comma from every focused terminal.
         OpenSettings,
-        ShowThemes,
         // Window menu Minimize / Zoom. Menu-only, like About / OpenHelp /
-        // OpenSettings / ShowThemes: absent from `keybindings::registry::ACTIONS`
+        // OpenSettings: absent from `keybindings::registry::ACTIONS`
         // so Settings > Keyboard Shortcuts does not grow Unassigned rows.
         MinimizeWindow,
         ZoomWindow,
