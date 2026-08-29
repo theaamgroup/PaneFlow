@@ -93,6 +93,11 @@ actions!(
         // default there would swallow the comma from every focused terminal.
         OpenSettings,
         ShowThemes,
+        // Window menu Minimize / Zoom. Menu-only, like About / OpenHelp /
+        // OpenSettings / ShowThemes: absent from `keybindings::registry::ACTIONS`
+        // so Settings > Keyboard Shortcuts does not grow Unassigned rows.
+        MinimizeWindow,
+        ZoomWindow,
         // US-022 (cmux port 2026-Q2) - markdown pane navigation. Scoped to
         // the `Markdown` key context (root) and `MarkdownSearch` (when the
         // find overlay is open). Defined as separate actions from terminal
