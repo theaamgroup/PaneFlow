@@ -164,10 +164,26 @@ impl PaneFlowApp {
             .child(section_header(ui, "Tab bar buttons"))
             .child(buttons_card);
 
+        let new_pane_section = div()
+            .flex()
+            .flex_col()
+            .child(section_header(ui, "New pane"))
+            .child(setting_card(ui).child(toggle_row(
+                "row-new-pane-shows-sessions",
+                "Show agent sessions beside the New pane picker",
+                "Open the Agent sessions sidebar on the right of every new-pane tab so a listed session can be resumed into it.",
+                None,
+                config.new_pane_shows_sessions(),
+                "new_pane_shows_sessions",
+                ui,
+                cx,
+            )));
+
         div()
             .flex()
             .flex_col()
-            .child(buttons_section)
+            .child(new_pane_section)
+            .child(buttons_section.mt(px(24.)))
             .child(div().h(px(180.)).flex_none())
     }
 }

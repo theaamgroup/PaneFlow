@@ -1065,7 +1065,12 @@ impl PaneFlowApp {
         }
 
         self.reroot_files_tree(cx);
-        if self.agent_sessions.sessions_sidebar_open {
+        if self.agent_sessions.sessions_sidebar_open
+            && !crate::app::pane_palette::palette_bound_sessions_survives_activation(
+                self.agent_sessions.sessions_bound_palette,
+                self.open_tab_palette_ids(),
+            )
+        {
             let keep_sidebar_focus = self.agent_sessions.sessions_focus.is_focused(window);
             match self.workspaces[idx]
                 .active_tab()
@@ -1119,7 +1124,12 @@ impl PaneFlowApp {
         self.dismiss_inline_close_arm(cx);
         self.active_idx = idx;
         self.reroot_files_tree(cx);
-        if self.agent_sessions.sessions_sidebar_open {
+        if self.agent_sessions.sessions_sidebar_open
+            && !crate::app::pane_palette::palette_bound_sessions_survives_activation(
+                self.agent_sessions.sessions_bound_palette,
+                self.open_tab_palette_ids(),
+            )
+        {
             self.close_sessions_sidebar(cx);
         }
         self.save_session(cx);

@@ -138,6 +138,13 @@ pub struct PaneFlowConfig {
     /// a surface with no way back.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub review_enabled: Option<bool>,
+    /// When `Some(true)`, a Tab-placement New pane picker also opens the
+    /// Agent sessions sidebar, scoped to the workspace cwd, so a listed
+    /// session can be resumed into the new pane. `Some(false)` / `None`
+    /// (the default) leave history reachable only from a pane-header
+    /// button. Split-placement pickers never open the sidebar.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub new_pane_shows_sessions: Option<bool>,
     /// EP-003 US-011 (review redesign): delay in milliseconds
     /// before the Review view pre-fills a freshly-launched review CLI's input
     /// (tmux send-keys style). `None` resolves to 2000 ms; values are clamped to
@@ -437,6 +444,12 @@ impl PaneFlowConfig {
     /// was already using disappear.
     pub fn review_view_enabled(&self) -> bool {
         self.review_enabled.unwrap_or(true)
+    }
+
+    /// Resolve whether a Tab-placement New pane picker should show the
+    /// Agent sessions sidebar. Absent means off.
+    pub fn new_pane_shows_sessions(&self) -> bool {
+        self.new_pane_shows_sessions.unwrap_or(false)
     }
 
     /// EP-003 US-011: resolve `review_prefill_delay_ms`: default 2000, clamped to

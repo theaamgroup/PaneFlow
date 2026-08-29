@@ -753,6 +753,7 @@ impl PaneFlowApp {
                 sessions_omitted: [0; crate::agent_sessions::SESSION_AGENT_COUNT],
                 sessions_cwd: None,
                 sessions_surface_id: None,
+                sessions_bound_palette: None,
                 sessions_scroll: gpui::ScrollHandle::new(),
                 sessions_scan_generation: 0,
                 sessions_selected: 0,

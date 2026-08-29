@@ -55,6 +55,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `agent_stall_detection` | boolean or null | `true` | Enables stalled-agent detection. |
 | `agent_stall_threshold_secs` | integer or null | `60` | Silence threshold before a Thinking agent is marked Stalled. Clamped to `30` to `86400`. |
 | `review_enabled` | boolean or null | `true` | Master switch for the Review surface. `false` hides the Review view and its sidebar tab, makes the Review shortcut a no-op, and reopens a Review-mode session in the terminal view. |
+| `new_pane_shows_sessions` | boolean or null | `false` | When true, a Tab-placement New pane picker also opens the Agent sessions sidebar, scoped to the workspace cwd, so a listed session can be resumed into the new pane. Split-placement pickers leave the sidebar alone. |
 | `review_prefill_delay_ms` | integer or null | `2000` | Delay before Review pre-fills a freshly launched CLI. Clamped to `250` to `10000`. |
 | `submit_paste_delay_ms` | integer or null | `70` | Minimum delay between bracketed paste and submit carriage return. Clamped to `10` to `5000`. |
 | `external_editor` | string or null | `auto` | `auto`, `system`, `zed`, `cursor`, `windsurf`, `code`. |
@@ -303,6 +304,7 @@ test fixture leaves it unset.
   "agent_stall_detection": true,
   "agent_stall_threshold_secs": 60,
   "review_enabled": true,
+  "new_pane_shows_sessions": false,
   "review_prefill_delay_ms": 2000,
   "submit_paste_delay_ms": 70,
   "external_editor": "auto",

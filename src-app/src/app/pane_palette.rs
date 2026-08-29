@@ -146,6 +146,38 @@ fn tab_needs_palette(
     root_is_none && saved_layout_is_none && !palette_targets_this_tab
 }
 
+/// Whether creating a picker should also open the Agent sessions sidebar.
+pub(crate) fn palette_should_open_sessions(
+    setting_on: bool,
+    has_enabled_session_agent: bool,
+    tab_placement: bool,
+) -> bool {
+    setting_on && has_enabled_session_agent && tab_placement
+}
+
+/// Palette-bound history is window-global. Workspace activation must not
+/// close it on an empty New pane tab (no leaf) or retarget it onto a
+/// waiting-agent pane: either would hide history while the picker stays
+/// up, or steal resume into the live agent.
+pub(crate) fn palette_bound_sessions_survives_activation(
+    bound_palette: Option<(u64, u64)>,
+    open_tab_palette: Option<(u64, u64)>,
+) -> bool {
+    match (bound_palette, open_tab_palette) {
+        (Some(bound), Some(open)) => bound == open,
+        _ => false,
+    }
+}
+
+/// Resume from a palette-bound sidebar fills the stored picker tab, even
+/// when another tab is now active.
+pub(crate) fn palette_resume_target_tab(
+    bound_palette: Option<(u64, u64)>,
+    _active_tab_id: u64,
+) -> Option<(u64, u64)> {
+    bound_palette
+}
+
 impl PaneFlowApp {
     /// Build the picker catalogue for `ws_idx` (US-015): Terminal first, then
     /// the visible agents in `TerminalAgent::ALL` order, then the workspace's
@@ -228,6 +260,7 @@ impl PaneFlowApp {
         self.focus_workspace_tab(ws_idx, tab_idx, window, cx);
         // The card owns the keyboard: there is no text field to hand focus to.
         window.focus(&self.pane_palette_focus, cx);
+        self.maybe_open_sessions_for_tab_palette(ws_id, tab_id, None, cx);
         cx.notify();
     }
 
@@ -318,6 +351,9 @@ impl PaneFlowApp {
                 )
         });
         if !tab_needs_palette(root_is_none, saved_layout_is_none, palette_targets_this_tab) {
+            if palette_targets_this_tab {
+                self.maybe_open_sessions_for_tab_palette(ws_id, tab_id, None, cx);
+            }
             return;
         }
         self.pane_palette = Some(PanePaletteState {
@@ -329,7 +365,16 @@ impl PaneFlowApp {
             scroll: ScrollHandle::new(),
         });
         self.pending_palette_focus = true;
+        self.maybe_open_sessions_for_tab_palette(ws_id, tab_id, None, cx);
         cx.notify();
+    }
+
+    pub(crate) fn open_tab_palette_ids(&self) -> Option<(u64, u64)> {
+        let palette = self.pane_palette.as_ref()?;
+        match palette.placement {
+            PalettePlacement::Tab { tab_id } => Some((palette.ws_id, tab_id)),
+            PalettePlacement::Split { .. } => None,
+        }
     }
 
     /// Target pane and direction of a pending split picker in the *active*
@@ -346,7 +391,8 @@ impl PaneFlowApp {
 
     /// Drop the picker state without touching its tab. Used by the launch
     /// path, which is about to fill that very tab.
-    fn discard_pane_palette(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn discard_pane_palette(&mut self, cx: &mut Context<Self>) {
+        self.close_palette_bound_sessions_sidebar(cx);
         self.pane_palette = None;
         cx.notify();
     }
@@ -359,6 +405,7 @@ impl PaneFlowApp {
         let Some(palette) = self.pane_palette.take() else {
             return;
         };
+        self.close_palette_bound_sessions_sidebar(cx);
         match &palette.placement {
             PalettePlacement::Tab { tab_id } => {
                 let position = self
@@ -386,6 +433,53 @@ impl PaneFlowApp {
             window.focus(&handle, cx);
         }
         cx.notify();
+    }
+
+    fn close_palette_bound_sessions_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.agent_sessions.sessions_bound_palette.take().is_some()
+            && self.agent_sessions.sessions_sidebar_open
+        {
+            self.close_sessions_sidebar(cx);
+        }
+    }
+
+    /// Open the sessions sidebar for a Tab-placement picker when the setting
+    /// is on and at least one session-capable agent is visible. Split
+    /// pickers never take this path. Bound to this `(ws_id, tab_id)` so a
+    /// later click resumes into the picker tab.
+    ///
+    /// Already-bound is a user-dismiss latch: the empty-tab normalizer must
+    /// not reopen history for the same picker. Safe only because workspace
+    /// activation leaves palette-bound history alone.
+    fn maybe_open_sessions_for_tab_palette(
+        &mut self,
+        ws_id: u64,
+        tab_id: u64,
+        focus_window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_sessions.sessions_bound_palette == Some((ws_id, tab_id)) {
+            return;
+        }
+        let has_agents =
+            !crate::agent_sessions::enabled_session_agents_from_config(&self.cached_config)
+                .is_empty();
+        if !palette_should_open_sessions(
+            self.cached_config.new_pane_shows_sessions(),
+            has_agents,
+            true,
+        ) {
+            return;
+        }
+        let Some(ws_idx) = self.workspaces.iter().position(|ws| ws.id == ws_id) else {
+            return;
+        };
+        let cwd = {
+            let cwd = &self.workspaces[ws_idx].cwd;
+            (!cwd.is_empty()).then(|| cwd.clone())
+        };
+        self.open_sessions_sidebar_at(cwd, None, focus_window, cx);
+        self.agent_sessions.sessions_bound_palette = Some((ws_id, tab_id));
     }
 
     fn pane_palette_set_error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -642,6 +736,55 @@ mod tests {
         assert!(!tab_needs_palette(true, true, true));
         assert!(!tab_needs_palette(false, false, false));
         assert!(!tab_needs_palette(false, false, true));
+    }
+
+    #[test]
+    fn palette_opens_history_only_for_tab_placement_when_setting_and_agents_enabled() {
+        assert!(
+            !palette_should_open_sessions(false, true, true),
+            "setting off: identical to today"
+        );
+        assert!(
+            !palette_should_open_sessions(true, false, true),
+            "no session-capable agent: nothing to list"
+        );
+        assert!(
+            !palette_should_open_sessions(true, true, false),
+            "split-placement pickers leave the sidebar alone"
+        );
+        assert!(palette_should_open_sessions(true, true, true));
+    }
+
+    #[test]
+    fn palette_bound_history_survives_workspace_activation() {
+        let bound = Some((1u64, 2u64));
+        let picker = Some((1u64, 2u64));
+        // Empty New pane tab has no leaf: Cmd+1 / already-selected row must
+        // not close history, or the dismiss latch would refuse to reopen it.
+        // WaitingElseFirst may then switch to a live agent tab: retargeting
+        // would clear the binding so a later click resumes into that agent.
+        assert!(
+            palette_bound_sessions_survives_activation(bound, picker),
+            "activation must not close or retarget while the picker is bound"
+        );
+        assert!(!palette_bound_sessions_survives_activation(None, picker));
+        assert!(!palette_bound_sessions_survives_activation(bound, None));
+        assert!(!palette_bound_sessions_survives_activation(
+            bound,
+            Some((1, 99))
+        ));
+    }
+
+    #[test]
+    fn palette_resume_fills_the_bound_tab_not_the_active_tab() {
+        let bound = Some((10u64, 20u64));
+        let active_tab_id = 99u64;
+        assert_eq!(
+            palette_resume_target_tab(bound, active_tab_id),
+            Some((10, 20)),
+            "sidebar is window-global: switching tabs must not fill the active empty tab"
+        );
+        assert_eq!(palette_resume_target_tab(None, active_tab_id), None);
     }
 
     #[test]

@@ -747,6 +747,15 @@ struct AgentSessionsState {
     /// Surface id of the terminal whose tab-bar button opened the sidebar.
     /// Resume commands are sent back only if that exact terminal still exists.
     sessions_surface_id: Option<u64>,
+    /// When the sidebar was opened for a Tab-placement New pane picker,
+    /// the `(workspace id, tab id)` of that picker. `None` means the
+    /// sidebar is bound to `sessions_surface_id` instead. Kept after the
+    /// user dismisses the sidebar so the empty-tab normalizer does not
+    /// reopen history for the same picker. Workspace activation must not
+    /// close or retarget the sidebar while this matches the live picker,
+    /// or the latch would hide history and a later click would resume
+    /// into whatever pane became active.
+    sessions_bound_palette: Option<(u64, u64)>,
     /// Scroll state for the sessions list. Re-created on every open so a fresh
     /// sidebar starts at offset 0.
     sessions_scroll: gpui::ScrollHandle,
