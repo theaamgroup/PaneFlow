@@ -1791,6 +1791,16 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(|this: &mut Self, _: &ShowThemes, window, cx| {
                 this.open_theme_picker(window, cx);
             }))
+            .on_action(
+                cx.listener(|_this: &mut Self, _: &MinimizeWindow, window, _cx| {
+                    window.minimize_window();
+                }),
+            )
+            .on_action(
+                cx.listener(|_this: &mut Self, _: &ZoomWindow, window, _cx| {
+                    window.zoom_window();
+                }),
+            )
             .on_action(cx.listener(|_this: &mut Self, _: &Copy, _window, cx| {
                 cx.dispatch_action(&TerminalCopy);
             }))

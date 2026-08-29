@@ -960,8 +960,8 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
     use gpui::{Menu, MenuItem, OsAction};
 
     use crate::{
-        About, CloseWorkspace, Copy, NewWorkspace, NextWorkspace, OpenHelp, OpenSettings, Paste,
-        Quit, SelectAll, ShowThemes,
+        About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
+        OpenSettings, Paste, Quit, SelectAll, ShowThemes, ZoomWindow,
     };
 
     cx.set_menus(vec![
@@ -986,10 +986,12 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
         // appearance, and sits between Edit and Window.
         Menu::new("View").items(vec![MenuItem::action("Themes…", ShowThemes)]),
         Menu::new("Window").items(vec![
-            MenuItem::action("New Workspace", NewWorkspace),
-            MenuItem::action("Close Workspace", CloseWorkspace),
+            MenuItem::action("Minimize", MinimizeWindow),
+            MenuItem::action("Zoom", ZoomWindow),
             MenuItem::separator(),
             MenuItem::action("Next Workspace", NextWorkspace),
+            MenuItem::action("Close Workspace", CloseWorkspace),
+            MenuItem::action("New Workspace", NewWorkspace),
         ]),
         // macOS convention: every app ships a Help menu (even if it only
         // points to an online doc/repo). Without one, Apple's HIG-conforming
@@ -1012,9 +1014,9 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
 #[cfg(target_os = "macos")]
 pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     use crate::{
-        About, CloseWorkspace, Copy, NewWorkspace, NextWorkspace, OpenHelp, OpenSettings,
-        PaneFlowApp, Paste, Quit, SelectAll, ShowThemes, TerminalCopy, TerminalPaste,
-        TerminalSelectAll,
+        About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
+        OpenSettings, PaneFlowApp, Paste, Quit, SelectAll, ShowThemes, TerminalCopy, TerminalPaste,
+        TerminalSelectAll, ZoomWindow,
     };
 
     fn with_active_paneflow_window(
@@ -1093,6 +1095,13 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
                 app.show_toast(format!("Could not open help: {e}"), cx);
             }
         });
+    });
+
+    cx.on_action(|_: &MinimizeWindow, cx| {
+        with_active_paneflow_window(cx, |_app, window, _cx| window.minimize_window());
+    });
+    cx.on_action(|_: &ZoomWindow, cx| {
+        with_active_paneflow_window(cx, |_app, window, _cx| window.zoom_window());
     });
 }
 
@@ -1238,6 +1247,38 @@ mod tests {
             "View belongs between Edit and Window"
         );
 
+        let window_menu = menus
+            .split("Menu::new(\"Window\")")
+            .nth(1)
+            .and_then(|rest| rest.split("Menu::new(\"Help\")").next())
+            .expect("the Window menu");
+        let minimize_at = window_menu
+            .find("MenuItem::action(\"Minimize\", MinimizeWindow)")
+            .expect("Window > Minimize must exist and dispatch MinimizeWindow");
+        let zoom_at = window_menu
+            .find("MenuItem::action(\"Zoom\", ZoomWindow)")
+            .expect("Window > Zoom must exist and dispatch ZoomWindow");
+        let window_separator_at = window_menu
+            .find("MenuItem::separator()")
+            .expect("the Window menu keeps the separator above the workspace group");
+        let next_at = window_menu
+            .find("MenuItem::action(\"Next Workspace\", NextWorkspace)")
+            .expect("Window > Next Workspace");
+        let close_at = window_menu
+            .find("MenuItem::action(\"Close Workspace\", CloseWorkspace)")
+            .expect("Window > Close Workspace");
+        let new_at = window_menu
+            .find("MenuItem::action(\"New Workspace\", NewWorkspace)")
+            .expect("Window > New Workspace");
+        assert!(
+            minimize_at < zoom_at
+                && zoom_at < window_separator_at
+                && window_separator_at < next_at
+                && next_at < close_at
+                && close_at < new_at,
+            "Window is Minimize, Zoom, separator, Next, Close, New Workspace"
+        );
+
         // AppKit validates a menu item through `is_action_available`, which
         // can miss the render-root listeners while focus sits in a terminal.
         // Without an app-global fallback the item paints permanently greyed,
@@ -1245,6 +1286,8 @@ mod tests {
         for fallback in [
             "cx.on_action(|_: &OpenSettings, cx|",
             "cx.on_action(|_: &ShowThemes, cx|",
+            "cx.on_action(|_: &MinimizeWindow, cx|",
+            "cx.on_action(|_: &ZoomWindow, cx|",
         ] {
             assert!(
                 production.contains(fallback),
