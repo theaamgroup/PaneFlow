@@ -999,6 +999,172 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
         // `OpenHelp` which opens the GitHub README in the default browser.
         Menu::new("Help").items(vec![MenuItem::action("PaneFlow Help", OpenHelp)]),
     ]);
+    apply_macos_app_menu_icons();
+}
+
+/// Copy AppKit's About/Quit menu images onto GPUI's custom-selector items.
+///
+/// macOS 26 assigns those glyphs by selector (`orderFrontStandardAboutPanel:` /
+/// `terminate:`). GPUI builds every `MenuItem::action` with
+/// `handleGPUIMenuItem:`, so the live items stay bare unless we stamp the
+/// images on after `cx.set_menus`. Selectors stay GPUI's: About must open
+/// our dialog, not the system panel.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn apply_macos_app_menu_icons() {
+    use cocoa::appkit::NSApplication;
+    use cocoa::base::{id, nil};
+    use objc::{msg_send, sel, sel_impl};
+
+    let Some((about_image, quit_image)) = probe_standard_app_menu_images() else {
+        log::debug!("macOS menu icons: AppKit supplied no About/Quit images");
+        return;
+    };
+
+    // SAFETY: `cx.set_menus` just installed the menu on AppKit's main thread
+    // via `setMainMenu_`. The probe images are retained `NSImage` objects
+    // and released below after `setImage:` has retained them on the items.
+    unsafe {
+        let app = NSApplication::sharedApplication(nil);
+        if app == nil {
+            log::debug!("macOS menu icons: NSApp is nil; skipping");
+        } else {
+            let main_menu: id = app.mainMenu();
+            if main_menu == nil {
+                log::debug!("macOS menu icons: mainMenu is nil; skipping");
+            } else {
+                apply_app_menu_icons_to_main_menu(main_menu, about_image, quit_image);
+            }
+        }
+        if about_image != nil {
+            let _: () = msg_send![about_image, release];
+        }
+        if quit_image != nil {
+            let _: () = msg_send![quit_image, release];
+        }
+    }
+}
+
+/// Probe AppKit for the images it assigns to the standard About/Quit selectors.
+///
+/// Returns retained images (either pointer may be `nil` if this OS does not
+/// supply that glyph). The caller owns the retains.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn probe_standard_app_menu_images() -> Option<(cocoa::base::id, cocoa::base::id)> {
+    use cocoa::appkit::{NSMenu, NSMenuItem};
+    use cocoa::base::{id, nil, selector};
+    use cocoa::foundation::{NSAutoreleasePool, NSString};
+    use objc::{msg_send, sel, sel_impl};
+
+    // SAFETY: throwaway `NSMenu` / `NSMenuItem`s on the AppKit thread GPUI
+    // already occupies for `set_menus`. Images are retained before the
+    // autorelease pool drains so they outlive the scratch menu.
+    unsafe {
+        let pool = NSAutoreleasePool::new(nil);
+        let empty_key: id = msg_send![NSString::alloc(nil).init_str(""), autorelease];
+        let about_item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str("About Probe"),
+            selector("orderFrontStandardAboutPanel:"),
+            empty_key,
+        );
+        let _: id = msg_send![about_item, autorelease];
+        let quit_item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str("Quit Probe"),
+            selector("terminate:"),
+            empty_key,
+        );
+        let _: id = msg_send![quit_item, autorelease];
+
+        let menu = NSMenu::new(nil);
+        let _: id = msg_send![menu, autorelease];
+        menu.addItem_(about_item);
+        menu.addItem_(quit_item);
+        let _: () = msg_send![menu, update];
+
+        let about_image: id = msg_send![about_item, image];
+        let quit_image: id = msg_send![quit_item, image];
+        let about_image: id = if about_image == nil {
+            nil
+        } else {
+            msg_send![about_image, retain]
+        };
+        let quit_image: id = if quit_image == nil {
+            nil
+        } else {
+            msg_send![quit_image, retain]
+        };
+
+        let _: () = msg_send![pool, drain];
+
+        if about_image == nil && quit_image == nil {
+            None
+        } else {
+            Some((about_image, quit_image))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+unsafe fn apply_app_menu_icons_to_main_menu(
+    main_menu: cocoa::base::id,
+    about_image: cocoa::base::id,
+    quit_image: cocoa::base::id,
+) {
+    use cocoa::appkit::NSMenu;
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSInteger;
+    use objc::{msg_send, sel, sel_impl};
+
+    // SAFETY: caller passes a live `NSMenu` (NSApp.mainMenu or a test
+    // scratch menu) and retained probe images. All AppKit calls stay on
+    // the same thread.
+    unsafe {
+        let count: NSInteger = msg_send![main_menu, numberOfItems];
+        if count < 1 {
+            log::debug!("macOS menu icons: mainMenu has no application submenu; skipping");
+            return;
+        }
+        let app_item: id = main_menu.itemAtIndex_(0);
+        if app_item == nil {
+            log::debug!("macOS menu icons: application menu item is nil; skipping");
+            return;
+        }
+        let submenu: id = msg_send![app_item, submenu];
+        if submenu == nil {
+            log::debug!("macOS menu icons: application submenu is nil; skipping");
+            return;
+        }
+
+        set_menu_item_image_by_title(submenu, "About PaneFlow", about_image);
+        set_menu_item_image_by_title(submenu, "Quit PaneFlow", quit_image);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+unsafe fn set_menu_item_image_by_title(menu: cocoa::base::id, title: &str, image: cocoa::base::id) {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{msg_send, sel, sel_impl};
+
+    if image == nil {
+        return;
+    }
+    // SAFETY: `menu` is a live `NSMenu`; `image` is a retained `NSImage`.
+    // `itemWithTitle:` copies the title string, so the alloc'd `NSString`
+    // can be released immediately after the lookup.
+    unsafe {
+        let title_ns = NSString::alloc(nil).init_str(title);
+        let item: id = msg_send![menu, itemWithTitle: title_ns];
+        let _: () = msg_send![title_ns, release];
+        if item == nil {
+            log::debug!("macOS menu icons: no item titled {title:?}; skipping");
+            return;
+        }
+        let _: () = msg_send![item, setImage: image];
+    }
 }
 
 /// Register macOS menu actions as app-global fallbacks.
@@ -1293,6 +1459,152 @@ mod tests {
                 production.contains(fallback),
                 "missing app-global menu fallback `{fallback}`; the item would grey out"
             );
+        }
+    }
+
+    /// Issue #121: macOS 26 paints About/Quit glyphs from the item's selector.
+    /// GPUI's `MenuItem::action` always uses `handleGPUIMenuItem:`, so the
+    /// items stay bare unless we copy AppKit's own images on afterwards.
+    /// The About item must keep dispatching `About` (our dialog), not
+    /// `orderFrontStandardAboutPanel:`.
+    #[test]
+    fn the_macos_menu_bar_copies_appkit_about_and_quit_icons() {
+        let production = include_str!("bootstrap.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let install = production
+            .split("pub(crate) fn install_macos_menu_bar")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn install_macos_menu_action_fallbacks")
+                    .next()
+            })
+            .expect("install_macos_menu_bar");
+
+        let set_menus_at = install
+            .find("cx.set_menus(vec![")
+            .expect("cx.set_menus installs the native menu");
+        let apply_at = install.find("apply_macos_app_menu_icons()").expect(
+            "About/Quit icons must be copied from AppKit after cx.set_menus; a rebuilt menu drops them",
+        );
+        assert!(
+            set_menus_at < apply_at,
+            "menu icons must be applied after GPUI installs the menu"
+        );
+        let after_icon_pass = install
+            .split("apply_macos_app_menu_icons();")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the rest of install_macos_menu_bar after the icon pass");
+        assert!(
+            !after_icon_pass.contains("set_menus"),
+            "cx.set_menus after the icon pass would drop the images"
+        );
+        assert_eq!(
+            production.matches("cx.set_menus(").count(),
+            1,
+            "a second cx.set_menus would rebuild the menu and drop the icons"
+        );
+
+        assert!(
+            install.contains("MenuItem::action(\"About PaneFlow\", About)"),
+            "About must keep the GPUI About action, not the system panel"
+        );
+        assert!(
+            install.contains("MenuItem::action(\"Quit PaneFlow\", Quit)"),
+            "Quit must keep the GPUI Quit action"
+        );
+
+        assert!(
+            production.contains("selector(\"orderFrontStandardAboutPanel:\")"),
+            "About icon must be probed from AppKit's standard About selector"
+        );
+        assert!(
+            production.contains("selector(\"terminate:\")"),
+            "Quit icon must be probed from AppKit's standard terminate selector"
+        );
+    }
+
+    /// Live AppKit check for issue #121: when this OS injects About/Quit
+    /// glyphs by selector (macOS 26+), copying them onto GPUI-style
+    /// custom-selector items must not swap those items' actions.
+    /// Selector-injected images are absent on macOS 15 / Xcode 16.4 CI;
+    /// production already skips in that case, and this test returns rather
+    /// than treating a nil probe as a failure.
+    #[cfg(target_os = "macos")]
+    #[allow(deprecated)]
+    #[test]
+    fn appkit_about_and_quit_images_copy_onto_custom_selector_items() {
+        use cocoa::appkit::{NSMenu, NSMenuItem};
+        use cocoa::base::{id, nil, selector};
+        use cocoa::foundation::NSString;
+        use objc::{msg_send, sel, sel_impl};
+
+        let Some((about_image, quit_image)) = super::probe_standard_app_menu_images() else {
+            return;
+        };
+        if about_image == nil || quit_image == nil {
+            unsafe {
+                if about_image != nil {
+                    let _: () = msg_send![about_image, release];
+                }
+                if quit_image != nil {
+                    let _: () = msg_send![quit_image, release];
+                }
+            }
+            return;
+        }
+
+        // SAFETY: scratch NSMenu graph owned by this test; released before
+        // return. Probe images were retained by `probe_standard_app_menu_images`.
+        unsafe {
+            let empty = NSString::alloc(nil).init_str("");
+            let gpui_sel = selector("handleGPUIMenuItem:");
+            let about = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+                NSString::alloc(nil).init_str("About PaneFlow"),
+                gpui_sel,
+                empty,
+            );
+            let quit = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+                NSString::alloc(nil).init_str("Quit PaneFlow"),
+                gpui_sel,
+                empty,
+            );
+            let submenu = NSMenu::new(nil);
+            submenu.addItem_(about);
+            submenu.addItem_(quit);
+
+            let app_item = NSMenuItem::new(nil);
+            let _: () = msg_send![
+                app_item,
+                setTitle: NSString::alloc(nil).init_str("PaneFlow")
+            ];
+            app_item.setSubmenu_(submenu);
+
+            let main_menu = NSMenu::new(nil);
+            main_menu.addItem_(app_item);
+
+            let about_before: id = msg_send![about, image];
+            let quit_before: id = msg_send![quit, image];
+            assert_eq!(about_before, nil);
+            assert_eq!(quit_before, nil);
+
+            super::apply_app_menu_icons_to_main_menu(main_menu, about_image, quit_image);
+
+            let about_after: id = msg_send![about, image];
+            let quit_after: id = msg_send![quit, image];
+            assert_eq!(about_after, about_image);
+            assert_eq!(quit_after, quit_image);
+
+            let about_action: cocoa::base::SEL = msg_send![about, action];
+            let quit_action: cocoa::base::SEL = msg_send![quit, action];
+            assert_eq!(about_action, gpui_sel);
+            assert_eq!(quit_action, gpui_sel);
+
+            let _: () = msg_send![about_image, release];
+            let _: () = msg_send![quit_image, release];
+            let _: () = msg_send![main_menu, release];
         }
     }
 
