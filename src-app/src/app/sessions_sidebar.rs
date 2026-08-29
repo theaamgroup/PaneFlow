@@ -59,7 +59,20 @@ impl PaneFlowApp {
                     .map(|p| p.to_string_lossy().into_owned())
             })
         });
+        self.open_sessions_sidebar_at(cwd_str, surface_id, focus_window, cx);
+    }
 
+    /// Open (or re-target) the sessions sidebar at `cwd`. `surface_id` is
+    /// the resume target for a live pane; `None` means the sidebar is
+    /// helping a New pane picker choose a session (the caller then sets
+    /// `sessions_bound_palette`).
+    pub(crate) fn open_sessions_sidebar_at(
+        &mut self,
+        cwd: Option<String>,
+        surface_id: Option<u64>,
+        focus_window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         // Mutual exclusion: only one right column. Opening sessions closes
         // the Files sidebar (and vice-versa, in `toggle_files_sidebar`).
         if self.files_sidebar_open {
@@ -71,8 +84,9 @@ impl PaneFlowApp {
         self.dismiss_transient_surfaces();
 
         self.set_sessions_sidebar_open(true, cx);
-        self.agent_sessions.sessions_cwd = cwd_str.clone();
+        self.agent_sessions.sessions_cwd = cwd.clone();
         self.agent_sessions.sessions_surface_id = surface_id;
+        self.agent_sessions.sessions_bound_palette = None;
         for sessions in &mut self.agent_sessions.sessions_by_agent {
             sessions.clear();
         }
@@ -98,7 +112,7 @@ impl PaneFlowApp {
             self.agent_sessions.sessions_focus.focus(window, cx);
         }
 
-        if let Some(cwd) = cwd_str {
+        if let Some(cwd) = cwd {
             // Parallel scans. Each supported agent owns a documented native
             // contract (JSONL store or CLI list command) and writes to its own
             // Vec on the main thread. The sidebar may be closed or re-targeted
@@ -578,7 +592,7 @@ impl PaneFlowApp {
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.agent_sessions.sessions_focus.focus(window, cx);
                 this.select_session_row(agent, &session_id);
-                this.resume_session_from_sidebar(agent, &session_id, cx);
+                this.resume_session_from_sidebar(agent, &session_id, window, cx);
                 cx.stop_propagation();
             }))
             // Per-session agent glyph in its brand accent - a touch smaller
@@ -612,12 +626,57 @@ impl PaneFlowApp {
         &mut self,
         agent: SessionAgent,
         session_id: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(command) = resume_command(agent, session_id, &self.cached_config) else {
             self.show_toast("Could not resume session - invalid session id", cx);
             return;
         };
+        let active_tab_id = self
+            .agent_sessions
+            .sessions_bound_palette
+            .and_then(|(ws_id, _)| {
+                self.workspaces
+                    .iter()
+                    .find(|ws| ws.id == ws_id)
+                    .map(|ws| ws.active_tab().id)
+            })
+            .unwrap_or(0);
+        if let Some((ws_id, tab_id)) = crate::app::pane_palette::palette_resume_target_tab(
+            self.agent_sessions.sessions_bound_palette,
+            active_tab_id,
+        ) {
+            let Some(ws_idx) = self.workspaces.iter().position(|ws| ws.id == ws_id) else {
+                self.show_toast(
+                    "Could not resume session - this project is no longer open",
+                    cx,
+                );
+                return;
+            };
+            let Some(tab_idx) = self.workspaces[ws_idx]
+                .tabs()
+                .iter()
+                .position(|tab| tab.id == tab_id)
+            else {
+                self.show_toast("Could not resume session - that pane is gone", cx);
+                return;
+            };
+            // Fill THAT picker tab, not whichever tab happens to be active:
+            // the sessions sidebar is window-global.
+            self.workspaces[ws_idx].set_active_tab(tab_idx);
+            let title = agent.terminal_agent().display_name().to_string();
+            self.discard_pane_palette(cx);
+            self.open_tab_with_surface(
+                ws_idx,
+                title,
+                paneflow_config::schema::TerminalSurfaceProfile::Agent,
+                Some(command),
+                window,
+                cx,
+            );
+            return;
+        }
         match self.send_command_to_sessions_surface(&command, cx) {
             ResumeSendResult::Sent => {}
             ResumeSendResult::Missing => {
@@ -673,7 +732,7 @@ impl PaneFlowApp {
     fn handle_sessions_sidebar_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let len = self.sessions_nav_len();
@@ -684,7 +743,7 @@ impl PaneFlowApp {
                 if let Some(target) = self.sessions_nav_target_at(selected) {
                     let agent = target.agent;
                     let session_id = target.session_id.to_string();
-                    self.resume_session_from_sidebar(agent, &session_id, cx);
+                    self.resume_session_from_sidebar(agent, &session_id, window, cx);
                 }
             }
             "up" if len > 0 => {

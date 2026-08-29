@@ -96,6 +96,7 @@ mod tests {
             agent_stall_detection: Some(true),
             agent_stall_threshold_secs: Some(300),
             review_enabled: Some(true),
+            new_pane_shows_sessions: Some(false),
             review_prefill_delay_ms: Some(2000),
             submit_paste_delay_ms: Some(70),
             external_editor: Some("auto".to_string()),
@@ -385,6 +386,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.resolved_agent_stall_threshold_secs(), 600);
+    }
+
+    #[test]
+    fn new_pane_shows_sessions_defaults_off() {
+        assert!(!PaneFlowConfig::default().new_pane_shows_sessions());
+        let on = PaneFlowConfig {
+            new_pane_shows_sessions: Some(true),
+            ..Default::default()
+        };
+        assert!(on.new_pane_shows_sessions());
+        let off = PaneFlowConfig {
+            new_pane_shows_sessions: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.new_pane_shows_sessions());
     }
 
     #[test]
