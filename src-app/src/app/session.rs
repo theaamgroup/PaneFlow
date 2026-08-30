@@ -1162,7 +1162,13 @@ fn rotate_corruption_backups(dir: &Path, stem: &str) {
                     .is_some_and(|n| n.starts_with(&prefix))
             })
             .collect(),
-        Err(_) => return,
+        Err(e) => {
+            log::warn!(
+                "session backup rotation: could not list {}: {e}",
+                dir.display()
+            );
+            return;
+        }
     };
 
     if backups.len() <= MAX_CORRUPTION_BACKUPS {
@@ -1708,6 +1714,28 @@ mod tests {
         // Live session.json itself is unaffected by the rotation.
         std::fs::write(&session_path, "{").expect("seed");
         assert!(session_path.exists());
+    }
+
+    #[test]
+    fn corruption_backup_rotation_warns_when_directory_cannot_be_listed() {
+        crate::diff::capture_logs();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let not_a_directory = tmp.path().join("session-backups");
+        std::fs::write(&not_a_directory, b"not a directory").expect("seed file");
+        let read_error = std::fs::read_dir(&not_a_directory)
+            .expect_err("a file cannot be listed as a directory")
+            .to_string();
+
+        rotate_corruption_backups(&not_a_directory, "session.json");
+
+        assert!(
+            crate::diff::captured_logs_contain(&not_a_directory.display().to_string()),
+            "warning should identify the directory that could not be listed"
+        );
+        assert!(
+            crate::diff::captured_logs_contain(&read_error),
+            "warning should include the read_dir error"
+        );
     }
 
     /// US-011 AC: a burst of `save_session` calls (e.g. closing 20 workspaces)

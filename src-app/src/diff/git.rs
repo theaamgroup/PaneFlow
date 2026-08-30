@@ -937,7 +937,7 @@ fn compute_file_stats_against(worktree_dir: &Path, base: &str) -> HashMap<String
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, Once};
 
@@ -966,17 +966,21 @@ mod tests {
         records: Mutex::new(Vec::new()),
     };
 
-    fn capture_logs() {
+    pub(crate) fn capture_logs() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
             log::set_logger(&TEST_LOGGER).expect("test logger should initialize once");
             log::set_max_level(log::LevelFilter::Warn);
         });
+    }
+
+    pub(crate) fn captured_logs_contain(needle: &str) -> bool {
         TEST_LOGGER
             .records
             .lock()
             .expect("test logger lock poisoned")
-            .clear();
+            .iter()
+            .any(|(_, message)| message.contains(needle))
     }
 
     #[test]
