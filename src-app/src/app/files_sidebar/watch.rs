@@ -16,6 +16,16 @@ use gpui::Context;
 use crate::PaneFlowApp;
 use crate::app::files_tree;
 
+fn should_apply_files_hydration(
+    sidebar_open: bool,
+    current_root: &Path,
+    expected_root: &Path,
+    current_generation: u64,
+    expected_generation: u64,
+) -> bool {
+    sidebar_open && current_root == expected_root && current_generation == expected_generation
+}
+
 impl PaneFlowApp {
     /// Mirror the live tree's expansion into the active workspace (excluding
     /// the implicit root) so it survives close/reopen and persists to
@@ -49,6 +59,8 @@ impl PaneFlowApp {
         persisted: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        self.files_hydrate_generation = self.files_hydrate_generation.wrapping_add(1);
+        let generation = self.files_hydrate_generation;
         // Drop the previous watch + channel immediately (cheap), and show a
         // root shell so the panel paints this frame while the reads run.
         self.files_watcher = None;
@@ -68,7 +80,13 @@ impl PaneFlowApp {
                 let watch_dirs = tree.expanded.iter().cloned().collect::<Vec<_>>();
                 let still_current = this
                     .update(cx, |app, cx| {
-                        if app.files_sidebar_open && app.files_tree.root == root {
+                        if should_apply_files_hydration(
+                            app.files_sidebar_open,
+                            &app.files_tree.root,
+                            &root,
+                            app.files_hydrate_generation,
+                            generation,
+                        ) {
                             app.files_tree = tree;
                             app.sync_files_expansion();
                             app.clamp_files_selection();
@@ -92,9 +110,13 @@ impl PaneFlowApp {
                 })
                 .await;
                 let _ = this.update(cx, |app, _cx| {
-                    if app.files_sidebar_open
-                        && app.files_tree.root == root
-                        && let Some((watcher, rx)) = built
+                    if should_apply_files_hydration(
+                        app.files_sidebar_open,
+                        &app.files_tree.root,
+                        &root,
+                        app.files_hydrate_generation,
+                        generation,
+                    ) && let Some((watcher, rx)) = built
                     {
                         app.files_watcher = Some(watcher);
                         app.files_event_rx = Some(rx);
@@ -207,4 +229,30 @@ fn build_files_watcher(
         }
     }
     Some((watcher, rx))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::should_apply_files_hydration;
+
+    #[test]
+    fn files_hydration_ignores_stale_generation() {
+        let root = Path::new("/repo");
+        let current_generation = 2;
+        let stale_generation = 1;
+        let mut files_tree_generation = current_generation;
+        let mut files_event_rx_generation = Some(current_generation);
+
+        if should_apply_files_hydration(true, root, root, current_generation, stale_generation) {
+            files_tree_generation = stale_generation;
+        }
+        if should_apply_files_hydration(true, root, root, current_generation, stale_generation) {
+            files_event_rx_generation = Some(stale_generation);
+        }
+
+        assert_eq!(files_tree_generation, current_generation);
+        assert_eq!(files_event_rx_generation, Some(current_generation));
+    }
 }
