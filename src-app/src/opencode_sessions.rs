@@ -64,21 +64,23 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
 /// Test-only seam: lets the ENOENT test point at a deliberately missing
 /// program name without mutating the process environment.
 fn read_sessions_with_program(program: &str, cwd: &str) -> (Vec<SessionMeta>, usize) {
-    let Some(stdout) = run_opencode_list(program) else {
+    let Some(stdout) = run_opencode_list(program, cwd) else {
         return (Vec::new(), 0);
     };
     parse_sessions(&stdout, cwd)
 }
 
-/// Spawn `opencode session list --format json` and return its stdout
+/// Spawn `opencode session list --format json` in `cwd` and return its stdout
 /// bytes on success, `None` on every failure mode (missing binary,
 /// non-zero exit, or any spawn error). Logging side effects:
 /// `info!` for ENOENT (expected when the user doesn't have OpenCode
 /// installed), `warn!` for other failures (capped at
 /// [`STDERR_LOG_CAP`] chars).
-fn run_opencode_list(program: &str) -> Option<Vec<u8>> {
+fn run_opencode_list(program: &str, cwd: &str) -> Option<Vec<u8>> {
     let mut cmd = Command::new(program);
-    cmd.args(["session", "list", "--format", "json"]);
+    cmd.args(["session", "list", "--format", "json", "--max-count"])
+        .arg(crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE.to_string())
+        .current_dir(cwd);
 
     // U-032: bound the subprocess. run_with_timeout nulls stdin (mandatory: a
     // GUI process on Windows would otherwise inherit the parent stdin and a
@@ -254,6 +256,8 @@ fn unix_ms_to_iso8601(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     /// Real CLI output captured from `opencode 1.14.41` during the
     /// US-001 spike. Single record, `directory: "/home/arthur"`,
@@ -356,6 +360,39 @@ mod tests {
             read_sessions_with_program("opencode-does-not-exist-zzz-9d2c1a", "/home/arthur");
         assert_eq!(omitted, 0);
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn read_sessions_runs_opencode_in_scanned_cwd_with_retention_limit() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let scanned_cwd = root.path().join("workspace");
+        fs::create_dir(&scanned_cwd).expect("create scanned cwd");
+        let stub = root.path().join("opencode-stub");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+printf '%s\n' "$PWD"
+printf '%s\n' "$*"
+"#,
+        )
+        .expect("write stub");
+        let mut permissions = fs::metadata(&stub).expect("stub metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&stub, permissions).expect("make stub executable");
+
+        let cwd = scanned_cwd.to_str().expect("UTF-8 temp path");
+        let stdout =
+            run_opencode_list(stub.to_str().expect("UTF-8 stub path"), cwd).expect("stub succeeds");
+        let output = String::from_utf8(stdout).expect("UTF-8 stub output");
+        let mut lines = output.lines();
+        let observed_cwd = lines.next().expect("stub cwd");
+        let observed_args = lines.next().expect("stub args");
+
+        assert_eq!(
+            fs::canonicalize(observed_cwd).expect("canonical observed cwd"),
+            fs::canonicalize(scanned_cwd).expect("canonical scanned cwd")
+        );
+        assert_eq!(observed_args, "session list --format json --max-count 100");
     }
 
     #[test]
