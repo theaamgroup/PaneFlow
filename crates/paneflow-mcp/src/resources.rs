@@ -3,7 +3,7 @@ use std::fmt;
 use paneflow_ipc_client::IpcTransport;
 use serde_json::{json, Value};
 
-use crate::bridge::{Bridge, BridgeError};
+use crate::bridge::{Bridge, BridgeError, MAX_LINES};
 use crate::output::wrap_untrusted;
 
 #[derive(Debug)]
@@ -66,7 +66,7 @@ pub fn read<T: IpcTransport + ?Sized>(
         )));
     }
     let result = bridge
-        .read_surface(surface_id, None, None)
+        .read_surface(surface_id, Some(MAX_LINES), None)
         .map_err(ResourceError::Bridge)?;
     let header = format!(
         "source=\"surface:{surface_id}\" {} total_lines=\"{}\" eof=\"{}\"",
@@ -157,6 +157,11 @@ mod tests {
             transport.last_params("surface.read").unwrap()["workspace_id"],
             42
         );
+        assert_eq!(
+            transport.last_params("surface.read").unwrap()["lines"],
+            MAX_LINES
+        );
+        assert!(transport.last_params("surface.read").unwrap()["offset"].is_null());
 
         let invalid = read("file://nope", &bridge).expect_err("bad uri");
         assert!(matches!(invalid, ResourceError::NotFound(_)));
