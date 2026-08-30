@@ -1173,6 +1173,13 @@ fn surface_read_value(
     })
 }
 
+fn surface_read_header_attrs(surface_id: u64, total: usize, eof: bool, truncated: bool) -> String {
+    let effective_eof = eof && !truncated;
+    format!(
+        "source=\"surface:{surface_id}\" total_lines=\"{total}\" eof=\"{effective_eof}\" truncated=\"{truncated}\""
+    )
+}
+
 fn truncate_ipc_text(text: String, returned: usize) -> (String, usize, bool) {
     if text.len() <= crate::limits::MAX_IPC_TEXT_BYTES {
         return (text, returned, false);
@@ -2911,7 +2918,7 @@ impl PaneFlowApp {
                 let (text, returned, truncated) = truncate_ipc_text(text, returned);
                 let text = if fenced {
                     wrap_untrusted(
-                        &format!("source=\"surface:{sid}\" total_lines=\"{total}\" eof=\"{eof}\""),
+                        &surface_read_header_attrs(sid, total, eof, truncated),
                         &text,
                     )
                 } else {
@@ -5265,6 +5272,18 @@ mod tests {
         let truncated = super::surface_read_value("tail".to_string(), 1, 10, true, 43, true);
         assert_eq!(truncated["eof"], false);
         assert_eq!(truncated["truncated"], true);
+    }
+
+    #[test]
+    fn surface_read_fence_header_reports_effective_eof() {
+        assert_eq!(
+            super::surface_read_header_attrs(7, 4000, true, true),
+            "source=\"surface:7\" total_lines=\"4000\" eof=\"false\" truncated=\"true\""
+        );
+        assert_eq!(
+            super::surface_read_header_attrs(7, 10, true, false),
+            "source=\"surface:7\" total_lines=\"10\" eof=\"true\" truncated=\"false\""
+        );
     }
 
     #[test]
