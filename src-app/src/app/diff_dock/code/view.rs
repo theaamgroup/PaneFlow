@@ -374,6 +374,10 @@ pub(crate) struct CodeView {
     disk: DiskState,
     /// Written explanation of the last failed save (US-015).
     save_error: Option<String>,
+    /// Ordering guard for watcher probes and saves. Every disk read claims a
+    /// generation before it starts; a save advances it before writing and the
+    /// post-save re-stat claims another, so older bytes cannot land afterward.
+    disk_generation: u64,
     /// A save is in flight; a second Ctrl+S is ignored rather than racing it.
     saving: bool,
     /// Parent-directory watcher (US-016). Held only to keep it alive: dropping
@@ -432,6 +436,7 @@ impl CodeView {
             stamp: None,
             disk: DiskState::default(),
             save_error: None,
+            disk_generation: 0,
             saving: false,
             _watcher: None,
             _watch_bridge: None,
@@ -486,6 +491,7 @@ impl CodeView {
         self.stamp = None;
         self.disk = DiskState::default();
         self.save_error = None;
+        self.disk_generation = self.disk_generation.wrapping_add(1);
         self.saving = false;
         self._watcher = None;
         self._watch_bridge = None;
@@ -1567,6 +1573,7 @@ impl CodeView {
         let path = self.path.clone();
         let expected = self.stamp;
         let mark = self.history.mark();
+        self.disk_generation = self.disk_generation.wrapping_add(1);
         self.saving = true;
         self.save_error = None;
         cx.notify();
@@ -1622,7 +1629,37 @@ impl CodeView {
                 self.disk = DiskState::Conflict;
             }
         }
+        self.recheck_disk(cx);
         cx.notify();
+    }
+
+    /// Re-stat after a save so events ignored while the write was in flight do
+    /// not hide an external change that landed immediately afterward.
+    fn recheck_disk(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let generation = self.begin_disk_probe();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let probe = path.clone();
+            let (stamp, text) = cx
+                .background_spawn(async move {
+                    (
+                        FileStamp::read(&probe),
+                        std::fs::read_to_string(&probe).ok(),
+                    )
+                })
+                .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
+                    view.disk_changed(generation, stamp, text, cx);
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn begin_disk_probe(&mut self) -> u64 {
+        self.disk_generation = self.disk_generation.wrapping_add(1);
+        self.disk_generation
     }
 
     /// Watch the file's parent directory for someone else's write (US-016).
@@ -1694,6 +1731,15 @@ impl CodeView {
                         Either::Right(_) => break,
                     }
                 }
+                let generation = cx.update(|cx| {
+                    this.update(cx, |view: &mut Self, _| {
+                        (view.path == path).then(|| view.begin_disk_probe())
+                    })
+                    .unwrap_or(None)
+                });
+                let Some(generation) = generation else {
+                    break;
+                };
                 let probe = path.clone();
                 let (stamp, text) = cx
                     .background_spawn(async move {
@@ -1705,7 +1751,7 @@ impl CodeView {
                     .await;
                 let updated = cx.update(|cx| {
                     this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                        view.disk_changed(stamp, text, cx);
+                        view.disk_changed(generation, stamp, text, cx);
                     })
                 });
                 // A closed tab is the loop's exit condition, not an error.
@@ -1720,10 +1766,14 @@ impl CodeView {
     /// React to what the watcher found on disk (US-016).
     fn disk_changed(
         &mut self,
+        generation: u64,
         stamp: Option<FileStamp>,
         text: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.saving || generation != self.disk_generation {
+            return;
+        }
         match (stamp, text) {
             (None, _) | (_, None) => {
                 if self.disk != DiskState::Deleted {
@@ -2397,6 +2447,7 @@ mod tests {
             stamp: None,
             disk: DiskState::default(),
             save_error: None,
+            disk_generation: 0,
             saving: false,
             _watcher: None,
             _watch_bridge: None,
@@ -2682,6 +2733,7 @@ mod tests {
                     stamp,
                     disk: DiskState::default(),
                     save_error: None,
+                    disk_generation: 0,
                     saving: false,
                     _watcher: None,
                     _watch_bridge: None,
@@ -2803,6 +2855,7 @@ mod tests {
             stamp: None,
             disk: DiskState::default(),
             save_error: None,
+            disk_generation: 0,
             saving: false,
             _watcher: None,
             _watch_bridge: None,
@@ -2845,7 +2898,8 @@ mod tests {
         std::fs::write(&path, "one\ntwo\nthree\n").expect("external write");
         let stamp = FileStamp::read(&path);
         view.update(cx, |view, cx| {
-            view.disk_changed(stamp, Some("one\ntwo\nthree\n".to_string()), cx);
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some("one\ntwo\nthree\n".to_string()), cx);
             assert_eq!(text_of(view), "one\ntwo\nthree\n", "the reload landed");
             assert!(
                 !view.is_dirty(),
@@ -3069,6 +3123,29 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn disk_changed_ignores_stale_pre_save_probe(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "v1\n", false);
+        let path = dir.path().join("main.rs");
+        let stale_stamp = FileStamp::read(&path);
+        let stale_generation = view.update(cx, |view, _cx| view.begin_disk_probe());
+
+        view.update_in(cx, |view, window, cx| {
+            view.select_all(&CeSelectAll, window, cx);
+            view.replace_text_in_range(None, "v2\n", window, cx);
+            view.save_action(&CeSave, window, cx);
+        });
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+
+        view.update(cx, |view, cx| {
+            view.disk_changed(stale_generation, stale_stamp, Some("v1\n".to_string()), cx);
+            assert_eq!(text_of(view), "v2\n", "a pre-save probe is stale");
+            assert_eq!(view.disk, DiskState::InSync);
+            assert_eq!(view.stamp, FileStamp::read(&path));
+        });
+    }
+
     /// US-016 AC: a save is refused *before* writing when the file changed in
     /// the meantime, and the on-disk bytes are untouched.
     #[gpui::test]
@@ -3117,7 +3194,8 @@ mod tests {
 
         view.update(cx, |view, cx| {
             view.selection = CodeSelection::at(4);
-            view.disk_changed(stamp, Some("ONE!\nTWO!\n".to_string()), cx);
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some("ONE!\nTWO!\n".to_string()), cx);
         });
 
         view.update_in(cx, |view, window, cx| {
@@ -3154,7 +3232,8 @@ mod tests {
         let stamp = FileStamp::read(&path);
 
         view.update(cx, |view, cx| {
-            view.disk_changed(stamp, Some("theirs\n".to_string()), cx);
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some("theirs\n".to_string()), cx);
             assert!(view.has_conflict());
             assert_eq!(text_of(view), "one\nmine\n", "the buffer was not touched");
         });
@@ -3180,7 +3259,8 @@ mod tests {
         std::fs::remove_file(&path).expect("delete");
 
         view.update(cx, |view, cx| {
-            view.disk_changed(None, None, cx);
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, None, None, cx);
             view.stamp = None;
             assert_eq!(view.disk, DiskState::Deleted);
         });
