@@ -325,6 +325,7 @@ struct ReadSnapshot {
 enum Read {
     Snapshot(ReadSnapshot),
     Gone,
+    Transient,
 }
 
 struct Engine<'c, T: IpcTransport> {
@@ -517,6 +518,17 @@ impl<T: IpcTransport> Engine<'_, T> {
                         Read::Gone => {
                             self.fail(i, "pane closed before the pattern appeared", false);
                         }
+                        Read::Transient => {
+                            if Instant::now() >= deadline {
+                                let (pattern, timeout) =
+                                    self.runs[i].unit.ready.clone().expect("polling has ready");
+                                self.fail(
+                                    i,
+                                    &format!("timed out after {timeout}s waiting for /{pattern}/"),
+                                    true,
+                                );
+                            }
+                        }
                         Read::Snapshot(snapshot) => {
                             let text = match baseline.as_ref() {
                                 Some(base) => {
@@ -557,6 +569,7 @@ impl<T: IpcTransport> Engine<'_, T> {
                                 self.fail(i, "pane closed before the text could be fed", false);
                                 continue;
                             }
+                            Read::Transient => {}
                             Read::Snapshot(snapshot) => {
                                 let output_generation = snapshot.output_generation;
                                 if last_generation == output_generation {
@@ -611,6 +624,7 @@ impl<T: IpcTransport> Engine<'_, T> {
         let sid = self.runs[i].surface_id.expect("feeding has a surface");
         let baseline = match self.read_window(sid, READ_WINDOW_LINES)? {
             Read::Snapshot(snapshot) => Some(snapshot),
+            Read::Transient => return Ok(()),
             Read::Gone => {
                 self.fail(i, "pane closed before the text could be fed", false);
                 return Ok(());
@@ -845,6 +859,9 @@ impl<T: IpcTransport> Engine<'_, T> {
                     if is_surface_gone_error(&message) {
                         return Ok(Read::Gone);
                     }
+                    if is_transient_read_error(&message) {
+                        return Ok(Read::Transient);
+                    }
                     return Err(format!("surface.read failed: {message}"));
                 }
                 Ok(Read::Snapshot(ReadSnapshot {
@@ -857,6 +874,7 @@ impl<T: IpcTransport> Engine<'_, T> {
                 }))
             }
             Err(e) if is_surface_gone_error(&e) => Ok(Read::Gone),
+            Err(e) if is_transient_read_error(&e) => Ok(Read::Transient),
             Err(e) => Err(format!("instance unreachable: {e}")),
         }
     }
@@ -993,6 +1011,15 @@ fn legacy_error_message(value: &Value) -> Option<String> {
 fn is_surface_gone_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("not found") || lower.contains("-32602")
+}
+
+fn is_transient_read_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("did not respond within")
+        || lower.contains("busy")
+        || lower.contains("-32000")
 }
 
 fn text_after_baseline(baseline: &ReadSnapshot, current: &ReadSnapshot) -> Option<String> {
@@ -1213,6 +1240,7 @@ mod tests {
     struct FakeInstance {
         calls: RefCell<Vec<(String, Value)>>,
         reads: RefCell<HashMap<u64, Vec<String>>>,
+        read_errors: RefCell<HashMap<u64, Vec<String>>>,
         scripting: bool,
     }
     impl FakeInstance {
@@ -1220,6 +1248,7 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 reads: RefCell::new(HashMap::new()),
+                read_errors: RefCell::new(HashMap::new()),
                 scripting,
             }
         }
@@ -1227,6 +1256,11 @@ mod tests {
             self.reads
                 .borrow_mut()
                 .insert(sid, texts.iter().map(|s| s.to_string()).collect());
+        }
+        fn push_read_errors(&self, sid: u64, errors: &[&str]) {
+            self.read_errors
+                .borrow_mut()
+                .insert(sid, errors.iter().map(|s| s.to_string()).collect());
         }
     }
     impl IpcTransport for FakeInstance {
@@ -1247,6 +1281,12 @@ mod tests {
                 "surface.split" => Ok(json!({ "split": true, "surface_id": 99 })),
                 "surface.read" => {
                     let sid = params["surface_id"].as_u64().unwrap_or(0);
+                    let mut read_errors = self.read_errors.borrow_mut();
+                    let errors = read_errors.entry(sid).or_default();
+                    if !errors.is_empty() {
+                        return Err(errors.remove(0));
+                    }
+                    drop(read_errors);
                     let mut reads = self.reads.borrow_mut();
                     let texts = reads.entry(sid).or_default();
                     let text = if texts.len() > 1 {
@@ -1373,6 +1413,24 @@ mod tests {
         );
         assert_eq!(sent[0]["submit"], false, "default never submits");
         assert_eq!(sent[0]["surface_id"], 1, "fed into impl's pane");
+    }
+
+    #[test]
+    fn flow_progress_survives_transient_read_errors() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let file = dir.path().join("flow.toml");
+        std::fs::write(
+            &file,
+            "[defaults]\ntimeout_secs = 5\n\n[[step]]\nid = \"impl\"\npane = { command = \"true\" }\nready = { pattern = \"READY\" }\n",
+        )
+        .unwrap();
+        let fake = FakeInstance::new(true);
+        fake.push_read_errors(1, &["server error -32000: Paneflow is busy; retry shortly"]);
+        fake.push_reads(1, &["READY"]);
+
+        let code = run(&fake, file.to_str().unwrap(), false, true).expect("flow continues");
+
+        assert_eq!(code, EXIT_OK);
     }
 
     /// A barrier that never matches times out, fails the step, and fail_fast
