@@ -4,8 +4,8 @@ on:
   push:
     tags: ["v*"]
   # Dry-run dispatch. Builds, signs, notarizes, and stages the DMG, but
-  # skips the GitHub Release. Use this to validate the signing chain on a
-  # branch before cutting a tag. Artifacts land as workflow artifacts with
+  # skips the GitHub Release. Use this from main to validate the signing chain
+  # before cutting a tag. Artifacts land as workflow artifacts with
   # 7-day retention.
   workflow_dispatch:
     inputs:
@@ -13,14 +13,9 @@ on:
         description: "Dry-run semver (no v prefix, e.g. 0.1.0-rc.1)"
         required: true
         type: string
-      target_ref:
-        description: "Git ref to build from"
-        required: false
-        type: string
-        default: main
 
 permissions:
-  contents: write
+  contents: read
 
 # Serialize releases by ref. A tag-push race (or a dry-run launched on
 # top of a real tag) should not double-publish. Grouped by ref_name so
@@ -43,7 +38,9 @@ env:
   # Tag-push: github.ref_name is the tag. Dry-run: synthesize v<inputs.version>
   # so every ${TAG#v} strip stays correct.
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
-  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && (inputs.target_ref || 'main') || github.ref_name }}
+  # Dry-runs are intentionally main-only. Allowing an arbitrary checkout here
+  # would execute branch-controlled scripts while release credentials exist.
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref_name }}
   RELEASE_MODE: ${{ github.event_name == 'workflow_dispatch' && 'dry-run' || 'release' }}
   TARGET: aarch64-apple-darwin
   ARCH: aarch64
@@ -51,6 +48,10 @@ env:
 jobs:
   build:
     name: Build aarch64-apple-darwin
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    environment: release
+    permissions:
+      contents: write
     runs-on: macos-15
     timeout-minutes: 150
     steps:

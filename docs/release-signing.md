@@ -6,8 +6,8 @@ old hand-rolled updater and minisign client remain deleted.
 
 | Mechanism | Protects | Verified by | Keys live |
 |---|---|---|---|
-| Developer ID codesign + Apple notarization | The `.app` a user launches | Gatekeeper (`spctl`) | `APPLE_*` GitHub secrets |
-| Sparkle EdDSA | The DMG offered by the appcast | Sparkle before extraction | `SPARKLE_PRIVATE_KEY` GitHub secret; public half committed as `SUPublicEDKey` in `assets/Info.plist` |
+| Developer ID codesign + Apple notarization | The `.app` a user launches | Gatekeeper (`spctl`) | Legacy repository-scoped `APPLE_*` secrets; move them to the protected `release` environment on rotation |
+| Sparkle EdDSA | The DMG offered by the appcast | Sparkle before extraction | `SPARKLE_PRIVATE_KEY` secret in the protected `release` environment; public half committed as `SUPublicEDKey` in `assets/Info.plist` |
 
 Runbook: [`docs/release/macos-signing.md`](release/macos-signing.md).
 
@@ -32,7 +32,12 @@ packaging path that was deliberately removed.
 
 ## GitHub secrets and variables
 
-The macOS release path needs exactly these.
+The macOS release path needs exactly these. Store every newly provisioned value
+in the protected `release` environment, never as a repository-wide Actions
+secret. Its deployment policy admits only `main` and `v*` tags. The existing
+`APPLE_*` values are the legacy exception: GitHub cannot reveal them for an
+automated move, so migrate them into the environment during their next
+rotation and then delete the repository-scoped copies.
 
 ### Secrets
 
@@ -50,7 +55,8 @@ Populate multi-line secrets from a file, never from a pipe:
 ```bash
 base64 -i DeveloperID.p12 -o /tmp/cert.p12.b64
 chmod 600 /tmp/cert.p12.b64
-gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/paneflow < /tmp/cert.p12.b64
+gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/paneflow --env release \
+  < /tmp/cert.p12.b64
 rm -P /tmp/cert.p12.b64
 ```
 

@@ -56,12 +56,12 @@ an unsigned `.app` and stop there.
 
 | Secret | Where | Used by | What it is |
 |---|---|---|---|
-| `APPLE_DEVELOPER_CERT_P12` | repo Actions secrets | `scripts/sign-macos.sh` | Base64 of the exported Developer ID Application certificate + private key (`.p12`). The `P12` suffix is PKCS#12, not a truncated name — see below. |
-| `APPLE_DEVELOPER_CERT_PASSWORD` | repo Actions secrets | `scripts/sign-macos.sh` | Password set when exporting that `.p12`. Independent of the cert blob. |
-| `APPLE_ID` | repo Actions secrets | `scripts/notarize-macos.sh` | Apple Developer account email |
-| `APPLE_APP_SPECIFIC_PASSWORD` | repo Actions secrets | `scripts/notarize-macos.sh` | App-specific password from appleid.apple.com, **not** the Apple ID login password |
-| `APPLE_TEAM_ID` | repo Actions secrets | both Apple scripts | 10-character Team ID. `sign-macos.sh` hard-fails if the identity's common name does not contain `(TEAMID)`. |
-| `SPARKLE_PRIVATE_KEY` | repo Actions secrets | `generate_appcast` | Base64 Ed25519 private seed exported by Sparkle's `generate_keys`. It signs the DMG enclosure and never enters the app bundle. |
+| `APPLE_DEVELOPER_CERT_P12` | repo Actions secret (legacy) | `scripts/sign-macos.sh` | Base64 of the exported Developer ID Application certificate + private key (`.p12`). The `P12` suffix is PKCS#12, not a truncated name — see below. |
+| `APPLE_DEVELOPER_CERT_PASSWORD` | repo Actions secret (legacy) | `scripts/sign-macos.sh` | Password set when exporting that `.p12`. Independent of the cert blob. |
+| `APPLE_ID` | repo Actions secret (legacy) | `scripts/notarize-macos.sh` | Apple Developer account email |
+| `APPLE_APP_SPECIFIC_PASSWORD` | repo Actions secret (legacy) | `scripts/notarize-macos.sh` | App-specific password from appleid.apple.com, **not** the Apple ID login password |
+| `APPLE_TEAM_ID` | repo Actions secret (legacy) | both Apple scripts | 10-character Team ID. `sign-macos.sh` hard-fails if the identity's common name does not contain `(TEAMID)`. |
+| `SPARKLE_PRIVATE_KEY` | `release` environment secret | `generate_appcast` | Base64 Ed25519 private seed exported by Sparkle's `generate_keys`. It signs the DMG enclosure and never enters the app bundle. |
 | `GITHUB_TOKEN` | injected by Actions | `gh release view` / `gh release edit` | Do **not** create this. The workflow requests `permissions: contents: write` so the default token can attach assets and undraft the release. |
 
 Generate the Sparkle key once, using the pinned tool the release consumes:
@@ -73,7 +73,7 @@ SPARKLE_DIST="$(scripts/sparkle-dist.sh)"
 "$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow \
   -x /tmp/paneflow-sparkle-private-key
 
-gh secret set SPARKLE_PRIVATE_KEY -R theaamgroup/PaneFlow \
+gh secret set SPARKLE_PRIVATE_KEY -R theaamgroup/PaneFlow --env release \
   < /tmp/paneflow-sparkle-private-key
 rm -P /tmp/paneflow-sparkle-private-key
 ```
@@ -81,6 +81,15 @@ rm -P /tmp/paneflow-sparkle-private-key
 Commit the printed public key as `SUPublicEDKey` in `assets/Info.plist`; it is
 not a secret or an Actions variable. The value in the plist and the private
 seed in `SPARKLE_PRIVATE_KEY` must always remain a pair.
+
+Keep all newly provisioned signing material in the `release` environment,
+whose deployment policy admits only `main` and `v*` tags. Never put new
+credentials in repository-wide Actions secrets: a branch-controlled workflow
+can otherwise read them without passing the release environment's ref policy.
+The existing `APPLE_*` values predate that policy and remain repository-scoped
+until an owner re-enters them in the environment; GitHub does not expose stored
+secret values for an automated migration. Move them during the next Apple
+credential rotation, then delete the repository-scoped copies.
 
 For rotation, first ship a release whose plist trusts the replacement public
 key while releases are still signed by the old key. Wait for that bridge build

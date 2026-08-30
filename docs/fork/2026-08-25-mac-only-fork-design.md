@@ -135,7 +135,9 @@ macOS-only `release.yml`. Wire `APPLE_DEVELOPER_CERT_P12`,
 `APPLE_DEVELOPER_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
 `APPLE_TEAM_ID`. Signed, notarized, stapled DMG. Sparkle adds
 `SPARKLE_PRIVATE_KEY` (archive-signing seed); its public half is committed as
-`SUPublicEDKey` in `assets/Info.plist`. The 2026-08-26 hand-rolled updater
+`SUPublicEDKey` in `assets/Info.plist`. New signing values belong in the
+ref-restricted `release` environment, not repository-wide secrets; migrate the
+legacy `APPLE_*` values there on rotation. The 2026-08-26 hand-rolled updater
 and minisign client stay deleted; do not recreate `MINISIGN_SECRET_KEY`,
 `PANEFLOW_MINISIGN_*`, or `src-app/src/update/`.
 
