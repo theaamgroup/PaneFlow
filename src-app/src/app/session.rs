@@ -1034,7 +1034,11 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
     match serde_json::to_string_pretty(state) {
         Ok(json) => {
             let tmp_path = session_tmp_path(path);
-            match std::fs::write(&tmp_path, &json) {
+            let write_result = std::fs::File::create(&tmp_path).and_then(|mut temporary| {
+                std::io::Write::write_all(&mut temporary, json.as_bytes())?;
+                temporary.sync_all()
+            });
+            match write_result {
                 Ok(()) => {
                     if let Err(e) = std::fs::rename(&tmp_path, path) {
                         log::warn!("session save rename failed: {e}");
@@ -1884,6 +1888,25 @@ mod tests {
             paneflow_config::schema::SESSION_SCHEMA_VERSION
         );
         assert!(loaded.workspaces.is_empty());
+    }
+
+    #[test]
+    fn write_session_json_syncs_temp_before_rename() {
+        let source = include_str!("session.rs");
+        let write_fn = source
+            .split_once("fn write_session_json_inner")
+            .expect("write_session_json_inner definition")
+            .1
+            .split_once("fn session_corruption_toast_message")
+            .expect("end of write_session_json_inner")
+            .0;
+        let sync = write_fn
+            .find("sync_all")
+            .expect("session temp file must be synced before publication");
+        let rename = write_fn
+            .find("std::fs::rename")
+            .expect("session temp file must be atomically published");
+        assert!(sync < rename, "temp-file sync must happen before rename");
     }
 
     #[test]
