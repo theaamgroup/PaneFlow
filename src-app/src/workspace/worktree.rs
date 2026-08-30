@@ -1206,11 +1206,32 @@ pub fn prune(repo_root: &Path) -> Result<(), String> {
 /// an unreadable entry yields an empty/partial copy, never an error. Returns
 /// the file names copied.
 pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(src_root) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(src_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "failed to read env files from {}: {error}",
+                    src_root.display()
+                );
+            }
+            return Vec::new();
+        }
     };
     let mut copied = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        "failed to read env file entry from {}: {error}",
+                        src_root.display()
+                    );
+                }
+                continue;
+            }
+        };
         let name = entry.file_name();
         let name_s = name.to_string_lossy();
         if !name_s.starts_with(".env") {
@@ -1223,8 +1244,15 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
         if dst.exists() {
             continue;
         }
-        if std::fs::copy(entry.path(), &dst).is_ok() {
-            copied.push(name_s.into_owned());
+        let src = entry.path();
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => copied.push(name_s.into_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                "failed to copy env file from {} to {}: {error}",
+                src.display(),
+                dst.display()
+            ),
         }
     }
     copied.sort();
@@ -1279,6 +1307,7 @@ pub fn teardown_all(worktrees: Vec<ManagedWorktree>, protected_session_ids: Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn same_workspace_duplicate_records_preserve_keep_policy() {
@@ -2121,5 +2150,27 @@ mod tests {
         let dst = tempfile::tempdir().expect("dst");
         let copied = copy_env_files(Path::new("/nonexistent-paneflow-test"), dst.path());
         assert!(copied.is_empty());
+    }
+
+    #[test]
+    #[traced_test]
+    fn copy_env_files_logs_copy_failure() {
+        let src = tempfile::tempdir().expect("src");
+        let src_file = src.path().join(".env.local");
+        std::fs::write(&src_file, "A=1").expect("source env");
+        let mut permissions = std::fs::metadata(&src_file)
+            .expect("metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o000);
+        std::fs::set_permissions(&src_file, permissions).expect("unreadable source env");
+        let dst = tempfile::tempdir().expect("dst");
+
+        let copied = copy_env_files(src.path(), dst.path());
+
+        assert!(copied.is_empty());
+        assert!(
+            logs_contain("failed to copy env file"),
+            "copy failure should emit a warning"
+        );
     }
 }
