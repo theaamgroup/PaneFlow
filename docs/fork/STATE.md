@@ -92,11 +92,12 @@ Companion documents:
 - `docs/fork/2026-08-25-post-2c-plan.md` is the **historical 2026-08-25
   execution plan** (schema, telemetry, identity, CI). Leftover-removal
   buckets 1–4 (2026-08-26) superseded its self-update “disable the feed”
-  decision: the in-app updater is deleted. GitHub issue #13's bundle-id and
+  decision: the old hand-rolled updater was deleted. GitHub issue #13's bundle-id and
   Notifications smoke was completed on the installed v0.1.1 app on 2026-08-28.
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
   **leak register**, and a **16-item traps register**. Read it before touching
-  platform code or the config schema. The in-app updater is gone.
+  platform code or the config schema. Sparkle owns self-update; the old updater
+  and minisign remain gone.
 - `CLAUDE.md` holds build prerequisites, the module tree, and the commands.
 
 This file holds only: where the work stands, what is next, and the rules the
@@ -159,7 +160,7 @@ Issue **#110** is implemented: the window-level focus-loss fallback commits or
 cancels transient editing state even when the focused row unmounts or a
 Window-less navigation path runs. It no longer belongs in the follow-up list.
 
-Two things that pass gates but are **not** end-to-end verified:
+Three things that pass gates but are **not** end-to-end verified:
 
 - **No live GUI smoke was possible.** Plain keystrokes deliver via
   `CGEventPostToPid`, but modified chords never fire an action, and
@@ -172,6 +173,11 @@ Two things that pass gates but are **not** end-to-end verified:
   such at both sites: a sidebar row only joins the dispatch path once its
   rename is already live, but the `f2` branch only runs when it is not.
   Fixing it needs per-row focus handles.
+- **Sparkle's full installed-update path needs two consecutive signed tags.**
+  The bundled framework loads and starts in a live GUI, but the first
+  Sparkle-enabled release must still prove `/Applications` vN staging vN+1,
+  silent install on quit from the DMG, and deliberate Developer-ID mismatch
+  rejection. The release runbook carries that first-release gate.
 
 ## Identity
 
@@ -179,7 +185,7 @@ Two things that pass gates but are **not** end-to-end verified:
 |---|---|
 | Local clone | `~/Github/paneflow` (directory still carries the upstream name) |
 | Branch | **`main`**. Reconciled 2026-08-25: the fork point is tagged `upstream-fork-point`, `main` was fast-forwarded to the fork work (strict ancestor, no rewrite), and `mac-only-fork` remains at the same commit - delete it after the first release tag. |
-| `origin` | `github.com/theaamgroup/paneflow` (private). Renamed from `panescli` on 2026-08-25 when the PanesCLI rebrand was dropped; GitHub keeps redirects. |
+| `origin` | `github.com/theaamgroup/paneflow` (public since 2026-08-30 so Sparkle can fetch release assets anonymously). Renamed from `panescli` on 2026-08-25 when the PanesCLI rebrand was dropped; GitHub keeps redirects. |
 | `upstream` | `github.com/arthjean/paneflow` (read-only, kept for cherry-picks) |
 | Fork point | v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a` |
 | gpui backup | `github.com/theaamgroup/zed`, holds pinned rev `3aaba57b`. `Cargo.toml` points at **`zed-industries/zed`** rev `fecc3273`; do not reintroduce an `arthjean/zed` pin (CLAUDE.md forbids it). |
@@ -204,14 +210,15 @@ dropped; see `docs/fork/2026-08-25-post-2c-plan.md`.
 The debug sibling is not optional. `APP_SUBDIR` in
 `crates/paneflow-config/src/loader.rs:17` switches to `paneflow-dev` under
 `debug_assertions` across config, session, threads, sockets and caches, so a
-`cargo run` build never reads the release config path. Build-from-source is now
-the only workflow here, so this is the most likely source of confusion.
+`cargo run` build never reads the release config path. Building from source is
+still the main development workflow, so this is a likely source of confusion
+even though signed release DMGs are also available.
 
 ## Stage status
 
 | Stage | State |
 |---|---|
-| 0. GitHub plumbing | **Done.** Private repo created, both branches pushed, zed backup forked and its pinned rev verified present. |
+| 0. GitHub plumbing | **Done.** Repo created privately, made public for Sparkle on 2026-08-30 after a clean 1,399-commit gitleaks scan, both branches pushed, zed backup forked and its pinned rev verified present. |
 | 1. File-level deletion | **Done.** Non-macOS packaging, the two upstream-publishing workflows, non-macOS docs and scripts and assets, and upstream's project-management cruft. |
 | Docs correctness pass | **Done.** 36 files, +2124/-2355. Turned out to be more a correctness fix than a platform strip. |
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
@@ -219,12 +226,12 @@ the only workflow here, so this is the most likely source of confusion.
 | 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
 | Config-schema pass | **Done.** Ghostty and `windows_*_material` dropped from the published schema, Rust struct, and docs. Loader still accepts leftover keys; `"backend":"ghostty"` maps to Alacritty. |
 | Telemetry | **Gone.** `paneflow-telemetry` crate, app module, consent toasts, config block. |
-| Self-update | **Gone.** In-app updater and minisign client deleted 2026-08-26. Apple DMG signing remains. |
+| Self-update | **Sparkle 2 (#119).** The hand-rolled updater/minisign client remain deleted. Sparkle checks hourly, downloads silently, and installs only on ordinary quit. |
 | Identity | **Done.** Bundle id `com.theaamgroup.paneflow`, authors The AAM Group, Help/`--help`/schema `$id` point at `theaamgroup/paneflow`. |
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.1.1.** First release tag `v0.1.0` is on `44150ff` (2026-08-26); `v0.1.1` cuts the 2026-08-28 deep-review fixes. GitHub Release: DMG + `.sha256` only. `upstream-fork-point` remains. The 80 inherited upstream tags were deleted locally on 2026-08-28 (recover with `git fetch upstream --tags`); local tags now match origin exactly, which is what freed the `v0.1.1` name - it previously pointed at upstream commit `c19a55ba`, off our history. |
+| Version | **0.1.2.** First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before #119 carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. |
 
 ## Verified green, and how to reproduce it
 

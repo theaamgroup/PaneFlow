@@ -246,19 +246,36 @@ fn run_status(expected_hook_path: Option<&Path>, out: &mut dyn Write, err: &mut 
 }
 
 fn report_other_agents(out: &mut dyn Write) {
-    if which::which("codex").is_ok() {
+    report_detected_other_agents(
+        out,
+        which::which("codex").is_ok(),
+        which::which("gemini").is_ok(),
+        which::which("opencode").is_ok(),
+    );
+}
+
+fn report_detected_other_agents(
+    out: &mut dyn Write,
+    codex_detected: bool,
+    gemini_detected: bool,
+    opencode_detected: bool,
+) {
+    if codex_detected {
         let _ = writeln!(
             out,
             "codex: hooks injected per-launch by the shim (no user-scope install)"
         );
     }
-    if which::which("gemini").is_ok() {
-        let _ = writeln!(out, "gemini: no notification-hook mechanism (unsupported)");
-    }
-    if which::which("opencode").is_ok() {
+    if gemini_detected {
         let _ = writeln!(
             out,
-            "opencode: no notification-hook mechanism (unsupported)"
+            "gemini: hooks injected per-launch by the shim (no user-scope install)"
+        );
+    }
+    if opencode_detected {
+        let _ = writeln!(
+            out,
+            "opencode: hooks injected per-launch by the shim (no user-scope install)"
         );
     }
 }
@@ -391,5 +408,21 @@ mod tests {
         let code = run_hooks_with(&["setup".to_string()], None, &mut out, &mut err);
         assert_eq!(code, 1);
         assert!(String::from_utf8_lossy(&err).contains("unavailable"));
+    }
+
+    #[test]
+    fn report_other_agents_describes_gemini_and_opencode_as_shim_injected() {
+        let mut out = Vec::new();
+        report_detected_other_agents(&mut out, true, true, true);
+        let output = String::from_utf8(out).unwrap();
+
+        for agent in ["codex", "gemini", "opencode"] {
+            assert!(
+                output.contains(&format!("{agent}: hooks injected per-launch by the shim")),
+                "missing shim-injection status for {agent}: {output}"
+            );
+        }
+        assert!(!output.contains("no notification-hook mechanism"));
+        assert!(!output.contains("unsupported"));
     }
 }

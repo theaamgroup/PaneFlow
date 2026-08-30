@@ -90,10 +90,13 @@ Relevant config keys:
 | `total_lines`       | Total retained lines                              |
 | `eof`               | Whether the read reached the oldest retained line |
 | `output_generation` | Monotonic counter advanced by pane output         |
+| `truncated`         | Whether the IPC byte cap omitted older output     |
 
 Defaults and limits: `lines` defaults to 200 and clamps to 1-4000.
 `offset` starts from the end of the buffer. Passing an out-of-range
-offset is an invalid-params error.
+offset is an invalid-params error. If a requested window exceeds the IPC byte
+cap, the response preserves its newest complete rows, reports their count in
+`lines`, sets `eof: false`, and sets `truncated: true`.
 
 The `fenced` JSON-RPC param defaults to `ai_injection_fence`. The CLI
 flag `--raw` passes `fenced: false`.

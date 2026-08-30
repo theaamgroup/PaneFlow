@@ -1,7 +1,8 @@
 # Build PaneFlow from source
 
-This fork has no download, installer, or Homebrew tap. Building from
-source is the only way to run it.
+Signed, notarized DMGs are published on the
+[GitHub Releases page](https://github.com/theaamgroup/PaneFlow/releases).
+This guide covers building from source; there is no Homebrew tap.
 
 You need macOS 13 Ventura or later on Apple Silicon. Two of the
 toolchain steps below are easy to get wrong and fail in a misleading
@@ -88,8 +89,8 @@ PANEFLOW_ALLOW_MULTIPLE=1 PANEFLOW_SOCKET_PATH=/tmp/paneflow-head.sock \
   cargo run --release -p paneflow-app
 ```
 
-`PANEFLOW_ALLOW_MULTIPLE` is presence-gated: `=0` still skips the
-singleton guard.
+`PANEFLOW_ALLOW_MULTIPLE` is value-gated: only `=1` skips the singleton
+guard. An empty value or `=0` keeps the guard enabled.
 
 After a debug build, the CLI is `./target/debug/paneflow`. After a
 release build, `./target/release/paneflow`. The `.app` bundle does not
@@ -101,7 +102,7 @@ put either on your `PATH`.
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
-./target/debug/paneflow --version    # paneflow 0.1.1
+./target/debug/paneflow --version    # paneflow 0.1.2
 ```
 
 `cargo fmt --check` must pass before every commit that touches Rust; CI

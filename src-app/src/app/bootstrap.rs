@@ -36,6 +36,11 @@ impl PaneFlowApp {
     }
 
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        // Packaged release builds load Sparkle from Contents/Frameworks and
+        // schedule silent hourly checks. Plain cargo binaries have no bundle
+        // framework and return immediately.
+        crate::sparkle::start_if_bundled();
+
         let title_bar = cx.new(title_bar::TitleBar::new);
         cx.subscribe(&title_bar, Self::handle_title_bar_event)
             .detach();

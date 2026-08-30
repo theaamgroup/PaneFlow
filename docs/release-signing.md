@@ -1,11 +1,13 @@
 # Release signing: what signs what
 
-This fork signs releases with **one mechanism**: Apple Developer ID codesign
-plus notarization. There is no in-app updater and no minisign client.
+This fork uses two independent trust anchors: Apple Developer ID codesign plus
+notarization for the app bundle, and Sparkle EdDSA for each update archive. The
+old hand-rolled updater and minisign client remain deleted.
 
 | Mechanism | Protects | Verified by | Keys live |
 |---|---|---|---|
-| Developer ID codesign + Apple notarization | The `.app` a user launches | Gatekeeper (`spctl`) | `APPLE_*` GitHub secrets |
+| Developer ID codesign + Apple notarization | The `.app` a user launches | Gatekeeper (`spctl`) | Legacy repository-scoped `APPLE_*` secrets; move them to the protected `release` environment on rotation |
+| Sparkle EdDSA | The DMG offered by the appcast | Sparkle before extraction | `SPARKLE_PRIVATE_KEY` secret in the protected `release` environment; public half committed as `SUPublicEDKey` in `assets/Info.plist` |
 
 Runbook: [`docs/release/macos-signing.md`](release/macos-signing.md).
 
@@ -30,7 +32,14 @@ packaging path that was deliberately removed.
 
 ## GitHub secrets and variables
 
-The macOS release path needs exactly these.
+The macOS release path needs exactly these. Store every newly provisioned value
+in the protected `release` environment, never as a repository-wide Actions
+secret. Its deployment policy admits only `main` and `v*` tags. The existing
+environment also requires approval by the designated release owner before a
+credential-bearing job starts. The existing `APPLE_*` values are the legacy
+exception: GitHub cannot reveal them for an automated move, so migrate them
+into the environment during their next rotation and then delete the
+repository-scoped copies.
 
 ### Secrets
 
@@ -41,13 +50,15 @@ The macOS release path needs exactly these.
 | `APPLE_ID` | `scripts/notarize-macos.sh` | Apple ID of the account that owns the Developer Program membership |
 | `APPLE_APP_SPECIFIC_PASSWORD` | `scripts/notarize-macos.sh` | App-specific password generated at appleid.apple.com, not the account password |
 | `APPLE_TEAM_ID` | both scripts | 10-character Team ID; `sign-macos.sh` hard-fails if the discovered signing identity does not contain it |
+| `SPARKLE_PRIVATE_KEY` | `generate_appcast` in `release.yml` | Base64 Ed25519 private seed exported by Sparkle's `generate_keys`; never commit it |
 
 Populate multi-line secrets from a file, never from a pipe:
 
 ```bash
 base64 -i DeveloperID.p12 -o /tmp/cert.p12.b64
 chmod 600 /tmp/cert.p12.b64
-gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/paneflow < /tmp/cert.p12.b64
+gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/paneflow --env release \
+  < /tmp/cert.p12.b64
 rm -P /tmp/cert.p12.b64
 ```
 

@@ -1,15 +1,16 @@
-# PaneFlow: macOS-only private fork
+# PaneFlow: macOS-only fork
 
 Date: 2026-08-25
-Status: approved, Stage 1 in progress
+Status: implemented; living decision record
 Fork point: `arthjean/paneflow` v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a`
 
 ## Purpose
 
-Take PaneFlow private under `theaamgroup` and strip it to macOS only, so The
-AAM Group can make improvements and fixes to it. The result is never published
-publicly. The product name stays PaneFlow; a rebrand to PanesCLI was scoped and
-dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
+Take PaneFlow under `theaamgroup` and strip it to macOS only, so The AAM Group
+can make improvements and fixes to it. The repository began private and became
+public when anonymous Sparkle appcast and DMG access became a release
+requirement. The product name stays PaneFlow; a rebrand to PanesCLI was scoped
+and dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 
 ## Decisions
 
@@ -18,10 +19,10 @@ dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 | Fork model | Keep all 1035 commits, keep `upstream` remote | `git blame` works, upstream fixes are cherry-pickable, `.git` stays 60M (no history rewrite, since `filter-repo` would destroy the merge base) |
 | Cut depth | Deep. Strip non-Mac `cfg` branches from shared source | Readable Mac-only source. Every future upstream merge conflicts across roughly 80 files. Accepted knowingly. |
 | Ghostty backend | Delete entirely | Verified unreachable on macOS. See Verification below. |
-| Self-update | **Deleted 2026-08-26** (supersedes “disable the feed”) | No feed, no minisign client, no title-bar update pill, no `--update-and-exit`. Apple Developer ID codesign + notarized DMG remains the install path. GitHub issue #8 (minisign keypair) is obsolete. |
+| Self-update | **Sparkle 2, added by #119.** The deleted hand-rolled updater stays deleted | Hourly background checks, EdDSA + Developer ID verification, silent download, install on ordinary quit, no forced relaunch or update UI. No minisign and no `src-app/src/update/`. |
 | Telemetry | **Deleted** (post-2c grind). Do not resurrect PostHog | Never set `POSTHOG_API_KEY`. Crate, app module, consent UI, and `build.rs` env directives are gone. |
 | Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server, conductor skill and `PANEFLOW_*` stay. See `docs/fork/2026-08-25-post-2c-plan.md` |
-| gpui dependency | Keep pointing at `arthjean/zed`, take a cold-backup fork | `Cargo.lock` pins the rev with a checksum, so the risk is availability, not drift. Insurance without a diff. |
+| gpui dependency | Pin `zed-industries/zed` by exact revision, keep the AAM fork only as a cold backup | `Cargo.lock` and all three Cargo dependency entries pin the revision, so the risk is availability, not drift. Never restore the old `arthjean/zed` source. |
 | Apple signing | AAM Developer ID, signed and notarized DMG | Other AAM Macs can install without Gatekeeper warnings |
 
 ## Naming
@@ -132,9 +133,13 @@ Cargo resolves path dependencies for all targets. These must land together:
 
 macOS-only `release.yml`. Wire `APPLE_DEVELOPER_CERT_P12`,
 `APPLE_DEVELOPER_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
-`APPLE_TEAM_ID`. Signed, notarized, stapled DMG. The in-app updater and
-minisign client were deleted 2026-08-26; do not recreate `MINISIGN_SECRET_KEY`
-or `PANEFLOW_MINISIGN_*`.
+`APPLE_TEAM_ID`. Signed, notarized, stapled DMG. Sparkle adds
+`SPARKLE_PRIVATE_KEY` (archive-signing seed); its public half is committed as
+`SUPublicEDKey` in `assets/Info.plist`. New signing values belong in the
+ref-restricted `release` environment, not repository-wide secrets; migrate the
+legacy `APPLE_*` values there on rotation. The 2026-08-26 hand-rolled updater
+and minisign client stay deleted; do not recreate `MINISIGN_SECRET_KEY`,
+`PANEFLOW_MINISIGN_*`, or `src-app/src/update/`.
 
 ## Known defects to fix in this fork
 
@@ -184,9 +189,10 @@ rather than living only in chat.
 
 Everything below points at upstream and must be cut or repointed.
 
-1. **Done (2026-08-26).** `src-app/src/update/` and the in-app updater are
-   deleted. There is no `checker.rs` feed, no `spawn_check`, and no poll of
-   `api.github.com/repos/arthjean/paneflow/releases/latest`.
+1. **Done (2026-08-26), still enforced after #119.** `src-app/src/update/` and
+   the old in-app updater are deleted. There is no `checker.rs`, minisign,
+   `--update-and-exit`, or poll of Arthur Jean's releases. Sparkle is a new,
+   framework-owned path whose feed is the AAM GitHub Release appcast.
 2. **Done.** `.github/workflows/repo_publish.yml` is deleted. It used to chain
    off a successful `release` run and `rclone sync` into Cloudflare R2 at
    `pkg.paneflow.dev`, then purge his Cloudflare zone.
@@ -199,9 +205,9 @@ Everything below points at upstream and must be cut or repointed.
    `paneflow.dev` menu links at `src-app/src/app/profile_menu.rs:23` to `:27`.
    `.github/SECURITY.md`, `.github/CONTRIBUTING.md`, and
    `.github/CODE_OF_CONDUCT.md` carried upstream URLs; all three are deleted.
-   This is a private fork: no public advisory process, no contribution guide.
-   Report problems to the repository owner. README's Safety model keeps a
-   one-paragraph version; agent working rules live in `AGENTS.md` / `CLAUDE.md`.
+   The repository becoming public for Sparkle does not restore upstream's
+   contribution or advisory documents. Report problems to the repository
+   owner. Agent working rules live in `AGENTS.md` / `CLAUDE.md`.
 
 ## Traps register
 
@@ -270,7 +276,8 @@ Found during the inventory. Each one would have cost a debugging session.
     `PANEFLOW_MINISIGN_PUBKEY` from a fully warm cache still recompiled
     `paneflow-app`. The PostHog `build.rs` directives (`POSTHOG_API_KEY` /
     `POSTHOG_HOST`) and the minisign pubkey bake are **gone** with telemetry
-    and the updater; do not resurrect them.
+    and the old updater; do not resurrect them. Sparkle's public key lives in
+    `Info.plist` and is not read by Rust compilation.
 
     Method note, since it generalises: the first attempt to verify this
     "confirmed" the bug, because backing the fix out edited `build.rs` in the

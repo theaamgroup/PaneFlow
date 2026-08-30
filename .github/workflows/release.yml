@@ -4,8 +4,8 @@ on:
   push:
     tags: ["v*"]
   # Dry-run dispatch. Builds, signs, notarizes, and stages the DMG, but
-  # skips the GitHub Release. Use this to validate the signing chain on a
-  # branch before cutting a tag. Artifacts land as workflow artifacts with
+  # skips the GitHub Release. Use this from main to validate the signing chain
+  # before cutting a tag. Artifacts land as workflow artifacts with
   # 7-day retention.
   workflow_dispatch:
     inputs:
@@ -13,14 +13,9 @@ on:
         description: "Dry-run semver (no v prefix, e.g. 0.1.0-rc.1)"
         required: true
         type: string
-      target_ref:
-        description: "Git ref to build from"
-        required: false
-        type: string
-        default: main
 
 permissions:
-  contents: write
+  contents: read
 
 # Serialize releases by ref. A tag-push race (or a dry-run launched on
 # top of a real tag) should not double-publish. Grouped by ref_name so
@@ -43,7 +38,9 @@ env:
   # Tag-push: github.ref_name is the tag. Dry-run: synthesize v<inputs.version>
   # so every ${TAG#v} strip stays correct.
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
-  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && (inputs.target_ref || 'main') || github.ref_name }}
+  # Dry-runs are intentionally main-only. Allowing an arbitrary checkout here
+  # would execute branch-controlled scripts while release credentials exist.
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref_name }}
   RELEASE_MODE: ${{ github.event_name == 'workflow_dispatch' && 'dry-run' || 'release' }}
   TARGET: aarch64-apple-darwin
   ARCH: aarch64
@@ -51,6 +48,10 @@ env:
 jobs:
   build:
     name: Build aarch64-apple-darwin
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    environment: release
+    permissions:
+      contents: write
     runs-on: macos-15
     timeout-minutes: 150
     steps:
@@ -84,6 +85,22 @@ jobs:
           toolchain: "1.96.1"
           components: rustfmt, clippy
           targets: ${{ env.TARGET }}
+
+      - name: Verify release version matches Cargo.toml
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          tag_version="${TAG#v}"
+          manifest_version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "paneflow-app") | .version')"
+          if [ -z "$manifest_version" ] || [ "$manifest_version" = "null" ]; then
+            echo "::error::Could not resolve paneflow-app version from cargo metadata."
+            exit 1
+          fi
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "::error::Release tag version $tag_version does not match Cargo.toml version $manifest_version."
+            exit 1
+          fi
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -238,6 +255,79 @@ jobs:
             exit 1
           fi
           ( cd release-assets && shasum -a 256 "${dmg}" > "${dmg}.sha256" )
+          ls -la release-assets/
+
+      - name: Generate signed Sparkle appcast
+        if: steps.macos_signing.outputs.signing_available == 'true' && steps.notarize.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          if [ -z "${SPARKLE_PRIVATE_KEY:-}" ]; then
+            if [ "$RELEASE_MODE" = "release" ]; then
+              echo "::error::SPARKLE_PRIVATE_KEY is required for tag-push releases."
+              exit 1
+            fi
+            echo "::warning::SPARKLE_PRIVATE_KEY is missing; dry-run appcast generation skipped."
+            exit 0
+          fi
+
+          version="${TAG#v}"
+          dmg="paneflow-${version}-${ARCH}-apple-darwin.dmg"
+          notes="release-assets/${dmg%.dmg}.md"
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq '.body' > "$notes"
+
+          sparkle_dist="$(scripts/sparkle-dist.sh)"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$sparkle_dist/bin/generate_appcast" \
+                --ed-key-file - \
+                --versions "$version" \
+                --maximum-versions 1 \
+                --maximum-deltas 0 \
+                --embed-release-notes \
+                --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/" \
+                --link "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" \
+                -o "$PWD/release-assets/appcast.xml" \
+                "$PWD/release-assets"
+          rm -f "$notes"
+
+          xmllint --noout release-assets/appcast.xml
+          grep -Fq "<sparkle:version>${version}</sparkle:version>" release-assets/appcast.xml
+          grep -Fq "sparkle:edSignature=" release-assets/appcast.xml
+          grep -Fq "$dmg" release-assets/appcast.xml
+
+          signature="$(xmllint --xpath \
+            'string(//*[local-name()="enclosure"]/@*[local-name()="edSignature"])' \
+            release-assets/appcast.xml)"
+          [ -n "$signature" ] || {
+            echo "::error::Sparkle appcast enclosure has no EdDSA signature."
+            exit 1
+          }
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$sparkle_dist/bin/sign_update" \
+                --verify --ed-key-file - "release-assets/$dmg" "$signature"
+
+          tampered_dmg="$(mktemp "${RUNNER_TEMP}/paneflow-tampered.XXXXXX.dmg")"
+          cp "release-assets/$dmg" "$tampered_dmg"
+          printf '\0' >> "$tampered_dmg"
+          if printf '%s' "$SPARKLE_PRIVATE_KEY" \
+              | "$sparkle_dist/bin/sign_update" \
+                  --verify --ed-key-file - "$tampered_dmg" "$signature"; then
+            echo "::error::Sparkle accepted a deliberately tampered DMG."
+            rm -f "$tampered_dmg"
+            exit 1
+          fi
+          rm -f "$tampered_dmg"
+
+          if find release-assets -maxdepth 1 -name '*.delta' -print -quit | grep -q .; then
+            echo "::error::Delta updates are not enabled for PaneFlow releases."
+            exit 1
+          fi
           ls -la release-assets/
 
       - name: Verify release artifacts staged

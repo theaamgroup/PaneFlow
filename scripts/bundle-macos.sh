@@ -5,6 +5,7 @@
 #   dist/PaneFlow.app/Contents/
 #     MacOS/paneflow                  (executable, chmod 755)
 #     Info.plist                      (from assets/Info.plist, @VERSION@ substituted)
+#     Frameworks/Sparkle.framework    (pinned, checksum-verified Sparkle 2)
 #     Resources/PaneFlow.icns         (from assets/PaneFlow.icns, produced by US-014)
 #
 # Usage:
@@ -103,16 +104,30 @@ APP="$REPO_ROOT/dist/PaneFlow.app"
 CONTENTS="$APP/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
+FRAMEWORKS_DIR="$CONTENTS/Frameworks"
 
 rm -rf "$APP"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 
 install -m 0755 "$BIN" "$MACOS_DIR/paneflow"
 install -m 0644 "$ICNS_SRC" "$RESOURCES_DIR/PaneFlow.icns"
 
+# Sparkle is fetched from its pinned official release and checksum-verified by
+# sparkle-dist.sh. `ditto` preserves the framework's version symlinks and
+# executable modes; flattening those breaks both dyld and the code signature.
+SPARKLE_DIST_DIR="${SPARKLE_DIST_DIR:-$("$SCRIPT_DIR/sparkle-dist.sh")}"
+[ -d "$SPARKLE_DIST_DIR/Sparkle.framework" ] || die \
+    "Sparkle.framework not found under $SPARKLE_DIST_DIR"
+[ -f "$SPARKLE_DIST_DIR/LICENSE" ] || die "Sparkle LICENSE not found under $SPARKLE_DIST_DIR"
+ditto "$SPARKLE_DIST_DIR/Sparkle.framework" "$FRAMEWORKS_DIR/Sparkle.framework"
+mkdir -p "$RESOURCES_DIR/ThirdPartyLicenses"
+install -m 0644 "$SPARKLE_DIST_DIR/LICENSE" "$RESOURCES_DIR/ThirdPartyLicenses/Sparkle.txt"
+
 # Substitute @VERSION@ in the Info.plist template. `sed -e` keeps the
 # command portable between BSD sed (macOS) and GNU sed (Linux CI).
-sed -e "s/@VERSION@/$VERSION/g" "$INFO_PLIST_SRC" > "$CONTENTS/Info.plist"
+sed \
+    -e "s|@VERSION@|$VERSION|g" \
+    "$INFO_PLIST_SRC" > "$CONTENTS/Info.plist"
 chmod 0644 "$CONTENTS/Info.plist"
 
 echo "Built bundle: $APP ($ARCH, v$VERSION)"

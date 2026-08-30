@@ -52,5 +52,21 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/theaamgroup/PaneFlow/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>7Uo+3QJd0ZXG3eu1mghn4RtlGHOVPIrO3t3COALBaII=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>3600</integer>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SUShowReleaseNotes</key>
+    <false/>
 </dict>
 </plist>

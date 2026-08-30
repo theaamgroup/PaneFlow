@@ -68,6 +68,8 @@ use std::process::Command;
 /// Nested staging always uses `--profile release-min`, so a debug outer
 /// build still embeds these Mach-O sizes, not debug binaries.
 const EMBED_SIZE_LIMIT_BYTES: u64 = 1_400_000;
+const EMBED_BINARIES: [&str; 3] = ["paneflow-shim", "paneflow-ai-hook", "paneflow-mcp"];
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PANEFLOW_SKIP_EMBED_BUILD");
 
@@ -133,12 +135,15 @@ fn main() {
         );
     }
 
-    let skip_nested_build = std::env::var_os("PANEFLOW_SKIP_EMBED_BUILD").is_some();
+    let skip_nested_build = matches!(
+        std::env::var("PANEFLOW_SKIP_EMBED_BUILD").ok().as_deref(),
+        Some("1")
+    );
     if !skip_nested_build {
         stage_ai_hook_binaries(&workspace_root, &target, &embed_dir);
     } else {
         println!(
-            "cargo:warning=PANEFLOW_SKIP_EMBED_BUILD is set - assuming {} is already populated",
+            "cargo:warning=PANEFLOW_SKIP_EMBED_BUILD=1 - validating pre-populated helpers in {}",
             embed_dir.display()
         );
     }
@@ -207,7 +212,7 @@ fn stage_ai_hook_binaries(workspace_root: &Path, target: &str, embed_dir: &Path)
 
     // Copy only the three binaries we need; anything else in
     // `artifact_dir` is a transitive build product we don't want to embed.
-    for bin in ["paneflow-shim", "paneflow-ai-hook", "paneflow-mcp"] {
+    for bin in EMBED_BINARIES {
         let src = artifact_dir.join(bin);
         let dst = embed_dir.join(bin);
 
@@ -254,6 +259,20 @@ fn enforce_embed_size_budget(embed_dir: &Path) {
             let size = metadata.len();
             total = total.saturating_add(size);
             per_file.insert(entry.file_name().to_string_lossy().into_owned(), size);
+        }
+    }
+
+    for binary in EMBED_BINARIES {
+        match per_file.get(binary) {
+            Some(size) if *size > 0 => {}
+            Some(_) => panic!(
+                "US-008/EP-001: required embedded helper {} is empty",
+                embed_dir.join(binary).display()
+            ),
+            None => panic!(
+                "US-008/EP-001: required embedded helper {} is missing",
+                embed_dir.join(binary).display()
+            ),
         }
     }
 

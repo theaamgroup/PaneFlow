@@ -9,9 +9,11 @@ spent waiting on Apple's notarization queue. If a step pushes you past its
 budget, check that step's troubleshooting box before plowing on. The runbook has
 probably already anticipated the failure.
 
-**Last validated on:** 2026-08-26, tag `v0.1.0` (`44150ff`). Signed
-`paneflow-0.1.0-aarch64-apple-darwin.dmg` + `.sha256`. Workflow run
-https://github.com/theaamgroup/paneflow/actions/runs/33010849870.
+**Apple signing path last validated on:** 2026-08-26, tag `v0.1.0`
+(`44150ff`). Signed `paneflow-0.1.0-aarch64-apple-darwin.dmg` + `.sha256`.
+Workflow run https://github.com/theaamgroup/paneflow/actions/runs/33010849870.
+The Sparkle appcast path is new in #119 and must receive its first full
+installed-update validation on the first Sparkle-enabled release.
 
 Related runbooks:
 
@@ -23,8 +25,8 @@ Related runbooks:
 Prerequisites (one-time, not part of the per-release cadence):
 
 - `gh` CLI authenticated with `repo` scope (`gh auth status`).
-- GitHub **secrets** and **variables** populated as in
-  [Required secrets and variables](#required-secrets-and-variables) below.
+- GitHub signing **secrets** populated as in
+  [Required signing material](#required-signing-material) below.
   The user adds these; the workflow does not create them.
 - A local macOS build environment: full Xcode plus the separately downloadable
   Metal toolchain. See the build prerequisites in `CLAUDE.md`.
@@ -33,8 +35,8 @@ The release workflow is a single signed `aarch64-apple-darwin` lane:
 
 | Job id | Runner | What it does |
 |---|---|---|
-| `build` | `macos-15` | `cargo fmt --check`, clippy, release binary, `.app`, Developer ID sign, notarize, staple, DMG, `.sha256` sibling |
-| `release` | `macos-15` | attach DMG + `.sha256`, publish the GitHub Release. Runs only on a `v*` tag push. |
+| `build` | `macos-15` | version guard, Rust gates, release binary, Sparkle-enabled `.app`, Developer ID sign, notarize, staple, DMG, `.sha256`, signed appcast |
+| `release` | `macos-15` | attach DMG + `.sha256` + `appcast.xml`, then publish the GitHub Release. Runs only on a `v*` tag push. |
 
 There is no Intel (`x86_64-apple-darwin`) leg. Dry-run is `workflow_dispatch` on
 the same `build` job; it skips `release`.
@@ -44,22 +46,75 @@ fed upstream's Linux packages, Windows Authenticode, and product analytics.
 
 ---
 
-## Required secrets and variables
+## Required signing material
 
-Populate these before the first tag. The first real tag is the end-to-end
-test of this path; a dry-run without secrets will build an unsigned `.app` and
-stop there.
+Populate these before the first Sparkle-enabled tag. That tag is the
+end-to-end test of the update path; a dry-run without Apple secrets will build
+an unsigned `.app` and stop there.
 
 ### Secrets the workflow reads
 
 | Secret | Where | Used by | What it is |
 |---|---|---|---|
-| `APPLE_DEVELOPER_CERT_P12` | repo Actions secrets | `scripts/sign-macos.sh` | Base64 of the exported Developer ID Application certificate + private key (`.p12`). The `P12` suffix is PKCS#12, not a truncated name — see below. |
-| `APPLE_DEVELOPER_CERT_PASSWORD` | repo Actions secrets | `scripts/sign-macos.sh` | Password set when exporting that `.p12`. Independent of the cert blob. |
-| `APPLE_ID` | repo Actions secrets | `scripts/notarize-macos.sh` | Apple Developer account email |
-| `APPLE_APP_SPECIFIC_PASSWORD` | repo Actions secrets | `scripts/notarize-macos.sh` | App-specific password from appleid.apple.com, **not** the Apple ID login password |
-| `APPLE_TEAM_ID` | repo Actions secrets | both Apple scripts | 10-character Team ID. `sign-macos.sh` hard-fails if the identity's common name does not contain `(TEAMID)`. |
+| `APPLE_DEVELOPER_CERT_P12` | repo Actions secret (legacy) | `scripts/sign-macos.sh` | Base64 of the exported Developer ID Application certificate + private key (`.p12`). The `P12` suffix is PKCS#12, not a truncated name — see below. |
+| `APPLE_DEVELOPER_CERT_PASSWORD` | repo Actions secret (legacy) | `scripts/sign-macos.sh` | Password set when exporting that `.p12`. Independent of the cert blob. |
+| `APPLE_ID` | repo Actions secret (legacy) | `scripts/notarize-macos.sh` | Apple Developer account email |
+| `APPLE_APP_SPECIFIC_PASSWORD` | repo Actions secret (legacy) | `scripts/notarize-macos.sh` | App-specific password from appleid.apple.com, **not** the Apple ID login password |
+| `APPLE_TEAM_ID` | repo Actions secret (legacy) | both Apple scripts | 10-character Team ID. `sign-macos.sh` hard-fails if the identity's common name does not contain `(TEAMID)`. |
+| `SPARKLE_PRIVATE_KEY` | `release` environment secret | `generate_appcast` | Base64 Ed25519 private seed exported by Sparkle's `generate_keys`. It signs the DMG enclosure and never enters the app bundle. |
 | `GITHUB_TOKEN` | injected by Actions | `gh release view` / `gh release edit` | Do **not** create this. The workflow requests `permissions: contents: write` so the default token can attach assets and undraft the release. |
+
+Generate the Sparkle key once, using the pinned tool the release consumes:
+
+```bash
+SPARKLE_DIST="$(scripts/sparkle-dist.sh)"
+"$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow
+"$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow -p
+"$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow \
+  -x /tmp/paneflow-sparkle-private-key
+
+gh secret set SPARKLE_PRIVATE_KEY -R theaamgroup/PaneFlow --env release \
+  < /tmp/paneflow-sparkle-private-key
+rm -P /tmp/paneflow-sparkle-private-key
+```
+
+Commit the printed public key as `SUPublicEDKey` in `assets/Info.plist`; it is
+not a secret or an Actions variable. The value in the plist and the private
+seed in `SPARKLE_PRIVATE_KEY` must always remain a pair.
+
+Keep all newly provisioned signing material in the `release` environment,
+whose deployment policy admits only `main` and `v*` tags. Never put new
+credentials in repository-wide Actions secrets: a branch-controlled workflow
+can otherwise read them without passing the release environment's ref policy.
+The environment also requires approval from the designated release owner, so
+both dry-runs and tag releases pause before the credential-bearing build job.
+The existing `APPLE_*` values predate that policy and remain repository-scoped
+until an owner re-enters them in the environment; GitHub does not expose stored
+secret values for an automated migration. Move them during the next Apple
+credential rotation, then delete the repository-scoped copies.
+
+For rotation, first ship a release whose plist trusts the replacement public
+key while releases are still signed by the old key. Wait for that bridge build
+to reach the installed fleet before switching the CI secret and retiring the
+old key. A one-step replacement strands every install that still trusts only
+the old key.
+
+The repository is public because Sparkle fetches the appcast and DMG without
+GitHub credentials. It was made public on 2026-08-30 only after gitleaks scanned
+all 1,399 commits and its ten findings were confirmed as false-positive
+`action_name` field literals. Do not make release assets private without first
+moving them and the appcast to an anonymous public mirror.
+
+Updater policy for the initial rollout:
+
+- No prompt, forced relaunch, release-notes window, Settings toggle, phased
+  rollout, or delta archives. A user who never quits intentionally remains on
+  the running version until the next ordinary quit/launch cycle.
+- `PANEFLOW_DISABLE_SPARKLE=1` is an exact-value diagnostic escape hatch used
+  by bundle render tests; it is not a `paneflow.json` product preference.
+- Roll back a bad release by pulling its appcast/release before more clients
+  stage it, then publishing a higher patch version that reverts the change.
+  Never republish a changed archive under an existing version or signature.
 
 ### `APPLE_DEVELOPER_CERT_P` diagnosis: split, not a typo
 
@@ -213,25 +268,31 @@ without anything actually being wrong.
 
 The `build` job runs, in order:
 
-1. `cargo fmt --check` (hard fail; the cheapest guard against burning a tagged
+1. Verify `${RELEASE_TAG#v}` matches the inherited `paneflow-app` Cargo version.
+   A mismatch fails before compilation.
+2. `cargo fmt --check` (hard fail; the cheapest guard against burning a tagged
    run).
-2. `cargo clippy --workspace --locked --target aarch64-apple-darwin -- -D warnings`.
-3. `cargo build --release --target aarch64-apple-darwin`. There is no
-   minisign pubkey bake; the in-app updater is deleted.
-4. `scripts/bundle-macos.sh` produces `dist/PaneFlow.app`.
-5. `Detect macOS signing secrets`. On a tag push, a missing `APPLE_*` secret is
+3. `cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings`.
+4. `cargo test --workspace --locked --target aarch64-apple-darwin`.
+5. `cargo build --release --target aarch64-apple-darwin`.
+6. `scripts/bundle-macos.sh` checksum-verifies the pinned Sparkle distribution,
+   embeds `Sparkle.framework`, and produces `dist/PaneFlow.app`.
+7. `Detect macOS signing secrets`. On a tag push, a missing `APPLE_*` secret is
    a hard failure here, not a downgrade to unsigned. Dry-run may continue
    unsigned and uploads `dist/PaneFlow.app` as a workflow artifact.
-6. `scripts/sign-macos.sh` codesigns it (nested dylibs, nested executables,
+8. `scripts/sign-macos.sh` codesigns it (Sparkle helpers inside-out, other
+   nested dylibs and executables,
    parent seal) with the hardened runtime and the release entitlements.
-7. `scripts/notarize-macos.sh` zips it with `ditto`, submits to `notarytool`,
+9. `scripts/notarize-macos.sh` zips it with `ditto`, submits to `notarytool`,
    polls, staples the ticket, and runs `spctl --assess`.
-8. `scripts/create-dmg.sh` builds
+10. `scripts/create-dmg.sh` builds
    `paneflow-<semver>-aarch64-apple-darwin.dmg` and independently re-verifies
    `codesign`, `stapler validate`, and `spctl` against the bundle mounted from
    the finished image. A `.sha256` sibling is staged next to it.
-9. The `release` job (tag-push only) attaches the DMG + `.sha256` and
-   publishes the GitHub Release.
+11. Sparkle's `generate_appcast` signs the DMG with `SPARKLE_PRIVATE_KEY`,
+    embeds GitHub-generated release notes, and stages `appcast.xml`.
+12. The `release` job (tag-push only) attaches all three assets, verifies the
+    exact remote asset set while the release is still a draft, then publishes.
 
 **Manual judgement:** a green run with a `::warning::` annotation on the signing
 or notarization leg deserves a read before you proceed. A warning there is often
@@ -257,6 +318,7 @@ gh release view vX.Y.Z --json assets --jq '.assets[].name' | sort
 Expected assets:
 
 ```
+appcast.xml
 paneflow-X.Y.Z-aarch64-apple-darwin.dmg
 paneflow-X.Y.Z-aarch64-apple-darwin.dmg.sha256
 ```

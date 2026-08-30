@@ -3,7 +3,7 @@ use std::fmt;
 use paneflow_ipc_client::IpcTransport;
 use serde_json::{json, Value};
 
-use crate::bridge::{Bridge, BridgeError};
+use crate::bridge::{Bridge, BridgeError, MAX_LINES};
 use crate::output::wrap_untrusted;
 
 #[derive(Debug)]
@@ -66,13 +66,14 @@ pub fn read<T: IpcTransport + ?Sized>(
         )));
     }
     let result = bridge
-        .read_surface(surface_id, None, None)
+        .read_surface(surface_id, Some(MAX_LINES), None)
         .map_err(ResourceError::Bridge)?;
     let header = format!(
-        "source=\"surface:{surface_id}\" {} total_lines=\"{}\" eof=\"{}\"",
+        "source=\"surface:{surface_id}\" {} total_lines=\"{}\" eof=\"{}\" truncated=\"{}\"",
         bridge.scope().attr(),
         result.total_lines,
-        result.eof
+        result.eof,
+        result.truncated
     );
     Ok(json!({
         "contents": [{
@@ -144,7 +145,7 @@ mod tests {
             .with("surface.list", json!({"surfaces": [surface(3)]}))
             .with(
                 "surface.read",
-                json!({"text": "ready", "total_lines": 1, "eof": true}),
+                json!({"text": "ready", "total_lines": 1, "eof": false, "truncated": true}),
             );
         let bridge = Bridge::new(&transport, BridgeScope::Workspace(42));
         let result = read("pane://surface/3/content", &bridge).expect("resource");
@@ -153,10 +154,19 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("ready"));
+        assert!(result["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("truncated=\"true\""));
         assert_eq!(
             transport.last_params("surface.read").unwrap()["workspace_id"],
             42
         );
+        assert_eq!(
+            transport.last_params("surface.read").unwrap()["lines"],
+            MAX_LINES
+        );
+        assert!(transport.last_params("surface.read").unwrap()["offset"].is_null());
 
         let invalid = read("file://nope", &bridge).expect_err("bad uri");
         assert!(matches!(invalid, ResourceError::NotFound(_)));

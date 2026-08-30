@@ -55,6 +55,7 @@ mod search;
 mod search_engine;
 mod settings;
 mod sidebar_title;
+mod sparkle;
 mod terminal;
 pub mod theme;
 mod ui_primitives;

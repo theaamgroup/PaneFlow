@@ -553,7 +553,7 @@ jobs:
           # line is our hard gate. The bundle path is preserved, so
           # Info.plist + Resources/ load correctly and Core Text sees
           # the same bundle context as a real install.
-          RUST_LOG=info "$APP/Contents/MacOS/paneflow" \
+          PANEFLOW_DISABLE_SPARKLE=1 RUST_LOG=info "$APP/Contents/MacOS/paneflow" \
             >paneflow.log 2>&1 &
           APP_PID=$!
 

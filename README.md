@@ -12,8 +12,9 @@ coordinate instead of work blind.
 It is written in Rust, renders through Metal, and stays on your machine.
 No Electron, no hosted agent runtime, nothing phoning home.
 
-This repository is a private, macOS-only fork owned by The AAM Group.
-There is no installer. Build it from source: **[INSTALL.md](INSTALL.md)**.
+This is The AAM Group's macOS-only PaneFlow fork. Download the signed,
+notarized DMG from the **[latest release](https://github.com/theaamgroup/PaneFlow/releases/latest)**,
+or build it from source with **[INSTALL.md](INSTALL.md)**.
 
 ## Why it exists
 

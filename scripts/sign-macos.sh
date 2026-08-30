@@ -158,10 +158,10 @@ fi
 # the children with the wrong entitlements (--deep) or leaves them unsigned
 # (which notarytool then rejects with "The binary is not signed").
 #
-# bundle-macos.sh today produces a flat bundle (Contents/MacOS/paneflow +
-# Contents/Resources/PaneFlow.icns), so the find loops below match nothing
-# and exit immediately. Kept in place so that when PaneFlow grows a helper
-# bundle (LSP sidecar, MCP host, ...), no signing-script change is required.
+# bundle-macos.sh includes Sparkle.framework. Sparkle's helpers require a
+# dedicated signing order and must not inherit PaneFlow's JIT/Apple-events
+# entitlements, so the generic walk skips that framework and the exact Sparkle
+# pass below follows the framework's distribution-signing guidance.
 #
 # Flags:
 #   --force        replace any prior signature (idempotent re-signs).
@@ -183,6 +183,7 @@ NESTED_PATTERNS=(
     "Contents/PlugIns"
     "Contents/XPCServices"
 )
+SPARKLE_FRAMEWORK="$APP/Contents/Frameworks/Sparkle.framework"
 
 # Apple TN3127: dylibs MUST be signed without --entitlements (notarytool
 # warns "entitlements are not valid for this file type" otherwise). Walk
@@ -198,6 +199,9 @@ for sub in "${NESTED_PATTERNS[@]}"; do
 
     # Pass 1: plain dylibs - sign WITHOUT --entitlements.
     while IFS= read -r -d '' nested; do
+        case "$nested" in
+            "$SPARKLE_FRAMEWORK"|"$SPARKLE_FRAMEWORK"/*) continue ;;
+        esac
         codesign \
             --force \
             --options runtime \
@@ -212,6 +216,9 @@ for sub in "${NESTED_PATTERNS[@]}"; do
     # OR with implicit -and. `! -name '*.dylib'` excludes dylibs that
     # carry the executable bit so pass 1 covers them exactly once.
     while IFS= read -r -d '' nested; do
+        case "$nested" in
+            "$SPARKLE_FRAMEWORK"|"$SPARKLE_FRAMEWORK"/*) continue ;;
+        esac
         codesign \
             --force \
             --options runtime \
@@ -226,6 +233,41 @@ for sub in "${NESTED_PATTERNS[@]}"; do
                     \( -type f -perm -u+x ! -name '*.dylib' \) \
                 \) -print0)
 done
+
+# Sparkle 2 distribution signing, inside-out. The Downloader service keeps
+# its upstream entitlements; the other helpers intentionally receive none.
+# PaneFlow is not sandboxed, so the XPC services are not enabled in Info.plist,
+# but signing the complete official framework keeps its sealed bundle valid.
+if [ -d "$SPARKLE_FRAMEWORK" ]; then
+    SPARKLE_VERSION_DIR="$SPARKLE_FRAMEWORK/Versions/B"
+    SPARKLE_INSTALLER="$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc"
+    SPARKLE_DOWNLOADER="$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc"
+    SPARKLE_AUTOUPDATE="$SPARKLE_VERSION_DIR/Autoupdate"
+    SPARKLE_UPDATER="$SPARKLE_VERSION_DIR/Updater.app"
+
+    for required in \
+        "$SPARKLE_INSTALLER" \
+        "$SPARKLE_DOWNLOADER" \
+        "$SPARKLE_AUTOUPDATE" \
+        "$SPARKLE_UPDATER"; do
+        [ -e "$required" ] || {
+            echo "error: incomplete Sparkle.framework; missing $required" >&2
+            exit 1
+        }
+    done
+
+    codesign --force --options runtime --timestamp \
+        --sign "$IDENTITY" "$SPARKLE_INSTALLER"
+    codesign --force --options runtime --timestamp \
+        --preserve-metadata=entitlements \
+        --sign "$IDENTITY" "$SPARKLE_DOWNLOADER"
+    codesign --force --options runtime --timestamp \
+        --sign "$IDENTITY" "$SPARKLE_AUTOUPDATE"
+    codesign --force --options runtime --timestamp \
+        --sign "$IDENTITY" "$SPARKLE_UPDATER"
+    codesign --force --options runtime --timestamp \
+        --sign "$IDENTITY" "$SPARKLE_FRAMEWORK"
+fi
 
 codesign \
     --force \
