@@ -177,6 +177,8 @@ pub(crate) fn compare_nodes(a: &FileNode, b: &FileNode) -> std::cmp::Ordering {
     })
 }
 
+const MAX_DIRECTORY_ENTRIES: usize = 2_000;
+
 /// Read a directory into sorted [`FileNode`]s. Non-panicking: an unreadable
 /// directory (permissions / removed) yields an empty listing rather than an
 /// error. `root` anchors the gitignore matcher so root-level patterns
@@ -217,6 +219,7 @@ pub(crate) fn read_dir_sorted(root: &Path, dir: &Path) -> Vec<FileNode> {
                 size,
             })
         })
+        .take(MAX_DIRECTORY_ENTRIES)
         .collect();
     nodes.sort_by(compare_nodes);
     nodes
@@ -642,5 +645,22 @@ mod tests {
         assert_eq!(sub.size, 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_dir_sorted_caps_large_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for index in 0..5_000 {
+            std::fs::write(tmp.path().join(format!("file-{index:04}.txt")), "")
+                .expect("write file");
+        }
+
+        let nodes = read_dir_sorted(tmp.path(), tmp.path());
+
+        assert!(
+            nodes.len() <= MAX_DIRECTORY_ENTRIES,
+            "listing contained {} entries",
+            nodes.len()
+        );
     }
 }

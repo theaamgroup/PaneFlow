@@ -4,15 +4,45 @@ use super::{
     HookInstall, HookInstallResult, HookInstallSkip, HookLease,
 };
 use paneflow_agent_config::{
-    config_dir, read_optional_text, with_config_lock, write_json_atomic, write_text_atomic,
+    home_dir, read_optional_text, with_config_lock, write_json_atomic, write_text_atomic,
 };
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../assets/opencode-paneflow-status.ts");
 
 fn opencode_config_dir() -> Option<PathBuf> {
-    config_dir().map(|directory| directory.join("opencode"))
+    opencode_config_dir_from(
+        home_dir(),
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("OPENCODE_CONFIG"),
+        std::env::var_os("OPENCODE_CONFIG_DIR"),
+    )
+}
+
+fn opencode_config_dir_from(
+    home: Option<PathBuf>,
+    xdg_config_home: Option<OsString>,
+    opencode_config: Option<OsString>,
+    opencode_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(config) = opencode_config
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return config.parent().map(Path::to_path_buf);
+    }
+    if let Some(directory) = opencode_config_dir
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Some(directory);
+    }
+    xdg_config_home
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| home.map(|directory| directory.join(".config")))
+        .map(|directory| directory.join("opencode"))
 }
 
 pub(crate) struct OpenCodePluginGuard {
@@ -185,6 +215,42 @@ fn is_paneflow_plugin_entry(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_config_dir_matches_xdg_not_application_support() {
+        let home = Some(PathBuf::from("/Users/alice"));
+        assert_eq!(
+            opencode_config_dir_from(
+                home.clone(),
+                Some(OsString::from("/Users/alice/.config")),
+                None,
+                None,
+            ),
+            Some(PathBuf::from("/Users/alice/.config/opencode")),
+        );
+        assert_eq!(
+            opencode_config_dir_from(
+                home.clone(),
+                None,
+                Some(OsString::from("/tmp/custom/opencode.json")),
+                Some(OsString::from("/tmp/ignored")),
+            ),
+            Some(PathBuf::from("/tmp/custom")),
+        );
+        assert_eq!(
+            opencode_config_dir_from(
+                home.clone(),
+                None,
+                None,
+                Some(OsString::from("/tmp/opencode")),
+            ),
+            Some(PathBuf::from("/tmp/opencode")),
+        );
+        assert_eq!(
+            opencode_config_dir_from(home, None, None, None),
+            Some(PathBuf::from("/Users/alice/.config/opencode")),
+        );
+    }
 
     #[test]
     fn primary_config_survives_invalid_utf8() {

@@ -28,6 +28,9 @@ mod scope_header;
 mod syntax;
 mod view;
 
+#[cfg(test)]
+pub(crate) use git::tests::{capture_logs, captured_logs_contain};
+
 // Only the host view + its seed type are consumed outside this module
 // (`pane::PaneSurface::Diff`, `event_handlers::open_multi_diff_for_repo`). The
 // engine / git / rows types stay crate-internal, reached via `super::` paths.

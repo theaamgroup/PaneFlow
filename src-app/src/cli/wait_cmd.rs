@@ -105,7 +105,7 @@ pub fn wait(
             if mode == MatchMode::All && all_matches.contains_key(&id) {
                 continue;
             }
-            match read_matches_since(client, id, &re, baselines.get(&id).and_then(|b| b.as_ref()))?
+            match poll_matches_since(client, id, &re, baselines.get(&id).and_then(|b| b.as_ref()))?
             {
                 PaneState::Matched(lines) => {
                     alive += 1;
@@ -263,6 +263,31 @@ fn read_matches_since(
     } else {
         PaneState::NoMatch
     })
+}
+
+/// Read during an established wait. Once the baseline is known, transient IPC
+/// backpressure or transport failures can safely skip one poll without making
+/// existing scrollback eligible to match.
+fn poll_matches_since(
+    client: &impl IpcTransport,
+    id: u64,
+    re: &Regex,
+    baseline: Option<&ReadSnapshot>,
+) -> Result<PaneState, CliError> {
+    match read_matches_since(client, id, re, baseline) {
+        Err(e) if is_transient_read_error(&e.message) => Ok(PaneState::NoMatch),
+        result => result,
+    }
+}
+
+fn is_transient_read_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("-32000")
+        || lower.contains("-32002")
+        || lower.contains("busy")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("unreachable")
 }
 
 fn new_text_since_baseline(baseline: &str, current: &str) -> String {
@@ -503,8 +528,8 @@ fn wait_idle_poll(
     baseline: Option<&ReadSnapshot>,
 ) -> Result<i32, CliError> {
     let deadline = Instant::now() + timeout;
-    let mut last_snapshot = match read_snapshot(client, id)? {
-        Some(s) => s,
+    let mut last_snapshot = match baseline {
+        Some(snapshot) => snapshot.clone(),
         None => {
             return Err(CliError::runtime(
                 "target pane closed before idle wait started",
@@ -515,8 +540,22 @@ fn wait_idle_poll(
     loop {
         sleep(Duration::from_millis(IDLE_SLICE_CAP_MS));
         let past_deadline = Instant::now() >= deadline;
-        let Some(current) = read_snapshot(client, id)? else {
-            return Err(CliError::runtime("target pane closed before it went idle"));
+        let current = match read_snapshot(client, id) {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                return Err(CliError::runtime("target pane closed before it went idle"));
+            }
+            Err(e) if is_transient_read_error(&e.message) => {
+                if past_deadline {
+                    eprintln!(
+                        "paneflow: timeout after {}s waiting for surface {id} to go idle",
+                        timeout.as_secs()
+                    );
+                    return Ok(EXIT_TIMEOUT);
+                }
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         let changed = match (current.output_generation, last_snapshot.output_generation) {
             (Some(current), Some(previous)) => current > previous,
@@ -691,6 +730,48 @@ mod tests {
         };
         let err = wait(&fake, "1", "DONE", Some(5), MatchMode::Single).unwrap_err();
         assert!(err.message.contains("overloaded"), "got: {}", err.message);
+    }
+
+    /// A successful baseline makes later read failures safe to retry: the
+    /// baseline still prevents old text from satisfying the wait once IPC
+    /// recovers.
+    struct LaterReadOverload {
+        reads: std::cell::Cell<u64>,
+    }
+    impl IpcTransport for LaterReadOverload {
+        fn call(&self, method: &str, _params: Value) -> Result<Value, String> {
+            match method {
+                "surface.list" => Ok(json!({
+                    "surfaces": [{ "surface_id": 1u64, "name": "agent", "cmd": "claude", "cwd": "/tmp" }]
+                })),
+                "surface.read" => {
+                    let n = self.reads.get() + 1;
+                    self.reads.set(n);
+                    match n {
+                        1 => Ok(json!({ "text": "", "output_generation": n })),
+                        2 => Err("server error -32000: overloaded".to_string()),
+                        3 => Err(
+                            "paneflow IPC unreachable (paneflow did not respond within 10s)"
+                                .to_string(),
+                        ),
+                        _ => Ok(json!({
+                            "text": "Build DONE in 3s\n",
+                            "output_generation": n
+                        })),
+                    }
+                }
+                other => Err(format!("unexpected method {other}")),
+            }
+        }
+    }
+
+    #[test]
+    fn wait_retries_transient_read_errors_until_deadline() {
+        let fake = LaterReadOverload {
+            reads: std::cell::Cell::new(0),
+        };
+        let code = wait(&fake, "1", "DONE", Some(2), MatchMode::Single).expect("ok");
+        assert_eq!(code, EXIT_OK);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::{PaneFlowApp, SettingsSection, config_writer, keybindings};
 /// before decrementing so a tick cannot observe `in_flight == 0` with a stale
 /// `last_persist_gen`.
 #[must_use]
-struct ConfigPersistInFlight {
+pub(crate) struct ConfigPersistInFlight {
     persist_gen: u64,
     last_persist_gen: Arc<AtomicU64>,
     in_flight: Arc<AtomicUsize>,
@@ -177,7 +177,7 @@ impl PaneFlowApp {
 
     /// Mark a settings persist in-flight and assign its generation. Call
     /// immediately before spawning the off-thread write.
-    fn begin_config_persist(&self) -> ConfigPersistInFlight {
+    pub(crate) fn begin_config_persist(&self) -> ConfigPersistInFlight {
         self.config_persist_in_flight.fetch_add(1, Ordering::SeqCst);
         let persist_gen = self.config_persist_seq.fetch_add(1, Ordering::SeqCst) + 1;
         ConfigPersistInFlight {

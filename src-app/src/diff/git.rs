@@ -199,7 +199,10 @@ pub fn list_worktrees(repo_dir: &Path) -> Result<Vec<Worktree>, String> {
 pub fn list_repo_worktrees(repo_dir: &Path) -> Vec<(PathBuf, String)> {
     let worktrees = match list_worktrees(repo_dir) {
         Ok(w) => w,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            log::warn!("git: failed to list repository worktrees: {e}");
+            return Vec::new();
+        }
     };
     worktrees
         .into_iter()
@@ -934,8 +937,70 @@ fn compute_file_stats_against(worktree_dir: &Path, base: &str) -> HashMap<String
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::sync::{Mutex, Once};
+
+    struct TestLogger {
+        records: Mutex<Vec<(log::Level, String)>>,
+    }
+
+    impl log::Log for TestLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                self.records
+                    .lock()
+                    .expect("test logger lock poisoned")
+                    .push((record.level(), record.args().to_string()));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static TEST_LOGGER: TestLogger = TestLogger {
+        records: Mutex::new(Vec::new()),
+    };
+
+    pub(crate) fn capture_logs() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            log::set_logger(&TEST_LOGGER).expect("test logger should initialize once");
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+    }
+
+    pub(crate) fn captured_logs_contain(needle: &str) -> bool {
+        TEST_LOGGER
+            .records
+            .lock()
+            .expect("test logger lock poisoned")
+            .iter()
+            .any(|(_, message)| message.contains(needle))
+    }
+
+    #[test]
+    fn list_repo_worktrees_warns_when_git_fails() {
+        capture_logs();
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+
+        assert!(list_repo_worktrees(&missing).is_empty());
+
+        let records = TEST_LOGGER
+            .records
+            .lock()
+            .expect("test logger lock poisoned");
+        assert!(records.iter().any(|(level, message)| {
+            *level == log::Level::Warn
+                && message.contains("git: failed to list repository worktrees")
+                && message.contains("git worktree failed")
+        }));
+    }
 
     #[test]
     fn parse_worktrees_basic() {

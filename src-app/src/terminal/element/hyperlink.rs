@@ -8,6 +8,7 @@
 //! Both return `HyperlinkZone`; the scheme allowlist (`is_url_scheme_openable`)
 //! guards what `TerminalView` will actually open.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -262,6 +263,13 @@ fn expand_tilde_path(path_str: &str) -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(rest))
 }
 
+#[cfg(test)]
+thread_local! {
+    static RECORDED_PATH_PROBES: std::cell::RefCell<Option<Vec<String>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// Resolve `path_str` against `cwd` and canonicalize the result. Returns the
 /// canonical absolute path when:
 /// - the candidate is a POSIX or Windows absolute path that exists, or
@@ -273,6 +281,12 @@ fn expand_tilde_path(path_str: &str) -> Option<PathBuf> {
 /// passed to `open::that`, so the user opens the actual resolved target rather
 /// than a misleading traversal path printed by the terminal.
 fn resolve_path(path_str: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(test)]
+    RECORDED_PATH_PROBES.with(|probes| {
+        if let Some(probes) = probes.borrow_mut().as_mut() {
+            probes.push(path_str.to_owned());
+        }
+    });
     let candidate = if let Some(expanded) = expand_tilde_path(path_str) {
         expanded
     } else if is_posix_absolute(path_str) || is_windows_absolute(path_str) {
@@ -321,6 +335,20 @@ fn validated_path_candidate(
         return None;
     }
     Some(resolved)
+}
+
+fn validated_path_candidate_cached<'a>(
+    cache: &mut HashMap<&'a str, Option<PathBuf>>,
+    path_str: &'a str,
+    cwd: Option<&Path>,
+    extension_ok: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(resolved) = cache.get(path_str) {
+        return resolved.clone();
+    }
+    let resolved = validated_path_candidate(path_str, cwd, extension_ok);
+    cache.insert(path_str, resolved.clone());
+    resolved
 }
 
 fn char_span_for_bytes(
@@ -385,6 +413,7 @@ pub fn detect_file_paths_on_line_mapped(
     cwd: Option<&Path>,
 ) -> Vec<HyperlinkZone> {
     let mut zones = Vec::new();
+    let mut candidate_cache = HashMap::new();
     for ext_match in markdown_extension_regex().find_iter(line_text) {
         let path_end = ext_match.end();
         if !extension_tail_ok(line_text, path_end) {
@@ -392,9 +421,12 @@ pub fn detect_file_paths_on_line_mapped(
         }
         for start in candidate_start_positions(line_text, ext_match.start()) {
             let candidate = &line_text[start..path_end];
-            let Some(resolved) =
-                validated_path_candidate(candidate, cwd, canonical_has_md_extension)
-            else {
+            let Some(resolved) = validated_path_candidate_cached(
+                &mut candidate_cache,
+                candidate,
+                cwd,
+                canonical_has_md_extension,
+            ) else {
                 continue;
             };
             if let Some(zone) = zone_for_candidate(
@@ -591,13 +623,19 @@ pub fn detect_code_paths_on_line_mapped(
     // win on the quoted path. The generic scan below also matches the bare
     // filename but with no line number; the hover `find` returns the first
     // (Python) match, which carries the correct line.
+    let mut candidate_cache = HashMap::new();
     let mut zones: Vec<HyperlinkZone> = python_traceback_regex()
         .captures_iter(line_text)
         .filter_map(|cap| {
             let path_m = cap.name("path")?;
             let path_str = path_m.as_str();
             let line_no = cap.name("line")?.as_str().parse::<u32>().ok()?;
-            let resolved = validated_path_candidate(path_str, cwd, canonical_has_code_extension)?;
+            let resolved = validated_path_candidate_cached(
+                &mut candidate_cache,
+                path_str,
+                cwd,
+                canonical_has_code_extension,
+            )?;
             zone_for_candidate(
                 line_text,
                 line,
@@ -623,9 +661,12 @@ pub fn detect_code_paths_on_line_mapped(
         for start in candidate_start_positions(line_text, ext_match.start()) {
             let matched = &line_text[start..display_end];
             let (path_str, line_no, col_no) = split_path_and_location(matched);
-            let Some(resolved) =
-                validated_path_candidate(path_str, cwd, canonical_has_code_extension)
-            else {
+            let Some(resolved) = validated_path_candidate_cached(
+                &mut candidate_cache,
+                path_str,
+                cwd,
+                canonical_has_code_extension,
+            ) else {
                 continue;
             };
             if let Some(zone) = zone_for_candidate(
@@ -662,6 +703,20 @@ mod tests {
     /// Builds a 1-to-1 char→column map for ASCII-only test text.
     fn ascii_map(text: &str) -> Vec<usize> {
         (0..text.chars().count()).collect()
+    }
+
+    fn record_path_probes<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        RECORDED_PATH_PROBES.with(|probes| {
+            assert!(probes.borrow_mut().replace(Vec::new()).is_none());
+        });
+        let output = f();
+        let probes = RECORDED_PATH_PROBES.with(|probes| {
+            probes
+                .borrow_mut()
+                .take()
+                .expect("path probe recording must be active")
+        });
+        (output, probes)
     }
 
     // ── US-020: URL trailing-punctuation / unbalanced-paren trimming ────────
@@ -879,6 +934,30 @@ mod tests {
         let map = ascii_map(&line_text);
         let zones = detect_file_paths_on_line_mapped(&line_text, line0(), &map, None);
         assert!(zones.is_empty());
+    }
+
+    #[test]
+    fn detect_file_paths_on_line_mapped_probes_each_unique_candidate_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let line_text = std::iter::repeat_n("foo00.md", 50)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let map = ascii_map(&line_text);
+
+        let (zones, probes) = record_path_probes(|| {
+            detect_file_paths_on_line_mapped(&line_text, line0(), &map, Some(tmp.path()))
+        });
+        let unique_probe_count = probes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+
+        assert!(zones.is_empty());
+        assert_eq!(
+            probes.len(),
+            unique_probe_count,
+            "each unique candidate must cause at most one filesystem probe"
+        );
     }
 
     #[test]

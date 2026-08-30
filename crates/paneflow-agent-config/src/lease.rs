@@ -1,6 +1,10 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCK_RETRY: Duration = Duration::from_millis(25);
 
 /// Crash-safe lifetime lease for an agent configuration resource.
 ///
@@ -33,7 +37,25 @@ impl ConfigLease {
             .create(true)
             .truncate(false)
             .open(path)?;
-        file.lock_shared()?;
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match file.try_lock_shared() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return Err(Error::new(
+                            ErrorKind::TimedOut,
+                            format!(
+                                "timed out waiting for the Paneflow config lease for {}",
+                                resource.display()
+                            ),
+                        ));
+                    }
+                    std::thread::sleep(LOCK_RETRY);
+                }
+                Err(TryLockError::Error(error)) => return Err(error),
+            }
+        }
         Ok(Self {
             file: Some(file),
             marker,
@@ -148,6 +170,28 @@ mod tests {
         let mut survivor = ConfigLease::acquire(&resource).unwrap();
         let mut last = survivor.try_take_last().unwrap().unwrap();
         assert!(last.take_created().unwrap());
+    }
+
+    #[test]
+    fn acquire_times_out_when_exclusive_lock_held() {
+        let resource = unique_resource("timeout");
+        let mut lease = ConfigLease::acquire(&resource).unwrap();
+        let last = lease.try_take_last().unwrap().unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            result_tx
+                .send(ConfigLease::acquire(&resource).map(|_| ()))
+                .unwrap();
+        });
+
+        let result = result_rx
+            .recv_timeout(LOCK_TIMEOUT + Duration::from_millis(500))
+            .expect("lease acquisition did not respect its timeout");
+        drop(last);
+        contender.join().unwrap();
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
     }
 
     fn unique_resource(label: &str) -> PathBuf {

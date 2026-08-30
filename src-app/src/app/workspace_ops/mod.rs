@@ -1761,6 +1761,11 @@ impl PaneFlowApp {
             self.show_toast("Workspace no longer exists", cx);
             return;
         };
+        if self.workspaces[idx].active_tab().is_zoomed() {
+            self.push_closed_record(ClosedRecord::Pane(record), cx);
+            self.show_toast("Unzoom before splitting panes", cx);
+            return;
+        }
         self.active_idx = idx;
         let ws_id = record.workspace_id;
         let surface = restore_closed_surface_record(&record.surface, ws_id, cx);
@@ -2537,6 +2542,36 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_close_pane_refuses_split_when_zoomed_and_keeps_record() {
+        let src = include_str!("mod.rs");
+        let restore = src
+            .split("fn restore_closed_pane(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn restore_closed_tab_record(").next())
+            .expect("restore_closed_pane body");
+        let zoom_guard = restore
+            .find("active_tab().is_zoomed()")
+            .expect("undo-close must inspect the destination tab's zoom state");
+        let surface_restore = restore
+            .find("restore_closed_surface_record(")
+            .expect("closed surface reconstruction site");
+        assert!(
+            zoom_guard < surface_restore,
+            "zoom refusal must happen before recreating a PTY or pane: {restore}"
+        );
+        let refusal_end = restore[zoom_guard..]
+            .find("return;")
+            .map(|offset| zoom_guard + offset + "return;".len())
+            .expect("zoom refusal return");
+        let refusal = &restore[zoom_guard..refusal_end];
+        assert!(
+            refusal.contains("push_closed_record(ClosedRecord::Pane(record)")
+                && refusal.contains("Unzoom before splitting panes"),
+            "the popped record must be restored before the zoom toast: {refusal}"
+        );
+    }
 
     #[test]
     fn pending_keep_dominates_a_matching_live_auto_owner() {

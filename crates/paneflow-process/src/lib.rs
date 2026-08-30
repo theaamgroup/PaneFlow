@@ -12,7 +12,7 @@
 
 use std::error::Error;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::OnceLock;
@@ -555,19 +555,61 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<()> {
     // A missing or dead reaper is not worth failing the launch over: the child
     // is already running and the caller wanted it running. Dropping the handle
     // here is exactly the pre-existing behavior.
-    if let Some(sender) = DETACHED_REAPER.get_or_init(start_detached_reaper).as_ref() {
-        let _ = sender.send(child);
-    }
+    let sender = DETACHED_REAPER.get_or_init(start_detached_reaper).as_ref();
+    send_to_detached_reaper(sender, child, &mut io::stderr().lock());
     Ok(())
 }
 
 fn start_detached_reaper() -> Option<mpsc::Sender<Child>> {
+    let mut diagnostic = io::stderr().lock();
+    start_detached_reaper_with(
+        |receiver| {
+            thread::Builder::new()
+                .name("paneflow-detached-reaper".to_owned())
+                .spawn(move || reap_detached_children(&receiver))
+        },
+        &mut diagnostic,
+    )
+}
+
+fn start_detached_reaper_with<F, W>(spawn: F, diagnostic: &mut W) -> Option<mpsc::Sender<Child>>
+where
+    F: FnOnce(Receiver<Child>) -> io::Result<thread::JoinHandle<()>>,
+    W: Write,
+{
     let (sender, receiver) = mpsc::channel::<Child>();
-    thread::Builder::new()
-        .name("paneflow-detached-reaper".to_owned())
-        .spawn(move || reap_detached_children(&receiver))
-        .ok()
-        .map(|_| sender)
+    match spawn(receiver) {
+        Ok(_) => Some(sender),
+        Err(error) => {
+            let _ = writeln!(
+                diagnostic,
+                "paneflow-process warning: detached reaper thread could not be started: {error}"
+            );
+            None
+        }
+    }
+}
+
+fn send_to_detached_reaper<T, W>(sender: Option<&mpsc::Sender<T>>, child: T, diagnostic: &mut W)
+where
+    W: Write,
+{
+    match sender {
+        Some(sender) => {
+            if let Err(error) = sender.send(child) {
+                let _ = writeln!(
+                    diagnostic,
+                    "paneflow-process warning: detached child could not be sent to reaper: {error}"
+                );
+            }
+        }
+        None => {
+            let _ = writeln!(
+                diagnostic,
+                "paneflow-process warning: detached reaper is unavailable; child will not be reaped"
+            );
+        }
+    }
 }
 
 /// Hold every spawned child until it exits.
@@ -738,6 +780,26 @@ mod tests {
         let err = spawn_detached(&mut Command::new("paneflow-no-such-binary-4f2a"))
             .expect_err("a missing binary must surface as a spawn error");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn detached_reaper_failures_emit_warnings() {
+        let mut diagnostic = Vec::new();
+        let reaper = start_detached_reaper_with(
+            |_| Err(io::Error::other("test thread spawn failure")),
+            &mut diagnostic,
+        );
+        assert!(reaper.is_none());
+
+        let (sender, receiver) = mpsc::channel::<()>();
+        drop(receiver);
+        send_to_detached_reaper(Some(&sender), (), &mut diagnostic);
+        send_to_detached_reaper(None, (), &mut diagnostic);
+
+        let diagnostic = String::from_utf8(diagnostic).expect("diagnostic must be UTF-8");
+        assert!(diagnostic.contains("test thread spawn failure"));
+        assert!(diagnostic.contains("could not be sent to reaper"));
+        assert!(diagnostic.contains("reaper is unavailable"));
     }
 
     #[cfg(unix)]

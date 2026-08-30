@@ -251,6 +251,10 @@ impl PaneFlowApp {
             self.launch_pad_set_error("No git repository for this workspace", cx);
             return;
         };
+        if ws.active_tab().is_zoomed() {
+            self.launch_pad_set_error("Unzoom before splitting panes", cx);
+            return;
+        }
         if ws.active_tab().root.is_none() || !ws.active_tab().can_add_pane() {
             self.launch_pad_set_error(format!("Maximum pane count reached ({MAX_PANES})"), cx);
             return;
@@ -507,6 +511,20 @@ impl PaneFlowApp {
                 cx,
             );
             self.spawn_persisted_worktree_teardown(vec![reservation], cx);
+            return;
+        }
+
+        // The active tab can change or become zoomed while the worktree is
+        // created off-thread. Refuse before spawning a PTY into the temporary
+        // zoom tree, but make the already-created checkout explicit.
+        if self.workspaces[ws_idx].active_tab().is_zoomed() {
+            self.launch_pad_set_error(
+                format!(
+                    "Unzoom before splitting panes - worktree created at {}",
+                    plan.worktree_path.display()
+                ),
+                cx,
+            );
             return;
         }
 
@@ -846,6 +864,55 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_pad_refuses_split_when_zoomed() {
+        let src = include_str!("launch_pad.rs");
+        let confirm = src
+            .split("pub(crate) fn launch_pad_confirm(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn launch_pad_begin_creation(").next())
+            .expect("launch_pad_confirm body");
+        let zoom_guard = confirm
+            .find("ws.active_tab().is_zoomed()")
+            .expect("Launch Pad must refuse zoom before starting worktree creation");
+        let start = confirm
+            .find("lp.running = true")
+            .expect("Launch Pad running transition");
+        assert!(
+            zoom_guard < start,
+            "zoom refusal must happen before worktree creation starts: {confirm}"
+        );
+        assert!(
+            confirm[zoom_guard..start].contains("Unzoom before splitting panes"),
+            "the early refusal must use the standard split message"
+        );
+
+        let finish = src
+            .split("fn launch_pad_finish(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn handle_launch_pad_key_down")
+                    .next()
+            })
+            .expect("launch_pad_finish body");
+        let late_guard = finish
+            .find("active_tab().is_zoomed()")
+            .expect("completion must re-check zoom after asynchronous worktree creation");
+        let terminal = finish
+            .find("let new_terminal")
+            .expect("terminal creation site");
+        assert!(
+            late_guard < terminal,
+            "a tab may become zoomed during creation, so re-check before spawning its PTY"
+        );
+        let refusal = &finish[late_guard..terminal];
+        assert!(
+            refusal.contains("Unzoom before splitting panes")
+                && refusal.contains("worktree created at"),
+            "a late refusal must explain both the required action and the checkout left behind"
+        );
+    }
 
     #[test]
     fn launch_pad_plan_uses_hashed_path_when_slug_path_is_claimed() {

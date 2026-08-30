@@ -983,6 +983,10 @@ struct PaneFlowApp {
     /// Monotonic settings-persist generation. `persist_setting` `fetch_add`s
     /// before spawning the off-thread write, matching [`Self::save_seq`].
     config_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Coalescing token for full-array workspace-template writes. This is
+    /// separate from `config_persist_seq` because a later single-field write
+    /// does not carry the commands snapshot and therefore cannot supersede it.
+    workspace_commands_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Off-thread settings writes that have spawned but not finished. A
     /// ConfigWatcher reload is ignored while this is non-zero so write N's
     /// file cannot replace in-memory write N+1.
@@ -1134,6 +1138,8 @@ struct PaneFlowApp {
     /// Receiver for raw watch events, drained + debounced by the background
     /// loop in `bootstrap`. `Some` only while a watcher is installed.
     files_event_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
+    /// Invalidates detached Files tree hydration stages from an older open.
+    files_hydrate_generation: u64,
     /// Open right-click context menu for a Files-sidebar row (EP-003 US-009),
     /// or `None` when closed. Mutually exclusive with the other popovers.
     files_menu_open: Option<FilesContextMenu>,

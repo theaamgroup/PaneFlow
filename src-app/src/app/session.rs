@@ -1034,7 +1034,11 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
     match serde_json::to_string_pretty(state) {
         Ok(json) => {
             let tmp_path = session_tmp_path(path);
-            match std::fs::write(&tmp_path, &json) {
+            let write_result = std::fs::File::create(&tmp_path).and_then(|mut temporary| {
+                std::io::Write::write_all(&mut temporary, json.as_bytes())?;
+                temporary.sync_all()
+            });
+            match write_result {
                 Ok(()) => {
                     if let Err(e) = std::fs::rename(&tmp_path, path) {
                         log::warn!("session save rename failed: {e}");
@@ -1158,7 +1162,13 @@ fn rotate_corruption_backups(dir: &Path, stem: &str) {
                     .is_some_and(|n| n.starts_with(&prefix))
             })
             .collect(),
-        Err(_) => return,
+        Err(e) => {
+            log::warn!(
+                "session backup rotation: could not list {}: {e}",
+                dir.display()
+            );
+            return;
+        }
     };
 
     if backups.len() <= MAX_CORRUPTION_BACKUPS {
@@ -1706,6 +1716,28 @@ mod tests {
         assert!(session_path.exists());
     }
 
+    #[test]
+    fn corruption_backup_rotation_warns_when_directory_cannot_be_listed() {
+        crate::diff::capture_logs();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let not_a_directory = tmp.path().join("session-backups");
+        std::fs::write(&not_a_directory, b"not a directory").expect("seed file");
+        let read_error = std::fs::read_dir(&not_a_directory)
+            .expect_err("a file cannot be listed as a directory")
+            .to_string();
+
+        rotate_corruption_backups(&not_a_directory, "session.json");
+
+        assert!(
+            crate::diff::captured_logs_contain(&not_a_directory.display().to_string()),
+            "warning should identify the directory that could not be listed"
+        );
+        assert!(
+            crate::diff::captured_logs_contain(&read_error),
+            "warning should include the read_dir error"
+        );
+    }
+
     /// US-011 AC: a burst of `save_session` calls (e.g. closing 20 workspaces)
     /// must coalesce to a single disk write - only the most-recent snapshot
     /// wins. This guards the `save_seq` monotonic-token predicate that the
@@ -1884,6 +1916,25 @@ mod tests {
             paneflow_config::schema::SESSION_SCHEMA_VERSION
         );
         assert!(loaded.workspaces.is_empty());
+    }
+
+    #[test]
+    fn write_session_json_syncs_temp_before_rename() {
+        let source = include_str!("session.rs");
+        let write_fn = source
+            .split_once("fn write_session_json_inner")
+            .expect("write_session_json_inner definition")
+            .1
+            .split_once("fn session_corruption_toast_message")
+            .expect("end of write_session_json_inner")
+            .0;
+        let sync = write_fn
+            .find("sync_all")
+            .expect("session temp file must be synced before publication");
+        let rename = write_fn
+            .find("std::fs::rename")
+            .expect("session temp file must be atomically published");
+        assert!(sync < rename, "temp-file sync must happen before rename");
     }
 
     #[test]

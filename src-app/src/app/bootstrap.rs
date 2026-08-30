@@ -698,6 +698,9 @@ impl PaneFlowApp {
             save_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_corruption,
             config_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            workspace_commands_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            )),
             config_persist_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config_last_persist_gen,
             // US-014: hydrate the render-path config cache once at startup.
@@ -772,6 +775,7 @@ impl PaneFlowApp {
             files_surface_id: None,
             files_watcher: None,
             files_event_rx: None,
+            files_hydrate_generation: 0,
             files_menu_open: None,
             toast: None,
             toast_queue: std::collections::VecDeque::new(),

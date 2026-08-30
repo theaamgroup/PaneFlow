@@ -670,6 +670,16 @@ impl PaneFlowApp {
                     return;
                 };
 
+                if edge.is_some()
+                    && self.workspaces[ws_idx]
+                        .tabs()
+                        .get(tab_idx)
+                        .is_some_and(|tab| tab.is_zoomed())
+                {
+                    self.show_toast("Unzoom before splitting panes", cx);
+                    return;
+                }
+
                 // A split adds one pane to the current tab - refuse at the cap
                 // (edge case #5). A center drop opens its own workspace tab, so
                 // it does not grow this tab's count and isn't capped here.
@@ -1834,6 +1844,30 @@ mod tests {
     use crate::terminal::ServiceInfo;
     use crate::workspace::{PaneScan, PortEntry};
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn session_drop_edge_split_refuses_when_zoomed() {
+        let src = include_str!("event_handlers.rs");
+        let handler = src
+            .split("pane::PaneEvent::DropSessionSplit {")
+            .nth(1)
+            .and_then(|rest| rest.split("pane::PaneEvent::DropPaneMove {").next())
+            .expect("DropSessionSplit handler");
+        let zoom_guard = handler
+            .find("tab.is_zoomed()")
+            .expect("edge session drops must inspect the owning tab's zoom state");
+        let terminal = handler
+            .find("let term = cx.new")
+            .expect("session terminal creation site");
+        assert!(
+            zoom_guard < terminal,
+            "zoom refusal must happen before creating the resumed terminal: {handler}"
+        );
+        assert!(
+            handler[zoom_guard..terminal].contains("Unzoom before splitting panes"),
+            "drop refusal must use the standard split toast"
+        );
+    }
 
     #[test]
     fn same_process_pinned_missing_current_does_not_match() {

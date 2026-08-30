@@ -114,6 +114,17 @@ fn parse_terminal_profile(value: Option<&serde_json::Value>) -> TerminalSurfaceP
     }
 }
 
+fn surface_split_root(tab: &crate::workspace::Tab) -> Result<&LayoutTree, JsonRpcError> {
+    if tab.is_zoomed() {
+        return Err(JsonRpcError::invalid_params(
+            "Unzoom before splitting panes",
+        ));
+    }
+    tab.root
+        .as_ref()
+        .ok_or_else(|| JsonRpcError::invalid_params("Workspace has no root"))
+}
+
 pub(crate) fn parse_workspace_pane_plan(
     spec: &serde_json::Value,
 ) -> Result<PlannedPane, JsonRpcError> {
@@ -3337,8 +3348,9 @@ impl PaneFlowApp {
                 let Some(tab) = ws.tabs().get(tab_idx) else {
                     return JsonRpcError::invalid_params("Workspace has no root").into_value();
                 };
-                let Some(root) = tab.root.as_ref() else {
-                    return JsonRpcError::invalid_params("Workspace has no root").into_value();
+                let root = match surface_split_root(tab) {
+                    Ok(root) => root,
+                    Err(err) => return err.into_value(),
                 };
                 if !tab.can_add_pane() {
                     return JsonRpcError::invalid_params("Maximum pane count reached").into_value();
@@ -6416,6 +6428,46 @@ mod tests {
         });
         assert_eq!(value["tab_id"], back_tab_id);
         assert_eq!(value["tab_title"], "background");
+    }
+
+    #[gpui::test]
+    fn surface_split_refuses_when_tab_is_zoomed(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let cx = cx.add_empty_window();
+        let make_pane = |cx: &mut gpui::VisualTestContext| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| Pane::new(terminal, 1, cx))
+        };
+        let left = make_pane(cx);
+        let right = make_pane(cx);
+        let full = crate::layout::LayoutTree::from_panes_equal(
+            SplitDirection::Vertical,
+            vec![left.clone(), right],
+        )
+        .expect("two panes make a layout");
+        let saved_leaf_count = full.leaf_count();
+        let mut tab =
+            crate::workspace::Tab::new("zoomed", Some(crate::layout::LayoutTree::Leaf(left)));
+        tab.saved_layout = Some(full);
+
+        let error = surface_split_root(&tab)
+            .err()
+            .expect("surface.split must refuse a zoomed tab");
+        assert_eq!(error.code, JsonRpcError::INVALID_PARAMS);
+        assert_eq!(error.message, "Unzoom before splitting panes");
+
+        cx.update(|_, cx| {
+            tab.exit_zoom(cx);
+        });
+        assert_eq!(
+            tab.root
+                .as_ref()
+                .expect("exit_zoom restores root")
+                .leaf_count(),
+            saved_leaf_count,
+            "a refused split leaves the saved tree intact"
+        );
     }
 
     /// US-003: the pane cap bounds a *tab*. A tab already at `MAX_PANES` leaves
