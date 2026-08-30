@@ -35,9 +35,11 @@ packaging path that was deliberately removed.
 The macOS release path needs exactly these. Store every newly provisioned value
 in the protected `release` environment, never as a repository-wide Actions
 secret. Its deployment policy admits only `main` and `v*` tags. The existing
-`APPLE_*` values are the legacy exception: GitHub cannot reveal them for an
-automated move, so migrate them into the environment during their next
-rotation and then delete the repository-scoped copies.
+environment also requires approval by the designated release owner before a
+credential-bearing job starts. The existing `APPLE_*` values are the legacy
+exception: GitHub cannot reveal them for an automated move, so migrate them
+into the environment during their next rotation and then delete the
+repository-scoped copies.
 
 ### Secrets
 

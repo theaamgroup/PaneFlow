@@ -86,6 +86,8 @@ Keep all newly provisioned signing material in the `release` environment,
 whose deployment policy admits only `main` and `v*` tags. Never put new
 credentials in repository-wide Actions secrets: a branch-controlled workflow
 can otherwise read them without passing the release environment's ref policy.
+The environment also requires approval from the designated release owner, so
+both dry-runs and tag releases pause before the credential-bearing build job.
 The existing `APPLE_*` values predate that policy and remain repository-scoped
 until an owner re-enters them in the environment; GitHub does not expose stored
 secret values for an automated migration. Move them during the next Apple
