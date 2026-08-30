@@ -1167,28 +1167,47 @@ fn surface_read_value(
         "text": text,
         "lines": returned,
         "total_lines": total,
-        "eof": eof,
+        "eof": eof && !truncated,
         "output_generation": output_generation,
         "truncated": truncated,
     })
 }
 
-fn truncate_ipc_text(text: String) -> (String, bool) {
+fn truncate_ipc_text(text: String, returned: usize) -> (String, usize, bool) {
     if text.len() <= crate::limits::MAX_IPC_TEXT_BYTES {
-        return (text, false);
+        return (text, returned, false);
     }
 
-    const MARKER: &str = "\n[paneflow: output truncated to fit IPC frame]\n";
+    // surface.read windows are ordered oldest-to-newest. Preserve the suffix
+    // so an oversized response keeps the live pane tail instead of silently
+    // discarding the output an agent is most likely trying to inspect.
+    const MARKER: &str = "[paneflow: older output truncated to fit IPC frame]\n";
     let keep = crate::limits::MAX_IPC_TEXT_BYTES.saturating_sub(MARKER.len());
-    let mut boundary = keep.min(text.len());
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
+    let mut boundary = text.len().saturating_sub(keep);
+    while boundary < text.len() && !text.is_char_boundary(boundary) {
+        boundary += 1;
     }
 
-    let mut out = text;
-    out.truncate(boundary);
+    // Prefer complete terminal rows. A single row can itself exceed the byte
+    // cap, in which case retaining its UTF-8-safe tail is more useful than
+    // returning only the marker.
+    if boundary > 0
+        && text.as_bytes()[boundary - 1] != b'\n'
+        && let Some(newline) = text[boundary..].find('\n')
+    {
+        boundary += newline + 1;
+    }
+    let suffix = &text[boundary..];
+    let retained = if suffix.is_empty() {
+        0
+    } else {
+        suffix.split('\n').count().min(returned)
+    };
+
+    let mut out = String::with_capacity(crate::limits::MAX_IPC_TEXT_BYTES);
     out.push_str(MARKER);
-    (out, true)
+    out.push_str(suffix);
+    (out, retained, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -2889,7 +2908,7 @@ impl PaneFlowApp {
                     .get("fenced")
                     .and_then(|v| v.as_bool())
                     .unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
-                let (text, truncated) = truncate_ipc_text(text);
+                let (text, returned, truncated) = truncate_ipc_text(text, returned);
                 let text = if fenced {
                     wrap_untrusted(
                         &format!("source=\"surface:{sid}\" total_lines=\"{total}\" eof=\"{eof}\""),
@@ -5242,6 +5261,10 @@ mod tests {
         assert_eq!(v["eof"], false);
         assert_eq!(v["output_generation"], 42);
         assert_eq!(v["truncated"], false);
+
+        let truncated = super::surface_read_value("tail".to_string(), 1, 10, true, 43, true);
+        assert_eq!(truncated["eof"], false);
+        assert_eq!(truncated["truncated"], true);
     }
 
     #[test]
@@ -5327,11 +5350,26 @@ mod tests {
 
     #[test]
     fn truncate_ipc_text_marks_oversized_surface_read() {
-        let oversized = "x".repeat(crate::limits::MAX_IPC_TEXT_BYTES + 1024);
-        let (text, truncated) = super::truncate_ipc_text(oversized);
+        let mut oversized = "old\n".repeat(crate::limits::MAX_IPC_TEXT_BYTES / 4 + 1024);
+        oversized.push_str("newest output");
+        let returned = oversized.split('\n').count();
+        let (text, retained, truncated) = super::truncate_ipc_text(oversized, returned);
         assert!(truncated);
         assert!(text.len() <= crate::limits::MAX_IPC_TEXT_BYTES);
-        assert!(text.contains("output truncated"));
+        assert!(text.starts_with("[paneflow: older output truncated"));
+        assert!(text.ends_with("newest output"));
+        assert!(retained > 0);
+        assert!(retained < returned);
+    }
+
+    #[test]
+    fn truncate_ipc_text_keeps_utf8_tail_of_single_oversized_row() {
+        let oversized = "🦀".repeat(crate::limits::MAX_IPC_TEXT_BYTES / 4 + 1024);
+        let (text, retained, truncated) = super::truncate_ipc_text(oversized, 1);
+        assert!(truncated);
+        assert_eq!(retained, 1);
+        assert!(text.len() <= crate::limits::MAX_IPC_TEXT_BYTES);
+        assert!(text.ends_with('🦀'));
     }
 
     #[test]

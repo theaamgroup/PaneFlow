@@ -69,10 +69,11 @@ pub fn read<T: IpcTransport + ?Sized>(
         .read_surface(surface_id, Some(MAX_LINES), None)
         .map_err(ResourceError::Bridge)?;
     let header = format!(
-        "source=\"surface:{surface_id}\" {} total_lines=\"{}\" eof=\"{}\"",
+        "source=\"surface:{surface_id}\" {} total_lines=\"{}\" eof=\"{}\" truncated=\"{}\"",
         bridge.scope().attr(),
         result.total_lines,
-        result.eof
+        result.eof,
+        result.truncated
     );
     Ok(json!({
         "contents": [{
@@ -144,7 +145,7 @@ mod tests {
             .with("surface.list", json!({"surfaces": [surface(3)]}))
             .with(
                 "surface.read",
-                json!({"text": "ready", "total_lines": 1, "eof": true}),
+                json!({"text": "ready", "total_lines": 1, "eof": false, "truncated": true}),
             );
         let bridge = Bridge::new(&transport, BridgeScope::Workspace(42));
         let result = read("pane://surface/3/content", &bridge).expect("resource");
@@ -153,6 +154,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("ready"));
+        assert!(result["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("truncated=\"true\""));
         assert_eq!(
             transport.last_params("surface.read").unwrap()["workspace_id"],
             42

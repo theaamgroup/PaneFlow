@@ -122,6 +122,8 @@ pub struct SurfaceReadResult {
     pub text: String,
     pub total_lines: u64,
     pub eof: bool,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
