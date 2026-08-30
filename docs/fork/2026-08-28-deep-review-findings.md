@@ -657,6 +657,10 @@ cites an absent `arthjean/zed mermaid_render`.
 **Suggested fix:** Remove the `rsa` ignore; correct the `quick-xml` provenance.
 
 ### 57. [MEDIUM] The embedded-binary size gate has no lower bound
+**Resolved 2026-08-30 (#152).** The escape hatch is now exact-value gated on
+`PANEFLOW_SKIP_EMBED_BUILD=1`, and the build fails unless all three required
+helpers exist and are non-empty.
+
 **Location:** `src-app/build.rs:234-284`
 **Problem:** Only checks `total > EMBED_SIZE_LIMIT_BYTES`. With `PANEFLOW_SKIP_EMBED_BUILD`
 (documented in zero `.md` files) an empty-but-existing staging dir measures 0 and passes — and
