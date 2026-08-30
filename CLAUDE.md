@@ -10,7 +10,7 @@ output, and the method rules this project has already paid for. Read it before
 planning a pass so you do not redo finished work or repeat a falsified finding.
 
 **Where this fork stands (2026-08-30):** product is PaneFlow (the PanesCLI
-rename was dropped). Version **0.1.2**. Origin `theaamgroup/paneflow` on
+rename was dropped). Version **0.1.3**. Origin `theaamgroup/paneflow` on
 `main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The old hand-rolled updater remains **deleted**;
@@ -30,7 +30,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.1.2
+./target/debug/paneflow --version          # paneflow 0.1.3
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 
