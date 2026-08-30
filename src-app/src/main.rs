@@ -974,6 +974,10 @@ struct PaneFlowApp {
     /// Monotonic settings-persist generation. `persist_setting` `fetch_add`s
     /// before spawning the off-thread write, matching [`Self::save_seq`].
     config_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Coalescing token for full-array workspace-template writes. This is
+    /// separate from `config_persist_seq` because a later single-field write
+    /// does not carry the commands snapshot and therefore cannot supersede it.
+    workspace_commands_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Off-thread settings writes that have spawned but not finished. A
     /// ConfigWatcher reload is ignored while this is non-zero so write N's
     /// file cannot replace in-memory write N+1.

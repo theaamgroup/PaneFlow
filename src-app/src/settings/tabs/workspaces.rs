@@ -1465,9 +1465,22 @@ impl PaneFlowApp {
             .unwrap_or_else(|| "Saved workspace templates".to_string());
         self.workspace_template_status = Some("Saving workspace templates...".to_string());
         cx.notify();
+        let seq = self
+            .workspace_commands_persist_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let save_seq = std::sync::Arc::clone(&self.workspace_commands_persist_seq);
+        let flight = self.begin_config_persist();
         cx.spawn(async move |this, cx| {
-            let ok =
-                smol::unblock(move || crate::config_writer::save_commands_checked(commands)).await;
+            let writer_seq = std::sync::Arc::clone(&save_seq);
+            let ok = smol::unblock(move || {
+                crate::config_writer::save_commands_checked_if_current(commands, &writer_seq, seq)
+            })
+            .await;
+            drop(flight);
+            if save_seq.load(std::sync::atomic::Ordering::SeqCst) != seq {
+                return;
+            }
             let _ = this.update(cx, |this, cx| {
                 if ok {
                     this.workspace_template_status = Some(saved_message);

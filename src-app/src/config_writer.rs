@@ -5,6 +5,7 @@
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// US-016: serialize every read-modify-write of `paneflow.json`.
@@ -498,8 +499,8 @@ pub fn with_agent_panel_field(
     serde_json::from_value(json).unwrap_or_else(|_| config.clone())
 }
 
-/// In-memory companion for [`save_commands_checked`]. Replaces the full
-/// user-defined command/template list while preserving every other config
+/// In-memory companion for [`save_commands_checked_if_current`]. Replaces the
+/// full user-defined command/template list while preserving every other config
 /// field.
 pub fn with_commands(
     config: &paneflow_config::schema::PaneFlowConfig,
@@ -542,13 +543,28 @@ pub fn save_agent_panel_field_checked(key: &str, value: serde_json::Value) -> bo
     write_config_checked(&path, &json)
 }
 
-/// Save the full `commands` array in `paneflow.json`, preserving unknown
-/// top-level keys and sibling settings.
-pub fn save_commands_checked(commands: Vec<paneflow_config::schema::CommandDefinition>) -> bool {
+/// Save the full `commands` array only when this is still the newest workspace
+/// template snapshot. The generation check happens while holding the shared
+/// config-write lock so an older task cannot overwrite a newer task that
+/// acquired the lock first.
+pub fn save_commands_checked_if_current(
+    commands: Vec<paneflow_config::schema::CommandDefinition>,
+    save_seq: &AtomicU64,
+    seq: u64,
+) -> bool {
     let Some(path) = paneflow_config::loader::config_path() else {
         log::warn!("config: cannot determine config path, not saving");
         return false;
     };
+    save_commands_at_if_current(&path, commands, save_seq, seq)
+}
+
+fn save_commands_at_if_current(
+    path: &Path,
+    commands: Vec<paneflow_config::schema::CommandDefinition>,
+    save_seq: &AtomicU64,
+    seq: u64,
+) -> bool {
     let value = match serde_json::to_value(commands) {
         Ok(value) => value,
         Err(e) => {
@@ -557,13 +573,16 @@ pub fn save_commands_checked(commands: Vec<paneflow_config::schema::CommandDefin
         }
     };
     let _guard = config_write_guard();
-    let Ok(mut json) = load_raw_config(&path) else {
+    if save_seq.load(Ordering::SeqCst) != seq {
+        return true;
+    }
+    let Ok(mut json) = load_raw_config(path) else {
         return false;
     };
     if let Some(root) = json.as_object_mut() {
         root.insert("commands".to_string(), value);
     }
-    write_config_checked(&path, &json)
+    write_config_checked(path, &json)
 }
 
 #[cfg(test)]
@@ -571,12 +590,53 @@ mod tests {
     use super::{
         AGENT_BUTTON_VISIBILITY_MIGRATION_KEY, ConfigWritePrecondition, apply_agent_panel_field,
         apply_reset_shortcuts, apply_terminal_field, load_raw_config, merge_shortcut,
-        migrate_agent_button_visibility_at, reset_shortcuts_at, write_config_checked,
-        write_config_checked_with_precondition,
+        migrate_agent_button_visibility_at, reset_shortcuts_at, save_commands_at_if_current,
+        with_commands, write_config_checked, write_config_checked_with_precondition,
     };
     use crate::agent_launcher::TerminalAgent;
+    use paneflow_config::schema::CommandDefinition;
     use serde_json::{Value, json};
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn shell_command(name: &str, command: &str) -> CommandDefinition {
+        CommandDefinition {
+            name: name.to_string(),
+            description: None,
+            keywords: Vec::new(),
+            workspace: None,
+            command: Some(command.to_string()),
+        }
+    }
+
+    #[test]
+    fn persist_workspace_commands_keeps_newer_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        let save_seq = AtomicU64::new(2);
+        let older = vec![shell_command("Dev", "old")];
+        let newer = vec![shell_command("Dev", "new")];
+        let cached = with_commands(
+            &with_commands(
+                &paneflow_config::schema::PaneFlowConfig::default(),
+                older.clone(),
+            ),
+            newer.clone(),
+        );
+
+        assert!(save_commands_at_if_current(
+            &path,
+            newer.clone(),
+            &save_seq,
+            2
+        ));
+        assert!(save_commands_at_if_current(&path, older, &save_seq, 1));
+
+        let got: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(got["commands"], serde_json::to_value(&newer).unwrap());
+        assert_eq!(cached.commands, newer);
+        assert_eq!(save_seq.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn agent_visibility_migration_marks_missing_config_without_promoting_agents() {
