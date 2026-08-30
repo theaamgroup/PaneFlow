@@ -26,7 +26,7 @@ pub mod ai_hook;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::{prelude::*, ConnectOptions, GenericFilePath, Stream};
 use interprocess::ConnectWaitMode;
@@ -39,6 +39,17 @@ pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 /// writes a response (it can synthesize a `-32002` dispatch timeout
 /// envelope), so a stall this long means the process is wedged.
 const IPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Keep retries bounded even when the server remains overloaded. A timeout
+/// consumes most of this budget, so it gets at most one short follow-up; fast
+/// busy replies can use the full exponential-backoff sequence.
+const IPC_CALL_BUDGET: Duration = Duration::from_secs(12);
+const IPC_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(25),
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+];
 
 /// U-029: per-reply read cap on the untrusted IPC socket. Mirrors the server's
 /// `MAX_REQUEST_LEN` (`src-app/src/ipc.rs`). The recv timeout bounds wall-clock
@@ -75,14 +86,93 @@ impl IpcTransport for IpcClient {
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = build_request(id, method, params);
-        let line = send_and_receive(&self.socket, &request).map_err(|e| {
-            format!(
-                "paneflow IPC unreachable at {} ({e}); is Paneflow running?",
-                self.socket.display()
-            )
-        })?;
-        parse_response(&line)
+        call_with_sender(&self.socket, method, &request, send_and_receive)
     }
+}
+
+fn call_with_sender<F>(
+    socket: &Path,
+    method: &str,
+    request: &Value,
+    mut send: F,
+) -> Result<Value, String>
+where
+    F: FnMut(&Path, &Value, Duration) -> io::Result<String>,
+{
+    let started = Instant::now();
+    let mut retry_index = 0;
+    loop {
+        let remaining = IPC_CALL_BUDGET.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(format!(
+                "paneflow IPC timed out at {} after {}s",
+                socket.display(),
+                IPC_CALL_BUDGET.as_secs()
+            ));
+        }
+
+        let outcome = send(socket, request, remaining.min(IPC_TIMEOUT));
+        let should_retry = match &outcome {
+            Ok(line) => is_busy_retry_response(line),
+            Err(error) => is_timeout(error) && method_is_safe_to_retry_after_timeout(method),
+        };
+
+        if should_retry {
+            if let Some(delay) = IPC_RETRY_DELAYS.get(retry_index).copied() {
+                if delay < IPC_CALL_BUDGET.saturating_sub(started.elapsed()) {
+                    std::thread::sleep(delay);
+                    retry_index += 1;
+                    continue;
+                }
+            }
+        }
+
+        return match outcome {
+            Ok(line) => parse_response(&line),
+            Err(error) if is_timeout(&error) => Err(format!(
+                "paneflow IPC timed out at {} ({error})",
+                socket.display()
+            )),
+            Err(error) => Err(format!(
+                "paneflow IPC unreachable at {} ({error}); is Paneflow running?",
+                socket.display()
+            )),
+        };
+    }
+}
+
+fn is_timeout(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
+fn is_busy_retry_response(line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+        return false;
+    };
+    let Some(error) = value.get("error") else {
+        return false;
+    };
+    error.get("code").and_then(Value::as_i64) == Some(-32000)
+        && error.get("message").and_then(Value::as_str) == Some("Paneflow is busy; retry shortly")
+}
+
+fn method_is_safe_to_retry_after_timeout(method: &str) -> bool {
+    matches!(
+        method,
+        "system.ping"
+            | "system.capabilities"
+            | "system.identify"
+            | "workspace.list"
+            | "workspace.current"
+            | "surface.list"
+            | "surface.read"
+            | "surface.search"
+            | "surface.status"
+            | "fleet.list"
+    )
 }
 
 /// Build a JSON-RPC 2.0 request frame.
@@ -145,22 +235,24 @@ fn tolerate_unsupported(r: io::Result<()>) -> io::Result<()> {
     }
 }
 
-fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
-    let mut stream = connect_request_stream(socket)?;
-    // Bound both directions on the same deadline: a peer that never drains our
-    // write could otherwise wedge `write_all`.
-    {
-        tolerate_unsupported(stream.set_recv_timeout(Some(IPC_TIMEOUT)))?;
-        tolerate_unsupported(stream.set_send_timeout(Some(IPC_TIMEOUT)))?;
-    }
+fn send_and_receive(socket: &Path, request: &Value, timeout: Duration) -> io::Result<String> {
+    let started = Instant::now();
+    let mut stream = connect_stream_with_timeout(socket, timeout)?;
 
     let mut payload =
         serde_json::to_vec(request).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     payload.push(b'\n');
 
     {
+        // Recompute what remains before each blocking phase so connect, write,
+        // and read share one deadline instead of each receiving a fresh one.
+        let write_timeout = remaining_timeout(started, timeout)?;
+        tolerate_unsupported(stream.set_send_timeout(Some(write_timeout)))?;
         stream.write_all(&payload)?;
         stream.flush()?;
+
+        let read_timeout = remaining_timeout(started, timeout)?;
+        tolerate_unsupported(stream.set_recv_timeout(Some(read_timeout)))?;
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
@@ -184,7 +276,7 @@ fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
             {
                 Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "paneflow did not respond within 10s",
+                    "paneflow did not respond before the IPC deadline",
                 ))
             }
             Err(e) => Err(e),
@@ -192,8 +284,16 @@ fn send_and_receive(socket: &Path, request: &Value) -> io::Result<String> {
     }
 }
 
-fn connect_request_stream(socket: &Path) -> io::Result<Stream> {
-    connect_stream_with_timeout(socket, IPC_TIMEOUT)
+fn remaining_timeout(started: Instant, timeout: Duration) -> io::Result<Duration> {
+    timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "paneflow did not respond before the IPC deadline",
+            )
+        })
 }
 
 /// Connect with the same wall-clock deadline later applied to recv/send.
@@ -597,6 +697,77 @@ mod tests {
         assert_eq!(result["surfaces"][0]["name"], "cargo-run");
 
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn call_retries_busy_and_timeout() {
+        let request = build_request(1, "surface.read", json!({}));
+        let mut attempts = 0;
+        let result = call_with_sender(
+            Path::new("/unused-test-socket"),
+            "surface.read",
+            &request,
+            |_, _, _| {
+                attempts += 1;
+                match attempts {
+                    1 => Ok(json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "error": {"code": -32000, "message": "Paneflow is busy; retry shortly"},
+                    })
+                    .to_string()),
+                    2 => Err(io::Error::from(io::ErrorKind::TimedOut)),
+                    _ => Ok(json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {"retried": true},
+                    })
+                    .to_string()),
+                }
+            },
+        )
+        .expect("busy response and timed-out read should both retry");
+        assert_eq!(result, json!({"retried": true}));
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn call_does_not_retry_timeout_for_mutation_or_shutdown_response() {
+        let mutation_request = build_request(1, "surface.send_text", json!({}));
+        let mut timeout_attempts = 0;
+        let timeout = call_with_sender(
+            Path::new("/unused-test-socket"),
+            "surface.send_text",
+            &mutation_request,
+            |_, _, _| {
+                timeout_attempts += 1;
+                Err(io::Error::from(io::ErrorKind::TimedOut))
+            },
+        )
+        .expect_err("mutating timeout must not retry");
+        assert_eq!(timeout_attempts, 1);
+        assert!(timeout.contains("timed out"), "got: {timeout}");
+        assert!(!timeout.contains("unreachable"), "got: {timeout}");
+
+        let read_request = build_request(2, "surface.read", json!({}));
+        let mut shutdown_attempts = 0;
+        let shutdown = call_with_sender(
+            Path::new("/unused-test-socket"),
+            "surface.read",
+            &read_request,
+            |_, _, _| {
+                shutdown_attempts += 1;
+                Ok(json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "error": {"code": -32000, "message": "App shutting down"},
+                })
+                .to_string())
+            },
+        )
+        .expect_err("shutdown response must not retry");
+        assert_eq!(shutdown_attempts, 1);
+        assert!(shutdown.contains("App shutting down"), "got: {shutdown}");
     }
 
     #[cfg(unix)]
