@@ -600,6 +600,7 @@ pub fn is_paneflow_worktree_dir(repo_root: &Path, branch: &str, path: &Path) -> 
 fn run_git(repo: &Path, args: &[&str], deadline: Duration) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo).args(args);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
     let out = paneflow_process::run_with_timeout(cmd, deadline, STDOUT_CAP)
         .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
     if !out.status.success() {
@@ -1308,6 +1309,23 @@ pub fn teardown_all(worktrees: Vec<ManagedWorktree>, protected_session_ids: Vec<
 mod tests {
     use super::*;
     use tracing_test::traced_test;
+
+    #[test]
+    fn run_git_sets_git_terminal_prompt_off() {
+        let source = include_str!("worktree.rs");
+        let run_git_body = source
+            .split_once("fn run_git(")
+            .expect("run_git helper")
+            .1
+            .split_once("/// `git worktree list --porcelain`")
+            .expect("end of run_git helper")
+            .0;
+
+        assert!(
+            run_git_body.contains(".env(\"GIT_TERMINAL_PROMPT\", \"0\")"),
+            "worktree git commands must fail instead of opening an interactive credential prompt"
+        );
+    }
 
     #[test]
     fn same_workspace_duplicate_records_preserve_keep_policy() {
