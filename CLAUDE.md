@@ -9,12 +9,13 @@ what is next with real counts, the verification commands and their expected
 output, and the method rules this project has already paid for. Read it before
 planning a pass so you do not redo finished work or repeat a falsified finding.
 
-**Where this fork stands (2026-08-25):** product is PaneFlow (the PanesCLI
+**Where this fork stands (2026-08-30):** product is PaneFlow (the PanesCLI
 rename was dropped). Version **0.1.2**. Origin `theaamgroup/paneflow` on
 `main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
 `windows_*_material` schema, and community files (`SECURITY.md`,
-`CONTRIBUTING.md`) are gone. The in-app updater is **deleted**; Apple DMG
-signing remains. First signed GitHub Release is **v0.1.0** (Developer ID
+`CONTRIBUTING.md`) are gone. The old hand-rolled updater remains **deleted**;
+Sparkle 2 performs silent hourly checks and installs verified updates only when
+the user quits. First signed GitHub Release is **v0.1.0** (Developer ID
 signed, notarized, stapled; #11 closed with `spctl` evidence). #13 closed on
 2026-08-28 after an installed v0.1.1 signed/notarized live-app and notification
 hook smoke. #10 was closed by rebinding next-workspace to `Ctrl+Tab`; #14 and
@@ -481,7 +482,7 @@ chore: description
 
 Atomic commits per logical change. Branch naming: `feat/description`, cut from `main`. Do not add new `US-NNN` story IDs to commit messages: there is no story tracker in this fork.
 
-Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork): drop non-macOS packaging scripts`, so the divergence stays greppable in the log. There is no CONTRIBUTING.md or SECURITY.md; this is a private fork.
+Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork): drop non-macOS packaging scripts`, so the divergence stays greppable in the log. There is no CONTRIBUTING.md or SECURITY.md; this is a public, owner-maintained fork.
 
 ## Platform (macOS only)
 
@@ -492,6 +493,6 @@ This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacr
 - **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:239`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition: it exits 1 with a `FAIL:` line when the STAGE 2c total is non-zero or the negative control reads 0, and `run_tests.yml::platform_census` runs it (and `win-census.sh`) on every push and PR. It prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. A zero cfg census is also blind to ungated Windows strings (`powershell` / `.exe` / `.cmd` / `.bat` / `.ps1` / `\\?\` / `%APPDATA%`); that class is a separate reported check in the same script (issue #103) and is **not** part of the STAGE 2c integer.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.
 - Still use `std::path::PathBuf`, `std::env`, and `dirs` for filesystem and environment access. macOS-correct is not the same as hardcoded.
-- **The in-app updater is deleted; Apple DMG signing remains.** There is no feed, no minisign client, no title-bar update pill. `scripts/{bundle,sign,notarize}-macos.sh` and `create-dmg.sh` still produce the signed `.app` / `.dmg`. Do not create `GPG_*`, `AZURE_*`, or `POSTHOG_API_KEY`. `APPLE_DEVELOPER_CERT_P` is a **false hit**: the real secret is `APPLE_DEVELOPER_CERT_P12` (PKCS#12), plus `APPLE_DEVELOPER_CERT_PASSWORD`.
+- **The old updater stays deleted; Sparkle 2 owns self-update.** Never recreate `src-app/src/update/`, minisign, an update prompt, or a forced relaunch. `src-app/src/sparkle.rs` dynamically loads the bundled framework, checks the AAM GitHub appcast hourly, downloads in the background, and holds installation until ordinary app termination. Packaging pins and checksum-verifies Sparkle in `scripts/sparkle-dist.sh`; release signing adds EdDSA (`SPARKLE_PRIVATE_KEY`) on top of Developer ID + notarization. Do not create `GPG_*`, `AZURE_*`, `POSTHOG_API_KEY`, `MINISIGN_SECRET_KEY`, or `PANEFLOW_MINISIGN_*`.
 
 The full removal plan, with the paired edits that have to land together, is in `docs/fork/2026-08-25-mac-only-fork-design.md`.

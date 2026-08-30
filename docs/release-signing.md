@@ -1,11 +1,13 @@
 # Release signing: what signs what
 
-This fork signs releases with **one mechanism**: Apple Developer ID codesign
-plus notarization. There is no in-app updater and no minisign client.
+This fork uses two independent trust anchors: Apple Developer ID codesign plus
+notarization for the app bundle, and Sparkle EdDSA for each update archive. The
+old hand-rolled updater and minisign client remain deleted.
 
 | Mechanism | Protects | Verified by | Keys live |
 |---|---|---|---|
 | Developer ID codesign + Apple notarization | The `.app` a user launches | Gatekeeper (`spctl`) | `APPLE_*` GitHub secrets |
+| Sparkle EdDSA | The DMG offered by the appcast | Sparkle before extraction | `SPARKLE_PRIVATE_KEY` GitHub secret; public half committed as `SUPublicEDKey` in `assets/Info.plist` |
 
 Runbook: [`docs/release/macos-signing.md`](release/macos-signing.md).
 
@@ -41,6 +43,7 @@ The macOS release path needs exactly these.
 | `APPLE_ID` | `scripts/notarize-macos.sh` | Apple ID of the account that owns the Developer Program membership |
 | `APPLE_APP_SPECIFIC_PASSWORD` | `scripts/notarize-macos.sh` | App-specific password generated at appleid.apple.com, not the account password |
 | `APPLE_TEAM_ID` | both scripts | 10-character Team ID; `sign-macos.sh` hard-fails if the discovered signing identity does not contain it |
+| `SPARKLE_PRIVATE_KEY` | `generate_appcast` in `release.yml` | Base64 Ed25519 private seed exported by Sparkle's `generate_keys`; never commit it |
 
 Populate multi-line secrets from a file, never from a pipe:
 

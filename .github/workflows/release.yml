@@ -85,6 +85,22 @@ jobs:
           components: rustfmt, clippy
           targets: ${{ env.TARGET }}
 
+      - name: Verify release version matches Cargo.toml
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          tag_version="${TAG#v}"
+          manifest_version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "paneflow-app") | .version')"
+          if [ -z "$manifest_version" ] || [ "$manifest_version" = "null" ]; then
+            echo "::error::Could not resolve paneflow-app version from cargo metadata."
+            exit 1
+          fi
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "::error::Release tag version $tag_version does not match Cargo.toml version $manifest_version."
+            exit 1
+          fi
+
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
@@ -238,6 +254,79 @@ jobs:
             exit 1
           fi
           ( cd release-assets && shasum -a 256 "${dmg}" > "${dmg}.sha256" )
+          ls -la release-assets/
+
+      - name: Generate signed Sparkle appcast
+        if: steps.macos_signing.outputs.signing_available == 'true' && steps.notarize.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          if [ -z "${SPARKLE_PRIVATE_KEY:-}" ]; then
+            if [ "$RELEASE_MODE" = "release" ]; then
+              echo "::error::SPARKLE_PRIVATE_KEY is required for tag-push releases."
+              exit 1
+            fi
+            echo "::warning::SPARKLE_PRIVATE_KEY is missing; dry-run appcast generation skipped."
+            exit 0
+          fi
+
+          version="${TAG#v}"
+          dmg="paneflow-${version}-${ARCH}-apple-darwin.dmg"
+          notes="release-assets/${dmg%.dmg}.md"
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq '.body' > "$notes"
+
+          sparkle_dist="$(scripts/sparkle-dist.sh)"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$sparkle_dist/bin/generate_appcast" \
+                --ed-key-file - \
+                --versions "$version" \
+                --maximum-versions 1 \
+                --maximum-deltas 0 \
+                --embed-release-notes \
+                --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/" \
+                --link "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" \
+                -o "$PWD/release-assets/appcast.xml" \
+                "$PWD/release-assets"
+          rm -f "$notes"
+
+          xmllint --noout release-assets/appcast.xml
+          grep -Fq "<sparkle:version>${version}</sparkle:version>" release-assets/appcast.xml
+          grep -Fq "sparkle:edSignature=" release-assets/appcast.xml
+          grep -Fq "$dmg" release-assets/appcast.xml
+
+          signature="$(xmllint --xpath \
+            'string(//*[local-name()="enclosure"]/@*[local-name()="edSignature"])' \
+            release-assets/appcast.xml)"
+          [ -n "$signature" ] || {
+            echo "::error::Sparkle appcast enclosure has no EdDSA signature."
+            exit 1
+          }
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$sparkle_dist/bin/sign_update" \
+                --verify --ed-key-file - "release-assets/$dmg" "$signature"
+
+          tampered_dmg="$(mktemp "${RUNNER_TEMP}/paneflow-tampered.XXXXXX.dmg")"
+          cp "release-assets/$dmg" "$tampered_dmg"
+          printf '\0' >> "$tampered_dmg"
+          if printf '%s' "$SPARKLE_PRIVATE_KEY" \
+              | "$sparkle_dist/bin/sign_update" \
+                  --verify --ed-key-file - "$tampered_dmg" "$signature"; then
+            echo "::error::Sparkle accepted a deliberately tampered DMG."
+            rm -f "$tampered_dmg"
+            exit 1
+          fi
+          rm -f "$tampered_dmg"
+
+          if find release-assets -maxdepth 1 -name '*.delta' -print -quit | grep -q .; then
+            echo "::error::Delta updates are not enabled for PaneFlow releases."
+            exit 1
+          fi
           ls -la release-assets/
 
       - name: Verify release artifacts staged

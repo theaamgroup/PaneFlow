@@ -166,7 +166,8 @@ dist/paneflow-<version>-<arch>-apple-darwin.dmg
 **The `-apple-darwin` suffix is a contract, not cosmetics.** The release
 workflow, the runbook, and `scripts/create-dmg.sh` all name the asset
 `paneflow-<version>-<arch>-apple-darwin.dmg`. Keep that spelling so
-operators and CI stay aligned. There is no in-app updater matching on it.
+operators and CI stay aligned. Sparkle's appcast enclosure uses this exact
+filename, so changing it also requires changing the release workflow.
 
 After `hdiutil create` and `hdiutil verify`, the script mounts the image
 read-only and re-runs three independent checks against the bundle *inside the
