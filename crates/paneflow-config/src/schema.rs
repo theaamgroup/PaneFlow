@@ -193,7 +193,7 @@ mod tests {
                         command: Some("claude".to_string()),
                         prompt: Some("Review this".to_string()),
                         cwd: Some("~/dev/app".to_string()),
-                        path: None,
+                        path: Some("README.md".to_string()),
                         env: Some(HashMap::new()),
                         focus: Some(true),
                         scrollback: Some("previous output".to_string()),

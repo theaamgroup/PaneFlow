@@ -578,6 +578,10 @@
           "type": ["string", "null"],
           "description": "Working directory override (relative paths resolve against the workspace cwd)."
         },
+        "path": {
+          "type": ["string", "null"],
+          "description": "File path for non-terminal surfaces such as markdown."
+        },
         "env": {
           "type": ["object", "null"],
           "description": "Extra environment variables merged over terminal.env. The same protected-key and loader-key filtering applies at PTY spawn.",

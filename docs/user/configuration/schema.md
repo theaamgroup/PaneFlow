@@ -220,13 +220,6 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
 `command`, `prompt`, `cwd`, `path`, `env`, `focus`, `scrollback`,
 `agent`, and per-surface `font_size`.
 
-Known schema bug: `path` is missing from `definitions.surface` in
-`schemas/paneflow.schema.json`, which sets `additionalProperties: false`
-there. The Rust `SurfaceDefinition` has the field and the runtime accepts
-it, but editors flag it as invalid. The schema drift test does not catch
-this because `path` is `skip_serializing_if = "Option::is_none"` and the
-test fixture leaves it unset.
-
 ```json
 {
   "commands": [
