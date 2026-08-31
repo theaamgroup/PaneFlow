@@ -180,6 +180,16 @@ fn has_closing_quote(line_text: &str, after_opener: usize, q: char) -> bool {
     line_text[after_opener..].chars().any(|c| c == q)
 }
 
+fn is_quoted_path_opener(line_text: &str, idx: usize) -> bool {
+    if idx == 0 {
+        return true;
+    }
+    line_text[..idx]
+        .chars()
+        .next_back()
+        .is_none_or(is_path_start_boundary)
+}
+
 fn push_unique_start(out: &mut Vec<usize>, start: usize) {
     if !out.contains(&start) {
         out.push(start);
@@ -233,15 +243,24 @@ fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
             }
             continue;
         }
-        if matches!(ch, '\'' | '"' | '`') && has_closing_quote(line_text, idx + ch.len_utf8(), ch) {
-            in_quote = Some(ch);
-            let next = idx + ch.len_utf8();
-            if next < ext_start {
-                last_quoted = next;
-                last_ordinary = next;
-                consider(next, &mut last_rooted, &mut last_spaced);
+        if matches!(ch, '\'' | '"' | '`') {
+            if is_quoted_path_opener(line_text, idx)
+                && has_closing_quote(line_text, idx + ch.len_utf8(), ch)
+            {
+                in_quote = Some(ch);
+                let next = idx + ch.len_utf8();
+                if next < ext_start {
+                    last_quoted = next;
+                    last_ordinary = next;
+                    consider(next, &mut last_rooted, &mut last_spaced);
+                }
+                continue;
             }
-            continue;
+            if !is_quoted_path_opener(line_text, idx) {
+                // Contractions and possessives (`can't`, `user's/file.rs`)
+                // are not quote openers and not path-start boundaries.
+                continue;
+            }
         }
         if is_path_start_boundary(ch) {
             let next = idx + ch.len_utf8();
@@ -1203,6 +1222,29 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_md(tmp.path(), "notes/todo.md");
         let line_text = "couldn't open notes/todo.md";
+        let map = ascii_map(line_text);
+        let zones = detect_file_paths_on_line_mapped(line_text, line0(), &map, Some(tmp.path()));
+        assert_eq!(zones.len(), 1);
+        assert!(zones[0].uri.ends_with("todo.md"));
+    }
+
+    #[test]
+    fn contraction_apostrophes_do_not_quote_a_later_path_apostrophe() {
+        let line = "can't open user's/file.rs";
+        let ext = line.find(".rs").expect(".rs");
+        let starts = candidate_start_positions(line, ext);
+        let path_at = line.find("user's/").expect("user's/");
+        assert!(
+            starts.contains(&path_at),
+            "possessive path token must still be probed, got {starts:?}"
+        );
+    }
+
+    #[test]
+    fn contraction_does_not_use_a_later_unrelated_apostrophe_as_closer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_md(tmp.path(), "notes/todo.md");
+        let line_text = "can't open notes/todo.md (see 'help')";
         let map = ascii_map(line_text);
         let zones = detect_file_paths_on_line_mapped(line_text, line0(), &map, Some(tmp.path()));
         assert_eq!(zones.len(), 1);
