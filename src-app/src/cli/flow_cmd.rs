@@ -320,6 +320,7 @@ impl UnitRun {
 struct ReadSnapshot {
     text: String,
     output_generation: Option<u64>,
+    total_lines: Option<u64>,
 }
 
 /// What a barrier/settle poll saw.
@@ -872,6 +873,7 @@ impl<T: IpcTransport> Engine<'_, T> {
                         .unwrap_or_default()
                         .to_string(),
                     output_generation: result.get("output_generation").and_then(Value::as_u64),
+                    total_lines: result.get("total_lines").and_then(Value::as_u64),
                 }))
             }
             Err(e) if is_surface_gone_error(&e) => Ok(Read::Gone),
@@ -1030,7 +1032,12 @@ fn text_after_baseline(baseline: &ReadSnapshot, current: &ReadSnapshot) -> Optio
     ) {
         return None;
     }
-    Some(new_text_since_baseline(&baseline.text, &current.text))
+    Some(new_text_since_baseline(
+        &baseline.text,
+        &current.text,
+        baseline.total_lines,
+        current.total_lines,
+    ))
 }
 
 /// Substitute `${var}` tokens from the capture store. `${item}` was resolved
@@ -1135,16 +1142,19 @@ mod tests {
         let baseline = ReadSnapshot {
             text: "old READY\n".to_string(),
             output_generation: Some(10),
+            total_lines: None,
         };
         let unchanged = ReadSnapshot {
             text: "old READY\nnew READY\n".to_string(),
             output_generation: Some(10),
+            total_lines: None,
         };
         assert!(text_after_baseline(&baseline, &unchanged).is_none());
 
         let advanced = ReadSnapshot {
             text: "old READY\nnew READY\n".to_string(),
             output_generation: Some(11),
+            total_lines: None,
         };
         assert_eq!(
             text_after_baseline(&baseline, &advanced).expect("delta"),
