@@ -128,10 +128,13 @@ pub(crate) enum ConfirmStyle {
 pub(crate) struct PendingClose {
     pub(crate) target: CloseTarget,
     pub(crate) style: ConfirmStyle,
-    pub(crate) agent: TerminalAgent,
+    /// The live agent to name in the confirmation copy. `None` on a
+    /// workspace-folder close that is not killing a detected agent: the modal
+    /// still asks, with different copy.
+    pub(crate) agent: Option<TerminalAgent>,
     /// Qualifying agents BEYOND [`Self::agent`], captured when the close was
     /// armed so the copy can say "and 2 other agents" instead of naming one
-    /// and killing three.
+    /// and killing three. Zero when [`Self::agent`] is `None`.
     pub(crate) extra_agents: usize,
     /// A workspace close also destroys qualifying dock/Review terminals that
     /// are not captured by workspace Undo. The modal must not promise those
@@ -330,7 +333,7 @@ mod tests {
         PendingClose {
             target,
             style: ConfirmStyle::Inline,
-            agent: TerminalAgent::ClaudeCode,
+            agent: Some(TerminalAgent::ClaudeCode),
             extra_agents: 0,
             loses_off_tree_sessions: false,
             label: String::new(),
@@ -670,7 +673,7 @@ mod tests {
                 tab_id: 2,
             },
             style: ConfirmStyle::Modal,
-            agent: TerminalAgent::ClaudeCode,
+            agent: Some(TerminalAgent::ClaudeCode),
             extra_agents: 0,
             loses_off_tree_sessions: false,
             label: "Fix the bug".into(),
@@ -701,7 +704,7 @@ mod tests {
         let pane_pending = PendingClose {
             target: pane_target(&a),
             style: ConfirmStyle::Inline,
-            agent: TerminalAgent::ClaudeCode,
+            agent: Some(TerminalAgent::ClaudeCode),
             extra_agents: 0,
             loses_off_tree_sessions: false,
             label: String::new(),
@@ -716,7 +719,7 @@ mod tests {
                 tab_id: 2,
             },
             style: ConfirmStyle::Modal,
-            agent: TerminalAgent::ClaudeCode,
+            agent: Some(TerminalAgent::ClaudeCode),
             extra_agents: 0,
             loses_off_tree_sessions: false,
             label: String::new(),

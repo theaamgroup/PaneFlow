@@ -28,7 +28,6 @@ use crate::{ClosedRecord, PaneFlowApp};
 /// close: it arms the same in-app modal the UI uses and reports that fact to
 /// the caller instead of pretending the workspace is already gone.
 pub(crate) enum WorkspaceCloseOutcome {
-    Closed,
     ConfirmationRequired,
     NotFound,
 }
@@ -115,6 +114,32 @@ pub(crate) fn close_confirm_body(
         format!(
             "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
              {opener} brings {back} back with {their} scrollback, but does not resume {agents}."
+        )
+    }
+}
+
+/// Body copy for a workspace-folder close that is not killing a live agent.
+///
+/// Workspace X always asks, even for a shell-only folder. The agent-named
+/// [`close_confirm_body`] would be a lie here: nothing is "still running".
+pub(crate) fn workspace_close_confirm_body(
+    undo_shortcut: Option<&str>,
+    loses_off_tree_sessions: bool,
+) -> String {
+    let opener = match undo_shortcut {
+        Some(key) => key.to_string(),
+        None => "Undo close".to_string(),
+    };
+    if loses_off_tree_sessions {
+        format!(
+            "This closes the workspace and every terminal in it. {opener} restores only saved \
+             workspace panes and their scrollback; dock and Review sessions are not restored, and \
+             running processes are not resumed."
+        )
+    } else {
+        format!(
+            "This closes the workspace and every terminal in it. {opener} restores the layout \
+             and scrollback; running processes are not resumed."
         )
     }
 }
@@ -324,41 +349,48 @@ impl PaneFlowApp {
             .collect()
     }
 
-    /// Arm a workspace close when any terminal in any tab holds a live agent.
-    /// `None` means the index was stale; `Some(false)` means no confirmation
-    /// was needed; `Some(true)` means the modal is now pending.
+    /// Arm a workspace-folder close confirmation.
+    ///
+    /// Always asks, including for a shell-only folder: the modal is the
+    /// confirmation window, and the workspace stays until Confirm. `false`
+    /// means the index was stale.
     fn arm_pending_close_workspace(
         &mut self,
         ws_idx: usize,
         style: ConfirmStyle,
         cx: &mut Context<Self>,
-    ) -> Option<bool> {
-        let workspace = self.workspaces.get(ws_idx)?;
+    ) -> bool {
+        let Some(workspace) = self.workspaces.get(ws_idx) else {
+            return false;
+        };
         let workspace_id = workspace.id;
         let label = confirm_label(&workspace.title);
         let states = self.workspace_close_states(ws_idx, cx);
         let now = std::time::Instant::now();
-        let Some(agent) = agent_needing_confirmation(&states, now) else {
-            return Some(false);
+        let agent = agent_needing_confirmation(&states, now);
+        let extra_agents = if agent.is_some() {
+            agents_needing_confirmation_count(&states, now).saturating_sub(1)
+        } else {
+            0
         };
-        let loses_off_tree_sessions = agent_needing_confirmation(
-            &self.workspace_off_tree_close_states(workspace_id, cx),
-            now,
-        )
-        .is_some();
+        // Dock and Review terminals die with the folder and are not on the
+        // workspace undo record, whether or not they host a live agent.
+        let loses_off_tree_sessions = !self
+            .workspace_off_tree_close_states(workspace_id, cx)
+            .is_empty();
         self.set_pending_close(
             Some(PendingClose {
                 target: CloseTarget::Workspace { workspace_id },
                 style,
                 agent,
-                extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
+                extra_agents,
                 loses_off_tree_sessions,
                 label,
                 armed_at: now,
             }),
             cx,
         );
-        Some(true)
+        true
     }
 
     /// The single entry point for UI workspace-close gestures.
@@ -366,15 +398,10 @@ impl PaneFlowApp {
         &mut self,
         ws_idx: usize,
         style: ConfirmStyle,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.arm_pending_close_workspace(ws_idx, style, cx) {
-            Some(true) | None => {}
-            Some(false) => {
-                self.close_workspace_at_inner(ws_idx, Some(window), cx);
-            }
-        }
+        self.arm_pending_close_workspace(ws_idx, style, cx);
     }
 
     /// Window-less sibling for `workspace.close`. It may arm the modal, but
@@ -385,16 +412,10 @@ impl PaneFlowApp {
         style: ConfirmStyle,
         cx: &mut Context<Self>,
     ) -> WorkspaceCloseOutcome {
-        match self.arm_pending_close_workspace(ws_idx, style, cx) {
-            None => WorkspaceCloseOutcome::NotFound,
-            Some(true) => WorkspaceCloseOutcome::ConfirmationRequired,
-            Some(false) => {
-                if self.close_workspace_at_inner(ws_idx, None, cx) {
-                    WorkspaceCloseOutcome::Closed
-                } else {
-                    WorkspaceCloseOutcome::NotFound
-                }
-            }
+        if self.arm_pending_close_workspace(ws_idx, style, cx) {
+            WorkspaceCloseOutcome::ConfirmationRequired
+        } else {
+            WorkspaceCloseOutcome::NotFound
         }
     }
 
@@ -441,7 +462,7 @@ impl PaneFlowApp {
                     tab_id,
                 },
                 style,
-                agent,
+                agent: Some(agent),
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
                 loses_off_tree_sessions: false,
                 label: confirm_label(&label),
@@ -476,7 +497,7 @@ impl PaneFlowApp {
                     pane: pane.downgrade(),
                 },
                 style,
-                agent,
+                agent: Some(agent),
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
                 loses_off_tree_sessions: false,
                 label: confirm_label(&label),
@@ -778,12 +799,21 @@ impl PaneFlowApp {
             CloseTarget::Pane { .. } => "pane",
         };
         let title = close_confirm_title(noun, &pending.label);
-        let body = close_confirm_body(
-            pending.agent,
-            pending.extra_agents,
-            self.shortcut_for_action("undo_close_pane"),
-            pending.loses_off_tree_sessions,
-        );
+        let undo = self.shortcut_for_action("undo_close_pane");
+        let body = match pending.agent {
+            Some(agent) => close_confirm_body(
+                agent,
+                pending.extra_agents,
+                undo,
+                pending.loses_off_tree_sessions,
+            ),
+            None => workspace_close_confirm_body(undo, pending.loses_off_tree_sessions),
+        };
+        let accept_label = if pending.agent.is_some() {
+            "Close anyway"
+        } else {
+            "Close"
+        };
         let cancel_resting = ui.subtle;
         let cancel_hover = ui.surface;
 
@@ -826,7 +856,7 @@ impl PaneFlowApp {
                         this.confirm_pending_close(window, cx);
                         cx.stop_propagation();
                     }))
-                    .child("Close anyway"),
+                    .child(accept_label),
             );
 
         let backdrop = div()
@@ -1005,6 +1035,38 @@ mod tests {
         );
         assert!(body.contains("no agent is resumed"), "{body}");
         assert!(!body.contains("brings them back"), "{body}");
+    }
+
+    #[test]
+    fn workspace_close_copy_without_an_agent_explains_folder_close() {
+        let bound = workspace_close_confirm_body(Some("Cmd+Shift+T"), false);
+        assert_eq!(
+            bound,
+            "This closes the workspace and every terminal in it. Cmd+Shift+T restores the layout \
+             and scrollback; running processes are not resumed."
+        );
+        assert!(
+            !bound.contains("Claude") && !bound.contains("still running"),
+            "empty-folder copy must not pretend an agent is live: {bound}"
+        );
+
+        let unbound = workspace_close_confirm_body(None, false);
+        assert_eq!(
+            unbound,
+            "This closes the workspace and every terminal in it. Undo close restores the layout \
+             and scrollback; running processes are not resumed."
+        );
+    }
+
+    #[test]
+    fn workspace_close_copy_without_an_agent_does_not_promise_off_tree_undo() {
+        let body = workspace_close_confirm_body(Some("Cmd+Shift+T"), true);
+        assert_eq!(
+            body,
+            "This closes the workspace and every terminal in it. Cmd+Shift+T restores only saved \
+             workspace panes and their scrollback; dock and Review sessions are not restored, and \
+             running processes are not resumed."
+        );
     }
 
     #[test]
@@ -1261,6 +1323,77 @@ mod tests {
         assert!(
             capture_at < remove_at && closer.contains("ClosedRecord::Workspace"),
             "the workspace undo record must be pushed before its panes are dropped: {closer}"
+        );
+    }
+
+    /// Folder X (and every other workspace-close entry) must ask before
+    /// `workspaces.remove`, including when no live agent is detected. The
+    /// previous contract skipped the modal on `Some(false)` and closed
+    /// immediately — the "it closed before asking" report.
+    #[test]
+    fn workspace_close_request_never_closes_before_the_modal() {
+        let src = include_str!("close_confirm.rs");
+        let request = src
+            .split("pub(crate) fn request_close_workspace(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn request_close_workspace_without_window(")
+                    .next()
+            })
+            .expect("request_close_workspace body");
+        assert!(
+            !request.contains("close_workspace_at_inner"),
+            "the folder X must not remove the workspace before the modal is answered: {request}"
+        );
+
+        let arm = src
+            .split("fn arm_pending_close_workspace(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("/// The single entry point for UI workspace-close gestures.")
+                    .next()
+            })
+            .expect("arm_pending_close_workspace body");
+        assert!(
+            !arm.contains("return Some(false)"),
+            "a workspace with no live agent must still arm the modal, not skip it: {arm}"
+        );
+        assert!(
+            arm.contains("set_pending_close("),
+            "arming must write pending_close even when no agent is live: {arm}"
+        );
+        assert!(
+            !arm.contains("close_workspace_at_inner"),
+            "arming must not close the workspace: {arm}"
+        );
+        assert!(
+            arm.contains("is_empty()"),
+            "dock and Review terminals die with the folder even when they are not agents, so the \
+             undo copy must key off their presence, not off a live-agent scan: {arm}"
+        );
+
+        let windowless = src
+            .split("pub(crate) fn request_close_workspace_without_window(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("/// The one entry point every user-initiated tab close")
+                    .next()
+            })
+            .expect("request_close_workspace_without_window body");
+        assert!(
+            !windowless.contains("close_workspace_at_inner"),
+            "IPC must not close a workspace without the in-app modal: {windowless}"
+        );
+
+        let render = src
+            .split("pub(crate) fn render_close_confirm_dialog(")
+            .nth(1)
+            .and_then(|rest| rest.split("deferred(backdrop)").next())
+            .expect("render_close_confirm_dialog body");
+        assert!(
+            render.contains("workspace_close_confirm_body("),
+            "a no-agent workspace close must use the folder copy, not name a fictitious agent: \
+             {render}"
         );
     }
 
@@ -1567,7 +1700,7 @@ mod tests {
                 pane: pane.downgrade(),
             },
             style: ConfirmStyle::Inline,
-            agent: TerminalAgent::ClaudeCode,
+            agent: Some(TerminalAgent::ClaudeCode),
             extra_agents: 0,
             loses_off_tree_sessions: false,
             label: String::new(),

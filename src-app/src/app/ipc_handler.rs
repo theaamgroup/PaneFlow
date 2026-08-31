@@ -2855,9 +2855,6 @@ impl PaneFlowApp {
                         crate::app::close_guard::ConfirmStyle::Modal,
                         cx,
                     ) {
-                        crate::app::close_confirm::WorkspaceCloseOutcome::Closed => {
-                            serde_json::json!({"closed": idx})
-                        }
                         crate::app::close_confirm::WorkspaceCloseOutcome::ConfirmationRequired => {
                             serde_json::json!({"confirmation_required": true, "workspace": idx})
                         }
