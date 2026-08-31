@@ -4,10 +4,18 @@ Native Rust terminal workspace for running coding agents in parallel. Built with
 
 Fork context, decisions, the upstream leak register, and the traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
 
-**Start here for work in progress:** `docs/fork/STATE.md` records what is done,
-what is next with real counts, the verification commands and their expected
-output, and the method rules this project has already paid for. Read it before
-planning a pass so you do not redo finished work or repeat a falsified finding.
+**Work tracking:** GitHub issues are the backlog. File an issue for every bug
+and every feature (`gh issue create`); remaining work is `gh issue list`.
+Markdown is for documentation, design, runbooks, and fixtures
+(`examples/TASK.md` is load-bearing). Do not add TODO.md, ISSUES.md,
+ROADMAP.md, FIXES.md, a live findings.md queue, or any other markdown list of
+open work, and do not grow `docs/fork/STATE.md` into a backlog.
+
+**Start here for method and verification:** `docs/fork/STATE.md` records what
+has landed, the verification commands and their expected output, and the
+method rules this project has already paid for. Read it before planning a
+pass so you do not redo finished work or repeat a falsified finding. Open
+work lives on GitHub issues, not in that file.
 
 **Where this fork stands (2026-08-30):** product is PaneFlow (the PanesCLI
 rename was dropped). Version **0.1.3**. Origin `theaamgroup/paneflow` on
@@ -480,7 +488,7 @@ docs: description
 chore: description
 ```
 
-Atomic commits per logical change. Branch naming: `feat/description`, cut from `main`. Do not add new `US-NNN` story IDs to commit messages: there is no story tracker in this fork.
+Atomic commits per logical change. Branch naming: `feat/description`, cut from `main`. Cite the GitHub issue (`#123`) when the commit addresses one. Do not add `US-NNN` story IDs to commit messages: those PRDs are gone, and GitHub issues are the tracker.
 
 Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork): drop non-macOS packaging scripts`, so the divergence stays greppable in the log. There is no CONTRIBUTING.md or SECURITY.md; this is a public, owner-maintained fork.
 

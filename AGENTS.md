@@ -33,11 +33,20 @@ This is a private fork. There is no CONTRIBUTING.md, SECURITY.md, or public
 advisory process. History uses Conventional Commit prefixes plus a scope, for
 example `feat(app): adapt paneflow-hook for Codex PID env var`. Follow
 `type(scope): description`. Use `(fork)` for anything that diverges from
-upstream. `panic!`, `unimplemented!`, and `dbg!` are denied by workspace clippy;
+upstream. Cite the GitHub issue (`#123`) when the commit addresses one.
+`panic!`, `unimplemented!`, and `dbg!` are denied by workspace clippy;
 `todo!` warns. Verify load-bearing claims by running them.
+
+## Work tracking
+GitHub issues are the tracker for bugs, features, and remaining work. File an
+issue (`gh issue create`) when a defect is confirmed or a feature is scoped;
+list open work with `gh issue list`. Markdown documents how the system works
+and the decisions already made. It is not the backlog: do not add TODO.md,
+ISSUES.md, ROADMAP.md, FIXES.md, or other markdown lists of open work, and do
+not append remaining work to `docs/fork/STATE.md`.
 
 ## Platform
 macOS only. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`. There is no Linux or Windows target in this fork: do not add `#[cfg(target_os = "linux")]` or `#[cfg(windows)]` branches back, and do not reintroduce the Ghostty backend. Config lives at `~/Library/Application Support/paneflow/paneflow.json`.
 
 ## Deeper reference
-`CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. `docs/fork/STATE.md` is the living handoff (counts, remaining human work, method rules). `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and the traps register. Read those before touching platform code. Do not duplicate their content here.
+`CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. Open work lives in GitHub issues. `docs/fork/STATE.md` is the living handoff (landed work, verification commands, method rules). `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and the traps register. Read those before touching platform code. Do not duplicate their content here.
