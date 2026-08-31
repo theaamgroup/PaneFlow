@@ -173,16 +173,38 @@ fn is_path_start_boundary(c: char) -> bool {
 }
 
 fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
-    let mut starts = vec![0];
+    // First Cmd-hover has no line cache. Probe only the rightmost path-like
+    // token (nearest left boundary, ignoring whitespace inside quotes) so a
+    // dense compiler/log line cannot canonicalize every start-boundary prefix.
+    let mut last_start = 0;
+    let mut in_quote: Option<char> = None;
     for (idx, ch) in line_text[..ext_start].char_indices() {
+        if let Some(q) = in_quote {
+            if ch == q {
+                in_quote = None;
+                let next = idx + ch.len_utf8();
+                if next < ext_start {
+                    last_start = next;
+                }
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            in_quote = Some(ch);
+            let next = idx + ch.len_utf8();
+            if next < ext_start {
+                last_start = next;
+            }
+            continue;
+        }
         if is_path_start_boundary(ch) {
             let next = idx + ch.len_utf8();
             if next < ext_start {
-                starts.push(next);
+                last_start = next;
             }
         }
     }
-    starts
+    vec![last_start]
 }
 
 fn extension_tail_ok(line_text: &str, ext_end: usize) -> bool {
@@ -957,6 +979,81 @@ mod tests {
             probes.len(),
             unique_probe_count,
             "each unique candidate must cause at most one filesystem probe"
+        );
+    }
+
+    #[test]
+    fn detect_file_paths_bounds_canonicalize_probes() {
+        // First Cmd-hover of a new line has no hover_link_cache hit. A dense
+        // 200-column compiler/log line must not canonicalize every
+        // start-boundary prefix; only the rightmost path-like token.
+        const MAX_PROBES: usize = 4;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_md(tmp.path(), "found.md");
+        write_md(tmp.path(), "found.rs");
+
+        let mut missing_md = String::new();
+        while missing_md.chars().count() < 200 {
+            missing_md.push_str("token ");
+        }
+        missing_md.push_str("missing.md");
+        let map = ascii_map(&missing_md);
+        let (zones, probes) = record_path_probes(|| {
+            detect_file_paths_on_line_mapped(&missing_md, line0(), &map, Some(tmp.path()))
+        });
+        assert!(zones.is_empty());
+        assert!(
+            probes.len() <= MAX_PROBES,
+            "first scan of a dense 200-column path line probed {} times (candidates: {probes:?})",
+            probes.len()
+        );
+
+        let mut found_md = String::new();
+        while found_md.chars().count() < 200 {
+            found_md.push_str("token ");
+        }
+        found_md.push_str("found.md");
+        let map = ascii_map(&found_md);
+        let (zones, probes) = record_path_probes(|| {
+            detect_file_paths_on_line_mapped(&found_md, line0(), &map, Some(tmp.path()))
+        });
+        assert_eq!(zones.len(), 1);
+        assert!(
+            probes.len() <= MAX_PROBES,
+            "first hover of a dense 200-column path line probed {} times (candidates: {probes:?})",
+            probes.len()
+        );
+
+        let mut missing_rs = String::new();
+        while missing_rs.chars().count() < 200 {
+            missing_rs.push_str("token ");
+        }
+        missing_rs.push_str("missing.rs");
+        let map = ascii_map(&missing_rs);
+        let (zones, probes) = record_path_probes(|| {
+            detect_code_paths_on_line_mapped(&missing_rs, line0(), &map, Some(tmp.path()))
+        });
+        assert!(zones.is_empty());
+        assert!(
+            probes.len() <= MAX_PROBES,
+            "first code-path scan of a dense 200-column line probed {} times (candidates: {probes:?})",
+            probes.len()
+        );
+
+        let mut found_rs = String::new();
+        while found_rs.chars().count() < 200 {
+            found_rs.push_str("token ");
+        }
+        found_rs.push_str("found.rs");
+        let map = ascii_map(&found_rs);
+        let (zones, probes) = record_path_probes(|| {
+            detect_code_paths_on_line_mapped(&found_rs, line0(), &map, Some(tmp.path()))
+        });
+        assert_eq!(zones.len(), 1);
+        assert!(
+            probes.len() <= MAX_PROBES,
+            "first code-path hover of a dense 200-column line probed {} times (candidates: {probes:?})",
+            probes.len()
         );
     }
 
