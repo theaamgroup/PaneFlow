@@ -525,6 +525,8 @@ fn load_base_text(worktree_dir: &Path, merge_base: &str, rel_path: &str) -> (Str
 /// error (permission denied, device error) is logged and rendered as an
 /// unreadable (binary) stub rather than masquerading as a deletion.
 fn load_working_text(worktree_dir: &Path, rel_path: &str) -> (String, bool) {
+    use std::io::Read as _;
+
     let path = worktree_dir.join(rel_path);
     // U-041: lstat first. A tracked/untracked symlink in a crafted repo could
     // point outside the worktree; `fs::read` would dereference it and pull an
@@ -539,8 +541,19 @@ fn load_working_text(worktree_dir: &Path, rel_path: &str) -> (String, bool) {
                 .unwrap_or_default();
             (target, false)
         }
-        Ok(_) => match std::fs::read(&path) {
-            Ok(bytes) => classify(bytes),
+        Ok(_) => match std::fs::File::open(&path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                match file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes) {
+                    Ok(_) if bytes.len() as u64 > MAX_FILE_BYTES => (String::new(), true),
+                    Ok(_) => classify(bytes),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+                    Err(e) => {
+                        log::warn!("git: failed to read working-tree file {rel_path}: {e}");
+                        (String::new(), true)
+                    }
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
             Err(e) => {
                 log::warn!("git: failed to read working-tree file {rel_path}: {e}");
@@ -1073,6 +1086,28 @@ pub(crate) mod tests {
         );
         let (_, bin) = classify(vec![0x00, 0x01, 0x02]);
         assert!(bin);
+    }
+
+    #[test]
+    fn load_working_text_caps_bytes() {
+        // Call load_working_text directly so the is_too_large metadata
+        // pre-check cannot hide an unbounded read (metadata miss, TOCTOU
+        // grow, or a file already over the cap).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let oversized_len = MAX_FILE_BYTES as usize + 2;
+        std::fs::write(root.join("huge.txt"), vec![b'a'; oversized_len]).unwrap();
+
+        let (text, is_binary) = load_working_text(root, "huge.txt");
+        assert!(
+            text.len() as u64 <= MAX_FILE_BYTES + 1,
+            "load_working_text retained {} bytes from an oversized working-tree file",
+            text.len()
+        );
+        assert!(
+            text.is_empty() && is_binary,
+            "oversized working-tree content should stub as binary without keeping the buffer"
+        );
     }
 
     #[test]
