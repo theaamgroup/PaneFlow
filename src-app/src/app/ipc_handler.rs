@@ -1544,17 +1544,17 @@ pub(crate) fn should_apply_watcher_config(
 
 /// Take a ConfigWatcher deposit for apply.
 ///
-/// A persist-in-flight skip is deferred: the payload is put back when the slot
-/// is still empty so a later tick can apply it after `in_flight` returns to 0.
-/// `ConfigPersistInFlight::drop` fetch_maxes `last_persist_gen` before
-/// decrementing `in_flight`, so a deferred deposit is restamped to
-/// `persist_seq` and is not discarded as strictly older on retry. A strictly
-/// older `incoming_gen` is discarded, even while a persist is in flight.
+/// A persist-in-flight skip is deferred: the payload is put back with its
+/// original `incoming_gen` when the slot is still empty so a later tick can
+/// apply it after `in_flight` returns to 0, but only if that generation is
+/// still not older than `last_persist_gen`. Promoting the snapshot to the
+/// in-flight persist's sequence would let write A's file beat write B once B
+/// completes. A strictly older `incoming_gen` is discarded, even while a
+/// persist is in flight.
 pub(crate) fn take_watcher_config_for_apply(
     pending: &std::sync::Mutex<Option<(PaneFlowConfig, u64)>>,
     in_flight: usize,
     last_persist_gen: u64,
-    persist_seq: u64,
 ) -> Option<(PaneFlowConfig, u64)> {
     let taken = pending.lock().unwrap_or_else(|e| e.into_inner()).take();
     let (config, incoming_gen) = taken?;
@@ -1564,7 +1564,7 @@ pub(crate) fn take_watcher_config_for_apply(
     if in_flight > 0 && incoming_gen >= last_persist_gen {
         let mut slot = pending.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
-            *slot = Some((config, incoming_gen.max(persist_seq)));
+            *slot = Some((config, incoming_gen));
         }
     }
     None
@@ -1695,15 +1695,9 @@ impl PaneFlowApp {
         let last_persist_gen = self
             .config_last_persist_gen
             .load(std::sync::atomic::Ordering::SeqCst);
-        let persist_seq = self
-            .config_persist_seq
-            .load(std::sync::atomic::Ordering::SeqCst);
-        if let Some((config, _)) = take_watcher_config_for_apply(
-            &self.pending_config,
-            in_flight,
-            last_persist_gen,
-            persist_seq,
-        ) {
+        if let Some((config, _)) =
+            take_watcher_config_for_apply(&self.pending_config, in_flight, last_persist_gen)
+        {
             let default_shell_changed =
                 normalized_shell_value(self.cached_config.default_shell.as_deref())
                     != normalized_shell_value(config.default_shell.as_deref());
@@ -6413,7 +6407,7 @@ mod tests {
     }
 
     #[test]
-    fn process_config_changes_applies_in_flight_deposit_after_persist_guard_drops() {
+    fn process_config_changes_does_not_promote_deferred_snapshot_to_newer_persist() {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -6435,15 +6429,20 @@ mod tests {
             &pending,
             in_flight.load(Ordering::SeqCst),
             last_persist_gen.load(Ordering::SeqCst),
-            persist_seq.load(Ordering::SeqCst),
         );
         assert!(
             first.is_none(),
             "must not apply a watcher deposit while a persist is in flight"
         );
-        assert!(
-            pending.lock().unwrap().is_some(),
-            "in-flight skip must put the deposit back"
+        let deferred_gen = pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, generation)| *generation)
+            .expect("in-flight skip must put the deposit back");
+        assert_eq!(
+            deferred_gen, 3,
+            "deferred snapshot must keep its original generation, not persist_seq"
         );
 
         last_persist_gen.fetch_max(persist_gen, Ordering::SeqCst);
@@ -6453,12 +6452,28 @@ mod tests {
             &pending,
             in_flight.load(Ordering::SeqCst),
             last_persist_gen.load(Ordering::SeqCst),
-            persist_seq.load(Ordering::SeqCst),
         );
+        assert!(
+            second.is_none(),
+            "a snapshot of write A must not replace cached_config after write B completes"
+        );
+        assert!(pending.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn process_config_changes_applies_same_generation_deposit_after_in_flight_drops() {
+        use std::sync::Mutex;
+
+        let pending = Mutex::new(Some((watcher_config_with_shell("/bin/zsh"), 4)));
+        let first = super::take_watcher_config_for_apply(&pending, 1, 4);
+        assert!(first.is_none());
+        assert!(pending.lock().unwrap().is_some());
+
+        let second = super::take_watcher_config_for_apply(&pending, 0, 4);
         assert_eq!(
             second.map(|(config, _)| config.default_shell),
             Some(Some("/bin/zsh".to_string())),
-            "deferred deposit must apply after the persist guard drops"
+            "a snapshot already stamped at last_persist_gen must apply once idle"
         );
         assert!(pending.lock().unwrap().is_none());
     }
@@ -6468,7 +6483,7 @@ mod tests {
         use std::sync::Mutex;
 
         let pending = Mutex::new(Some((watcher_config_with_shell("/bin/bash"), 3)));
-        let applied = super::take_watcher_config_for_apply(&pending, 0, 4, 4);
+        let applied = super::take_watcher_config_for_apply(&pending, 0, 4);
         assert!(
             applied.is_none(),
             "strictly older incoming_gen must not replace cached_config"

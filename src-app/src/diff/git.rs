@@ -623,13 +623,15 @@ enum BatchCheck {
     Other,
 }
 
-fn cat_file_specs(merge_base: &str, lookups: &[String]) -> String {
-    let mut stdin = String::new();
+fn cat_file_specs(merge_base: &str, lookups: &[String]) -> Vec<u8> {
+    // `-Z` NUL-frames each `<merge-base>:<path>` spec so a tracked name
+    // that contains a newline cannot split the batch into extra requests.
+    let mut stdin = Vec::new();
     for path in lookups {
-        stdin.push_str(merge_base);
-        stdin.push(':');
-        stdin.push_str(path);
-        stdin.push('\n');
+        stdin.extend_from_slice(merge_base.as_bytes());
+        stdin.push(b':');
+        stdin.extend_from_slice(path.as_bytes());
+        stdin.push(0);
     }
     stdin
 }
@@ -654,18 +656,18 @@ fn parse_batch_check_line(line: &[u8]) -> BatchCheck {
     }
 }
 
-/// Parse `git cat-file --batch` stdout for `count` requests. `None` is a
+/// Parse `git cat-file --batch -Z` stdout for `count` requests. `None` is a
 /// missing/ambiguous object; `Some(bytes)` is the raw blob (or other object)
-/// payload.
+/// payload. Headers and payloads are NUL-terminated.
 fn parse_cat_file_batch(stdout: &[u8], count: usize) -> Result<Vec<Option<Vec<u8>>>, String> {
     let mut rest = stdout;
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
-        let Some(nl) = rest.iter().position(|&b| b == b'\n') else {
+        let Some(nul) = rest.iter().position(|&b| b == 0) else {
             return Err("truncated git cat-file --batch header".to_string());
         };
-        let header = &rest[..nl];
-        rest = &rest[nl + 1..];
+        let header = &rest[..nul];
+        rest = &rest[nul + 1..];
         if header.ends_with(b" missing") || header.ends_with(b" ambiguous") {
             records.push(None);
             continue;
@@ -682,8 +684,8 @@ fn parse_cat_file_batch(stdout: &[u8], count: usize) -> Result<Vec<Option<Vec<u8
         }
         let bytes = rest[..size].to_vec();
         rest = &rest[size..];
-        if rest.first() != Some(&b'\n') {
-            return Err("git cat-file --batch payload missing trailing newline".to_string());
+        if rest.first() != Some(&0) {
+            return Err("git cat-file --batch payload missing trailing NUL".to_string());
         }
         rest = &rest[1..];
         records.push(Some(bytes));
@@ -713,8 +715,8 @@ fn load_base_texts_batch(
     let stdin = cat_file_specs(merge_base, lookups);
     let check = match budget.run_stdin(
         worktree_dir,
-        &["cat-file", "--batch-check"],
-        stdin.as_bytes(),
+        &["cat-file", "--batch-check", "-Z"],
+        &stdin,
         GIT_STDOUT_CAP,
     ) {
         Ok(bytes) => bytes,
@@ -725,7 +727,7 @@ fn load_base_texts_batch(
         }
     };
     let lines: Vec<&[u8]> = check
-        .split(|&b| b == b'\n')
+        .split(|&b| b == 0)
         .filter(|line| !line.is_empty())
         .collect();
     if lines.len() != lookups.len() {
@@ -760,8 +762,8 @@ fn load_base_texts_batch(
     let stdin = cat_file_specs(merge_base, &fetch);
     let payload = match budget.run_stdin(
         worktree_dir,
-        &["cat-file", "--batch"],
-        stdin.as_bytes(),
+        &["cat-file", "--batch", "-Z"],
+        &stdin,
         GIT_BATCH_STDOUT_CAP,
     ) {
         Ok(bytes) => bytes,
@@ -1463,13 +1465,23 @@ pub(crate) mod tests {
     #[test]
     fn parse_cat_file_batch_missing_empty_and_blob() {
         let mut stdout = Vec::new();
-        stdout.extend_from_slice(b"HEAD:gone.rs missing\n");
-        stdout.extend_from_slice(b"abc blob 0\n\n");
-        stdout.extend_from_slice(b"def blob 5\nhello\n");
+        stdout.extend_from_slice(b"HEAD:gone.rs missing\0");
+        stdout.extend_from_slice(b"abc blob 0\0\0");
+        stdout.extend_from_slice(b"def blob 5\0hello\0");
         let parsed = parse_cat_file_batch(&stdout, 3).unwrap();
         assert_eq!(parsed[0], None);
         assert_eq!(parsed[1], Some(Vec::new()));
         assert_eq!(parsed[2], Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn cat_file_specs_nul_frames_paths_that_contain_newlines() {
+        let specs = cat_file_specs("abc123", &["foo\nbar.rs".into(), "ok.rs".into()]);
+        let records: Vec<&[u8]> = specs.split(|&b| b == 0).filter(|r| !r.is_empty()).collect();
+        assert_eq!(
+            records,
+            [b"abc123:foo\nbar.rs".as_slice(), b"abc123:ok.rs".as_slice()]
+        );
     }
 
     #[test]
@@ -1736,10 +1748,11 @@ pub(crate) mod tests {
         let cat_file_batch = cmds.iter().any(|c| {
             git_subcommand_name(c) == Some("cat-file")
                 && c.split_whitespace().any(|a| a == "--batch")
+                && c.split_whitespace().any(|a| a == "-Z")
         });
         assert!(
             cat_file_batch,
-            "one worktree diff must load blobs via git cat-file --batch, commands={cmds:?}"
+            "one worktree diff must load blobs via git cat-file --batch -Z, commands={cmds:?}"
         );
         assert!(
             show_count == 0,
