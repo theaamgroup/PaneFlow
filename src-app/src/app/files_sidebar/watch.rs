@@ -26,6 +26,19 @@ fn should_apply_files_hydration(
     sidebar_open && current_root == expected_root && current_generation == expected_generation
 }
 
+/// Blocking re-read of already-cached directories. Call from `smol::unblock`.
+fn reread_cached_dirs(
+    root: &Path,
+    dirs: Vec<PathBuf>,
+) -> Vec<(PathBuf, Vec<files_tree::FileNode>)> {
+    dirs.into_iter()
+        .map(|dir| {
+            let listing = files_tree::read_dir_sorted(root, &dir);
+            (dir, listing)
+        })
+        .collect()
+}
+
 impl PaneFlowApp {
     /// Mirror the live tree's expansion into the active workspace (excluding
     /// the implicit root) so it survives close/reopen and persists to
@@ -163,6 +176,10 @@ impl PaneFlowApp {
     /// change under a collapsed/uncached dir is ignored until it's expanded
     /// (then read fresh by `toggle_dir`). `rescan` (a notify overflow/Rescan
     /// signal, US-006 AC3) forces a root re-read. Never walks the whole tree.
+    ///
+    /// Directory reads run on a background executor keyed by
+    /// `files_hydrate_generation`. Listings apply on the GPUI thread only if
+    /// the sidebar is still open and the root and generation still match.
     pub(crate) fn refresh_files_dirs(
         &mut self,
         mut dirs: Vec<PathBuf>,
@@ -176,20 +193,49 @@ impl PaneFlowApp {
         if rescan {
             dirs.push(root.clone());
         }
-        let mut changed = false;
-        for dir in files_tree::coalesce_by_prefix(dirs) {
-            // AC4: only re-read directories we've already cached (expanded).
-            if let std::collections::hash_map::Entry::Occupied(mut e) =
-                self.files_tree.children.entry(dir.clone())
-            {
-                e.insert(files_tree::read_dir_sorted(&root, &dir));
-                changed = true;
-            }
+        // AC4: only re-read directories we've already cached (expanded).
+        let to_reread: Vec<PathBuf> = files_tree::coalesce_by_prefix(dirs)
+            .into_iter()
+            .filter(|dir| self.files_tree.children.contains_key(dir))
+            .collect();
+        if to_reread.is_empty() {
+            return;
         }
-        if changed {
-            self.clamp_files_selection();
-            cx.notify();
-        }
+        let generation = self.files_hydrate_generation;
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let listings = smol::unblock({
+                    let root = root.clone();
+                    move || reread_cached_dirs(&root, to_reread)
+                })
+                .await;
+                let _ = this.update(cx, |app, cx| {
+                    if !should_apply_files_hydration(
+                        app.files_sidebar_open,
+                        &app.files_tree.root,
+                        &root,
+                        app.files_hydrate_generation,
+                        generation,
+                    ) {
+                        return;
+                    }
+                    let mut changed = false;
+                    for (dir, listing) in listings {
+                        if let std::collections::hash_map::Entry::Occupied(mut e) =
+                            app.files_tree.children.entry(dir)
+                        {
+                            e.insert(listing);
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        app.clamp_files_selection();
+                        cx.notify();
+                    }
+                });
+            },
+        )
+        .detach();
     }
 }
 
@@ -257,6 +303,48 @@ mod tests {
 
         assert_eq!(files_tree_generation, current_generation);
         assert_eq!(files_event_rx_generation, Some(current_generation));
+    }
+
+    #[test]
+    fn files_refresh_apply_uses_hydration_generation_guard() {
+        let src = include_str!("watch.rs");
+        let body = src
+            .split("pub(crate) fn refresh_files_dirs(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// US-018: build non-recursive").next())
+            .expect("refresh_files_dirs body");
+        assert!(
+            !body.contains("read_dir_sorted"),
+            "refresh_files_dirs must not re-read directories on the GPUI thread: {body}"
+        );
+        assert!(
+            body.contains("should_apply_files_hydration"),
+            "refresh apply must use the same generation guard as hydration: {body}"
+        );
+        assert!(
+            body.contains("files_hydrate_generation"),
+            "refresh apply must key listings by files_hydrate_generation: {body}"
+        );
+        assert!(
+            body.contains("smol::unblock"),
+            "refresh must re-read on a background executor: {body}"
+        );
+
+        let root = Path::new("/repo");
+        let current_generation = 2;
+        let stale_generation = 1;
+        let mut listing_generation = current_generation;
+        if should_apply_files_hydration(true, root, root, current_generation, stale_generation) {
+            listing_generation = stale_generation;
+        }
+        assert_eq!(listing_generation, current_generation);
+        assert!(should_apply_files_hydration(
+            true,
+            root,
+            root,
+            current_generation,
+            current_generation,
+        ));
     }
 
     #[test]
