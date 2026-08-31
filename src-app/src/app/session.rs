@@ -2040,6 +2040,73 @@ mod tests {
         );
     }
 
+    fn marked_managed_worktree_checkout(
+        tmp: &tempfile::TempDir,
+        branch: &str,
+    ) -> (PathBuf, String, paneflow_config::schema::ManagedWorktreeDef) {
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let path = crate::workspace::worktree::worktree_dir(&repo_root, branch);
+        std::fs::create_dir_all(&path).expect("owned worktree dir");
+        std::fs::write(
+            crate::workspace::worktree::owner_marker_path(&path),
+            format!(
+                "owner=paneflow\nrepo_root={}\nbranch={branch}\n",
+                std::fs::canonicalize(&repo_root)
+                    .expect("canonical repo root")
+                    .display()
+            ),
+        )
+        .expect("owner marker");
+        let identity = crate::workspace::worktree::worktree_identity(&path)
+            .expect("directory identity")
+            .as_str()
+            .to_string();
+        let def = paneflow_config::schema::ManagedWorktreeDef {
+            path: path.to_string_lossy().into_owned(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            branch: branch.to_string(),
+            teardown: "auto".to_string(),
+            directory_identity: Some(identity.clone()),
+        };
+        (path, identity, def)
+    }
+
+    #[test]
+    fn restored_managed_worktree_matching_directory_identity_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (path, identity, def) = marked_managed_worktree_checkout(&tmp, "feat/identity-match");
+
+        let restored = rehydrate_managed_worktree(&def)
+            .expect("a marked checkout with a matching directory identity restores");
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
+        assert_eq!(
+            restored.identity.as_ref().map(|identity| identity.as_str()),
+            Some(identity.as_str())
+        );
+    }
+
+    #[test]
+    fn restored_managed_worktree_mismatched_directory_identity_is_dropped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_, identity, mut def) =
+            marked_managed_worktree_checkout(&tmp, "feat/identity-mismatch");
+        let other = "0:0:0:0";
+        assert_ne!(
+            identity, other,
+            "fixture identity must differ from the mismatched persisted value"
+        );
+        def.directory_identity = Some(other.to_string());
+
+        assert!(
+            rehydrate_managed_worktree(&def).is_none(),
+            "a marked checkout with a different directory identity is dropped"
+        );
+    }
+
     #[test]
     fn restored_managed_ownership_is_not_truncated_at_one_tab_pane_cap() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2252,6 +2319,37 @@ mod tests {
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].path, "/tmp/repo.worktrees/feature");
         assert_eq!(journal[0].teardown, "keep");
+    }
+
+    #[test]
+    fn persisted_pending_worktree_teardowns_keep_managed_worktree_directory_identity() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("repo.worktrees").join("feature");
+        std::fs::create_dir_all(&path).expect("checkout");
+        let identity =
+            crate::workspace::worktree::worktree_identity(&path).expect("directory identity");
+        let worktree = crate::workspace::worktree::ManagedWorktree {
+            path,
+            repo_root: tmp.path().join("repo"),
+            branch: "feature".to_string(),
+            teardown: crate::workspace::worktree::TeardownPolicy::Auto,
+            identity: Some(identity.clone()),
+        };
+
+        let def = managed_worktree_def(&worktree);
+        assert_eq!(
+            def.directory_identity.as_deref(),
+            Some(identity.as_str()),
+            "managed_worktree_def must persist directory identity"
+        );
+
+        let journal = persisted_pending_worktree_teardowns(&[worktree], &[]);
+        assert_eq!(journal.len(), 1);
+        assert_eq!(
+            journal[0].directory_identity.as_deref(),
+            Some(identity.as_str()),
+            "pending teardown journal must persist directory identity"
+        );
     }
 
     /// EP-002 US-005: a legacy pane listing several surfaces restores the

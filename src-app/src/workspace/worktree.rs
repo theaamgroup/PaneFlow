@@ -2344,6 +2344,76 @@ mod tests {
     }
 
     #[test]
+    fn managed_worktree_matching_directory_identity_restores() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let branch = "feat/identity-match";
+        let path = worktree_dir(&repo_root, branch);
+        std::fs::create_dir_all(&path).expect("worktree dir");
+        write_owner_marker(&path, &repo_root, branch).expect("marker");
+        let identity = worktree_identity(&path).expect("directory identity");
+
+        let restored = managed_worktree_from_persisted_record(
+            &path.to_string_lossy(),
+            &repo_root.to_string_lossy(),
+            branch,
+            "auto",
+            Some(identity.as_str()),
+        )
+        .expect("matching directory identity restores a marked checkout");
+
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
+        assert_eq!(
+            restored.identity.as_ref().map(WorktreeIdentity::as_str),
+            Some(identity.as_str())
+        );
+    }
+
+    #[test]
+    fn managed_worktree_mismatched_directory_identity_is_dropped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let branch = "feat/identity-mismatch";
+        let path = worktree_dir(&repo_root, branch);
+        std::fs::create_dir_all(&path).expect("worktree dir");
+        write_owner_marker(&path, &repo_root, branch).expect("marker");
+        let identity = worktree_identity(&path).expect("directory identity");
+        let other = "0:0:0:0";
+        assert_ne!(
+            identity.as_str(),
+            other,
+            "fixture identity must differ from the mismatched persisted value"
+        );
+
+        assert!(
+            managed_worktree_from_record(
+                &path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                branch,
+                "auto",
+            )
+            .is_some(),
+            "a marked checkout still restores without persisted identity"
+        );
+        assert!(
+            managed_worktree_from_persisted_record(
+                &path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                branch,
+                "auto",
+                Some(other),
+            )
+            .is_none(),
+            "a marked checkout with a different directory identity is dropped"
+        );
+    }
+
+    #[test]
     fn copy_env_files_copies_top_level_env_only_and_never_clobbers() {
         let src = tempfile::tempdir().expect("src");
         let dst = tempfile::tempdir().expect("dst");
