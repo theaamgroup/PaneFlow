@@ -719,12 +719,17 @@ impl Render for StartupSplashView {
         if !self.mount_scheduled {
             self.mount_scheduled = true;
             cx.spawn_in(window, async move |_, cx| {
-                smol::Timer::after(std::time::Duration::from_millis(
-                    STARTUP_SPLASH_MIN_VISIBLE_MS,
-                ))
-                .await;
+                let loaded = smol::unblock(PaneFlowApp::load_session);
+                let min_visible = async {
+                    smol::Timer::after(std::time::Duration::from_millis(
+                        STARTUP_SPLASH_MIN_VISIBLE_MS,
+                    ))
+                    .await;
+                };
+                let ((saved_session, session_corruption), _) =
+                    smol::future::zip(loaded, min_visible).await;
                 let _ = cx.update(|window, cx| {
-                    mount_paneflow_app(window, cx);
+                    mount_paneflow_app(window, cx, saved_session, session_corruption);
                 });
             })
             .detach();
@@ -1048,6 +1053,9 @@ struct PaneFlowApp {
     /// this until after the first frame, then toasts the backup path so a
     /// corrupt file is not a silent first-launch.
     session_corruption: Option<app::session::SessionCorruptionInfo>,
+    /// Remaining workspaces from the splash-thread session load. Drained one
+    /// bounded batch per GPUI frame so restore cannot stall the event loop.
+    session_restore: Option<app::session::PendingSessionRestore>,
     /// Monotonic settings-persist generation. `persist_setting` `fetch_add`s
     /// before spawning the off-thread write, matching [`Self::save_seq`].
     config_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -2299,8 +2307,15 @@ fn register_focus_lost_fallback<T: 'static>(
     .detach();
 }
 
-fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> {
-    let view = window.replace_root(cx, |_, cx| PaneFlowApp::new(cx));
+fn mount_paneflow_app(
+    window: &mut Window,
+    cx: &mut App,
+    saved_session: Option<paneflow_config::schema::SessionState>,
+    session_corruption: Option<app::session::SessionCorruptionInfo>,
+) -> Entity<PaneFlowApp> {
+    let view = window.replace_root(cx, |_, cx| {
+        PaneFlowApp::new(saved_session, session_corruption, cx)
+    });
     view.update(cx, |_, cx| {
         register_focus_lost_fallback(window, cx, |app| &app.empty_workspace_focus);
     });
@@ -2358,16 +2373,11 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
     });
 
     view.update(cx, |app, cx| {
-        // Issue #108: a restored session can open onto a workspace with no
-        // panes (or no workspaces at all). Focus the placeholder then, so the
-        // global keybindings work from the first keystroke.
-        let focused = match app.workspaces.get(app.active_idx) {
-            Some(ws) => ws.focus_first(window, cx),
-            None => false,
-        };
-        if !focused {
-            window.focus(&app.empty_workspace_focus, cx);
-        }
+        // Issue #156: restore workspaces across frames. Focus is applied
+        // after the last batch (or immediately when there is nothing to
+        // restore). Issue #108: a restored session can open onto a workspace
+        // with no panes; the placeholder keeps global keybindings alive.
+        app.begin_staged_session_restore(window, cx);
     });
     view
 }
