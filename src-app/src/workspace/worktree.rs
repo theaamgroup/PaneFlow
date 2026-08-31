@@ -1608,6 +1608,47 @@ mod tests {
     }
 
     #[test]
+    fn merge_managed_worktree_records_conflicting_identity_fails_closed_to_keep() {
+        let first = ManagedWorktree {
+            path: PathBuf::from("/tmp/repo.worktrees/feature"),
+            repo_root: PathBuf::from("/tmp/repo"),
+            branch: "feature".to_string(),
+            teardown: TeardownPolicy::Auto,
+            identity: Some(WorktreeIdentity("1:2:3:4".to_string())),
+        };
+        let mut second = first.clone();
+        second.identity = Some(WorktreeIdentity("5:6:7:8".to_string()));
+
+        let merged = merge_managed_worktree_records(vec![first, second]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].teardown, TeardownPolicy::Keep);
+    }
+
+    #[test]
+    fn merge_managed_worktree_records_conflicting_ownership_metadata_fails_closed_to_keep() {
+        let first = ManagedWorktree {
+            path: PathBuf::from("/tmp/repo.worktrees/feature"),
+            repo_root: PathBuf::from("/tmp/repo"),
+            branch: "feature".to_string(),
+            teardown: TeardownPolicy::Auto,
+            identity: Some(WorktreeIdentity("1:2:3:4".to_string())),
+        };
+
+        let mut other_root = first.clone();
+        other_root.repo_root = PathBuf::from("/tmp/other-repo");
+        let merged_root = merge_managed_worktree_records(vec![first.clone(), other_root]);
+        assert_eq!(merged_root.len(), 1);
+        assert_eq!(merged_root[0].teardown, TeardownPolicy::Keep);
+
+        let mut other_branch = first.clone();
+        other_branch.branch = "other-feature".to_string();
+        let merged_branch = merge_managed_worktree_records(vec![first, other_branch]);
+        assert_eq!(merged_branch.len(), 1);
+        assert_eq!(merged_branch[0].teardown, TeardownPolicy::Keep);
+    }
+
+    #[test]
     fn merge_preserves_more_than_the_layout_pane_cap() {
         let records: Vec<_> = (0..40)
             .map(|index| ManagedWorktree {

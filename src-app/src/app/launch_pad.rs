@@ -919,9 +919,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
         std::fs::create_dir(&repo_root).expect("repo dir");
-        if !test_git(&repo_root, &["init"]) {
-            return;
-        }
+        assert!(test_git(&repo_root, &["init"]), "git fixture required");
+        let repo_root = std::fs::canonicalize(&repo_root).expect("canonicalize repo");
         assert!(test_git(&repo_root, &["config", "core.autocrlf", "false"]));
         std::fs::write(repo_root.join("README.md"), "init\n").expect("readme");
         assert!(test_git(&repo_root, &["add", "README.md"]));
@@ -938,22 +937,25 @@ mod tests {
             ],
         ));
 
-        let branch_a = "feat/a b";
+        // `feat/a b` / `feat/a-b` slug-collide, but git rejects the space in a
+        // ref name; `feat-a-b` is the valid occupier of that same slug path.
+        let branch_a = "feat-a-b";
         let branch_b = "feat/a-b";
         let legacy = worktree::worktree_dir(&repo_root, branch_a);
         std::fs::create_dir_all(legacy.parent().expect("worktree parent")).expect("parent dir");
-        if !test_git(
-            &repo_root,
-            &[
-                "worktree",
-                "add",
-                legacy.to_str().expect("utf8 path"),
-                "-b",
-                branch_a,
-            ],
-        ) {
-            return;
-        }
+        assert!(
+            test_git(
+                &repo_root,
+                &[
+                    "worktree",
+                    "add",
+                    legacy.to_str().expect("utf8 path"),
+                    "-b",
+                    branch_a,
+                ],
+            ),
+            "git fixture required"
+        );
 
         let (path, create_branch) = launch_pad_worktree_plan(&repo_root, branch_b).expect("plan");
         assert_eq!(path, worktree::worktree_dir_hashed(&repo_root, branch_b));
@@ -1002,9 +1004,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
         std::fs::create_dir(&repo_root).expect("repo dir");
-        if !test_git(&repo_root, &["init"]) {
-            return;
-        }
+        assert!(test_git(&repo_root, &["init"]), "git fixture required");
         std::fs::write(repo_root.join("README.md"), "init\n").expect("readme");
         assert!(test_git(&repo_root, &["add", "README.md"]));
         assert!(test_git(
@@ -1056,6 +1056,48 @@ mod tests {
         assert!(
             retain_arm.contains("ownership reservation retained") && retain_arm.contains("return;"),
             "a possibly registered checkout must return before clearing its reservation: {retain_arm}"
+        );
+    }
+
+    #[test]
+    fn worktree_checkout_may_exist_is_true_when_list_worktrees_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("not-a-repo");
+        std::fs::create_dir(&repo_root).expect("non-repo dir");
+        let missing = tmp.path().join("missing-checkout");
+        assert!(
+            !missing.exists(),
+            "path must be absent so try_exists does not short-circuit the git list"
+        );
+        assert!(
+            worktree::list_worktrees(&repo_root).is_err(),
+            "non-repo root must make list_worktrees error so the fail-closed arm runs"
+        );
+        assert!(
+            worktree_checkout_may_exist(&repo_root, &missing),
+            "a git list failure must fail-closed and keep the reservation"
+        );
+    }
+
+    #[test]
+    fn worktree_checkout_may_exist_is_false_for_missing_path_in_real_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir(&repo_root).expect("repo dir");
+        assert!(test_git(&repo_root, &["init"]), "git fixture required");
+        let missing = tmp.path().join("missing-checkout");
+        assert!(
+            !missing.exists(),
+            "path must be absent so try_exists does not short-circuit the git list"
+        );
+        let entries = worktree::list_worktrees(&repo_root).expect("list worktrees");
+        assert!(
+            entries.iter().all(|entry| entry.path != missing),
+            "fixture must not register the missing path"
+        );
+        assert!(
+            !worktree_checkout_may_exist(&repo_root, &missing),
+            "a missing path with a successful empty match must not keep the reservation"
         );
     }
 
