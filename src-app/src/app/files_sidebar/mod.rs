@@ -185,6 +185,7 @@ impl PaneFlowApp {
         self.files_menu_open = None;
         self.files_surface_id = None;
         self.files_selected = 0;
+        self.files_dir_refresh_seq.clear();
     }
 
     /// Re-root the tree on the active workspace's `cwd` when it changed while

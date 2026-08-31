@@ -149,6 +149,17 @@ pub fn run_with_timeout(
     run_with_timeout_capped(cmd, deadline, stdout_cap, STDERR_CAP)
 }
 
+/// [`run_with_timeout`] that writes `stdin` to the child and closes the pipe
+/// (EOF) so plumbing such as `git cat-file --batch` can read a request set.
+pub fn run_with_timeout_stdin(
+    cmd: Command,
+    stdin: &[u8],
+    deadline: Duration,
+    stdout_cap: u64,
+) -> Result<BoundedOutput, ProcError> {
+    run_bounded(cmd, Some(stdin), deadline, stdout_cap, STDERR_CAP)
+}
+
 /// [`run_with_timeout`] with an explicit stderr capture cap.
 ///
 /// Most callers want the crate's small diagnostic [`STDERR_CAP`]. A pane
@@ -156,7 +167,17 @@ pub fn run_with_timeout(
 /// needs a matching budget so fail-closed capture does not SIGKILL a live
 /// `cargo build` / `npm ci`.
 pub fn run_with_timeout_capped(
+    cmd: Command,
+    deadline: Duration,
+    stdout_cap: u64,
+    stderr_cap: u64,
+) -> Result<BoundedOutput, ProcError> {
+    run_bounded(cmd, None, deadline, stdout_cap, stderr_cap)
+}
+
+fn run_bounded(
     mut cmd: Command,
+    stdin: Option<&[u8]>,
     deadline: Duration,
     stdout_cap: u64,
     stderr_cap: u64,
@@ -164,9 +185,13 @@ pub fn run_with_timeout_capped(
     let stdout_cap = validate_capture_cap(stdout_cap)?;
     let stderr_cap = validate_capture_cap(stderr_cap)?;
 
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
     configure_process_tree(&mut cmd);
     // Prepare the reaper before spawning the child. Once a process exists,
@@ -190,6 +215,14 @@ pub fn run_with_timeout_capped(
         .stderr
         .take()
         .ok_or_else(|| supervision_error("stderr capture pipe unavailable after spawn"))?;
+    if let Some(bytes) = stdin {
+        let stdin_pipe = process
+            .child_mut()?
+            .stdin
+            .take()
+            .ok_or_else(|| supervision_error("stdin pipe unavailable after spawn"))?;
+        spawn_stdin_writer(stdin_pipe, bytes.to_vec())?;
+    }
 
     let (reader_tx, reader_rx) = mpsc::channel();
     process.attach_reader(reader_rx);
@@ -417,6 +450,16 @@ enum ReaderFailure {
 struct ReaderMessage {
     stream: OutputStream,
     result: Result<Vec<u8>, ReaderFailure>,
+}
+
+fn spawn_stdin_writer(mut pipe: std::process::ChildStdin, bytes: Vec<u8>) -> Result<(), ProcError> {
+    thread::Builder::new()
+        .name("paneflow-process-stdin".to_string())
+        .spawn(move || {
+            let _ = pipe.write_all(&bytes);
+        })
+        .map(|_| ())
+        .map_err(ProcError::Supervision)
 }
 
 fn spawn_bounded_reader<R>(
@@ -800,6 +843,16 @@ mod tests {
         assert!(diagnostic.contains("test thread spawn failure"));
         assert!(diagnostic.contains("could not be sent to reaper"));
         assert!(diagnostic.contains("reaper is unavailable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_is_forwarded_and_closed() {
+        let out =
+            run_with_timeout_stdin(sh("cat"), b"hello batch", Duration::from_secs(5), 1 << 20)
+                .expect("cat should complete after stdin EOF");
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"hello batch");
     }
 
     #[cfg(unix)]

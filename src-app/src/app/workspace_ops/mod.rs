@@ -57,6 +57,9 @@ fn path_is_within_worktree(candidate: &std::path::Path, worktree: &std::path::Pa
     let Some(resolved_candidate) = candidate.canonicalize().ok() else {
         return false;
     };
+    if resolved_candidate.starts_with(worktree) {
+        return true;
+    }
     let resolved_worktree = worktree
         .canonicalize()
         .unwrap_or_else(|_| worktree.to_path_buf());
@@ -1150,6 +1153,10 @@ impl PaneFlowApp {
         ignored_workspace: Option<usize>,
         cx: &App,
     ) -> bool {
+        let resolved_worktree = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.to_path_buf());
+        let worktree_path = resolved_worktree.as_path();
         path_is_within_worktree(&crate::launch_cwd::implicit_launch_cwd(), worktree_path)
             || self
                 .workspaces
@@ -1164,16 +1171,17 @@ impl PaneFlowApp {
                         })
                         || workspace.collect_panes().into_iter().any(|pane| {
                             pane.read(cx).terminals().any(|terminal| {
-                                let terminal = terminal.read(cx);
-                                terminal.terminal.current_cwd.as_deref().is_some_and(|cwd| {
-                                    path_is_within_worktree(
-                                        std::path::Path::new(cwd),
-                                        worktree_path,
-                                    )
-                                }) || terminal
+                                terminal
+                                    .read(cx)
                                     .terminal
-                                    .cwd_now()
-                                    .is_some_and(|cwd| path_is_within_worktree(&cwd, worktree_path))
+                                    .current_cwd
+                                    .as_deref()
+                                    .is_some_and(|cwd| {
+                                        path_is_within_worktree(
+                                            std::path::Path::new(cwd),
+                                            worktree_path,
+                                        )
+                                    })
                             })
                         })
                 })
@@ -1360,6 +1368,10 @@ impl PaneFlowApp {
     /// picks what runs in it from the folder's `+` action or the launch pad.
     #[allow(dead_code)]
     pub(crate) fn create_workspace(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_restore.is_some() {
+            self.show_toast("Restoring session", cx);
+            return;
+        }
         if self.workspaces.len() >= MAX_WORKSPACES {
             return;
         }
@@ -1392,6 +1404,10 @@ impl PaneFlowApp {
         paths: &[std::path::PathBuf],
         cx: &mut Context<Self>,
     ) {
+        if self.session_restore.is_some() {
+            self.show_toast("Restoring session", cx);
+            return;
+        }
         let mut opened = false;
         for path in paths {
             if self.workspaces.len() >= MAX_WORKSPACES {
@@ -1446,6 +1462,10 @@ impl PaneFlowApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.session_restore.is_some() {
+            self.show_toast("Restoring session", cx);
+            return;
+        }
         if self.workspaces.len() >= MAX_WORKSPACES {
             return;
         }
@@ -3757,12 +3777,19 @@ mod tests {
         let scan = src
             .split("pub(crate) fn live_workspace_uses_worktree(")
             .nth(1)
-            .and_then(|rest| rest.split("/// Tear down a batch").next())
+            .and_then(|rest| {
+                rest.split("/// Whether a candidate CWD is inside a checkout")
+                    .next()
+            })
             .expect("live worktree scan");
         assert!(scan.contains("workspace.collect_panes()"), "{scan}");
         assert!(scan.contains(".terminals()"), "{scan}");
         assert!(scan.contains("current_cwd"), "{scan}");
-        assert!(scan.contains("cwd_now()"), "{scan}");
+        assert!(scan.contains(".canonicalize()"), "{scan}");
+        assert!(
+            !scan.contains("cwd_now()"),
+            "live_workspace_uses_worktree must use cached current_cwd only: {scan}"
+        );
     }
 
     #[test]
@@ -3807,6 +3834,10 @@ mod tests {
         symlink(&worktree, &alias).expect("symlink");
 
         assert!(path_is_within_worktree(&alias.join("src"), &worktree));
+        assert!(path_is_within_worktree(
+            &alias.join("src"),
+            &worktree.canonicalize().expect("canonical worktree")
+        ));
         assert!(!path_is_within_worktree(temp.path(), &worktree));
     }
 

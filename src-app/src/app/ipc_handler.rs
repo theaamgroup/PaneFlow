@@ -1542,6 +1542,34 @@ pub(crate) fn should_apply_watcher_config(
     in_flight == 0 && incoming_gen >= last_persist_gen
 }
 
+/// Take a ConfigWatcher deposit for apply.
+///
+/// A persist-in-flight skip is deferred: the payload is put back with its
+/// original `incoming_gen` when the slot is still empty so a later tick can
+/// apply it after `in_flight` returns to 0, but only if that generation is
+/// still not older than `last_persist_gen`. Promoting the snapshot to the
+/// in-flight persist's sequence would let write A's file beat write B once B
+/// completes. A strictly older `incoming_gen` is discarded, even while a
+/// persist is in flight.
+pub(crate) fn take_watcher_config_for_apply(
+    pending: &std::sync::Mutex<Option<(PaneFlowConfig, u64)>>,
+    in_flight: usize,
+    last_persist_gen: u64,
+) -> Option<(PaneFlowConfig, u64)> {
+    let taken = pending.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let (config, incoming_gen) = taken?;
+    if should_apply_watcher_config(in_flight, incoming_gen, last_persist_gen) {
+        return Some((config, incoming_gen));
+    }
+    if in_flight > 0 && incoming_gen >= last_persist_gen {
+        let mut slot = pending.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some((config, incoming_gen));
+        }
+    }
+    None
+}
+
 impl PaneFlowApp {
     /// One automation poll tick for IPC, surface events, and config reloads.
     /// Keeping this order in one method prevents the bootstrap closure from
@@ -1661,53 +1689,48 @@ impl PaneFlowApp {
 
     /// Apply any pending config change deposited by the background `ConfigWatcher`.
     pub(crate) fn process_config_changes(&mut self, cx: &mut Context<Self>) {
-        let new_config = self
-            .pending_config
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some((config, incoming_gen)) = new_config {
-            let in_flight = self
-                .config_persist_in_flight
-                .load(std::sync::atomic::Ordering::SeqCst);
-            let last_persist_gen = self
-                .config_last_persist_gen
-                .load(std::sync::atomic::Ordering::SeqCst);
-            if should_apply_watcher_config(in_flight, incoming_gen, last_persist_gen) {
-                let default_shell_changed =
-                    normalized_shell_value(self.cached_config.default_shell.as_deref())
-                        != normalized_shell_value(config.default_shell.as_deref());
-                let theme_mode = crate::ThemeMode::from_config(
-                    config.theme_mode.as_deref(),
-                    config.theme.as_deref(),
-                );
-                keybindings::apply_keybindings(cx, &config.shortcuts);
-                self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
-                crate::theme::invalidate_theme_cache();
-                // US-014 (render cache): refresh the cached config so render paths
-                // pick up the reload without a per-frame `load_config()`. Last use
-                // of `config` - move it in.
-                self.cached_config = config;
-                self.theme_mode = theme_mode;
-                // Hot-reload the motion switch (GPUI refreshes the windows itself
-                // when the value actually changes).
-                crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
-                // A hand edit that switches Review off while it is the live
-                // mode has to demote here: the footer tab that would let the
-                // user out stops rendering on the very next frame.
-                self.leave_review_if_disabled(cx);
-                if default_shell_changed {
-                    self.handle_default_shell_changed(cx);
-                }
-                // US-015: push the refreshed config to every pane's tab-bar cache.
-                for ws in &self.workspaces {
-                    ws.propagate_config(&self.cached_config, cx);
-                }
-                // The embedded settings page reads `self.cached_config` directly and
-                // its shortcut list is refreshed above (`effective_shortcuts`), so an
-                // external `paneflow.json` edit reflects without any extra push.
-                cx.notify();
+        let in_flight = self
+            .config_persist_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let last_persist_gen = self
+            .config_last_persist_gen
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if let Some((config, _)) =
+            take_watcher_config_for_apply(&self.pending_config, in_flight, last_persist_gen)
+        {
+            let default_shell_changed =
+                normalized_shell_value(self.cached_config.default_shell.as_deref())
+                    != normalized_shell_value(config.default_shell.as_deref());
+            let theme_mode = crate::ThemeMode::from_config(
+                config.theme_mode.as_deref(),
+                config.theme.as_deref(),
+            );
+            keybindings::apply_keybindings(cx, &config.shortcuts);
+            self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
+            crate::theme::invalidate_theme_cache();
+            // US-014 (render cache): refresh the cached config so render paths
+            // pick up the reload without a per-frame `load_config()`. Last use
+            // of `config` - move it in.
+            self.cached_config = config;
+            self.theme_mode = theme_mode;
+            // Hot-reload the motion switch (GPUI refreshes the windows itself
+            // when the value actually changes).
+            crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
+            // A hand edit that switches Review off while it is the live
+            // mode has to demote here: the footer tab that would let the
+            // user out stops rendering on the very next frame.
+            self.leave_review_if_disabled(cx);
+            if default_shell_changed {
+                self.handle_default_shell_changed(cx);
             }
+            // US-015: push the refreshed config to every pane's tab-bar cache.
+            for ws in &self.workspaces {
+                ws.propagate_config(&self.cached_config, cx);
+            }
+            // The embedded settings page reads `self.cached_config` directly and
+            // its shortcut list is refreshed above (`effective_shortcuts`), so an
+            // external `paneflow.json` edit reflects without any extra push.
+            cx.notify();
         }
 
         // US-006: drain the theme watcher's "file changed" signal. The
@@ -1935,6 +1958,9 @@ impl PaneFlowApp {
         params: &serde_json::Value,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
+        if self.session_restore.is_some() {
+            return serde_json::json!({"error": "Session restore in progress"});
+        }
         if self.workspaces.len() >= MAX_WORKSPACES {
             return JsonRpcError::invalid_params("Workspace limit reached").into_value();
         }
@@ -2671,7 +2697,10 @@ impl PaneFlowApp {
                         })
                     })
                     .collect();
-                serde_json::json!({"workspaces": list})
+                serde_json::json!({
+                    "workspaces": list,
+                    "restoring": self.session_restore.is_some(),
+                })
             }
             "workspace.current" => {
                 if let Some(ws) = self.active_workspace() {
@@ -2691,6 +2720,9 @@ impl PaneFlowApp {
                 }
             }
             "workspace.create" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 // Cap workspace count to prevent unbounded growth from malicious
                 // or buggy IPC clients (CWE-400). Matches the keyboard-action cap
                 // in `workspace_ops::create_workspace`.
@@ -2787,6 +2819,9 @@ impl PaneFlowApp {
             }
             "workspace.up" => self.handle_workspace_up(params, cx),
             "workspace.select" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 // Deliberately a storage index: `workspace.list` exposes the
                 // same stable indices to automation, independent of how the
                 // sidebar is visually grouped or sorted.
@@ -2802,6 +2837,9 @@ impl PaneFlowApp {
                 }
             }
             "workspace.close" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 if !ipc_orchestration_enabled() {
                     return orchestration_disabled_error(method).into_value();
                 }
@@ -3452,6 +3490,9 @@ impl PaneFlowApp {
                 })
             }
             "workspace.restore_layout" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 let Some(layout_value) = params.get("layout") else {
                     return serde_json::json!({"error": "Missing 'layout' parameter"});
                 };
@@ -6356,6 +6397,101 @@ mod tests {
         assert!(super::should_apply_watcher_config(0, 4, 4));
         assert!(super::should_apply_watcher_config(0, 5, 4));
         assert!(super::should_apply_watcher_config(0, 0, 0));
+    }
+
+    fn watcher_config_with_shell(shell: &str) -> PaneFlowConfig {
+        PaneFlowConfig {
+            default_shell: Some(shell.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn process_config_changes_does_not_promote_deferred_snapshot_to_newer_persist() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        let pending = Mutex::new(None);
+        let last_persist_gen = AtomicU64::new(3);
+        let persist_seq = AtomicU64::new(3);
+        let in_flight = AtomicUsize::new(0);
+
+        // Match `begin_config_persist` + `ConfigPersistInFlight::drop`.
+        in_flight.fetch_add(1, Ordering::SeqCst);
+        let persist_gen = persist_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        super::deposit_watcher_config(
+            &pending,
+            &last_persist_gen,
+            watcher_config_with_shell("/bin/zsh"),
+        );
+
+        let first = super::take_watcher_config_for_apply(
+            &pending,
+            in_flight.load(Ordering::SeqCst),
+            last_persist_gen.load(Ordering::SeqCst),
+        );
+        assert!(
+            first.is_none(),
+            "must not apply a watcher deposit while a persist is in flight"
+        );
+        let deferred_gen = pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, generation)| *generation)
+            .expect("in-flight skip must put the deposit back");
+        assert_eq!(
+            deferred_gen, 3,
+            "deferred snapshot must keep its original generation, not persist_seq"
+        );
+
+        last_persist_gen.fetch_max(persist_gen, Ordering::SeqCst);
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+
+        let second = super::take_watcher_config_for_apply(
+            &pending,
+            in_flight.load(Ordering::SeqCst),
+            last_persist_gen.load(Ordering::SeqCst),
+        );
+        assert!(
+            second.is_none(),
+            "a snapshot of write A must not replace cached_config after write B completes"
+        );
+        assert!(pending.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn process_config_changes_applies_same_generation_deposit_after_in_flight_drops() {
+        use std::sync::Mutex;
+
+        let pending = Mutex::new(Some((watcher_config_with_shell("/bin/zsh"), 4)));
+        let first = super::take_watcher_config_for_apply(&pending, 1, 4);
+        assert!(first.is_none());
+        assert!(pending.lock().unwrap().is_some());
+
+        let second = super::take_watcher_config_for_apply(&pending, 0, 4);
+        assert_eq!(
+            second.map(|(config, _)| config.default_shell),
+            Some(Some("/bin/zsh".to_string())),
+            "a snapshot already stamped at last_persist_gen must apply once idle"
+        );
+        assert!(pending.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn process_config_changes_discards_strictly_older_incoming_gen() {
+        use std::sync::Mutex;
+
+        let pending = Mutex::new(Some((watcher_config_with_shell("/bin/bash"), 3)));
+        let applied = super::take_watcher_config_for_apply(&pending, 0, 4);
+        assert!(
+            applied.is_none(),
+            "strictly older incoming_gen must not replace cached_config"
+        );
+        assert!(
+            pending.lock().unwrap().is_none(),
+            "strictly older incoming_gen must be discarded, not deferred"
+        );
     }
 
     /// US-003 (prd-cli-tab-hierarchy): a `surface_id` living in a background

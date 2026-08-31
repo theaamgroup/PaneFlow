@@ -10,14 +10,25 @@
 //!
 //! Diff semantic: `merge-base(HEAD, <base>)..working-tree`, including
 //! uncommitted (tracked) changes - "what this branch adds since it diverged
-//! from base". Base text comes from `git show <merge-base>:<path>`, new text
-//! from the working-tree file on disk.
+//! from base". Base text comes from one `git cat-file --batch` of
+//! `<merge-base>:<path>` specs, new text from the working-tree file on disk.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::engine::{DiffHunk, compute_hunks};
+
+#[cfg(test)]
+thread_local! {
+    static GIT_COMMANDS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_git_commands() -> Vec<String> {
+    GIT_COMMANDS.with(|cmds| std::mem::take(&mut *cmds.borrow_mut()))
+}
 
 /// A git worktree as reported by `git worktree list --porcelain`.
 ///
@@ -96,80 +107,111 @@ pub struct FileDiffStat {
     pub removed: u32,
 }
 
-/// Parse `git worktree list --porcelain`. Ported from Zed's
-/// `git::repository::parse_worktrees_from_str` (`crates/git/src/repository.rs:363`).
+/// Map the shared `git worktree list --porcelain` parser into Review
+/// [`Worktree`]s. HEAD-less and bare entries are kept (a `worktree ` line is
+/// enough) so this listing matches Launch Pad / managed teardown.
 pub fn parse_worktrees_from_str(raw: &str, main_worktree_path: Option<&Path>) -> Vec<Worktree> {
-    let mut worktrees = Vec::new();
-    let normalized = raw.replace("\r\n", "\n");
-    for entry in normalized.split("\n\n") {
-        let mut path = None;
-        let mut sha = None;
-        let mut ref_name = None;
-        let mut is_bare = false;
-
-        for line in entry.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("worktree ") {
-                path = Some(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("HEAD ") {
-                sha = Some(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("branch ") {
-                ref_name = Some(rest.to_string());
-            } else if line == "bare" {
-                is_bare = true;
-            }
-            // Ignore detached / locked / prunable / etc.
-        }
-
-        if let (Some(path), Some(sha)) = (path, sha) {
-            let path = PathBuf::from(path);
-            let is_main = main_worktree_path.is_some_and(|main| path == main);
-            worktrees.push(Worktree {
-                path,
-                ref_name,
-                sha,
-                is_main,
-                is_bare,
+    crate::workspace::worktree::parse_worktree_porcelain(raw)
+        .into_iter()
+        .map(|entry| {
+            let ref_name = entry.branch.as_ref().map(|branch| {
+                if branch.starts_with("refs/") {
+                    branch.clone()
+                } else {
+                    format!("refs/heads/{branch}")
+                }
             });
-        }
-    }
-    worktrees
+            let is_main = main_worktree_path.is_some_and(|main| entry.path == main);
+            Worktree {
+                path: entry.path,
+                ref_name,
+                sha: entry.sha.unwrap_or_default(),
+                is_main,
+                is_bare: entry.is_bare,
+            }
+        })
+        .collect()
 }
 
 /// Wall-clock deadline for every diff-viewer git call (U-035). Generous enough
 /// for a large but healthy repo, short enough that a dead/slow mount or a
 /// hanging `.git/config` helper fails instead of wedging the blocking-pool task.
-const GIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const GIT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// stdout cap for diff-viewer git calls. Comfortably above [`MAX_FILE_BYTES`]
-/// (512 KiB) so a legitimate `git show` of an accepted file is never truncated,
+/// (512 KiB) so a legitimate blob of an accepted file is never truncated,
 /// while bounding a runaway/hijacked git that streams unbounded output.
 /// Exceeding the cap fails the run outright; `MAX_FILE_BYTES` is no longer the
 /// backstop for a truncated payload.
 const GIT_STDOUT_CAP: u64 = 16 * 1024 * 1024;
+
+/// stdout cap for a whole-column `git cat-file --batch`. Sized for
+/// [`MAX_FILE_COUNT`] blobs at [`MAX_FILE_BYTES`] plus cat-file headers.
+const GIT_BATCH_STDOUT_CAP: u64 = (MAX_FILE_COUNT as u64) * (MAX_FILE_BYTES + 256) + 8192;
 
 /// Run a git subprocess in `dir`, returning captured stdout bytes on success.
 /// A non-zero exit (or a timeout) returns `Err` with the trimmed stderr (or a
 /// generic message); the caller renders the diff's "unavailable" state. Never
 /// panics, never blocks past [`GIT_DEADLINE`].
 fn run_git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(dir)
+    run_git_timed(dir, args, GIT_DEADLINE)
+}
+
+#[cfg(test)]
+fn record_git_args(args: &[&str]) {
+    GIT_COMMANDS.with(|cmds| cmds.borrow_mut().push(args.join(" ")));
+}
+
+#[cfg(not(test))]
+fn record_git_args(_args: &[&str]) {}
+
+fn run_git_timed(dir: &Path, args: &[&str], deadline: Duration) -> Result<Vec<u8>, String> {
+    record_git_args(args);
+    if deadline.is_zero() {
+        return Err("git diff exceeded its deadline".to_string());
+    }
+    let mut cmd = crate::workspace::worktree::git_command();
+    crate::workspace::worktree::git_subcommand(&mut cmd, args);
+    cmd.current_dir(dir)
         // U-035: never block on a credential/helper prompt.
         .env("GIT_TERMINAL_PROMPT", "0");
     // U-035: bound the subprocess (run_with_timeout also nulls stdin + caps
     // stdout) so a hung git can't pin the diff viewer's blocking-pool task.
     let output =
-        paneflow_process::run_with_timeout(cmd, GIT_DEADLINE, GIT_STDOUT_CAP).map_err(|e| {
+        paneflow_process::run_with_timeout(cmd, deadline, GIT_STDOUT_CAP).map_err(|e| {
             format!(
                 "git {} failed: {e}",
                 args.first().copied().unwrap_or("command")
             )
         })?;
+    git_stdout(args, output)
+}
+
+fn run_git_stdin_timed(
+    dir: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    deadline: Duration,
+    stdout_cap: u64,
+) -> Result<Vec<u8>, String> {
+    record_git_args(args);
+    if deadline.is_zero() {
+        return Err("git diff exceeded its deadline".to_string());
+    }
+    let mut cmd = crate::workspace::worktree::git_command();
+    crate::workspace::worktree::git_subcommand(&mut cmd, args);
+    cmd.current_dir(dir).env("GIT_TERMINAL_PROMPT", "0");
+    let output = paneflow_process::run_with_timeout_stdin(cmd, stdin, deadline, stdout_cap)
+        .map_err(|e| {
+            format!(
+                "git {} failed: {e}",
+                args.first().copied().unwrap_or("command")
+            )
+        })?;
+    git_stdout(args, output)
+}
+
+fn git_stdout(args: &[&str], output: paneflow_process::BoundedOutput) -> Result<Vec<u8>, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let msg = stderr.trim();
@@ -180,6 +222,48 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         });
     }
     Ok(output.stdout)
+}
+
+/// Wall-clock budget for one [`compute_diff_against`] column build. Every git
+/// subprocess inside that build consumes remaining time from this budget
+/// instead of a fresh [`GIT_DEADLINE`], so 200 files cannot stack 200 timeouts.
+struct GitBudget {
+    deadline_at: Instant,
+}
+
+impl GitBudget {
+    fn for_column() -> Self {
+        Self {
+            deadline_at: Instant::now() + GIT_DEADLINE,
+        }
+    }
+
+    fn remaining(&self) -> Result<Duration, String> {
+        let now = Instant::now();
+        if now >= self.deadline_at {
+            Err("git diff exceeded its deadline".to_string())
+        } else {
+            Ok(self.deadline_at - now)
+        }
+    }
+
+    fn run(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+        run_git_timed(dir, args, self.remaining()?)
+    }
+
+    fn run_stdin(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        stdin: &[u8],
+        stdout_cap: u64,
+    ) -> Result<Vec<u8>, String> {
+        run_git_stdin_timed(dir, args, stdin, self.remaining()?, stdout_cap)
+    }
+}
+
+fn deadline_exhausted(budget: &GitBudget, err: &str) -> bool {
+    budget.remaining().is_err() || err.contains("exceeded its deadline")
 }
 
 /// List all worktrees of the repository containing `repo_dir`. Live path:
@@ -204,8 +288,15 @@ pub fn list_repo_worktrees(repo_dir: &Path) -> Vec<(PathBuf, String)> {
             return Vec::new();
         }
     };
+    review_worktree_entries(worktrees)
+}
+
+/// Review columns are checkout trees. A porcelain `bare` entry is the
+/// administrative repository, not a work tree; `git diff` there exits 128.
+fn review_worktree_entries(worktrees: Vec<Worktree>) -> Vec<(PathBuf, String)> {
     worktrees
         .into_iter()
+        .filter(|w| !w.is_bare)
         .map(|w| {
             let branch = w
                 .ref_name
@@ -434,10 +525,22 @@ fn worktree_toplevel(dir: &Path) -> PathBuf {
 }
 
 fn list_untracked_limited(dir: &Path, limit: usize) -> (Vec<String>, bool) {
+    list_untracked_limited_timed(dir, limit, GIT_DEADLINE)
+}
+
+fn list_untracked_limited_timed(
+    dir: &Path,
+    limit: usize,
+    deadline: Duration,
+) -> (Vec<String>, bool) {
     if limit == 0 {
         return (Vec::new(), false);
     }
-    let Ok(out) = run_git(dir, &["ls-files", "--others", "--exclude-standard", "-z"]) else {
+    let Ok(out) = run_git_timed(
+        dir,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        deadline,
+    ) else {
         return (Vec::new(), false);
     };
     let mut paths = Vec::new();
@@ -488,37 +591,227 @@ fn classify(bytes: Vec<u8>) -> (String, bool) {
     }
 }
 
-fn base_path_exists(worktree_dir: &Path, merge_base: &str, rel_path: &str) -> Result<bool, String> {
-    let out = run_git(
-        worktree_dir,
-        &["ls-tree", "-z", "--name-only", merge_base, "--", rel_path],
-    )?;
-    Ok(out
-        .split(|&b| b == 0)
-        .any(|path| path == rel_path.as_bytes()))
+#[derive(Clone)]
+struct BaseBlob {
+    text: String,
+    is_binary: bool,
+    too_large: bool,
 }
 
-/// Load the base-side text of `rel_path` at the merge-base commit. Returns
-/// `(text, is_binary)`; a path absent at the merge-base (file added since
-/// divergence) yields empty text, not an error.
-fn load_base_text(worktree_dir: &Path, merge_base: &str, rel_path: &str) -> (String, bool) {
-    let spec = format!("{merge_base}:{rel_path}");
-    match run_git(worktree_dir, &["show", &spec]) {
-        Ok(bytes) => classify(bytes),
-        Err(show_err) => match base_path_exists(worktree_dir, merge_base, rel_path) {
-            Ok(false) => (String::new(), false),
-            Ok(true) => {
-                log::warn!("git: failed to load base-side file {rel_path}: {show_err}");
-                (String::new(), true)
-            }
-            Err(exists_err) => {
-                log::warn!(
-                    "git: failed to verify base-side file {rel_path}: {show_err}; {exists_err}"
-                );
-                (String::new(), true)
-            }
-        },
+impl BaseBlob {
+    fn empty() -> Self {
+        Self {
+            text: String::new(),
+            is_binary: false,
+            too_large: false,
+        }
     }
+
+    fn binary() -> Self {
+        Self {
+            text: String::new(),
+            is_binary: true,
+            too_large: false,
+        }
+    }
+
+    fn too_large() -> Self {
+        Self {
+            text: String::new(),
+            is_binary: true,
+            too_large: true,
+        }
+    }
+}
+
+enum BatchCheck {
+    Missing,
+    Blob { size: u64 },
+    Other,
+}
+
+fn cat_file_specs(merge_base: &str, lookups: &[String]) -> Vec<u8> {
+    // `-Z` NUL-frames each `<merge-base>:<path>` spec so a tracked name
+    // that contains a newline cannot split the batch into extra requests.
+    let mut stdin = Vec::new();
+    for path in lookups {
+        stdin.extend_from_slice(merge_base.as_bytes());
+        stdin.push(b':');
+        stdin.extend_from_slice(path.as_bytes());
+        stdin.push(0);
+    }
+    stdin
+}
+
+fn parse_batch_check_line(line: &[u8]) -> BatchCheck {
+    if line.ends_with(b" missing") || line.ends_with(b" ambiguous") {
+        return BatchCheck::Missing;
+    }
+    let Ok(header) = std::str::from_utf8(line) else {
+        return BatchCheck::Other;
+    };
+    let mut parts = header.splitn(3, ' ');
+    let _sha = parts.next();
+    let kind = parts.next();
+    let size = parts.next();
+    match (kind, size) {
+        (Some("blob"), Some(size)) => size
+            .parse::<u64>()
+            .map(|size| BatchCheck::Blob { size })
+            .unwrap_or(BatchCheck::Other),
+        _ => BatchCheck::Other,
+    }
+}
+
+/// Parse `git cat-file --batch -Z` stdout for `count` requests. `None` is a
+/// missing/ambiguous object; `Some(bytes)` is the raw blob (or other object)
+/// payload. Headers and payloads are NUL-terminated.
+fn parse_cat_file_batch(stdout: &[u8], count: usize) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut rest = stdout;
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some(nul) = rest.iter().position(|&b| b == 0) else {
+            return Err("truncated git cat-file --batch header".to_string());
+        };
+        let header = &rest[..nul];
+        rest = &rest[nul + 1..];
+        if header.ends_with(b" missing") || header.ends_with(b" ambiguous") {
+            records.push(None);
+            continue;
+        }
+        let header_s = std::str::from_utf8(header)
+            .map_err(|_| "non-utf8 git cat-file --batch header".to_string())?;
+        let size = header_s
+            .rsplit(' ')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+            .ok_or_else(|| format!("invalid git cat-file --batch header: {header_s}"))?;
+        if rest.len() < size + 1 {
+            return Err("truncated git cat-file --batch payload".to_string());
+        }
+        let bytes = rest[..size].to_vec();
+        rest = &rest[size..];
+        if rest.first() != Some(&0) {
+            return Err("git cat-file --batch payload missing trailing NUL".to_string());
+        }
+        rest = &rest[1..];
+        records.push(Some(bytes));
+    }
+    Ok(records)
+}
+
+fn stub_lookups(lookups: &[String]) -> HashMap<String, BaseBlob> {
+    lookups
+        .iter()
+        .cloned()
+        .map(|path| (path, BaseBlob::binary()))
+        .collect()
+}
+
+/// Load merge-base blobs for `lookups` with at most two git processes
+/// (`cat-file --batch-check` then `cat-file --batch`), under `budget`.
+fn load_base_texts_batch(
+    worktree_dir: &Path,
+    merge_base: &str,
+    lookups: &[String],
+    budget: &GitBudget,
+) -> Result<HashMap<String, BaseBlob>, String> {
+    if lookups.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let stdin = cat_file_specs(merge_base, lookups);
+    let check = match budget.run_stdin(
+        worktree_dir,
+        &["cat-file", "--batch-check", "-Z"],
+        &stdin,
+        GIT_STDOUT_CAP,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) if deadline_exhausted(budget, &e) => return Err(e),
+        Err(e) => {
+            log::warn!("git: cat-file --batch-check failed: {e}");
+            return Ok(stub_lookups(lookups));
+        }
+    };
+    let lines: Vec<&[u8]> = check
+        .split(|&b| b == 0)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() != lookups.len() {
+        log::warn!(
+            "git: cat-file --batch-check returned {} records for {} specs",
+            lines.len(),
+            lookups.len()
+        );
+        return Ok(stub_lookups(lookups));
+    }
+
+    let mut out = HashMap::new();
+    let mut fetch: Vec<String> = Vec::new();
+    for (path, line) in lookups.iter().zip(lines) {
+        match parse_batch_check_line(line) {
+            BatchCheck::Missing => {
+                out.insert(path.clone(), BaseBlob::empty());
+            }
+            BatchCheck::Blob { size } if size > MAX_FILE_BYTES => {
+                out.insert(path.clone(), BaseBlob::too_large());
+            }
+            BatchCheck::Blob { .. } => fetch.push(path.clone()),
+            BatchCheck::Other => {
+                out.insert(path.clone(), BaseBlob::binary());
+            }
+        }
+    }
+    if fetch.is_empty() {
+        return Ok(out);
+    }
+
+    let stdin = cat_file_specs(merge_base, &fetch);
+    let payload = match budget.run_stdin(
+        worktree_dir,
+        &["cat-file", "--batch", "-Z"],
+        &stdin,
+        GIT_BATCH_STDOUT_CAP,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) if deadline_exhausted(budget, &e) => return Err(e),
+        Err(e) => {
+            log::warn!("git: cat-file --batch failed: {e}");
+            for path in fetch {
+                out.insert(path, BaseBlob::binary());
+            }
+            return Ok(out);
+        }
+    };
+    let records = match parse_cat_file_batch(&payload, fetch.len()) {
+        Ok(records) => records,
+        Err(e) => {
+            log::warn!("git: failed to parse cat-file --batch: {e}");
+            for path in fetch {
+                out.insert(path, BaseBlob::binary());
+            }
+            return Ok(out);
+        }
+    };
+    for (path, record) in fetch.into_iter().zip(records) {
+        match record {
+            Some(bytes) => {
+                let (text, is_binary) = classify(bytes);
+                out.insert(
+                    path,
+                    BaseBlob {
+                        text,
+                        is_binary,
+                        too_large: false,
+                    },
+                );
+            }
+            None => {
+                out.insert(path, BaseBlob::empty());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Read the working-tree text of `rel_path`. Returns `(text, is_binary)`; a
@@ -526,12 +819,14 @@ fn load_base_text(worktree_dir: &Path, merge_base: &str, rel_path: &str) -> (Str
 /// error (permission denied, device error) is logged and rendered as an
 /// unreadable (binary) stub rather than masquerading as a deletion.
 fn load_working_text(worktree_dir: &Path, rel_path: &str) -> (String, bool) {
+    use std::io::Read as _;
+
     let path = worktree_dir.join(rel_path);
     // U-041: lstat first. A tracked/untracked symlink in a crafted repo could
     // point outside the worktree; `fs::read` would dereference it and pull an
     // out-of-tree file into `new_text`. Render the LINK TARGET instead of
     // following it - this also matches git's own symlink-blob semantics (the
-    // base side via `git show` returns the target path, not the pointee's
+    // base side via `git cat-file` returns the target path, not the pointee's
     // content), so an unchanged symlink produces no spurious diff.
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -540,8 +835,19 @@ fn load_working_text(worktree_dir: &Path, rel_path: &str) -> (String, bool) {
                 .unwrap_or_default();
             (target, false)
         }
-        Ok(_) => match std::fs::read(&path) {
-            Ok(bytes) => classify(bytes),
+        Ok(_) => match std::fs::File::open(&path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                match file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes) {
+                    Ok(_) if bytes.len() as u64 > MAX_FILE_BYTES => (String::new(), true),
+                    Ok(_) => classify(bytes),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+                    Err(e) => {
+                        log::warn!("git: failed to read working-tree file {rel_path}: {e}");
+                        (String::new(), true)
+                    }
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
             Err(e) => {
                 log::warn!("git: failed to read working-tree file {rel_path}: {e}");
@@ -798,7 +1104,8 @@ pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
 /// Oversized / lockfile / over-count files are shown as stubs rather than
 /// loaded, bounding peak RAM.
 fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
-    let name_status = match run_git(
+    let budget = GitBudget::for_column();
+    let name_status = match budget.run(
         worktree_dir,
         // `-M` enables rename detection so a moved file reads as one `R` record
         // (old → new) instead of a delete + add pair - de-noises task-branch diffs.
@@ -824,18 +1131,62 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
     // tree, empty base → rendered as a pure addition).
     if changes.len() <= MAX_FILE_COUNT {
         let remaining = MAX_FILE_COUNT + 1 - changes.len();
-        let (untracked, untracked_truncated) = list_untracked_limited(worktree_dir, remaining);
+        let deadline = match budget.remaining() {
+            Ok(deadline) => deadline,
+            Err(e) => {
+                return WorktreeDiff {
+                    files: Vec::new(),
+                    error: Some(e),
+                };
+            }
+        };
+        let (untracked, untracked_truncated) =
+            list_untracked_limited_timed(worktree_dir, remaining, deadline);
         truncated |= untracked_truncated;
         for path in untracked {
             changes.push((FileChange::Added, path, None));
         }
     }
     log::debug!("git: {} changed files", changes.len());
+
+    let mut lookups = Vec::new();
+    for (change, path, old_path) in &changes {
+        if is_skipped_name(path) || is_too_large(worktree_dir, path) {
+            continue;
+        }
+        if *change == FileChange::Added {
+            continue;
+        }
+        let lookup = match (*change, old_path) {
+            (FileChange::Renamed, Some(src)) => src.clone(),
+            _ => path.clone(),
+        };
+        lookups.push(lookup);
+    }
+    lookups.sort();
+    lookups.dedup();
+    let blobs = match load_base_texts_batch(worktree_dir, base, &lookups, &budget) {
+        Ok(blobs) => blobs,
+        Err(e) => {
+            log::warn!("git: batched base load failed: {e}");
+            return WorktreeDiff {
+                files: Vec::new(),
+                error: Some(e),
+            };
+        }
+    };
+
     let mut files = Vec::new();
     for (change, path, old_path) in changes {
         if files.len() >= MAX_FILE_COUNT {
             truncated = true;
             break;
+        }
+        if budget.remaining().is_err() {
+            return WorktreeDiff {
+                files: Vec::new(),
+                error: Some("git diff exceeded its deadline".to_string()),
+            };
         }
         // Skip lockfiles and oversized files: emit a stub, never load/diff/
         // highlight them. This is the primary OOM guard.
@@ -852,7 +1203,15 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
         };
         let (base_text, base_bin) = match change {
             FileChange::Added => (String::new(), false),
-            _ => load_base_text(worktree_dir, base, base_lookup),
+            _ => match blobs.get(base_lookup) {
+                Some(blob) if blob.too_large => {
+                    log::debug!("git: skip (oversized base blob) {path}");
+                    files.push(stub_file(path, change));
+                    continue;
+                }
+                Some(blob) => (blob.text.clone(), blob.is_binary),
+                None => (String::new(), true),
+            },
         };
         let (new_text, new_bin) = match change {
             FileChange::Deleted => (String::new(), false),
@@ -1020,10 +1379,59 @@ pub(crate) mod tests {
         let raw = "worktree /repo/bare\nbare\n\n\
                    worktree /repo/det\nHEAD aaa111\ndetached\n";
         let wts = parse_worktrees_from_str(raw, None);
-        // Bare entry has no HEAD → skipped; detached entry kept with no ref_name.
-        assert_eq!(wts.len(), 1);
+        // A `worktree ` line is enough: HEAD-less/bare entries stay so Launch
+        // Pad and Review list the same checkout set.
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].path, PathBuf::from("/repo/bare"));
+        assert!(wts[0].is_bare);
+        assert_eq!(wts[0].sha, "");
         assert_eq!(wts[0].ref_name, None);
-        assert_eq!(wts[0].sha, "aaa111");
+        assert_eq!(wts[1].path, PathBuf::from("/repo/det"));
+        assert!(!wts[1].is_bare);
+        assert_eq!(wts[1].ref_name, None);
+        assert_eq!(wts[1].sha, "aaa111");
+    }
+
+    #[test]
+    fn porcelain_parsers_agree_on_headless_and_detached() {
+        let raw = "worktree /repo/bare\nbare\n\n\
+                   worktree /repo/det\nHEAD aaa111\ndetached\n\n\
+                   worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n";
+        let workspace_paths: Vec<_> = crate::workspace::worktree::parse_worktree_porcelain(raw)
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        let diff_paths: Vec<_> = parse_worktrees_from_str(raw, None)
+            .into_iter()
+            .map(|worktree| worktree.path)
+            .collect();
+        assert_eq!(
+            workspace_paths, diff_paths,
+            "Launch Pad and Review must list the same worktrees"
+        );
+        assert_eq!(
+            workspace_paths,
+            vec![
+                PathBuf::from("/repo/bare"),
+                PathBuf::from("/repo/det"),
+                PathBuf::from("/repo/main"),
+            ]
+        );
+    }
+
+    #[test]
+    fn review_worktree_entries_drop_bare_admin_repos() {
+        let raw = "worktree /repo/bare\nbare\n\n\
+                   worktree /repo/det\nHEAD aaa111\ndetached\n\n\
+                   worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n";
+        let columns = review_worktree_entries(parse_worktrees_from_str(raw, None));
+        assert_eq!(
+            columns
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("/repo/det"), PathBuf::from("/repo/main")]
+        );
     }
 
     #[test]
@@ -1074,6 +1482,50 @@ pub(crate) mod tests {
         );
         let (_, bin) = classify(vec![0x00, 0x01, 0x02]);
         assert!(bin);
+    }
+
+    #[test]
+    fn parse_cat_file_batch_missing_empty_and_blob() {
+        let mut stdout = Vec::new();
+        stdout.extend_from_slice(b"HEAD:gone.rs missing\0");
+        stdout.extend_from_slice(b"abc blob 0\0\0");
+        stdout.extend_from_slice(b"def blob 5\0hello\0");
+        let parsed = parse_cat_file_batch(&stdout, 3).unwrap();
+        assert_eq!(parsed[0], None);
+        assert_eq!(parsed[1], Some(Vec::new()));
+        assert_eq!(parsed[2], Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn cat_file_specs_nul_frames_paths_that_contain_newlines() {
+        let specs = cat_file_specs("abc123", &["foo\nbar.rs".into(), "ok.rs".into()]);
+        let records: Vec<&[u8]> = specs.split(|&b| b == 0).filter(|r| !r.is_empty()).collect();
+        assert_eq!(
+            records,
+            [b"abc123:foo\nbar.rs".as_slice(), b"abc123:ok.rs".as_slice()]
+        );
+    }
+
+    #[test]
+    fn load_working_text_caps_bytes() {
+        // Call load_working_text directly so the is_too_large metadata
+        // pre-check cannot hide an unbounded read (metadata miss, TOCTOU
+        // grow, or a file already over the cap).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let oversized_len = MAX_FILE_BYTES as usize + 2;
+        std::fs::write(root.join("huge.txt"), vec![b'a'; oversized_len]).unwrap();
+
+        let (text, is_binary) = load_working_text(root, "huge.txt");
+        assert!(
+            text.len() as u64 <= MAX_FILE_BYTES + 1,
+            "load_working_text retained {} bytes from an oversized working-tree file",
+            text.len()
+        );
+        assert!(
+            text.is_empty() && is_binary,
+            "oversized working-tree content should stub as binary without keeping the buffer"
+        );
     }
 
     #[test]
@@ -1248,5 +1700,86 @@ pub(crate) mod tests {
             .output()
             .map(|out| out.status.success())
             .unwrap_or(false)
+    }
+
+    fn git_subcommand_name(recorded: &str) -> Option<&str> {
+        recorded.split_whitespace().next()
+    }
+
+    #[test]
+    fn compute_diff_against_batches_git_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        assert!(test_git(root, &["config", "core.autocrlf", "false"]));
+        assert!(test_git(
+            root,
+            &["config", "user.email", "paneflow@example.com"]
+        ));
+        assert!(test_git(root, &["config", "user.name", "Paneflow"]));
+
+        let files = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"];
+        for name in files {
+            std::fs::write(root.join(name), format!("base-{name}\n")).unwrap();
+            assert!(test_git(root, &["add", name]));
+        }
+        assert!(test_git(root, &["commit", "-m", "init"]));
+        for name in files {
+            std::fs::write(root.join(name), format!("new-{name}\n")).unwrap();
+        }
+
+        let _ = take_git_commands();
+        let diff = compute_worktree_diff(root, "HEAD");
+        let cmds = take_git_commands();
+
+        assert!(
+            diff.error.is_none(),
+            "diff should succeed, error={:?}",
+            diff.error
+        );
+        assert_eq!(
+            diff.files.len(),
+            files.len(),
+            "expected one FileDiff per modified file, got {:?}",
+            diff.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        for name in files {
+            let file = diff
+                .files
+                .iter()
+                .find(|f| f.path == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(
+                file.base_text.contains(&format!("base-{name}")),
+                "{name} base_text={:?}",
+                file.base_text
+            );
+            assert!(
+                file.new_text.contains(&format!("new-{name}")),
+                "{name} new_text={:?}",
+                file.new_text
+            );
+        }
+
+        let show_count = cmds
+            .iter()
+            .filter(|c| git_subcommand_name(c) == Some("show"))
+            .count();
+        let cat_file_batch = cmds.iter().any(|c| {
+            git_subcommand_name(c) == Some("cat-file")
+                && c.split_whitespace().any(|a| a == "--batch")
+                && c.split_whitespace().any(|a| a == "-Z")
+        });
+        assert!(
+            cat_file_batch,
+            "one worktree diff must load blobs via git cat-file --batch -Z, commands={cmds:?}"
+        );
+        assert!(
+            show_count == 0,
+            "one worktree diff of {} files must not issue one git show per file (got {show_count} show calls), commands={cmds:?}",
+            files.len()
+        );
     }
 }

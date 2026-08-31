@@ -20,7 +20,7 @@ use crate::workspace::{Workspace, next_workspace_id};
 use crate::{PaneFlowApp, ipc, keybindings};
 
 impl PaneFlowApp {
-    fn default_workspace(cx: &mut Context<Self>) -> Workspace {
+    pub(crate) fn default_workspace(cx: &mut Context<Self>) -> Workspace {
         let ws_id = next_workspace_id();
         let cwd = launch_cwd::implicit_launch_cwd();
         let terminal_cwd = cwd.clone();
@@ -35,7 +35,11 @@ impl PaneFlowApp {
         ws
     }
 
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        saved_session: Option<paneflow_config::schema::SessionState>,
+        session_corruption: Option<super::session::SessionCorruptionInfo>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Packaged release builds load Sparkle from Contents/Frameworks and
         // schedule silent hourly checks. Plain cargo binaries have no bundle
         // framework and return immediately.
@@ -133,12 +137,10 @@ impl PaneFlowApp {
             }
         }
 
-        // Restore session or create a single default workspace. The
-        // tuple's second component carries forensic context when
-        // `session.json` was unparseable (US-006). Kept on the app and
-        // toasted after the first frame; the log stays so headless
-        // launches still have a record.
-        let (saved_session, session_corruption) = Self::load_session();
+        // Session bytes were read off-thread while the splash was mounted.
+        // Forensic context from an unparseable `session.json` (US-006) is
+        // kept on the app and toasted after the first frame; the log stays
+        // so headless launches still have a record.
         if let Some(info) = &session_corruption {
             log::warn!(
                 "session.json corrupted: category={} size={} age_secs={:?} backup={:?}",
@@ -174,24 +176,15 @@ impl PaneFlowApp {
                 restored_pending_worktree_teardowns,
             );
 
-        let (workspaces, active_idx) = match saved_session {
-            Some(session) => {
-                log::info!(
-                    "restoring session: {} workspace(s), mode={:?}",
-                    session.workspaces.len(),
-                    session.mode
-                );
-                let (workspaces, active_idx) = Self::restore_workspaces(&session, cx);
-                if workspaces.is_empty() {
-                    log::warn!(
-                        "session restore: session contained no restorable workspaces; creating default workspace"
-                    );
-                    (vec![Self::default_workspace(cx)], 0)
-                } else {
-                    (workspaces, active_idx)
-                }
-            }
-            None => (vec![Self::default_workspace(cx)], 0),
+        let session_restore =
+            saved_session.and_then(super::session::PendingSessionRestore::from_session);
+        let (workspaces, active_idx, boot_mode) = if session_restore.is_some() {
+            // Issue #156: mount a lightweight root and restore at most one
+            // workspace per GPUI frame. Diff mode and the saved active
+            // workspace are applied only after the last batch.
+            (Vec::new(), 0, paneflow_config::schema::AppMode::Cli)
+        } else {
+            (vec![Self::default_workspace(cx)], 0, restored_mode)
         };
         // Setup notify file watcher for .git directories
         let (git_event_tx, git_event_rx) = std::sync::mpsc::channel();
@@ -702,6 +695,7 @@ impl PaneFlowApp {
             pending_config,
             save_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_corruption,
+            session_restore,
             config_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             workspace_commands_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
@@ -781,6 +775,7 @@ impl PaneFlowApp {
             files_watcher: None,
             files_event_rx: None,
             files_hydrate_generation: 0,
+            files_dir_refresh_seq: std::collections::HashMap::new(),
             files_menu_open: None,
             toast: None,
             toast_queue: std::collections::VecDeque::new(),
@@ -850,8 +845,9 @@ impl PaneFlowApp {
                 diff_collapsed_dirs: std::collections::HashSet::new(),
                 diff_file_filter,
             },
-            // Start in the mode the user left on quit.
-            mode: restored_mode,
+            // Start in the mode the user left on quit, unless a staged
+            // restore still has to finish (Diff is applied then).
+            mode: boot_mode,
             diff_dock: crate::DiffDockState {
                 open: false,
                 data: None,
@@ -881,44 +877,17 @@ impl PaneFlowApp {
             sidebar_rename_focus: cx.focus_handle(),
         };
 
-        // US-015 (prd-git-diff-mode-2026-Q3.md): restore Diff mode only when
-        // it is reconstructable. The diff derives its repo from the restored
-        // active workspace (Project / Worktree) or any open repo (Multi-project),
-        // so no separate repo-root needs persisting. If viable, mount the diff
-        // for the restored scope; otherwise collapse to CLI so the window never
-        // opens onto an empty diff.
-        if matches!(app.mode, paneflow_config::schema::AppMode::Diff) {
-            // A session saved before Review was switched off is the one path
-            // that can reach Diff mode without going through
-            // `enter_diff_mode`'s gate, and the footer tab that would let the
-            // user back out is not rendered while it is off. Fold the switch
-            // into the existing viability test so it collapses to CLI the same
-            // way an unreconstructable diff already does.
-            let viable = app.cached_config.review_view_enabled()
-                && match app.diff_mode.diff_scope {
-                    crate::diff::DiffScope::MultiProject => {
-                        app.workspaces.iter().any(|ws| ws.repo_root.is_some())
-                    }
-                    _ => app
-                        .workspaces
-                        .get(app.active_idx)
-                        .is_some_and(|ws| ws.repo_root.is_some()),
-                };
-            if viable {
-                app.rebuild_diff_view(cx);
-            } else {
-                app.mode = paneflow_config::schema::AppMode::Cli;
-            }
+        if app.session_restore.is_none() {
+            app.apply_restored_diff_mode(boot_mode, cx);
+            // The journal was durable before the prior process attempted cleanup.
+            // Resume it only after the full app exists so completion can remove the
+            // entries and persist the cleared journal.
+            app.resume_pending_worktree_teardowns(cx);
         }
 
         // Hydrate the motion switch from the config: it gates the
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
-
-        // The journal was durable before the prior process attempted cleanup.
-        // Resume it only after the full app exists so completion can remove the
-        // entries and persist the cleared journal.
-        app.resume_pending_worktree_teardowns(cx);
 
         app
     }

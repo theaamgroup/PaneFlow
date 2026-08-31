@@ -15,7 +15,7 @@
 //! dependencies are READY. Wall-clock resolution is `TICK` (500 ms), with
 //! settling based on `output_generation` instead of text diffs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::flow_spec::{self, FlowPlan, OnFailure, Unit, UnitAction};
+use super::scrollback::new_text_since_baseline;
 use super::up_cmd::{self, WorktreePlan};
 use super::{CliError, EXIT_OK, EXIT_RUNTIME, EXIT_TIMEOUT};
 
@@ -1032,21 +1033,6 @@ fn text_after_baseline(baseline: &ReadSnapshot, current: &ReadSnapshot) -> Optio
     Some(new_text_since_baseline(&baseline.text, &current.text))
 }
 
-fn new_text_since_baseline(baseline: &str, current: &str) -> String {
-    if current == baseline {
-        return String::new();
-    }
-    if let Some(rest) = current.strip_prefix(baseline) {
-        return rest.to_string();
-    }
-    let old_lines: HashSet<&str> = baseline.lines().collect();
-    current
-        .lines()
-        .filter(|line| !old_lines.contains(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Substitute `${var}` tokens from the capture store. `${item}` was resolved
 /// at expansion, so every remaining token must be a captured variable -
 /// unknown means the capturing step failed or was skipped (US-014). The
@@ -1455,6 +1441,61 @@ mod tests {
                 .iter()
                 .all(|(m, _)| m != "surface.send_text"),
             "skipped dependent must not send"
+        );
+    }
+
+    /// Post-feed ready poll: the 500-line window is no longer a prefix of the
+    /// `fire_feed` baseline, but a later identical sentinel must still count.
+    #[test]
+    fn flow_ready_matches_repeated_sentinel_after_window_slides() {
+        let mut run = UnitRun::new(
+            Unit {
+                id: "review".to_string(),
+                group: "review".to_string(),
+                needs: Vec::new(),
+                action: UnitAction::Send {
+                    target: "impl".to_string(),
+                    text: "rerun".to_string(),
+                },
+                ready: Some(("tests passed".to_string(), 30)),
+                capture: None,
+                submit: false,
+            },
+            None,
+            None,
+        );
+        run.surface_id = Some(1);
+
+        let fake = FakeInstance::new(true);
+        fake.push_reads(
+            1,
+            &[
+                "noise-1\ntests passed\nkeep-me\n",
+                "keep-me\nnew output\ntests passed\n",
+            ],
+        );
+
+        let mut engine = Engine {
+            client: &fake,
+            on_failure: OnFailure::FailFast,
+            name: "flow".to_string(),
+            layout: "even_h",
+            runs: vec![run],
+            vars: HashMap::new(),
+            started: Instant::now(),
+            json_out: true,
+            split_count: 0,
+            anchor: Some(1),
+        };
+        engine.fire_feed(0).expect("feed");
+        assert!(
+            matches!(engine.runs[0].state, State::Polling { .. }),
+            "post-feed enters the ready barrier"
+        );
+        engine.progress().expect("poll");
+        assert!(
+            matches!(engine.runs[0].state, State::Ready),
+            "repeated sentinel after the window slides must mark the unit Ready"
         );
     }
 }

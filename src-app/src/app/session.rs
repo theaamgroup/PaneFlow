@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{App, AppContext, Context, Entity};
+use gpui::{App, AppContext, Context, Entity, Window};
 use paneflow_config::schema::LayoutNode;
 
 use crate::PaneFlowApp;
@@ -31,6 +31,81 @@ use paneflow_config::schema::MAX_PANE_SURFACES;
 /// failure produces a new backup, and without rotation a user with a
 /// chronic corruption (e.g. a flaky disk) would silently fill Application Support.
 const MAX_CORRUPTION_BACKUPS: usize = 5;
+
+/// Workspaces rebuilt on one GPUI frame during startup restore. One keeps
+/// entity construction bounded so painting can run between workspaces.
+const STARTUP_RESTORE_BATCH: usize = 1;
+
+#[cfg(test)]
+thread_local! {
+    static SLOW_RESTORE_HOOK: std::cell::RefCell<Option<std::sync::Arc<dyn Fn() + 'static>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Staged startup restore: remaining workspace snapshots plus the UI bits
+/// applied only after the last batch (active index, Diff mode).
+pub(crate) struct PendingSessionRestore {
+    remaining: VecDeque<paneflow_config::schema::WorkspaceSession>,
+    active_workspace: usize,
+    mode: paneflow_config::schema::AppMode,
+    worktree_owners: std::collections::HashMap<PathBuf, usize>,
+}
+
+impl PendingSessionRestore {
+    pub(crate) fn from_session(session: paneflow_config::schema::SessionState) -> Option<Self> {
+        if session.workspaces.len() > MAX_WORKSPACES {
+            log::warn!(
+                "session restore: {} workspaces exceeds MAX_WORKSPACES ({MAX_WORKSPACES}); restoring the first {MAX_WORKSPACES}",
+                session.workspaces.len()
+            );
+        }
+        let remaining: VecDeque<_> = session
+            .workspaces
+            .into_iter()
+            .take(MAX_WORKSPACES)
+            .collect();
+        if remaining.is_empty() {
+            return None;
+        }
+        Some(Self {
+            remaining,
+            active_workspace: session.active_workspace,
+            mode: session.mode,
+            worktree_owners: std::collections::HashMap::new(),
+        })
+    }
+}
+
+/// Run `step` on the next frame; if it returns true, schedule another frame.
+/// Production session restore and the event-loop GPUI test share this helper
+/// so a next-frame probe can fire before a slow batch finishes.
+pub(crate) fn schedule_frame_step<T: 'static>(
+    window: &mut Window,
+    cx: &mut Context<T>,
+    step: fn(&mut T, &mut Window, &mut Context<T>) -> bool,
+) {
+    cx.on_next_frame(window, move |this, window, cx| {
+        #[cfg(test)]
+        run_slow_restore_hook();
+        if step(this, window, cx) {
+            schedule_frame_step(window, cx, step);
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_slow_restore_hook() {
+    SLOW_RESTORE_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn set_slow_restore_hook(hook: Option<std::sync::Arc<dyn Fn() + 'static>>) {
+    SLOW_RESTORE_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
 
 /// US-011: debounce window for coalescing a burst of [`PaneFlowApp::save_session`]
 /// calls into a single disk write. Short enough to be imperceptible, long
@@ -150,6 +225,9 @@ impl PaneFlowApp {
     /// instead - there the write has to land before the process exits or is
     /// replaced, so a deferred task would be lost.
     pub(crate) fn save_session(&self, cx: &App) {
+        if self.session_restore.is_some() {
+            return;
+        }
         let state = self.build_session_state(cx);
         let Some(path) = paneflow_config::loader::session_path_migrated() else {
             log::warn!("session save skipped: no session path resolved");
@@ -191,6 +269,12 @@ impl PaneFlowApp {
     /// the user rather than exiting as if the layout landed.
     pub(crate) fn save_session_blocking(&self, cx: &App) -> bool {
         crate::window_state::save();
+        // Staged restore has not finished rewriting `session.json`. Returning
+        // true here would let Launch Pad / worktree teardown treat the old
+        // file as a durable journal of the in-memory mutation.
+        if self.session_restore.is_some() {
+            return false;
+        }
         // Cancel any in-flight deferred save: bump the coalescing token so a
         // background task still sleeping in its debounce wakes to a stale `seq`
         // and no-ops. Without this, a `save_session` fired moments before quit
@@ -219,6 +303,12 @@ impl PaneFlowApp {
     /// Persist then quit. A failed write is toasted and quit is delayed so
     /// the message is visible instead of racing the process exit.
     pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
+        // Keep the on-disk session from the previous launch rather than
+        // clobbering it with a partial in-memory restore, then quit.
+        if self.session_restore.is_some() {
+            cx.quit();
+            return;
+        }
         if self.save_session_blocking(cx) {
             // `build_session_state` journals every closed-record worktree as a
             // pending retirement. Quit immediately after that atomic write:
@@ -394,164 +484,243 @@ impl PaneFlowApp {
         }
     }
 
-    /// Rebuild workspaces from a saved session. Each workspace's layout tree
-    /// is reconstructed via `LayoutTree::from_layout_node` with CWD-aware
-    /// terminal spawning. Returns the workspace list and active index.
-    pub(crate) fn restore_workspaces(
-        session: &paneflow_config::schema::SessionState,
+    /// Start yielding workspace restore across GPUI frames. A session with no
+    /// pending workspaces focuses immediately; otherwise one bounded batch
+    /// runs per frame.
+    pub(crate) fn begin_staged_session_restore(
+        &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Vec<Workspace>, usize) {
-        let mut workspaces: Vec<Workspace> = Vec::new();
-        let mut worktree_owners: std::collections::HashMap<std::path::PathBuf, usize> =
-            std::collections::HashMap::new();
-
-        // U-016: cap restored workspaces. Each layout's pane count is bounded by
-        // `validate_layout` (US-011) below, so this is the only remaining
-        // unbounded restore axis - a session.json with thousands of workspace
-        // entries would otherwise each spawn ≥1 real PTY.
-        if session.workspaces.len() > MAX_WORKSPACES {
-            log::warn!(
-                "session restore: {} workspaces exceeds MAX_WORKSPACES ({MAX_WORKSPACES}); restoring the first {MAX_WORKSPACES}",
-                session.workspaces.len()
+    ) {
+        if self.session_restore.is_none() {
+            self.focus_restored_session(window, cx);
+            return;
+        }
+        if let Some(pending) = &self.session_restore {
+            log::info!(
+                "restoring session: {} workspace(s), mode={:?}",
+                pending.remaining.len(),
+                pending.mode
             );
         }
-        for ws_session in session.workspaces.iter().take(MAX_WORKSPACES) {
-            let mut cwd = restored_workspace_cwd(&ws_session.cwd);
-            let mut title = ws_session.title.clone();
-            if should_repair_restored_root_terminal(&title, &cwd) {
-                let repaired_cwd = launch_cwd::implicit_launch_cwd();
-                log::info!(
-                    "session restore: repairing legacy default workspace at filesystem root"
-                );
-                title = launch_cwd::title_for_cwd_or(&repaired_cwd, title);
-                cwd = repaired_cwd;
-            }
-            let ws_id = next_workspace_id();
+        window.focus(&self.empty_workspace_focus, cx);
+        schedule_frame_step(window, cx, Self::restore_startup_frame);
+    }
 
-            // US-018: v2 restores a tab list. A v1 file never reaches here
-            // with its old shape - `migrate_session_v1` has already turned its
-            // single tree into tabs - so this is the only restore path.
-            // Cap each tab with `validated_layout_within_cap` (the skipped
-            // 99ac43b sanitizer is not used) and hoist the PTY ceiling to a
-            // per-workspace total (issue #30).
-            if ws_session.tabs.len() > MAX_TABS_PER_WORKSPACE {
-                log::warn!(
-                    "session restore: workspace \"{title}\" holds {} tabs, restoring the first {MAX_TABS_PER_WORKSPACE}",
-                    ws_session.tabs.len()
-                );
-            }
-            let mut tabs = Vec::new();
-            let mut workspace_terminals = 0usize;
-            let mut warned_terminal_cap = false;
-            for tab_session in ws_session.tabs.iter().take(MAX_TABS_PER_WORKSPACE) {
-                let restored_layout = tab_session
-                    .layout
-                    .clone()
-                    .map(without_persisted_scrollback)
-                    .and_then(validated_layout_within_cap);
-                if let Some(ref layout) = restored_layout {
-                    let n = layout_terminal_count(layout);
-                    if skip_tab_over_workspace_terminal_cap(
-                        workspace_terminals,
-                        n,
-                        MAX_WORKSPACE_TERMINALS,
-                    ) {
-                        if !warned_terminal_cap {
-                            log::warn!(
-                                "session restore: workspace \"{title}\" would exceed MAX_WORKSPACE_TERMINALS ({MAX_WORKSPACE_TERMINALS}); dropping remaining PTY tabs"
-                            );
-                            warned_terminal_cap = true;
-                        }
-                        continue;
-                    }
-                    workspace_terminals += n;
-                }
-                let root = restored_layout.map(|layout| {
-                    let mut pane_deque: VecDeque<Entity<Pane>> = VecDeque::new();
-                    let ws_cwd = cwd.clone();
-                    LayoutTree::from_layout_node(&layout, &mut pane_deque, &mut |node| {
-                        let surfaces = match node {
-                            LayoutNode::Pane { surfaces } => surfaces.as_slice(),
-                            _ => &[],
-                        };
-                        Self::spawn_pane_from_surfaces(ws_id, surfaces, &ws_cwd, cx)
-                    })
-                });
-                tabs.push(Tab::new(tab_session.title.clone(), root));
-            }
-            let mut workspace =
-                Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
-
-            workspace.custom_buttons = ws_session.custom_buttons.clone();
-            // Issue #107: restore the sidebar pin. Additive on v2 - an older
-            // session has no key and deserializes to `false` (unpinned).
-            workspace.pinned = ws_session.pinned;
-            // EP-002 (orchestration-v2): rehydrate worktree ownership so the
-            // close-time teardown still applies after a restart.
-            let mut restored_worktrees =
-                rehydrate_managed_worktree_records(&ws_session.managed_worktrees);
-            for worktree in &mut restored_worktrees {
-                if let Some(&first_owner) = worktree_owners.get(&worktree.path) {
-                    // Sessions written before exclusive ownership validation
-                    // may name one checkout from multiple workspaces. Keep the
-                    // checkout for both rather than letting either owner delete
-                    // the other's live cwd.
-                    worktree.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
-                    if let Some(first_workspace) = workspaces.get_mut(first_owner) {
-                        for first in &mut first_workspace.managed_worktrees {
-                            if first.path == worktree.path {
-                                first.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
-                            }
-                        }
-                    }
-                } else {
-                    worktree_owners.insert(worktree.path.clone(), workspaces.len());
-                }
-            }
-            workspace.managed_worktrees = restored_worktrees;
-            // US-007: rehydrate expanded dirs as absolute paths under this
-            // workspace's cwd. Paths that no longer resolve to a directory are
-            // dropped lazily later (by the tree's `hydrated` filter on open),
-            // so a deleted folder never resurrects a dead row.
-            workspace.files_expanded = ws_session
-                .expanded_paths
-                .iter()
-                .filter_map(|rel| rehydrate_expanded_path(&workspace.cwd, rel))
-                .collect();
-            // US-013: kick off the deferred git-stats probe (off render thread).
-            Self::spawn_initial_git_stats(ws_id, workspace.cwd.clone(), cx);
-            workspaces.push(workspace);
+    fn restore_startup_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let more = self.restore_next_workspace_batch(cx);
+        cx.notify();
+        if more {
+            true
+        } else {
+            self.finish_session_restore(window, cx);
+            false
         }
+    }
 
-        // US-009 (orchestration-v2): `git worktree prune` on every repo whose
-        // restored workspaces own worktrees - drops references whose directory
-        // vanished (manual rm -rf, crashed teardown). Git-native guarantee: a
-        // worktree whose directory still exists is untouched (AC5). Best-effort,
-        // off the render thread, deduplicated per repo.
-        let mut prune_roots: Vec<std::path::PathBuf> = workspaces
-            .iter()
-            .flat_map(|ws| ws.managed_worktrees.iter().map(|wt| wt.repo_root.clone()))
-            .collect();
-        prune_roots.sort();
-        prune_roots.dedup();
-        if !prune_roots.is_empty() {
-            cx.spawn(async move |_this, _cx: &mut gpui::AsyncApp| {
-                smol::unblock(move || {
-                    for root in prune_roots {
-                        if let Err(e) = crate::workspace::worktree::prune(&root) {
-                            log::debug!("worktree prune skipped for {}: {e}", root.display());
-                        }
+    fn restore_next_workspace_batch(&mut self, cx: &mut Context<Self>) -> bool {
+        for _ in 0..STARTUP_RESTORE_BATCH {
+            let Some(ws_session) = self
+                .session_restore
+                .as_mut()
+                .and_then(|pending| pending.remaining.pop_front())
+            else {
+                break;
+            };
+            let workspace = {
+                let Some(pending) = self.session_restore.as_mut() else {
+                    break;
+                };
+                Self::restore_one_workspace(
+                    &ws_session,
+                    &mut self.workspaces,
+                    &mut pending.worktree_owners,
+                    cx,
+                )
+            };
+            self.watch_git_dir(&workspace);
+            self.workspaces.push(workspace);
+        }
+        self.session_restore
+            .as_ref()
+            .is_some_and(|pending| !pending.remaining.is_empty())
+    }
+
+    fn finish_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending = self.session_restore.take();
+        if self.workspaces.is_empty() {
+            log::warn!(
+                "session restore: session contained no restorable workspaces; creating default workspace"
+            );
+            let workspace = Self::default_workspace(cx);
+            self.watch_git_dir(&workspace);
+            self.workspaces.push(workspace);
+            self.active_idx = 0;
+        } else if let Some(pending) = pending.as_ref() {
+            self.active_idx = pending
+                .active_workspace
+                .min(self.workspaces.len().saturating_sub(1));
+        }
+        spawn_restored_worktree_prune(&self.workspaces, cx);
+        if let Some(pending) = pending {
+            self.apply_restored_diff_mode(pending.mode, cx);
+        }
+        self.resume_pending_worktree_teardowns(cx);
+        self.focus_restored_session(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn apply_restored_diff_mode(
+        &mut self,
+        restored_mode: paneflow_config::schema::AppMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.mode = restored_mode;
+        if !matches!(self.mode, paneflow_config::schema::AppMode::Diff) {
+            return;
+        }
+        // US-015: restore Diff mode only when it is reconstructable. A session
+        // saved before Review was switched off is the one path that can reach
+        // Diff mode without going through `enter_diff_mode`'s gate.
+        let viable = self.cached_config.review_view_enabled()
+            && match self.diff_mode.diff_scope {
+                crate::diff::DiffScope::MultiProject => {
+                    self.workspaces.iter().any(|ws| ws.repo_root.is_some())
+                }
+                _ => self
+                    .workspaces
+                    .get(self.active_idx)
+                    .is_some_and(|ws| ws.repo_root.is_some()),
+            };
+        if viable {
+            self.rebuild_diff_view(cx);
+        } else {
+            self.mode = paneflow_config::schema::AppMode::Cli;
+        }
+    }
+
+    pub(crate) fn focus_restored_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = match self.workspaces.get(self.active_idx) {
+            Some(ws) => ws.focus_first(window, cx),
+            None => false,
+        };
+        if !focused {
+            window.focus(&self.empty_workspace_focus, cx);
+        }
+    }
+
+    /// Rebuild one workspace from a saved session snapshot. Each layout tree
+    /// is reconstructed via `LayoutTree::from_layout_node` with CWD-aware
+    /// terminal spawning.
+    fn restore_one_workspace(
+        ws_session: &paneflow_config::schema::WorkspaceSession,
+        workspaces: &mut [Workspace],
+        worktree_owners: &mut std::collections::HashMap<PathBuf, usize>,
+        cx: &mut Context<Self>,
+    ) -> Workspace {
+        let mut cwd = restored_workspace_cwd(&ws_session.cwd);
+        let mut title = ws_session.title.clone();
+        if should_repair_restored_root_terminal(&title, &cwd) {
+            let repaired_cwd = launch_cwd::implicit_launch_cwd();
+            log::info!("session restore: repairing legacy default workspace at filesystem root");
+            title = launch_cwd::title_for_cwd_or(&repaired_cwd, title);
+            cwd = repaired_cwd;
+        }
+        let ws_id = next_workspace_id();
+
+        // US-018: v2 restores a tab list. A v1 file never reaches here
+        // with its old shape - `migrate_session_v1` has already turned its
+        // single tree into tabs - so this is the only restore path.
+        // Cap each tab with `validated_layout_within_cap` (the skipped
+        // 99ac43b sanitizer is not used) and hoist the PTY ceiling to a
+        // per-workspace total (issue #30).
+        if ws_session.tabs.len() > MAX_TABS_PER_WORKSPACE {
+            log::warn!(
+                "session restore: workspace \"{title}\" holds {} tabs, restoring the first {MAX_TABS_PER_WORKSPACE}",
+                ws_session.tabs.len()
+            );
+        }
+        let mut tabs = Vec::new();
+        let mut workspace_terminals = 0usize;
+        let mut warned_terminal_cap = false;
+        for tab_session in ws_session.tabs.iter().take(MAX_TABS_PER_WORKSPACE) {
+            let restored_layout = tab_session
+                .layout
+                .clone()
+                .map(without_persisted_scrollback)
+                .and_then(validated_layout_within_cap);
+            if let Some(ref layout) = restored_layout {
+                let n = layout_terminal_count(layout);
+                if skip_tab_over_workspace_terminal_cap(
+                    workspace_terminals,
+                    n,
+                    MAX_WORKSPACE_TERMINALS,
+                ) {
+                    if !warned_terminal_cap {
+                        log::warn!(
+                            "session restore: workspace \"{title}\" would exceed MAX_WORKSPACE_TERMINALS ({MAX_WORKSPACE_TERMINALS}); dropping remaining PTY tabs"
+                        );
+                        warned_terminal_cap = true;
                     }
+                    continue;
+                }
+                workspace_terminals += n;
+            }
+            let root = restored_layout.map(|layout| {
+                let mut pane_deque: VecDeque<Entity<Pane>> = VecDeque::new();
+                let ws_cwd = cwd.clone();
+                LayoutTree::from_layout_node(&layout, &mut pane_deque, &mut |node| {
+                    let surfaces = match node {
+                        LayoutNode::Pane { surfaces } => surfaces.as_slice(),
+                        _ => &[],
+                    };
+                    Self::spawn_pane_from_surfaces(ws_id, surfaces, &ws_cwd, cx)
                 })
-                .await;
-            })
-            .detach();
+            });
+            tabs.push(Tab::new(tab_session.title.clone(), root));
         }
+        let mut workspace =
+            Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
 
-        let active_idx = session
-            .active_workspace
-            .min(workspaces.len().saturating_sub(1));
-        (workspaces, active_idx)
+        workspace.custom_buttons = ws_session.custom_buttons.clone();
+        // Issue #107: restore the sidebar pin. Additive on v2 - an older
+        // session has no key and deserializes to `false` (unpinned).
+        workspace.pinned = ws_session.pinned;
+        // EP-002 (orchestration-v2): rehydrate worktree ownership so the
+        // close-time teardown still applies after a restart.
+        let mut restored_worktrees =
+            rehydrate_managed_worktree_records(&ws_session.managed_worktrees);
+        for worktree in &mut restored_worktrees {
+            if let Some(&first_owner) = worktree_owners.get(&worktree.path) {
+                // Sessions written before exclusive ownership validation
+                // may name one checkout from multiple workspaces. Keep the
+                // checkout for both rather than letting either owner delete
+                // the other's live cwd.
+                worktree.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+                if let Some(first_workspace) = workspaces.get_mut(first_owner) {
+                    for first in &mut first_workspace.managed_worktrees {
+                        if first.path == worktree.path {
+                            first.teardown = crate::workspace::worktree::TeardownPolicy::Keep;
+                        }
+                    }
+                }
+            } else {
+                worktree_owners.insert(worktree.path.clone(), workspaces.len());
+            }
+        }
+        workspace.managed_worktrees = restored_worktrees;
+        // US-007: rehydrate expanded dirs as absolute paths under this
+        // workspace's cwd. Paths that no longer resolve to a directory are
+        // dropped lazily later (by the tree's `hydrated` filter on open),
+        // so a deleted folder never resurrects a dead row.
+        workspace.files_expanded = ws_session
+            .expanded_paths
+            .iter()
+            .filter_map(|rel| rehydrate_expanded_path(&workspace.cwd, rel))
+            .collect();
+        // US-013: kick off the deferred git-stats probe (off render thread).
+        Self::spawn_initial_git_stats(ws_id, workspace.cwd.clone(), cx);
+        workspace
     }
 
     /// Build the single [`crate::pane::PaneSurface`] described by one
@@ -670,6 +839,34 @@ impl PaneFlowApp {
         cx.subscribe(&pane, Self::handle_pane_event).detach();
         pane
     }
+}
+
+fn spawn_restored_worktree_prune(workspaces: &[Workspace], cx: &mut Context<PaneFlowApp>) {
+    // US-009 (orchestration-v2): `git worktree prune` on every repo whose
+    // restored workspaces own worktrees - drops references whose directory
+    // vanished (manual rm -rf, crashed teardown). Git-native guarantee: a
+    // worktree whose directory still exists is untouched (AC5). Best-effort,
+    // off the render thread, deduplicated per repo.
+    let mut prune_roots: Vec<PathBuf> = workspaces
+        .iter()
+        .flat_map(|ws| ws.managed_worktrees.iter().map(|wt| wt.repo_root.clone()))
+        .collect();
+    prune_roots.sort();
+    prune_roots.dedup();
+    if prune_roots.is_empty() {
+        return;
+    }
+    cx.spawn(async move |_this, _cx: &mut gpui::AsyncApp| {
+        smol::unblock(move || {
+            for root in prune_roots {
+                if let Err(e) = crate::workspace::worktree::prune(&root) {
+                    log::debug!("worktree prune skipped for {}: {e}", root.display());
+                }
+            }
+        })
+        .await;
+    })
+    .detach();
 }
 
 // ---------------------------------------------------------------------------
@@ -1852,6 +2049,73 @@ mod tests {
         );
     }
 
+    fn marked_managed_worktree_checkout(
+        tmp: &tempfile::TempDir,
+        branch: &str,
+    ) -> (PathBuf, String, paneflow_config::schema::ManagedWorktreeDef) {
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let path = crate::workspace::worktree::worktree_dir(&repo_root, branch);
+        std::fs::create_dir_all(&path).expect("owned worktree dir");
+        std::fs::write(
+            crate::workspace::worktree::owner_marker_path(&path),
+            format!(
+                "owner=paneflow\nrepo_root={}\nbranch={branch}\n",
+                std::fs::canonicalize(&repo_root)
+                    .expect("canonical repo root")
+                    .display()
+            ),
+        )
+        .expect("owner marker");
+        let identity = crate::workspace::worktree::worktree_identity(&path)
+            .expect("directory identity")
+            .as_str()
+            .to_string();
+        let def = paneflow_config::schema::ManagedWorktreeDef {
+            path: path.to_string_lossy().into_owned(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            branch: branch.to_string(),
+            teardown: "auto".to_string(),
+            directory_identity: Some(identity.clone()),
+        };
+        (path, identity, def)
+    }
+
+    #[test]
+    fn restored_managed_worktree_matching_directory_identity_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (path, identity, def) = marked_managed_worktree_checkout(&tmp, "feat/identity-match");
+
+        let restored = rehydrate_managed_worktree(&def)
+            .expect("a marked checkout with a matching directory identity restores");
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
+        assert_eq!(
+            restored.identity.as_ref().map(|identity| identity.as_str()),
+            Some(identity.as_str())
+        );
+    }
+
+    #[test]
+    fn restored_managed_worktree_mismatched_directory_identity_is_dropped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_, identity, mut def) =
+            marked_managed_worktree_checkout(&tmp, "feat/identity-mismatch");
+        let other = "0:0:0:0";
+        assert_ne!(
+            identity, other,
+            "fixture identity must differ from the mismatched persisted value"
+        );
+        def.directory_identity = Some(other.to_string());
+
+        assert!(
+            rehydrate_managed_worktree(&def).is_none(),
+            "a marked checkout with a different directory identity is dropped"
+        );
+    }
+
     #[test]
     fn restored_managed_ownership_is_not_truncated_at_one_tab_pane_cap() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2024,6 +2288,24 @@ mod tests {
             .expect("successful-save branch");
         assert!(success.contains("cx.quit()"));
         assert!(!success.contains("spawn_persisted_worktree_teardown"));
+        assert!(
+            quit.contains("if self.session_restore.is_some()") && quit.contains("cx.quit()"),
+            "quit during staged restore must not toast a failed write: {quit}"
+        );
+
+        let blocking = src
+            .split("pub(crate) fn save_session_blocking(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn toast_pending_session_corruption(")
+                    .next()
+            })
+            .expect("save_session_blocking body");
+        assert!(
+            blocking.contains("if self.session_restore.is_some()")
+                && blocking.contains("return false;"),
+            "blocking save must fail closed while restore is still staging: {blocking}"
+        );
 
         let failure = quit.split("return;").nth(1).expect("failed-save branch");
         assert!(
@@ -2064,6 +2346,37 @@ mod tests {
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].path, "/tmp/repo.worktrees/feature");
         assert_eq!(journal[0].teardown, "keep");
+    }
+
+    #[test]
+    fn persisted_pending_worktree_teardowns_keep_managed_worktree_directory_identity() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("repo.worktrees").join("feature");
+        std::fs::create_dir_all(&path).expect("checkout");
+        let identity =
+            crate::workspace::worktree::worktree_identity(&path).expect("directory identity");
+        let worktree = crate::workspace::worktree::ManagedWorktree {
+            path,
+            repo_root: tmp.path().join("repo"),
+            branch: "feature".to_string(),
+            teardown: crate::workspace::worktree::TeardownPolicy::Auto,
+            identity: Some(identity.clone()),
+        };
+
+        let def = managed_worktree_def(&worktree);
+        assert_eq!(
+            def.directory_identity.as_deref(),
+            Some(identity.as_str()),
+            "managed_worktree_def must persist directory identity"
+        );
+
+        let journal = persisted_pending_worktree_teardowns(&[worktree], &[]);
+        assert_eq!(journal.len(), 1);
+        assert_eq!(
+            journal[0].directory_identity.as_deref(),
+            Some(identity.as_str()),
+            "pending teardown journal must persist directory identity"
+        );
     }
 
     /// EP-002 US-005: a legacy pane listing several surfaces restores the
@@ -2173,5 +2486,137 @@ mod tests {
             close_settings < toggle_sidebar,
             "Settings must close before the persisted sidebar intent changes"
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_restore_tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window, div, prelude::*, px, size};
+
+    use super::{schedule_frame_step, set_slow_restore_hook};
+
+    struct RestoreHarness {
+        remaining: usize,
+        restored: usize,
+        finished: Rc<Cell<bool>>,
+    }
+
+    impl RestoreHarness {
+        fn restore_step(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+            self.restored += 1;
+            self.remaining = self.remaining.saturating_sub(1);
+            if self.remaining == 0 {
+                self.finished.set(true);
+                false
+            } else {
+                true
+            }
+        }
+    }
+
+    impl Render for RestoreHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("startup-restore-probe")
+                .w_full()
+                .h_full()
+                .debug_selector(|| "startup-restore-probe".into())
+        }
+    }
+
+    struct SlowRestoreHookGuard;
+
+    impl Drop for SlowRestoreHookGuard {
+        fn drop(&mut self) {
+            set_slow_restore_hook(None);
+        }
+    }
+
+    #[gpui::test]
+    fn startup_restore_keeps_event_loop_responsive(cx: &mut TestAppContext) {
+        let _guard = SlowRestoreHookGuard;
+        let finished = Rc::new(Cell::new(false));
+        let probe = Rc::new(Cell::new(false));
+        let slow_started = Arc::new(AtomicBool::new(false));
+        let slow_finished = Arc::new(AtomicBool::new(false));
+
+        set_slow_restore_hook(Some(Arc::new({
+            let slow_started = slow_started.clone();
+            let slow_finished = slow_finished.clone();
+            move || {
+                slow_started.store(true, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(25));
+                slow_finished.store(true, Ordering::SeqCst);
+            }
+        })));
+
+        let probe_flag = probe.clone();
+        let finished_for_view = finished.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            window.on_next_frame(move |_, _| probe_flag.set(true));
+            schedule_frame_step(window, cx, RestoreHarness::restore_step);
+            RestoreHarness {
+                remaining: 2,
+                restored: 0,
+                finished: finished_for_view,
+            }
+        });
+
+        cx.simulate_resize(size(px(200.), px(200.)));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("startup-restore-probe").is_some(),
+            "lightweight root must paint a frame before restore runs"
+        );
+        assert!(
+            !finished.get(),
+            "restore must not finish during the first painted frame"
+        );
+        assert!(
+            !slow_started.load(Ordering::SeqCst),
+            "injected slow restore must not start before the first painted frame"
+        );
+        assert!(
+            !probe.get(),
+            "next-frame probe is queued behind the painted frame, not run by draw()"
+        );
+
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            probe.get(),
+            "next-frame probe must run on the first restore frame"
+        );
+        assert!(
+            slow_started.load(Ordering::SeqCst),
+            "injected slow restore must run on the first restore frame"
+        );
+        assert!(
+            slow_finished.load(Ordering::SeqCst),
+            "the first restore batch is the injected slow restore"
+        );
+        assert!(
+            !finished.get(),
+            "one workspace per frame: two workspaces cannot finish on the first restore frame"
+        );
+        assert_eq!(cx.update(|_, cx| view.read(cx).restored), 1);
+
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        assert!(finished.get(), "the second frame must finish restore");
+        assert_eq!(cx.update(|_, cx| view.read(cx).restored), 2);
     }
 }

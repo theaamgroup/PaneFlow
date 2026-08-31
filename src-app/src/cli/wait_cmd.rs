@@ -12,15 +12,16 @@
 //! closes exactly one connection, so a long `wait` never holds a socket open
 //! between polls and never approaches the server's 16-connection cap.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use paneflow_ipc_client::{IpcClient, IpcTransport, StreamEvent};
+use paneflow_ipc_client::{IpcTransport, StreamEvent};
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::scrollback::new_text_since_baseline;
 use super::selector::{resolve_all, resolve_target};
 use super::{CliError, EXIT_OK, EXIT_TIMEOUT};
 
@@ -287,22 +288,6 @@ fn is_transient_read_error(message: &str) -> bool {
         || lower.contains("busy")
         || lower.contains("timeout")
         || lower.contains("timed out")
-        || lower.contains("unreachable")
-}
-
-fn new_text_since_baseline(baseline: &str, current: &str) -> String {
-    if current == baseline {
-        return String::new();
-    }
-    if let Some(rest) = current.strip_prefix(baseline) {
-        return rest.to_string();
-    }
-    let old_lines: HashSet<&str> = baseline.lines().collect();
-    current
-        .lines()
-        .filter(|line| !old_lines.contains(line))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +401,7 @@ fn pane_matches_since(
 /// sampling so the command remains deterministic instead of returning an
 /// unsupported-platform error.
 pub fn wait_idle(
-    client: &IpcClient,
+    client: &impl IpcTransport,
     target: &str,
     for_ms: Option<u64>,
     timeout_secs: Option<u64>,
@@ -435,14 +420,19 @@ pub fn wait_idle(
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let deadline = Instant::now() + timeout;
 
+    let baseline = read_snapshot(client, id)?;
+    if baseline.is_none() {
+        return Err(CliError::runtime(
+            "target pane closed before idle wait started",
+        ));
+    }
+
     let socket = paneflow_ipc_client::resolve_socket_path().ok_or_else(|| {
         CliError::target(
             "cannot locate the IPC socket; is PaneFlow running? \
              (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a PaneFlow pane)",
         )
     })?;
-
-    let baseline = read_snapshot(client, id)?;
 
     // Ctrl-C is a clean stop; dropping the socket frees the server-side
     // subscription on its next write (RAII), so nothing leaks (US-007 AC4).
@@ -484,6 +474,9 @@ pub fn wait_idle(
     match stream_result {
         Ok(()) => match outcome {
             IdleOutcome::Idle => {
+                if read_snapshot(client, id)?.is_none() {
+                    return Err(CliError::runtime("target pane closed before it went idle"));
+                }
                 super::print_json(
                     &json!({ "surface_id": id, "idle": !matched, "matched": matched }),
                 )?;
@@ -693,6 +686,16 @@ mod tests {
         assert!(err.message.contains("closed"), "got: {}", err.message);
     }
 
+    #[test]
+    fn wait_idle_fails_when_target_pane_gone() {
+        // First surface.read is -32602 / not found, matching
+        // wait_fails_fast_when_target_pane_gone. The stream path must not
+        // treat Ok(None) as a quiet pane and exit 0 after --for.
+        let fake = FakeWait::new(vec![None]);
+        let err = wait_idle(&fake, "1", Some(1), Some(1), None).unwrap_err();
+        assert!(err.message.contains("closed"), "got: {}", err.message);
+    }
+
     /// First `surface.read` is a transient non-gone IPC error; later reads
     /// would return text that already contains the pattern. Baseline failure
     /// must fail `wait`, not treat a missing baseline as "match the whole
@@ -750,10 +753,7 @@ mod tests {
                     match n {
                         1 => Ok(json!({ "text": "", "output_generation": n })),
                         2 => Err("server error -32000: overloaded".to_string()),
-                        3 => Err(
-                            "paneflow IPC unreachable (paneflow did not respond within 10s)"
-                                .to_string(),
-                        ),
+                        3 => Err("server error -32002: Request dispatch timeout".to_string()),
                         _ => Ok(json!({
                             "text": "Build DONE in 3s\n",
                             "output_generation": n
@@ -772,6 +772,67 @@ mod tests {
         };
         let code = wait(&fake, "1", "DONE", Some(2), MatchMode::Single).expect("ok");
         assert_eq!(code, EXIT_OK);
+    }
+
+    /// After a successful baseline, a down instance must fail `wait` immediately
+    /// rather than mapping "unreachable" onto `PaneState::NoMatch` and spinning
+    /// until `--timeout`.
+    struct LaterReadUnreachable {
+        reads: std::cell::Cell<u64>,
+    }
+    impl IpcTransport for LaterReadUnreachable {
+        fn call(&self, method: &str, _params: Value) -> Result<Value, String> {
+            match method {
+                "surface.list" => Ok(json!({
+                    "surfaces": [{ "surface_id": 1u64, "name": "agent", "cmd": "claude", "cwd": "/tmp" }]
+                })),
+                "surface.read" => {
+                    let n = self.reads.get() + 1;
+                    self.reads.set(n);
+                    if n == 1 {
+                        Ok(json!({ "text": "", "output_generation": n }))
+                    } else {
+                        Err(
+                            "paneflow IPC unreachable at /tmp/paneflow.sock (Connection refused); is PaneFlow running?"
+                                .to_string(),
+                        )
+                    }
+                }
+                other => Err(format!("unexpected method {other}")),
+            }
+        }
+    }
+
+    #[test]
+    fn wait_unreachable_after_baseline_is_hard_error() {
+        let unreachable = "paneflow IPC unreachable at /tmp/paneflow.sock (Connection refused); is PaneFlow running?";
+        let re = Regex::new("DONE").unwrap();
+        let baseline = ReadSnapshot {
+            text: String::new(),
+            output_generation: Some(1),
+        };
+        let err = match poll_matches_since(&ReadError(unreachable), 1, &re, Some(&baseline)) {
+            Err(e) => e,
+            Ok(PaneState::NoMatch) => {
+                panic!("unreachable after baseline mapped to PaneState::NoMatch")
+            }
+            Ok(PaneState::Gone) => panic!("unreachable after baseline mapped to PaneState::Gone"),
+            Ok(PaneState::Matched(_)) => {
+                panic!("unreachable after baseline mapped to PaneState::Matched")
+            }
+        };
+        assert!(err.message.contains("unreachable"), "got: {}", err.message);
+
+        let fake = LaterReadUnreachable {
+            reads: std::cell::Cell::new(0),
+        };
+        let err = wait(&fake, "1", "DONE", Some(0), MatchMode::Single).unwrap_err();
+        assert!(err.message.contains("unreachable"), "got: {}", err.message);
+        assert_eq!(
+            fake.reads.get(),
+            2,
+            "must fail on the first post-baseline poll"
+        );
     }
 
     #[test]
@@ -867,13 +928,47 @@ mod tests {
         let current = "please print RENDER_AUDIT_DONE when complete\nactual work\n";
         assert_eq!(new_text_since_baseline(base, current), "actual work\n");
 
-        // When the scrollback window shifted, remove already-seen lines instead
-        // of matching the old sentinel line again.
-        let shifted = "actual work\nplease print RENDER_AUDIT_DONE when complete\nnew DONE\n";
-        assert_eq!(
-            new_text_since_baseline(base, shifted),
-            "actual work\nnew DONE"
+        // Last-N window slide: the echo line is still the overlapping suffix of
+        // the baseline (prefix of current) and must not rematch.
+        let base = "old header\nplease print RENDER_AUDIT_DONE when complete\nstill working\n";
+        let shifted = "please print RENDER_AUDIT_DONE when complete\nstill working\nnew DONE\n";
+        assert_eq!(new_text_since_baseline(base, shifted), "new DONE\n");
+    }
+
+    #[test]
+    fn wait_matches_repeated_sentinel_after_window_slides() {
+        // Baseline already contains DONE; wait must ignore that occurrence.
+        // After the 500-line read window slides, the original sentinel is gone
+        // and an identical DONE is printed at the tail.
+        let sentinel = "Build DONE in 3s";
+        let filler: Vec<String> = (0..READ_WINDOW_LINES as usize - 1)
+            .map(|i| format!("log {i}"))
+            .collect();
+        let baseline = std::iter::once(sentinel.to_string())
+            .chain(filler.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let slid = filler
+            .iter()
+            .cloned()
+            .chain(std::iter::once(sentinel.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            slid.strip_prefix(&baseline).is_none(),
+            "slid window must not be a prefix of the baseline"
         );
+        assert!(
+            new_text_since_baseline(&baseline, &slid).contains("DONE"),
+            "reprinted sentinel after a window slide must count as new text, got {:?}",
+            new_text_since_baseline(&baseline, &slid)
+        );
+
+        let baseline = Box::leak(baseline.into_boxed_str());
+        let slid = Box::leak(slid.into_boxed_str());
+        let fake = FakeWait::new(vec![Some(baseline), Some(slid)]);
+        let code = wait(&fake, "1", "DONE", Some(0), MatchMode::Single).expect("ok");
+        assert_eq!(code, EXIT_OK);
     }
 
     // ---------- EP-003 US-007/US-008: idle quiescence rule ----------

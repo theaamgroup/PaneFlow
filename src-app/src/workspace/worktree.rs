@@ -23,9 +23,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// Wall-clock bound for plumbing git calls (list/status/remove/prune).
+/// Wall-clock bound for plumbing git calls (list/status/remove/prune)
+/// and the destructive-gate process CWD scan.
 const GIT_DEADLINE: Duration = Duration::from_secs(10);
 /// `worktree add` checks out a full tree - give it more room on big repos.
 const ADD_DEADLINE: Duration = Duration::from_secs(120);
@@ -518,11 +519,18 @@ pub(crate) fn pending_managed_worktree_from_persisted_record(
 }
 
 /// One entry of `git worktree list --porcelain`.
+///
+/// A `worktree ` line is enough to keep the entry. Bare and other HEAD-less
+/// checkouts are included so Launch Pad collision checks and the Review
+/// Worktree-scope picker list the same set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorktreeEntry {
     pub path: PathBuf,
-    /// `None` for a detached-HEAD worktree.
+    /// `None` for a detached-HEAD or HEAD-less (including bare) worktree.
     pub branch: Option<String>,
+    /// SHA from the porcelain `HEAD` line; `None` when that line is absent.
+    pub sha: Option<String>,
+    pub is_bare: bool,
 }
 
 /// Filesystem-safe directory name for a branch (`feat/x` → `feat-x`).
@@ -595,11 +603,45 @@ pub fn is_paneflow_worktree_dir(repo_root: &Path, branch: &str, path: &Path) -> 
     path == worktree_dir(repo_root, branch) || path == worktree_dir_hashed(repo_root, branch)
 }
 
+/// Isolated `git` spawn: ignore the opened repo's `core.hooksPath` /
+/// `core.fsmonitor` / `diff.external`, drop inherited git location/SSH env,
+/// and never prompt.
+pub(crate) fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "-c",
+        "core.fsmonitor=",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+    ]);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env_remove("GIT_DIR");
+    cmd.env_remove("GIT_WORK_TREE");
+    cmd.env_remove("GIT_SSH_COMMAND");
+    cmd
+}
+
+/// Append a git subcommand, forcing `--no-ext-diff` on `git diff`.
+pub(crate) fn git_subcommand(cmd: &mut Command, args: &[&str]) {
+    match args {
+        ["diff", rest @ ..] => {
+            cmd.arg("diff").arg("--no-ext-diff").args(rest);
+        }
+        _ => {
+            cmd.args(args);
+        }
+    }
+}
+
 /// Run a git plumbing command and return trimmed stdout, mapping every
 /// failure mode (spawn, timeout, non-zero exit) to a displayable message.
 fn run_git(repo: &Path, args: &[&str], deadline: Duration) -> Result<String, String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).args(args);
+    let mut cmd = git_command();
+    cmd.arg("-C").arg(repo);
+    git_subcommand(&mut cmd, args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     let out = paneflow_process::run_with_timeout(cmd, deadline, STDOUT_CAP)
         .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
@@ -626,25 +668,36 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<WorktreeEntry>, String> {
 
 /// Pure porcelain parser (unit-tested). Entries are blank-line separated;
 /// `branch refs/heads/<name>` is absent for detached or bare entries.
+/// A `worktree ` line is enough; HEAD-less and bare entries are kept.
 pub fn parse_worktree_porcelain(stdout: &str) -> Vec<WorktreeEntry> {
     let mut entries = Vec::new();
     let mut path: Option<PathBuf> = None;
     let mut branch: Option<String> = None;
+    let mut sha: Option<String> = None;
+    let mut is_bare = false;
     for line in stdout.lines().chain(std::iter::once("")) {
         if line.is_empty() {
             if let Some(p) = path.take() {
                 entries.push(WorktreeEntry {
                     path: p,
                     branch: branch.take(),
+                    sha: sha.take(),
+                    is_bare,
                 });
             }
             branch = None;
+            sha = None;
+            is_bare = false;
             continue;
         }
         if let Some(p) = line.strip_prefix("worktree ") {
             path = Some(PathBuf::from(p));
         } else if let Some(b) = line.strip_prefix("branch ") {
             branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        } else if let Some(h) = line.strip_prefix("HEAD ") {
+            sha = Some(h.to_string());
+        } else if line == "bare" {
+            is_bare = true;
         }
     }
     entries
@@ -977,6 +1030,28 @@ enum ProcessCwdProbe {
     Skip,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessCwdScanBudget {
+    Proceed,
+    SkipBestEffort,
+}
+
+/// Remaining work after [`GIT_DEADLINE`]: skip leftover same-UID PIDs, but
+/// fail closed if a descendant or protected-session probe never ran.
+fn process_cwd_scan_budget(
+    deadline_at: Instant,
+    required: bool,
+) -> Result<ProcessCwdScanBudget, String> {
+    if Instant::now() < deadline_at {
+        return Ok(ProcessCwdScanBudget::Proceed);
+    }
+    if required {
+        Err("process CWD scan exceeded its deadline".to_string())
+    } else {
+        Ok(ProcessCwdScanBudget::SkipBestEffort)
+    }
+}
+
 fn process_cwd_probe(
     session_id: i32,
     effective_uid: u32,
@@ -1025,7 +1100,10 @@ fn process_still_requires_cwd_probe(
 /// after the GPUI-side live-terminal sample, and retirement can outlive the
 /// terminal entity entirely, so the background worker independently scans all
 /// processes. CWD failures are fatal only for authenticated session members or
-/// PaneFlow descendants; unrelated inaccessible processes are ignored.
+/// PaneFlow descendants; unrelated inaccessible processes are ignored. The
+/// scan is bounded by [`GIT_DEADLINE`]: leftover best-effort PIDs are skipped
+/// when the budget expires, and the gate fails closed only if a required
+/// descendant or protected-session probe could not complete.
 fn worktree_has_live_process_cwd(
     worktree_path: &Path,
     protected_session_ids: &[u32],
@@ -1035,6 +1113,7 @@ fn worktree_has_live_process_cwd(
     use libproc::processes::{ProcFilter, pids_by_type};
     use std::collections::{HashMap, HashSet};
 
+    let deadline_at = Instant::now() + GIT_DEADLINE;
     let worktree_path = worktree_path
         .canonicalize()
         .map_err(|error| format!("cannot canonicalize worktree before cwd scan: {error}"))?;
@@ -1066,9 +1145,9 @@ fn worktree_has_live_process_cwd(
         let Ok(pid_i32) = i32::try_from(pid) else {
             continue;
         };
-        // Resolve session membership before BSDInfo: a protected foreground
-        // member's PID normally differs from its session ID, and unreadable
-        // BSD metadata must not make that member disappear from the gate.
+        // Classify session membership before the deadline skip: an
+        // unclassified protected-session PID must not be treated as
+        // best-effort leftover.
         // SAFETY: getsid is a read-only process query.
         let session_id = unsafe { libc::getsid(pid_i32) };
         if session_id < 0 {
@@ -1089,6 +1168,11 @@ fn worktree_has_live_process_cwd(
         let in_protected_session = protected_session_contains(session_id, &protected_sessions);
         if in_protected_session {
             protected_processes.insert(pid);
+        }
+        match process_cwd_scan_budget(deadline_at, relevant.contains(&pid) || in_protected_session)?
+        {
+            ProcessCwdScanBudget::SkipBestEffort => continue,
+            ProcessCwdScanBudget::Proceed => {}
         }
         match pidinfo::<BSDInfo>(pid_i32, 0) {
             Ok(info) => {
@@ -1153,6 +1237,10 @@ fn worktree_has_live_process_cwd(
         let is_paneflow_descendant = relevant.contains(&pid_u32);
         let was_in_protected_session = protected_processes.contains(&pid_u32);
         let required = is_paneflow_descendant || was_in_protected_session;
+        match process_cwd_scan_budget(deadline_at, required)? {
+            ProcessCwdScanBudget::SkipBestEffort => continue,
+            ProcessCwdScanBudget::Proceed => {}
+        }
         match process_cwd(pid) {
             Ok(cwd) => {
                 let cwd = match cwd.canonicalize() {
@@ -1206,6 +1294,12 @@ pub fn prune(repo_root: &Path) -> Result<(), String> {
 /// don't clobber it). Best-effort by design (US-007): a missing source dir or
 /// an unreadable entry yields an empty/partial copy, never an error. Returns
 /// the file names copied.
+///
+/// Symlinks are never followed: `Path::is_file` / `std::fs::copy` would copy
+/// a `.env` that points at `~/.ssh/id_rsa` into the new worktree as a regular
+/// file. Source entries that are not regular files are skipped, and the
+/// destination is created with `O_EXCL` so a planted dest symlink cannot be
+/// written through.
 pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
     let entries = match std::fs::read_dir(src_root) {
         Ok(entries) => entries,
@@ -1238,17 +1332,28 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
         if !name_s.starts_with(".env") {
             continue;
         }
-        if !entry.path().is_file() {
+        let src = entry.path();
+        let src_meta = match std::fs::symlink_metadata(&src) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!("failed to inspect env file {}: {error}", src.display());
+                continue;
+            }
+        };
+        if !src_meta.file_type().is_file() {
             continue;
         }
         let dst = dst_root.join(&name);
-        if dst.exists() {
+        // `Path::exists` follows dest symlinks; a dangling dest link would
+        // look absent and `std::fs::copy` would create the pointee.
+        if std::fs::symlink_metadata(&dst).is_ok() {
             continue;
         }
-        let src = entry.path();
-        match std::fs::copy(&src, &dst) {
-            Ok(_) => copied.push(name_s.into_owned()),
+        match copy_env_file_no_follow(&src, &dst) {
+            Ok(()) => copied.push(name_s.into_owned()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => tracing::warn!(
                 "failed to copy env file from {} to {}: {error}",
                 src.display(),
@@ -1258,6 +1363,31 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
     }
     copied.sort();
     copied
+}
+
+/// Copy `src` onto a newly created regular `dst`. Source is opened with
+/// `O_NOFOLLOW` and dest with `O_EXCL` so neither name can be a symlink.
+fn copy_env_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::{self, Write};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut src_file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(src)?;
+    let permissions = src_file.metadata()?.permissions();
+    let mut dst_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(permissions.mode())
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dst)?;
+    // Apply the source mode before any secret bytes land, so a 0600
+    // `.env` is never world-readable for the duration of `io::copy`.
+    dst_file.set_permissions(permissions)?;
+    io::copy(&mut src_file, &mut dst_file)?;
+    dst_file.flush()?;
+    Ok(())
 }
 
 /// Tear down a batch of managed worktrees (blocking - run via `smol::unblock`
@@ -1324,6 +1454,138 @@ mod tests {
         assert!(
             run_git_body.contains(".env(\"GIT_TERMINAL_PROMPT\", \"0\")"),
             "worktree git commands must fail instead of opening an interactive credential prompt"
+        );
+    }
+
+    const GIT_ISOLATION_PRELUDE: &[&str] = &[
+        "core.fsmonitor=",
+        "core.hooksPath=/dev/null",
+        "diff.external=",
+        "GIT_CONFIG_NOSYSTEM",
+        "env_remove(\"GIT_DIR\")",
+        "env_remove(\"GIT_WORK_TREE\")",
+        "env_remove(\"GIT_SSH_COMMAND\")",
+    ];
+
+    fn run_git_fn_source(source: &str) -> &str {
+        let after = source.split_once("fn run_git(").expect("run_git helper").1;
+        after.get(..after.len().min(2000)).unwrap_or(after)
+    }
+
+    fn source_has_git_isolation_prelude(source: &str) -> bool {
+        GIT_ISOLATION_PRELUDE
+            .iter()
+            .all(|needle| source.contains(needle))
+    }
+
+    fn assert_production_git_command_isolated(source: &str) {
+        let run_git_src = run_git_fn_source(source);
+        if source_has_git_isolation_prelude(run_git_src) {
+            return;
+        }
+        assert!(
+            run_git_src.contains("git_command()"),
+            "production git Command must carry the isolation prelude or call git_command()"
+        );
+        assert!(
+            source_has_git_isolation_prelude(source)
+                || source_has_git_isolation_prelude(include_str!("worktree.rs")),
+            "git_command() helper must pass -c core.fsmonitor= -c core.hooksPath=/dev/null \
+             -c diff.external=, GIT_CONFIG_NOSYSTEM, and env_remove GIT_DIR/GIT_WORK_TREE/GIT_SSH_COMMAND"
+        );
+    }
+
+    #[test]
+    fn git_run_disables_repo_hooks() {
+        assert_production_git_command_isolated(include_str!("worktree.rs"));
+        assert_production_git_command_isolated(include_str!("../diff/git.rs"));
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let marker = tmp.path().join("HOOK_RAN");
+        let marker_script = tmp.path().join("marker.sh");
+        std::fs::write(
+            &marker_script,
+            format!(
+                "#!/bin/sh\nprintf 'ran\\n' >> '{}'\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .expect("marker script");
+        let mut permissions = std::fs::metadata(&marker_script)
+            .expect("marker metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&marker_script, permissions).expect("chmod marker");
+
+        let hooks_dir = repo_root.join("hostile-hooks");
+        std::fs::create_dir_all(&hooks_dir).expect("hooks dir");
+        std::fs::copy(&marker_script, hooks_dir.join("post-checkout")).expect("post-checkout hook");
+        let mut hook_permissions = std::fs::metadata(hooks_dir.join("post-checkout"))
+            .expect("hook metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut hook_permissions, 0o755);
+        std::fs::set_permissions(hooks_dir.join("post-checkout"), hook_permissions)
+            .expect("chmod hook");
+
+        let hooks_dir_s = hooks_dir.to_string_lossy();
+        let marker_script_s = marker_script.to_string_lossy();
+        run_git(
+            &repo_root,
+            &["config", "core.hooksPath", &hooks_dir_s],
+            GIT_DEADLINE,
+        )
+        .expect("config hooksPath");
+        run_git(
+            &repo_root,
+            &["config", "core.fsmonitor", &marker_script_s],
+            GIT_DEADLINE,
+        )
+        .expect("config fsmonitor");
+        run_git(
+            &repo_root,
+            &["config", "diff.external", &marker_script_s],
+            GIT_DEADLINE,
+        )
+        .expect("config diff.external");
+
+        std::fs::write(repo_root.join("README.md"), "changed\n").expect("dirty worktree");
+
+        let listed = list_worktrees(&repo_root).expect("list worktrees");
+        assert!(!listed.is_empty(), "hostile repo must still list");
+        is_clean(&repo_root).expect("git status against hostile hooksPath/fsmonitor");
+        let diff = crate::diff::compute_head_diff(&repo_root);
+        assert!(
+            diff.error.is_none(),
+            "git diff against hostile diff.external: {:?}",
+            diff.error
+        );
+        let branch = "feat/hostile-hooks";
+        let path = worktree_dir(&repo_root, branch);
+        add_worktree(&repo_root, &path, branch, true).expect("worktree add");
+
+        assert!(
+            !marker.exists(),
+            "repo core.hooksPath/core.fsmonitor/diff.external must not run: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
         );
     }
 
@@ -1396,6 +1658,75 @@ mod tests {
             process_cwd_probe(200, 0, 501, false, &protected_sessions),
             ProcessCwdProbe::Skip,
             "an unrelated different-UID process must not be probed"
+        );
+    }
+
+    #[test]
+    fn worktree_has_live_process_cwd_respects_deadline() {
+        let source = include_str!("worktree.rs");
+        let start = source
+            .find("fn worktree_has_live_process_cwd(")
+            .expect("worktree_has_live_process_cwd");
+        let scan = &source[start..];
+        let scan = scan
+            .split_once("\npub fn prune(")
+            .map(|(body, _)| body)
+            .unwrap_or(scan);
+
+        assert!(
+            scan.contains("GIT_DEADLINE") || scan.contains("deadline"),
+            "process CWD scan must take a deadline argument or reuse a deadline constant"
+        );
+        assert!(
+            scan.contains("Instant::now()") || scan.contains("deadline_at"),
+            "process CWD scan must observe a wall-clock deadline, not only a process-count cap"
+        );
+        let budget_hits = scan.matches("process_cwd_scan_budget(").count();
+        assert!(
+            budget_hits >= 2,
+            "enumeration and CWD probes must both consult the deadline, found {budget_hits}"
+        );
+        let first_loop = scan
+            .split("for pid in &pids")
+            .nth(1)
+            .and_then(|rest| rest.split("for pid in parents.keys()").next())
+            .expect("first PID loop");
+        let getsid_at = first_loop
+            .find("libc::getsid")
+            .expect("getsid in first PID loop");
+        let budget_at = first_loop
+            .find("process_cwd_scan_budget(")
+            .expect("budget in first PID loop");
+        assert!(
+            getsid_at < budget_at,
+            "session membership must be classified before the deadline skip"
+        );
+        assert!(
+            first_loop.contains("in_protected_session"),
+            "deadline skip must treat protected-session PIDs as required: {first_loop}"
+        );
+
+        let expired = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            process_cwd_scan_budget(expired, false),
+            Ok(ProcessCwdScanBudget::SkipBestEffort),
+            "expired budget must skip leftover best-effort PIDs"
+        );
+        let required = process_cwd_scan_budget(expired, true);
+        assert!(
+            required
+                .as_ref()
+                .is_err_and(|error| error.contains("deadline")),
+            "expired budget must fail closed if a required probe never ran: {required:?}"
+        );
+        let live = Instant::now() + GIT_DEADLINE;
+        assert_eq!(
+            process_cwd_scan_budget(live, true),
+            Ok(ProcessCwdScanBudget::Proceed)
+        );
+        assert_eq!(
+            process_cwd_scan_budget(live, false),
+            Ok(ProcessCwdScanBudget::Proceed)
         );
     }
 
@@ -1523,6 +1854,26 @@ mod tests {
         );
         assert_eq!(entries[1].branch.as_deref(), Some("feat/x"));
         assert_eq!(entries[2].branch, None, "detached HEAD has no branch");
+        assert_eq!(
+            entries[2].sha.as_deref(),
+            Some("3333333333333333333333333333333333333333")
+        );
+        assert!(!entries[2].is_bare);
+    }
+
+    #[test]
+    fn parse_worktree_porcelain_keeps_headless_and_bare() {
+        let out = "worktree /repo/bare\nbare\n\nworktree /repo/no-head\nlocked\n";
+        let entries = parse_worktree_porcelain(out);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/repo/bare"));
+        assert!(entries[0].is_bare);
+        assert_eq!(entries[0].sha, None);
+        assert_eq!(entries[0].branch, None);
+        assert_eq!(entries[1].path, PathBuf::from("/repo/no-head"));
+        assert!(!entries[1].is_bare);
+        assert_eq!(entries[1].sha, None);
+        assert_eq!(entries[1].branch, None);
     }
 
     #[test]
@@ -2140,6 +2491,101 @@ mod tests {
     }
 
     #[test]
+    fn managed_worktree_matching_directory_identity_restores() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let branch = "feat/identity-match";
+        let path = worktree_dir(&repo_root, branch);
+        std::fs::create_dir_all(&path).expect("worktree dir");
+        write_owner_marker(&path, &repo_root, branch).expect("marker");
+        let identity = worktree_identity(&path).expect("directory identity");
+
+        let restored = managed_worktree_from_persisted_record(
+            &path.to_string_lossy(),
+            &repo_root.to_string_lossy(),
+            branch,
+            "auto",
+            Some(identity.as_str()),
+        )
+        .expect("matching directory identity restores a marked checkout");
+
+        assert_eq!(
+            restored.path,
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
+        assert_eq!(
+            restored.identity.as_ref().map(WorktreeIdentity::as_str),
+            Some(identity.as_str())
+        );
+    }
+
+    #[test]
+    fn managed_worktree_mismatched_directory_identity_is_dropped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let branch = "feat/identity-mismatch";
+        let path = worktree_dir(&repo_root, branch);
+        std::fs::create_dir_all(&path).expect("worktree dir");
+        write_owner_marker(&path, &repo_root, branch).expect("marker");
+        let identity = worktree_identity(&path).expect("directory identity");
+        let other = "0:0:0:0";
+        assert_ne!(
+            identity.as_str(),
+            other,
+            "fixture identity must differ from the mismatched persisted value"
+        );
+
+        assert!(
+            managed_worktree_from_record(
+                &path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                branch,
+                "auto",
+            )
+            .is_some(),
+            "a marked checkout still restores without persisted identity"
+        );
+        assert!(
+            managed_worktree_from_persisted_record(
+                &path.to_string_lossy(),
+                &repo_root.to_string_lossy(),
+                branch,
+                "auto",
+                Some(other),
+            )
+            .is_none(),
+            "a marked checkout with a different directory identity is dropped"
+        );
+    }
+
+    #[test]
+    fn copy_env_files_preserves_source_mode_before_bytes_land() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().expect("src");
+        let dst = tempfile::tempdir().expect("dst");
+        let env = src.path().join(".env");
+        std::fs::write(&env, "SECRET=1").unwrap();
+        let mut permissions = std::fs::metadata(&env).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&env, permissions).unwrap();
+
+        let copied = copy_env_files(src.path(), dst.path());
+        assert_eq!(copied, vec![".env".to_string()]);
+        let mode = std::fs::metadata(dst.path().join(".env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "copied .env must not be created world-readable"
+        );
+    }
+
+    #[test]
     fn copy_env_files_copies_top_level_env_only_and_never_clobbers() {
         let src = tempfile::tempdir().expect("src");
         let dst = tempfile::tempdir().expect("dst");
@@ -2168,6 +2614,44 @@ mod tests {
         let dst = tempfile::tempdir().expect("dst");
         let copied = copy_env_files(Path::new("/nonexistent-paneflow-test"), dst.path());
         assert!(copied.is_empty());
+    }
+
+    #[test]
+    fn copy_env_files_skips_symlinks() {
+        let src = tempfile::tempdir().expect("src");
+        let dst = tempfile::tempdir().expect("dst");
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("id_rsa");
+        std::fs::write(&secret, "SECRET_KEY").unwrap();
+        std::os::unix::fs::symlink(&secret, src.path().join(".env")).expect("src .env symlink");
+        std::fs::write(src.path().join(".env.local"), "SAFE=1").unwrap();
+
+        let planted = outside.path().join("planted");
+        std::os::unix::fs::symlink(&planted, dst.path().join(".env.remote"))
+            .expect("dangling dest .env symlink");
+        std::fs::write(src.path().join(".env.remote"), "LEAK=1").unwrap();
+
+        let copied = copy_env_files(src.path(), dst.path());
+
+        assert_eq!(copied, vec![".env.local".to_string()]);
+        assert!(
+            !dst.path().join(".env").exists(),
+            "src/.env symlink to a file outside the repo must not materialize dest .env"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join(".env.local")).unwrap(),
+            "SAFE=1"
+        );
+        assert!(
+            !planted.exists(),
+            "copy must not follow a planted dest symlink"
+        );
+        assert!(
+            std::fs::symlink_metadata(dst.path().join(".env.remote"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
