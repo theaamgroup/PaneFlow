@@ -17,7 +17,7 @@ use std::io;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use paneflow_ipc_client::{IpcClient, IpcTransport, StreamEvent};
+use paneflow_ipc_client::{IpcTransport, StreamEvent};
 use regex::Regex;
 use serde_json::{Value, json};
 
@@ -402,7 +402,7 @@ fn pane_matches_since(
 /// sampling so the command remains deterministic instead of returning an
 /// unsupported-platform error.
 pub fn wait_idle(
-    client: &IpcClient,
+    client: &impl IpcTransport,
     target: &str,
     for_ms: Option<u64>,
     timeout_secs: Option<u64>,
@@ -421,14 +421,19 @@ pub fn wait_idle(
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let deadline = Instant::now() + timeout;
 
+    let baseline = read_snapshot(client, id)?;
+    if baseline.is_none() {
+        return Err(CliError::runtime(
+            "target pane closed before idle wait started",
+        ));
+    }
+
     let socket = paneflow_ipc_client::resolve_socket_path().ok_or_else(|| {
         CliError::target(
             "cannot locate the IPC socket; is PaneFlow running? \
              (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a PaneFlow pane)",
         )
     })?;
-
-    let baseline = read_snapshot(client, id)?;
 
     // Ctrl-C is a clean stop; dropping the socket frees the server-side
     // subscription on its next write (RAII), so nothing leaks (US-007 AC4).
@@ -470,6 +475,9 @@ pub fn wait_idle(
     match stream_result {
         Ok(()) => match outcome {
             IdleOutcome::Idle => {
+                if read_snapshot(client, id)?.is_none() {
+                    return Err(CliError::runtime("target pane closed before it went idle"));
+                }
                 super::print_json(
                     &json!({ "surface_id": id, "idle": !matched, "matched": matched }),
                 )?;
@@ -676,6 +684,16 @@ mod tests {
         // with the whole watched set gone, wait fails fast instead of spinning.
         let fake = FakeWait::new(vec![None]);
         let err = wait(&fake, "1", "DONE", Some(30), MatchMode::Single).unwrap_err();
+        assert!(err.message.contains("closed"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn wait_idle_fails_when_target_pane_gone() {
+        // First surface.read is -32602 / not found, matching
+        // wait_fails_fast_when_target_pane_gone. The stream path must not
+        // treat Ok(None) as a quiet pane and exit 0 after --for.
+        let fake = FakeWait::new(vec![None]);
+        let err = wait_idle(&fake, "1", Some(1), Some(1), None).unwrap_err();
         assert!(err.message.contains("closed"), "got: {}", err.message);
     }
 
