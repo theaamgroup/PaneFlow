@@ -225,7 +225,9 @@ fn build_files_watcher(
                 "files watcher: failed to watch {} ({e}); falling back to on-expand reads",
                 dir.display()
             );
-            return None;
+            if dir.as_path() == root {
+                return None;
+            }
         }
     }
     Some((watcher, rx))
@@ -236,6 +238,7 @@ mod tests {
     use std::path::Path;
 
     use super::should_apply_files_hydration;
+    use notify::Watcher;
 
     #[test]
     fn files_hydration_ignores_stale_generation() {
@@ -254,5 +257,21 @@ mod tests {
 
         assert_eq!(files_tree_generation, current_generation);
         assert_eq!(files_event_rx_generation, Some(current_generation));
+    }
+
+    #[test]
+    fn files_watcher_keeps_root_watch_when_one_expanded_dir_fails() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let missing = root.path().join("does-not-exist");
+        assert!(!missing.exists(), "expanded dir must fail to watch");
+
+        let built = super::build_files_watcher(root.path(), &[missing]);
+        let (mut watcher, _rx) = built.expect(
+            "a failed expanded-dir watch must keep the watcher when the root watch succeeded",
+        );
+        assert!(
+            watcher.unwatch(root.path()).is_ok(),
+            "root watch must remain after a later expanded-dir watch error"
+        );
     }
 }
