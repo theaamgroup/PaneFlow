@@ -45,7 +45,7 @@ if ! archive_is_valid; then
     download="$(mktemp "$VERSION_DIR/${SPARKLE_ARCHIVE}.download.XXXXXX")"
     trap 'rm -f "$download"' EXIT
     echo "Fetching Sparkle ${SPARKLE_VERSION} from ${SPARKLE_URL}" >&2
-    curl --fail --location --silent --show-error "$SPARKLE_URL" --output "$download"
+    curl --fail --location --silent --show-error --connect-timeout 15 --max-time 120 --retry 3 --retry-all-errors "$SPARKLE_URL" --output "$download"
     actual_sha="$(shasum -a 256 "$download" | awk '{print $1}')"
     [ "$actual_sha" = "$SPARKLE_SHA256" ] || die \
         "Sparkle archive checksum mismatch (expected $SPARKLE_SHA256, got $actual_sha)"

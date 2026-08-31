@@ -269,4 +269,17 @@ mod tests {
             NO
         );
     }
+
+    #[test]
+    fn sparkle_dist_curl_has_timeouts() {
+        let src = include_str!("../../scripts/sparkle-dist.sh");
+        let curl = src
+            .lines()
+            .find(|line| line.contains("curl ") && line.contains("$SPARKLE_URL"))
+            .expect("sparkle-dist.sh must curl SPARKLE_URL");
+        assert!(
+            curl.contains("--connect-timeout") && curl.contains("--max-time"),
+            "Sparkle fetch must fail a hung download instead of blocking packaging: {curl}"
+        );
+    }
 }
