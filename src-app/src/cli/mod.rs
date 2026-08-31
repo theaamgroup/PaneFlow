@@ -17,6 +17,7 @@ mod control_cmds;
 mod flow_cmd;
 mod flow_spec;
 mod read_cmds;
+mod scrollback;
 mod selector;
 mod send_cmd;
 mod up_cmd;

@@ -12,7 +12,7 @@
 //! closes exactly one connection, so a long `wait` never holds a socket open
 //! between polls and never approaches the server's 16-connection cap.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use paneflow_ipc_client::{IpcClient, IpcTransport, StreamEvent};
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::scrollback::new_text_since_baseline;
 use super::selector::{resolve_all, resolve_target};
 use super::{CliError, EXIT_OK, EXIT_TIMEOUT};
 
@@ -288,21 +289,6 @@ fn is_transient_read_error(message: &str) -> bool {
         || lower.contains("timeout")
         || lower.contains("timed out")
         || lower.contains("unreachable")
-}
-
-fn new_text_since_baseline(baseline: &str, current: &str) -> String {
-    if current == baseline {
-        return String::new();
-    }
-    if let Some(rest) = current.strip_prefix(baseline) {
-        return rest.to_string();
-    }
-    let old_lines: HashSet<&str> = baseline.lines().collect();
-    current
-        .lines()
-        .filter(|line| !old_lines.contains(line))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -867,13 +853,11 @@ mod tests {
         let current = "please print RENDER_AUDIT_DONE when complete\nactual work\n";
         assert_eq!(new_text_since_baseline(base, current), "actual work\n");
 
-        // When the scrollback window shifted, remove already-seen lines instead
-        // of matching the old sentinel line again.
-        let shifted = "actual work\nplease print RENDER_AUDIT_DONE when complete\nnew DONE\n";
-        assert_eq!(
-            new_text_since_baseline(base, shifted),
-            "actual work\nnew DONE"
-        );
+        // Last-N window slide: the echo line is still the overlapping suffix of
+        // the baseline (prefix of current) and must not rematch.
+        let base = "old header\nplease print RENDER_AUDIT_DONE when complete\nstill working\n";
+        let shifted = "please print RENDER_AUDIT_DONE when complete\nstill working\nnew DONE\n";
+        assert_eq!(new_text_since_baseline(base, shifted), "new DONE\n");
     }
 
     // ---------- EP-003 US-007/US-008: idle quiescence rule ----------
