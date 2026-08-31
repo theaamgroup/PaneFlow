@@ -1059,6 +1059,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn worktree_checkout_may_exist_is_true_when_list_worktrees_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("not-a-repo");
+        std::fs::create_dir(&repo_root).expect("non-repo dir");
+        let missing = tmp.path().join("missing-checkout");
+        assert!(
+            !missing.exists(),
+            "path must be absent so try_exists does not short-circuit the git list"
+        );
+        assert!(
+            worktree::list_worktrees(&repo_root).is_err(),
+            "non-repo root must make list_worktrees error so the fail-closed arm runs"
+        );
+        assert!(
+            worktree_checkout_may_exist(&repo_root, &missing),
+            "a git list failure must fail-closed and keep the reservation"
+        );
+    }
+
+    #[test]
+    fn worktree_checkout_may_exist_is_false_for_missing_path_in_real_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir(&repo_root).expect("repo dir");
+        if !test_git(&repo_root, &["init"]) {
+            return;
+        }
+        let missing = tmp.path().join("missing-checkout");
+        assert!(
+            !missing.exists(),
+            "path must be absent so try_exists does not short-circuit the git list"
+        );
+        let entries = worktree::list_worktrees(&repo_root).expect("list worktrees");
+        assert!(
+            entries.iter().all(|entry| entry.path != missing),
+            "fixture must not register the missing path"
+        );
+        assert!(
+            !worktree_checkout_may_exist(&repo_root, &missing),
+            "a missing path with a successful empty match must not keep the reservation"
+        );
+    }
+
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {
         std::process::Command::new("git")
             .args(args)
