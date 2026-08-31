@@ -46,6 +46,7 @@ pub use git::{GitDiffStats, detect_branch, find_git_dir, resolve_repo_root};
 pub(crate) use ports::PortEntry;
 pub use ports::{PaneScan, scan_panes};
 pub use tab::Tab;
+pub(crate) use tab::apply_pane_rename_to_tab;
 
 /// Hard cap on open workspaces (US-054: single source for the bound previously
 /// re-declared as a local `const` at every create/IPC site).

@@ -2329,6 +2329,32 @@ impl PaneFlowApp {
         }
     }
 
+    /// Rename a CLI pane and the tab that holds it so the sidebar row matches
+    /// the pane header. `new_name` is already sanitized; `None` clears.
+    pub(crate) fn rename_cli_pane(
+        &mut self,
+        pane: &Entity<crate::pane::Pane>,
+        new_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(terminal) = pane.read(cx).active_terminal_opt().cloned() {
+            terminal.update(cx, |view, _| {
+                view.terminal.custom_name = new_name.clone();
+            });
+        }
+        let title = new_name.as_deref();
+        for workspace in &mut self.workspaces {
+            if let Some(tab_idx) = workspace.tab_index_containing_pane(pane)
+                && let Some(tab) = workspace.tab_mut(tab_idx)
+            {
+                crate::workspace::apply_pane_rename_to_tab(tab, title);
+                break;
+            }
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
     pub(crate) fn handle_next_workspace(
         &mut self,
         _: &NextWorkspace,

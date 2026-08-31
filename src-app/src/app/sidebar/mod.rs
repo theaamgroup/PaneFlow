@@ -831,7 +831,11 @@ pub(crate) enum RenameKey {
 /// this guard Option+E types a combining acute into the name instead of being
 /// ignored. `shift` is deliberately not in that set - it is how a capital
 /// arrives.
-fn rename_key_action(key: &str, key_char: Option<&str>, mods: gpui::Modifiers) -> RenameKey {
+pub(crate) fn rename_key_action(
+    key: &str,
+    key_char: Option<&str>,
+    mods: gpui::Modifiers,
+) -> RenameKey {
     match key {
         "enter" => RenameKey::Commit,
         "escape" => RenameKey::Cancel,

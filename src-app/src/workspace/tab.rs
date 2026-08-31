@@ -170,3 +170,36 @@ impl Tab {
         Some(tree.serialize_without_scrollback(cx))
     }
 }
+
+/// Copy a CLI pane rename onto its tab so the sidebar row matches the pane
+/// header. `None` (or whitespace) clears the stored title so the row goes
+/// back to deriving from the pane.
+pub(crate) fn apply_pane_rename_to_tab(tab: &mut Tab, new_name: Option<&str>) {
+    tab.title = new_name.unwrap_or("").trim().to_string();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renaming_a_cli_pane_overwrites_the_tab_title() {
+        let mut tab = Tab::new("Claude", None);
+        apply_pane_rename_to_tab(&mut tab, Some("logs"));
+        assert_eq!(
+            tab.title, "logs",
+            "a pane rename must replace the palette/preset title the tab was created with"
+        );
+        apply_pane_rename_to_tab(&mut tab, None);
+        assert!(
+            tab.title.is_empty(),
+            "clearing the pane name must un-freeze the tab so derivation can resume"
+        );
+        apply_pane_rename_to_tab(&mut tab, Some("  "));
+        assert!(
+            tab.title.is_empty(),
+            "whitespace is not a name: {title:?}",
+            title = tab.title
+        );
+    }
+}

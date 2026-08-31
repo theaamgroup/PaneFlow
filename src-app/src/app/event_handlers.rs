@@ -630,6 +630,12 @@ impl PaneFlowApp {
                 };
                 self.toggle_cli_diff_dock(cwd, cx);
             }
+            pane::PaneEvent::Renamed { name } => {
+                let name = name
+                    .as_deref()
+                    .and_then(crate::app::ipc_handler::sanitize_pane_name);
+                self.rename_cli_pane(&pane, name, cx);
+            }
             pane::PaneEvent::OpenPaneMenu { position } => {
                 // EP-002 US-007: open the pane header menu. Mutually exclusive
                 // with the other popovers, matching the workspace/profile/

@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, SharedString, Size, Styled, Window, deferred, div,
-    ease_out_quint, img, prelude::*, px, rgb, svg,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString, Size, Styled, Window,
+    deferred, div, ease_out_quint, img, prelude::*, px, rgb, svg,
 };
 
 use crate::settings::components::with_alpha;
@@ -279,6 +279,15 @@ pub enum PaneEvent {
         source_pane_id: u64,
         edge: Option<DropEdge>,
     },
+    /// The user committed an inline rename of this CLI pane. The parent writes
+    /// `custom_name` and the owning tab title together so the sidebar row
+    /// cannot drift from the header.
+    Renamed { name: Option<String> },
+}
+
+struct PaneRename {
+    text: String,
+    seeded: bool,
 }
 
 /// Reversible hover transition state for one header interactive surface.
@@ -391,6 +400,9 @@ pub struct Pane {
     /// Pushed by `PaneFlowApp::set_pending_close`, which owns the single
     /// pending-close slot and disarms whichever pane is leaving it.
     close_armed: bool,
+    /// Inline header rename. `None` when the title is a label, not an editor.
+    rename: Option<PaneRename>,
+    rename_focus: FocusHandle,
     /// Ghostty-style unfocused dim: `true` when this pane is NOT the focused
     /// one in a multi-pane workspace. Pushed idempotently by
     /// [`crate::layout::LayoutTree::sync_unfocused_dim`] - never mutated
@@ -455,6 +467,8 @@ impl Pane {
             pending_prefill: false,
             broadcast_stripe: None,
             close_armed: false,
+            rename: None,
+            rename_focus: cx.focus_handle(),
             dimmed: false,
             dim_from: 0.0,
             dim_alpha: Rc::new(Cell::new(0.0)),
@@ -1442,11 +1456,116 @@ impl Pane {
     // Pane header rendering - identity + action cluster, no tab strip
     // -----------------------------------------------------------------------
 
-    /// Render the surface's title slot: an ellipsized label, and nothing more.
-    /// The inline rename editor that used to live here went out with its only
-    /// gesture (double-click); `surface.rename` over IPC remains the way to set
-    /// a custom name.
+    /// Start the header editor. The context menu is the gesture; double-click
+    /// on the name still only focuses, so a word-select in the header cannot
+    /// drop the pane into edit mode.
+    pub(crate) fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = Self::surface_full_title(&self.surface, cx);
+        self.rename = Some(PaneRename {
+            text: title,
+            seeded: true,
+        });
+        self.rename_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        let trimmed = rename.text.trim();
+        let name = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        cx.emit(PaneEvent::Renamed { name });
+        self.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.take().is_none() {
+            return;
+        }
+        self.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn apply_rename_key(&mut self, key: &crate::app::sidebar::RenameKey) {
+        let Some(rename) = self.rename.as_mut() else {
+            return;
+        };
+        match key {
+            crate::app::sidebar::RenameKey::Backspace => {
+                if std::mem::take(&mut rename.seeded) {
+                    rename.text.clear();
+                } else {
+                    rename.text.pop();
+                }
+            }
+            crate::app::sidebar::RenameKey::Insert(ch) => {
+                if std::mem::take(&mut rename.seeded) {
+                    rename.text.clear();
+                }
+                rename.text.push_str(ch);
+            }
+            crate::app::sidebar::RenameKey::Commit
+            | crate::app::sidebar::RenameKey::Cancel
+            | crate::app::sidebar::RenameKey::Ignore => {}
+        }
+    }
+
+    /// Render the surface's title slot: an ellipsized label, or the inline
+    /// editor while a rename started from the pane context menu is live.
     fn render_surface_title(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if let Some(rename) = &self.rename {
+            let ui = pane_colors();
+            let (editor_bg, editor_body) = if rename.seeded {
+                (ui.accent.opacity(0.3), rename.text.clone())
+            } else {
+                (ui.overlay, format!("{}|", rename.text))
+            };
+            return div()
+                .id("pane-header-title-editor")
+                .track_focus(&self.rename_focus)
+                .min_w_0()
+                .flex_1()
+                .overflow_x_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(HEADER_TEXT_SIZE))
+                .line_height(px(HEADER_TEXT_LINE_HEIGHT))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .bg(editor_bg)
+                .px_1()
+                .rounded_sm()
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                    let action = crate::app::sidebar::rename_key_action(
+                        e.keystroke.key.as_str(),
+                        e.keystroke.key_char.as_deref(),
+                        e.keystroke.modifiers,
+                    );
+                    match action {
+                        crate::app::sidebar::RenameKey::Commit => {
+                            this.commit_rename(window, cx);
+                            cx.stop_propagation();
+                        }
+                        crate::app::sidebar::RenameKey::Cancel => {
+                            this.cancel_rename(window, cx);
+                            cx.stop_propagation();
+                        }
+                        crate::app::sidebar::RenameKey::Ignore => {}
+                        other => {
+                            this.apply_rename_key(&other);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }
+                }))
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.commit_rename(window, cx);
+                }))
+                .child(editor_body)
+                .into_any_element();
+        }
+
         let full_title = Self::surface_full_title(&self.surface, cx);
         let show_tooltip = full_title.chars().count() > SURFACE_TITLE_TOOLTIP_THRESHOLD;
         let mut title = div()
@@ -1556,6 +1675,10 @@ impl Pane {
             // the header should not put the pane into an editing mode the user
             // did not ask for.
             .on_click(cx.listener(|this, _e: &ClickEvent, window, cx| {
+                if this.rename.is_some() {
+                    cx.stop_propagation();
+                    return;
+                }
                 this.focus_handle(cx).focus(window, cx);
                 cx.notify();
                 cx.stop_propagation();

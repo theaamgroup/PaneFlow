@@ -520,10 +520,11 @@ impl PaneFlowApp {
             .map(|t| t.entity_id().as_u64())
             .filter(|sid| self.broadcast.pending.contains_key(sid));
 
-        let rows = 2 + usize::from(pending_sid.is_some()) + 1;
+        let rows = 3 + usize::from(pending_sid.is_some()) + 1;
         let menu_height = px(8. + rows as f32 * 29. + 18.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
+        let source_for_rename = source.clone();
         let mut context_menu = select_menu("pane-context-menu", ui)
             .occlude()
             .absolute()
@@ -534,7 +535,20 @@ impl PaneFlowApp {
                 this.pane_menu_open = None;
                 cx.notify();
             }))
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(self.render_select_menu_item(
+                "pane-context-rename".into(),
+                "Rename",
+                None,
+                ui,
+                cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.pane_menu_open = None;
+                    this.commit_inline_rename(window, cx);
+                    source_for_rename.update(cx, |pane, cx| pane.begin_rename(window, cx));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ));
 
         if let Some(value) = full_path {
             context_menu = context_menu.child(self.render_select_menu_item(

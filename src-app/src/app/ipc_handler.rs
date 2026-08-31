@@ -3051,11 +3051,16 @@ impl PaneFlowApp {
                     Ok(t) => t,
                     Err(e) => return e.into_value(),
                 };
-                terminal.update(cx, |view, _cx| {
-                    view.terminal.custom_name = new_name.clone();
-                });
-                self.save_session(cx);
-                cx.notify();
+                let sid = terminal.entity_id().as_u64();
+                if let Some(loc) = find_pane_by_surface_id(&self.workspaces, sid, cx) {
+                    self.rename_cli_pane(&loc.pane, new_name.clone(), cx);
+                } else {
+                    terminal.update(cx, |view, _cx| {
+                        view.terminal.custom_name = new_name.clone();
+                    });
+                    self.save_session(cx);
+                    cx.notify();
+                }
                 serde_json::json!({"renamed": true, "name": new_name})
             }
             "surface.focus" => {
@@ -6162,6 +6167,24 @@ mod tests {
         let targeting = super::rename_target_params(&p);
         assert_eq!(targeting["name"], "target-selector");
         assert_eq!(targeting["new_name"], "winner");
+    }
+
+    #[test]
+    fn surface_rename_also_renames_the_owning_tab() {
+        let src = include_str!("ipc_handler.rs");
+        let arm = src
+            .split("\"surface.rename\" => {")
+            .nth(1)
+            .and_then(|rest| rest.split("\"surface.focus\" => {").next())
+            .expect("surface.rename arm");
+        assert!(
+            arm.contains("rename_cli_pane("),
+            "a pane rename must write the owning tab title, not only custom_name: {arm}"
+        );
+        assert!(
+            arm.contains("find_pane_by_surface_id"),
+            "the tab write needs the pane that owns this surface: {arm}"
+        );
     }
 
     #[test]
