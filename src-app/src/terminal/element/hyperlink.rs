@@ -188,21 +188,32 @@ fn push_unique_start(out: &mut Vec<usize>, start: usize) {
 
 fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
     // First Cmd-hover has no line cache. Keep a small probe set: the
-    // rightmost rooted start (`/` or `~/`), the quote-aware rightmost
-    // token, and (if a quote never closed) the ordinary whitespace
-    // boundary. That recovers unquoted `Application Support` paths
-    // without canonicalizing every prefix of a dense log line.
+    // rightmost rooted start (`/` or `~/`), the rightmost unquoted
+    // start whose remainder still contains a space and a `/`, the
+    // quote-aware rightmost token, and (if a quote never closed) the
+    // ordinary whitespace boundary. That recovers unquoted
+    // `Application Support` / `My Notes` paths without canonicalizing
+    // every prefix of a dense log line.
     let mut last_ordinary = 0;
     let mut last_quoted = 0;
     let mut last_rooted = None;
+    let mut last_spaced = None;
     let mut in_quote: Option<char> = None;
 
-    let consider = |pos: usize, last_rooted: &mut Option<usize>| {
-        if pos < ext_start && is_rooted_path_prefix(&line_text[pos..ext_start]) {
-            *last_rooted = Some(pos);
-        }
-    };
-    consider(0, &mut last_rooted);
+    let consider =
+        |pos: usize, last_rooted: &mut Option<usize>, last_spaced: &mut Option<usize>| {
+            if pos >= ext_start {
+                return;
+            }
+            let s = &line_text[pos..ext_start];
+            if is_rooted_path_prefix(s) {
+                *last_rooted = Some(pos);
+            }
+            if s.contains('/') && s.chars().any(char::is_whitespace) {
+                *last_spaced = Some(pos);
+            }
+        };
+    consider(0, &mut last_rooted, &mut last_spaced);
 
     for (idx, ch) in line_text[..ext_start].char_indices() {
         if let Some(q) = in_quote {
@@ -212,7 +223,7 @@ fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
                 if next < ext_start {
                     last_quoted = next;
                     last_ordinary = next;
-                    consider(next, &mut last_rooted);
+                    consider(next, &mut last_rooted, &mut last_spaced);
                 }
             } else if is_path_start_boundary(ch) {
                 let next = idx + ch.len_utf8();
@@ -228,7 +239,7 @@ fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
             if next < ext_start {
                 last_quoted = next;
                 last_ordinary = next;
-                consider(next, &mut last_rooted);
+                consider(next, &mut last_rooted, &mut last_spaced);
             }
             continue;
         }
@@ -237,13 +248,16 @@ fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
             if next < ext_start {
                 last_quoted = next;
                 last_ordinary = next;
-                consider(next, &mut last_rooted);
+                consider(next, &mut last_rooted, &mut last_spaced);
             }
         }
     }
 
-    let mut starts = Vec::with_capacity(3);
+    let mut starts = Vec::with_capacity(4);
     if let Some(pos) = last_rooted {
+        push_unique_start(&mut starts, pos);
+    }
+    if let Some(pos) = last_spaced {
         push_unique_start(&mut starts, pos);
     }
     push_unique_start(&mut starts, last_quoted);
@@ -1136,6 +1150,40 @@ mod tests {
         assert!(
             starts.contains(&0),
             "rooted start must be probed, got {starts:?}"
+        );
+    }
+
+    #[test]
+    fn unquoted_relative_markdown_path_with_spaces_resolves() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_md(tmp.path(), "docs/My Notes/todo.md");
+        let line_text = "error: docs/My Notes/todo.md";
+        let map = ascii_map(line_text);
+        let (zones, probes) = record_path_probes(|| {
+            detect_file_paths_on_line_mapped(line_text, line0(), &map, Some(tmp.path()))
+        });
+        assert_eq!(zones.len(), 1);
+        assert!(
+            zones[0].uri.ends_with("todo.md"),
+            "unquoted spaced relative path must resolve, got {}",
+            zones[0].uri
+        );
+        assert!(
+            probes.iter().any(|probe| probe.contains("My Notes")),
+            "probes must include the spaced relative path, got {probes:?}"
+        );
+        assert!(probes.len() <= 4, "probe cap exceeded: {probes:?}");
+    }
+
+    #[test]
+    fn candidate_starts_for_unquoted_relative_path_include_spaced_prefix() {
+        let line = "error: docs/My Notes/todo.md";
+        let ext = line.find(".md").expect(".md");
+        let starts = candidate_start_positions(line, ext);
+        let docs_at = line.find("docs/").expect("docs/");
+        assert!(
+            starts.contains(&docs_at),
+            "spaced relative start must be probed, got {starts:?}"
         );
     }
 

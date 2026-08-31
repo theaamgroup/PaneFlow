@@ -1369,7 +1369,7 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
 /// `O_NOFOLLOW` and dest with `O_EXCL` so neither name can be a symlink.
 fn copy_env_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::io::{self, Write};
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let mut src_file = std::fs::OpenOptions::new()
         .read(true)
@@ -1379,9 +1379,13 @@ fn copy_env_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut dst_file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(permissions.mode())
+        .custom_flags(libc::O_NOFOLLOW)
         .open(dst)?;
-    io::copy(&mut src_file, &mut dst_file)?;
+    // Apply the source mode before any secret bytes land, so a 0600
+    // `.env` is never world-readable for the duration of `io::copy`.
     dst_file.set_permissions(permissions)?;
+    io::copy(&mut src_file, &mut dst_file)?;
     dst_file.flush()?;
     Ok(())
 }
@@ -2553,6 +2557,31 @@ mod tests {
             )
             .is_none(),
             "a marked checkout with a different directory identity is dropped"
+        );
+    }
+
+    #[test]
+    fn copy_env_files_preserves_source_mode_before_bytes_land() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().expect("src");
+        let dst = tempfile::tempdir().expect("dst");
+        let env = src.path().join(".env");
+        std::fs::write(&env, "SECRET=1").unwrap();
+        let mut permissions = std::fs::metadata(&env).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&env, permissions).unwrap();
+
+        let copied = copy_env_files(src.path(), dst.path());
+        assert_eq!(copied, vec![".env".to_string()]);
+        let mode = std::fs::metadata(dst.path().join(".env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "copied .env must not be created world-readable"
         );
     }
 

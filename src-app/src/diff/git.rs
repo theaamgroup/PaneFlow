@@ -288,8 +288,15 @@ pub fn list_repo_worktrees(repo_dir: &Path) -> Vec<(PathBuf, String)> {
             return Vec::new();
         }
     };
+    review_worktree_entries(worktrees)
+}
+
+/// Review columns are checkout trees. A porcelain `bare` entry is the
+/// administrative repository, not a work tree; `git diff` there exits 128.
+fn review_worktree_entries(worktrees: Vec<Worktree>) -> Vec<(PathBuf, String)> {
     worktrees
         .into_iter()
+        .filter(|w| !w.is_bare)
         .map(|w| {
             let branch = w
                 .ref_name
@@ -1409,6 +1416,21 @@ pub(crate) mod tests {
                 PathBuf::from("/repo/det"),
                 PathBuf::from("/repo/main"),
             ]
+        );
+    }
+
+    #[test]
+    fn review_worktree_entries_drop_bare_admin_repos() {
+        let raw = "worktree /repo/bare\nbare\n\n\
+                   worktree /repo/det\nHEAD aaa111\ndetached\n\n\
+                   worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n";
+        let columns = review_worktree_entries(parse_worktrees_from_str(raw, None));
+        assert_eq!(
+            columns
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("/repo/det"), PathBuf::from("/repo/main")]
         );
     }
 
