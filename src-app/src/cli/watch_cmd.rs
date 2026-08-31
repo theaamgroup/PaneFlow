@@ -33,8 +33,8 @@ pub fn watch(
 
     let socket = paneflow_ipc_client::resolve_socket_path().ok_or_else(|| {
         CliError::target(
-            "cannot locate the IPC socket; is Paneflow running? \
-             (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a Paneflow pane)",
+            "cannot locate the IPC socket; is PaneFlow running? \
+             (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a PaneFlow pane)",
         )
     })?;
 
@@ -62,7 +62,7 @@ pub fn watch(
             }
         }
         Err(e) => Err(CliError::target(format!(
-            "watch failed: {e}; is Paneflow running?"
+            "watch failed: {e}; is PaneFlow running?"
         ))),
     }
 }

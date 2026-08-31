@@ -321,7 +321,7 @@ impl ClosedRecord {
 const PRIMARY_SIDEBAR_ANIMATION_MS: u64 = 280;
 const PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA: f32 = 0.5;
 const STARTUP_SPLASH_TEXT_WIDTH: f32 = 198.;
-const STARTUP_SPLASH_TEXT: [&str; 8] = ["P", "a", "n", "e", "f", "l", "o", "w"];
+const STARTUP_SPLASH_TEXT: [&str; 8] = ["P", "a", "n", "e", "F", "l", "o", "w"];
 const STARTUP_SPLASH_LETTER_COUNT: f32 = STARTUP_SPLASH_TEXT.len() as f32;
 const STARTUP_SPLASH_TEXT_ALPHA: f32 = 0.54;
 const STARTUP_SPLASH_SHIMMER_ALPHA: f32 = 0.82;
@@ -341,12 +341,15 @@ struct StartupSplashView {
 }
 
 impl StartupSplashView {
-    fn new(_: &mut Context<Self>) -> Self {
-        let config = paneflow_config::loader::load_config();
+    fn from_bootstrap(native_material_active: bool) -> Self {
         Self {
             mount_scheduled: false,
-            native_material_active: config.cockpit_chrome_material_enabled(),
+            native_material_active,
         }
+    }
+
+    fn new(native_material_active: bool, _: &mut Context<Self>) -> Self {
+        Self::from_bootstrap(native_material_active)
     }
 }
 
@@ -357,6 +360,17 @@ fn should_load_login_shell_env_for_startup(
     is_unknown_verb: bool,
 ) -> bool {
     !(is_mcp_subcommand || is_cli_subcommand || is_hooks_subcommand || is_unknown_verb)
+}
+
+fn prepare_process_environment_before_threads(
+    should_load_login_shell_env: bool,
+    mut load_login_shell_env: impl FnMut(),
+    mut augment_path_for_gui_launch: impl FnMut(),
+) {
+    if should_load_login_shell_env {
+        load_login_shell_env();
+    }
+    augment_path_for_gui_launch();
 }
 
 fn should_extract_mcp_bridge_for_cli(args: &[String]) -> bool {
@@ -423,9 +437,22 @@ fn global_help_text() -> String {
     )
 }
 
+fn unknown_verb_error(verb: &str) -> String {
+    let mut escaped = String::with_capacity(verb.len());
+    for ch in verb.chars() {
+        if ch.is_control() {
+            escaped.extend(ch.escape_default());
+        } else {
+            escaped.push(ch);
+        }
+    }
+    format!("paneflow: unknown verb '{escaped}'; see `paneflow --help` for the verb list")
+}
+
 #[cfg(test)]
 mod native_material_tests {
     use super::{
+        StartupSplashView, prepare_process_environment_before_threads,
         should_extract_mcp_bridge_for_cli, should_load_login_shell_env_for_startup,
         should_setup_hooks_for_cli,
     };
@@ -451,6 +478,36 @@ mod native_material_tests {
         assert!(!should_load_login_shell_env_for_startup(
             false, false, false, true
         ));
+    }
+
+    #[test]
+    fn startup_splash_uses_bootstrap_material_value_without_reloading_config() {
+        let enabled = StartupSplashView::from_bootstrap(true);
+        let disabled = StartupSplashView::from_bootstrap(false);
+
+        assert!(enabled.native_material_active);
+        assert!(!disabled.native_material_active);
+    }
+
+    #[test]
+    fn startup_environment_mutations_precede_runtime_initialization() {
+        let steps = std::cell::RefCell::new(Vec::new());
+
+        prepare_process_environment_before_threads(
+            true,
+            || steps.borrow_mut().push("login-shell-path"),
+            || steps.borrow_mut().push("static-path-augmentation"),
+        );
+        steps.borrow_mut().push("runtime-initialization");
+
+        assert_eq!(
+            steps.into_inner(),
+            [
+                "login-shell-path",
+                "static-path-augmentation",
+                "runtime-initialization"
+            ]
+        );
     }
 
     #[test]
@@ -496,7 +553,7 @@ mod native_material_tests {
 
 #[cfg(test)]
 mod help_tests {
-    use super::global_help_text;
+    use super::{global_help_text, unknown_verb_error};
 
     #[test]
     fn cli_help_lists_verbs_mcp_and_hooks() {
@@ -532,6 +589,16 @@ mod help_tests {
             help.contains("-v, --version"),
             "--help must still list -v/--version:\n{help}"
         );
+    }
+
+    #[test]
+    fn unknown_verb_error_escapes_control_characters() {
+        let error = unknown_verb_error("bad\n\u{1b}[31mverb\r");
+
+        assert!(!error.contains('\n'));
+        assert!(!error.contains('\r'));
+        assert!(!error.contains('\u{1b}'));
+        assert!(error.contains("bad\\n\\u{1b}[31mverb\\r"));
     }
 }
 
@@ -2462,6 +2529,21 @@ fn main() {
     ))
     .init();
 
+    // Adopt the login-shell PATH only for the real GUI path, then apply the
+    // static per-user additions. This phase completes before any initializer
+    // below is allowed to spawn a long-lived thread; both callees mutate the
+    // process environment and rely on that ordering for safety.
+    prepare_process_environment_before_threads(
+        should_load_login_shell_env_for_startup(
+            is_mcp_subcommand,
+            is_cli_subcommand,
+            is_hooks_subcommand,
+            is_unknown_verb,
+        ),
+        login_shell_env::load_login_shell_env,
+        runtime_paths::augment_path_for_gui_launch,
+    );
+
     // US-003: install the process-wide kill-on-parent-death guard BEFORE any
     // agent CLI or ConPTY spawns so children inherit the Job Object (Windows).
     match agents::parent_guard::install_process_job() {
@@ -2477,30 +2559,6 @@ fn main() {
             );
         }
     }
-
-    // Adopt the user's login-shell environment only for the real GUI path
-    // (Finder / Dock / `.desktop`), where the inherited launchd / systemd-user
-    // PATH omits Homebrew, Nix, version managers, and `~/.zprofile` additions.
-    // Scriptable CLI/MCP/hooks invocations must not execute an
-    // interactive login shell as a side effect. Runs before the static prepend
-    // below so per-user bin dirs stay first. Must run before any other thread
-    // spawns - it mutates the process environment (see the module's safety note).
-    if should_load_login_shell_env_for_startup(
-        is_mcp_subcommand,
-        is_cli_subcommand,
-        is_hooks_subcommand,
-        is_unknown_verb,
-    ) {
-        login_shell_env::load_login_shell_env();
-    }
-
-    // Patch PATH BEFORE GPUI starts so agent launch and CLI helper lookups find
-    // binaries installed under `~/.bun/bin` when Paneflow is launched from a
-    // `.desktop` file / Finder / Start Menu (those inherit a minimal
-    // systemd-user / launchd / Explorer PATH that does not source the user's
-    // shell rc). Must run before any other thread spawns - see safety note on
-    // `augment_path_for_gui_launch`.
-    runtime_paths::augment_path_for_gui_launch();
 
     // EP-002 US-004: `paneflow mcp <subcommand>` runs as a scriptable CLI
     // and exits - it never initializes GPUI / opens a window. Placed after
@@ -2577,7 +2635,7 @@ fn main() {
     // (no argv[1]) and any `-`/`--` flag are NOT flagged, so the GUI and the
     // global-flag scans keep their existing behaviour.
     if is_unknown_verb && let Some(verb) = args.get(1) {
-        eprintln!("paneflow: unknown verb '{verb}'; see `paneflow --help` for the verb list");
+        eprintln!("{}", unknown_verb_error(verb));
         std::process::exit(2);
     }
 
@@ -2691,6 +2749,7 @@ fn main() {
                 ..Default::default()
             };
 
+            let startup_native_material_active = config.cockpit_chrome_material_enabled();
             let window_result = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -2715,7 +2774,7 @@ fn main() {
                         );
                     }
 
-                    cx.new(StartupSplashView::new)
+                    cx.new(|cx| StartupSplashView::new(startup_native_material_active, cx))
                 },
             );
 
@@ -2726,7 +2785,7 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     eprintln!(
                         "Error: PaneFlow could not create its GPU-backed window on macOS.\n\n\
-                         Update macOS and restart Paneflow. If this started after enabling a native backdrop, launch once with:\n\
+                         Update macOS and restart PaneFlow. If this started after enabling a native backdrop, launch once with:\n\
                          \x20 PANEFLOW_WINDOW_BACKDROP=off\n\n\
                          Underlying error: {e}"
                     );

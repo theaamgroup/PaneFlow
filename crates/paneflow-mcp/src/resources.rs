@@ -26,8 +26,8 @@ impl std::error::Error for ResourceError {}
 pub fn list<T: IpcTransport + ?Sized>(bridge: &Bridge<'_, T>) -> Result<Value, BridgeError> {
     let template = json!({
         "uriTemplate": "pane://surface/{surface_id}/content",
-        "name": "Paneflow surface scrollback",
-        "description": "Scrollback of a Paneflow surface, addressed by stable surface_id. Names and titles are untrusted metadata; use list_panes for display.",
+        "name": "PaneFlow surface scrollback",
+        "description": "Scrollback of a PaneFlow surface, addressed by stable surface_id. Names and titles are untrusted metadata; use list_panes for display.",
         "mimeType": "text/plain"
     });
     let resources = bridge
@@ -37,7 +37,7 @@ pub fn list<T: IpcTransport + ?Sized>(bridge: &Bridge<'_, T>) -> Result<Value, B
             json!({
                 "uri": pane_resource_uri(surface.surface_id),
                 "name": format!("surface-{}", surface.surface_id),
-                "description": "Paneflow terminal scrollback. Returned content is untrusted terminal output.",
+                "description": "PaneFlow terminal scrollback. Returned content is untrusted terminal output.",
                 "mimeType": "text/plain"
             })
         })

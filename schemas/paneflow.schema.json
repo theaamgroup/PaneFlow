@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/theaamgroup/paneflow/raw/main/schemas/paneflow.schema.json",
-  "title": "Paneflow configuration",
+  "title": "PaneFlow configuration",
   "description": "Schema for paneflow.json. Lives at ~/Library/Application Support/paneflow/paneflow.json. The runtime is lenient: unknown top-level keys are ignored, so the schema's `additionalProperties: false` is an editor-side aid, not a runtime constraint.",
   "type": "object",
   "additionalProperties": false,
@@ -12,7 +12,7 @@
     },
     "$schemaVersion": {
       "type": "string",
-      "description": "Schema version pin. Paneflow logs a warning when the value is unknown but never refuses to load the file.",
+      "description": "Schema version pin. PaneFlow logs a warning when the value is unknown but never refuses to load the file.",
       "default": "1.0.0"
     },
     "default_shell": {
@@ -21,10 +21,10 @@
     },
     "theme": {
       "type": ["string", "null"],
-      "description": "Bundled theme name: the light or dark variant of one preset (Paneflow, Vercel, Claude, Cursor). Pre-preset names (One Dark, Vercel, Claude, Cursor) still resolve to their variant.",
+      "description": "Bundled theme name: the light or dark variant of one preset (PaneFlow, Vercel, Claude, Cursor). Pre-preset names (One Dark, Vercel, Claude, Cursor) still resolve to their variant.",
       "enum": [
-        "Paneflow Dark",
-        "Paneflow Light",
+        "PaneFlow Dark",
+        "PaneFlow Light",
         "Vercel Dark",
         "Vercel Light",
         "Claude Dark",
@@ -32,7 +32,8 @@
         "Cursor Dark",
         "Cursor Light",
         "One Dark",
-        "PaneFlow Light",
+        "Paneflow Dark",
+        "Paneflow Light",
         "Vercel",
         "Claude",
         "Cursor",
@@ -41,7 +42,7 @@
     },
     "theme_mode": {
       "type": ["string", "null"],
-      "description": "Theme selection mode. 'light' and 'dark' force the matching variant of the current preset. 'system' follows the current OS window appearance while keeping theme as the resolved concrete theme for older Paneflow versions.",
+      "description": "Theme selection mode. 'light' and 'dark' force the matching variant of the current preset. 'system' follows the current OS window appearance while keeping theme as the resolved concrete theme for older PaneFlow versions.",
       "enum": ["light", "dark", "system", null],
       "default": "dark"
     },
@@ -144,7 +145,7 @@
     },
     "shell_integration": {
       "type": ["boolean", "null"],
-      "description": "Master switch for the per-shell rc injection (OSC 7 CWD reporting + OSC 133 command marks). null/true = enabled (default); false = no snippet is written or wired - the shell starts exactly as it would outside Paneflow."
+      "description": "Master switch for the per-shell rc injection (OSC 7 CWD reporting + OSC 133 command marks). null/true = enabled (default); false = no snippet is written or wired - the shell starts exactly as it would outside PaneFlow."
     },
     "agent_stall_detection": {
       "type": ["boolean", "null"],

@@ -252,7 +252,7 @@ impl PaneFlowApp {
             .child(self.terminal_toggle_row(
                 "term-integrated-glyphs",
                 "Integrated glyphs",
-                "Draw block elements with Paneflow's built-in renderer instead of the font glyph.",
+                "Draw block elements with PaneFlow's built-in renderer instead of the font glyph.",
                 integrated_glyphs,
                 "integrated_glyphs",
                 true,

@@ -337,7 +337,7 @@ pub fn start_server() -> (
         && let Some(info) = detect_existing_instance(socket_spec.path())
     {
         eprintln!(
-            "paneflow: another Paneflow instance is already running on {}.\n\
+            "paneflow: another PaneFlow instance is already running on {}.\n\
              Existing instance: {}\n\
              Close the open window first, or set PANEFLOW_ALLOW_MULTIPLE=1 to override.",
             socket_spec.path().display(),
@@ -1218,7 +1218,7 @@ fn dispatch_to_gpui(
     match request_tx.try_send(ipc_req) {
         Ok(()) => {}
         Err(mpsc::TrySendError::Full(_)) => {
-            return json!({"jsonrpc": "2.0", "error": {"code": -32000, "message": "Paneflow is busy; retry shortly"}, "id": id});
+            return json!({"jsonrpc": "2.0", "error": {"code": -32000, "message": "PaneFlow is busy; retry shortly"}, "id": id});
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
             return json!({"jsonrpc": "2.0", "error": {"code": -32000, "message": "App shutting down"}, "id": id});
@@ -1718,7 +1718,7 @@ mod dispatch_tests {
         );
 
         assert_eq!(resp["error"]["code"], -32000);
-        assert_eq!(resp["error"]["message"], "Paneflow is busy; retry shortly");
+        assert_eq!(resp["error"]["message"], "PaneFlow is busy; retry shortly");
         assert_eq!(resp["id"], "req-overload");
     }
 

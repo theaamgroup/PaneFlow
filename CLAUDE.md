@@ -397,7 +397,7 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 ```json
 {
   "default_shell": "/bin/zsh",
-  "theme": "Paneflow Dark",
+  "theme": "PaneFlow Dark",
   "window_decorations": "client",
   "font_family": "JetBrainsMono Nerd Font Mono",
   "font_size": 13.0,
@@ -407,7 +407,7 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 }
 ```
 
-- **Themes**: **8 bundled variants** (`theme/builtin.rs:9-18`): `Paneflow Dark` (default identifier, `DEFAULT_THEME`), `Paneflow Light`, `Vercel Dark` / `Vercel Light`, `Claude Dark` / `Claude Light`, `Cursor Dark` / `Cursor Light`. Legacy alias table (`LEGACY_THEME_ALIASES`) maps `One Dark` → `Paneflow Dark` and `PaneFlow Light` → `Paneflow Light` (plus the old single-name Vercel/Claude/Cursor entries onto their dark variants). Names are matched case-insensitively. Hot-reload is notify-driven with a 500 ms mtime-poll fallback (`theme/watcher.rs:37`).
+- **Themes**: **8 bundled variants** (`theme/builtin.rs:9-18`): `PaneFlow Dark` (default identifier, `DEFAULT_THEME`), `PaneFlow Light`, `Vercel Dark` / `Vercel Light`, `Claude Dark` / `Claude Light`, `Cursor Dark` / `Cursor Light`. Legacy alias table (`LEGACY_THEME_ALIASES`) maps `One Dark` → `PaneFlow Dark` (plus the old single-name Vercel/Claude/Cursor entries onto their dark variants). The previous `Paneflow Dark` / `Paneflow Light` spelling still resolves (names are matched case-insensitively). Hot-reload is notify-driven with a 500 ms mtime-poll fallback (`theme/watcher.rs:37`).
 - **`window_decorations`**: read at startup only, requires restart. `"client"` = CSD (default), `"server"` = SSD. An invalid value logs a warning and falls back to `"client"`.
 - **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings here.
 - **`option_as_meta`**: **defaults to `false`**. `keys::default_option_as_meta()` returns the literal `false` (`keys.rs:69`); it used to compute `!cfg!(target_os = "macos")`, which was a runtime expression that is constant in a macOS-only fork. So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior. The published JSON Schema and `docs/user/configuration/schema.md` both declare `false` too - they moved together in `6a7b14d` and a drift test reads the doc off disk.

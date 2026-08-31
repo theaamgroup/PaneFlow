@@ -101,11 +101,11 @@ fn map_hook_status(status: HookStatus) -> StatusOutcome {
 }
 
 const HOOKS_USAGE: &str = "\
-paneflow hooks - register the Paneflow agent-notification hooks with your agents
+paneflow hooks - register the PaneFlow agent-notification hooks with your agents
 
 Usage:
   paneflow hooks setup       Install persistent hooks for every supported agent
-  paneflow hooks uninstall   Remove the Paneflow hooks
+  paneflow hooks uninstall   Remove the PaneFlow hooks
   paneflow hooks status      Report the hook installation state per agent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,7 +201,7 @@ fn run_uninstall(out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             0
         }
         Ok(UninstallOutcome::NothingToRemove) => {
-            let _ = writeln!(out, "claude-code: no Paneflow hooks present");
+            let _ = writeln!(out, "claude-code: no PaneFlow hooks present");
             0
         }
         Err(error) => {

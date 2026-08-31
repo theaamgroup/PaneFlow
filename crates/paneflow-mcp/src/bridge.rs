@@ -30,12 +30,12 @@ impl fmt::Display for BridgeError {
         match self {
             Self::Target(message) => f.write_str(message),
             Self::Transport { method, message } => {
-                write!(f, "Paneflow IPC {method} failed: {message}")
+                write!(f, "PaneFlow IPC {method} failed: {message}")
             }
             Self::Protocol { method, message } => {
                 write!(
                     f,
-                    "Paneflow IPC {method} returned an invalid response: {message}"
+                    "PaneFlow IPC {method} returned an invalid response: {message}"
                 )
             }
         }

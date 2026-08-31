@@ -96,7 +96,7 @@ fn main() -> ExitCode {
         // cannot proceed regardless of PaneFlow state.
         eprintln!(
             "paneflow-shim: invoked under an unexpected name; copy or \
-             hardlink this binary under one of the Paneflow-wrapped agent \
+             hardlink this binary under one of the PaneFlow-wrapped agent \
              CLI names ('claude', 'codex', 'gemini', …) and put that \
              directory first on $PATH."
         );

@@ -437,8 +437,8 @@ pub fn wait_idle(
 
     let socket = paneflow_ipc_client::resolve_socket_path().ok_or_else(|| {
         CliError::target(
-            "cannot locate the IPC socket; is Paneflow running? \
-             (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a Paneflow pane)",
+            "cannot locate the IPC socket; is PaneFlow running? \
+             (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a PaneFlow pane)",
         )
     })?;
 
@@ -498,7 +498,7 @@ pub fn wait_idle(
             }
             // The stream died before idle: exit 1 (runtime), not a silent hang.
             IdleOutcome::Dead => Err(CliError::runtime(
-                "the Paneflow event stream closed before the pane went idle (did Paneflow exit?)",
+                "the PaneFlow event stream closed before the pane went idle (did PaneFlow exit?)",
             )),
             IdleOutcome::Continue => Err(CliError::runtime(
                 "idle wait ended without a verdict (internal)",

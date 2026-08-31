@@ -43,9 +43,9 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let Some(socket) = paneflow_ipc_client::resolve_socket_path() else {
         eprintln!(
-            "paneflow-mcp: cannot locate the Paneflow IPC socket. \
-             Set PANEFLOW_SOCKET_PATH (normally inherited from the Paneflow PTY) \
-             or launch this bridge from inside a Paneflow pane."
+            "paneflow-mcp: cannot locate the PaneFlow IPC socket. \
+             Set PANEFLOW_SOCKET_PATH (normally inherited from the PaneFlow PTY) \
+             or launch this bridge from inside a PaneFlow pane."
         );
         return ExitCode::FAILURE;
     };

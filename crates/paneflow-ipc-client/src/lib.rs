@@ -134,7 +134,7 @@ where
                 socket.display()
             )),
             Err(error) => Err(format!(
-                "paneflow IPC unreachable at {} ({error}); is Paneflow running?",
+                "paneflow IPC unreachable at {} ({error}); is PaneFlow running?",
                 socket.display()
             )),
         };
@@ -156,7 +156,7 @@ fn is_busy_retry_response(line: &str) -> bool {
         return false;
     };
     error.get("code").and_then(Value::as_i64) == Some(-32000)
-        && error.get("message").and_then(Value::as_str) == Some("Paneflow is busy; retry shortly")
+        && error.get("message").and_then(Value::as_str) == Some("PaneFlow is busy; retry shortly")
 }
 
 fn method_is_safe_to_retry_after_timeout(method: &str) -> bool {
@@ -713,7 +713,7 @@ mod tests {
                     1 => Ok(json!({
                         "jsonrpc": "2.0",
                         "id": 1,
-                        "error": {"code": -32000, "message": "Paneflow is busy; retry shortly"},
+                        "error": {"code": -32000, "message": "PaneFlow is busy; retry shortly"},
                     })
                     .to_string()),
                     2 => Err(io::Error::from(io::ErrorKind::TimedOut)),

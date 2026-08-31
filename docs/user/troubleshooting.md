@@ -125,8 +125,8 @@ See [keybindings.md](keybindings.md) for the action names.
 
 ### Why is my theme not hot-reloading?
 
-Paneflow ships four presets in two variants each: `"Paneflow Dark"`,
-`"Paneflow Light"`, `"Vercel Dark"`, `"Vercel Light"`, `"Claude Dark"`,
+PaneFlow ships four presets in two variants each: `"PaneFlow Dark"`,
+`"PaneFlow Light"`, `"Vercel Dark"`, `"Vercel Light"`, `"Claude Dark"`,
 `"Claude Light"`, `"Cursor Dark"`, and `"Cursor Light"`. Runtime lookup
 is case-insensitive, but canonical names keep schema validation clean.
 See [themes.md](themes.md) for the bundled set.

@@ -20,11 +20,11 @@ use crate::agents::{self, AgentConfigWriter};
 use crate::api::{self, InstallKind, StatusKind, UninstallKind};
 
 const USAGE: &str = "\
-paneflow mcp - register the Paneflow MCP bridge with your CLI agents
+paneflow mcp - register the PaneFlow MCP bridge with your CLI agents
 
 Usage:
   paneflow mcp install      Register the bridge with every detected agent
-  paneflow mcp uninstall    Remove the Paneflow entry from every agent
+  paneflow mcp uninstall    Remove the PaneFlow entry from every agent
   paneflow mcp status       Report the bridge registration state per agent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +158,7 @@ fn run_uninstall(writers: &[Box<dyn AgentConfigWriter>], out: &mut dyn Write) ->
                 let _ = writeln!(out, "{}: removed", r.id);
             }
             UninstallKind::NothingToRemove => {
-                let _ = writeln!(out, "{}: no Paneflow entry (nothing to remove)", r.id);
+                let _ = writeln!(out, "{}: no PaneFlow entry (nothing to remove)", r.id);
             }
             UninstallKind::NotDetected => {
                 let _ = writeln!(out, "{}: not detected (nothing to remove)", r.id);

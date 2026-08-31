@@ -111,7 +111,7 @@ fn check_orchestration_gate(client: &impl IpcTransport, dry_run: bool) -> Result
             match (orchestration, scripting) {
                 (Some(true), _) | (_, Some(true)) | (None, _) => Ok(()),
                 (Some(false), _) => Err(CliError::runtime(
-                    "this flow creates panes with commands/prompts: relaunch Paneflow with \
+                    "this flow creates panes with commands/prompts: relaunch PaneFlow with \
                      PANEFLOW_IPC_ORCHESTRATION=1",
                 )),
             }
@@ -136,7 +136,7 @@ fn check_scripting_gate(client: &impl IpcTransport, dry_run: bool) -> Result<(),
         Ok(caps) => match caps.get("scripting").and_then(Value::as_bool) {
             Some(true) | None => Ok(()),
             Some(false) => Err(CliError::runtime(
-                "this flow submits prompts: relaunch Paneflow with PANEFLOW_IPC_SCRIPTING=1 \
+                "this flow submits prompts: relaunch PaneFlow with PANEFLOW_IPC_SCRIPTING=1 \
                  (or drop the `submit = true` flags)",
             )),
         },
@@ -1425,7 +1425,7 @@ mod tests {
         )
         .unwrap();
         let fake = FakeInstance::new(true);
-        fake.push_read_errors(1, &["server error -32000: Paneflow is busy; retry shortly"]);
+        fake.push_read_errors(1, &["server error -32000: PaneFlow is busy; retry shortly"]);
         fake.push_reads(1, &["READY"]);
 
         let code = run(&fake, file.to_str().unwrap(), false, true).expect("flow continues");

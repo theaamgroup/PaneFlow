@@ -52,7 +52,7 @@ fn acquire_lock(lock_path: &Path, target: &Path, timeout: Duration) -> Result<Co
                     return Err(Error::new(
                         ErrorKind::TimedOut,
                         format!(
-                            "timed out waiting for the Paneflow config lock while editing {}",
+                            "timed out waiting for the PaneFlow config lock while editing {}",
                             target.display()
                         ),
                     ));

@@ -17,7 +17,7 @@ use crate::{PaneFlowApp, ThemeMode, config_writer};
 impl PaneFlowApp {
     /// Resolve the theme currently persisted in config (or the built-in
     /// default), canonicalized: a `paneflow.json` written before presets
-    /// existed still names `One Dark`, which is now `Paneflow Dark`.
+    /// existed still names `One Dark`, which is now `PaneFlow Dark`.
     /// US-014: reads the cached config, not a per-call `load_config()`.
     pub(crate) fn current_theme_name(&self) -> String {
         self.cached_config

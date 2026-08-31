@@ -107,13 +107,13 @@ pub(crate) fn install_with(
             Some(p) if p.exists() => Some(p),
             Some(p) => {
                 return Err(format!(
-                    "MCP bridge binary is missing at {} - launch Paneflow once to extract it, then retry. Nothing was written.",
+                    "MCP bridge binary is missing at {} - launch PaneFlow once to extract it, then retry. Nothing was written.",
                     p.display()
                 ));
             }
             None => {
                 return Err(
-                    "could not resolve the Paneflow data directory, so the bridge path is unknown. Nothing was written."
+                    "could not resolve the PaneFlow data directory, so the bridge path is unknown. Nothing was written."
                         .to_string(),
                 );
             }

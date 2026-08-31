@@ -4,7 +4,10 @@
 //! - the process-wide focus flag updated by the GPUI app;
 //! - a single cross-platform `notify-rust` firing path used by `ai.*` handlers.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Once,
+    atomic::{AtomicBool, Ordering},
+};
 
 use gpui::BackgroundExecutor;
 use paneflow_config::schema::{AgentPanelConfig, NotifyWhenAgentWaiting, PaneFlowConfig};
@@ -12,6 +15,13 @@ use paneflow_config::schema::{AgentPanelConfig, NotifyWhenAgentWaiting, PaneFlow
 use crate::agent_launcher::TerminalAgent;
 
 const NOTIFICATION_DETAIL_CAP_CHARS: usize = 512;
+const PANEFLOW_BUNDLE_IDENTIFIER: &str = "com.theaamgroup.paneflow";
+
+/// `notify-rust` otherwise asks macOS to resolve its internal sentinel app name
+/// `use_default`. That lookup opens an unexplained Choose Application dialog,
+/// and concurrent first notifications can each open their own dialog. Set the
+/// real bundle identity ourselves, serialized before any notification is shown.
+static NOTIFICATION_APPLICATION_INIT: Once = Once::new();
 
 /// Window-active gate updated by `cx.observe_window_activation`.
 /// `true` while the OS reports the Paneflow window as the focused one.
@@ -140,7 +150,7 @@ fn notification_context_body(workspace_title: &str, session_summary: Option<&str
     session_summary
         .and_then(notification_detail)
         .or_else(|| notification_detail(workspace_title))
-        .unwrap_or_else(|| "Paneflow".to_string())
+        .unwrap_or_else(|| "PaneFlow".to_string())
 }
 
 pub(crate) fn attention_notification_body(workspace_title: &str, message: Option<&str>) -> String {
@@ -162,20 +172,101 @@ pub(crate) fn stalled_notification_body(workspace_title: &str, silent_secs: u64)
 }
 
 fn show_desktop_notification(notification: DesktopNotification) -> Result<(), String> {
+    initialize_notification_application();
+
     let mut builder = notify_rust::Notification::new();
     builder
         .summary(&notification.summary)
         .body(&notification.body)
-        .appname("Paneflow")
+        .appname("PaneFlow")
         .icon("paneflow")
         .timeout(std::time::Duration::from_secs(8));
 
     builder.show().map(|_| ()).map_err(|err| err.to_string())
 }
 
+fn initialize_notification_application() {
+    initialize_notification_application_with(&NOTIFICATION_APPLICATION_INIT, || {
+        notify_rust::set_application(PANEFLOW_BUNDLE_IDENTIFIER).map_err(|err| err.to_string())
+    });
+}
+
+fn initialize_notification_application_with(
+    guard: &Once,
+    initialize: impl FnOnce() -> Result<(), String>,
+) {
+    guard.call_once(|| {
+        if let Err(error) = initialize() {
+            log::warn!("desktop notifications: failed to use PaneFlow bundle identity: {error}");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
+
+    #[test]
+    fn notification_bundle_identifier_matches_the_app_bundle() {
+        let plist = include_str!("../../../assets/Info.plist");
+        let expected = format!(
+            "<key>CFBundleIdentifier</key>\n    <string>{PANEFLOW_BUNDLE_IDENTIFIER}</string>"
+        );
+        assert!(
+            plist.contains(&expected),
+            "desktop notification identity must match assets/Info.plist"
+        );
+    }
+
+    #[test]
+    fn notification_application_initialization_is_serialized() {
+        const WORKERS: usize = 8;
+
+        let guard = Arc::new(Once::new());
+        let barrier = Arc::new(Barrier::new(WORKERS));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let guard = Arc::clone(&guard);
+                let barrier = Arc::clone(&barrier);
+                let calls = Arc::clone(&calls);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    initialize_notification_application_with(&guard, || {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    });
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().expect("notification initializer worker");
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn failed_notification_application_initialization_is_not_retried() {
+        let guard = Once::new();
+        let calls = AtomicUsize::new(0);
+
+        initialize_notification_application_with(&guard, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err("test failure".to_string())
+        });
+        initialize_notification_application_with(&guard, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn notification_gate_honors_never_and_window_focus() {

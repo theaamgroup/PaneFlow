@@ -332,7 +332,7 @@ pub fn inspect_hooks(root: &Value, expected: Option<&Path>) -> HookStatus {
         if managed.len() != 1 {
             return repair(
                 paths.first().cloned(),
-                format!("hook event `{event}` must contain exactly one Paneflow group"),
+                format!("hook event `{event}` must contain exactly one PaneFlow group"),
             );
         }
         match validate_group(managed[0], event) {
@@ -345,7 +345,7 @@ pub fn inspect_hooks(root: &Value, expected: Option<&Path>) -> HookStatus {
     if paths.iter().any(|path| path != &found) {
         return repair(
             Some(found),
-            "Paneflow hook events point at different binaries",
+            "PaneFlow hook events point at different binaries",
         );
     }
     if let Some(expected) = expected {
@@ -361,32 +361,32 @@ fn validate_group(group: &Value, event: &str) -> Result<String, String> {
     let hooks = group
         .get("hooks")
         .and_then(Value::as_array)
-        .ok_or_else(|| format!("Paneflow group for `{event}` has no hook array"))?;
+        .ok_or_else(|| format!("PaneFlow group for `{event}` has no hook array"))?;
     if hooks.len() != 1 {
         return Err(format!(
-            "Paneflow group for `{event}` must contain one hook"
+            "PaneFlow group for `{event}` must contain one hook"
         ));
     }
     let handler = hooks[0]
         .as_object()
-        .ok_or_else(|| format!("Paneflow hook for `{event}` must be an object"))?;
+        .ok_or_else(|| format!("PaneFlow hook for `{event}` must be an object"))?;
     if handler.get("type").and_then(Value::as_str) != Some("command")
         || handler.get("timeout").and_then(Value::as_u64) != Some(5)
     {
         return Err(format!(
-            "Paneflow hook for `{event}` must be a five-second command hook"
+            "PaneFlow hook for `{event}` must be a five-second command hook"
         ));
     }
     let command = handler
         .get("command")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("Paneflow hook for `{event}` has no command"))?;
+        .ok_or_else(|| format!("PaneFlow hook for `{event}` has no command"))?;
     let path = paneflow_hook_program_token(command)
-        .ok_or_else(|| format!("Paneflow hook for `{event}` has an invalid command"))?;
+        .ok_or_else(|| format!("PaneFlow hook for `{event}` has an invalid command"))?;
     let canonical = render_hook_command(Path::new(&path), event);
     if group != &managed_group_for_command(canonical) {
         return Err(format!(
-            "Paneflow group for `{event}` does not match the canonical shape"
+            "PaneFlow group for `{event}` does not match the canonical shape"
         ));
     }
     Ok(path)

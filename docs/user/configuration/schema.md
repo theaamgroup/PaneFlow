@@ -32,7 +32,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `$schema` | string | none | Editor-only pointer to the public schema. Ignored at runtime. |
 | `$schemaVersion` | string | `1.0.0` | Logs a warning when unknown, but never blocks loading. |
 | `default_shell` | string or null | platform default | Chain: configured -> `$SHELL` -> `/bin/sh`. Each candidate must be an existing file with an exec bit, otherwise it is skipped with a warning. A bare name (no `/`) is resolved via `which`, then probed in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`, which is what makes `"fish"` work under a GUI launch with a minimal `PATH`. |
-| `theme` | string or null | `Paneflow Dark` | Bundled theme name, one preset's light or dark variant. Current values: `Paneflow Dark`, `Paneflow Light`, `Vercel Dark`, `Vercel Light`, `Claude Dark`, `Claude Light`, `Cursor Dark`, `Cursor Light`. Pre-preset names (`One Dark`, `Vercel`, `Claude`, `Cursor`) still resolve. |
+| `theme` | string or null | `PaneFlow Dark` | Bundled theme name, one preset's light or dark variant. Current values: `PaneFlow Dark`, `PaneFlow Light`, `Vercel Dark`, `Vercel Light`, `Claude Dark`, `Claude Light`, `Cursor Dark`, `Cursor Light`. Pre-preset names (`One Dark`, `Vercel`, `Claude`, `Cursor`) still resolve. |
 | `theme_mode` | string or null | `dark` | `light`, `dark`, or `system`. |
 | `font_family` | string or null | bundled JetBrainsMono NFM | Accepts `.PaneflowMono`, `JetBrainsMono NFM`, `.PaneflowSans`, embedded family names, or installed monospace families. |
 | `font_fallbacks` | array of strings or null | none | Ordered glyph fallback families for symbols, Powerline, CJK, emoji, or Nerd Font glyphs. |
@@ -274,7 +274,7 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "$schema": "./schemas/paneflow.schema.json",
   "$schemaVersion": "1.0.0",
   "default_shell": null,
-  "theme": "Paneflow Dark",
+  "theme": "PaneFlow Dark",
   "theme_mode": "dark",
   "font_family": null,
   "font_fallbacks": [],

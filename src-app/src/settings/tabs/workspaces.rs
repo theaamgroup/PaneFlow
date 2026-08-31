@@ -781,7 +781,7 @@ impl PaneFlowApp {
                 .child(hairline(ui))
                 .child(self.workspace_text_row(
                     "Prompt",
-                    "Prefilled only. Paneflow does not submit it for you.",
+                    "Prefilled only. PaneFlow does not submit it for you.",
                     self.workspace_pane_prompt_input.clone(),
                     ui,
                     cx,

@@ -1,17 +1,17 @@
 # Themes
 
-> Choose Paneflow's bundled themes from Settings or paneflow.json. Four presets (Paneflow, Vercel, Claude, Cursor) ship today, each in a light and a dark variant, and hot-reload without restart.
+> Choose PaneFlow's bundled themes from Settings or paneflow.json. Four presets (PaneFlow, Vercel, Claude, Cursor) ship today, each in a light and a dark variant, and hot-reload without restart.
 
-Paneflow reads a top-level `"theme"` value from `paneflow.json`.
+PaneFlow reads a top-level `"theme"` value from `paneflow.json`.
 Themes are organised as four **presets**, each shipping a light and a
-dark variant: `Paneflow`, `Vercel`, `Claude`, and `Cursor`. The
+dark variant: `PaneFlow`, `Vercel`, `Claude`, and `Cursor`. The
 `"theme"` key names one concrete variant, for example
-`"Paneflow Dark"` or `"Vercel Light"`. Omit the key, set it to `null`,
-or reset it from Settings to use the default `Paneflow Dark` theme.
+`"PaneFlow Dark"` or `"Vercel Light"`. Omit the key, set it to `null`,
+or reset it from Settings to use the default `PaneFlow Dark` theme.
 
 > **TL;DR.** Use **Settings -> Appearance** for the UI: the preset select
 > picks the identity, the Light/Dark/System tiles pick which variant of
-> it runs. Or set `"theme": "Paneflow Dark"` (or any other variant) in
+> it runs. Or set `"theme": "PaneFlow Dark"` (or any other variant) in
 > `paneflow.json`. Theme changes hot-reload after save, with no app
 > restart.
 
@@ -19,15 +19,15 @@ or reset it from Settings to use the default `Paneflow Dark` theme.
 
 Open **Settings -> Appearance**. The page exposes two orthogonal axes:
 
-* the **preset select** picks the visual identity (Paneflow, Vercel,
+* the **preset select** picks the visual identity (PaneFlow, Vercel,
   Claude, Cursor) and keeps your current light/dark choice;
 * the **Light / Dark / System tiles** pick which variant of that preset
   runs.
 
-| Tile | What Paneflow saves |
+| Tile | What PaneFlow saves |
 | --- | --- |
-| Light | The current preset's light variant, e.g. `"Paneflow Light"` |
-| Dark | The current preset's dark variant, e.g. `"Paneflow Dark"` |
+| Light | The current preset's light variant, e.g. `"PaneFlow Light"` |
+| Dark | The current preset's dark variant, e.g. `"PaneFlow Dark"` |
 | System | The variant matching the OS appearance at click time. |
 
 `System` is not stored as a persistent follow-the-OS mode today.
@@ -38,7 +38,7 @@ You can also edit `paneflow.json` directly:
 
 ```json
 {
-  "theme": "Paneflow Light"
+  "theme": "PaneFlow Light"
 }
 ```
 
@@ -52,9 +52,9 @@ The config file lives at:
 The schema lists the canonical spellings. Runtime lookup is
 case-insensitive, but using the canonical names keeps editor
 autocomplete and review diffs clean. Names written before presets
-existed (`One Dark`, `PaneFlow Light`, `Vercel`, `Claude`, `Cursor`)
+existed (`One Dark`, `Paneflow Dark`, `Paneflow Light`, `Vercel`, `Claude`, `Cursor`)
 still resolve, to the same pixels as before. Unknown names fall back to
-`Paneflow Dark` and emit a log warning the next time the file is parsed.
+`PaneFlow Dark` and emit a log warning the next time the file is parsed.
 The full set of recognised keys lives in the
 [configuration schema](configuration/schema.md).
 
@@ -64,13 +64,13 @@ Stable in current builds.
 
 | Preset | Variant | Description |
 | --- | --- | --- |
-| Paneflow | `"Paneflow Dark"` | Default. Inspired by Atom's One Dark palette, then adjusted for Paneflow's terminal and app chrome. Named `One Dark` before presets. |
-| Paneflow | `"Paneflow Light"` | White work surface, light app shell, and a dedicated light syntax palette. |
+| PaneFlow | `"PaneFlow Dark"` | Default. Inspired by Atom's One Dark palette, then adjusted for PaneFlow's terminal and app chrome. Named `One Dark` before presets. |
+| PaneFlow | `"PaneFlow Light"` | White work surface, light app shell, and a dedicated light syntax palette. |
 | Vercel | `"Vercel Dark"` | Monochrome black-and-white theme inspired by Vercel's precise accent style. Includes terminal, app chrome, settings, diff, and syntax palettes. |
 | Vercel | `"Vercel Light"` | The same Geist identity on white: near-black structure, darkened accent hues. |
-| Claude | `"Claude Dark"` | Claude Desktop-style: graphite surfaces, ivory text, muted controls, Claude's orange accent. Keeps Paneflow's canonical diff/status red, green, and yellow. |
+| Claude | `"Claude Dark"` | Claude Desktop-style: graphite surfaces, ivory text, muted controls, Claude's orange accent. Keeps PaneFlow's canonical diff/status red, green, and yellow. |
 | Claude | `"Claude Light"` | The same identity on Claude's cream paper surface, with warm ink and the orange accent. |
-| Cursor | `"Cursor Dark"` | Cursor IDE-style: near-black workspace, compact graphite sidebar, dark composer surface, pale blue accent. Keeps Paneflow's canonical diff/status hues. |
+| Cursor | `"Cursor Dark"` | Cursor IDE-style: near-black workspace, compact graphite sidebar, dark composer surface, pale blue accent. Keeps PaneFlow's canonical diff/status hues. |
 | Cursor | `"Cursor Light"` | The VS Code Light+ identity Cursor ships by default, token family by token family. |
 
 A PaneFlow theme defines 36 terminal colour slots: a 24-colour ANSI

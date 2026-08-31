@@ -1,12 +1,12 @@
-# Paneflow MCP bridge (`paneflow-mcp`)
+# PaneFlow MCP bridge (`paneflow-mcp`)
 
-Let an MCP-capable CLI agent running **inside a Paneflow pane** read the
+Let an MCP-capable CLI agent running **inside a PaneFlow pane** read the
 terminal output of **other surfaces in the current workspace** - so you can say
 *"check the logs in the cargo-run pane"* instead of selecting, copying, and
 pasting by hand.
 
 `paneflow-mcp` is a small stdio [MCP](https://modelcontextprotocol.io) server.
-The agent spawns it as a subprocess; it proxies each call to Paneflow's local
+The agent spawns it as a subprocess; it proxies each call to PaneFlow's local
 JSON-RPC socket (the same one the AI-hook uses). It is **read-only** - it can
 list, read, and search surfaces, but cannot type into or control them.
 
@@ -39,7 +39,7 @@ read access is intentional.
 
 `tab_id` is a stable identity, never a positional index, and it is omitted for
 surfaces that live outside the CLI tab hierarchy (Agents threads, the bottom
-dock) or when the running Paneflow predates it. Targeting stays by surface
+dock) or when the running PaneFlow predates it. Targeting stays by surface
 name or `surface_id`: the tab is context for the agent, not an addressing key.
 
 MCP resources use stable `surface_id` URIs:
@@ -48,8 +48,8 @@ MCP resources use stable `surface_id` URIs:
 
 ## Install (one command)
 
-The bridge binary **ships inside Paneflow** - no build step. On every launch,
-Paneflow extracts it to a stable, non-versioned path
+The bridge binary **ships inside PaneFlow** - no build step. On every launch,
+PaneFlow extracts it to a stable, non-versioned path
 (`~/Library/Application Support/paneflow/bin/paneflow-mcp`) that survives
 updates.
 
@@ -72,7 +72,7 @@ opencode: skipped (not detected)
 The command is **idempotent** (re-running it is a no-op when nothing changed),
 **no-clobber** (it only touches the `paneflow` entry, preserving every other MCP
 server and setting), and **backed up** (the prior config is copied to
-`<file>.bak` before any write). Run it again after a Paneflow update if `status`
+`<file>.bak` before any write). Run it again after a PaneFlow update if `status`
 reports a stale path.
 
 ```bash
@@ -82,7 +82,7 @@ paneflow mcp uninstall   # remove only the `paneflow` entry, everywhere
 
 `status` distinguishes five states per agent: *not detected*, *installed*,
 *detected but not installed*, *stale path*, and *needs repair* when a
-`paneflow` entry exists but is disabled or no longer matches Paneflow's managed
+`paneflow` entry exists but is disabled or no longer matches PaneFlow's managed
 schema. `status` never extracts or writes the bridge binary.
 
 > Where each agent's entry lands: Claude Code: `~/.claude.json`
@@ -111,9 +111,9 @@ point `command` at that absolute path.
 > their CLIs move fast. `paneflow mcp install` tracks the current format; verify
 > manual snippets against each agent's current docs.
 
-The bridge finds the running Paneflow instance via `$PANEFLOW_SOCKET_PATH`,
+The bridge finds the running PaneFlow instance via `$PANEFLOW_SOCKET_PATH`,
 injected into every pane's environment - so it must be launched from inside a
-Paneflow pane (which is exactly where your agent runs).
+PaneFlow pane (which is exactly where your agent runs).
 
 ### Claude Code
 
@@ -179,7 +179,7 @@ prefer Gemini's confirmation prompt given the untrusted-output surface.
 
 ## Example
 
-In an agent running inside Paneflow:
+In an agent running inside PaneFlow:
 
 > *"List my panes, then read the last 100 lines of the cargo-run pane and tell
 > me why the build failed."*

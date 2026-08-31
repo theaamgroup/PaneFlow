@@ -94,7 +94,7 @@ fn prompt_with_report_contract(text: &str, report: &ReportContract) -> String {
         prompt.push('\n');
     }
     prompt.push_str(
-        "\nPaneflow report protocol:\n\
+        "\nPaneFlow report protocol:\n\
          - Write the complete final answer/report to this exact UTF-8 text file, overwriting it if it exists:\n",
     );
     prompt.push_str(&report.path);
@@ -153,7 +153,7 @@ fn send_to(
         }
         // The scripting gate is off on the running instance.
         Err(e) if is_send_text_disabled_error(&e) => Err(CliError::runtime(format!(
-            "send is disabled on the running Paneflow instance; relaunch it with \
+            "send is disabled on the running PaneFlow instance; relaunch it with \
              PANEFLOW_IPC_SCRIPTING=1 to enable text injection (server said: {e})"
         ))),
         Err(e) => Err(CliError::runtime(e)),
@@ -286,7 +286,7 @@ pub fn key(client: &impl IpcTransport, target: &str, keystroke: &str) -> Result<
             Ok(EXIT_OK)
         }
         Err(e) if is_send_keystroke_disabled_error(&e) => Err(CliError::runtime(format!(
-            "key is disabled on the running Paneflow instance; relaunch it with \
+            "key is disabled on the running PaneFlow instance; relaunch it with \
              PANEFLOW_IPC_SCRIPTING=1 to enable keystroke injection (server said: {e})"
         ))),
         Err(e) => Err(CliError::runtime(e)),
@@ -580,7 +580,7 @@ mod tests {
             .find(|(method, _)| method == "surface.send_text")
             .expect("send_text call");
         let text = send_call.1["text"].as_str().unwrap();
-        assert!(text.contains("Paneflow report protocol"));
+        assert!(text.contains("PaneFlow report protocol"));
         assert!(text.contains("REPORT_DONE"));
         assert!(text.contains("reports"));
     }

@@ -1,21 +1,21 @@
 ---
 name: paneflow-conductor
-description: Orchestrate a fleet of CLI coding agents running side by side in Paneflow panes - discover them, read their live state, dispatch prompts, and wait on events - all over the public `paneflow` CLI. Use when the user asks you to coordinate, supervise, or hand work between multiple agents (Claude Code, Codex, OpenCode, Gemini, ...) that are open in Paneflow.
+description: Orchestrate a fleet of CLI coding agents running side by side in PaneFlow panes - discover them, read their live state, dispatch prompts, and wait on events - all over the public `paneflow` CLI. Use when the user asks you to coordinate, supervise, or hand work between multiple agents (Claude Code, Codex, OpenCode, Gemini, ...) that are open in PaneFlow.
 ---
 
-# Paneflow conductor
+# PaneFlow conductor
 
 You are the **conductor**: an agent that drives *other* CLI coding agents running
-in Paneflow panes. You do it through one public CLI, `paneflow`, which talks to
-the running Paneflow instance over its local IPC socket. You never scrape the
-screen and you never poll in a busy loop - Paneflow exposes the fleet's state and
+in PaneFlow panes. You do it through one public CLI, `paneflow`, which talks to
+the running PaneFlow instance over its local IPC socket. You never scrape the
+screen and you never poll in a busy loop - PaneFlow exposes the fleet's state and
 pushes events.
 
 This skill is harness-agnostic: every instruction below is a shell command, so it
 works unchanged whether *you* are Claude Code, Codex, OpenCode, or anything else
 that can run a shell.
 
-## 0. Preflight: is Paneflow running?
+## 0. Preflight: is PaneFlow running?
 
 Before anything else, confirm an instance is up:
 
@@ -24,7 +24,7 @@ paneflow ps
 ```
 
 If it prints a fleet table (or `(no agents)`), you are connected - continue. If it
-fails with a message like `cannot locate the IPC socket; is Paneflow running?`
+fails with a message like `cannot locate the IPC socket; is PaneFlow running?`
 (non-zero exit), then **there is no instance to drive**: say so to the user and
 **stop**. Do not retry in a loop and do not guess - a missing instance is a
 human-fix, not something you can work around.
@@ -39,10 +39,10 @@ paneflow ls            # the panes themselves (surface_id, name, cwd, cmd)
 
 `state` is one of `thinking`, `waiting_for_input`, `finished`, `errored`,
 `stalled`, `idle` (a bare shell with no agent), or `unknown_running` (an agent
-Paneflow detected but cannot hook). Target any pane by its `surface_id`, its
+PaneFlow detected but cannot hook). Target any pane by its `surface_id`, its
 name, `cmdline:<substr>`, or `cwd:<path>`.
 
-Every agent row also carries `hooked`. `hooked:true` means Paneflow tracks the
+Every agent row also carries `hooked`. `hooked:true` means PaneFlow tracks the
 agent's turns: you get its `ai.stop` / `ai.notification` events and its
 `last_result`, and its `state` is real. `hooked:false` means it was only spotted
 by a process scan - the row then reads `state:"unknown_running"` plus a short
@@ -60,7 +60,7 @@ paneflow search backend 'error|panic'   # grep the pane's scrollback for a patte
 ```
 
 The CLI verbs are `ls`, `read`, `search` (not `list_panes` / `read_pane` /
-`search_pane` - those are the MCP **tool** names; Paneflow accepts them as
+`search_pane` - those are the MCP **tool** names; PaneFlow accepts them as
 aliases, but write the real verb). A genuinely unknown verb (`paneflow blha`)
 exits non-zero with `unknown verb; see paneflow --help` - it never launches a
 stray GUI window.
@@ -80,7 +80,7 @@ ways to get the complete result:
 
 1. **Structured channel (free, try first).** After a hooked agent's turn ends,
    its last message is exposed as `last_result` in `paneflow status <pane> --json`
-   / `paneflow ps --json` - read by Paneflow off-screen, so it is not truncated:
+   / `paneflow ps --json` - read by PaneFlow off-screen, so it is not truncated:
 
    ```bash
    paneflow wait --match reviewer --idle --pattern '^REPORT_DONE' --timeout 600
@@ -91,7 +91,7 @@ ways to get the complete result:
    so treat an empty value as "not available - use the file".
 
 2. **Report-to-file (reliable, for long or alt-screen output).** Use
-   `send --report-file <path>` so Paneflow appends a precise file contract to
+   `send --report-file <path>` so PaneFlow appends a precise file contract to
    the prompt. The agent writes the full report there, then prints
    `REPORT_DONE <path>`; you read the file in full - zero viewport truncation:
 
@@ -108,7 +108,7 @@ ways to get the complete result:
    ```
 
    Always remove the temp dir when you are done with it (the `rm -rf` above), the
-   same way Paneflow age-sweeps the >64 KiB context files it stages for `up` /
+   same way PaneFlow age-sweeps the >64 KiB context files it stages for `up` /
    `split`.
 
 A **non**-full-screen agent (Codex renders inline) needs none of this: its output
@@ -117,12 +117,12 @@ the file only when the agent runs full-screen, or the report is long.
 
 ## 3. Wait on events instead of polling
 
-Paneflow pushes on Unix/macOS and falls back to a bounded `output_generation`
+PaneFlow pushes on Unix/macOS and falls back to a bounded `output_generation`
 clock when a transport cannot tick subscriptions (Windows named pipes). **Never**
 sit in a home-grown `status` loop, and
 **never** write a background bash poller on `output_generation`: a shell you
 background from inside an agent does not inherit the IPC socket env, so it reads
-`NA` and stalls. Let Paneflow's wait primitive tell you when something happened.
+`NA` and stalls. Let PaneFlow's wait primitive tell you when something happened.
 
 `wait --idle` blocks until a pane stops producing output - the cleanest "the turn
 is over" signal:
@@ -208,7 +208,7 @@ paneflow flow run my-pipeline.flow.toml             # run it
 paneflow flow run my-pipeline.flow.toml --json      # + machine-readable report on stdout
 ```
 
-Paneflow ships a worked two-agent pipeline (cross-vendor impl -> review) at
+PaneFlow ships a worked two-agent pipeline (cross-vendor impl -> review) at
 `examples/review-pipeline.flow.toml` in its source tree - copy it as a starting
 point. The path you pass is relative to wherever you run the command, so point at
 your own file; don't assume that example path resolves from an arbitrary pane's
@@ -221,7 +221,7 @@ cwd.
 # mode) presses Enter. This is the default, human-in-loop path.
 paneflow send reviewer "Please review the diff in the backend pane."
 
-# Auto-submit toward an agent. Paneflow wraps the text in bracketed paste and
+# Auto-submit toward an agent. PaneFlow wraps the text in bracketed paste and
 # sends the Enter as a SEPARATE, calibrated write, then verifies a hooked agent
 # state transition. If no turn start is confirmed, the command exits non-zero
 # instead of returning a false `submitted:true`.

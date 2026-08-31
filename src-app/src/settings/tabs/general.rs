@@ -222,7 +222,7 @@ impl PaneFlowApp {
             .child(section_header(ui, "Notifications"))
             .child(setting_card(ui).child(toggle_row_with(
                 "Native OS notifications",
-                "Alert you when an agent needs attention or finishes while Paneflow is unfocused.",
+                "Alert you when an agent needs attention or finishes while PaneFlow is unfocused.",
                 None,
                 ui,
                 div()

@@ -132,7 +132,7 @@ pub fn looks_like_unknown_verb(arg: Option<&str>) -> bool {
 #[command(
     name = "paneflow",
     version,
-    about = "Drive a running Paneflow instance from the shell",
+    about = "Drive a running PaneFlow instance from the shell",
     // The GUI launch (no subcommand) is handled in main.rs, never here, so a
     // bare `paneflow` never reaches clap. `Option<Commands>` keeps clap from
     // forcing `subcommand_required` / `arg_required_else_help` regardless.
@@ -436,8 +436,8 @@ pub fn run() -> i32 {
 /// resolvable-but-dead socket is not a `connect` failure.
 fn connect() -> Result<IpcClient, String> {
     let socket = paneflow_ipc_client::resolve_socket_path().ok_or_else(|| {
-        "paneflow: cannot locate the IPC socket; is Paneflow running? \
-         (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a Paneflow pane)"
+        "paneflow: cannot locate the IPC socket; is PaneFlow running? \
+         (set PANEFLOW_SOCKET_PATH if you launched the CLI outside a PaneFlow pane)"
             .to_string()
     })?;
     Ok(IpcClient::new(socket))

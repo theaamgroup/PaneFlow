@@ -403,7 +403,7 @@ pub(crate) fn toml_status(path: &Path, expected: Option<&Path>) -> Result<Status
         found,
         expected,
         shape_ok,
-        "Codex MCP entry must have empty args, forward Paneflow's socket/workspace variables, and must not be disabled",
+        "Codex MCP entry must have empty args, forward PaneFlow's socket/workspace variables, and must not be disabled",
     ))
 }
 

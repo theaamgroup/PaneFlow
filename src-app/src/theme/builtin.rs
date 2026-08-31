@@ -7,8 +7,8 @@ pub type ThemeEntry = (&'static str, fn() -> TerminalTheme);
 /// Every bundled theme, flat. Two entries per [`ThemePreset`] (its light and
 /// its dark variant); `theme` in `paneflow.json` names one of these.
 pub static THEMES: &[ThemeEntry] = &[
-    ("Paneflow Dark", paneflow_dark),
-    ("Paneflow Light", paneflow_light),
+    ("PaneFlow Dark", paneflow_dark),
+    ("PaneFlow Light", paneflow_light),
     ("Vercel Dark", vercel_dark),
     ("Vercel Light", vercel_light),
     ("Claude Dark", claude_dark),
@@ -18,7 +18,7 @@ pub static THEMES: &[ThemeEntry] = &[
 ];
 
 /// The theme applied when config names none (or names an unknown one).
-pub const DEFAULT_THEME: &str = "Paneflow Dark";
+pub const DEFAULT_THEME: &str = "PaneFlow Dark";
 
 /// One visual identity in two variants. The Themes page splits the choice into
 /// two orthogonal axes, the way Codex and VS Code do: the preset select picks
@@ -38,9 +38,9 @@ impl ThemePreset {
 
 pub static PRESETS: &[ThemePreset] = &[
     ThemePreset {
-        name: "Paneflow",
-        light: "Paneflow Light",
-        dark: "Paneflow Dark",
+        name: "PaneFlow",
+        light: "PaneFlow Light",
+        dark: "PaneFlow Dark",
     },
     ThemePreset {
         name: "Vercel",
@@ -63,8 +63,7 @@ pub static PRESETS: &[ThemePreset] = &[
 /// so a `paneflow.json` written by an older build keeps resolving - and keeps
 /// resolving to the *same pixels*, since only the names changed.
 static LEGACY_THEME_ALIASES: &[(&str, &str)] = &[
-    ("One Dark", "Paneflow Dark"),
-    ("PaneFlow Light", "Paneflow Light"),
+    ("One Dark", "PaneFlow Dark"),
     ("Vercel", "Vercel Dark"),
     ("Claude", "Claude Dark"),
     ("Cursor", "Cursor Dark"),
@@ -732,10 +731,11 @@ mod tests {
 
     #[test]
     fn legacy_theme_names_resolve_to_their_variant() {
-        assert_eq!(canonical_theme_name("One Dark"), Some("Paneflow Dark"));
+        assert_eq!(canonical_theme_name("One Dark"), Some("PaneFlow Dark"));
+        assert_eq!(canonical_theme_name("Paneflow Dark"), Some("PaneFlow Dark"));
         assert_eq!(
-            canonical_theme_name("PaneFlow Light"),
-            Some("Paneflow Light")
+            canonical_theme_name("Paneflow Light"),
+            Some("PaneFlow Light")
         );
         assert_eq!(canonical_theme_name("Vercel"), Some("Vercel Dark"));
         assert_eq!(canonical_theme_name("Claude"), Some("Claude Dark"));

@@ -904,8 +904,8 @@ mod tests {
     fn bundled_themes_satisfy_selection_contrast_invariant() {
         // All bundled themes must produce a readable selection foreground.
         for (label, theme) in [
-            ("Paneflow Dark", apply_surface_overrides(paneflow_dark())),
-            ("Paneflow Light", apply_surface_overrides(paneflow_light())),
+            ("PaneFlow Dark", apply_surface_overrides(paneflow_dark())),
+            ("PaneFlow Light", apply_surface_overrides(paneflow_light())),
             ("Vercel Dark", apply_surface_overrides(vercel_dark())),
             ("Vercel Light", apply_surface_overrides(vercel_light())),
             ("Claude Dark", apply_surface_overrides(claude_dark())),
@@ -1055,8 +1055,8 @@ mod tests {
     fn bundled_themes_populate_at_least_18_distinct_syntax_hues() {
         // US-001 AC #1/#5: ≥ 18 distinct color values per theme (up from 8).
         for (label, theme) in [
-            ("Paneflow Dark", paneflow_dark()),
-            ("Paneflow Light", paneflow_light()),
+            ("PaneFlow Dark", paneflow_dark()),
+            ("PaneFlow Light", paneflow_light()),
             ("Vercel Dark", vercel_dark()),
             ("Vercel Light", vercel_light()),
             ("Claude Dark", claude_dark()),
@@ -1079,8 +1079,8 @@ mod tests {
         // that token family invisible / indistinguishable from plain text.
         let default = Hsla::default();
         for (label, theme) in [
-            ("Paneflow Dark", paneflow_dark()),
-            ("Paneflow Light", paneflow_light()),
+            ("PaneFlow Dark", paneflow_dark()),
+            ("PaneFlow Light", paneflow_light()),
             ("Vercel Dark", vercel_dark()),
             ("Vercel Light", vercel_light()),
             ("Claude Dark", claude_dark()),

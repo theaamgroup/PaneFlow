@@ -28,7 +28,7 @@ impl fmt::Display for ScopeConfigError {
         match self {
             Self::MissingWorkspaceId => write!(
                 f,
-                "{WORKSPACE_ENV} is missing; launch from a Paneflow pane or set {MCP_SCOPE_ENV}=all explicitly"
+                "{WORKSPACE_ENV} is missing; launch from a PaneFlow pane or set {MCP_SCOPE_ENV}=all explicitly"
             ),
             Self::InvalidWorkspaceId(value) => {
                 write!(f, "{WORKSPACE_ENV} must be a non-negative integer, got '{value}'")

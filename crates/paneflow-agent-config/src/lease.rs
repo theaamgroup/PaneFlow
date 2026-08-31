@@ -46,7 +46,7 @@ impl ConfigLease {
                         return Err(Error::new(
                             ErrorKind::TimedOut,
                             format!(
-                                "timed out waiting for the Paneflow config lease for {}",
+                                "timed out waiting for the PaneFlow config lease for {}",
                                 resource.display()
                             ),
                         ));

@@ -1,8 +1,8 @@
 # Agent notification hooks (`paneflow hooks`)
 
-Paneflow ships a tiny callback binary, `paneflow-ai-hook`, that an agent CLI
+PaneFlow ships a tiny callback binary, `paneflow-ai-hook`, that an agent CLI
 runs on lifecycle events (prompt submitted, tool use, stop, notification) to
-report its turn state to a running Paneflow instance over the IPC socket. That
+report its turn state to a running PaneFlow instance over the IPC socket. That
 state drives the sidebar activity indicators and the turn-end desktop
 notification (EP-004, `prd-cli-agent-orchestration`).
 
@@ -14,7 +14,7 @@ keeps them from firing twice.
 | Installer | Scope | Where it writes | Lifetime |
 |-----------|-------|-----------------|----------|
 | **Ephemeral shim** (`paneflow-shim`) | project | `./.claude/settings.local.json` in the launched project | written on agent launch, swept on exit |
-| **Persistent setup** (`paneflow hooks setup`) | user | `~/.claude/settings.json` | written once, survives restarts and Paneflow updates |
+| **Persistent setup** (`paneflow hooks setup`) | user | `~/.claude/settings.json` | written once, survives restarts and PaneFlow updates |
 
 The shim copy references the version-pinned binary under
 `cache_dir()/paneflow/bin/<VERSION>/`; the persistent copy references the
@@ -46,7 +46,7 @@ only mechanism, and it cleans up after itself on exit.
 ```bash
 paneflow hooks setup       # install persistent hooks for every supported agent
 paneflow hooks status      # report per-agent install state
-paneflow hooks uninstall   # remove only Paneflow-managed hooks (no clobber)
+paneflow hooks uninstall   # remove only PaneFlow-managed hooks (no clobber)
 ```
 
 Exit codes mirror `paneflow mcp`: `0` success (or no agent detected), `1` an
@@ -64,7 +64,7 @@ on exit.
 Only **Claude Code** exposes a verified, file-based user-scope notification-hook
 surface, so it is the only agent that receives a persistent install
 (`paneflow hooks setup`). Every other integration is EPHEMERAL: injected by
-the shim when the agent launches inside a Paneflow terminal, removed when it
+the shim when the agent launches inside a PaneFlow terminal, removed when it
 exits. The shim wraps all 16 `TerminalAgent` binaries; whatever has no hook
 surface below still gets the universal lifecycle (`ai.exit` on crash,
 `ai.session_end` on quit) plus the sidebar's "running" row from the process
@@ -81,7 +81,7 @@ scan.
 | OpenCode | TS plugin + `plugin` entry | `~/.config/opencode/plugins/paneflow-status.ts` + `opencode.json` | chat.message, tool.execute.before/after, session.idle, permission.asked |
 | Pi | TS extension (auto-loaded) | `~/.pi/agent/extensions/paneflow-status.ts` | agent_start/end, tool_execution_start/end |
 | Hermes | marked YAML block | `~/.hermes/config.yaml` | pre/post_llm_call, pre/post_tool_call, pre_approval_request |
-| Grok | dedicated merged hook file (wholly Paneflow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse |
+| Grok | dedicated merged hook file (wholly PaneFlow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse |
 
 Safety properties shared by every ephemeral installer: idempotent merge,
 ownership detection by command basename (`paneflow-ai-hook`), orphan sweep on
@@ -90,7 +90,7 @@ a symlinked config dir, an unparseable PRIMARY config (`opencode.json`,
 `~/.hermes/config.yaml` with an existing `hooks:` key), or a `.jsonc`-only
 OpenCode setup all skip the install instead of clobbering. The TS bridges are
 env-gated on `PANEFLOW_SOCKET_PATH`, so they are inert when the CLI runs
-outside a Paneflow terminal.
+outside a PaneFlow terminal.
 
 Deliberately not integrated (no safe surface): **Copilot CLI** (no hooks, no
 JSON stream), **Factory Droid** (dashboard-managed hooks), **Kiro** (hooks
@@ -104,10 +104,10 @@ the "running" row.
 The shim (`paneflow-shim`) wraps each agent so two reliability gaps are closed
 (EP-005 US-017):
 
-- **Orphan guard** (Paneflow is hard-killed, e.g. `kill -9`): the agent must not
+- **Orphan guard** (PaneFlow is hard-killed, e.g. `kill -9`): the agent must not
   survive and keep burning API tokens. kqueue `NOTE_EXIT` is not arm-able from
   the post-`execve` child, so the shim runs a tiny thread that polls
-  `getppid()`; a reparent to `launchd` means Paneflow exited and the agent is
+  `getppid()`; a reparent to `launchd` means PaneFlow exited and the agent is
   `SIGKILL`ed (`spawn_parent_death_guard`, `crates/paneflow-shim/src/exec.rs`).
   The guard is told the child was reaped before its PID can be recycled, so a
   late tick never signals a reused PID.
@@ -119,7 +119,7 @@ The shim (`paneflow-shim`) wraps each agent so two reliability gaps are closed
 Both guards still need a one-time RUNTIME smoke on real hardware:
 
 - **Orphan smoke**: launch an agent in a pane, note its PID (`paneflow ps`),
-  `kill -9` the Paneflow process, then confirm the agent PID is gone within
+  `kill -9` the PaneFlow process, then confirm the agent PID is gone within
   ~1 s (`ps -p <pid>` returns nothing). PASS = no orphan.
 - **Interrupt smoke**: launch an agent, start a turn so the sidebar shows the
   "thinking" loader, press `Ctrl+C` to interrupt mid-turn (the agent stays
