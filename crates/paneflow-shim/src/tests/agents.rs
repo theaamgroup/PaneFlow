@@ -257,6 +257,38 @@ fn opencode_guard_preserves_user_config_and_refuses_unparseable() {
 }
 
 #[test]
+fn merge_opencode_plugin_entry_rejects_non_array_plugin() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join("opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let plugin = dir.join("plugins").join(PANEFLOW_TS_BASENAME);
+
+    for (fixture, kind) in [
+        (r#"{"plugin": "other"}"#, "string"),
+        (r#"{"plugin": {}}"#, "object"),
+    ] {
+        std::fs::write(dir.join("opencode.json"), fixture).unwrap();
+        let Err(error) = OpenCodePluginGuard::install_at(&dir) else {
+            panic!("install_at must return Err when plugin is a {kind}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(kind),
+            "error must name the existing type {kind}, got {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("opencode.json")).unwrap(),
+            fixture,
+            "non-array plugin config must be left byte-identical"
+        );
+        assert!(
+            !plugin.exists(),
+            "failed install must not leave the plugin file behind"
+        );
+    }
+}
+
+#[test]
 fn opencode_guard_skips_jsonc_only_setup() {
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join("opencode");

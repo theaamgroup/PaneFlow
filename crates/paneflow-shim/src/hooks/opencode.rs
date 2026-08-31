@@ -94,7 +94,7 @@ impl OpenCodePluginGuard {
                 Some(content) => serde_json::from_str(&content)
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
             };
-            merge_opencode_plugin_entry(&mut root, plugin_config_path);
+            merge_opencode_plugin_entry(&mut root, plugin_config_path)?;
             write_json_atomic(&config_path, &root)?;
             if created_config {
                 lease.mark_created()?;
@@ -135,7 +135,7 @@ impl OpenCodePluginGuard {
                 return Ok(());
             };
             let before = root.clone();
-            remove_opencode_plugin_entry(&mut root);
+            remove_opencode_plugin_entry(&mut root)?;
             if root == before {
                 return Ok(());
             }
@@ -158,7 +158,7 @@ impl Drop for OpenCodePluginGuard {
             let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
                 return Ok(());
             };
-            remove_opencode_plugin_entry(&mut root);
+            remove_opencode_plugin_entry(&mut root)?;
             if (self.created_config || lease_created_config)
                 && root.as_object().is_some_and(serde_json::Map::is_empty)
             {
@@ -170,27 +170,36 @@ impl Drop for OpenCodePluginGuard {
     }
 }
 
-fn merge_opencode_plugin_entry(root: &mut serde_json::Value, plugin_path: &str) {
+fn merge_opencode_plugin_entry(
+    root: &mut serde_json::Value,
+    plugin_path: &str,
+) -> std::io::Result<()> {
     if !root.is_object() {
         *root = serde_json::json!({});
     }
     let Some(root) = root.as_object_mut() else {
-        return;
+        return Ok(());
     };
     let plugins = root
         .entry("plugin")
         .or_insert_with(|| serde_json::json!([]));
     let Some(plugins) = plugins.as_array_mut() else {
-        return;
+        return Err(non_array_plugin_error(plugins));
     };
     plugins.retain(|entry| !is_paneflow_plugin_entry(entry));
     plugins.push(serde_json::Value::String(plugin_path.to_owned()));
+    Ok(())
 }
 
-fn remove_opencode_plugin_entry(root: &mut serde_json::Value) {
+fn remove_opencode_plugin_entry(root: &mut serde_json::Value) -> std::io::Result<()> {
     let Some(root) = root.as_object_mut() else {
-        return;
+        return Ok(());
     };
+    if let Some(plugin) = root.get("plugin") {
+        if !plugin.is_array() {
+            return Err(non_array_plugin_error(plugin));
+        }
+    }
     if let Some(plugins) = root
         .get_mut("plugin")
         .and_then(|value| value.as_array_mut())
@@ -204,6 +213,22 @@ fn remove_opencode_plugin_entry(root: &mut serde_json::Value) {
     {
         root.remove("plugin");
     }
+    Ok(())
+}
+
+fn non_array_plugin_error(value: &serde_json::Value) -> std::io::Error {
+    let kind = match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    };
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("OpenCode config key `plugin` must be an array, found {kind}"),
+    )
 }
 
 fn is_paneflow_plugin_entry(value: &serde_json::Value) -> bool {
@@ -279,5 +304,24 @@ mod tests {
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
         assert_eq!(root, serde_json::json!({}));
+    }
+
+    #[test]
+    fn merge_opencode_plugin_entry_remove_rejects_non_array() {
+        let mut root = serde_json::json!({"plugin": "other"});
+        let error = remove_opencode_plugin_entry(&mut root).unwrap_err();
+        assert!(
+            error.to_string().contains("string"),
+            "error must name the existing type, got {error}"
+        );
+        assert_eq!(root, serde_json::json!({"plugin": "other"}));
+
+        let mut root = serde_json::json!({"plugin": {}});
+        let error = remove_opencode_plugin_entry(&mut root).unwrap_err();
+        assert!(
+            error.to_string().contains("object"),
+            "error must name the existing type, got {error}"
+        );
+        assert_eq!(root, serde_json::json!({"plugin": {}}));
     }
 }
