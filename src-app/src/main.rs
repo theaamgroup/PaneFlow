@@ -2544,6 +2544,15 @@ fn main() {
         runtime_paths::augment_path_for_gui_launch,
     );
 
+    // Keep the guard alive for the entire process so panic events are flushed
+    // before Paneflow exits. The DSN is intentionally part of the binary.
+    let _sentry_guard = sentry::init((
+        "https://51b669778f3bb5da02eefb8ee8794ccb@o4510421488173056.ingest.us.sentry.io/4512005402656768",
+        sentry::ClientOptions::new()
+            .maybe_release(sentry::release_name!())
+            .send_default_pii(true),
+    ));
+
     // US-003: install the process-wide kill-on-parent-death guard BEFORE any
     // agent CLI or ConPTY spawns so children inherit the Job Object (Windows).
     match agents::parent_guard::install_process_job() {
