@@ -595,11 +595,45 @@ pub fn is_paneflow_worktree_dir(repo_root: &Path, branch: &str, path: &Path) -> 
     path == worktree_dir(repo_root, branch) || path == worktree_dir_hashed(repo_root, branch)
 }
 
+/// Isolated `git` spawn: ignore the opened repo's `core.hooksPath` /
+/// `core.fsmonitor` / `diff.external`, drop inherited git location/SSH env,
+/// and never prompt.
+pub(crate) fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "-c",
+        "core.fsmonitor=",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+    ]);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env_remove("GIT_DIR");
+    cmd.env_remove("GIT_WORK_TREE");
+    cmd.env_remove("GIT_SSH_COMMAND");
+    cmd
+}
+
+/// Append a git subcommand, forcing `--no-ext-diff` on `git diff`.
+pub(crate) fn git_subcommand(cmd: &mut Command, args: &[&str]) {
+    match args {
+        ["diff", rest @ ..] => {
+            cmd.arg("diff").arg("--no-ext-diff").args(rest);
+        }
+        _ => {
+            cmd.args(args);
+        }
+    }
+}
+
 /// Run a git plumbing command and return trimmed stdout, mapping every
 /// failure mode (spawn, timeout, non-zero exit) to a displayable message.
 fn run_git(repo: &Path, args: &[&str], deadline: Duration) -> Result<String, String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).args(args);
+    let mut cmd = git_command();
+    cmd.arg("-C").arg(repo);
+    git_subcommand(&mut cmd, args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     let out = paneflow_process::run_with_timeout(cmd, deadline, STDOUT_CAP)
         .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
@@ -1324,6 +1358,138 @@ mod tests {
         assert!(
             run_git_body.contains(".env(\"GIT_TERMINAL_PROMPT\", \"0\")"),
             "worktree git commands must fail instead of opening an interactive credential prompt"
+        );
+    }
+
+    const GIT_ISOLATION_PRELUDE: &[&str] = &[
+        "core.fsmonitor=",
+        "core.hooksPath=/dev/null",
+        "diff.external=",
+        "GIT_CONFIG_NOSYSTEM",
+        "env_remove(\"GIT_DIR\")",
+        "env_remove(\"GIT_WORK_TREE\")",
+        "env_remove(\"GIT_SSH_COMMAND\")",
+    ];
+
+    fn run_git_fn_source(source: &str) -> &str {
+        let after = source.split_once("fn run_git(").expect("run_git helper").1;
+        after.get(..after.len().min(2000)).unwrap_or(after)
+    }
+
+    fn source_has_git_isolation_prelude(source: &str) -> bool {
+        GIT_ISOLATION_PRELUDE
+            .iter()
+            .all(|needle| source.contains(needle))
+    }
+
+    fn assert_production_git_command_isolated(source: &str) {
+        let run_git_src = run_git_fn_source(source);
+        if source_has_git_isolation_prelude(run_git_src) {
+            return;
+        }
+        assert!(
+            run_git_src.contains("git_command()"),
+            "production git Command must carry the isolation prelude or call git_command()"
+        );
+        assert!(
+            source_has_git_isolation_prelude(source)
+                || source_has_git_isolation_prelude(include_str!("worktree.rs")),
+            "git_command() helper must pass -c core.fsmonitor= -c core.hooksPath=/dev/null \
+             -c diff.external=, GIT_CONFIG_NOSYSTEM, and env_remove GIT_DIR/GIT_WORK_TREE/GIT_SSH_COMMAND"
+        );
+    }
+
+    #[test]
+    fn git_run_disables_repo_hooks() {
+        assert_production_git_command_isolated(include_str!("worktree.rs"));
+        assert_production_git_command_isolated(include_str!("../diff/git.rs"));
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+
+        let marker = tmp.path().join("HOOK_RAN");
+        let marker_script = tmp.path().join("marker.sh");
+        std::fs::write(
+            &marker_script,
+            format!(
+                "#!/bin/sh\nprintf 'ran\\n' >> '{}'\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .expect("marker script");
+        let mut permissions = std::fs::metadata(&marker_script)
+            .expect("marker metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&marker_script, permissions).expect("chmod marker");
+
+        let hooks_dir = repo_root.join("hostile-hooks");
+        std::fs::create_dir_all(&hooks_dir).expect("hooks dir");
+        std::fs::copy(&marker_script, hooks_dir.join("post-checkout")).expect("post-checkout hook");
+        let mut hook_permissions = std::fs::metadata(hooks_dir.join("post-checkout"))
+            .expect("hook metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut hook_permissions, 0o755);
+        std::fs::set_permissions(hooks_dir.join("post-checkout"), hook_permissions)
+            .expect("chmod hook");
+
+        let hooks_dir_s = hooks_dir.to_string_lossy();
+        let marker_script_s = marker_script.to_string_lossy();
+        run_git(
+            &repo_root,
+            &["config", "core.hooksPath", &hooks_dir_s],
+            GIT_DEADLINE,
+        )
+        .expect("config hooksPath");
+        run_git(
+            &repo_root,
+            &["config", "core.fsmonitor", &marker_script_s],
+            GIT_DEADLINE,
+        )
+        .expect("config fsmonitor");
+        run_git(
+            &repo_root,
+            &["config", "diff.external", &marker_script_s],
+            GIT_DEADLINE,
+        )
+        .expect("config diff.external");
+
+        std::fs::write(repo_root.join("README.md"), "changed\n").expect("dirty worktree");
+
+        let listed = list_worktrees(&repo_root).expect("list worktrees");
+        assert!(!listed.is_empty(), "hostile repo must still list");
+        is_clean(&repo_root).expect("git status against hostile hooksPath/fsmonitor");
+        let diff = crate::diff::compute_head_diff(&repo_root);
+        assert!(
+            diff.error.is_none(),
+            "git diff against hostile diff.external: {:?}",
+            diff.error
+        );
+        let branch = "feat/hostile-hooks";
+        let path = worktree_dir(&repo_root, branch);
+        add_worktree(&repo_root, &path, branch, true).expect("worktree add");
+
+        assert!(
+            !marker.exists(),
+            "repo core.hooksPath/core.fsmonitor/diff.external must not run: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
         );
     }
 

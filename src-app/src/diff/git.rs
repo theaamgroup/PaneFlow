@@ -15,7 +15,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::engine::{DiffHunk, compute_hunks};
 
@@ -156,9 +155,9 @@ const GIT_STDOUT_CAP: u64 = 16 * 1024 * 1024;
 /// generic message); the caller renders the diff's "unavailable" state. Never
 /// panics, never blocks past [`GIT_DEADLINE`].
 fn run_git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(dir)
+    let mut cmd = crate::workspace::worktree::git_command();
+    crate::workspace::worktree::git_subcommand(&mut cmd, args);
+    cmd.current_dir(dir)
         // U-035: never block on a credential/helper prompt.
         .env("GIT_TERMINAL_PROMPT", "0");
     // U-035: bound the subprocess (run_with_timeout also nulls stdin + caps
