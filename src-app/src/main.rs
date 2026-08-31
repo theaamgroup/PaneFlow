@@ -1216,6 +1216,9 @@ struct PaneFlowApp {
     files_event_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
     /// Invalidates detached Files tree hydration stages from an older open.
     files_hydrate_generation: u64,
+    /// Per-directory refresh sequence so an older `smol::unblock` listing
+    /// cannot overwrite a newer one that shared the same hydration generation.
+    files_dir_refresh_seq: std::collections::HashMap<std::path::PathBuf, u64>,
     /// Open right-click context menu for a Files-sidebar row (EP-003 US-009),
     /// or `None` when closed. Mutually exclusive with the other popovers.
     files_menu_open: Option<FilesContextMenu>,

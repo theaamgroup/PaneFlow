@@ -1145,13 +1145,9 @@ fn worktree_has_live_process_cwd(
         let Ok(pid_i32) = i32::try_from(pid) else {
             continue;
         };
-        match process_cwd_scan_budget(deadline_at, relevant.contains(&pid))? {
-            ProcessCwdScanBudget::SkipBestEffort => continue,
-            ProcessCwdScanBudget::Proceed => {}
-        }
-        // Resolve session membership before BSDInfo: a protected foreground
-        // member's PID normally differs from its session ID, and unreadable
-        // BSD metadata must not make that member disappear from the gate.
+        // Classify session membership before the deadline skip: an
+        // unclassified protected-session PID must not be treated as
+        // best-effort leftover.
         // SAFETY: getsid is a read-only process query.
         let session_id = unsafe { libc::getsid(pid_i32) };
         if session_id < 0 {
@@ -1172,6 +1168,11 @@ fn worktree_has_live_process_cwd(
         let in_protected_session = protected_session_contains(session_id, &protected_sessions);
         if in_protected_session {
             protected_processes.insert(pid);
+        }
+        match process_cwd_scan_budget(deadline_at, relevant.contains(&pid) || in_protected_session)?
+        {
+            ProcessCwdScanBudget::SkipBestEffort => continue,
+            ProcessCwdScanBudget::Proceed => {}
         }
         match pidinfo::<BSDInfo>(pid_i32, 0) {
             Ok(info) => {
@@ -1680,6 +1681,25 @@ mod tests {
         assert!(
             budget_hits >= 2,
             "enumeration and CWD probes must both consult the deadline, found {budget_hits}"
+        );
+        let first_loop = scan
+            .split("for pid in &pids")
+            .nth(1)
+            .and_then(|rest| rest.split("for pid in parents.keys()").next())
+            .expect("first PID loop");
+        let getsid_at = first_loop
+            .find("libc::getsid")
+            .expect("getsid in first PID loop");
+        let budget_at = first_loop
+            .find("process_cwd_scan_budget(")
+            .expect("budget in first PID loop");
+        assert!(
+            getsid_at < budget_at,
+            "session membership must be classified before the deadline skip"
+        );
+        assert!(
+            first_loop.contains("in_protected_session"),
+            "deadline skip must treat protected-session PIDs as required: {first_loop}"
         );
 
         let expired = Instant::now() - Duration::from_secs(1);

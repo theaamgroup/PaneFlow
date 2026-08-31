@@ -1557,9 +1557,7 @@ pub(crate) fn take_watcher_config_for_apply(
     persist_seq: u64,
 ) -> Option<(PaneFlowConfig, u64)> {
     let taken = pending.lock().unwrap_or_else(|e| e.into_inner()).take();
-    let Some((config, incoming_gen)) = taken else {
-        return None;
-    };
+    let (config, incoming_gen) = taken?;
     if should_apply_watcher_config(in_flight, incoming_gen, last_persist_gen) {
         return Some((config, incoming_gen));
     }
@@ -1966,6 +1964,9 @@ impl PaneFlowApp {
         params: &serde_json::Value,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
+        if self.session_restore.is_some() {
+            return serde_json::json!({"error": "Session restore in progress"});
+        }
         if self.workspaces.len() >= MAX_WORKSPACES {
             return JsonRpcError::invalid_params("Workspace limit reached").into_value();
         }
@@ -2702,7 +2703,10 @@ impl PaneFlowApp {
                         })
                     })
                     .collect();
-                serde_json::json!({"workspaces": list})
+                serde_json::json!({
+                    "workspaces": list,
+                    "restoring": self.session_restore.is_some(),
+                })
             }
             "workspace.current" => {
                 if let Some(ws) = self.active_workspace() {
@@ -2722,6 +2726,9 @@ impl PaneFlowApp {
                 }
             }
             "workspace.create" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 // Cap workspace count to prevent unbounded growth from malicious
                 // or buggy IPC clients (CWE-400). Matches the keyboard-action cap
                 // in `workspace_ops::create_workspace`.
@@ -2818,6 +2825,9 @@ impl PaneFlowApp {
             }
             "workspace.up" => self.handle_workspace_up(params, cx),
             "workspace.select" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 // Deliberately a storage index: `workspace.list` exposes the
                 // same stable indices to automation, independent of how the
                 // sidebar is visually grouped or sorted.
@@ -2833,6 +2843,9 @@ impl PaneFlowApp {
                 }
             }
             "workspace.close" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 if !ipc_orchestration_enabled() {
                     return orchestration_disabled_error(method).into_value();
                 }
@@ -3483,6 +3496,9 @@ impl PaneFlowApp {
                 })
             }
             "workspace.restore_layout" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
                 let Some(layout_value) = params.get("layout") else {
                     return serde_json::json!({"error": "Missing 'layout' parameter"});
                 };

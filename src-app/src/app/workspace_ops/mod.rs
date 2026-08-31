@@ -1368,6 +1368,10 @@ impl PaneFlowApp {
     /// picks what runs in it from the folder's `+` action or the launch pad.
     #[allow(dead_code)]
     pub(crate) fn create_workspace(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_restore.is_some() {
+            self.show_toast("Restoring session", cx);
+            return;
+        }
         if self.workspaces.len() >= MAX_WORKSPACES {
             return;
         }
@@ -1400,6 +1404,10 @@ impl PaneFlowApp {
         paths: &[std::path::PathBuf],
         cx: &mut Context<Self>,
     ) {
+        if self.session_restore.is_some() {
+            self.show_toast("Restoring session", cx);
+            return;
+        }
         let mut opened = false;
         for path in paths {
             if self.workspaces.len() >= MAX_WORKSPACES {
@@ -1454,6 +1462,10 @@ impl PaneFlowApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.session_restore.is_some() {
+            self.show_toast("Restoring session", cx);
+            return;
+        }
         if self.workspaces.len() >= MAX_WORKSPACES {
             return;
         }

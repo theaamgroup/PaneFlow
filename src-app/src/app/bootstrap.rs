@@ -775,6 +775,7 @@ impl PaneFlowApp {
             files_watcher: None,
             files_event_rx: None,
             files_hydrate_generation: 0,
+            files_dir_refresh_seq: std::collections::HashMap::new(),
             files_menu_open: None,
             toast: None,
             toast_queue: std::collections::VecDeque::new(),

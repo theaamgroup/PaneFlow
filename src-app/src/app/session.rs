@@ -269,8 +269,11 @@ impl PaneFlowApp {
     /// the user rather than exiting as if the layout landed.
     pub(crate) fn save_session_blocking(&self, cx: &App) -> bool {
         crate::window_state::save();
+        // Staged restore has not finished rewriting `session.json`. Returning
+        // true here would let Launch Pad / worktree teardown treat the old
+        // file as a durable journal of the in-memory mutation.
         if self.session_restore.is_some() {
-            return true;
+            return false;
         }
         // Cancel any in-flight deferred save: bump the coalescing token so a
         // background task still sleeping in its debounce wakes to a stale `seq`
@@ -300,6 +303,12 @@ impl PaneFlowApp {
     /// Persist then quit. A failed write is toasted and quit is delayed so
     /// the message is visible instead of racing the process exit.
     pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
+        // Keep the on-disk session from the previous launch rather than
+        // clobbering it with a partial in-memory restore, then quit.
+        if self.session_restore.is_some() {
+            cx.quit();
+            return;
+        }
         if self.save_session_blocking(cx) {
             // `build_session_state` journals every closed-record worktree as a
             // pending retirement. Quit immediately after that atomic write:
@@ -2279,6 +2288,24 @@ mod tests {
             .expect("successful-save branch");
         assert!(success.contains("cx.quit()"));
         assert!(!success.contains("spawn_persisted_worktree_teardown"));
+        assert!(
+            quit.contains("if self.session_restore.is_some()") && quit.contains("cx.quit()"),
+            "quit during staged restore must not toast a failed write: {quit}"
+        );
+
+        let blocking = src
+            .split("pub(crate) fn save_session_blocking(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("pub(crate) fn toast_pending_session_corruption(")
+                    .next()
+            })
+            .expect("save_session_blocking body");
+        assert!(
+            blocking.contains("if self.session_restore.is_some()")
+                && blocking.contains("return false;"),
+            "blocking save must fail closed while restore is still staging: {blocking}"
+        );
 
         let failure = quit.split("return;").nth(1).expect("failed-save branch");
         assert!(

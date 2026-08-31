@@ -172,39 +172,85 @@ fn is_path_start_boundary(c: char) -> bool {
     c.is_whitespace() || matches!(c, '(' | '[' | '<' | '\'' | '"' | '`' | '{')
 }
 
+fn is_rooted_path_prefix(s: &str) -> bool {
+    s.starts_with('/') || s.starts_with("~/")
+}
+
+fn has_closing_quote(line_text: &str, after_opener: usize, q: char) -> bool {
+    line_text[after_opener..].chars().any(|c| c == q)
+}
+
+fn push_unique_start(out: &mut Vec<usize>, start: usize) {
+    if !out.contains(&start) {
+        out.push(start);
+    }
+}
+
 fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
-    // First Cmd-hover has no line cache. Probe only the rightmost path-like
-    // token (nearest left boundary, ignoring whitespace inside quotes) so a
-    // dense compiler/log line cannot canonicalize every start-boundary prefix.
-    let mut last_start = 0;
+    // First Cmd-hover has no line cache. Keep a small probe set: the
+    // rightmost rooted start (`/` or `~/`), the quote-aware rightmost
+    // token, and (if a quote never closed) the ordinary whitespace
+    // boundary. That recovers unquoted `Application Support` paths
+    // without canonicalizing every prefix of a dense log line.
+    let mut last_ordinary = 0;
+    let mut last_quoted = 0;
+    let mut last_rooted = None;
     let mut in_quote: Option<char> = None;
+
+    let consider = |pos: usize, last_rooted: &mut Option<usize>| {
+        if pos < ext_start && is_rooted_path_prefix(&line_text[pos..ext_start]) {
+            *last_rooted = Some(pos);
+        }
+    };
+    consider(0, &mut last_rooted);
+
     for (idx, ch) in line_text[..ext_start].char_indices() {
         if let Some(q) = in_quote {
             if ch == q {
                 in_quote = None;
                 let next = idx + ch.len_utf8();
                 if next < ext_start {
-                    last_start = next;
+                    last_quoted = next;
+                    last_ordinary = next;
+                    consider(next, &mut last_rooted);
+                }
+            } else if is_path_start_boundary(ch) {
+                let next = idx + ch.len_utf8();
+                if next < ext_start {
+                    last_ordinary = next;
                 }
             }
             continue;
         }
-        if matches!(ch, '\'' | '"' | '`') {
+        if matches!(ch, '\'' | '"' | '`') && has_closing_quote(line_text, idx + ch.len_utf8(), ch) {
             in_quote = Some(ch);
             let next = idx + ch.len_utf8();
             if next < ext_start {
-                last_start = next;
+                last_quoted = next;
+                last_ordinary = next;
+                consider(next, &mut last_rooted);
             }
             continue;
         }
         if is_path_start_boundary(ch) {
             let next = idx + ch.len_utf8();
             if next < ext_start {
-                last_start = next;
+                last_quoted = next;
+                last_ordinary = next;
+                consider(next, &mut last_rooted);
             }
         }
     }
-    vec![last_start]
+
+    let mut starts = Vec::with_capacity(3);
+    if let Some(pos) = last_rooted {
+        push_unique_start(&mut starts, pos);
+    }
+    push_unique_start(&mut starts, last_quoted);
+    if in_quote.is_some() {
+        push_unique_start(&mut starts, last_ordinary);
+    }
+    starts
 }
 
 fn extension_tail_ok(line_text: &str, ext_end: usize) -> bool {
@@ -1055,6 +1101,64 @@ mod tests {
             "first code-path hover of a dense 200-column line probed {} times (candidates: {probes:?})",
             probes.len()
         );
+    }
+
+    #[test]
+    fn unquoted_absolute_markdown_path_with_spaces_resolves() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = write_md(tmp.path(), "Library/Application Support/foo.md");
+        let abs = canonical_display(&file);
+        let line_text = format!("error: {abs}");
+        let map = ascii_map(&line_text);
+        let (zones, probes) = record_path_probes(|| {
+            detect_file_paths_on_line_mapped(&line_text, line0(), &map, None)
+        });
+        assert_eq!(zones.len(), 1);
+        assert!(
+            zones[0].uri.ends_with("foo.md"),
+            "unquoted spaced absolute path must resolve, got {}",
+            zones[0].uri
+        );
+        assert!(
+            probes
+                .iter()
+                .any(|probe| probe.contains("Application Support")),
+            "probes must include the rooted spaced path, got {probes:?}"
+        );
+        assert!(probes.len() <= 4, "probe cap exceeded: {probes:?}");
+    }
+
+    #[test]
+    fn candidate_starts_for_unquoted_abs_path_include_root() {
+        let line = "/Users/me/Library/Application Support/foo.md";
+        let ext = line.find(".md").expect(".md");
+        let starts = candidate_start_positions(line, ext);
+        assert!(
+            starts.contains(&0),
+            "rooted start must be probed, got {starts:?}"
+        );
+    }
+
+    #[test]
+    fn unmatched_apostrophe_does_not_swallow_code_path_boundary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_md(tmp.path(), "src/main.rs");
+        let line_text = "couldn't open src/main.rs";
+        let map = ascii_map(line_text);
+        let zones = detect_code_paths_on_line_mapped(line_text, line0(), &map, Some(tmp.path()));
+        assert_eq!(zones.len(), 1);
+        assert!(zones[0].uri.ends_with("main.rs"));
+    }
+
+    #[test]
+    fn unmatched_apostrophe_does_not_swallow_markdown_path_boundary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_md(tmp.path(), "notes/todo.md");
+        let line_text = "couldn't open notes/todo.md";
+        let map = ascii_map(line_text);
+        let zones = detect_file_paths_on_line_mapped(line_text, line0(), &map, Some(tmp.path()));
+        assert_eq!(zones.len(), 1);
+        assert!(zones[0].uri.ends_with("todo.md"));
     }
 
     #[test]

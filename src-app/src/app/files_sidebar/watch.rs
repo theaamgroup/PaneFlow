@@ -26,6 +26,10 @@ fn should_apply_files_hydration(
     sidebar_open && current_root == expected_root && current_generation == expected_generation
 }
 
+fn should_apply_files_dir_refresh(current_seq: u64, expected_seq: u64) -> bool {
+    current_seq == expected_seq
+}
+
 /// Blocking re-read of already-cached directories. Call from `smol::unblock`.
 fn reread_cached_dirs(
     root: &Path,
@@ -73,6 +77,7 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         self.files_hydrate_generation = self.files_hydrate_generation.wrapping_add(1);
+        self.files_dir_refresh_seq.clear();
         let generation = self.files_hydrate_generation;
         // Drop the previous watch + channel immediately (cheap), and show a
         // root shell so the panel paints this frame while the reads run.
@@ -202,11 +207,26 @@ impl PaneFlowApp {
             return;
         }
         let generation = self.files_hydrate_generation;
+        let sequenced: Vec<(PathBuf, u64)> = to_reread
+            .iter()
+            .map(|dir| {
+                let seq = self
+                    .files_dir_refresh_seq
+                    .entry(dir.clone())
+                    .and_modify(|seq| *seq = seq.wrapping_add(1))
+                    .or_insert(1);
+                (dir.clone(), *seq)
+            })
+            .collect();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let listings = smol::unblock({
                     let root = root.clone();
-                    move || reread_cached_dirs(&root, to_reread)
+                    let dirs = sequenced
+                        .iter()
+                        .map(|(dir, _)| dir.clone())
+                        .collect::<Vec<_>>();
+                    move || reread_cached_dirs(&root, dirs)
                 })
                 .await;
                 let _ = this.update(cx, |app, cx| {
@@ -220,7 +240,14 @@ impl PaneFlowApp {
                         return;
                     }
                     let mut changed = false;
-                    for (dir, listing) in listings {
+                    for ((dir, seq), listing) in sequenced
+                        .into_iter()
+                        .zip(listings.into_iter().map(|(_, listing)| listing))
+                    {
+                        let current_seq = app.files_dir_refresh_seq.get(&dir).copied().unwrap_or(0);
+                        if !should_apply_files_dir_refresh(current_seq, seq) {
+                            continue;
+                        }
                         if let std::collections::hash_map::Entry::Occupied(mut e) =
                             app.files_tree.children.entry(dir)
                         {
@@ -283,7 +310,7 @@ fn build_files_watcher(
 mod tests {
     use std::path::Path;
 
-    use super::should_apply_files_hydration;
+    use super::{should_apply_files_dir_refresh, should_apply_files_hydration};
     use notify::Watcher;
 
     #[test]
@@ -359,6 +386,14 @@ mod tests {
             body.contains("smol::unblock"),
             "refresh must re-read on a background executor: {body}"
         );
+        assert!(
+            body.contains("files_dir_refresh_seq"),
+            "refresh apply must key listings by per-directory sequence: {body}"
+        );
+        assert!(
+            body.contains("should_apply_files_dir_refresh"),
+            "refresh apply must drop superseded per-directory listings: {body}"
+        );
 
         let root = Path::new("/repo");
         let current_generation = 2;
@@ -375,6 +410,16 @@ mod tests {
             current_generation,
             current_generation,
         ));
+    }
+
+    #[test]
+    fn files_dir_refresh_seq_is_independent_per_directory() {
+        assert!(should_apply_files_dir_refresh(2, 2));
+        assert!(!should_apply_files_dir_refresh(2, 1));
+        assert!(
+            should_apply_files_dir_refresh(1, 1),
+            "a later refresh of A must not drop an in-flight listing for B"
+        );
     }
 
     #[test]
