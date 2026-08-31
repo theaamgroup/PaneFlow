@@ -288,7 +288,6 @@ fn is_transient_read_error(message: &str) -> bool {
         || lower.contains("busy")
         || lower.contains("timeout")
         || lower.contains("timed out")
-        || lower.contains("unreachable")
 }
 
 // ---------------------------------------------------------------------------
@@ -754,10 +753,7 @@ mod tests {
                     match n {
                         1 => Ok(json!({ "text": "", "output_generation": n })),
                         2 => Err("server error -32000: overloaded".to_string()),
-                        3 => Err(
-                            "paneflow IPC unreachable (paneflow did not respond within 10s)"
-                                .to_string(),
-                        ),
+                        3 => Err("server error -32002: Request dispatch timeout".to_string()),
                         _ => Ok(json!({
                             "text": "Build DONE in 3s\n",
                             "output_generation": n
@@ -776,6 +772,67 @@ mod tests {
         };
         let code = wait(&fake, "1", "DONE", Some(2), MatchMode::Single).expect("ok");
         assert_eq!(code, EXIT_OK);
+    }
+
+    /// After a successful baseline, a down instance must fail `wait` immediately
+    /// rather than mapping "unreachable" onto `PaneState::NoMatch` and spinning
+    /// until `--timeout`.
+    struct LaterReadUnreachable {
+        reads: std::cell::Cell<u64>,
+    }
+    impl IpcTransport for LaterReadUnreachable {
+        fn call(&self, method: &str, _params: Value) -> Result<Value, String> {
+            match method {
+                "surface.list" => Ok(json!({
+                    "surfaces": [{ "surface_id": 1u64, "name": "agent", "cmd": "claude", "cwd": "/tmp" }]
+                })),
+                "surface.read" => {
+                    let n = self.reads.get() + 1;
+                    self.reads.set(n);
+                    if n == 1 {
+                        Ok(json!({ "text": "", "output_generation": n }))
+                    } else {
+                        Err(
+                            "paneflow IPC unreachable at /tmp/paneflow.sock (Connection refused); is PaneFlow running?"
+                                .to_string(),
+                        )
+                    }
+                }
+                other => Err(format!("unexpected method {other}")),
+            }
+        }
+    }
+
+    #[test]
+    fn wait_unreachable_after_baseline_is_hard_error() {
+        let unreachable = "paneflow IPC unreachable at /tmp/paneflow.sock (Connection refused); is PaneFlow running?";
+        let re = Regex::new("DONE").unwrap();
+        let baseline = ReadSnapshot {
+            text: String::new(),
+            output_generation: Some(1),
+        };
+        let err = match poll_matches_since(&ReadError(unreachable), 1, &re, Some(&baseline)) {
+            Err(e) => e,
+            Ok(PaneState::NoMatch) => {
+                panic!("unreachable after baseline mapped to PaneState::NoMatch")
+            }
+            Ok(PaneState::Gone) => panic!("unreachable after baseline mapped to PaneState::Gone"),
+            Ok(PaneState::Matched(_)) => {
+                panic!("unreachable after baseline mapped to PaneState::Matched")
+            }
+        };
+        assert!(err.message.contains("unreachable"), "got: {}", err.message);
+
+        let fake = LaterReadUnreachable {
+            reads: std::cell::Cell::new(0),
+        };
+        let err = wait(&fake, "1", "DONE", Some(0), MatchMode::Single).unwrap_err();
+        assert!(err.message.contains("unreachable"), "got: {}", err.message);
+        assert_eq!(
+            fake.reads.get(),
+            2,
+            "must fail on the first post-baseline poll"
+        );
     }
 
     #[test]
