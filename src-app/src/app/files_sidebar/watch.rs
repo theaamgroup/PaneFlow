@@ -289,6 +289,7 @@ mod tests {
     #[test]
     fn files_hydration_ignores_stale_generation() {
         let root = Path::new("/repo");
+        let other = Path::new("/other");
         let current_generation = 2;
         let stale_generation = 1;
         let mut files_tree_generation = current_generation;
@@ -303,6 +304,35 @@ mod tests {
 
         assert_eq!(files_tree_generation, current_generation);
         assert_eq!(files_event_rx_generation, Some(current_generation));
+
+        assert!(should_apply_files_hydration(
+            true,
+            root,
+            root,
+            current_generation,
+            current_generation,
+        ));
+        assert!(!should_apply_files_hydration(
+            false,
+            root,
+            root,
+            current_generation,
+            current_generation,
+        ));
+        assert!(!should_apply_files_hydration(
+            true,
+            other,
+            root,
+            current_generation,
+            current_generation,
+        ));
+        assert!(!should_apply_files_hydration(
+            true,
+            root,
+            root,
+            current_generation,
+            stale_generation,
+        ));
     }
 
     #[test]
