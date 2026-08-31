@@ -264,6 +264,7 @@ mod tests {
             prevent_relaunch(object, sel!(description), ptr::null_mut()),
             NO
         );
+        assert_eq!(handles_scheduled_reminders(object, sel!(description)), YES);
         assert_eq!(
             suppress_scheduled_update_ui(object, sel!(description), ptr::null_mut(), YES,),
             NO
