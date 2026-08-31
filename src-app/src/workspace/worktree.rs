@@ -23,9 +23,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// Wall-clock bound for plumbing git calls (list/status/remove/prune).
+/// Wall-clock bound for plumbing git calls (list/status/remove/prune)
+/// and the destructive-gate process CWD scan.
 const GIT_DEADLINE: Duration = Duration::from_secs(10);
 /// `worktree add` checks out a full tree - give it more room on big repos.
 const ADD_DEADLINE: Duration = Duration::from_secs(120);
@@ -1029,6 +1030,28 @@ enum ProcessCwdProbe {
     Skip,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessCwdScanBudget {
+    Proceed,
+    SkipBestEffort,
+}
+
+/// Remaining work after [`GIT_DEADLINE`]: skip leftover same-UID PIDs, but
+/// fail closed if a descendant or protected-session probe never ran.
+fn process_cwd_scan_budget(
+    deadline_at: Instant,
+    required: bool,
+) -> Result<ProcessCwdScanBudget, String> {
+    if Instant::now() < deadline_at {
+        return Ok(ProcessCwdScanBudget::Proceed);
+    }
+    if required {
+        Err("process CWD scan exceeded its deadline".to_string())
+    } else {
+        Ok(ProcessCwdScanBudget::SkipBestEffort)
+    }
+}
+
 fn process_cwd_probe(
     session_id: i32,
     effective_uid: u32,
@@ -1077,7 +1100,10 @@ fn process_still_requires_cwd_probe(
 /// after the GPUI-side live-terminal sample, and retirement can outlive the
 /// terminal entity entirely, so the background worker independently scans all
 /// processes. CWD failures are fatal only for authenticated session members or
-/// PaneFlow descendants; unrelated inaccessible processes are ignored.
+/// PaneFlow descendants; unrelated inaccessible processes are ignored. The
+/// scan is bounded by [`GIT_DEADLINE`]: leftover best-effort PIDs are skipped
+/// when the budget expires, and the gate fails closed only if a required
+/// descendant or protected-session probe could not complete.
 fn worktree_has_live_process_cwd(
     worktree_path: &Path,
     protected_session_ids: &[u32],
@@ -1087,6 +1113,7 @@ fn worktree_has_live_process_cwd(
     use libproc::processes::{ProcFilter, pids_by_type};
     use std::collections::{HashMap, HashSet};
 
+    let deadline_at = Instant::now() + GIT_DEADLINE;
     let worktree_path = worktree_path
         .canonicalize()
         .map_err(|error| format!("cannot canonicalize worktree before cwd scan: {error}"))?;
@@ -1118,6 +1145,10 @@ fn worktree_has_live_process_cwd(
         let Ok(pid_i32) = i32::try_from(pid) else {
             continue;
         };
+        match process_cwd_scan_budget(deadline_at, relevant.contains(&pid))? {
+            ProcessCwdScanBudget::SkipBestEffort => continue,
+            ProcessCwdScanBudget::Proceed => {}
+        }
         // Resolve session membership before BSDInfo: a protected foreground
         // member's PID normally differs from its session ID, and unreadable
         // BSD metadata must not make that member disappear from the gate.
@@ -1205,6 +1236,10 @@ fn worktree_has_live_process_cwd(
         let is_paneflow_descendant = relevant.contains(&pid_u32);
         let was_in_protected_session = protected_processes.contains(&pid_u32);
         let required = is_paneflow_descendant || was_in_protected_session;
+        match process_cwd_scan_budget(deadline_at, required)? {
+            ProcessCwdScanBudget::SkipBestEffort => continue,
+            ProcessCwdScanBudget::Proceed => {}
+        }
         match process_cwd(pid) {
             Ok(cwd) => {
                 let cwd = match cwd.canonicalize() {
@@ -1618,6 +1653,56 @@ mod tests {
             process_cwd_probe(200, 0, 501, false, &protected_sessions),
             ProcessCwdProbe::Skip,
             "an unrelated different-UID process must not be probed"
+        );
+    }
+
+    #[test]
+    fn worktree_has_live_process_cwd_respects_deadline() {
+        let source = include_str!("worktree.rs");
+        let start = source
+            .find("fn worktree_has_live_process_cwd(")
+            .expect("worktree_has_live_process_cwd");
+        let scan = &source[start..];
+        let scan = scan
+            .split_once("\npub fn prune(")
+            .map(|(body, _)| body)
+            .unwrap_or(scan);
+
+        assert!(
+            scan.contains("GIT_DEADLINE") || scan.contains("deadline"),
+            "process CWD scan must take a deadline argument or reuse a deadline constant"
+        );
+        assert!(
+            scan.contains("Instant::now()") || scan.contains("deadline_at"),
+            "process CWD scan must observe a wall-clock deadline, not only a process-count cap"
+        );
+        let budget_hits = scan.matches("process_cwd_scan_budget(").count();
+        assert!(
+            budget_hits >= 2,
+            "enumeration and CWD probes must both consult the deadline, found {budget_hits}"
+        );
+
+        let expired = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            process_cwd_scan_budget(expired, false),
+            Ok(ProcessCwdScanBudget::SkipBestEffort),
+            "expired budget must skip leftover best-effort PIDs"
+        );
+        let required = process_cwd_scan_budget(expired, true);
+        assert!(
+            required
+                .as_ref()
+                .is_err_and(|error| error.contains("deadline")),
+            "expired budget must fail closed if a required probe never ran: {required:?}"
+        );
+        let live = Instant::now() + GIT_DEADLINE;
+        assert_eq!(
+            process_cwd_scan_budget(live, true),
+            Ok(ProcessCwdScanBudget::Proceed)
+        );
+        assert_eq!(
+            process_cwd_scan_budget(live, false),
+            Ok(ProcessCwdScanBudget::Proceed)
         );
     }
 
