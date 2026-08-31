@@ -1240,6 +1240,12 @@ pub fn prune(repo_root: &Path) -> Result<(), String> {
 /// don't clobber it). Best-effort by design (US-007): a missing source dir or
 /// an unreadable entry yields an empty/partial copy, never an error. Returns
 /// the file names copied.
+///
+/// Symlinks are never followed: `Path::is_file` / `std::fs::copy` would copy
+/// a `.env` that points at `~/.ssh/id_rsa` into the new worktree as a regular
+/// file. Source entries that are not regular files are skipped, and the
+/// destination is created with `O_EXCL` so a planted dest symlink cannot be
+/// written through.
 pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
     let entries = match std::fs::read_dir(src_root) {
         Ok(entries) => entries,
@@ -1272,17 +1278,28 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
         if !name_s.starts_with(".env") {
             continue;
         }
-        if !entry.path().is_file() {
+        let src = entry.path();
+        let src_meta = match std::fs::symlink_metadata(&src) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!("failed to inspect env file {}: {error}", src.display());
+                continue;
+            }
+        };
+        if !src_meta.file_type().is_file() {
             continue;
         }
         let dst = dst_root.join(&name);
-        if dst.exists() {
+        // `Path::exists` follows dest symlinks; a dangling dest link would
+        // look absent and `std::fs::copy` would create the pointee.
+        if std::fs::symlink_metadata(&dst).is_ok() {
             continue;
         }
-        let src = entry.path();
-        match std::fs::copy(&src, &dst) {
-            Ok(_) => copied.push(name_s.into_owned()),
+        match copy_env_file_no_follow(&src, &dst) {
+            Ok(()) => copied.push(name_s.into_owned()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => tracing::warn!(
                 "failed to copy env file from {} to {}: {error}",
                 src.display(),
@@ -1292,6 +1309,27 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
     }
     copied.sort();
     copied
+}
+
+/// Copy `src` onto a newly created regular `dst`. Source is opened with
+/// `O_NOFOLLOW` and dest with `O_EXCL` so neither name can be a symlink.
+fn copy_env_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::{self, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut src_file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(src)?;
+    let permissions = src_file.metadata()?.permissions();
+    let mut dst_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+    io::copy(&mut src_file, &mut dst_file)?;
+    dst_file.set_permissions(permissions)?;
+    dst_file.flush()?;
+    Ok(())
 }
 
 /// Tear down a batch of managed worktrees (blocking - run via `smol::unblock`
@@ -2334,6 +2372,44 @@ mod tests {
         let dst = tempfile::tempdir().expect("dst");
         let copied = copy_env_files(Path::new("/nonexistent-paneflow-test"), dst.path());
         assert!(copied.is_empty());
+    }
+
+    #[test]
+    fn copy_env_files_skips_symlinks() {
+        let src = tempfile::tempdir().expect("src");
+        let dst = tempfile::tempdir().expect("dst");
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("id_rsa");
+        std::fs::write(&secret, "SECRET_KEY").unwrap();
+        std::os::unix::fs::symlink(&secret, src.path().join(".env")).expect("src .env symlink");
+        std::fs::write(src.path().join(".env.local"), "SAFE=1").unwrap();
+
+        let planted = outside.path().join("planted");
+        std::os::unix::fs::symlink(&planted, dst.path().join(".env.remote"))
+            .expect("dangling dest .env symlink");
+        std::fs::write(src.path().join(".env.remote"), "LEAK=1").unwrap();
+
+        let copied = copy_env_files(src.path(), dst.path());
+
+        assert_eq!(copied, vec![".env.local".to_string()]);
+        assert!(
+            !dst.path().join(".env").exists(),
+            "src/.env symlink to a file outside the repo must not materialize dest .env"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join(".env.local")).unwrap(),
+            "SAFE=1"
+        );
+        assert!(
+            !planted.exists(),
+            "copy must not follow a planted dest symlink"
+        );
+        assert!(
+            std::fs::symlink_metadata(dst.path().join(".env.remote"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
