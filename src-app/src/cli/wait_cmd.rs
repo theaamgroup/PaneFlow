@@ -860,6 +860,42 @@ mod tests {
         assert_eq!(new_text_since_baseline(base, shifted), "new DONE\n");
     }
 
+    #[test]
+    fn wait_matches_repeated_sentinel_after_window_slides() {
+        // Baseline already contains DONE; wait must ignore that occurrence.
+        // After the 500-line read window slides, the original sentinel is gone
+        // and an identical DONE is printed at the tail.
+        let sentinel = "Build DONE in 3s";
+        let filler: Vec<String> = (0..READ_WINDOW_LINES as usize - 1)
+            .map(|i| format!("log {i}"))
+            .collect();
+        let baseline = std::iter::once(sentinel.to_string())
+            .chain(filler.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let slid = filler
+            .iter()
+            .cloned()
+            .chain(std::iter::once(sentinel.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            slid.strip_prefix(&baseline).is_none(),
+            "slid window must not be a prefix of the baseline"
+        );
+        assert!(
+            new_text_since_baseline(&baseline, &slid).contains("DONE"),
+            "reprinted sentinel after a window slide must count as new text, got {:?}",
+            new_text_since_baseline(&baseline, &slid)
+        );
+
+        let baseline = Box::leak(baseline.into_boxed_str());
+        let slid = Box::leak(slid.into_boxed_str());
+        let fake = FakeWait::new(vec![Some(baseline), Some(slid)]);
+        let code = wait(&fake, "1", "DONE", Some(0), MatchMode::Single).expect("ok");
+        assert_eq!(code, EXIT_OK);
+    }
+
     // ---------- EP-003 US-007/US-008: idle quiescence rule ----------
 
     const FW: Duration = Duration::from_millis(1000);
