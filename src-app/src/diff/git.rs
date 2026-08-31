@@ -107,47 +107,30 @@ pub struct FileDiffStat {
     pub removed: u32,
 }
 
-/// Parse `git worktree list --porcelain`. Ported from Zed's
-/// `git::repository::parse_worktrees_from_str` (`crates/git/src/repository.rs:363`).
+/// Map the shared `git worktree list --porcelain` parser into Review
+/// [`Worktree`]s. HEAD-less and bare entries are kept (a `worktree ` line is
+/// enough) so this listing matches Launch Pad / managed teardown.
 pub fn parse_worktrees_from_str(raw: &str, main_worktree_path: Option<&Path>) -> Vec<Worktree> {
-    let mut worktrees = Vec::new();
-    let normalized = raw.replace("\r\n", "\n");
-    for entry in normalized.split("\n\n") {
-        let mut path = None;
-        let mut sha = None;
-        let mut ref_name = None;
-        let mut is_bare = false;
-
-        for line in entry.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("worktree ") {
-                path = Some(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("HEAD ") {
-                sha = Some(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("branch ") {
-                ref_name = Some(rest.to_string());
-            } else if line == "bare" {
-                is_bare = true;
-            }
-            // Ignore detached / locked / prunable / etc.
-        }
-
-        if let (Some(path), Some(sha)) = (path, sha) {
-            let path = PathBuf::from(path);
-            let is_main = main_worktree_path.is_some_and(|main| path == main);
-            worktrees.push(Worktree {
-                path,
-                ref_name,
-                sha,
-                is_main,
-                is_bare,
+    crate::workspace::worktree::parse_worktree_porcelain(raw)
+        .into_iter()
+        .map(|entry| {
+            let ref_name = entry.branch.as_ref().map(|branch| {
+                if branch.starts_with("refs/") {
+                    branch.clone()
+                } else {
+                    format!("refs/heads/{branch}")
+                }
             });
-        }
-    }
-    worktrees
+            let is_main = main_worktree_path.is_some_and(|main| entry.path == main);
+            Worktree {
+                path: entry.path,
+                ref_name,
+                sha: entry.sha.unwrap_or_default(),
+                is_main,
+                is_bare: entry.is_bare,
+            }
+        })
+        .collect()
 }
 
 /// Wall-clock deadline for every diff-viewer git call (U-035). Generous enough
@@ -1387,10 +1370,44 @@ pub(crate) mod tests {
         let raw = "worktree /repo/bare\nbare\n\n\
                    worktree /repo/det\nHEAD aaa111\ndetached\n";
         let wts = parse_worktrees_from_str(raw, None);
-        // Bare entry has no HEAD → skipped; detached entry kept with no ref_name.
-        assert_eq!(wts.len(), 1);
+        // A `worktree ` line is enough: HEAD-less/bare entries stay so Launch
+        // Pad and Review list the same checkout set.
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].path, PathBuf::from("/repo/bare"));
+        assert!(wts[0].is_bare);
+        assert_eq!(wts[0].sha, "");
         assert_eq!(wts[0].ref_name, None);
-        assert_eq!(wts[0].sha, "aaa111");
+        assert_eq!(wts[1].path, PathBuf::from("/repo/det"));
+        assert!(!wts[1].is_bare);
+        assert_eq!(wts[1].ref_name, None);
+        assert_eq!(wts[1].sha, "aaa111");
+    }
+
+    #[test]
+    fn porcelain_parsers_agree_on_headless_and_detached() {
+        let raw = "worktree /repo/bare\nbare\n\n\
+                   worktree /repo/det\nHEAD aaa111\ndetached\n\n\
+                   worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n";
+        let workspace_paths: Vec<_> = crate::workspace::worktree::parse_worktree_porcelain(raw)
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        let diff_paths: Vec<_> = parse_worktrees_from_str(raw, None)
+            .into_iter()
+            .map(|worktree| worktree.path)
+            .collect();
+        assert_eq!(
+            workspace_paths, diff_paths,
+            "Launch Pad and Review must list the same worktrees"
+        );
+        assert_eq!(
+            workspace_paths,
+            vec![
+                PathBuf::from("/repo/bare"),
+                PathBuf::from("/repo/det"),
+                PathBuf::from("/repo/main"),
+            ]
+        );
     }
 
     #[test]

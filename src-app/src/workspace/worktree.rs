@@ -518,11 +518,18 @@ pub(crate) fn pending_managed_worktree_from_persisted_record(
 }
 
 /// One entry of `git worktree list --porcelain`.
+///
+/// A `worktree ` line is enough to keep the entry. Bare and other HEAD-less
+/// checkouts are included so Launch Pad collision checks and the Review
+/// Worktree-scope picker list the same set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorktreeEntry {
     pub path: PathBuf,
-    /// `None` for a detached-HEAD worktree.
+    /// `None` for a detached-HEAD or HEAD-less (including bare) worktree.
     pub branch: Option<String>,
+    /// SHA from the porcelain `HEAD` line; `None` when that line is absent.
+    pub sha: Option<String>,
+    pub is_bare: bool,
 }
 
 /// Filesystem-safe directory name for a branch (`feat/x` → `feat-x`).
@@ -660,25 +667,36 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<WorktreeEntry>, String> {
 
 /// Pure porcelain parser (unit-tested). Entries are blank-line separated;
 /// `branch refs/heads/<name>` is absent for detached or bare entries.
+/// A `worktree ` line is enough; HEAD-less and bare entries are kept.
 pub fn parse_worktree_porcelain(stdout: &str) -> Vec<WorktreeEntry> {
     let mut entries = Vec::new();
     let mut path: Option<PathBuf> = None;
     let mut branch: Option<String> = None;
+    let mut sha: Option<String> = None;
+    let mut is_bare = false;
     for line in stdout.lines().chain(std::iter::once("")) {
         if line.is_empty() {
             if let Some(p) = path.take() {
                 entries.push(WorktreeEntry {
                     path: p,
                     branch: branch.take(),
+                    sha: sha.take(),
+                    is_bare,
                 });
             }
             branch = None;
+            sha = None;
+            is_bare = false;
             continue;
         }
         if let Some(p) = line.strip_prefix("worktree ") {
             path = Some(PathBuf::from(p));
         } else if let Some(b) = line.strip_prefix("branch ") {
             branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        } else if let Some(h) = line.strip_prefix("HEAD ") {
+            sha = Some(h.to_string());
+        } else if line == "bare" {
+            is_bare = true;
         }
     }
     entries
@@ -1727,6 +1745,26 @@ mod tests {
         );
         assert_eq!(entries[1].branch.as_deref(), Some("feat/x"));
         assert_eq!(entries[2].branch, None, "detached HEAD has no branch");
+        assert_eq!(
+            entries[2].sha.as_deref(),
+            Some("3333333333333333333333333333333333333333")
+        );
+        assert!(!entries[2].is_bare);
+    }
+
+    #[test]
+    fn parse_worktree_porcelain_keeps_headless_and_bare() {
+        let out = "worktree /repo/bare\nbare\n\nworktree /repo/no-head\nlocked\n";
+        let entries = parse_worktree_porcelain(out);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/repo/bare"));
+        assert!(entries[0].is_bare);
+        assert_eq!(entries[0].sha, None);
+        assert_eq!(entries[0].branch, None);
+        assert_eq!(entries[1].path, PathBuf::from("/repo/no-head"));
+        assert!(!entries[1].is_bare);
+        assert_eq!(entries[1].sha, None);
+        assert_eq!(entries[1].branch, None);
     }
 
     #[test]
