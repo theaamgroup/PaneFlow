@@ -525,24 +525,22 @@ fn worktree_toplevel(dir: &Path) -> PathBuf {
 }
 
 fn list_untracked_limited(dir: &Path, limit: usize) -> (Vec<String>, bool) {
-    list_untracked_limited_timed(dir, limit, GIT_DEADLINE)
+    list_untracked_limited_timed(dir, limit, GIT_DEADLINE).unwrap_or((Vec::new(), false))
 }
 
 fn list_untracked_limited_timed(
     dir: &Path,
     limit: usize,
     deadline: Duration,
-) -> (Vec<String>, bool) {
+) -> Result<(Vec<String>, bool), String> {
     if limit == 0 {
-        return (Vec::new(), false);
+        return Ok((Vec::new(), false));
     }
-    let Ok(out) = run_git_timed(
+    let out = run_git_timed(
         dir,
         &["ls-files", "--others", "--exclude-standard", "-z"],
         deadline,
-    ) else {
-        return (Vec::new(), false);
-    };
+    )?;
     let mut paths = Vec::new();
     let mut truncated = false;
     for raw_path in out.split(|&b| b == 0).filter(|s| !s.is_empty()) {
@@ -555,7 +553,7 @@ fn list_untracked_limited_timed(
         };
         paths.push(path);
     }
-    (paths, truncated)
+    Ok((paths, truncated))
 }
 
 /// Resolve the merge-base SHA between `HEAD` and `base_ref` in `worktree_dir`.
@@ -1141,7 +1139,16 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
             }
         };
         let (untracked, untracked_truncated) =
-            list_untracked_limited_timed(worktree_dir, remaining, deadline);
+            match list_untracked_limited_timed(worktree_dir, remaining, deadline) {
+                Ok(listing) => listing,
+                Err(e) => {
+                    log::warn!("git: untracked listing failed: {e}");
+                    return WorktreeDiff {
+                        files: Vec::new(),
+                        error: Some(e),
+                    };
+                }
+            };
         truncated |= untracked_truncated;
         for path in untracked {
             changes.push((FileChange::Added, path, None));
@@ -1616,6 +1623,38 @@ pub(crate) mod tests {
                 added: 2,
                 removed: 0
             })
+        );
+    }
+
+    #[test]
+    fn list_untracked_limited_timed_propagates_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        std::fs::write(root.join("ghost.txt"), "x\n").unwrap();
+        let err = list_untracked_limited_timed(root, 8, Duration::from_secs(0))
+            .expect_err("zero deadline must fail closed");
+        assert!(
+            err.contains("deadline") || err.contains("timed") || err.contains("timeout"),
+            "untracked listing must surface the timeout, got {err}"
+        );
+    }
+
+    #[test]
+    fn compute_diff_against_surfaces_untracked_scan_timeout() {
+        let src = include_str!("git.rs");
+        let body = src
+            .split("fn compute_diff_against(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn compute_file_stats_against(").next())
+            .expect("compute_diff_against body");
+        assert!(
+            body.contains("list_untracked_limited_timed")
+                && body.contains("untracked listing failed")
+                && body.contains("error: Some(e)"),
+            "an exhausted untracked scan must become WorktreeDiff.error, not an empty listing: {body}"
         );
     }
 

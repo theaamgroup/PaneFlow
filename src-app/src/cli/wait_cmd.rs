@@ -66,6 +66,7 @@ enum PaneState {
 struct ReadSnapshot {
     text: String,
     output_generation: Option<u64>,
+    total_lines: Option<u64>,
 }
 
 /// `paneflow wait --match <sel> --pattern <regex> [--timeout N] [--any|--all]`.
@@ -200,9 +201,11 @@ fn read_snapshot(client: &impl IpcTransport, id: u64) -> Result<Option<ReadSnaps
             }
             let text = result.get("text").and_then(Value::as_str).unwrap_or("");
             let output_generation = result.get("output_generation").and_then(Value::as_u64);
+            let total_lines = result.get("total_lines").and_then(Value::as_u64);
             Ok(Some(ReadSnapshot {
                 text: text.to_string(),
                 output_generation,
+                total_lines,
             }))
         }
         // A down instance is fatal - propagate the "is Paneflow running?" error.
@@ -249,7 +252,12 @@ fn read_matches_since(
         {
             return Ok(PaneState::NoMatch);
         }
-        Some(base) => new_text_since_baseline(&base.text, &current.text),
+        Some(base) => new_text_since_baseline(
+            &base.text,
+            &current.text,
+            base.total_lines,
+            current.total_lines,
+        ),
         None => current.text,
     };
     // Decide on the new text (a regex may span lines), but surface the
@@ -810,6 +818,7 @@ mod tests {
         let baseline = ReadSnapshot {
             text: String::new(),
             output_generation: Some(1),
+            total_lines: None,
         };
         let err = match poll_matches_since(&ReadError(unreachable), 1, &re, Some(&baseline)) {
             Err(e) => e,
@@ -926,13 +935,19 @@ mod tests {
     fn baseline_diff_ignores_prompt_echo_sentinel() {
         let base = "please print RENDER_AUDIT_DONE when complete\n";
         let current = "please print RENDER_AUDIT_DONE when complete\nactual work\n";
-        assert_eq!(new_text_since_baseline(base, current), "actual work\n");
+        assert_eq!(
+            new_text_since_baseline(base, current, None, None),
+            "actual work\n"
+        );
 
         // Last-N window slide: the echo line is still the overlapping suffix of
         // the baseline (prefix of current) and must not rematch.
         let base = "old header\nplease print RENDER_AUDIT_DONE when complete\nstill working\n";
         let shifted = "please print RENDER_AUDIT_DONE when complete\nstill working\nnew DONE\n";
-        assert_eq!(new_text_since_baseline(base, shifted), "new DONE\n");
+        assert_eq!(
+            new_text_since_baseline(base, shifted, None, None),
+            "new DONE\n"
+        );
     }
 
     #[test]
@@ -959,9 +974,9 @@ mod tests {
             "slid window must not be a prefix of the baseline"
         );
         assert!(
-            new_text_since_baseline(&baseline, &slid).contains("DONE"),
+            new_text_since_baseline(&baseline, &slid, None, None).contains("DONE"),
             "reprinted sentinel after a window slide must count as new text, got {:?}",
-            new_text_since_baseline(&baseline, &slid)
+            new_text_since_baseline(&baseline, &slid, None, None)
         );
 
         let baseline = Box::leak(baseline.into_boxed_str());

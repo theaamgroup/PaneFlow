@@ -199,11 +199,11 @@ fn push_unique_start(out: &mut Vec<usize>, start: usize) {
 fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
     // First Cmd-hover has no line cache. Keep a small probe set: the
     // rightmost rooted start (`/` or `~/`), the rightmost unquoted
-    // start whose remainder still contains a space and a `/`, the
-    // quote-aware rightmost token, and (if a quote never closed) the
-    // ordinary whitespace boundary. That recovers unquoted
-    // `Application Support` / `My Notes` paths without canonicalizing
-    // every prefix of a dense log line.
+    // start whose remainder still contains a space (bare `My Notes.md`
+    // or `docs/My Notes/todo.md`), the quote-aware rightmost token,
+    // and (if a quote never closed) the ordinary whitespace boundary.
+    // That recovers unquoted spaced paths without canonicalizing every
+    // prefix of a dense log line.
     let mut last_ordinary = 0;
     let mut last_quoted = 0;
     let mut last_rooted = None;
@@ -219,7 +219,7 @@ fn candidate_start_positions(line_text: &str, ext_start: usize) -> Vec<usize> {
             if is_rooted_path_prefix(s) {
                 *last_rooted = Some(pos);
             }
-            if s.contains('/') && s.chars().any(char::is_whitespace) {
+            if s.chars().any(char::is_whitespace) {
                 *last_spaced = Some(pos);
             }
         };
@@ -1203,6 +1203,40 @@ mod tests {
         assert!(
             starts.contains(&docs_at),
             "spaced relative start must be probed, got {starts:?}"
+        );
+    }
+
+    #[test]
+    fn unquoted_bare_filename_with_spaces_resolves() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_md(tmp.path(), "My Notes.md");
+        let line_text = "open My Notes.md";
+        let map = ascii_map(line_text);
+        let (zones, probes) = record_path_probes(|| {
+            detect_file_paths_on_line_mapped(line_text, line0(), &map, Some(tmp.path()))
+        });
+        assert_eq!(zones.len(), 1);
+        assert!(
+            zones[0].uri.ends_with("My Notes.md") || zones[0].uri.ends_with("My%20Notes.md"),
+            "unquoted spaced bare filename must resolve, got {}",
+            zones[0].uri
+        );
+        assert!(
+            probes.iter().any(|probe| probe.contains("My Notes")),
+            "probes must include the spaced bare filename, got {probes:?}"
+        );
+        assert!(probes.len() <= 4, "probe cap exceeded: {probes:?}");
+    }
+
+    #[test]
+    fn candidate_starts_for_unquoted_bare_filename_include_spaced_prefix() {
+        let line = "open My Notes.md";
+        let ext = line.find(".md").expect(".md");
+        let starts = candidate_start_positions(line, ext);
+        let my_at = line.find("My ").expect("My ");
+        assert!(
+            starts.contains(&my_at),
+            "spaced bare filename start must be probed, got {starts:?}"
         );
     }
 
