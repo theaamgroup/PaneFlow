@@ -3,8 +3,11 @@ name: run_tests
 on:
   push:
     branches: [main]
+  # No base-branch filter on pull_request: #184 lands as a stack of PRs
+  # (each phase based on the previous one), and a stacked PR must get the
+  # same checks as one against main, or its "Done when" is only ever
+  # verified after the base merges.
   pull_request:
-    branches: [main]
 
 # Match Zed's pattern (run_tests.yml): on PR branches, collapse runs on the
 # same ref so a new push cancels any in-flight CI for that branch. On main,
