@@ -51,10 +51,6 @@ pub fn run() -> BuildResult<()> {
         manifest.ghostty_app_version()
     );
 
-    if std::env::var_os("CARGO_FEATURE_LINK").is_none() {
-        return Ok(());
-    }
-
     let target = required_env("TARGET")?;
     let contract = manifest.target_contract(&target)?;
     let action = contract.corrective_action();
@@ -102,7 +98,7 @@ fn emit_ghostty_native_cfg() {
     println!("cargo::rustc-check-cfg=cfg(ghostty_native)");
     // The `-sys` crate only compiles and links the FFI layer under the `link`
     // feature; `paneflow-terminal-ghostty/native` is what turns it on.
-    if std::env::var_os("CARGO_FEATURE_LINK").is_some() && ghostty_native_target() {
+    if ghostty_native_target() {
         println!("cargo::rustc-cfg=ghostty_native");
     }
 }

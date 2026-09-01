@@ -9,7 +9,7 @@ publish = false
 
 [features]
 default = []
-native = ["dep:paneflow-libghostty-sys", "paneflow-libghostty-sys/link"]
+native = ["dep:paneflow-libghostty-sys"]
 
 [dependencies]
 regex = "1"
