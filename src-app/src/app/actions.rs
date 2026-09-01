@@ -44,7 +44,6 @@ actions!(
         TerminalSelectAll,
         ScrollPageUp,
         ScrollPageDown,
-        CloseWindow,
         ToggleZoom,
         LayoutEvenHorizontal,
         LayoutEvenVertical,

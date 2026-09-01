@@ -1921,12 +1921,10 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_ws7))
             .on_action(cx.listener(Self::handle_ws8))
             .on_action(cx.listener(Self::handle_ws9))
-            .on_action(
-                cx.listener(|this: &mut Self, _: &CloseWindow, _window, cx| {
-                    this.quit_after_session_save(cx);
-                }),
-            )
-            // US-012: macOS menu-bar actions. `Quit` mirrors `CloseWindow`;
+            // US-012: macOS menu-bar actions. `Quit` is the single "close the
+            // app" path (issue #184 dropped the `CloseWindow` twin: the
+            // title-bar close emits `TitleBarEvent::CloseRequested`, which
+            // lands on the same `quit_after_session_save`).
             // `About` opens the in-app About dialog. `Copy` / `Paste` /
             // `SelectAll` delegate to the existing terminal clipboard and
             // selection actions so Edit > Copy / Paste / Select All work

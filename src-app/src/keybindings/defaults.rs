@@ -205,6 +205,33 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "jump_next_prompt",
         context: Some("Terminal"),
     },
+    // Terminal recovery (issue #184, ported from upstream v0.10.0). Both
+    // actions existed and worked but had no default and no menu entry, so
+    // they were unreachable until someone bound them by hand in
+    // Settings > Shortcuts.
+    //
+    // `secondary-shift-k` is ⇧⌘K here. kitty (`clear_terminal scroll`) and
+    // Ghostty both clear the scrollback on Shift+K under the platform
+    // modifier; the plain macOS spelling is ⌘K (iTerm2 "Clear Buffer",
+    // Terminal.app, Ghostty), which `MACOS_ONLY_DEFAULTS` adds on top, so
+    // this entry is the ⇧⌘K alias. It cost `open_attention_queue` its
+    // original slot; the queue moved to `secondary-shift-a` because it is
+    // reachable from the UI and clearing the scrollback is not. FR-12 still
+    // holds: Ctrl+K kill-line is BARE ctrl, not ctrl+shift.
+    //
+    // `secondary-shift-r` follows iTerm2's ⌘R "Reset". It is distinct from
+    // `alt-r` (toggle_search_regex, Search context) and `ctrl-alt-r`
+    // (reveal_workspace_in_file_manager).
+    DefaultBinding {
+        key: "secondary-shift-k",
+        action_name: "clear_scroll_history",
+        context: Some("Terminal"),
+    },
+    DefaultBinding {
+        key: "secondary-shift-r",
+        action_name: "reset_terminal",
+        context: Some("Terminal"),
+    },
     DefaultBinding {
         key: "secondary-shift-z",
         action_name: "toggle_zoom",
@@ -431,12 +458,15 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_broadcast_groups",
         context: None,
     },
-    // EP-002 (cli-cockpit): Attention Queue + Launch Pad. `secondary-shift-k`
-    // and `secondary-shift-l` are unclaimed (taken set before this block:
-    // d/e/w/n/q/j/t/z/=/s/a/g/space/b/m) and shadow no shell/readline/TUI
-    // chord (FR-12 - Ctrl+K kill-line is BARE ctrl, not ctrl+shift).
+    // EP-002 (cli-cockpit): Attention Queue + Launch Pad. The queue used to sit
+    // on `secondary-shift-k`, which the terminal convention wants for
+    // `clear_scroll_history` (see that binding above; issue #184); `a` for
+    // "attention" is the mnemonic and shadows no shell/readline/TUI chord,
+    // same FR-12 test as `secondary-shift-l`. Pinned by
+    // `attention_queue_is_cmd_shift_a_and_cmd_shift_k_clears_scrollback` in
+    // `apply.rs`.
     DefaultBinding {
-        key: "secondary-shift-k",
+        key: "secondary-shift-a",
         action_name: "open_attention_queue",
         context: None,
     },
@@ -450,8 +480,9 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
 /// Platform-specific default bindings layered on top of [`DEFAULTS`].
 ///
 /// US-010 binds `cmd-c` / `cmd-v` to terminal copy/paste on macOS so muscle
-/// memory from iTerm2 / Terminal.app / WezTerm works. The existing
-/// `ctrl-shift-c/v` Terminal bindings stay intact - these are purely additive.
+/// memory from iTerm2 / Terminal.app / WezTerm works, and `cmd-k` clears the
+/// scrollback for the same reason (issue #184). The existing `ctrl-shift-c/v`
+/// Terminal bindings stay intact - these are purely additive.
 #[cfg(target_os = "macos")]
 pub(super) const MACOS_ONLY_DEFAULTS: &[DefaultBinding] = &[
     DefaultBinding {
@@ -462,6 +493,14 @@ pub(super) const MACOS_ONLY_DEFAULTS: &[DefaultBinding] = &[
     DefaultBinding {
         key: "cmd-v",
         action_name: "terminal_paste",
+        context: Some("Terminal"),
+    },
+    // ⌘K is the macOS spelling of "clear the scrollback" (iTerm2 "Clear
+    // Buffer", Terminal.app, Ghostty). The `secondary-shift-k` entry in
+    // `DEFAULTS` stays as the ⇧⌘K alias; both reach the same action.
+    DefaultBinding {
+        key: "cmd-k",
+        action_name: "clear_scroll_history",
         context: Some("Terminal"),
     },
     // US-012: Cmd+Q quits the app and populates the "⌘Q" shortcut next to

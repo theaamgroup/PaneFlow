@@ -189,7 +189,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 92 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 90 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -368,9 +368,9 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 92 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 90 actions total (`app/actions.rs`); tables in `keybindings/defaults.rs`.
 
-**`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V` (Terminal) and `Cmd+Q` (quit) on top.
+**`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
 **The macOS menu bar** (`app/bootstrap.rs::install_macos_menu_bar`, `#[cfg(target_os = "macos")]`) is PaneFlow (`About PaneFlow`, `Settings…`, separator, `Quit PaneFlow`) / Edit / Window / Help. `Settings…` dispatches `OpenSettings` into `open_settings_window`. Theme selection lives in Settings → Appearance (and the title-bar profile menu's `Themes…` row, which calls `open_theme_picker` directly); there is no View menu. Every menu action needs BOTH a render-root `.on_action` in `main.rs` and an app-global fallback in `install_macos_menu_action_fallbacks`, or AppKit's `is_action_available` check paints the item permanently greyed while focus sits in a terminal. `OpenSettings` is deliberately absent from `keybindings/registry.rs::ACTIONS` (the `About` / `OpenHelp` precedent) so Settings → Keyboard Shortcuts does not grow permanently `Unassigned` rows, and **`Cmd+,` is deliberately unbound** (issue #105) - `no_default_binds_the_macos_preferences_chord` in `keybindings/apply.rs` fails if any default claims it. The sidebar's "Workspaces" header carries no `+`; New Workspace is `Cmd+Shift+N`, Window ▸ New Workspace, the profile menu, and the empty-state "Open folder" button. The sidebar footer carries **no Settings affordance at all** - the gear that survived issue #105 is gone, so `Settings…` on the menu bar and the title-bar profile menu are the only two entry points.
 
@@ -387,7 +387,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 92 ac
 | `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
 | `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
 | `Cmd+Shift+Z` | Toggle zoom | Global |
-| `Cmd+Shift+J` / `Cmd+Shift+K` | Jump to next waiting agent / open attention queue | Global |
+| `Cmd+Shift+J` / `Cmd+Shift+A` | Jump to next waiting agent / open attention queue | Global |
 | `Cmd+Shift+G` | Diff view | Global |
 | `Cmd+G` / `Cmd+J` | New file tab / new terminal tab (diff dock; `secondary-g` / `secondary-j`) | Global, not Terminal/TextInput/CodeEditor |
 | `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
@@ -400,12 +400,16 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 92 ac
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste (cross-platform layer, still bound) | Terminal |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll page | Terminal, Markdown |
 | `Cmd+Shift+Up` / `Cmd+Shift+Down` | Jump to prev / next shell prompt mark | Terminal |
+| `Cmd+K` / `Cmd+Shift+K` | Clear scrollback (`clear_scroll_history`; `cmd-k` is the macOS layer, `secondary-shift-k` the alias) | Terminal |
+| `Cmd+Shift+R` | Reset terminal (`reset_terminal`, RIS) | Terminal |
 | `Ctrl+Shift+X` / `Ctrl+Shift+F` | Copy mode / find-in-buffer | Terminal |
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Font size up / down / reset | Terminal |
 | `Enter` / `Shift+Enter` / `Esc` | Next / prev / dismiss | Search, MarkdownSearch |
 | `Alt+R` / `Alt+F` | Toggle regex / fleet-wide search | Search |
 | `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
 | `Cmd+Q` | Quit (macOS only) | Global |
+
+The Attention Queue is `Cmd+Shift+A`, not `Cmd+Shift+K` (issue #184): `secondary-shift-k` is the terminal-convention clear-scrollback chord (kitty, Ghostty) and `clear_scroll_history` owns it now, with `cmd-k` as the macOS spelling. `attention_queue_is_cmd_shift_a_and_cmd_shift_k_clears_scrollback` in `keybindings/apply.rs` fails if the queue drifts back, if any of those chords gains a second claimant, or if `close_window` returns (it was removed: closing the window is `Quit`, and the title-bar close button reaches `quit_after_session_save` through `TitleBarEvent::CloseRequested`).
 
 Next-workspace is `ctrl-tab`, not the upstream `secondary-tab` (Cmd+Tab): macOS reserves Cmd+Tab for the application switcher and never delivers it to the app (issue #10; a synthetic Cmd+Tab on 2026-08-27 moved focus to another app while Cmd+1/Cmd+2 through the same path switched workspaces). A test in `keybindings/apply.rs` fails if any default binds `secondary-tab` again.
 
