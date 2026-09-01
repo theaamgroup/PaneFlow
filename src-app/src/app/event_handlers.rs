@@ -1069,9 +1069,47 @@ impl PaneFlowApp {
                 // agent launched without the shim).
                 self.purge_sessions_for_surface(terminal.entity_id().as_u64(), cx);
             }
+            terminal::TerminalEvent::AgentProgressChanged { busy } => {
+                self.apply_terminal_agent_observation(
+                    &terminal,
+                    crate::app::agent_status::progress_lifecycle_event(*busy),
+                    cx,
+                );
+            }
+            terminal::TerminalEvent::AgentAttention { title, body } => {
+                if let Some(event) =
+                    crate::app::agent_status::notification_lifecycle_event(title, body)
+                {
+                    self.apply_terminal_agent_observation(&terminal, event, cx);
+                }
+            }
             // TitleChanged is handled by Pane's subscription
             _ => {}
         }
+    }
+
+    /// An agent said something about itself through its own pane (OSC 9;4
+    /// progress, OSC 9 / 777 notification). Only a pane whose process scan
+    /// already resolved an agent gets to open or move a session this way, so
+    /// a stray escape sequence from a plain shell cannot invent one.
+    fn apply_terminal_agent_observation(
+        &mut self,
+        terminal: &Entity<TerminalView>,
+        event: crate::ai_types::AgentLifecycleEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tool) = terminal.read(cx).terminal.detected_agent else {
+            return;
+        };
+        let surface_id = terminal.entity_id().as_u64();
+        self.apply_observed_agent_state(
+            surface_id,
+            tool,
+            None,
+            event,
+            crate::ai_types::AgentStateSource::Terminal,
+            cx,
+        );
     }
 
     /// US-020 - append a markdown tab to the pane that owns `source_terminal`.

@@ -481,6 +481,30 @@ impl PaneFlowApp {
         )
         .detach();
 
+        // Claude Code session-registry sweep (#184 Phase 3.8). The registry
+        // is the only channel that reports an agent's turn state when a
+        // managed-settings policy has disabled hooks, so this loop is what
+        // keeps the sidebar alive on a locked-down machine. It gates itself
+        // on a pane actually running Claude Code and does no filesystem work
+        // otherwise, so a PaneFlow with no agent in it pays only this timer.
+        cx.spawn(
+            async |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                loop {
+                    smol::Timer::after(crate::app::agent_status::REGISTRY_POLL_INTERVAL).await;
+                    let alive = cx.update(|cx| {
+                        this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                            app.sweep_claude_session_registry(cx);
+                        })
+                    });
+                    // An update that cannot run means the app is gone.
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            },
+        )
+        .detach();
+
         // Config hot-reload is now driven by ConfigWatcher (notify crate, 300ms debounce).
         // Changes are picked up in the 50ms IPC poll loop below via process_config_changes().
 
@@ -816,6 +840,7 @@ impl PaneFlowApp {
             pane_palette_focus: cx.focus_handle(),
             pending_palette_focus: false,
             pending_close: None,
+            claude_registry_seen: Default::default(),
             pending_close_focus: cx.focus_handle(),
             pending_close_focus_claim: false,
             custom_buttons_modal: None,

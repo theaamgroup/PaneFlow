@@ -1125,9 +1125,9 @@ fn surface_matches_workspace(surface: &SurfaceMeta, workspace_id: Option<u64>) -
 /// `(text, returned_line_count, total_lines, eof)`, where `eof` is `true`
 /// once the window reaches the oldest retained line.
 ///
-/// Live `surface.read` paginates on the grid (`extract_scrollback_window`);
-/// this helper stays as the string-level spec the windowed extract is tested
-/// against.
+/// Live `surface.read` paginates on the grid (`extract_scrollback_window`,
+/// history followed by the live screen); this helper stays as the
+/// string-level spec the windowed extract is tested against.
 #[cfg(test)]
 pub(crate) fn paginate_scrollback(
     full: &str,
@@ -2587,7 +2587,13 @@ impl PaneFlowApp {
         }
     }
 
-    fn set_session_surface(&mut self, ws_id: u64, key: u32, sid: u64, cx: &mut Context<Self>) {
+    pub(crate) fn set_session_surface(
+        &mut self,
+        ws_id: u64,
+        key: u32,
+        sid: u64,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == ws_id)
             && let Some(session) = ws.agent_sessions.get_mut(&key)
             && session.surface_id != Some(sid)
@@ -2908,9 +2914,10 @@ impl PaneFlowApp {
                 let output_generation = terminal.read(cx).terminal.output_generation;
                 let sid = terminal.entity_id().as_u64();
                 let read_started = std::time::Instant::now();
-                // Windowed extract: lock only walks the requested lines plus a
-                // trailing-empty probe for total_lines / eof. wait/flow ask for
-                // 500 and must not pay a 4000-line String (issue #29).
+                // Windowed extract of the history followed by the live screen
+                // (#184 Phase 3.6): wait/flow ask for 500 lines and must not
+                // pay a 4000-line String (issue #29), and a full-screen TUI
+                // has no history, so the screen is what a reader gets.
                 let (text, returned, total, eof) = terminal
                     .read(cx)
                     .terminal
@@ -3559,6 +3566,7 @@ impl PaneFlowApp {
                             ai_types::AgentLifecycleEvent::PromptSubmit,
                         ),
                         read_emitted_at(params),
+                        ai_types::AgentStateSource::Hook,
                     ) else {
                         return stale_frame_response();
                     };
@@ -3606,6 +3614,7 @@ impl PaneFlowApp {
                             tool_name: active_tool_name,
                         }),
                         read_emitted_at(params),
+                        ai_types::AgentStateSource::Hook,
                     ) else {
                         return stale_frame_response();
                     };
@@ -3649,6 +3658,7 @@ impl PaneFlowApp {
                             },
                         ),
                         read_emitted_at(params),
+                        ai_types::AgentStateSource::Hook,
                     ) else {
                         return stale_frame_response();
                     };
@@ -3722,6 +3732,7 @@ impl PaneFlowApp {
                             summary: session_summary.clone(),
                         }),
                         read_emitted_at(params),
+                        ai_types::AgentStateSource::Hook,
                     ) else {
                         return stale_frame_response();
                     };
@@ -3841,6 +3852,7 @@ impl PaneFlowApp {
                         tool,
                         transition,
                         read_emitted_at(params),
+                        ai_types::AgentStateSource::Hook,
                     ) else {
                         return stale_frame_response();
                     };
@@ -4037,20 +4049,33 @@ const SYNTHETIC_SESSION_PID_BASE: u32 = 0xFFFF_0000;
 // `&mut Workspace` so the single state-write choke point is unit-testable
 // without a GPUI Workspace (which needs a live layout tree). Every `ai.*`
 // handler passes `&mut ws.agent_sessions`.
-fn upsert_session_state(
+//
+// `source` names the channel that produced the frame (#184 Phase 3.8): the
+// pane's own escape sequences, the Claude Code session registry, or a hook.
+// A lower-ranked source cannot overwrite a fresher higher-ranked one.
+pub(crate) fn upsert_session_state(
     sessions: &mut std::collections::HashMap<u32, AgentSession>,
     pid: Option<u32>,
     tool: crate::agent_launcher::TerminalAgent,
     transition: ai_types::SessionTransition,
     emitted_at_ms: Option<u64>,
+    source: ai_types::AgentStateSource,
 ) -> Option<u32> {
-    upsert_session_state_with_start(sessions, pid, tool, transition, emitted_at_ms, |k| {
-        if k <= i32::MAX as u32 {
-            super::event_handlers::pid_start_time(k)
-        } else {
-            None
-        }
-    })
+    upsert_session_state_with_start(
+        sessions,
+        pid,
+        tool,
+        transition,
+        emitted_at_ms,
+        source,
+        |k| {
+            if k <= i32::MAX as u32 {
+                super::event_handlers::pid_start_time(k)
+            } else {
+                None
+            }
+        },
+    )
 }
 
 fn upsert_session_state_with_start(
@@ -4059,6 +4084,7 @@ fn upsert_session_state_with_start(
     tool: crate::agent_launcher::TerminalAgent,
     transition: ai_types::SessionTransition,
     emitted_at_ms: Option<u64>,
+    source: ai_types::AgentStateSource,
     probe_start: impl Fn(u32) -> Option<u64>,
 ) -> Option<u32> {
     let key = match pid {
@@ -4122,6 +4148,19 @@ fn upsert_session_state_with_start(
     {
         return None;
     }
+    // Source-precedence belt (#184 Phase 3.8), after the recycle check (a
+    // recycled PID is a new session with no source to defer to) and after the
+    // watermark (a stale frame is stale whoever sent it): a lower-ranked
+    // source only takes over once the higher-ranked one has been silent for
+    // `SOURCE_TAKEOVER_SILENCE`.
+    if let Some(existing) = sessions.get(&key)
+        && !ai_types::accepts_source(
+            Some((existing.source, existing.last_activity.elapsed())),
+            source,
+        )
+    {
+        return None;
+    }
     match sessions.get_mut(&key) {
         Some(s) => {
             s.waiting_since = ai_types::next_waiting_since(
@@ -4138,6 +4177,7 @@ fn upsert_session_state_with_start(
             // A legacy unstamped frame must not erase the watermark a stamped
             // one already established.
             s.last_event_at_ms = emitted_at_ms.or(s.last_event_at_ms);
+            s.source = source;
             if s.proc_start.is_none() {
                 s.proc_start = current_start;
             }
@@ -4153,6 +4193,7 @@ fn upsert_session_state_with_start(
             session.last_activity = now;
             session.last_event_at_ms = emitted_at_ms;
             session.proc_start = current_start;
+            session.source = source;
             sessions.insert(key, session);
         }
     }
@@ -5456,6 +5497,7 @@ mod tests {
                 tool_name: Some("Edit".into()),
             }),
             Some(1_000),
+            ai_types::AgentStateSource::Hook,
         )
         .expect("a first frame is never stale");
         assert_eq!(key, 4242);
@@ -5473,6 +5515,7 @@ mod tests {
                 message: Some("Approve edit?".into()),
             }),
             Some(1_100),
+            ai_types::AgentStateSource::Hook,
         )
         .expect("a forward frame applies");
         assert_eq!(key, 4242, "same PID updates in place");
@@ -5494,6 +5537,7 @@ mod tests {
                 TerminalAgent::ClaudeCode,
                 reduce_lifecycle_event(AgentLifecycleEvent::Stop { summary: None }),
                 Some(1_050),
+                ai_types::AgentStateSource::Hook,
             ),
             None
         );
@@ -5510,6 +5554,7 @@ mod tests {
                 summary: Some("done".into()),
             }),
             None,
+            ai_types::AgentStateSource::Hook,
         )
         .expect("an unstamped frame is accepted");
         assert_eq!(
@@ -5532,6 +5577,7 @@ mod tests {
             TerminalAgent::Codex,
             reduce_lifecycle_event(AgentLifecycleEvent::PromptSubmit),
             None,
+            ai_types::AgentStateSource::Hook,
         )
         .expect("a first frame is never stale");
         assert!(
@@ -5562,6 +5608,7 @@ mod tests {
                 tool_name: Some("Bash".into()),
             }),
             None,
+            ai_types::AgentStateSource::Hook,
             |_| Some(2_000),
         )
         .expect("a first frame is never stale");
@@ -5599,6 +5646,7 @@ mod tests {
             TerminalAgent::ClaudeCode,
             reduce_lifecycle_event(AgentLifecycleEvent::PromptSubmit),
             None,
+            ai_types::AgentStateSource::Hook,
             |_| Some(1_000),
         )
         .expect("a first frame is never stale");
@@ -5628,6 +5676,7 @@ mod tests {
             TerminalAgent::Codex,
             reduce_lifecycle_event(AgentLifecycleEvent::PromptSubmit),
             None,
+            ai_types::AgentStateSource::Hook,
             |_| None,
         )
         .expect("a first frame is never stale");
