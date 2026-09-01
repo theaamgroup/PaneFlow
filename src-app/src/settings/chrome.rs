@@ -511,6 +511,15 @@ impl PaneFlowApp {
             .min_h_0()
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                // Same rule as the Shortcuts list's own listener: a release
+                // off the panel never reaches `on_mouse_up`, so a move with
+                // no button held ends the drag instead of scrolling on it.
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    if scrollbar::end_drag(&this.settings_scroll, this.settings_drag.take()) {
+                        cx.notify();
+                    }
+                    return;
+                }
                 if let Some(drag) = this.settings_drag
                     && let Some(off) =
                         scrollbar::drag_offset(&this.settings_scroll, &drag, ev.position.y)
@@ -561,7 +570,7 @@ impl PaneFlowApp {
         // stray click into "every binding erased, no undo". The capture mode
         // and the filter are cleared for the same reason - a page that comes
         // back silently swallowing keystrokes reads as broken.
-        self.shortcut_reset_pending = false;
+        self.set_shortcut_reset_arm(None, cx);
         self.clear_shortcut_filters(cx);
         if section == SettingsSection::Shortcuts {
             // The page is virtualized: its rows have to exist before the first

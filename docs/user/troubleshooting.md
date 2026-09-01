@@ -178,8 +178,18 @@ There is no public issue tracker for this fork. Record findings against
 the defect list in
 [docs/fork/2026-08-25-mac-only-fork-design.md](../fork/2026-08-25-mac-only-fork-design.md).
 
-Useful to capture: macOS version, chip, whether the build is debug or
-release, the git commit, the config file contents, and a log run:
+Start with **Help ▸ System Info…**. It collects the environment block a
+report needs - PaneFlow version, install format, macOS version, chip,
+GPU and renderer, and the terminal engine's version - and its **Copy**
+button puts the whole block on the clipboard, ready to paste. The block
+carries no project path and no environment variables, so it is safe to
+paste as-is.
+
+If the app will not launch far enough to open the dialog, gather the
+same things by hand: the macOS version (`sw_vers`), the chip
+(`sysctl -n machdep.cpu.brand_string`), whether the build is debug or
+release, and the git commit for a local build. Either way, add the
+config file contents and a log run:
 
 ```bash
 RUST_LOG=info cargo run
