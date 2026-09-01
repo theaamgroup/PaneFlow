@@ -159,6 +159,11 @@
       "maximum": 86400,
       "default": 60
     },
+    "crash_reporting": {
+      "type": ["boolean", "null"],
+      "description": "Master switch for Sentry crash reporting. null/true = enabled (default): a GUI launch initializes crash reporting at startup, with send_default_pii disabled so reports never carry default PII. false = crash reporting is never initialized. Read once at startup; requires a restart. CLI invocations (paneflow mcp/hooks/<verb>) never initialize crash reporting regardless of this value.",
+      "default": true
+    },
     "review_enabled": {
       "type": ["boolean", "null"],
       "description": "Master switch for the Review surface. null/true = enabled (default). false = the Review view and its sidebar tab are hidden, the Review keyboard shortcut does nothing, and a session saved in Review mode reopens in the terminal view. With Review off the footer's mode strip disappears entirely.",
