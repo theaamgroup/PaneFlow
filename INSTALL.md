@@ -40,6 +40,11 @@ Toolchain`.
 xcodebuild -downloadComponent MetalToolchain
 ```
 
+**No Zig, ever.** The terminal engine is Ghostty's `libghostty-vt`, but the
+archive is vendored under `native/libghostty/prebuilt/aarch64-apple-darwin/`
+and the `paneflow-libghostty-sys` build script only verifies its hashes and
+links it. `cargo build` never downloads or rebuilds it.
+
 Do not check readiness with `xcrun -f metal`. It prints a path even when
 the toolchain is missing. Compile something instead:
 

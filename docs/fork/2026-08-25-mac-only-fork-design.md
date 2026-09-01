@@ -18,7 +18,7 @@ and dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 |---|---|---|
 | Fork model | Keep all 1035 commits, keep `upstream` remote | `git blame` works, upstream fixes are cherry-pickable, `.git` stays 60M (no history rewrite, since `filter-repo` would destroy the merge base) |
 | Cut depth | Deep. Strip non-Mac `cfg` branches from shared source | Readable Mac-only source. Every future upstream merge conflicts across roughly 80 files. Accepted knowingly. |
-| Ghostty backend | Delete entirely (2026-08-25); **being restored as the only engine by #184** | Verified unreachable on macOS at the time (see Verification below). Upstream v0.10.0 made macOS a Ghostty target; Phase 1 (2026-08-31) vendored the crates and darwin archive unwired, Phase 2 swaps the session host and deletes Alacritty. |
+| Ghostty backend | Deleted 2026-08-25; **restored as the only engine by #184 on 2026-08-31** | Was verified unreachable on macOS at the time (the historical section below). Upstream v0.10.0 made macOS a Ghostty target; Phase 1 vendored the crates and the darwin archive, Phase 2 swapped the session host and deleted Alacritty, keeping this fork's pinned teardown on top (trap 18). |
 | Self-update | **Sparkle 2, added by #119.** The deleted hand-rolled updater stays deleted | Hourly background checks, EdDSA + Developer ID verification, silent download, install on ordinary quit, no forced relaunch or update UI. No minisign and no `src-app/src/update/`. |
 | Telemetry | **Deleted** (post-2c grind). Do not resurrect PostHog | Never set `POSTHOG_API_KEY`. Crate, app module, consent UI, and `build.rs` env directives are gone. |
 | Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server, conductor skill and `PANEFLOW_*` stay. See `docs/fork/2026-08-25-post-2c-plan.md` |
@@ -296,7 +296,30 @@ Found during the inventory. Each one would have cost a debugging session.
     is no longer recognized on macOS, which is fine because nothing in
     this fork can write one.
 
-## Verification: Ghostty is unreachable on macOS
+18. **The close guard does not live in the engine (2026-08-31, #184).**
+    Upstream's Ghostty host tears a pane down from its runtime thread with
+    an unpinned `kill(-pgid, TERM)` → 100 ms → `KILL` on the shell's group.
+    This fork's contract is `TerminalState::Drop` in
+    `src-app/src/terminal/pty_session.rs`: pin every live process group in
+    the PTY session through the app-owned `dup()` of the master
+    (`SpawnedGhostty::master_fd`), SIGTERM them, drop the external guards,
+    *then* `GhosttySession::shutdown()`, close the dup, SIGKILL at 100 ms
+    with start-time pins re-checked. The runtime thread reaps and never
+    signals (`reap_child_bounded`); `terminate_child` survives only for the
+    engine-failure paths. Two things bit while landing it: the guard dups
+    the fd it is handed (`spawn_pty_guard` clears `FD_CLOEXEC` on its own
+    copy), so one app-owned dup is enough; and a synthetic `Cmd+Shift+W`
+    posted with `CGEventPostToPid` did not act on the pane (an AX
+    `frontmost` raise is a no-op on macOS 26, so the window was never key),
+    so the live check of this ladder is the
+    in-suite test `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session`
+    (real `/bin/sh`, background + stopped `sleep`), not a keystroke smoke.
+    The parent-death half (`kill -9` the GUI, guard reaps) does smoke
+    live over IPC.
+
+## Verification: Ghostty is unreachable on macOS (historical - reversed by #184 Phase 2, 2026-08-31)
+
+This section records the 2026-08-25 finding that justified stage 2a. It is no longer true: upstream v0.10.0 runs macOS on libghostty-vt and this fork does too. Kept because the SearchEngine-lift note under it still explains a shape of the code.
 
 Proven on 2026-08-25, then the remaining compiled stubs were deleted in
 leftover-removal bucket 2 (2026-08-26). There is no Ghostty backend, no

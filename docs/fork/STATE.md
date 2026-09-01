@@ -1,8 +1,60 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-08-28, through the five-agent deep
-review and the `v0.1.1` cut. The prior entry covered the workspace-close,
-managed-worktree, and terminal-session hardening in PR #114.
+Living handoff record. Updated 2026-08-31, through #184 Phase 2 (the
+libghostty-vt session-host swap). The prior entry covered the 2026-08-28
+five-agent deep review and the `v0.1.1` cut.
+
+**2026-08-31 #184: libghostty-vt is the only engine.** Landed as a stack of
+PRs (#185 toolchain 1.98.0 + chrome; #186 vendored crates + darwin archive;
+the session-host PR on top). What is now true, and where the evidence is:
+
+- `src-app` has no `alacritty_terminal` and no `polling`; every pane runs
+  on `paneflow-terminal-ghostty` over `portable-pty`. `alacritty_is_absent_from_the_app_crate`
+  guards the word itself. `terminal.backend` is gone from the schema; a
+  leftover key is ignored (`leftover_terminal_backend_key_is_ignored`).
+- The fork's teardown contract survived the swap and is stronger than
+  upstream's: `TerminalState::Drop` pins every process group in the PTY
+  session through an app-owned master dup, SIGTERMs, drops the guards,
+  shuts the runtime down, closes the dup, SIGKILLs at 100 ms; the runtime
+  thread reaps and never signals. Pinned by
+  `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session`
+  (real `/bin/sh`, background + stopped `sleep`) and, live, by the
+  parent-death smoke (`kill -9` the GUI: sleep reaped, every
+  `__paneflow-pty-guard` exits). All 28 survival tests named on #184 are
+  present by name.
+- Test names 2378 -> 2371 across the swap, every removed name accounted
+  for by class on the PR (engine internals, `From<Alac*>` maps, the deleted
+  `mouse.rs` encoder, inverted presence assertions, module moves); the
+  fork's behaviour tests were re-created on the Ghostty display-only
+  session under the same names.
+- Rides along from upstream: Kitty graphics, OSC 9/777 notifications, the
+  OSC 9;4 header chip, `TERM_PROGRAM=ghostty`.
+
+**Traps this pass hit, all worth carrying:**
+
+- **A synthetic chord does not drive a GPUI action.** `CGEventPostToPid`
+  delivers printable keys into a pane's PTY (the smoke proved `a` landed),
+  but `Cmd+Shift+W` posted the same way never closed the pane (the AX
+  `frontmost` raise is a documented no-op on macOS 26, so the window was
+  never key), and the IPC `workspace.close` hands the decision
+  to a modal no keystroke can reach without a window focus move. Live
+  checks of close paths therefore go through in-suite tests with real
+  shells; only the parent-death path smokes live. The earlier memory note
+  that "chords DO fire" was about the app receiving them, not acting.
+- **`grep` in the agent's tool shell is not `/usr/bin/grep`.** It is a
+  function routing to `ugrep --ignore-files`, which skips `target/`; the
+  census scripts under `bash` crawled 19 GB with BSD grep and took 27 min
+  cold. `--exclude-dir=target --exclude-dir=.git` (commit `9c86912c`)
+  made both scripts a 2 s gate with byte-identical reports.
+- **`pull_request: branches: [main]` starves a stacked PR of CI.** The
+  filter is gone (`4c512480`), so each phase's "Done when" can be checked
+  on CI before the next phase starts.
+- **Upstream's `tests/display_terminal.rs` had no macOS arm.** Its 15
+  integration tests had never run on this platform; enabled, all pass.
+- **The vendored archive links with `ld: duplicate symbol '_memset'`**
+  (`compiler_rt.o` vs `libghostty-vt-static_zcu.o`) and carries
+  `minos 13.0`. Benign (ld64 keeps the first; `Info.plist` already floors
+  at 13.0), a property of the archive, left to the rebuild follow-up.
 
 **2026-08-28 deep review.** Five parallel agents (correctness, security,
 architecture, performance, reality-check) swept the whole repo. Findings and
@@ -222,7 +274,8 @@ even though signed release DMGs are also available.
 | 1. File-level deletion | **Done.** Non-macOS packaging, the two upstream-publishing workflows, non-macOS docs and scripts and assets, and upstream's project-management cruft. |
 | Docs correctness pass | **Done.** 36 files, +2124/-2355. Turned out to be more a correctness fix than a platform strip. |
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
-| #184 Phase 1: libghostty returns | **Done 2026-08-31.** `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` and the `aarch64-apple-darwin` archive vendored from upstream v0.10.0 (hashes on the issue) and stripped to macOS; linking unconditional, no stub; **unwired** - Alacritty is still the engine until Phase 2 swaps the session host. |
+| #184 Phase 1: libghostty returns | **Done 2026-08-31.** `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` and the `aarch64-apple-darwin` archive vendored from upstream v0.10.0 (hashes on the issue) and stripped to macOS; linking unconditional, no stub; wired by Phase 2 the same day. |
+| #184 Phase 2: session-host swap | **Done 2026-08-31.** `src-app` runs on libghostty-vt; Alacritty and `polling` deleted; the fork's pinned teardown re-attached on top of upstream's host; Kitty graphics, OSC 9/777, the 9;4 chip and `TERM_PROGRAM=ghostty` ride along. 0.2.0 waits for the signed-DMG smoke. |
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
 | 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
 | Config-schema pass | **Done.** Ghostty and `windows_*_material` dropped from the published schema, Rust struct, and docs. Loader still accepts leftover keys; `"backend":"ghostty"` maps to Alacritty. |
@@ -238,14 +291,14 @@ even though signed release DMGs are also available.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 2079 passed, 0 failed, 2 ignored (2026-08-28)
+cargo test --workspace                       # 2371 names, 0 failed, 2 ignored (2026-08-31, #184 Phase 2)
 cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
 ./target/debug/paneflow --version            # paneflow 0.1.1
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
-                                             # negative control: cfg(unix) 138, cfg(macos) 71
+                                             # negative control: cfg(unix) 151, cfg(macos) 92 (2026-08-31)
 ```
 
 The census negative control is not decoration. Read it every time: a census
