@@ -557,11 +557,19 @@ mod tests {
 
     #[test]
     fn quoted_program_round_trips() {
-        let path = Path::new("/tmp/O'Brien/Pane Flow/paneflow-ai-hook");
-        let command = render_hook_command(path, "Stop");
-        assert_eq!(
-            paneflow_hook_program_token(&command).as_deref(),
-            Some(display_hook_program(path).as_str())
-        );
+        for raw in [
+            "/tmp/O'Brien/Pane Flow/paneflow-ai-hook",
+            "/tmp/backup(1)/paneflow-ai-hook",
+            "/tmp/issue#216/paneflow-ai-hook",
+            "/tmp/~archive/paneflow-ai-hook",
+        ] {
+            let path = Path::new(raw);
+            let command = render_hook_command(path, "Stop");
+            assert_eq!(
+                paneflow_hook_program_token(&command).as_deref(),
+                Some(display_hook_program(path).as_str()),
+                "round-trip failed for {raw}",
+            );
+        }
     }
 }
