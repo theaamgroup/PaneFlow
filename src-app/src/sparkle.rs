@@ -85,7 +85,11 @@ pub(crate) fn start_if_bundled() {
     });
 }
 
-fn bundled_framework_binary(executable: &Path) -> Option<PathBuf> {
+/// Where the packaged Sparkle framework binary sits for `executable`, or
+/// `None` when the executable is not inside a `.app` bundle at all. Shared
+/// with `crate::system_info`, so the install format the System Info report
+/// prints cannot disagree with what the updater bootstrap actually checks.
+pub(crate) fn bundled_framework_binary(executable: &Path) -> Option<PathBuf> {
     let macos = executable.parent()?;
     if macos.file_name()? != "MacOS" {
         return None;
