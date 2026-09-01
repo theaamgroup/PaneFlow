@@ -156,6 +156,39 @@ fn ascii_key_forms(raw_key: &str) -> String {
         .to_lowercase()
 }
 
+/// The one user chord shown for each registry action the user bound.
+///
+/// Issue #218: `apply_keybindings` binds every chord in `shortcuts`, but the
+/// page lists one row per action, so an action a hand-edited `paneflow.json`
+/// maps from several chords needs a single representative. Picking it by
+/// `HashMap` iteration made the displayed chord vary between launches; the
+/// pick is the sorted-first *normalized* chord (raw spelling as tiebreak), so
+/// the same file always shows the same row. `"none"` entries and unregistered
+/// actions are not candidates.
+fn user_key_by_action(user_shortcuts: &HashMap<String, String>) -> HashMap<&str, &str> {
+    let mut candidates: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (key, action_name) in user_shortcuts {
+        if action_name != "none" && ACTIONS.iter().any(|a| a.name == action_name) {
+            candidates
+                .entry(action_name.as_str())
+                .or_default()
+                .push(key.as_str());
+        }
+    }
+    let normalized = |key: &str| {
+        canonical_keystroke(key)
+            .map(|k| k.unparse())
+            .unwrap_or_else(|| key.to_string())
+    };
+    candidates
+        .into_iter()
+        .filter_map(|(action_name, mut keys)| {
+            keys.sort_by(|a, b| normalized(a).cmp(&normalized(b)).then_with(|| a.cmp(b)));
+            keys.first().map(|key| (action_name, *key))
+        })
+        .collect()
+}
+
 /// Compute the effective shortcut list by merging defaults with user overrides.
 ///
 /// User overrides replace default bindings for the same action. Additional user
@@ -163,13 +196,7 @@ fn ascii_key_forms(raw_key: &str) -> String {
 /// `Unassigned` so every action exposed by the keybinding registry is rebindable
 /// from Settings.
 pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<ShortcutEntry> {
-    // Build reverse map: action_name -> user key (last one wins if duplicates).
-    let mut user_by_action: HashMap<&str, &str> = HashMap::new();
-    for (key, action_name) in user_shortcuts {
-        if action_name != "none" && ACTIONS.iter().any(|a| a.name == action_name) {
-            user_by_action.insert(action_name.as_str(), key.as_str());
-        }
-    }
+    let user_by_action = user_key_by_action(user_shortcuts);
 
     let unbound_canonical: HashSet<Keystroke> = user_shortcuts
         .iter()
@@ -253,12 +280,12 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
         });
     }
 
-    // Add user bindings for actions that are not in the default tables.
-    for (key, action_name) in user_shortcuts {
-        if action_name == "none" {
-            continue;
-        }
-        if let Some(meta) = ACTIONS.iter().find(|a| a.name == action_name)
+    // Add user bindings for actions that are not in the default tables. Read
+    // from the same per-action pick as above, in registry order, so neither
+    // the chord shown nor the row order depends on `HashMap` iteration
+    // (issue #218).
+    for meta in ACTIONS {
+        if let Some(key) = user_by_action.get(meta.name).copied()
             && seen_actions.insert(meta.name)
         {
             entries.push(ShortcutEntry {
@@ -767,6 +794,80 @@ mod tests {
             None,
             "a remapped action's abandoned default chord is free"
         );
+    }
+
+    /// Issue #218: `apply_keybindings` binds every user chord, but the page
+    /// shows one row per action. When a hand-edited `paneflow.json` maps
+    /// several chords to one action, the row must show the same chord every
+    /// time - not whichever one `HashMap` iteration happened to yield. The
+    /// pick is the sorted-first normalized chord, so it is also the one a user
+    /// can predict from the file.
+    #[test]
+    fn duplicate_user_bindings_display_the_sorted_first_chord() {
+        // Six chords for one action; the sorted-first normalized chord is
+        // `ctrl-alt-b`. Twelve independently-seeded maps with rotated
+        // insertion order: an arbitrary pick agrees with the expectation on
+        // every one of them with probability (1/6)^12.
+        let chords = [
+            "ctrl-alt-z",
+            "ctrl-alt-m",
+            "ctrl-alt-b",
+            "ctrl-alt-y",
+            "ctrl-alt-q",
+            "ctrl-alt-f",
+        ];
+        let expected = format_keystroke("ctrl-alt-b");
+        for rotation in 0..12 {
+            let mut user = HashMap::new();
+            for i in 0..chords.len() {
+                let chord = chords[(i + rotation) % chords.len()];
+                user.insert(chord.to_string(), "split_horizontally".to_string());
+            }
+
+            // The effective_shortcuts path (a default-table action).
+            let entries = effective_shortcuts(&user);
+            let row = entries
+                .iter()
+                .find(|e| e.action_name == "split_horizontally")
+                .expect("split_horizontally is listed");
+            assert_eq!(
+                row.key, expected,
+                "rotation {rotation}: the row must show the sorted-first chord"
+            );
+            assert_eq!(
+                row.search_key,
+                ascii_key_forms("ctrl-alt-b"),
+                "rotation {rotation}: the search key must follow the same pick"
+            );
+
+            // The user-only-action path reads the same per-action selection.
+            let by_action = user_key_by_action(&user);
+            assert_eq!(
+                by_action.get("split_horizontally").copied(),
+                Some("ctrl-alt-b"),
+                "rotation {rotation}: the per-action pick must be the sorted-first chord"
+            );
+        }
+    }
+
+    #[test]
+    fn user_key_by_action_sorts_by_normalized_chord() {
+        // `+`-spelled and modifier-reordered chords are compared by their
+        // normalized form, so the pick does not depend on how the user wrote
+        // the chord in paneflow.json.
+        let mut user = HashMap::new();
+        user.insert("shift+ctrl+alt+d".to_string(), "close_pane".to_string());
+        user.insert("ctrl-alt-shift-c".to_string(), "close_pane".to_string());
+        user.insert("ctrl-alt-shift-e".to_string(), "close_pane".to_string());
+        assert_eq!(
+            user_key_by_action(&user).get("close_pane").copied(),
+            Some("ctrl-alt-shift-c")
+        );
+        // "none" entries and unregistered actions never become a pick.
+        let mut ignored = HashMap::new();
+        ignored.insert("ctrl-alt-x".to_string(), "none".to_string());
+        ignored.insert("ctrl-alt-w".to_string(), "bogus_action".to_string());
+        assert!(user_key_by_action(&ignored).is_empty());
     }
 
     #[test]
