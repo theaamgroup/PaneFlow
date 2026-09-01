@@ -499,37 +499,65 @@ pub fn subscribe_stream_timed(
 /// from the Paneflow PTY through the agent that launched this process) is
 /// authoritative - it carries the exact path the running instance bound.
 /// Falls back to the current build profile's default (`paneflow-dev` in debug,
-/// `paneflow` in release), mirroring `src-app/src/runtime_paths.rs`.
+/// `paneflow` in release).
+///
+/// LOCKSTEP: this chain re-implements the server's resolution in
+/// `src-app/src/runtime_paths.rs` (`socket_path_spec_from`) without its `dirs`
+/// dependency, and the two must be kept in lockstep or the client dials an
+/// endpoint the server never bound (#217). In particular: the override is read
+/// as `OsString`, so a non-UTF-8 value is honoured like the server's; a
+/// non-UTF-8 `$TMPDIR` is treated as unset and falls through to the cache dir;
+/// and the composed path is rejected against the same `sun_path` ceiling.
 pub fn resolve_socket_path() -> Option<PathBuf> {
-    if let Some(p) = socket_path_from_env(std::env::var("PANEFLOW_SOCKET_PATH").ok().as_deref()) {
-        return Some(p);
+    resolve_socket_path_from(&|key| std::env::var_os(key))
+}
+
+/// [`resolve_socket_path`] over an explicit env lookup, mirroring the server's
+/// `socket_path_spec_from` seam so tests never mutate process-global env.
+#[cfg(unix)]
+fn resolve_socket_path_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(path) = socket_path_from_env(env("PANEFLOW_SOCKET_PATH")) {
+        // Same reject behaviour as the server: an absolute but over-long
+        // override yields no endpoint at all (the server refuses to bind it);
+        // it does NOT fall through to the default path.
+        return check_sun_path_fits(&path).then_some(path);
     }
-    default_socket_path()
+    let path = default_socket_path_from(env)?;
+    check_sun_path_fits(&path).then_some(path)
 }
 
 /// Validate a `PANEFLOW_SOCKET_PATH` value: present and absolute. A relative
-/// path means the env was clobbered or we're outside a Paneflow PTY.
-pub(crate) fn socket_path_from_env(raw: Option<&str>) -> Option<PathBuf> {
+/// path means the env was clobbered or we're outside a Paneflow PTY. Takes the
+/// raw `OsString` (never a UTF-8 `String`) so a non-UTF-8 override is honoured
+/// exactly like the server's `runtime_paths::socket_path_from_env`.
+pub(crate) fn socket_path_from_env(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
     let path = PathBuf::from(raw?);
     path.is_absolute().then_some(path)
 }
 
-/// Best-effort default socket path, mirroring `src-app/src/runtime_paths.rs`.
-/// Uses raw env (no `dirs` dep) to keep the dependency tree minimal.
+/// Best-effort default socket path.
+///
+/// LOCKSTEP with the server's `runtime_dir_from` + path composition in
+/// `src-app/src/runtime_paths.rs`. Uses raw env (no `dirs` dep) to keep the
+/// dependency tree minimal; on macOS `dirs::cache_dir()` is
+/// `$HOME/Library/Caches`, so the last-resort branch is equivalent.
 ///
 /// `$XDG_RUNTIME_DIR` is skipped so a Finder-launched GUI (no XDG) and a
 /// terminal CLI (XDG often set from the login profile) compose the same path.
 /// Chain: `$TMPDIR`, then `$HOME/Library/Caches/run`.
 #[cfg(unix)]
-fn default_socket_path() -> Option<PathBuf> {
-    let runtime = std::env::var_os("TMPDIR")
+fn default_socket_path_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let runtime = env("TMPDIR")
+        // Same acceptance as the server (`runtime_paths::runtime_dir_from`):
+        // a non-UTF-8 value is treated as unset and falls through.
+        .and_then(|raw| raw.into_string().ok())
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         // Last resort, mirroring the server's `dirs::cache_dir().join("run")`
-        // (`runtime_paths::runtime_dir`). Without this, a client whose $TMPDIR
-        // is stripped (launchd/cron) returned None - "IPC unreachable" - even
-        // though the server had bound under the cache dir.
-        .or_else(cache_run_dir)?;
+        // (`runtime_paths::runtime_dir_from`). Without this, a client whose
+        // $TMPDIR is stripped (launchd/cron) returned None - "IPC unreachable"
+        // - even though the server had bound under the cache dir.
+        .or_else(|| cache_run_dir_from(env))?;
     let subdir = if cfg!(debug_assertions) {
         "paneflow-dev"
     } else {
@@ -547,8 +575,24 @@ fn default_socket_path() -> Option<PathBuf> {
 /// fallback without taking a `dirs` dependency (the whole point of this crate's
 /// minimal tree). macOS: `$HOME/Library/Caches`.
 #[cfg(unix)]
-fn cache_run_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library").join("Caches").join("run"))
+fn cache_run_dir_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    env("HOME").map(|h| PathBuf::from(h).join("Library").join("Caches").join("run"))
+}
+
+/// macOS `sockaddr_un.sun_path` is `[c_char; 104]`. LOCKSTEP with
+/// `runtime_paths::MAX_SOCKET_PATH_BYTES` (`src-app/src/runtime_paths.rs`).
+#[cfg(unix)]
+const MAX_SOCKET_PATH_BYTES: usize = 104;
+
+/// LOCKSTEP: same predicate as the server's `runtime_paths::check_sun_path_fits`
+/// (`src-app/src/runtime_paths.rs`). `bind()` needs room for the trailing NUL
+/// inside `sun_path`, so a path of *exactly* the array size does not fit -
+/// reject `>=`, not `>`. The server `log::warn!`s here; this crate has no `log`
+/// dependency, so the client simply reports no endpoint ("IPC unreachable") for
+/// a path the server refused to bind anyway.
+#[cfg(unix)]
+fn check_sun_path_fits(path: &Path) -> bool {
+    path.as_os_str().len() < MAX_SOCKET_PATH_BYTES
 }
 
 #[cfg(test)]
@@ -641,11 +685,17 @@ mod tests {
         // Absolute Unix domain-socket path. Relative paths are rejected.
         let absolute = "/run/user/1000/paneflow/paneflow.sock";
         assert_eq!(
-            socket_path_from_env(Some(absolute)),
+            socket_path_from_env(Some(std::ffi::OsString::from(absolute))),
             Some(PathBuf::from(absolute))
         );
-        assert_eq!(socket_path_from_env(Some("relative/path.sock")), None);
-        assert_eq!(socket_path_from_env(Some("")), None);
+        assert_eq!(
+            socket_path_from_env(Some(std::ffi::OsString::from("relative/path.sock"))),
+            None
+        );
+        assert_eq!(
+            socket_path_from_env(Some(std::ffi::OsString::from(""))),
+            None
+        );
         assert_eq!(socket_path_from_env(None), None);
     }
 
@@ -981,6 +1031,116 @@ mod tests {
         assert!(
             p.ends_with(&cache_suffix),
             "last resort is ~/Library/Caches/run; got {}",
+            p.display()
+        );
+    }
+
+    /// Build a value that is valid on-disk bytes but not UTF-8, to pin the
+    /// server-parity acceptance rules.
+    #[cfg(unix)]
+    fn non_utf8_os(bytes: &[u8]) -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt;
+        let value = std::ffi::OsString::from_vec(bytes.to_vec());
+        assert!(value.to_str().is_none(), "fixture must be non-UTF-8");
+        value
+    }
+
+    /// Env lookup over a fixed `OsString` table, mirroring the server's test
+    /// seam in `src-app/src/runtime_paths.rs`; anything not listed reads as
+    /// unset. Never touches process-global env, so it needs no lock.
+    #[cfg(unix)]
+    fn fake_env(
+        vars: Vec<(&'static str, std::ffi::OsString)>,
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+        move |key| vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_socket_path_override_is_honoured_like_the_server() {
+        let raw = non_utf8_os(b"/tmp/paneflow-\xff.sock");
+        let env = fake_env(vec![
+            ("PANEFLOW_SOCKET_PATH", raw.clone()),
+            ("TMPDIR", std::ffi::OsString::from("/tmp/macos-stub")),
+        ]);
+        assert_eq!(
+            resolve_socket_path_from(&env),
+            Some(PathBuf::from(raw)),
+            "the server reads the override as OsString (runtime_paths.rs:socket_path_from_env); \
+             a non-UTF-8 value must be honoured, not silently ignored"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlong_default_path_returns_none_like_the_server() {
+        // 120-byte TMPDIR → joined path blows past 104. The value never
+        // touches the filesystem, so it does not need to exist.
+        let long = "/".to_string() + &"x".repeat(119);
+        assert_eq!(long.len(), 120);
+        let env = fake_env(vec![("TMPDIR", std::ffi::OsString::from(&long))]);
+        assert!(
+            resolve_socket_path_from(&env).is_none(),
+            "an over-long sun_path must yield no endpoint, matching the server's refusal to bind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sun_path_ceiling_is_exclusive_like_the_server() {
+        // `bind()` needs the trailing NUL inside `sun_path`, so a path of
+        // exactly `MAX_SOCKET_PATH_BYTES` does not fit; one byte shorter does.
+        let at_limit = "/".to_string() + &"x".repeat(MAX_SOCKET_PATH_BYTES - 1);
+        assert_eq!(at_limit.len(), MAX_SOCKET_PATH_BYTES);
+        let env = fake_env(vec![
+            ("PANEFLOW_SOCKET_PATH", std::ffi::OsString::from(&at_limit)),
+            ("TMPDIR", std::ffi::OsString::from("/tmp/macos-stub")),
+        ]);
+        assert!(
+            resolve_socket_path_from(&env).is_none(),
+            "an absolute but over-long override must yield None (not fall through to the \
+             default): the server refuses to bind it"
+        );
+
+        let under_limit = "/".to_string() + &"x".repeat(MAX_SOCKET_PATH_BYTES - 2);
+        assert_eq!(under_limit.len(), MAX_SOCKET_PATH_BYTES - 1);
+        let env = fake_env(vec![(
+            "PANEFLOW_SOCKET_PATH",
+            std::ffi::OsString::from(&under_limit),
+        )]);
+        assert_eq!(
+            resolve_socket_path_from(&env),
+            Some(PathBuf::from(&under_limit))
+        );
+    }
+
+    /// Production wiring: `resolve_socket_path()` itself must read the
+    /// override through `var_os`, not UTF-8 `var` (#217 - the reported
+    /// defect was at the `std::env::var` call site).
+    #[cfg(unix)]
+    #[test]
+    fn resolve_socket_path_reads_the_override_as_os_string() {
+        let g = SocketEnvGuard::take();
+        g.clear();
+        let raw = non_utf8_os(b"/tmp/paneflow-\xff-live.sock");
+        // SAFETY: SOCKET_ENV_LOCK held.
+        unsafe { std::env::set_var("PANEFLOW_SOCKET_PATH", &raw) };
+        assert_eq!(resolve_socket_path(), Some(PathBuf::from(raw)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_tmpdir_falls_back_to_cache_dir_like_the_server() {
+        let g = SocketEnvGuard::take();
+        g.clear();
+        // SAFETY: SOCKET_ENV_LOCK held.
+        unsafe { std::env::set_var("TMPDIR", non_utf8_os(b"/tmp/bad-\xff-dir")) };
+        let p = resolve_socket_path().expect("cache fallback must resolve");
+        let cache_suffix = expected_socket_under(Path::new("Library/Caches/run"));
+        assert!(
+            p.ends_with(&cache_suffix),
+            "a non-UTF-8 $TMPDIR must read as unset, falling back to \
+             ~/Library/Caches/run like the server; got {}",
             p.display()
         );
     }
