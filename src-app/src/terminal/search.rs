@@ -37,12 +37,11 @@ impl TerminalView {
     }
 
     pub(super) fn reset_terminal(&mut self, cx: &mut Context<Self>) {
-        // Automated RIS reset, NOT user input - go through the notifier
-        // directly so US-002's keyboard_input_sent flag is not tripped.
-        // Explicit `&[u8]` cast: pulling `markdown` adds `palette` to the
-        // dep graph, whose blanket `AsRef` impls on byte arrays make a bare
-        // `b"...".as_ref()` ambiguous.
-        self.terminal.write_to_pty_silent(b"\x1bc".as_slice());
+        // An emulator reset, not input: the runtime resets the grid the way
+        // a program-emitted RIS would. Typing `ESC c` at the child (what
+        // this used to do) reaches the shell or agent as keystrokes and
+        // interrupts it instead of resetting the screen.
+        self.terminal.reset_terminal();
         cx.notify();
     }
 
@@ -390,5 +389,24 @@ mod tests {
     fn copy_mode_entry_keeps_scrollback_cursor_when_visible() {
         let cursor = Point::new(-5, 3);
         assert_eq!(copy_mode_entry_cursor(cursor, 10, 24), cursor);
+    }
+
+    /// Shift+Cmd+R resets the emulator; it must never type at the child.
+    #[test]
+    fn reset_terminal_never_writes_to_the_pty() {
+        let src = include_str!("search.rs");
+        let body = src
+            .split("fn reset_terminal(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn font_zoom_step(").next())
+            .expect("reset_terminal body");
+        assert!(
+            !body.contains("write_to_pty"),
+            "reset_terminal must reset the grid, not send ESC c as input"
+        );
+        assert!(
+            body.contains(".reset_terminal()"),
+            "reset_terminal must go through the runtime reset"
+        );
     }
 }

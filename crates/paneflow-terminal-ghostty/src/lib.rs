@@ -70,6 +70,7 @@ pub use model::{
 };
 pub use modes::{Mode, ModeReportState, encode_mode_report};
 pub use osc::{OSC_TERMINATOR_BEL, OSC_TERMINATOR_ST, OscCommand, OscCommandType, OscParser};
+pub use persistence::TranscriptWindow;
 pub use search::{
     MAX_QUERY_LEN, MAX_SEARCH_CELLS, SEARCH_CHUNK_CELLS, SearchChunk, SearchEngine, SearchLine,
 };

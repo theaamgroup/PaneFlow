@@ -603,8 +603,9 @@ impl PendingTerminalInput {
 /// Why an IPC write was not queued (see [`TerminalState::try_write_to_pty`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PtyWriteError {
-    /// The engine rejected the bytes: queue limit reached, runtime gone, or
-    /// the pending-input lock poisoned.
+    /// The engine rejected the bytes: queue limit reached, runtime gone, the
+    /// pending-input lock poisoned, or the spawn failed and there is no child
+    /// to receive them.
     Rejected,
 }
 
@@ -635,6 +636,9 @@ pub struct TerminalState {
     /// Set when a spawn failed, so the surface can report *why* the pane holds
     /// an error instead of a shell.
     backend_failure: Option<TerminalBackendFailureDiagnostics>,
+    /// The one warning [`Self::dispatch_ghostty_input`] logs for input that
+    /// reaches a spawn-failed pane; every later rejection is silent.
+    spawn_failure_input_warned: std::sync::atomic::AtomicBool,
     pub(crate) marks: SharedMarkRing,
     /// Watermark over [`super::marks::MarkRing::prompt_start_seq`], read by
     /// [`Self::take_shell_prompt_ready`].
@@ -971,6 +975,11 @@ impl TerminalState {
     /// can no longer render anything. A fresh display-only session takes its
     /// place so the message is visible, and the diagnostics explain why the
     /// pane holds text instead of a shell.
+    ///
+    /// The replacement is never promoted, so the input queued for the child
+    /// that never came is dropped here and [`Self::dispatch_ghostty_input`]
+    /// refuses everything after: `surface.send_text` gets `sent: false`
+    /// instead of a queue that fills up behind `sent: true`.
     pub(super) fn report_spawn_failure(
         &mut self,
         failure: TerminalBackendFailureDiagnostics,
@@ -978,6 +987,21 @@ impl TerminalState {
     ) {
         self.backend_failure = Some(failure);
         self.ghostty.shutdown();
+        let discarded = {
+            let mut pending = self
+                .pending_input
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let discarded = pending.len();
+            pending.clear();
+            discarded
+        };
+        if discarded > 0 {
+            log::debug!(
+                target: "paneflow::terminal::ghostty",
+                "spawn failure dropped {discarded} input events queued for the child"
+            );
+        }
 
         let size = self.ghostty.requested_window_size();
         let (session, pending, events_rx) =
@@ -1247,6 +1271,7 @@ impl TerminalState {
             ghostty,
             ghostty_events_rx: Some(events_rx),
             backend_failure: None,
+            spawn_failure_input_warned: std::sync::atomic::AtomicBool::new(false),
             marks,
             last_prompt_seq: 0,
             exited: None,
@@ -1573,8 +1598,9 @@ impl TerminalState {
 
     /// Fallible twin of [`Self::write_to_pty`] for IPC. Queuing onto the live
     /// engine or the pre-promotion pending buffer is `Ok`; a queue-limit
-    /// rejection, a gone runtime, or a poisoned pending lock is `Err`, so
-    /// `surface.send_text` never reports `sent: true` while dropping bytes.
+    /// rejection, a gone runtime, a poisoned pending lock, or a pane whose
+    /// spawn failed is `Err`, so `surface.send_text` never reports
+    /// `sent: true` while dropping bytes.
     pub(crate) fn try_write_to_pty(
         &self,
         input: impl Into<Cow<'static, [u8]>>,
@@ -1607,6 +1633,22 @@ impl TerminalState {
         input: PendingTerminalInput,
         user_initiated: bool,
     ) -> BackendInputResult {
+        if let Some(failure) = &self.backend_failure {
+            // The error pane is display-only and never promotes, so queuing
+            // here would accept bytes nothing will ever flush.
+            if !self
+                .spawn_failure_input_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                log::warn!(
+                    target: "paneflow::terminal::ghostty",
+                    "input to a pane whose spawn failed ({} / {}) is rejected: there is no child to receive it",
+                    failure.phase.as_str(),
+                    failure.reason_code
+                );
+            }
+            return BackendInputResult::Rejected;
+        }
         let Ok(mut pending) = self.pending_input.lock() else {
             return BackendInputResult::Rejected;
         };
@@ -1692,9 +1734,19 @@ impl TerminalState {
     }
 
     /// US-002: write to the PTY WITHOUT marking the session user-initiated.
-    /// For automated protocol writes (DEC 1004 focus in/out reports, search
-    /// RIS reset) that must not flip `keyboard_input_sent` - otherwise a
-    /// failed-spawn pane that merely gains focus would wrongly close on exit.
+    /// For automated protocol writes that must not flip `keyboard_input_sent`,
+    /// otherwise a failed-spawn pane that merely gains focus would wrongly
+    /// close on exit. Focus reports go through [`Self::write_ghostty_focus`]
+    /// and the Shift+Cmd+R reset no longer types at the child, so no
+    /// production path uses this today; it stays as the entry point for the
+    /// next protocol write.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "protocol-write entry point; the reset stopped typing at the child"
+        )
+    )]
     pub fn write_to_pty_silent(&self, input: impl Into<Cow<'static, [u8]>>) {
         self.notify_or_buffer(input.into());
     }
@@ -1728,7 +1780,7 @@ impl TerminalState {
     /// `enforce_closed_pane_scrollback_budget` strips most of a full extract
     /// back to 2 MiB milliseconds later anyway.
     pub(crate) fn extract_scrollback_capped(&self, lines: usize) -> Option<String> {
-        let (mut result, returned, _, _) = self.extract_scrollback_window(lines, 0);
+        let (mut result, returned, _, _) = self.extract_scrollback_window(lines, 0)?;
         if returned == 0 {
             return None;
         }
@@ -1746,33 +1798,36 @@ impl TerminalState {
     /// is painting (#184 Phase 3.6: a full-screen TUI has no history at all,
     /// so without the screen a reader saw nothing). `offset` skips lines
     /// from the newest end; `lines` is the window size. `total` is the row
-    /// count (trailing empty rows trimmed, capped at
-    /// [`crate::limits::MAX_SCROLLBACK_EXTRACT_LINES`]).
-    /// Returns `(text, returned, total, eof)`.
+    /// count (trailing empty rows trimmed; the history part is capped at
+    /// [`crate::limits::MAX_SCROLLBACK_EXTRACT_LINES`]). The window is cut
+    /// in the engine (`DisplayTerminal::transcript_window`), which reads the
+    /// screen plus the `lines` rows the window covers and nothing else.
+    ///
+    /// Returns `Some((text, returned, total, eof))`, or `None` when the
+    /// runtime did not answer (mailbox full or closed, no reply within a
+    /// second) or the engine failed the read. `None` is not a blank pane:
+    /// `surface.read` turns it into an error so `wait`/`flow` do not settle
+    /// on a wedged runtime as if it had gone quiet.
     pub(crate) fn extract_scrollback_window(
         &self,
         lines: usize,
         offset: usize,
-    ) -> (String, usize, usize, bool) {
-        let Some(transcript) = self.ghostty.transcript() else {
-            return (String::new(), 0, 0, true);
+    ) -> Option<(String, usize, usize, bool)> {
+        let reason = match self.ghostty.transcript(lines, offset) {
+            Some(Ok(window)) => {
+                return Some((window.text, window.returned, window.total, window.eof));
+            }
+            Some(Err(error)) => format!("engine error: {error}"),
+            None => "the runtime did not answer (mailbox full or closed, or no reply within 1 s)"
+                .to_owned(),
         };
-        let history = transcript.history.unwrap_or_default();
-        let screen = transcript.screen.unwrap_or_default();
-        let rows: Vec<&str> = history.lines().chain(screen.lines()).collect();
-        let mut last = rows.len();
-        while last > 0 && rows[last - 1].trim().is_empty() {
-            last -= 1;
-        }
-        let start = last.saturating_sub(crate::limits::MAX_SCROLLBACK_EXTRACT_LINES);
-        let total = last - start;
-        let end = total.saturating_sub(offset);
-        if end == 0 {
-            return (String::new(), 0, total, true);
-        }
-        let win_start = end.saturating_sub(lines);
-        let window = &rows[start + win_start..start + end];
-        (window.join("\n"), window.len(), total, win_start == 0)
+        log::warn!(
+            target: "paneflow::terminal::ghostty",
+            "transcript of surface {:?} (child pid {}) unavailable: {reason}",
+            self.title,
+            self.child_pid
+        );
+        None
     }
 
     /// The screen half of a read on its own, trailing blank rows trimmed.
@@ -1782,7 +1837,15 @@ impl TerminalState {
     /// pin what that read appends after the history.
     #[cfg(test)]
     pub fn screen_text(&self) -> Option<String> {
-        self.ghostty.transcript()?.screen
+        self.ghostty.screen_text()
+    }
+
+    /// Reset the emulator the way a program-emitted RIS (`ESC c`) does:
+    /// modes, screen, scrollback and tab stops go. This runs against the grid
+    /// in the runtime and writes nothing to the PTY, so the program in the
+    /// pane is not interrupted (Shift+Cmd+R used to type `ESC c` at it).
+    pub(crate) fn reset_terminal(&self) {
+        self.ghostty.reset();
     }
 
     /// Capture the screen and its recent history as VT sequences.
@@ -2216,22 +2279,35 @@ fn child_pid_start_time(pid: u32) -> Option<u64> {
     )
 }
 
-/// Cap `result` at `max_chars` bytes, cutting on a UTF-8 char boundary, then
-/// trim to the last complete line and strip any partial ANSI escape at the cut.
+/// Cap `result` at `max_chars` bytes keeping the NEWEST text: the cut lands
+/// on a UTF-8 char boundary and then moves forward to the next line start, so
+/// the kept text begins on a complete row (one oversized line with no newline
+/// is dropped whole). Mirrors the engine's `cap_complete_lines`, because
+/// [`TerminalState::extract_scrollback_capped`] hands this the tail of the
+/// transcript for undo to replay - cutting the head kept the oldest rows and
+/// dropped the screen.
 ///
-/// `String::truncate` panics if the byte index is not on a char boundary, and
+/// `String::drain` panics if the byte index is not on a char boundary, and
 /// scrollback is real grid text (CJK, emoji, box drawing are routine agent
-/// output), so the index is floored to a boundary first.
+/// output), so the index is raised to a boundary first. The tail is the
+/// original tail, so the partial-escape strip is only a guard against grid
+/// text that already ended mid-sequence.
 pub(super) fn cap_scrollback_at_char_boundary(result: &mut String, max_chars: usize) {
-    if result.len() > max_chars {
-        let boundary = result.floor_char_boundary(max_chars);
-        result.truncate(boundary);
-        // `rfind('\n')` always returns a char boundary.
-        if let Some(last_newline) = result.rfind('\n') {
-            result.truncate(last_newline);
-        }
-        strip_partial_ansi_tail(result);
+    if result.len() <= max_chars {
+        return;
     }
+    let mut start = result.ceil_char_boundary(result.len() - max_chars);
+    if start > 0 && result.as_bytes()[start - 1] != b'\n' {
+        match result[start..].find('\n') {
+            Some(newline) => start += newline + 1,
+            None => {
+                result.clear();
+                return;
+            }
+        }
+    }
+    result.drain(..start);
+    strip_partial_ansi_tail(result);
 }
 
 /// Strip any partial ANSI escape sequence from the end of a truncated string.
@@ -3825,7 +3901,9 @@ mod tests {
         );
         assert!(!eof, "a 5-line tail of a larger buffer is not eof");
 
-        let (text, got_returned, got_total, got_eof) = state.extract_scrollback_window(5, 0);
+        let (text, got_returned, got_total, got_eof) = state
+            .extract_scrollback_window(5, 0)
+            .expect("the runtime answers");
         assert_eq!(text, expected);
         assert_eq!(got_returned, returned);
         assert_eq!(got_total, total);
@@ -3887,8 +3965,9 @@ mod tests {
             "fixture: the history extract stops at the viewport"
         );
 
-        let (text, returned, total, eof) =
-            state.extract_scrollback_window(crate::limits::MAX_SCROLLBACK_EXTRACT_LINES, 0);
+        let (text, returned, total, eof) = state
+            .extract_scrollback_window(crate::limits::MAX_SCROLLBACK_EXTRACT_LINES, 0)
+            .expect("the runtime answers");
         let expected = format!("{history}\n{screen}");
         assert_eq!(text, expected);
         assert_eq!(returned, expected.lines().count());
@@ -3896,7 +3975,9 @@ mod tests {
         assert!(eof);
 
         // A one-row window is the bottom screen row, not the newest history row.
-        let (tail, ..) = state.extract_scrollback_window(1, 0);
+        let (tail, ..) = state
+            .extract_scrollback_window(1, 0)
+            .expect("the runtime answers");
         assert_eq!(tail, screen.rsplit('\n').next().unwrap());
     }
 
@@ -3907,7 +3988,7 @@ mod tests {
         for &(lines, offset) in &[(5, 0), (5, 5), (10, 20), (3, 40), (200, 0)] {
             let expected = crate::app::ipc_handler::paginate_scrollback(&full, lines, offset);
             let got = state.extract_scrollback_window(lines, offset);
-            assert_eq!(got, expected, "lines={lines} offset={offset}");
+            assert_eq!(got, Some(expected), "lines={lines} offset={offset}");
         }
     }
 
@@ -3916,28 +3997,197 @@ mod tests {
         let state = TerminalState::new_display_only(24, 80);
         assert_eq!(
             state.extract_scrollback_window(200, 0),
-            (String::new(), 0, 0, true)
+            Some((String::new(), 0, 0, true))
+        );
+    }
+
+    /// A runtime that cannot answer is not a blank pane: `surface.read`
+    /// used to report `{"text":"","total_lines":0,"eof":true}` for it, and
+    /// `paneflow wait` / `flow` settled on that as "the agent went quiet".
+    #[test]
+    fn extract_scrollback_window_is_none_when_the_runtime_does_not_answer() {
+        let state = seed_numbered_history(4, 40, 10);
+        assert!(state.extract_scrollback_window(200, 0).is_some());
+
+        state.ghostty.shutdown();
+
+        assert_eq!(
+            state.extract_scrollback_window(200, 0),
+            None,
+            "no answer must not read as an empty transcript at eof"
+        );
+        assert_eq!(
+            state.extract_scrollback_capped(100),
+            None,
+            "the undo capture maps the same failure to nothing, not to an empty record"
+        );
+    }
+
+    /// Issue #83 hands the cap the NEWEST rows; the cap must keep them. A
+    /// fixture wide enough that its rows cross `MAX_CHARS` is the only way
+    /// into the cap branch, so this one is 1200 multibyte rows.
+    #[test]
+    fn extract_scrollback_capped_keeps_the_newest_rows_when_the_char_cap_engages() {
+        let state = TerminalState::new_display_only(4, 240);
+        let row = |i: usize| format!("{i:05}{}", "中".repeat(115));
+        let mut chunk = String::new();
+        for i in 0..1200 {
+            chunk.push_str(&row(i));
+            chunk.push('\n');
+            if (i + 1) % 100 == 0 {
+                state.write_output(chunk.as_bytes());
+                chunk.clear();
+            }
+        }
+
+        let (full, returned, _, _) = state
+            .extract_scrollback_window(1200, 0)
+            .expect("the runtime answers");
+        assert_eq!(returned, 1200, "fixture: every row is retained");
+        assert!(
+            full.len() > crate::limits::MAX_CHARS,
+            "fixture must cross MAX_CHARS; len={}",
+            full.len()
+        );
+        let screen = state
+            .screen_text()
+            .expect("the newest rows are on the screen");
+
+        let capped = state.extract_scrollback_capped(1200).expect("history");
+
+        assert!(capped.len() <= crate::limits::MAX_CHARS);
+        assert!(
+            full.ends_with(&capped),
+            "undo replays the tail, so the rows kept must be the NEWEST ones"
+        );
+        assert!(
+            capped.ends_with(&screen),
+            "the screen when the pane closed is the newest text and must survive the cap"
+        );
+        assert!(
+            capped.starts_with(&row(1200 - capped.lines().count())),
+            "the kept text starts on a complete row"
+        );
+    }
+
+    /// Shift+Cmd+R resets the emulator. It used to type `ESC c` at the
+    /// child, which interrupts a running agent instead of resetting the
+    /// screen; now the grid resets and nothing is written towards the PTY.
+    #[test]
+    fn reset_terminal_resets_the_emulator_without_writing_to_the_pty() {
+        let state = seed_numbered_history(4, 40, 10);
+        state.write_output(b"\x1b[?2004h");
+        let (before, ..) = state
+            .extract_scrollback_window(200, 0)
+            .expect("the runtime answers");
+        assert!(before.contains("line-0009"));
+        assert!(
+            state
+                .session_backend()
+                .modes()
+                .contains(Modes::BRACKETED_PASTE),
+            "fixture: a negotiated mode"
+        );
+
+        state.reset_terminal();
+
+        assert_eq!(
+            state.extract_scrollback_window(200, 0),
+            Some((String::new(), 0, 0, true)),
+            "RIS drops the history and the screen"
+        );
+        assert!(
+            !state
+                .session_backend()
+                .modes()
+                .contains(Modes::BRACKETED_PASTE),
+            "RIS drops negotiated modes"
+        );
+        assert!(
+            state
+                .pending_input
+                .lock()
+                .expect("pending_input lock")
+                .is_empty(),
+            "the reset is not queued as input for the child"
+        );
+        assert_eq!(state.ghostty.queued_input_bytes(), 0);
+        assert!(
+            !state
+                .keyboard_input_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the reset is not user input"
         );
     }
 
     /// U-001: a multibyte codepoint straddling the byte cap must not panic
-    /// `String::truncate`; the cut lands on a char boundary at or below the cap.
+    /// the cut; it lands on a char boundary and then on a complete line.
     #[test]
     fn cap_scrollback_truncates_on_char_boundary() {
         const MAX: usize = 100;
         // 99 ASCII bytes, then a 4-byte '🦀' occupying byte indices 99..103, so
-        // byte index `MAX` (100) falls inside the codepoint - the case that
-        // panics a raw `truncate(MAX)`. No newline, so the line-trim is a no-op.
+        // the cut point `len - MAX` (3) is a boundary but the crab straddles
+        // the old head-side cut at byte 100. A single line with no newline
+        // cannot be kept as a complete line, so the cap yields nothing,
+        // exactly like the engine's `bounded_recent_text`.
         let mut s = "a".repeat(MAX - 1);
         s.push('🦀');
         assert!(s.len() > MAX, "fixture must exceed the cap");
-
         cap_scrollback_at_char_boundary(&mut s, MAX);
+        assert_eq!(
+            s, "",
+            "one oversized line with no newline is not kept partially"
+        );
 
-        // `String` already guarantees valid UTF-8; the contract is length ≤ cap
-        // and that the straddling char was dropped whole rather than split.
-        assert!(s.len() <= MAX, "capped length {} must be ≤ {MAX}", s.len());
-        assert_eq!(s, "a".repeat(MAX - 1));
+        // The tail-side cut inside a codepoint: `len - cap` lands in the
+        // middle of the second crab, the partial first line is dropped, and
+        // the complete newest lines survive.
+        let mut s = String::from("🦀🦀\nab\ncd");
+        cap_scrollback_at_char_boundary(&mut s, 9);
+        assert_eq!(s, "ab\ncd");
+
+        // A cut that lands exactly after a newline keeps the line after it.
+        let mut s = String::from("old\nnew");
+        cap_scrollback_at_char_boundary(&mut s, 3);
+        assert_eq!(s, "new");
+    }
+
+    /// The cap keeps the NEWEST rows: `extract_scrollback_capped` hands it the
+    /// tail of the transcript, and undo replays that tail, so cutting the
+    /// head (what it used to do) dropped the screen and replayed the oldest
+    /// rows instead. Multibyte rows, and a fixture that really crosses
+    /// `MAX_CHARS`, so the cap branch is the one under test.
+    #[test]
+    fn cap_scrollback_keeps_the_newest_complete_rows() {
+        let row = |i: usize| format!("{i:05}{}", "中".repeat(120));
+        let rows: Vec<String> = (0..1200).map(row).collect();
+        let full = rows.join("\n");
+        assert!(
+            full.len() > crate::limits::MAX_CHARS,
+            "fixture must exceed MAX_CHARS; len={}",
+            full.len()
+        );
+
+        let mut capped = full.clone();
+        cap_scrollback_at_char_boundary(&mut capped, crate::limits::MAX_CHARS);
+
+        assert!(capped.len() <= crate::limits::MAX_CHARS);
+        assert!(
+            full.ends_with(&capped),
+            "the kept text must be the newest rows, not the oldest"
+        );
+        assert!(
+            capped.starts_with(&rows[1200 - capped.lines().count()]),
+            "the kept text starts on a complete row"
+        );
+        assert!(
+            capped.ends_with(&rows[1199]),
+            "the newest row (the bottom of the screen) survives the cap"
+        );
+        assert!(
+            !capped.starts_with(&rows[0]),
+            "the oldest rows are the ones the cap drops"
+        );
     }
 
     /// Already-aligned cap is a no-op beyond the existing line trim.
@@ -3959,6 +4209,42 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert!(
             matches!(&queued[0], PendingTerminalInput::Raw(bytes) if bytes.as_ref() == b"claude\r")
+        );
+    }
+
+    #[test]
+    fn try_write_to_pty_is_rejected_after_a_spawn_failure() {
+        // A failed spawn never promotes, so whatever was queued for the child
+        // has no child to reach and a later write must be refused, not queued
+        // forever behind a `sent: true` (the pane is a static error pane).
+        let (mut state, _pending) = TerminalState::new_pending(80, 24);
+        assert_eq!(state.try_write_to_pty(b"claude\r".to_vec()), Ok(()));
+        state.report_spawn_failure(
+            TerminalBackendFailureDiagnostics::new(
+                TerminalBackendFailurePhase::Spawn,
+                TerminalBackendFailureDiagnostics::GHOSTTY_OPEN_PTY_FAILED,
+                Some(5),
+            ),
+            "spawn failed",
+        );
+
+        assert_eq!(
+            state.try_write_to_pty(b"x".to_vec()),
+            Err(PtyWriteError::Rejected),
+            "a spawn-failed pane must report the write it cannot deliver"
+        );
+        assert!(
+            state
+                .pending_input
+                .lock()
+                .expect("pending_input lock")
+                .is_empty(),
+            "input queued for the child that never came is dropped with it"
+        );
+        assert_eq!(
+            state.write_ghostty_key(test_key_input(paneflow_terminal_ghostty::KeyAction::Press)),
+            BackendInputResult::Rejected,
+            "structured input is refused the same way"
         );
     }
 

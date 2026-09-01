@@ -1,10 +1,121 @@
+use std::ops::Range;
+
 use crate::Result;
 use crate::engine::DisplayTerminal;
 
 const MAX_SCROLLBACK_LINES: usize = 4_000;
 const MAX_SCROLLBACK_CHARS: usize = 400_000;
+/// Rows per grid read while [`DisplayTerminal::transcript_window`] walks a
+/// blank screen back into history looking for the newest painted row.
+const BLANK_WALK_CHUNK_ROWS: usize = 64;
+/// Rows per grid read when materializing a transcript window, so a 4000-row
+/// page is several bounded reads rather than one grid-wide allocation.
+const WINDOW_READ_CHUNK_ROWS: usize = 256;
+
+/// One page of a pane's transcript, cut the way `surface.read` asks for it:
+/// the retained history followed by the screen being painted, trailing blank
+/// rows trimmed, windowed from the newest end.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TranscriptWindow {
+    /// The rows in the window, each `trim_end()`ed, joined with `\n`.
+    pub text: String,
+    /// Rows in `text`.
+    pub returned: usize,
+    /// Rows the whole transcript holds: the retained history (at most
+    /// 4000 rows) plus the screen, with trailing blank rows trimmed.
+    pub total: usize,
+    /// The window reaches the oldest retained row.
+    pub eof: bool,
+}
 
 impl DisplayTerminal {
+    /// Read one page of the transcript without materializing the rest.
+    ///
+    /// `offset` skips rows from the newest end and `lines` is the page size,
+    /// so the page covers transcript rows `[total - offset - lines, total -
+    /// offset)`. Only those rows and the screen are read from the grid: the
+    /// screen because it is the newest end and decides where trailing blank
+    /// rows stop, the page because it is what the caller asked for. A blank
+    /// screen over live history walks history backwards in chunks until it
+    /// meets a painted row, so a `clear` does not turn every later read into
+    /// a full-history read either (issue #29).
+    pub fn transcript_window(&self, lines: usize, offset: usize) -> Result<TranscriptWindow> {
+        let geometry = self.grid_geometry()?;
+        let history_rows = usize::try_from(geometry.scrollback).unwrap_or(0);
+        let start = history_rows.saturating_sub(MAX_SCROLLBACK_LINES);
+
+        let screen = self.trimmed_rows(history_rows..geometry.total_rows)?;
+        let end_row = match screen.iter().rposition(|row| !row.is_empty()) {
+            Some(index) => history_rows + index + 1,
+            None => self.newest_painted_history_row_end(start, history_rows)?,
+        };
+        let total = end_row.saturating_sub(start);
+        let end = total.saturating_sub(offset);
+        if end == 0 {
+            return Ok(TranscriptWindow {
+                text: String::new(),
+                returned: 0,
+                total,
+                eof: true,
+            });
+        }
+        let window_start = end.saturating_sub(lines);
+        let first_row = start + window_start;
+        let last_row = start + end;
+
+        let mut rows = Vec::with_capacity(last_row - first_row);
+        if first_row < history_rows {
+            rows.extend(self.trimmed_rows(first_row..last_row.min(history_rows))?);
+        }
+        if last_row > history_rows {
+            let from = first_row.max(history_rows) - history_rows;
+            rows.extend(screen[from..last_row - history_rows].iter().cloned());
+        }
+        Ok(TranscriptWindow {
+            text: rows.join("\n"),
+            returned: rows.len(),
+            total,
+            eof: window_start == 0,
+        })
+    }
+
+    /// Grid rows in `range`, each `trim_end()`ed, read in bounded chunks.
+    fn trimmed_rows(&self, range: Range<usize>) -> Result<Vec<String>> {
+        let mut rows = Vec::with_capacity(range.len());
+        let mut chunk_start = range.start;
+        while chunk_start < range.end {
+            let chunk_end = chunk_start
+                .saturating_add(WINDOW_READ_CHUNK_ROWS)
+                .min(range.end);
+            rows.extend(
+                self.grid_lines(Some(chunk_start..chunk_end))?
+                    .into_iter()
+                    .map(|line| line.text.trim_end().to_owned()),
+            );
+            chunk_start = chunk_end;
+        }
+        Ok(rows)
+    }
+
+    /// One past the newest history row in `[start, history_rows)` that holds
+    /// text, or `start` when every retained history row is blank. Walks
+    /// backwards in chunks so a blank screen does not cost the whole history.
+    fn newest_painted_history_row_end(&self, start: usize, history_rows: usize) -> Result<usize> {
+        let mut chunk_end = history_rows;
+        while chunk_end > start {
+            let chunk_start = chunk_end.saturating_sub(BLANK_WALK_CHUNK_ROWS).max(start);
+            let chunk = self.grid_lines(Some(chunk_start..chunk_end))?;
+            if let Some(index) = chunk
+                .iter()
+                .rposition(|line| !line.text.trim_end().is_empty())
+            {
+                return Ok(chunk_start + index + 1);
+            }
+            chunk_end = chunk_start;
+        }
+        Ok(start)
+    }
+
     pub fn extract_scrollback(&self) -> Result<Option<String>> {
         // Ghostty stores history before the active screen in its page list.
         // `scrollback_rows` is therefore the exclusive viewport boundary.

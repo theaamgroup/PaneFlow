@@ -562,3 +562,107 @@ fn extract_screen_returns_the_painted_rows_after_history() {
     terminal.feed(b"\x1b[?1049h\x1b[HTUI").unwrap();
     assert_eq!(terminal.extract_screen().unwrap().as_deref(), Some("TUI"));
 }
+
+/// `surface.read` pays for [`DisplayTerminal::transcript_window`] on every
+/// poll (issue #29): the window is cut in the engine, so only the rows it
+/// covers are read, not the whole retained history.
+#[test]
+fn transcript_window_reads_only_the_rows_the_window_covers() {
+    let mut terminal = terminal(32, 3);
+    let blank = terminal.transcript_window(200, 0).unwrap();
+    assert_eq!(
+        (blank.text.as_str(), blank.returned, blank.total, blank.eof),
+        ("", 0, 0, true),
+        "a blank terminal is an empty window at eof"
+    );
+
+    // history = first, second; screen = third, fourth, fifth
+    terminal
+        .feed(b"first\r\nsecond\r\nthird\r\nfourth\r\nfifth")
+        .unwrap();
+    let window = terminal.transcript_window(2, 1).unwrap();
+    assert_eq!(window.text, "third\nfourth");
+    assert_eq!(window.returned, 2);
+    assert_eq!(window.total, 5);
+    assert!(!window.eof);
+
+    let straddle = terminal.transcript_window(2, 2).unwrap();
+    assert_eq!(
+        straddle.text, "second\nthird",
+        "a window may straddle the history/screen boundary"
+    );
+
+    let full = terminal.transcript_window(usize::MAX, 0).unwrap();
+    let history = terminal.extract_scrollback().unwrap().unwrap();
+    let screen = terminal.extract_screen().unwrap().unwrap();
+    assert_eq!(full.text, format!("{history}\n{screen}"));
+    assert_eq!((full.returned, full.total, full.eof), (5, 5, true));
+
+    let past_the_top = terminal.transcript_window(2, 5).unwrap();
+    assert_eq!(
+        (
+            past_the_top.text.as_str(),
+            past_the_top.returned,
+            past_the_top.total,
+            past_the_top.eof
+        ),
+        ("", 0, 5, true)
+    );
+
+    // A cleared screen over live history: the trim walks history backwards
+    // from the blank screen instead of reading it all.
+    terminal.feed(b"\x1b[2J\x1b[H").unwrap();
+    let after_clear = terminal.transcript_window(200, 0).unwrap();
+    assert_eq!(
+        after_clear.text,
+        terminal.extract_scrollback().unwrap().unwrap()
+    );
+    assert_eq!(after_clear.total, after_clear.returned);
+    assert!(after_clear.eof);
+
+    // A full-screen TUI paints the alternate screen, which has no history.
+    terminal.feed(b"\x1b[?1049h\x1b[HTUI").unwrap();
+    let alt = terminal.transcript_window(200, 0).unwrap();
+    assert_eq!(
+        (alt.text.as_str(), alt.returned, alt.total, alt.eof),
+        ("TUI", 1, 1, true)
+    );
+}
+
+/// `reset` is the emulator-side RIS: modes, screen and scrollback go, and
+/// nothing is written anywhere a child would read it.
+#[test]
+fn reset_clears_modes_screen_and_scrollback_like_a_program_ris() {
+    let mut terminal = terminal(10, 2);
+    terminal
+        .feed(b"\x1b[?2004hone\r\ntwo\r\nthree\r\nfour")
+        .unwrap();
+    terminal.feed(b"\x1b[?1049h\x1b[HTUI").unwrap();
+    assert!(
+        terminal.snapshot().unwrap().history_size == 0,
+        "alt screen has no history"
+    );
+    assert!(terminal.modes().unwrap().alternate_screen);
+    assert!(terminal.modes().unwrap().bracketed_paste);
+
+    terminal.reset();
+
+    let modes = terminal.modes().unwrap();
+    assert!(
+        !modes.alternate_screen,
+        "RIS lands back on the primary screen"
+    );
+    assert!(!modes.bracketed_paste, "RIS drops negotiated modes");
+    let content = terminal.snapshot().unwrap();
+    assert_eq!(content.history_size, 0, "RIS drops the scrollback");
+    assert!(content.cells.iter().all(|cell| cell.character == ' '));
+    assert_eq!(terminal.extract_screen().unwrap(), None);
+    assert_eq!(terminal.extract_scrollback().unwrap(), None);
+    assert!(
+        !terminal
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event, BackendEvent::WritePty(_))),
+        "a reset must not answer through the PTY"
+    );
+}

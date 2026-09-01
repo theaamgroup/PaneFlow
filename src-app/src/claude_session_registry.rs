@@ -23,10 +23,15 @@
 //! - **It is written on transition, not on a timer.** Claude Code writes it
 //!   from an effect keyed on `[status, waitingFor]`, so the state is current
 //!   the moment the file changes and there is no polling latency to add.
-//! - **It is PID-keyed and PID-reuse safe.** The filename is the process id
-//!   and `procStart` pins the OS start time, which is the same invariant
-//!   `agent_sessions` already carries, so a record binds to a pane through the
-//!   existing ancestor walk (`workspace::pid_resolve`).
+//! - **It is PID-keyed.** The filename is the process id, so a record binds
+//!   to a pane through the existing ancestor walk (`workspace::pid_resolve`),
+//!   and a body that names a different PID than its filename is refused
+//!   ([`parse_record`]). `procStart` / `procStartFt` are parsed and kept on
+//!   the record for a future comparison against the start time Paneflow
+//!   probes for the same PID; the reader does NOT compare them today, because
+//!   the value's encoding on macOS is not known, so PID reuse between two
+//!   sweeps is not detected here. The reuse guard that exists is the one
+//!   `agent_sessions` carries on the pane side.
 //!
 //! Everything here is deliberately tolerant. The schema is internal to another
 //! program and can change without notice, so an unknown `status`, a missing
@@ -223,6 +228,13 @@ pub fn read_live_sessions(dir: &Path) -> Vec<ClaudeSessionRecord> {
         let Some(pid) = entry.file_name().to_str().and_then(pid_from_file_name) else {
             continue;
         };
+        // Only a regular file is a record. Claude Code never writes a link,
+        // and `file_type()` / `metadata()` below do not follow one while the
+        // read does, so a link named like a record would carry the reader
+        // past `MAX_RECORD_BYTES`.
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
         // Size-check before reading so a huge file is skipped rather than
         // loaded and then rejected.
         if entry
@@ -368,6 +380,43 @@ mod tests {
         let dir = std::env::temp_dir().join("paneflow-claude-registry-absent");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(read_live_sessions(&dir).is_empty());
+    }
+
+    /// The size check reads the directory entry, which does not follow a
+    /// symlink, while the read does: a link named like a record could carry
+    /// the reader past its own cap, so only a regular file is a record.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_not_a_record() {
+        let dir = std::env::temp_dir().join("paneflow-claude-registry-symlink");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let oversized = dir.join("oversized.blob");
+        let mut body = br#"{"status":"busy","pad":""#.to_vec();
+        body.extend(std::iter::repeat_n(b'x', MAX_RECORD_BYTES as usize + 1));
+        body.extend_from_slice(br#""}"#);
+        std::fs::write(&oversized, &body).expect("write oversized target");
+        std::os::unix::fs::symlink(&oversized, dir.join("31.json")).expect("symlink");
+
+        let plain = dir.join("plain.blob");
+        std::fs::write(&plain, br#"{"status":"busy"}"#).expect("write plain target");
+        std::os::unix::fs::symlink(&plain, dir.join("32.json")).expect("symlink");
+
+        std::fs::write(dir.join("33.json"), br#"{"status":"idle"}"#).expect("write record");
+
+        let pids: Vec<u32> = read_live_sessions(&dir)
+            .iter()
+            .map(|record| record.pid)
+            .collect();
+        assert_eq!(
+            pids,
+            vec![33],
+            "a symlink is skipped whatever it points at; the oversized one \
+             would otherwise be read past MAX_RECORD_BYTES"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
