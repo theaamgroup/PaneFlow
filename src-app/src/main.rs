@@ -1372,9 +1372,10 @@ struct PaneFlowApp {
     tab_menu_open: Option<TabContextMenu>,
     /// Pane header context menu (EP-002 US-007), or `None` when closed.
     pane_menu_open: Option<PaneContextMenu>,
-    /// Pane to focus on the next render (EP-003 US-009). Set by the drop and
-    /// split handlers - which run in a subscription callback without a
-    /// `Window` - and consumed in `render`, which has one. One-shot.
+    /// Pane to focus before the next frame (EP-003 US-009). Set by the drop
+    /// and split handlers - which run in a subscription callback without a
+    /// `Window` - and consumed by `drain_pending_window_actions`, the
+    /// window-bearing notify observer (issue #211). One-shot.
     pending_pane_focus: Option<Entity<Pane>>,
     /// Profile menu currently open at the right of the title bar.
     /// Stores the click position so the menu can anchor near the profile
@@ -1511,8 +1512,8 @@ struct PaneFlowApp {
     pane_palette: Option<app::pane_palette::PanePaletteState>,
     pane_palette_focus: FocusHandle,
     /// Set when the palette is opened from a path that has no `Window` (the
-    /// pane-event subscriber); the next render claims focus for it, mirroring
-    /// `pending_pane_focus`.
+    /// pane-event subscriber); `drain_pending_window_actions` claims focus
+    /// for it before the next frame, mirroring `pending_pane_focus`.
     pending_palette_focus: bool,
     /// Issue #83: the close awaiting confirmation, or `None`. One slot, so
     /// "only one close can be pending" is true by construction. Written ONLY
@@ -1768,6 +1769,40 @@ impl PaneFlowApp {
         pane
     }
 
+    /// Apply the window actions that event handlers could only queue: focus
+    /// the pane created by a drop-to-split (EP-003 US-009), claim focus for a
+    /// split picker opened from `PaneEvent::Split` (EP-005), drop a picker
+    /// whose slot left the screen, and attach the preset palette to a
+    /// paneless tab.
+    ///
+    /// Their originating handlers (`DropSplit`, `PaneEvent::Split`, the
+    /// pane-event subscribers) run without a `Window`, so they park state in
+    /// `pending_pane_focus` / `pending_palette_focus` and `cx.notify()`.
+    /// Until issue #211 this drain sat at the top of `render`; it now runs
+    /// from the window-bearing self-observer `mount_paneflow_app` registers.
+    /// GPUI fires notify observers while flushing effects - before the draw
+    /// the same notify schedules - so the frame that needs the focus still
+    /// paints with it, exactly as the render-time drain did. Two invariants
+    /// keep that equivalence:
+    ///
+    /// - every path that parks pending state or invalidates the palette
+    ///   (pane create/close, tab and workspace switches, session restore)
+    ///   calls `cx.notify()` on this entity, so the observer fires at least
+    ///   as often as a notify-driven repaint would have;
+    /// - everything in here is idempotent, so the re-notify a drain itself
+    ///   emits (prune/ensure) converges on the second pass instead of
+    ///   looping.
+    fn drain_pending_window_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.pending_pane_focus.take() {
+            pane.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        if std::mem::take(&mut self.pending_palette_focus) {
+            window.focus(&self.pane_palette_focus, cx);
+        }
+        self.prune_stale_split_palette(cx);
+        self.ensure_empty_tab_palette(cx);
+    }
+
     // --- Sidebar rendering ---
 }
 
@@ -1898,18 +1933,13 @@ impl Render for PaneFlowApp {
             - main_panel_left_inset
             - crate::app::constants::PANEL_INSET;
 
-        // EP-003 US-009: focus the pane created by a drop-to-split. Deferred
-        // here from the `DropSplit` subscription handler (no `Window` there).
-        if let Some(pane) = self.pending_pane_focus.take() {
-            pane.read(cx).focus_handle(cx).focus(window, cx);
-        }
-        // EP-005: same deferral for a split picker opened from `PaneEvent::Split`,
-        // and drop one whose slot left the screen since the last frame.
-        if std::mem::take(&mut self.pending_palette_focus) {
-            window.focus(&self.pane_palette_focus, cx);
-        }
-        self.prune_stale_split_palette(cx);
-        self.ensure_empty_tab_palette(cx);
+        // Issue #211: the deferred window actions (pending pane/palette
+        // focus, palette reconciliation) are NOT drained here. They run in
+        // `drain_pending_window_actions`, fired by the window-bearing notify
+        // observer `mount_paneflow_app` registers - still before this frame
+        // draws, since GPUI flushes notify effects ahead of the draw. A
+        // policy test at the bottom of this file pins the drains out of
+        // `render`.
         let main_content = if self.settings_section.is_some() {
             // Embedded settings take precedence over the mode screen: the left
             // rail becomes the settings nav (below) and this panel shows the
@@ -2678,6 +2708,24 @@ fn mount_paneflow_app(
         // with no panes; the placeholder keeps global keybindings alive.
         app.begin_staged_session_restore(window, cx);
     });
+    view.update(cx, |app, cx| {
+        // Issue #211: window-bearing self-observer for the deferred window
+        // actions (pending pane/palette focus, palette reconciliation).
+        // Event handlers park that state without a `Window` and notify; GPUI
+        // runs notify observers while flushing effects - before the draw the
+        // notify schedules - so the drain lands ahead of the frame that
+        // needs it, exactly where the old render-time drain landed.
+        let app_entity = cx.entity();
+        cx.observe_in(&app_entity, window, |this, _app, window, cx| {
+            this.drain_pending_window_actions(window, cx);
+        })
+        .detach();
+        // The observer only activates at the end of this update cycle, after
+        // the mount-time notifies already queued. Reconcile the mount state
+        // by hand so the first frame still paints it, like the old first
+        // render did.
+        app.drain_pending_window_actions(window, cx);
+    });
     view
 }
 
@@ -2767,6 +2815,67 @@ mod focus_lost_fallback_tests {
             cx.update(|window, cx| view.read(cx).legitimate_focus.is_focused(window)),
             "the fallback must not override a legitimate focus transfer"
         );
+    }
+}
+
+#[cfg(test)]
+mod render_side_effect_policy_tests {
+    /// Issue #211: the deferred window actions (pending pane/palette focus,
+    /// split-palette prune, empty-tab palette attach) used to be drained at
+    /// the top of `PaneFlowApp::render`, coupling correctness to repaint
+    /// timing. They now live in `drain_pending_window_actions`, driven by the
+    /// window-bearing notify observer registered in `mount_paneflow_app`.
+    /// This pin fails if any of those drains creeps back into `render`.
+    #[test]
+    fn paneflow_render_performs_no_pending_window_action_drains() {
+        let source = include_str!("main.rs");
+        let impl_start = source
+            .find("impl Render for PaneFlowApp")
+            .expect("main.rs declares `impl Render for PaneFlowApp`");
+        let render_rel = source[impl_start..]
+            .find("fn render(")
+            .expect("PaneFlowApp implements `fn render`");
+        let body_open_rel = source[impl_start + render_rel..]
+            .find('{')
+            .expect("`fn render` has a body");
+        let body_start = impl_start + render_rel + body_open_rel;
+        // Brace-match to the end of the fn body. Byte-level matching is fine
+        // here: the render body carries no unbalanced brace inside a string
+        // or char literal, and a future one would make this test panic
+        // loudly rather than pass silently.
+        let bytes = &source.as_bytes()[body_start..];
+        let mut depth = 0usize;
+        let mut body_end = None;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = Some(body_start + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &source[body_start..body_end.expect("`fn render` braces balance")];
+        // `self.`-prefixed so a comment may still *name* a drain; any actual
+        // read, write, or call in render has to go through `self.`.
+        for forbidden in [
+            "self.pending_pane_focus",
+            "self.pending_palette_focus",
+            "self.prune_stale_split_palette",
+            "self.ensure_empty_tab_palette",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "`PaneFlowApp::render` must not touch `{forbidden}`: those \
+                 drains belong to `drain_pending_window_actions`, which the \
+                 notify observer in `mount_paneflow_app` runs before the \
+                 frame draws (issue #211)"
+            );
+        }
     }
 }
 

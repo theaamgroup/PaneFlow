@@ -269,8 +269,9 @@ impl PaneFlowApp {
     /// (`PaneEvent::Split`).
     ///
     /// No `Window` here - the pane-event subscriber has none - so focus is
-    /// claimed on the next frame through `pending_palette_focus`, the same
-    /// deferral `pending_pane_focus` uses for a drop-to-split.
+    /// claimed by `drain_pending_window_actions` through
+    /// `pending_palette_focus`, the same deferral `pending_pane_focus` uses
+    /// for a drop-to-split.
     pub(crate) fn open_split_palette(
         &mut self,
         target: Entity<Pane>,
