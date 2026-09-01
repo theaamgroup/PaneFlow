@@ -7,7 +7,9 @@
 //! - `components` - shared UI primitives (cards, toggles, section headers).
 //! - `nav_header` - fixed Settings title + close action for the nav rail.
 //! - `tabs`       - per-section bodies (`general`, `appearance`, `shortcuts`,
-//!   `terminal`, `ai_agent`, `mcp`), each `impl PaneFlowApp`.
+//!   `terminal`, `ai_agent`, `mcp`, `workspaces`), each `impl PaneFlowApp`.
+//!   `shortcuts` is the one virtualized page (`gpui::list`) and hosts its own
+//!   scroll; see its module docs for why.
 //!
 //! The Settings button (`PaneFlowApp::open_settings_window`, in `app::settings`)
 //! sets `settings_section = Some(General)`; `main.rs` then swaps the left rail

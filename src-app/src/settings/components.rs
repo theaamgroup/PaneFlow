@@ -16,6 +16,8 @@
 //!   when on / soft neutral when off, with a white thumb.
 //! - **secondary_button** - filled, agents cancel-button style
 //!   (`ui.subtle` bg, no border).
+//! - **destructive_button** - the same silhouette in system red with a white
+//!   label, for an action with no undo (the Shortcuts reset confirm).
 //!
 //! - **toggle_row** - a full setting row (optional leading icon, title +
 //!   description, trailing switch) that owns its own persist listener. Shared
@@ -271,6 +273,45 @@ pub fn secondary_button(
     )
     .child(label)
     .on_click(on_click)
+}
+
+/// The fill of a destructive control: the iOS / macOS system red. Not a theme
+/// token, because no bundled theme carries a "danger" slot and the meaning has
+/// to read the same on every one of them.
+pub fn destructive_color() -> Hsla {
+    Hsla::from(gpui::rgb(0xff453a))
+}
+
+/// A [`secondary_button`] in destructive red, for an action that cannot be
+/// undone. Red fill with a white label rather than theme tokens: `accent` and
+/// `text` are independent per theme and their pairing is not guaranteed to be
+/// legible, while red-on-white reads the same everywhere and carries the
+/// warning by itself.
+///
+/// Returns the element unclicked so the caller attaches its own listener; a
+/// destructive action is never generic enough to bake in here.
+pub fn destructive_button(id: &'static str, label: &'static str) -> Stateful<Div> {
+    let resting = destructive_color();
+    let hovered = Hsla {
+        l: (resting.l - 0.05).max(0.0),
+        ..resting
+    };
+
+    squircle_skin(
+        div()
+            .id(id)
+            .px(px(10.))
+            .py(px(4.))
+            .cursor(CursorStyle::PointingHand)
+            .text_size(px(12.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(gpui::white()),
+        format!("{id}-squircle"),
+        ROW_RADIUS,
+        Some(resting),
+        Some(hovered),
+    )
+    .child(label)
 }
 
 // ── Codex-style select / dropdown primitives ─────────────────────────────

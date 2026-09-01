@@ -17,6 +17,12 @@ would drift. The source of truth is:
 
 The app also shows the live bindings in **Settings > Keyboard
 Shortcuts**, which is the right place to look them up while using it.
+That page is grouped by area, and its search box matches the action's
+name and its chord: typing `cmd+shift+a` (or `cmd-shift-a`) finds the
+row bound to ⌘⇧A. **Find by key** goes the other way - press a chord and
+the page shows whichever action owns it, without dispatching it. Click a
+row and press a chord to rebind it; **Reset to defaults** asks for a
+confirming click before it removes every override from `paneflow.json`.
 
 ## The `secondary` modifier
 
