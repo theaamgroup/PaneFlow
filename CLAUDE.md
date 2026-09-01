@@ -196,7 +196,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
 │   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs)
-│   ├── diff_sidebar/ files_sidebar/   ← diff + file trees
+│   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
+│   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
 │   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus; footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
@@ -255,7 +256,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   └── tabs/                          ← general, appearance, shortcuts, terminal, ai_agent, mcp,
 │                                        notifications, workspaces
 ├── diff/                              ← git diff engine + viewer (custom Element, own hscroll)
-├── markdown/                          ← streaming Markdown view (parser, security, theme)
+├── markdown/                          ← streaming Markdown view (parser, security, theme); panes come from
+│                                         OSC path click + session restore only (no Files-sidebar drag or click)
 ├── agents/                            ← agent process supervision, notifications
 ├── ai_hooks/                          ← ai.* hook payload extraction
 ├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
@@ -394,7 +396,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 90 ac
 | `Cmd+G` / `Cmd+J` | New file tab / new terminal tab (diff dock; `secondary-g` / `secondary-j`) | Global, not Terminal/TextInput/CodeEditor |
 | `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
 | `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
-| `Cmd+Alt+F` | Toggle files sidebar | Global |
+| `Cmd+Alt+F` | Toggle files sidebar for the active tab (inert in Review and Settings, where the rail is unmounted) | Global |
 | `Cmd+Alt+B` | Toggle primary sidebar (persisted across launches) | Global |
 | `Ctrl+Alt+R` / `Ctrl+Shift+Alt+C` | Reveal in Finder / copy workspace path | Global |
 | `Ctrl+Alt+Z` / `C` / `V` / `W` | Open workspace in Zed / Cursor / VS Code / Windsurf | Global |

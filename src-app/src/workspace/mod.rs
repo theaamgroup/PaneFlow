@@ -746,6 +746,45 @@ mod tests {
         assert!(!focused, "no pane exists, so focus cannot have landed");
     }
 
+    /// #184 Phase 4: wanting the Files rail belongs to the tab that asked for
+    /// it. Opening it in one tab must not put it in front of a sibling, and a
+    /// tab switch must find its own flag - the app-level mirror is rebuilt from
+    /// `active_tab().files_sidebar_open` every frame.
+    #[gpui::test]
+    fn files_sidebar_open_is_scoped_to_the_tab_that_opened_it(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut ws = test_workspace(cx);
+        assert!(ws.open_tab(Tab::new("Second", None)));
+        assert_eq!(ws.active_tab_idx(), 1);
+
+        ws.active_tab_mut().files_sidebar_open = true;
+        assert!(ws.active_tab().files_sidebar_open);
+        assert!(
+            !ws.tabs()[0].files_sidebar_open,
+            "opening the rail in one tab must not open it for a sibling"
+        );
+
+        ws.set_active_tab(0);
+        assert!(
+            !ws.active_tab().files_sidebar_open,
+            "the sibling tab starts closed and stays closed"
+        );
+        ws.set_active_tab(1);
+        assert!(
+            ws.active_tab().files_sidebar_open,
+            "the tab that opened the rail still wants it after a round trip"
+        );
+
+        // The flag travels with the tab through a reorder and dies with it on
+        // close: it is tab state, not a slot in the workspace.
+        ws.reorder_tab(1, 0);
+        assert!(ws.tabs()[0].files_sidebar_open);
+        assert!(!ws.tabs()[1].files_sidebar_open);
+        let closed = ws.close_tab(0).expect("the opening tab is removed");
+        assert!(closed.files_sidebar_open);
+        assert!(!ws.active_tab().files_sidebar_open);
+    }
+
     #[gpui::test]
     fn focus_first_reports_true_and_focuses_when_a_pane_exists(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();

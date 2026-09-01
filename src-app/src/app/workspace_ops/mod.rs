@@ -1067,7 +1067,7 @@ impl PaneFlowApp {
             }
         }
 
-        self.reroot_files_tree(cx);
+        self.sync_files_sidebar_session(cx);
         if self.agent_sessions.sessions_sidebar_open
             && !crate::app::pane_palette::palette_bound_sessions_survives_activation(
                 self.agent_sessions.sessions_bound_palette,
@@ -1126,7 +1126,7 @@ impl PaneFlowApp {
         // that was not the second click on that X.
         self.dismiss_inline_close_arm(cx);
         self.active_idx = idx;
-        self.reroot_files_tree(cx);
+        self.sync_files_sidebar_session(cx);
         if self.agent_sessions.sessions_sidebar_open
             && !crate::app::pane_palette::palette_bound_sessions_survives_activation(
                 self.agent_sessions.sessions_bound_palette,
