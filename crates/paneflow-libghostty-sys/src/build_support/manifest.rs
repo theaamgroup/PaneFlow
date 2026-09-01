@@ -17,6 +17,10 @@ pub(crate) struct Manifest {
     header_sha256: String,
     bindings_path: PathBuf,
     bindings_sha256: String,
+    notice_path: PathBuf,
+    notice_sha256: String,
+    sbom_path: PathBuf,
+    sbom_sha256: String,
     api_version: String,
     build_mode: String,
     targets: BTreeMap<String, TargetConfig>,
@@ -73,6 +77,10 @@ impl Manifest {
         validate_safe_relative_path(&manifest.bindings_path, "bindings_path")?;
         validate_manifest_digest(&manifest.header_sha256, "header_sha256")?;
         validate_manifest_digest(&manifest.bindings_sha256, "bindings_sha256")?;
+        validate_safe_relative_path(&manifest.notice_path, "notice_path")?;
+        validate_safe_relative_path(&manifest.sbom_path, "sbom_path")?;
+        validate_manifest_digest(&manifest.notice_sha256, "notice_sha256")?;
+        validate_manifest_digest(&manifest.sbom_sha256, "sbom_sha256")?;
         if manifest.targets.is_empty() {
             return Err(build_error("libghostty manifest declares no targets"));
         }
@@ -96,6 +104,26 @@ impl Manifest {
 
     pub(crate) fn bindings_sha256(&self) -> &str {
         &self.bindings_sha256
+    }
+
+    /// The third-party notice is the app's only license inventory for a
+    /// static archive `cargo deny` cannot see, and the SBOM is what a reviewer
+    /// reads; both are pinned so a stale copy fails the build like a stale
+    /// header would.
+    pub(crate) fn notice_path(&self) -> &Path {
+        &self.notice_path
+    }
+
+    pub(crate) fn notice_sha256(&self) -> &str {
+        &self.notice_sha256
+    }
+
+    pub(crate) fn sbom_path(&self) -> &Path {
+        &self.sbom_path
+    }
+
+    pub(crate) fn sbom_sha256(&self) -> &str {
+        &self.sbom_sha256
     }
 
     pub(crate) fn target_contract(&self, target: &str) -> BuildResult<TargetContract> {
@@ -250,7 +278,7 @@ pub(super) mod tests {
     /// The reviewed manifest with the macOS target's archive digest and system
     /// library list overridden.
     ///
-    /// `native/libghostty/manifest.toml` declares the target since US-007, so
+    /// `native/libghostty/manifest.toml` declares the target, so
     /// the fixture rewrites that block in place rather than appending a second
     /// one, which TOML would reject as a duplicate table. Every other field
     /// stays exactly as reviewed, and the contract is still exercised from the

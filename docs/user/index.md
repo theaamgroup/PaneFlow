@@ -45,7 +45,7 @@ source: see [INSTALL.md](../../INSTALL.md).
 ## What runs on the inside
 
 * **Pure Rust** + [GPUI](https://www.gpui.rs/), the same framework Zed runs on. Rendering goes through Metal.
-* **Native VT emulation** via `alacritty_terminal` (crates.io 0.26), which also owns the PTY (`tty::new`).
+* **Native VT emulation** via a vendored `libghostty-vt` static archive (upstream Ghostty `f2d5758f`, tag v0.10.0), wrapped by the `paneflow-terminal-ghostty` crate. It is the only engine - no fallback, no feature flag, no `terminal.backend` key. PaneFlow owns the PTY itself through `portable-pty`; libghostty parses the bytes and owns the grid; GPUI paints the snapshots. The archive is checked in under `native/libghostty/prebuilt/aarch64-apple-darwin/` and hash-verified at build time, so **no Zig toolchain is needed to build PaneFlow**.
 * **JSON-RPC IPC** over a Unix domain socket under the user runtime directory. See [scripting/reference](scripting/reference.md#json-rpc-connection).
 * **Latency probes** for cold start, keystroke-to-pixel, and pixel-coordinate tracing. Debug builds only (`#[cfg(debug_assertions)]`), opt in with `PANEFLOW_LATENCY_PROBE=1` or `PANEFLOW_PIXEL_PROBE=1`.
 

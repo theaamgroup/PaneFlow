@@ -57,7 +57,7 @@ Task 12 still replaced *upstream's* identity so this fork is not signed as
 
 Verified load-bearing. Each of these looks like cruft and is not.
 
-- `schemas/paneflow.schema.json`: two tests in `crates/paneflow-config/src/schema.rs` (lines 1685, 1778) read it off disk. Drift fails the suite.
+- `schemas/paneflow.schema.json`: two tests in `crates/paneflow-config/src/schema.rs` (`public_json_schema_covers_every_config_field`, `public_configuration_schema_doc_mentions_schema_keys`) read it off disk. Drift fails the suite.
 - `examples/review-pipeline.flow.toml`: `include_str!` target at `src-app/src/cli/flow_spec.rs:749`. Deleting it breaks the build. `examples/TASK.md` is its fixture.
 - `clippy.toml`: the `allow-unwrap-in-tests` escape hatch for the workspace lint policy in `Cargo.toml`. Without it, test code starts warning.
 - `rust-toolchain.toml`: the 1.98.0 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
@@ -325,11 +325,13 @@ Proven on 2026-08-25, then the remaining compiled stubs were deleted in
 leftover-removal bucket 2 (2026-08-26). There is no Ghostty backend, no
 `auto_selects_ghostty_for_target`, no `should_start_ghostty`, no
 `GhosttySession`, and no `GhosttyBuildDiagnostics`. `TerminalBackendConfig`
-is `Auto | Alacritty` only. The loader still maps leftover
-`"backend": "ghostty"` to Alacritty so old `paneflow.json` files load. No
+was `Auto | Alacritty` only until #184 removed the enum entirely (2026-08-31);
+the loader now ignores a leftover `"backend"` key so old `paneflow.json` files load. No
 env var selects a backend.
 
 ### SearchEngine lift (2026-08-26, issues #91 / #97)
+
+> Superseded 2026-08-31 by #184 Phase 2: the lifted `search_engine.rs` went with the Alacritty backend, and find-in-buffer now runs on the engine's own `crates/paneflow-terminal-ghostty/src/search.rs`. Kept as the record of why the lift existed.
 
 Upstream v0.9.0 promoted `paneflow-terminal-ghostty` from an optional,
 target-gated backend to an unconditional core dependency, and `74dcca2`

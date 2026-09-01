@@ -529,7 +529,7 @@ fn focused_copy_mode_cursor(
 /// neutral [`Content`] snapshot ([`content_from_term`]) plus the content mask;
 /// the golden-frame net fills it from a fixed fixture so the entire layout is
 /// reproducible with no display. The cells are the backend-neutral
-/// [`crate::terminal::types::Cell`] (EP-003) - no engine types reach here.
+/// [`crate::terminal::types::Cell`] - no engine types reach here.
 pub(crate) struct LayoutInputs<'a> {
     pub cells: Arc<[Cell]>,
     /// Cursor as snapshotted from the grid (before the copy-mode / selection

@@ -50,9 +50,6 @@ const DEFAULT_SCROLLBACK_LINES: usize = TerminalConfig::DEFAULT_SCROLLBACK_LINES
 /// place makes the child believe something else entirely, and two agent CLIs
 /// change their wire behavior on exactly these bytes:
 ///
-/// - `WT_SESSION`: Claude Code disables its OSC 9;4 progress reporting
-///   outright when it is set, so a stale inherited value silently loses the
-///   progress channel in *every* pane.
 /// - `TMUX` / `STY` / `ZELLIJ`: Claude Code and Codex both wrap their OSC
 ///   notifications in multiplexer passthrough (`ESC P tmux ; ESC …`), which
 ///   libghostty does not unwrap - the notification is swallowed whole.
@@ -63,11 +60,9 @@ const DEFAULT_SCROLLBACK_LINES: usize = TerminalConfig::DEFAULT_SCROLLBACK_LINES
 ///
 /// `ConEmu*` is matched by prefix (`ConEmuANSI`, `ConEmuPID`, `ConEmuTask`,
 /// `ConEmuBuild`, …). Matching is ASCII-case-insensitive because these arrive
-/// by INHERITANCE, in whatever casing the host set them (`ConEmuANSI` is
-/// mixed-case by definition), not through the upper-cased user-env merge.
+/// by INHERITANCE, in whatever casing the host set them, not through the
+/// upper-cased user-env merge.
 const INHERITED_HOST_TERMINAL_ENV: &[&str] = &[
-    "WT_SESSION",
-    "WT_PROFILE_ID",
     "TMUX",
     "TMUX_PANE",
     "STY",
@@ -84,7 +79,6 @@ const INHERITED_HOST_TERMINAL_ENV: &[&str] = &[
     "ALACRITTY_WINDOW_ID",
     "ALACRITTY_SOCKET",
 ];
-const CONEMU_ENV_PREFIX: &str = "conemu";
 const MAX_PENDING_CLIPBOARD_OPS: usize = 8;
 const MAX_PENDING_NOTIFICATIONS: usize = 8;
 
@@ -439,7 +433,7 @@ pub struct GhosttyBuildDiagnostics {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(
     dead_code,
-    reason = "native backend failure phases are cfg-dependent across the target matrix"
+    reason = "mirrors the engine's failure phases in full; not every phase is reachable on macOS"
 )]
 pub enum TerminalBackendFailurePhase {
     Initialization,
@@ -468,7 +462,7 @@ pub struct TerminalBackendFailureDiagnostics {
 
 #[allow(
     dead_code,
-    reason = "native backend reason codes are cfg-dependent across the target matrix"
+    reason = "mirrors the engine's reason codes in full; not every code is reachable on macOS"
 )]
 impl TerminalBackendFailureDiagnostics {
     pub(super) const GHOSTTY_INITIALIZATION_FAILED: &'static str = "ghostty_initialization_failed";
@@ -676,7 +670,7 @@ pub struct TerminalState {
     pub(super) cursor_color_override: Option<gpui::Hsla>,
     /// Terminal title set via OSC 0/2 escape sequences (e.g. shell prompt, Claude Code).
     pub title: String,
-    /// Current working directory of the shell process. EP-002 US-007: the
+    /// Current working directory of the shell process. the
     /// engine decodes OSC 7 and publishes it as a UI event; Unix/macOS also
     /// refresh from the process table via `cwd_now()`.
     pub current_cwd: Option<String>,
@@ -785,7 +779,7 @@ pub struct TerminalState {
     /// Note: on rapid keystrokes before a render frame, earlier timestamps are overwritten.
     #[cfg(debug_assertions)]
     pub(crate) last_keystroke_at: Option<std::time::Instant>,
-    /// US-012: input written while the engine has no child yet (the PTY opens
+    /// input written while the engine has no child yet (the PTY opens
     /// on a background thread and the session is promoted later). Without this
     /// queue an auto-launch command issued the instant a terminal mounts - or
     /// a keystroke typed in the brief pre-promotion window - would be lost.
@@ -825,7 +819,7 @@ pub(super) struct SpawnParams {
 }
 
 /// Foreground (main-thread) signal mask, captured so an off-thread PTY spawn
-/// (US-012) doesn't hand the child the background executor's mask (which blocks
+/// doesn't hand the child the background executor's mask (which blocks
 /// SIGINT/SIGTSTP and would break Ctrl-C / Ctrl-Z).
 pub type ForegroundSignalMask = libc::sigset_t;
 
@@ -847,7 +841,7 @@ pub(super) fn capture_foreground_signal_mask() -> Option<ForegroundSignalMask> {
 
 /// Install `mask` on the current thread, returning the previous mask to restore.
 /// Brackets the child fork so it inherits the foreground signal disposition
-/// even when the spawn runs on a background thread (US-012).
+/// even when the spawn runs on a background thread .
 #[cfg(unix)]
 pub(super) fn apply_thread_signal_mask(
     mask: Option<ForegroundSignalMask>,
@@ -893,11 +887,7 @@ impl TerminalState {
     /// OSC 0/2 is terminal-controlled input and this retained field is cloned
     /// by view, IPC and event consumers. Scrub controls/bidi and cap it at
     /// ingestion so no later sink or clone observes the raw, unbounded payload.
-    /// A bare executable path (`/bin/zsh`) is not a title and is dropped.
     fn ingest_title(&mut self, raw: String) {
-        if is_executable_path_title(&raw) {
-            return;
-        }
         self.title = crate::sidebar_title::clean_sidebar_title(&raw).unwrap_or_default();
     }
 
@@ -1028,7 +1018,7 @@ impl TerminalState {
     /// ([`new_pending`]), starts the engine against a child
     /// ([`GhosttySession::start`]), and promotes it
     /// ([`promote_ghostty`](Self::promote_ghostty)). The off-thread path
-    /// (`TerminalView::with_cwd_and_env`, US-012) runs the same steps but
+    /// (`TerminalView::with_cwd_and_env`,) runs the same steps but
     /// spreads the blocking one across the background executor with a
     /// `signal_mask` so the render thread never blocks on the spawn.
     ///
@@ -1157,7 +1147,7 @@ impl TerminalState {
         // Assemble the child environment (identity vars, TERM, AI-hook PATH
         // prepend, user-env merge with protected keys). Pure function so the env
         // contract stays unit-testable (the mockable `PtyBackend::spawn` seam is
-        // gone - EP-002 US-004).
+        // gone).
         let env = assemble_pty_env(env, workspace_id, surface_id, merged_env);
         // Keep terminal.env and identity propagation independent from shell
         // integration: opting out disables rc hooks, not the terminal env contract.
@@ -1180,7 +1170,7 @@ impl TerminalState {
 
     /// Build a terminal whose engine exists but has not been started yet, so a
     /// background spawn can start the same session against a real child and
-    /// [`promote_ghostty`](Self::promote_ghostty) it (US-012). The returned
+    /// [`promote_ghostty`](Self::promote_ghostty) it . The returned
     /// opaque pending handle is what [`GhosttySession::start`] consumes.
     #[allow(dead_code)]
     pub(super) fn new_pending(cols: usize, rows: usize) -> (Self, PendingTerminalBackend) {
@@ -1571,7 +1561,7 @@ impl TerminalState {
     }
 
     pub fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
-        // US-002: any path through write_to_pty is genuine user input
+        // any path through write_to_pty is genuine user input
         // (keystroke, paste, mouse report, IME commit, user scroll). Mark the
         // session user-initiated so a later exit closes the pane. Automated
         // protocol writes (focus reports, search RIS reset, OSC responses)
@@ -1689,7 +1679,7 @@ impl TerminalState {
     }
 
     /// Send input to the engine, or queue it while the engine still has no
-    /// child (US-012 pre-promotion window): the launch command an auto-launched
+    /// child (pre-promotion window): the launch command an auto-launched
     /// agent issues the instant it mounts, plus any keystroke typed before the
     /// off-thread spawn resolved. [`promote_ghostty`](Self::promote_ghostty)
     /// flushes the queue in order. Bounded by [`MAX_PENDING_INPUT_BYTES`] so a
@@ -1802,7 +1792,7 @@ impl TerminalState {
     /// rather than like a transcript of it. The bytes are produced by
     /// libghostty's own formatter over this process's terminal.
     // `capture_replay` / `restore_replay` are wired by the styled undo replay
-    // (#184 follow-up); until then they are engine plumbing with no caller.
+    // (#195); until then they are engine plumbing with no caller.
     #[allow(dead_code)]
     pub fn capture_replay(&self) -> Option<Vec<u8>> {
         self.ghostty.capture_replay()
@@ -1819,7 +1809,7 @@ impl TerminalState {
     /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
     /// return matching lines as `(grid_line, text)` pairs, deduped by line and
     /// capped at `max_matches`. The bool is `true` when the cap truncated the
-    /// result. Backs the `surface.search` IPC method (US-004). The engine
+    /// result. Backs the `surface.search` IPC method . The engine
     /// performs the search and the matched-line extraction atomically on its
     /// runtime thread.
     pub fn search_scrollback(
@@ -1874,6 +1864,7 @@ impl TerminalState {
     /// point for anything read from disk or from a config file, where
     /// [`Self::restore_scrollback`] and its ANSI stripping is the only safe
     /// path. Only pass bytes this process captured from its own terminal.
+    // Wired by the styled undo replay (#195).
     #[allow(dead_code)]
     pub fn restore_replay(&self, bytes: &[u8]) {
         self.ghostty.write_output(bytes);
@@ -2023,8 +2014,6 @@ pub(super) fn is_inherited_host_terminal_env_key(key: &str) -> bool {
     INHERITED_HOST_TERMINAL_ENV
         .iter()
         .any(|known| key.eq_ignore_ascii_case(known))
-        || key.len() > CONEMU_ENV_PREFIX.len()
-            && key[..CONEMU_ENV_PREFIX.len()].eq_ignore_ascii_case(CONEMU_ENV_PREFIX)
 }
 
 /// The names Paneflow inherited that must not reach a pane: host-terminal
@@ -2061,20 +2050,6 @@ pub(super) fn inherited_env_keys_to_strip() -> Vec<std::ffi::OsString> {
 /// keys.
 fn is_valid_env_name(key: &str) -> bool {
     !key.is_empty() && !key.contains('=') && !key.contains('\0')
-}
-
-/// True for an OSC 0/2 title that is merely an absolute path to an `.exe` -
-/// the self-title some shells emit at startup before the user's profile runs.
-/// Such a title is never a human-facing surface label, so callers drop it and
-/// keep the previous (or default) name. Matches nothing on a macOS title (a
-/// backslash path is not absolute there, and a `/usr/bin/pwsh` title has no
-/// `.exe` extension), so it has no false positives on real labels (e.g.
-/// `Claude Code`) or on a prompt that sets the title to a bare cwd (no `.exe`).
-fn is_executable_path_title(title: &str) -> bool {
-    let p = std::path::Path::new(title);
-    p.is_absolute()
-        && p.extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
 }
 
 /// Assemble the child PTY environment: PaneFlow identity vars, explicit TERM /
@@ -2121,10 +2096,14 @@ fn assemble_pty_env(
     }
 
     // Standard terminal identification for capability detection.
-    env.insert("TERM_PROGRAM".into(), "paneflow".into());
+    // `TERM_PROGRAM=ghostty` (#184): the agent CLIs key their OSC 9;4 and
+    // Kitty-graphics behaviour on it, and the engine really is Ghostty's. The
+    // runtime re-asserts both at spawn (`ghostty_session.rs`), so there is one
+    // answer whichever layer a reader looks at.
+    env.insert("TERM_PROGRAM".into(), "ghostty".into());
     env.insert(
         "TERM_PROGRAM_VERSION".into(),
-        env!("CARGO_PKG_VERSION").into(),
+        paneflow_terminal_ghostty::GHOSTTY_APP_VERSION.into(),
     );
     env.insert("COLORTERM".into(), "truecolor".into());
 
@@ -2464,7 +2443,7 @@ mod tests {
 
     #[test]
     fn new_pending_terminal_has_no_child_until_promoted() {
-        // US-012: a pending terminal carries no child until the off-thread
+        // a pending terminal carries no child until the off-thread
         // start resolves and `promote_ghostty` swaps the runtime in.
         let (state, _pending) = TerminalState::new_pending(80, 24);
         assert_eq!(state.child_pid, 0);
@@ -2520,7 +2499,7 @@ mod tests {
     fn backend_diagnostics_expose_target_triple() {
         let diagnostics = TerminalState::new_display_only(24, 80).backend_diagnostics();
         assert_eq!(diagnostics.target_triple, env!("PANEFLOW_TARGET_TRIPLE"));
-        // US-018 AC1: a macOS bug report must state the triple it came from.
+        // a macOS bug report must state the triple it came from.
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert_eq!(diagnostics.target_triple, "aarch64-apple-darwin");
     }
@@ -2634,7 +2613,7 @@ mod tests {
 
     #[test]
     fn structured_input_is_queued_in_order_before_promotion() {
-        // US-012: keys, mouse reports, focus events and pastes issued before
+        // keys, mouse reports, focus events and pastes issued before
         // the off-thread start resolves are queued, in order, rather than lost.
         let (state, _pending) = TerminalState::new_pending(80, 24);
 
@@ -2796,13 +2775,13 @@ mod tests {
         assert_eq!(
             state.exited,
             Some(42),
-            "US-003: the real exit code must be recorded, not -1"
+            "the real exit code must be recorded, not -1"
         );
     }
 
     #[test]
     fn exit_fallback_does_not_clobber_real_child_exit_code() {
-        // US-003 AC: first-write-wins. A runtime failure reported after a
+        // first-write-wins. A runtime failure reported after a
         // real child exit (the engine can publish both when the mailbox tears
         // down) must never overwrite the code already recorded.
         let mut state = TerminalState::new_display_only(24, 80);
@@ -2817,7 +2796,7 @@ mod tests {
         assert_eq!(
             state.exited,
             Some(1),
-            "US-003: a later failure must not clobber the real exit code"
+            "a later failure must not clobber the real exit code"
         );
     }
 
@@ -2892,23 +2871,18 @@ mod tests {
 
         let bin_dir = env
             .get("PANEFLOW_BIN_DIR")
-            .expect("US-009 AC: PANEFLOW_BIN_DIR must be set in the child env")
+            .expect("PANEFLOW_BIN_DIR must be set in the child env")
             .clone();
-        assert!(
-            !bin_dir.is_empty(),
-            "US-009: PANEFLOW_BIN_DIR must not be empty"
-        );
+        assert!(!bin_dir.is_empty(), "PANEFLOW_BIN_DIR must not be empty");
 
-        let path = env
-            .get("PATH")
-            .expect("US-009 AC: PATH must be set after injection");
+        let path = env.get("PATH").expect("PATH must be set after injection");
         let first = std::env::split_paths(path)
             .next()
             .expect("PATH must have at least one component");
         assert_eq!(
             first,
             PathBuf::from(&bin_dir),
-            "US-009 AC: PANEFLOW_BIN_DIR must be first on PATH"
+            "PANEFLOW_BIN_DIR must be first on PATH"
         );
     }
 
@@ -2926,7 +2900,7 @@ mod tests {
         );
     }
 
-    // US-014: user-supplied env vars are merged into the child PTY env.
+    // user-supplied env vars are merged into the child PTY env.
     #[test]
     fn user_env_is_merged_into_pty_env() {
         let mut user = HashMap::new();
@@ -2992,12 +2966,12 @@ mod tests {
         );
         assert_eq!(
             env.get("TERM_PROGRAM").map(String::as_str),
-            Some("paneflow"),
+            Some("ghostty"),
             "TERM_PROGRAM must stay Paneflow-owned even if the user sets it"
         );
         assert_eq!(
             env.get("TERM_PROGRAM_VERSION").map(String::as_str),
-            Some(env!("CARGO_PKG_VERSION")),
+            Some(paneflow_terminal_ghostty::GHOSTTY_APP_VERSION),
             "TERM_PROGRAM_VERSION must stay Paneflow-owned even if the user sets it"
         );
         assert_eq!(
@@ -3121,20 +3095,12 @@ mod tests {
                 "{key} must be recognized case-insensitively"
             );
         }
-        // ConEmu ships a whole family and only sets some of them.
-        for key in ["ConEmuANSI", "ConEmuPID", "ConEmuTask", "CONEMUBUILD"] {
-            assert!(
-                is_inherited_host_terminal_env_key(key),
-                "{key} must be matched by the ConEmu prefix rule"
-            );
-        }
     }
 
     #[test]
     fn host_terminal_matcher_does_not_swallow_unrelated_names() {
-        // The prefix rule is the risky half: it must not reach a var that
-        // merely starts with the same letters, and the bare prefix names no
-        // real variable.
+        // A name that merely starts like a marker must survive, and so must
+        // every variable PaneFlow sets for the pane.
         for key in [
             "conemu",
             "CONEMU",
@@ -3187,11 +3153,12 @@ mod tests {
         }
         assert_eq!(
             env.get("TERM_PROGRAM").map(String::as_str),
-            Some("paneflow")
+            Some("ghostty"),
+            "the assembled env and the spawn override must agree (#184)"
         );
     }
 
-    // US-019: foreground_command degrades gracefully (no panic, None) on a
+    // foreground_command degrades gracefully (no panic, None) on a
     // display-only terminal (child_pid == 0, no real PTY) on every platform.
     #[test]
     fn foreground_command_none_for_display_only() {
@@ -3375,7 +3342,7 @@ mod tests {
 
     #[test]
     fn output_generation_advances_on_pty_output() {
-        // US-010: `workspace.up` polls `output_generation` as its prefill
+        // `workspace.up` polls `output_generation` as its prefill
         // readiness signal. A fresh terminal has produced nothing (0); the
         // counter must advance once the shell emits output (Wakeup events
         // drained by `sync`), proving the signal tracks real PTY activity.
@@ -3612,7 +3579,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn terminate_process_group_delivers_sigterm_and_is_honored() {
-        // US-001 AC: the process group receives SIGTERM (not a hard SIGKILL).
+        // the process group receives SIGTERM (not a hard SIGKILL).
         // The child is its own session/group leader (setsid) and traps SIGTERM
         // to exit 42; a SIGKILL would instead show signal 9 with no exit code.
         // Proving the trap ran proves SIGTERM was delivered to the group - and
@@ -3658,7 +3625,7 @@ mod tests {
         let pinned_start = child_pid_start_time(pid as u32);
         assert!(
             terminate_process_group(pid, pinned_start),
-            "US-001: SIGTERM must be delivered to the live process group"
+            "SIGTERM must be delivered to the live process group"
         );
 
         // The trap exits 42 well within the 100ms grace window; poll for exit
@@ -3672,7 +3639,7 @@ mod tests {
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
-                panic!("US-001: child did not exit after SIGTERM within 30s");
+                panic!("child did not exit after SIGTERM within 30s");
             }
             std::thread::sleep(Duration::from_millis(20));
         };
@@ -3680,7 +3647,7 @@ mod tests {
         assert_eq!(
             status.code(),
             Some(42),
-            "US-001: child must exit via its SIGTERM handler (42), not be SIGKILLed (signal={:?})",
+            "child must exit via its SIGTERM handler (42), not be SIGKILLed (signal={:?})",
             status.signal()
         );
     }
@@ -3688,7 +3655,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn terminate_process_group_is_noop_for_dead_or_invalid_group() {
-        // US-001 AC (unhappy path): an empty/invalid group must be a harmless
+        // AC (unhappy path): an empty/invalid group must be a harmless
         // no-op guarded by the `getpgid(pid) == pid` identity check - no panic,
         // returns false.
         assert!(
@@ -3790,7 +3757,7 @@ mod tests {
         assert_eq!(
             env.get("NODE_OPTIONS").map(String::as_str),
             Some("--max-old-space-size=4096"),
-            "NODE_OPTIONS remains mergeable (US-014); not part of the zsh-startup denylist"
+            "NODE_OPTIONS remains mergeable ; not part of the zsh-startup denylist"
         );
     }
 

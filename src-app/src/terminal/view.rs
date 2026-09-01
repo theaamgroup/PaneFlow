@@ -42,8 +42,8 @@ struct GhosttyStartFailure {
 }
 
 /// Map a Ghostty startup failure to its structured diagnostics. Pure, so the
-/// macOS and Windows claims are asserted by their own CI legs rather than
-/// inferred from the Linux behavior of the same code.
+/// phase / reason-code mapping is asserted by a unit test rather than
+/// inferred from a live spawn.
 fn classify_ghostty_start_error(error: GhosttyStartError) -> GhosttyStartFailure {
     let (phase, reason_code, source) = match error {
         GhosttyStartError::Initialization(error) => (
@@ -81,11 +81,6 @@ fn classify_ghostty_start_error(error: GhosttyStartError) -> GhosttyStartFailure
         ),
     }
 }
-
-/// The leading engine wakeup is held until the 4 ms batch closes. Upstream
-/// renders it immediately on Linux only; on macOS the coalesced path is the
-/// one that was measured (see `process_backend_wakeup`).
-const RENDER_WAKEUP_IMMEDIATELY: bool = false;
 
 /// Set by the first pane that fails to start the engine, so a broken artifact
 /// costs one error line per process rather than one per pane (FR-05).
@@ -398,8 +393,8 @@ impl TerminalView {
     /// See [`crate::terminal::TerminalState::restore_replay`]: the bytes go in
     /// verbatim so the styling survives, which makes this valid only for an
     /// in-process capture.
-    // Styled undo replay (#184, allowed as better inert replay) lands with
-    // Phase 3; the fork's undo still restores plain text.
+    // Wired by the styled undo replay (#195); until then the fork's undo
+    // restores plain text through `restore_scrollback`.
     #[allow(dead_code)]
     pub(crate) fn restore_replay(&self, replay: &[u8]) {
         self.needs_initial_clear
@@ -596,46 +591,27 @@ impl TerminalView {
 
         // Backend event coalescing:
         // Phase 1: Block until first event (zero CPU when idle)
-        // Phase 2: Render the leading Linux wakeup immediately. Windows waits
-        // 4ms (max 100, dedup Wakeup) so ConPTY cannot expose a partial
-        // multi-write terminal frame.
+        // Phase 2: Hold the leading wakeup and batch for 4 ms (max 100 events,
+        // dedup Wakeup) so a multi-write frame is painted once
         // Phase 3: Process batch, yield to other GPUI tasks
         let events_rx = terminal.take_backend_events();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let mut events_rx = events_rx;
-                let mut immediate_ghostty_wakeup_burst_active = false;
                 // Phase 1: Block until an event arrives (zero CPU when idle); the
                 // loop ends when the runtime drops its sender.
                 while let Some(first_event) = events_rx.next().await {
-                    // Phase 2: Keep the existing low-latency path for Linux PTYs. Windows
-                    // holds its first wakeup until the batch closes because ConPTY can split
-                    // or normalize the synchronized-output sequence around TUI redraws.
+                    // Phase 2: the leading wakeup is held until the batch closes -
+                    // the coalesced path that was measured on macOS (see
+                    // `process_backend_wakeup`) - so a synchronized-output frame
+                    // is never painted half-written.
                     let mut batch = Vec::with_capacity(32);
                     let mut dequeued = 1usize;
-                    let render_wakeup_immediately = RENDER_WAKEUP_IMMEDIATELY;
                     let mut had_wakeup = first_event.is_wakeup();
-                    let leading_immediate_wakeup = render_wakeup_immediately
-                        && had_wakeup
-                        && !immediate_ghostty_wakeup_burst_active;
-                    if leading_immediate_wakeup {
-                        immediate_ghostty_wakeup_burst_active = true;
-                        let result = cx.update(|cx| {
-                            this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                                view.terminal.process_backend_wakeup();
-                                view.process_dirty_terminal(cx);
-                            })
-                        });
-                        if result.is_err() {
-                            break;
-                        }
-                        had_wakeup = false;
-                    }
-                    if !had_wakeup && !leading_immediate_wakeup {
+                    if !had_wakeup {
                         batch.push(first_event);
                     }
 
-                    let mut batch_window_elapsed = false;
                     {
                         let timer = futures::FutureExt::fuse(smol::Timer::after(
                             std::time::Duration::from_millis(4),
@@ -657,17 +633,10 @@ impl TerminalView {
                                     }
                                     if dequeued >= 100 { break; }
                                 }
-                                _ = timer => {
-                                    batch_window_elapsed = true;
-                                    break;
-                                },
+                                _ = timer => break,
                             }
                         }
                     }
-                    if batch_window_elapsed {
-                        immediate_ghostty_wakeup_burst_active = false;
-                    }
-
                     // Phase 3: Process the batch in a single entity update
                     let result = cx.update(|cx| {
                         this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
@@ -1191,7 +1160,7 @@ pub enum TerminalEvent {
     /// acknowledgement of a stalled agent badge on this pane.
     FocusGained,
     /// Terminal output activity detected - triggers an OS port scan
-    /// (`workspace::ports`; Linux `/proc/net/tcp`, macOS libproc, Windows IP Helper).
+    /// (`workspace::ports`, macOS libproc).
     /// Emitted alongside `ServiceDetected` during output scan ticks.
     ActivityBurst,
     /// A server/service was detected in PTY output (e.g. "Listening on :3000").
@@ -1233,16 +1202,12 @@ pub enum TerminalEvent {
     /// the whole of a turn and clears it when the prompt comes back, so on a
     /// pane running an agent this is a turn boundary reported by the agent
     /// itself - no hook involved. Emitted only on a change, never per report.
-    // Read by `PaneFlowApp` once #184 Phase 3.8 (agent status without hooks)
-    // lands; the notification itself already fires in `process_backend_wakeup`.
-    #[allow(dead_code)]
     AgentProgressChanged { busy: bool },
     /// The program in this pane asked for the user's attention through OSC 9
     /// or OSC 777. Already routed to a desktop notification; the receiver
     /// (`PaneFlowApp`) additionally reads it as agent state when the pane is
     /// running an agent, because that is the one thing Claude Code still says
     /// out loud when its hooks are switched off.
-    #[allow(dead_code)]
     AgentAttention { title: String, body: String },
 }
 

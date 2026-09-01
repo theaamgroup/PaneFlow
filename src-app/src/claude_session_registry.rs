@@ -7,7 +7,7 @@
 //! an interactive session **without any hook running**:
 //!
 //! ```json
-//! {"pid":14404,"sessionId":"517dd24b-…","cwd":"C:\\dev\\paneflow",
+//! {"pid":14404,"sessionId":"517dd24b-…","cwd":"/Users/dev/paneflow",
 //!  "procStart":"134323895399231254","kind":"interactive",
 //!  "status":"busy","statusUpdatedAt":1787916617655}
 //! ```
@@ -247,10 +247,10 @@ pub fn read_live_sessions(dir: &Path) -> Vec<ClaudeSessionRecord> {
 mod tests {
     use super::*;
 
-    /// The exact shape observed from Claude Code 2.1.250, trimmed of the
-    /// fields this reader does not consume.
+    /// The shape observed from Claude Code 2.1.250 (cwd replaced with a macOS
+    /// path), trimmed of the fields this reader does not consume.
     const REAL_RECORD: &str = r#"{"pid":14404,"sessionId":"517dd24b-54a9-47e9-b512-bc121e09408e",
-        "cwd":"C:\\dev\\paneflow","startedAt":1787915941365,
+        "cwd":"/Users/dev/paneflow","startedAt":1787915941365,
         "procStart":"134323895399231254","version":"2.1.250","peerProtocol":1,
         "peerFeatures":["notify_idle","artifact_yield"],"kind":"interactive",
         "entrypoint":"cli","name":"paneflow-f4","nameSource":"derived",

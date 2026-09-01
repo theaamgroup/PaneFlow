@@ -18,8 +18,12 @@ The pinned source is Ghostty
 `ReleaseFast` (`ghostty_app_version` `1.3.2-dev+f2d5758f6`, ABI
 `api_version` `0.1.0`). `bindings.rs` is pregenerated from the pinned C
 header. Its normalized UTF-8 checksum is verified both in the workspace and in
-the prepared artifact. Regenerate bindings only from that exact header, then
-update `bindings_sha256` and the reviewed target.
+the prepared artifact. Note what `header_sha256` covers: `include/ghostty/vt.h`
+is Ghostty's umbrella header (29 `#include`s), and the per-module headers it
+pulls in are not vendored here - the ABI is pinned by `bindings.rs` plus
+`api_version`, checked at build time against the archive's build-info symbol.
+To regenerate the bindings, check out Ghostty at `source_sha`, run bindgen over
+its `include/` tree, then update `bindings_sha256` and the reviewed target.
 
 ## macOS arm64 archive
 

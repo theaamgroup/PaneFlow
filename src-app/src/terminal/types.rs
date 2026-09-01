@@ -25,12 +25,11 @@ pub enum ShellQuoting {
 impl ShellQuoting {
     pub fn for_shell(shell: &str) -> Self {
         let basename = shell
-            .rsplit(['/', '\\'])
+            .rsplit('/')
             .next()
             .unwrap_or(shell)
             .to_ascii_lowercase();
-        let key = basename.trim_end_matches(".exe");
-        match key {
+        match basename.as_str() {
             "pwsh" | "powershell" => Self::PowerShell,
             "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "ash" | "mksh" => Self::Posix,
             _ => Self::default_for_platform(),
@@ -377,7 +376,7 @@ pub struct GridLineText {
 /// A single grid cell snapshotted as neutral value types on the engine's
 /// runtime thread and handed to the Window-free layout pass. Carries no engine
 /// handle and no GPUI handle, so the layout pass is deterministic and testable
-/// with no GPU and no display (US-002 golden-frame net).
+/// with no GPU and no display (golden-frame net).
 #[derive(Clone, Debug)]
 pub struct Cell {
     /// Viewport-line coordinates (scrollback rows negative), `display_offset`

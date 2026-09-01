@@ -5,14 +5,14 @@
 //! `toggle_files_sidebar` action (`secondary-alt-f`), mutually exclusive with
 //! the sessions sidebar (one right column). The pane header carries no Files
 //! button: the tree is keyboard/command-driven only. Renders a lazily-expanded,
-//! folders-first tree of the active workspace's `cwd`. Since US-019 of
-//! `prd-file-editor-2026-Q3` every file opens in the diff dock's editor, and
+//! folders-first tree of the active workspace's `cwd`. Every file opens in
+//! the diff dock's editor, and
 //! markdown is no longer the exception: a `.md` row reads as source there like
 //! any other file rather than opening a rendered pane of its own (rendered
 //! Markdown panes still come from an OSC path click and from session
 //! restore). Only editor-refused files (binary or over `MAX_FILE_BYTES`) stay
 //! muted; gitignored/hidden entries are filtered out before rendering. Rows
-//! carry no drag: the EP-003 markdown drag-to-pane is gone, so a click is the
+//! carry no drag: the markdown drag-to-pane is gone, so a click is the
 //! sidebar's only gesture and the dock editor its only destination.
 //!
 //! Wanting the rail belongs to the workspace tab that asked for it
@@ -330,7 +330,7 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    /// US-019: open a file in the diff dock's editor. Every file goes here,
+    /// open a file in the diff dock's editor. Every file goes here,
     /// markdown included - a `.md` row opens as source, not as a preview.
     ///
     /// The dock is the editor's only host, so a click from the sidebar has to

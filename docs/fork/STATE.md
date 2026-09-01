@@ -16,7 +16,8 @@ the session-host PR on top). What is now true, and where the evidence is:
   upstream's: `TerminalState::Drop` pins every process group in the PTY
   session through an app-owned master dup, SIGTERMs, drops the guards,
   shuts the runtime down, closes the dup, SIGKILLs at 100 ms; the runtime
-  thread reaps and never signals. Pinned by
+  thread reaps, signalling only on its own failure paths (runtime failed,
+  waitid failed, startup panic), never on a user close. Pinned by
   `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session`
   (real `/bin/sh`, background + stopped `sleep`) and, live, by the
   parent-death smoke (`kill -9` the GUI: sleep reaped, every
@@ -279,7 +280,7 @@ even though signed release DMGs are also available.
 | #184 Phase 3: engine product | **Done 2026-08-31.** 3.5 (scrollback doc), 3.6 (`surface.read` = history followed by the live screen, one atomic `Transcript` runtime read; the undo record carries the screen too), 3.7 (rode along in Phase 2), 3.8 (`AgentStateSource` ranking `Terminal < SessionRegistry < Hook`, 20 s takeover silence, Claude session-registry sweep at 400 ms, OSC 9;4 / 9 / 777 pane observations). Upstream's 18 tests for it carried by name plus `extract_screen_returns_the_painted_rows_after_history` and `extract_scrollback_window_appends_the_live_screen_after_history`. |
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
 | 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
-| Config-schema pass | **Done.** Ghostty and `windows_*_material` dropped from the published schema, Rust struct, and docs. Loader still accepts leftover keys; `"backend":"ghostty"` maps to Alacritty. |
+| Config-schema pass | **Done.** Ghostty and `windows_*_material` dropped from the published schema, Rust struct, and docs. Loader still accepts leftover keys; a leftover `"backend"` key is ignored (`leftover_terminal_backend_key_is_ignored`). |
 | Telemetry | **Gone.** `paneflow-telemetry` crate, app module, consent toasts, config block. |
 | Self-update | **Sparkle 2 (#119).** The hand-rolled updater/minisign client remain deleted. Sparkle checks hourly, downloads silently, and installs only on ordinary quit. |
 | Identity | **Done.** Bundle id `com.theaamgroup.paneflow`, authors The AAM Group, Help/`--help`/schema `$id` point at `theaamgroup/paneflow`. |
@@ -551,8 +552,8 @@ need it:
   **Resolved in 2b.** Note the correction: both sat INSIDE
   `#[cfg(target_os = "windows")]` blocks, so the delete rule removed them as a
   side effect. They did not need separate handling and did not survive to 2c.
-- `TerminalBackendConfig::Ghostty` is gone from the published schema and the
-  Rust enum. `"ghostty"` still parses to Alacritty so old config files load.
+- `TerminalBackendConfig` is gone entirely (#184): a leftover `"backend"` key in
+  an old `paneflow.json` is ignored, not mapped (`leftover_terminal_backend_key_is_ignored`).
 - Embed size cap is Mach-O `release-min` (2026-08-27): 1,211,840 B measured
   (shim 472,368 + ai-hook 336,464 + mcp 403,008), `EMBED_SIZE_LIMIT_BYTES =
   1_400_000` = total + 15.5% (slack 188,160 B = 13.4% of the cap).
