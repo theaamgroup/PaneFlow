@@ -18,7 +18,7 @@ pass so you do not redo finished work or repeat a falsified finding. Open
 work lives on GitHub issues, not in that file.
 
 **Where this fork stands (2026-08-31):** product is PaneFlow (the PanesCLI
-rename was dropped). Version **0.1.3**. Origin `theaamgroup/paneflow` on
+rename was dropped). Version **0.2.0**. Origin `theaamgroup/paneflow` on
 `main`. Windows, Linux, the telemetry crate, the published
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The Ghostty engine, deleted on 2026-08-25, is
@@ -40,7 +40,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.1.3
+./target/debug/paneflow --version          # paneflow 0.2.0
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 

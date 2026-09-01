@@ -107,7 +107,7 @@ put either on your `PATH`.
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
-./target/debug/paneflow --version    # paneflow 0.1.3
+./target/debug/paneflow --version    # paneflow 0.2.0
 ```
 
 `cargo fmt --check` must pass before every commit that touches Rust; CI
