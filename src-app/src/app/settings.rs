@@ -7,9 +7,12 @@
 //!   toggle the embedded settings (set/clear `settings_section`).
 //! - [`PaneFlowApp::persist_setting`] - the shared cache-mutate + repaint +
 //!   off-thread write used by every settings control.
-//! - [`PaneFlowApp::handle_settings_key_down`] /
-//!   [`PaneFlowApp::handle_shortcut_recording`] - key routing for the font-picker
-//!   typeahead, Escape handling, and shortcut capture.
+//! - [`PaneFlowApp::handle_settings_key_down`] - key routing for the
+//!   font-picker typeahead and Escape handling.
+//! - [`PaneFlowApp::intercept_shortcut_keystroke`] /
+//!   [`PaneFlowApp::handle_shortcut_recording`] - the Shortcuts page's
+//!   rebind recording and find-by-key capture, fed by the app-wide keystroke
+//!   interceptor so a chord is seen before GPUI dispatches it as an action.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -73,6 +76,12 @@ impl PaneFlowApp {
         // leftover query could filter the nav to a section that doesn't match
         // the displayed page).
         self.clear_settings_search(cx);
+        if section == SettingsSection::Shortcuts {
+            // The page is virtualized, so its rows have to exist before the
+            // first frame renders. `select_settings_section` does the same for
+            // the nav path; this is the deep-link one.
+            self.rebuild_shortcut_rows(cx);
+        }
         // Warm the MCP bridge status off-thread so the MCP page can render its
         // button label without ever doing config I/O during a frame.
         self.refresh_mcp_status(cx);
@@ -80,9 +89,58 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// Arm or disarm the Shortcuts page's key-capture mode.
+    ///
+    /// Arming clears the field so the next chord lands in an empty box; the
+    /// captured chord is then just the field's value, which keeps a single
+    /// visible filter state instead of a hidden second one.
+    ///
+    /// Disarming deliberately leaves the field alone. Clicking a row to rebind
+    /// disarms capture, and wiping the query there would drop the filter that
+    /// put the row on screen - re-collapsing its section and scrolling the
+    /// now-armed row out of sight.
+    pub(crate) fn set_shortcut_capture(&mut self, active: bool, cx: &mut Context<Self>) {
+        let changed = self.shortcut_capture_active != active;
+        self.shortcut_capture_active = active;
+        if active {
+            // Clearing the field notifies, and the observer on it rebuilds the
+            // filtered rows - no explicit rebuild needed on this arm.
+            self.shortcut_search_input.update(cx, |input, cx| {
+                input.clear(cx);
+            });
+            self.recording_shortcut_idx = None;
+        } else if changed {
+            // Leaving capture flips the match rule from "this exact chord" back
+            // to substring, so the visible rows change while the query does not
+            // - nothing else would tell the page to re-filter. Guarded on
+            // `changed` because every row click disarms capture on the way to
+            // recording, and an unconditional rebuild would re-seed the list
+            // (and scroll it) under the row the user just clicked.
+            self.rebuild_shortcut_rows(cx);
+        }
+    }
+
+    /// Clear the Shortcuts-page filter and leave capture mode. The explicit
+    /// "start over" action, unlike [`Self::set_shortcut_capture`].
+    pub(crate) fn clear_shortcut_filters(&mut self, cx: &mut Context<Self>) {
+        self.shortcut_capture_active = false;
+        self.shortcut_search_input.update(cx, |input, cx| {
+            input.clear(cx);
+        });
+        // Both halves of the filter moved at once, and the field's observer
+        // only knows about one of them.
+        self.rebuild_shortcut_rows(cx);
+    }
+
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_section = None;
         self.profile_menu_open = None;
+        // Shortcuts-page ephemeral state. The armed "Reset" confirmation is the
+        // one that matters: left standing across a close, it would turn a
+        // stray click on reopen into "every binding erased, no undo".
+        self.clear_shortcut_filters(cx);
+        self.collapsed_shortcut_groups.clear();
+        self.shortcut_reset_pending = false;
         self.font_dropdown_open = false;
         self.font_search.clear();
         self.theme_dropdown_open = false;
@@ -227,7 +285,7 @@ impl PaneFlowApp {
     pub(crate) fn handle_settings_key_down(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Font dropdown typeahead (Terminal page).
@@ -257,9 +315,10 @@ impl PaneFlowApp {
             return;
         }
 
-        // Escape (outside active shortcut recording): close an open Terminal-page
-        // dropdown first, otherwise leave settings. During recording, Escape
-        // falls through to `handle_shortcut_recording`, which cancels capture.
+        // Escape: close an open Terminal-page dropdown first, otherwise leave
+        // settings. Escape during shortcut recording or key capture never gets
+        // here - `intercept_shortcut_keystroke` consumes it upstream, before
+        // GPUI matches any binding.
         if event.keystroke.key == "escape" && self.recording_shortcut_idx.is_none() {
             if self.terminal_dropdown.is_some() {
                 self.terminal_dropdown = None;
@@ -271,18 +330,72 @@ impl PaneFlowApp {
                 self.close_settings(cx);
             }
             cx.notify();
-            return;
-        }
-
-        // Shortcut recording (only on the Shortcuts page).
-        if self.settings_section == Some(SettingsSection::Shortcuts) {
-            self.handle_shortcut_recording(event, window, cx);
         }
     }
 
+    /// App-wide keystroke interceptor for the Shortcuts settings page.
+    ///
+    /// Registered through `App::intercept_keystrokes` (in
+    /// `main.rs::mount_paneflow_app`), which is the *only* hook that runs
+    /// before GPUI matches a key binding. An `on_key_down` (or even
+    /// `capture_key_down`) listener is too late: when a binding matches and its
+    /// action is handled, `dispatch_key_event` returns without ever calling
+    /// `finish_dispatch_key_event`, so no key listener fires at all. That is
+    /// why pressing Cmd+Q to search for - or rebind - the Quit shortcut used to
+    /// quit the app instead, and why recording Cmd+Shift+D split the pane.
+    ///
+    /// Returns `true` when the chord was consumed, in which case the caller
+    /// must call `cx.stop_propagation()` to suppress the action.
+    pub(crate) fn intercept_shortcut_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.settings_section != Some(SettingsSection::Shortcuts) {
+            return false;
+        }
+        // Modifiers held on the way to a real chord are not a chord.
+        if keybindings::is_bare_modifier(keystroke) {
+            return false;
+        }
+
+        // Rebind recording takes precedence: the row is already armed.
+        if self.recording_shortcut_idx.is_some() {
+            self.handle_shortcut_recording(keystroke, window, cx);
+            cx.notify();
+            return true;
+        }
+
+        if !self.shortcut_capture_active {
+            return false;
+        }
+
+        if keystroke.key == "escape" {
+            self.set_shortcut_capture(false, cx);
+            cx.notify();
+            return true;
+        }
+
+        // The chord goes straight into the search field: seeing what was
+        // pressed is the whole point, and it keeps one visible filter state
+        // rather than a hidden second one. `format_keystroke` expects the
+        // `-`-separated spelling, which is what `recorded_shortcut_key` gives.
+        let formatted = keybindings::format_keystroke(&recorded_shortcut_key(keystroke));
+        self.shortcut_search_input.update(cx, |input, cx| {
+            input.set_value(formatted, cx);
+        });
+        cx.notify();
+        true
+    }
+
+    /// Record `keystroke` as the new binding of the armed row.
+    ///
+    /// Reached only through [`Self::intercept_shortcut_keystroke`], so the
+    /// chord arrives before GPUI could have dispatched it as an action.
     pub(crate) fn handle_shortcut_recording(
         &mut self,
-        event: &KeyDownEvent,
+        keystroke: &Keystroke,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -291,12 +404,12 @@ impl PaneFlowApp {
         };
 
         // Ignore bare modifier presses (Shift alone, Ctrl alone, etc.)
-        if keybindings::is_bare_modifier(&event.keystroke) {
+        if keybindings::is_bare_modifier(keystroke) {
             return;
         }
 
         // Escape cancels recording.
-        if event.keystroke.key == "escape" {
+        if keystroke.key == "escape" {
             self.recording_shortcut_idx = None;
             cx.notify();
             return;
@@ -313,8 +426,14 @@ impl PaneFlowApp {
         };
 
         // Format keystroke to a GPUI string (e.g. "ctrl-shift-d") and save it.
-        let new_key = recorded_shortcut_key(&event.keystroke);
-        if !config_writer::save_shortcut_checked(&new_key, action_name) {
+        // The write is synchronous but still goes through the persist guard,
+        // so a ConfigWatcher deposit stamped before it cannot be applied over
+        // the config reloaded just below.
+        let new_key = recorded_shortcut_key(keystroke);
+        let flight = self.begin_config_persist();
+        let saved = config_writer::save_shortcut_checked(&new_key, action_name);
+        drop(flight);
+        if !saved {
             self.recording_shortcut_idx = None;
             self.show_toast("Could not save shortcut", cx);
             cx.notify();
@@ -326,6 +445,9 @@ impl PaneFlowApp {
         keybindings::apply_keybindings(cx, &config.shortcuts);
         self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
         self.recording_shortcut_idx = None;
+        // The rows carry indices into `effective_shortcuts` and render its key
+        // text, so they are stale the moment it is replaced.
+        self.rebuild_shortcut_rows(cx);
         cx.notify();
     }
 }

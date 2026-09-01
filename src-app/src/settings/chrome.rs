@@ -9,6 +9,9 @@
 //!
 //! Section bodies live in `settings::tabs::*`; this file owns the nav, the
 //! panel shell, the scroll wrapper, and the section → title/body dispatch.
+//! One page opts out of the shared scroll wrapper: Shortcuts
+//! (`SettingsSection::owns_its_scroll`) is virtualized and needs a bounded
+//! viewport, so it receives the heading and hosts its own list.
 //!
 //! Replaces the old standalone `SettingsWindow` (a separate GPUI window) and
 //! the legacy inline `render_settings_page` (a nested mini-sidebar inside the
@@ -372,16 +375,6 @@ impl PaneFlowApp {
         let ui = crate::theme::ui_colors();
         let section = self.settings_section.unwrap_or(SettingsSection::General);
 
-        let body = match section {
-            SettingsSection::General => self.render_general_content(cx).into_any_element(),
-            SettingsSection::Appearance => self.render_appearance_content(cx).into_any_element(),
-            SettingsSection::Shortcuts => self.render_shortcuts_content(cx).into_any_element(),
-            SettingsSection::Terminal => self.render_terminal_content(cx).into_any_element(),
-            SettingsSection::AiAgent => self.render_ai_agent_content(cx).into_any_element(),
-            SettingsSection::McpServers => self.render_mcp_servers_content(cx).into_any_element(),
-            SettingsSection::Workspaces => self.render_workspaces_content(cx).into_any_element(),
-        };
-
         let ipc_banner = self.ipc_status.is_disabled().then(|| {
             use crate::widgets::callout::{Callout, CalloutIcon, CalloutSeverity};
             div().pb(px(16.)).child(
@@ -399,15 +392,15 @@ impl PaneFlowApp {
             .text_color(ui.text)
             .child(section_title(section));
 
-        let column = div()
+        let heading = div()
             .flex()
             .flex_col()
+            .flex_none()
             .child(title)
             .when_some(ipc_banner, |d, b| d.child(b))
-            .child(body)
             .into_any_element();
 
-        div()
+        let shell = div()
             .id("settings-panel")
             .track_focus(&self.settings_focus)
             .on_key_down(cx.listener(Self::handle_settings_key_down))
@@ -416,8 +409,45 @@ impl PaneFlowApp {
             .flex()
             .flex_col()
             .min_h_0()
-            .bg(settings_chrome_bg())
-            .child(self.render_settings_scroll(column, cx))
+            .bg(settings_chrome_bg());
+
+        if section.owns_its_scroll() {
+            return shell.child(self.render_shortcuts_page(heading, cx));
+        }
+
+        let body = match section {
+            SettingsSection::General => self.render_general_content(cx).into_any_element(),
+            SettingsSection::Appearance => self.render_appearance_content(cx).into_any_element(),
+            SettingsSection::Terminal => self.render_terminal_content(cx).into_any_element(),
+            SettingsSection::AiAgent => self.render_ai_agent_content(cx).into_any_element(),
+            SettingsSection::McpServers => self.render_mcp_servers_content(cx).into_any_element(),
+            SettingsSection::Workspaces => self.render_workspaces_content(cx).into_any_element(),
+            // Handled above; a page that owns its scroll never reaches here.
+            SettingsSection::Shortcuts => gpui::Empty.into_any_element(),
+        };
+
+        let column = div()
+            .flex()
+            .flex_col()
+            .child(heading)
+            .child(body)
+            .into_any_element();
+
+        shell.child(self.render_settings_scroll(column, cx))
+    }
+
+    /// Geometry shared by the page-level scroll container and the pages that
+    /// scroll themselves: the centered max-width reading column, at the same
+    /// left/right offset either way so switching sections never shifts it.
+    pub(crate) fn settings_reading_column(&self) -> gpui::Div {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .max_w(px(700.))
+            .mx_auto()
+            .px(px(28.))
+            .pt(px(28.))
     }
 
     /// Scrollable content area + visible scrollbar overlay. Centers a
@@ -445,15 +475,8 @@ impl PaneFlowApp {
             .flex_col()
             .items_start()
             .child(
-                div()
-                    .w_full()
+                self.settings_reading_column()
                     .flex_none()
-                    .flex()
-                    .flex_col()
-                    .max_w(px(700.))
-                    .mx_auto()
-                    .px(px(28.))
-                    .pt(px(28.))
                     .pb(px(72.))
                     .child(content),
             );
@@ -499,7 +522,8 @@ impl PaneFlowApp {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.settings_drag.take().is_some() {
+                    let drag = this.settings_drag.take();
+                    if scrollbar::end_drag(&this.settings_scroll, drag) {
                         cx.notify();
                     }
                 }),
@@ -531,6 +555,19 @@ impl PaneFlowApp {
             self.recording_shortcut_idx = None;
             let config = paneflow_config::loader::load_config();
             crate::keybindings::apply_keybindings(cx, &config.shortcuts);
+        }
+        // Shortcuts-page ephemeral state. The armed "Reset" confirmation is the
+        // one that matters: left standing across a nav round-trip, it turns a
+        // stray click into "every binding erased, no undo". The capture mode
+        // and the filter are cleared for the same reason - a page that comes
+        // back silently swallowing keystrokes reads as broken.
+        self.shortcut_reset_pending = false;
+        self.clear_shortcut_filters(cx);
+        if section == SettingsSection::Shortcuts {
+            // The page is virtualized: its rows have to exist before the first
+            // frame renders, and `effective_shortcuts` may have changed since
+            // the page was last open.
+            self.rebuild_shortcut_rows(cx);
         }
         if section == SettingsSection::McpServers {
             self.refresh_mcp_status(cx);

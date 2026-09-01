@@ -119,6 +119,20 @@ pub(crate) enum SettingsSection {
     Workspaces,
 }
 
+impl SettingsSection {
+    /// Whether the page renders its own scroll container instead of riding the
+    /// page-level one.
+    ///
+    /// Only Shortcuts does: it is the one page long enough (~80 rows) that
+    /// rendering every row each frame is what made the settings surface lag,
+    /// so it virtualizes with `gpui::list`. A virtualized list needs a bounded
+    /// viewport to virtualize against, which a page-level scroll container -
+    /// which hands its child unbounded height - cannot give it.
+    pub(crate) fn owns_its_scroll(self) -> bool {
+        matches!(self, SettingsSection::Shortcuts)
+    }
+}
+
 /// Light / dark / system selector shown at the top of the Themes settings page.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum ThemeMode {
@@ -1224,6 +1238,36 @@ struct PaneFlowApp {
     effective_shortcuts: Vec<keybindings::ShortcutEntry>,
     /// Index of the shortcut row currently being recorded (`None` = not recording).
     recording_shortcut_idx: Option<usize>,
+    /// Free-text filter for the Shortcuts page. Matches the action description
+    /// *and* the rendered keystroke, so "cmd+shift" and "workspace" both work.
+    shortcut_search_input: gpui::Entity<crate::widgets::text_input::TextInput>,
+    /// Whether the Shortcuts page is in key-capture mode: the pressed chord is
+    /// written into the search field instead of reaching the app, so the page
+    /// can answer "what already owns this key?" - which a text search cannot,
+    /// unless the user already knows how the chord is spelled.
+    ///
+    /// While this is set, [`Self::intercept_shortcut_keystroke`] swallows every
+    /// chord before GPUI can dispatch its action.
+    shortcut_capture_active: bool,
+    /// Whether "Reset to defaults" on the Shortcuts page is awaiting
+    /// confirmation. The reset rewrites every binding in `paneflow.json` with
+    /// no undo, so the button asks before it fires.
+    shortcut_reset_pending: bool,
+    /// Sections collapsed on the Shortcuts page. Empty = everything expanded.
+    collapsed_shortcut_groups: std::collections::HashSet<keybindings::ShortcutGroup>,
+    /// The Shortcuts page, flattened: section headers interleaved with the
+    /// bindings that survived the filter.
+    ///
+    /// Cached rather than derived in `render`, because the page is virtualized
+    /// and its item *count* has to be known before any item is rendered.
+    /// Rebuilt by `PaneFlowApp::rebuild_shortcut_rows` whenever the query, the
+    /// fold state or `effective_shortcuts` changes - never once per frame.
+    shortcut_rows: Vec<crate::settings::tabs::shortcuts::ShortcutListRow>,
+    /// Virtualized-list state for [`Self::shortcut_rows`]. Owns the page's
+    /// scroll position and the measured item heights.
+    shortcut_list: gpui::ListState,
+    /// Thumb-drag state for the Shortcuts list scrollbar.
+    shortcut_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
     /// Focus handle for the settings page (receives key events during recording/font search).
     settings_focus: FocusHandle,
     /// Cached list of monospace font family names from the system.
@@ -2442,6 +2486,35 @@ fn mount_paneflow_app(
     });
     view.update(cx, |_, cx| {
         register_focus_lost_fallback(window, cx, |app| &app.empty_workspace_focus);
+    });
+    view.update(cx, |_, cx| {
+        // Shortcuts-page key capture and rebind recording have to see a chord
+        // *before* GPUI matches it against the keymap, or pressing Cmd+Q to
+        // find (or rebind) Quit simply quits. `intercept_keystrokes` is the
+        // only hook that runs that early; a key-down listener never fires at
+        // all once a binding has been dispatched and handled.
+        let weak = cx.weak_entity();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            // This runs for every keystroke in the app, terminal typing
+            // included, so the common answer has to be cheap. `Entity::update`
+            // opens an update cycle and flushes the effect queue on exit;
+            // doing that mid-key-dispatch just to read one field would put a
+            // flush on the keystroke-to-pixel path. Read the gate first and
+            // only take the update when the page is open.
+            if app.read(cx).settings_section != Some(SettingsSection::Shortcuts) {
+                return;
+            }
+            let consumed = app.update(cx, |this, cx| {
+                this.intercept_shortcut_keystroke(&event.keystroke, window, cx)
+            });
+            if consumed {
+                cx.stop_propagation();
+            }
+        })
+        .detach();
     });
     view.update(cx, |_, cx| {
         let subscription = cx.observe_window_bounds(window, |this, window, cx| {

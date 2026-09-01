@@ -1704,6 +1704,13 @@ impl PaneFlowApp {
             );
             keybindings::apply_keybindings(cx, &config.shortcuts);
             self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
+            if self.settings_section == Some(crate::SettingsSection::Shortcuts) {
+                // The Shortcuts page is virtualized off a cached row list that
+                // indexes `effective_shortcuts`, so a hand edit to `shortcuts`
+                // while the page is open has to rebuild it or the rows go
+                // stale (an index past the new end renders as nothing).
+                self.rebuild_shortcut_rows(cx);
+            }
             crate::theme::invalidate_theme_cache();
             // US-014 (render cache): refresh the cached config so render paths
             // pick up the reload without a per-frame `load_config()`. Last use

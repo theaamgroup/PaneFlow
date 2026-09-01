@@ -20,6 +20,11 @@ pub struct ShortcutEntry {
     /// (zero-override) case. Indexing `DEFAULTS` by row would silently rebind
     /// the *wrong* action and corrupt `paneflow.json`.
     pub action_name: &'static str,
+    /// Section this row is filed under on the Shortcuts settings page.
+    pub group: super::registry::ShortcutGroup,
+    /// Lowercase ASCII spellings of [`Self::key`], for the settings text
+    /// filter. Empty when the action is unbound. See [`ascii_key_forms`].
+    pub search_key: String,
 }
 
 /// Format a GPUI keystroke string for display.
@@ -87,6 +92,70 @@ pub fn format_keystroke(key: &str) -> String {
     }
 }
 
+/// ASCII spellings of a raw keystroke, for the Shortcuts page's text filter.
+///
+/// [`format_keystroke`] renders Apple HIG glyphs (`⌘⇧D`, no separator), so a
+/// user typing "cmd+shift" would match nothing against the displayed key.
+/// This returns every ASCII spelling of the chord so a substring search finds
+/// it, with the usual aliases for each modifier, joined both ways the chord is
+/// written elsewhere: `+` (the docs, the `shortcuts` examples) and `-` (GPUI's
+/// own syntax, which is what `paneflow.json` and `defaults.rs` use).
+///
+/// This fork is macOS-only and `secondary` is always Cmd here, so `secondary`
+/// spells as `cmd` / `command` and nothing else: offering a `ctrl+…` reading
+/// of a chord the user presses with ⌘ would make the filter lie.
+///
+/// Result is lowercase and space-separated, e.g. `secondary-shift-d` ->
+/// `"cmd+shift+d command+shift+d cmd-shift-d command-shift-d"`.
+fn ascii_key_forms(raw_key: &str) -> String {
+    // The key itself can be `-` (font_size_decrease is `secondary--`), so the
+    // final separator is split off explicitly instead of letting `split('-')`
+    // turn the chord into empty tokens.
+    let (modifier_part, key) = match raw_key.strip_suffix("--") {
+        Some(modifiers) => (modifiers, "-"),
+        None => match raw_key.rsplit_once('-') {
+            Some((modifiers, key)) => (modifiers, key),
+            None => ("", raw_key),
+        },
+    };
+
+    // Each token expands to its accepted spellings; the chord is then the
+    // cartesian product of those, which stays tiny (chords are 2-4 tokens).
+    let alternatives: Vec<Vec<&str>> = modifier_part
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .chain(std::iter::once(key))
+        .map(|part| match part {
+            // `super` / `win` are accepted on the way in (`Keystroke::parse`
+            // reads them as the platform modifier) but spelled back as the
+            // key a Mac has.
+            "secondary" | "cmd" | "super" | "win" => vec!["cmd", "command"],
+            "ctrl" => vec!["ctrl", "control"],
+            "alt" => vec!["alt", "option", "opt"],
+            other => vec![other],
+        })
+        .collect();
+
+    let mut forms: Vec<Vec<&str>> = vec![Vec::new()];
+    for options in &alternatives {
+        let mut next = Vec::with_capacity(forms.len() * options.len());
+        for prefix in &forms {
+            for option in options {
+                let mut form = prefix.clone();
+                form.push(option);
+                next.push(form);
+            }
+        }
+        forms = next;
+    }
+    ["+", "-"]
+        .iter()
+        .flat_map(|separator| forms.iter().map(move |form| form.join(separator)))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 /// Compute the effective shortcut list by merging defaults with user overrides.
 ///
 /// User overrides replace default bindings for the same action. Additional user
@@ -121,6 +190,15 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
     let mut entries = Vec::new();
     let mut seen_actions: HashSet<&'static str> = HashSet::new();
 
+    // An action can be bound twice - once generically in `DEFAULTS` and once
+    // platform-natively in `MACOS_ONLY_DEFAULTS` (copy is both ctrl-shift-c
+    // and cmd-c). The settings page shows the native chord for those,
+    // matching the menu bar and what a Mac user reaches for.
+    let macos_key_by_action: HashMap<&str, &str> = MACOS_ONLY_DEFAULTS
+        .iter()
+        .map(|d| (d.action_name, d.key))
+        .collect();
+
     // Defaults first, with user overrides applied. US-010: include the
     // macOS-only defaults so the settings page reflects cmd-c/cmd-v.
     for d in DEFAULTS.iter().chain(MACOS_ONLY_DEFAULTS.iter()) {
@@ -128,16 +206,36 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
             continue;
         };
 
+        // One row per *action*, not per binding. A rebind is keyed by action
+        // name, so a second row for the same action would be a duplicate the
+        // user cannot edit independently - editing either rewrites the same
+        // entry in paneflow.json.
+        if seen_actions.contains(meta.name) {
+            continue;
+        }
+
+        // Prefer the platform-native chord, but only while it is still live:
+        // if the user unbound or reassigned cmd-c, copy is still on
+        // ctrl-shift-c and the row must say so rather than claim the chord it
+        // no longer owns.
+        let default_key = match macos_key_by_action.get(d.action_name).copied() {
+            Some(native) if !is_unbound(native) && !is_user_claimed(native) => native,
+            _ => d.key,
+        };
+
         // If user overrode this action to a different key, show that key. If a
         // different action claimed this default chord, mirror apply_keybindings
         // and hide the displaced default row until it is explicitly rebound.
+        // The displacement test is on `d.key` - the binding this iteration
+        // represents - so a dead native chord cannot suppress a live generic
+        // one and leave the action reading "Unassigned" while it still works.
         let key = if let Some(user_key) = user_by_action.get(d.action_name) {
             format_keystroke(user_key)
         } else {
             if is_unbound(d.key) || is_user_claimed(d.key) {
                 continue;
             }
-            format_keystroke(d.key)
+            format_keystroke(default_key)
         };
 
         seen_actions.insert(meta.name);
@@ -145,6 +243,13 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
             key,
             description: meta.description.to_string(),
             action_name: meta.name,
+            group: meta.group,
+            search_key: ascii_key_forms(
+                user_by_action
+                    .get(d.action_name)
+                    .copied()
+                    .unwrap_or(default_key),
+            ),
         });
     }
 
@@ -160,6 +265,8 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
                 key: format_keystroke(key),
                 description: meta.description.to_string(),
                 action_name: meta.name,
+                group: meta.group,
+                search_key: ascii_key_forms(key),
             });
         }
     }
@@ -170,6 +277,8 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
                 key: "Unassigned".to_string(),
                 description: action_description(meta.name).to_string(),
                 action_name: meta.name,
+                group: meta.group,
+                search_key: String::new(),
             });
         }
     }
@@ -388,5 +497,155 @@ mod tests {
         assert_eq!(format_keystroke("secondary-1"), "\u{2318}1");
         // Explicit `cmd` token also renders as ⌘ (user override form from AC5).
         assert_eq!(format_keystroke("cmd-shift-d"), "\u{2318}\u{21E7}D");
+    }
+
+    #[test]
+    fn ascii_key_forms_handles_a_minus_key() {
+        // font_size_decrease is `secondary--`: the key itself is `-`. Splitting
+        // naively produced empty tokens and spellings like "cmd++".
+        let forms = ascii_key_forms("secondary--");
+        assert!(forms.contains("cmd+-"), "{forms}");
+        assert!(forms.contains("command+-"), "{forms}");
+        assert!(!forms.contains("++"), "{forms}");
+    }
+
+    #[test]
+    fn every_default_chord_round_trips_through_parse() {
+        // A saved chord has to be readable by `Keystroke::parse`, which is what
+        // the keymap uses. `Keystroke::to_string` is the *display* impl (Apple
+        // glyphs on macOS) and does not round-trip; `unparse` does. This pins
+        // the property the rebind path depends on.
+        for d in DEFAULTS.iter().chain(MACOS_ONLY_DEFAULTS.iter()) {
+            let parsed = Keystroke::parse(d.key)
+                .unwrap_or_else(|_| panic!("default chord {} does not parse", d.key));
+            let round_tripped = Keystroke::parse(&parsed.unparse())
+                .unwrap_or_else(|_| panic!("unparse of {} does not re-parse", d.key));
+            assert_eq!(
+                round_tripped.key, parsed.key,
+                "{} lost its key through unparse",
+                d.key
+            );
+            assert_eq!(
+                round_tripped.modifiers, parsed.modifiers,
+                "{} lost its modifiers through unparse",
+                d.key
+            );
+        }
+    }
+
+    #[test]
+    fn ascii_key_forms_spells_secondary_as_cmd_only() {
+        // This fork is macOS-only: `secondary` is always Cmd here, so the
+        // filter must find the row under "cmd+shift" and must NOT claim a
+        // "ctrl+shift" reading the user cannot press.
+        let forms = ascii_key_forms("secondary-shift-d");
+        assert!(forms.contains("cmd+shift+d"), "{forms}");
+        assert!(forms.contains("command+shift+d"), "{forms}");
+        assert!(!forms.contains("ctrl+shift+d"), "{forms}");
+    }
+
+    #[test]
+    fn ascii_key_forms_expands_modifier_aliases() {
+        assert!(ascii_key_forms("alt-left").contains("option+left"));
+        assert!(ascii_key_forms("ctrl-c").contains("control+c"));
+        // `super` / `win` parse as the platform modifier, which is ⌘ on a Mac,
+        // so they spell back as `cmd` rather than a name from another OS.
+        let forms = ascii_key_forms("super-q");
+        assert!(forms.contains("cmd+q"), "{forms}");
+        assert!(!forms.contains("super+q"), "{forms}");
+    }
+
+    #[test]
+    fn ascii_key_forms_includes_the_dashed_spelling() {
+        // `paneflow.json` and `defaults.rs` write chords GPUI-style
+        // (`cmd-shift-a`), so a user copying one out of either has to find the
+        // row; the plus form alone would miss it.
+        let forms = ascii_key_forms("secondary-shift-a");
+        assert!(forms.contains("cmd-shift-a"), "{forms}");
+        assert!(forms.contains("cmd+shift+a"), "{forms}");
+        // A `-` key still reads as itself in both joins.
+        let minus = ascii_key_forms("secondary--");
+        assert!(minus.contains("cmd--"), "{minus}");
+        assert!(minus.contains("cmd+-"), "{minus}");
+    }
+
+    #[test]
+    fn ascii_key_forms_is_lowercase_for_substring_matching() {
+        // The settings filter lowercases the query, so the haystack must be
+        // lowercase too or a match on an uppercase key would be missed.
+        let forms = ascii_key_forms("ctrl-shift-PageUp");
+        assert_eq!(forms, forms.to_lowercase());
+        assert!(forms.contains("pageup"), "{forms}");
+    }
+
+    #[test]
+    fn the_page_lists_each_action_exactly_once() {
+        // A rebind is keyed by action name, so a second row for one action is
+        // a row the user cannot edit on its own. terminal_copy and
+        // terminal_paste are bound in DEFAULTS *and* in MACOS_ONLY_DEFAULTS,
+        // which used to emit them twice.
+        let entries = effective_shortcuts(&HashMap::new());
+        let mut seen: HashSet<&str> = HashSet::new();
+        for entry in &entries {
+            assert!(
+                seen.insert(entry.action_name),
+                "{} is listed more than once",
+                entry.action_name
+            );
+        }
+        assert_eq!(
+            entries.len(),
+            ACTIONS.len(),
+            "every registry action gets exactly one row"
+        );
+    }
+
+    #[test]
+    fn macos_rows_show_the_platform_native_chord() {
+        // Copy is ctrl-shift-c generically and cmd-c on macOS; the row should
+        // read the one the menu bar shows.
+        let entries = effective_shortcuts(&HashMap::new());
+        let copy = entries
+            .iter()
+            .find(|e| e.action_name == "terminal_copy")
+            .expect("copy is bound");
+        assert_eq!(copy.key, format_keystroke("cmd-c"));
+    }
+
+    #[test]
+    fn every_entry_carries_its_registry_group() {
+        // The Shortcuts page buckets by group; an entry landing in the wrong
+        // section (or a section the page never renders) would go missing.
+        let entries = effective_shortcuts(&HashMap::new());
+        for entry in &entries {
+            let meta = ACTIONS
+                .iter()
+                .find(|a| a.name == entry.action_name)
+                .expect("every entry comes from the registry");
+            assert_eq!(
+                entry.group, meta.group,
+                "{} landed in the wrong section",
+                entry.action_name
+            );
+        }
+        // Every declared section is reachable from the page.
+        for group in super::super::registry::ShortcutGroup::ALL {
+            assert!(
+                entries.iter().any(|e| e.group == *group),
+                "{group:?} has no rows, so its header would render empty"
+            );
+        }
+    }
+
+    #[test]
+    fn bound_entries_have_a_searchable_ascii_key() {
+        let entries = effective_shortcuts(&HashMap::new());
+        for entry in entries.iter().filter(|e| e.key != "Unassigned") {
+            assert!(
+                !entry.search_key.is_empty(),
+                "{} is bound but not findable by key",
+                entry.action_name
+            );
+        }
     }
 }
