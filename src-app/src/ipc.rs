@@ -942,8 +942,17 @@ fn handle_connection(
 
     // US-022 / EP-004: drop a peer that opens a connection and then goes mute,
     // so it can't pin this handler thread forever. Unix sockets use the OS
-    // receive timeout here.
-    let _ = stream.set_recv_timeout(Some(IPC_IDLE_TIMEOUT));
+    // receive timeout here. Issue #222: a refused deadline is a connection
+    // setup failure (same policy as `push_bytes`), not something to proceed
+    // past with no idle timeout - the read loop treats every error as a
+    // disconnect, so an untimed `read_request_line` would block on a mute
+    // peer until the process exits, holding one of the capped slots.
+    if let Err(e) = stream.set_recv_timeout(Some(IPC_IDLE_TIMEOUT))
+        && !socket_timeout_error_is_tolerable(&e)
+    {
+        log::warn!("ipc: could not set receive timeout on connection, closing: {e}");
+        return;
+    }
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -1175,6 +1184,17 @@ fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
     push_bytes(writer, frame.as_bytes())
 }
 
+/// Issue #222: the one `set_recv_timeout` / `set_send_timeout` failure a
+/// connection survives. `Unsupported` means the transport has no timeout knob
+/// at all, so proceeding without one is the only option; any other failure
+/// means the OS refused a deadline this socket should honour, and carrying on
+/// would let a mute or stalled peer pin the handler thread for good. Shared by
+/// the receive path (`handle_connection`) and the send path (`push_bytes`) so
+/// the two cannot drift.
+fn socket_timeout_error_is_tolerable(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::Unsupported
+}
+
 /// Send raw bytes to the peer, `true` on success.
 ///
 /// The `subscriber_connected` probe narrows but cannot close the disconnect
@@ -1183,7 +1203,7 @@ fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
 /// socket returns `BrokenPipe` cleanly.
 fn push_bytes(writer: &mut Stream, buf: &[u8]) -> bool {
     if let Err(e) = writer.set_send_timeout(Some(IPC_WRITE_TIMEOUT))
-        && e.kind() != std::io::ErrorKind::Unsupported
+        && !socket_timeout_error_is_tolerable(&e)
     {
         return false;
     }
@@ -1431,6 +1451,48 @@ mod auth {
                 }
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod timeout_policy_tests {
+    use super::socket_timeout_error_is_tolerable;
+    use std::io::{Error, ErrorKind};
+
+    /// Issue #222: the send path (`push_bytes`) and the receive path
+    /// (`handle_connection`) must agree on which `set_*_timeout` failure is
+    /// survivable. Only `Unsupported` (the transport has no timeout knob) is;
+    /// every other kind means the peer would otherwise run unbounded.
+    #[test]
+    fn socket_timeout_setup_tolerates_only_unsupported() {
+        assert!(socket_timeout_error_is_tolerable(&Error::from(
+            ErrorKind::Unsupported
+        )));
+        for kind in [
+            ErrorKind::InvalidInput,
+            ErrorKind::PermissionDenied,
+            ErrorKind::NotConnected,
+            ErrorKind::BrokenPipe,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                !socket_timeout_error_is_tolerable(&Error::from(kind)),
+                "{kind:?} must close the connection"
+            );
+        }
+    }
+
+    /// The receive path must consult the same policy as the send path:
+    /// discarding the `set_recv_timeout` result proceeds with no idle
+    /// timeout, and the read loop then blocks forever on a mute peer.
+    #[test]
+    fn receive_path_does_not_discard_the_recv_timeout_result() {
+        let src = include_str!("ipc.rs");
+        let discarded = ["let _ = ", "stream.set_recv_timeout("].concat();
+        assert!(
+            !src.contains(&discarded),
+            "set_recv_timeout result is discarded in handle_connection"
+        );
     }
 }
 
