@@ -17,7 +17,7 @@ Run all commands from the repository root.
 
 GPUI and the Alacritty VT crate are **not** local path dependencies. GPUI and `gpui_platform` are git dependencies pinned by exact `rev` to `zed-industries/zed` (`src-app/Cargo.toml:39-40`, plus a test-support `gpui` in `[dev-dependencies]` at `:253`) - three git deps in total, and there are no `collections` / `markdown` / `theme` / `ui` dependencies. Never reintroduce an `arthjean/zed` pin, and `alacritty_terminal` comes from crates.io (`src-app/Cargo.toml:62`). Cargo fetches both automatically, so no checkout has to be kept on disk. Never swap the Zed git deps for crates.io versions: GPUI is not published there.
 
-Build prerequisites (Rust 1.96.1, full Xcode, and the separately downloaded Metal toolchain) are documented in `CLAUDE.md`. They are non-obvious and a missing one fails the build in a confusing way.
+Build prerequisites (Rust 1.98.0, full Xcode, and the separately downloaded Metal toolchain) are documented in `CLAUDE.md`. They are non-obvious and a missing one fails the build in a confusing way.
 
 ## Coding Style & Naming Conventions
 Standard Rust formatting via `cargo fmt`: 4-space indentation, Rust defaults. Modules and files in `snake_case` (`config_writer.rs`, `service_detector.rs`), types in `UpperCamelCase`, functions and tests in `snake_case`. Prefer small, focused modules and brief doc comments where behavior is not obvious. Inline GPUI styling is the established pattern; match the existing builder-chain style instead of introducing a separate styling layer.

@@ -15,7 +15,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-scan() { grep -rn --include='*.rs' -E 'cfg!?\(|cfg_attr' . 2>/dev/null | grep -v '^\./target/'; }
+scan() { grep -rn --exclude-dir=target --exclude-dir=.git --include='*.rs' -E 'cfg!?\(|cfg_attr' . 2>/dev/null | grep -v '^\./target/'; }
 
 # Strip pure-comment lines: a doc comment explaining WHY an item is
 # `#[cfg(unix)]`-gated legitimately mentions Windows and must not block the
@@ -26,8 +26,8 @@ onlycomment() { grep -E ':[0-9]+:[[:space:]]*(//|/\*|\*)'; }
 ATTR=$(scan | grep -v 'cfg!(' | grep -Ei '\bwindows\b|"msvc"' | nocomment)
 MACRO=$(scan | grep    'cfg!(' | grep -Ei '\bwindows\b|"msvc"' | nocomment)
 COMMENTS=$(scan | grep -Ei '\bwindows\b|"msvc"' | onlycomment)
-TOML=$(grep -rn "target\.'cfg(windows)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
-IDENT=$(grep -rn --include='*.rs' 'windows_app_identity' . 2>/dev/null | grep -v '^\./target/')
+TOML=$(grep -rn --exclude-dir=target --exclude-dir=.git "target\.'cfg(windows)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
+IDENT=$(grep -rn --exclude-dir=target --exclude-dir=.git --include='*.rs' 'windows_app_identity' . 2>/dev/null | grep -v '^\./target/')
 UNIXMAC=$(scan | grep -E '\bunix\b' | grep -E 'not\s*\(\s*target_os\s*=\s*"macos"')
 
 # NEGATIVE CONTROL (mirrors linux-census.sh): cfg(unix) and
@@ -38,7 +38,7 @@ CTL_UNIX=$(scan | grep -E 'cfg!?[[:space:]]*\([[:space:]]*unix[[:space:]]*\)|cfg
 CTL_MAC=$(scan | grep -E 'target_os[[:space:]]*=[[:space:]]*"macos"' | grep -vE 'not[[:space:]]*\([[:space:]]*target_os' | nocomment)
 # Target-triple STRING checks. These are not cfg constructs at all, so no cfg
 # regex can see them -- found only by searching a different term space.
-STRCHK=$(grep -rn --include='*.rs' -E '"[^"]*(windows|msvc)[^"]*"' . 2>/dev/null | grep -v '^\./target/' \
+STRCHK=$(grep -rn --exclude-dir=target --exclude-dir=.git --include='*.rs' -E '"[^"]*(windows|msvc)[^"]*"' . 2>/dev/null | grep -v '^\./target/' \
          | grep -E '\.contains\(|\.starts_with\(|\.ends_with\(|==|!=' | grep -v 'cfg!')
 
 n() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l | tr -d ' '; }

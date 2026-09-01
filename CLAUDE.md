@@ -99,7 +99,7 @@ Mechanics that made 2c and the post-2c grind cheap:
 
 Verified on 2026-08-25. Two of these are non-obvious and each one fails the build in a confusing way.
 
-1. **Rust 1.96.1**, pinned by `rust-toolchain.toml`. rustup honors the pin automatically. The dependency graph's actual floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates), so anything older fails to build before tests can start.
+1. **Rust 1.98.0**, pinned by `rust-toolchain.toml`. rustup honors the pin automatically. The dependency graph's actual floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates), so anything older fails to build before tests can start.
 2. **Full Xcode. Command Line Tools are NOT sufficient.** GPUI compiles its Metal shaders at build time, which needs the Metal compiler that ships only with Xcode.
 3. **Xcode alone is still not sufficient.** Xcode 26 ships the Metal toolchain as a separate downloadable component, so `xcrun metal` fails with `cannot execute tool 'metal' due to missing Metal Toolchain` until you run:
 

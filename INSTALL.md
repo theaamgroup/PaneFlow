@@ -15,12 +15,12 @@ and putting `paneflow` on your `PATH`, see
 
 ## Prerequisites
 
-**1. Rust 1.96.1.** Pinned by [rust-toolchain.toml](rust-toolchain.toml),
+**1. Rust 1.98.0.** Pinned by [rust-toolchain.toml](rust-toolchain.toml),
 so rustup selects it automatically inside the repo.
 
 ```bash
 rustup show active-toolchain
-# 1.96.1-aarch64-apple-darwin (overridden by '.../paneflow/rust-toolchain.toml')
+# 1.98.0-aarch64-apple-darwin (overridden by '.../paneflow/rust-toolchain.toml')
 ```
 
 **2. Full Xcode. Command Line Tools are not enough.** GPUI compiles Metal

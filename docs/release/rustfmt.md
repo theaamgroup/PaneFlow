@@ -9,7 +9,7 @@ mid-release (the failure mode that broke CI on v0.2.11).
 
 - `rust-toolchain.toml` (repo root) - `channel`, `components`, `profile`
 - `.github/workflows/*.yml` - every explicit `dtolnay/rust-toolchain@master`
-  step passes the same `toolchain: "1.96.1"` input. Both must move together.
+  step passes the same `toolchain: "1.98.0"` input. Both must move together.
 
 ## Quarterly bump procedure
 

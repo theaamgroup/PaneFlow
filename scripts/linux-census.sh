@@ -37,7 +37,7 @@ for line in sys.stdin:
 ' "$1"
 }
 
-scan() { grep -rn --include='*.rs' -E 'cfg!?\(|cfg_attr' . 2>/dev/null | grep -v '^\./target/'; }
+scan() { grep -rn --exclude-dir=target --exclude-dir=.git --include='*.rs' -E 'cfg!?\(|cfg_attr' . 2>/dev/null | grep -v '^\./target/'; }
 nocomment() { grep -vE ':[0-9]+:[[:space:]]*(//|/\*|\*)'; }
 onlycomment() { grep -E ':[0-9]+:[[:space:]]*(//|/\*|\*)'; }
 
@@ -49,7 +49,7 @@ P_ALL="$P_LINUX|$P_NOTUNIX|$P_NOTMAC"
 ATTR=$(scan | grep -v 'cfg!(' | content_match "$P_ALL" | nocomment)
 MACRO=$(scan | grep    'cfg!(' | content_match "$P_ALL" | nocomment)
 COMMENTS=$(scan | content_match "$P_ALL" | onlycomment)
-TOML=$(grep -rn -E "target\.'cfg\((unix|target_os = \"linux\")\)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
+TOML=$(grep -rn --exclude-dir=target --exclude-dir=.git -E "target\.'cfg\((unix|target_os = \"linux\")\)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
 
 # Operator-negated cfg! macros naming a target_os (`!cfg!(target_os = "...")`).
 # Invisible to P_NOTMAC, which only matches the `not(...)` predicate form.
@@ -69,7 +69,7 @@ CTL_UNIX=$(scan | content_match 'cfg!?\s*\(\s*unix\s*\)|cfg_attr\s*\(\s*unix' | 
 CTL_MAC=$(scan | content_match 'target_os\s*=\s*"macos"' | grep -vE 'not[[:space:]]*\([[:space:]]*target_os' | nocomment)
 
 # Target-triple STRING checks -- not cfg constructs, invisible to any cfg regex.
-STRCHK=$(grep -rn --include='*.rs' -E '"[^"]*(linux|musl|gnueabi)[^"]*"' . 2>/dev/null | grep -v '^\./target/' | content_match '"[^"]*(linux|musl|gnueabi)[^"]*"' \
+STRCHK=$(grep -rn --exclude-dir=target --exclude-dir=.git --include='*.rs' -E '"[^"]*(linux|musl|gnueabi)[^"]*"' . 2>/dev/null | grep -v '^\./target/' | content_match '"[^"]*(linux|musl|gnueabi)[^"]*"' \
          | grep -E '\.contains\(|\.starts_with\(|\.ends_with\(|==|!=' | grep -v 'cfg!')
 
 n() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l | tr -d ' '; }
@@ -100,7 +100,7 @@ PYEOF
 
 # DIFFERENT TERM SPACE. Re-running the cfg grep only reproduces its own blind
 # spots. This is what found the orphaned window_chrome/backdrop.rs in 2b.
-TERMS=$(grep -rnE --include='*.rs' \
+TERMS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --include='*.rs' \
   '/proc/|/sys/|XDG_[A-Z]|\.desktop\b|AppImage|appimage|dpkg|\brpm\b|apt-get|\bdnf\b|zypper|pkexec|polkit|flatpak|Flatpak|\bsnap\b|Snapd|zsync|systemd|wayland|Wayland|X11|dbus|DBus|notify-rust|ostree|gtk|Gtk' \
   . 2>/dev/null | grep -v '^\./target/' | nocomment)
 
@@ -110,7 +110,7 @@ TERMS=$(grep -rnE --include='*.rs' \
 # arrives with no #[cfg] at all. Reported separately; not added to the
 # zero-condition integer. Suffixes use a trailing word boundary so `.execute`
 # is not counted as `.exe`.
-UNGATED_STR=$(grep -rn --include='*.rs' -E \
+UNGATED_STR=$(grep -rn --exclude-dir=target --exclude-dir=.git --include='*.rs' -E \
   'powershell|\.exe\b|\.cmd\b|\.bat\b|\.ps1\b|\\\\\?\\|%APPDATA%' \
   . 2>/dev/null | grep -v '^\./target/' | nocomment)
 
