@@ -8,9 +8,6 @@ links = "ghostty-vt"
 build = "build.rs"
 publish = false
 
-[features]
-default = []
-
 [build-dependencies]
 serde.workspace = true
 sha2 = "0.10"

@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use super::checksum::{validate_sha256, verify_hash, verify_text_hash};
-use super::manifest::{NativePlatform, TargetContract, WindowsContract};
+use super::manifest::TargetContract;
 use super::{BuildResult, artifact_error, build_error};
 
 pub(crate) struct ArtifactBundle {
@@ -13,10 +13,7 @@ pub(crate) struct ArtifactBundle {
     header: PathBuf,
     bindings: PathBuf,
     build_info: PathBuf,
-    headers_index: PathBuf,
-    symbols: PathBuf,
     uses_bundled_archive: bool,
-    platform: NativePlatform,
 }
 
 #[derive(Debug)]
@@ -42,53 +39,18 @@ impl ArtifactBundle {
             header: root.join(contract.header_path()),
             bindings: root.join("bindings.rs"),
             build_info: root.join("build-info.txt"),
-            headers_index: root.join("headers.sha256"),
-            symbols: root.join("symbols.txt"),
             root,
             uses_bundled_archive,
-            platform: contract.platform(),
         }
     }
 
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub(crate) fn required_inputs(&self) -> Vec<&Path> {
-        let mut inputs = vec![
+        vec![
             self.archive.as_path(),
             self.header.as_path(),
             self.bindings.as_path(),
             self.build_info.as_path(),
-        ];
-        match self.platform {
-            NativePlatform::Linux | NativePlatform::Macos => {}
-            NativePlatform::Windows => {
-                inputs.extend([self.headers_index.as_path(), self.symbols.as_path()]);
-            }
-        }
-        inputs
-    }
-
-    pub(crate) fn requires_directory_watch(&self) -> bool {
-        self.has_windows_inventory()
-    }
-
-    /// Whether this bundle carries the Windows-only inventory.
-    ///
-    /// Windows is the only platform whose prepared tree ships
-    /// `headers.sha256` and `symbols.txt`, is enumerated in full, and whose
-    /// `build-info.txt` is itself hash-pinned in the manifest, which is why
-    /// its recorded archive digest must match the manifest even for a
-    /// `PANEFLOW_LIBGHOSTTY_DIR` override.
-    ///
-    /// The match is exhaustive on purpose: a new platform has to state its own
-    /// answer here rather than being misrouted into the Windows inventory.
-    fn has_windows_inventory(&self) -> bool {
-        match self.platform {
-            NativePlatform::Linux | NativePlatform::Macos => false,
-            NativePlatform::Windows => true,
-        }
+        ]
     }
 
     pub(crate) fn link_directory(&self) -> BuildResult<&Path> {
@@ -147,9 +109,7 @@ impl ArtifactBundle {
         validate_sha256(prepared_archive_hash).map_err(|detail| {
             artifact_error(contract.target(), &self.build_info, detail, action)
         })?;
-        if (self.uses_bundled_archive || self.has_windows_inventory())
-            && prepared_archive_hash != contract.archive_sha256
-        {
+        if self.uses_bundled_archive && prepared_archive_hash != contract.archive_sha256 {
             return Err(artifact_error(
                 contract.target(),
                 &self.build_info,
@@ -160,91 +120,13 @@ impl ArtifactBundle {
                 action,
             ));
         }
-        let archive_hash = if self.uses_bundled_archive || self.has_windows_inventory() {
+        let archive_hash = if self.uses_bundled_archive {
             contract.archive_sha256.as_str()
         } else {
             prepared_archive_hash
         };
         verify_hash(&self.archive, archive_hash)
             .map_err(|detail| artifact_error(contract.target(), &self.archive, detail, action))?;
-
-        if let Some(windows) = contract.windows() {
-            self.validate_windows_metadata(contract, windows, &info, action)?;
-        }
-        Ok(())
-    }
-
-    fn validate_windows_metadata(
-        &self,
-        contract: &TargetContract,
-        windows: &WindowsContract,
-        info: &BuildInfo,
-        action: &str,
-    ) -> BuildResult<()> {
-        for (path, expected, info_key) in [
-            (
-                &self.headers_index,
-                windows.headers_index_sha256.as_str(),
-                "headers_sha256",
-            ),
-            (
-                &self.symbols,
-                windows.symbols_sha256.as_str(),
-                "symbols_sha256",
-            ),
-        ] {
-            let recorded = info.required(info_key).map_err(|detail| {
-                artifact_error(contract.target(), &self.build_info, detail, action)
-            })?;
-            if recorded != expected {
-                return Err(artifact_error(
-                    contract.target(),
-                    path,
-                    format!("build metadata hash is `{recorded}`, expected `{expected}`"),
-                    action,
-                ));
-            }
-            verify_artifact_text(path, expected, contract.target(), action)?;
-        }
-
-        verify_artifact_text(
-            &self.build_info,
-            &windows.build_info_sha256,
-            contract.target(),
-            action,
-        )?;
-        let indexed_headers = verify_header_index(
-            &self.root.join("include"),
-            &self.headers_index,
-            contract.target(),
-            action,
-        )?;
-        verify_windows_inventory(
-            &self.root,
-            &contract.archive_path,
-            &indexed_headers,
-            contract.target(),
-            action,
-        )?;
-
-        let symbol_count = fs::read_to_string(&self.symbols)
-            .map_err(|error| artifact_error(contract.target(), &self.symbols, error, action))?
-            .lines()
-            .filter(|line| !line.is_empty())
-            .count()
-            .to_string();
-        if info
-            .required("symbol_count")
-            .map_err(|detail| artifact_error(contract.target(), &self.build_info, detail, action))?
-            != symbol_count
-        {
-            return Err(artifact_error(
-                contract.target(),
-                &self.symbols,
-                format!("symbol inventory count does not match build-info ({symbol_count})"),
-                action,
-            ));
-        }
         Ok(())
     }
 }
@@ -340,159 +222,6 @@ fn verify_artifact_text(
     verify_text_hash(path, expected).map_err(|detail| artifact_error(target, path, detail, action))
 }
 
-fn verify_header_index(
-    include_root: &Path,
-    index: &Path,
-    target: &str,
-    action: &str,
-) -> BuildResult<HashSet<PathBuf>> {
-    let contents =
-        fs::read_to_string(index).map_err(|error| artifact_error(target, index, error, action))?;
-    let mut indexed = HashSet::new();
-    for line in contents.lines().filter(|line| !line.is_empty()) {
-        let (expected, relative) = line.split_once("  ").ok_or_else(|| {
-            artifact_error(
-                target,
-                index,
-                format!("invalid header index line `{line}`"),
-                action,
-            )
-        })?;
-        validate_sha256(expected)
-            .map_err(|detail| artifact_error(target, index, detail, action))?;
-        let relative_path = Path::new(relative);
-        if relative_path.is_absolute()
-            || relative_path
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(artifact_error(
-                target,
-                index,
-                format!("unsafe header index entry `{line}`"),
-                action,
-            ));
-        }
-        if !indexed.insert(relative_path.to_path_buf()) {
-            return Err(artifact_error(
-                target,
-                index,
-                format!("duplicate header index entry `{relative}`"),
-                action,
-            ));
-        }
-        let header = include_root.join(relative_path);
-        require_file_beneath(include_root, &header, target, action)?;
-        verify_artifact_text(&header, expected, target, action)?;
-    }
-    Ok(indexed)
-}
-
-fn verify_windows_inventory(
-    prepared_root: &Path,
-    archive_path: &Path,
-    indexed_headers: &HashSet<PathBuf>,
-    target: &str,
-    action: &str,
-) -> BuildResult<()> {
-    let mut expected = HashSet::from([
-        PathBuf::from("bindings.rs"),
-        PathBuf::from("build-info.txt"),
-        PathBuf::from("headers.sha256"),
-        PathBuf::from("symbols.txt"),
-        archive_path.to_path_buf(),
-    ]);
-    expected.extend(
-        indexed_headers
-            .iter()
-            .map(|relative| PathBuf::from("include").join(relative)),
-    );
-
-    let mut actual = HashSet::new();
-    collect_artifact_files(prepared_root, prepared_root, &mut actual, target, action)?;
-    if actual == expected {
-        return Ok(());
-    }
-
-    let mut missing = expected
-        .difference(&actual)
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let mut extra = actual
-        .difference(&expected)
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    missing.sort_unstable();
-    extra.sort_unstable();
-    Err(artifact_error(
-        target,
-        prepared_root,
-        format!(
-            "artifact inventory mismatch: missing [{}], extra [{}]",
-            missing.join(", "),
-            extra.join(", ")
-        ),
-        action,
-    ))
-}
-
-fn collect_artifact_files(
-    root: &Path,
-    directory: &Path,
-    files: &mut HashSet<PathBuf>,
-    target: &str,
-    action: &str,
-) -> BuildResult<()> {
-    let entries = fs::read_dir(directory).map_err(|error| {
-        artifact_error(
-            target,
-            directory,
-            format!("cannot enumerate artifact: {error}"),
-            action,
-        )
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            artifact_error(
-                target,
-                directory,
-                format!("cannot enumerate artifact entry: {error}"),
-                action,
-            )
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|error| {
-            artifact_error(
-                target,
-                &path,
-                format!("cannot inspect artifact entry: {error}"),
-                action,
-            )
-        })?;
-        if file_type.is_dir() {
-            collect_artifact_files(root, &path, files, target, action)?;
-        } else if file_type.is_file() {
-            let relative = path.strip_prefix(root).map_err(|error| {
-                artifact_error(
-                    target,
-                    &path,
-                    format!("artifact escaped its prepared root: {error}"),
-                    action,
-                )
-            })?;
-            files.insert(relative.to_path_buf());
-        } else {
-            return Err(artifact_error(
-                target,
-                &path,
-                "artifact contains a symlink or unsupported filesystem entry",
-                action,
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::manifest::Manifest;
@@ -518,52 +247,11 @@ mod tests {
         assert!(error.contains("missing `zig_version`"));
     }
 
-    #[test]
-    fn header_index_rejects_parent_traversal() -> BuildResult<()> {
-        let root = tempfile::tempdir()?;
-        let index = root.path().join("headers.sha256");
-        let digest = format!("{:x}", Sha256::digest(b"header"));
-        fs::write(&index, format!("{digest}  ../escape.h\n"))?;
-        let error = verify_header_index(root.path(), &index, "test-target", "replace fixture")
-            .expect_err("parent traversal must be rejected");
-        assert!(error.to_string().contains("unsafe header index entry"));
-        Ok(())
-    }
-
-    #[test]
-    fn windows_inventory_rejects_missing_archive() -> BuildResult<()> {
-        let root = tempfile::tempdir()?;
-        for path in [
-            "bindings.rs",
-            "build-info.txt",
-            "headers.sha256",
-            "symbols.txt",
-        ] {
-            fs::write(root.path().join(path), [])?;
-        }
-        let error = verify_windows_inventory(
-            root.path(),
-            Path::new("lib/ghostty-vt-static.lib"),
-            &HashSet::new(),
-            "test-target",
-            "replace fixture",
-        )
-        .expect_err("an incomplete inventory must be rejected");
-        assert!(error.to_string().contains("lib/ghostty-vt-static.lib"));
-        Ok(())
-    }
-
-    #[test]
-    fn validates_the_reviewed_linux_bundle_as_one_unit() -> BuildResult<()> {
-        validates_the_reviewed_bundle("x86_64-unknown-linux-gnu")
-    }
-
-    /// The committed macOS tree is validated on every host, not only on Darwin.
+    /// The committed macOS tree is validated as one unit.
     ///
-    /// `ArtifactBundle::validate` is pure path and checksum work, so a Linux
-    /// developer editing `native/libghostty/prebuilt/aarch64-apple-darwin/`
-    /// gets the same failure the macOS build script would raise, instead of
-    /// waiting for the `macos_check` job.
+    /// `ArtifactBundle::validate` is pure path and checksum work, so anyone
+    /// editing `native/libghostty/prebuilt/aarch64-apple-darwin/` gets the same
+    /// failure the app build would raise, from this crate's tests alone.
     #[test]
     fn validates_the_reviewed_macos_bundle_as_one_unit() -> BuildResult<()> {
         validates_the_reviewed_bundle(MACOS_TARGET)
@@ -581,8 +269,9 @@ mod tests {
         bundle.validate(&contract, "replace reviewed fixture")
     }
 
-    /// A macOS bundle laid out exactly as `scripts/build-libghostty-macos.sh`
-    /// writes it, paired with the manifest that declares its target.
+    /// A macOS bundle laid out exactly as upstream's build script writes it (the
+    /// shape of the vendored `prebuilt/aarch64-apple-darwin/` tree), paired with
+    /// the manifest that declares its target.
     ///
     /// Returns the manifest source and the ten `build-info.txt` entries.
     fn macos_fixture(root: &Path) -> BuildResult<(String, Vec<(String, String)>)> {
@@ -683,7 +372,6 @@ mod tests {
         assert!(inputs.iter().any(|path| path.ends_with("build-info.txt")));
         assert!(!inputs.iter().any(|path| path.ends_with("headers.sha256")));
         assert!(!inputs.iter().any(|path| path.ends_with("symbols.txt")));
-        assert!(!bundle.requires_directory_watch());
         bundle.validate(&contract, &contract.corrective_action())
     }
 
@@ -711,7 +399,7 @@ mod tests {
                 error.contains(&format!("missing `{key}`")),
                 "error must name the missing key `{key}`: {error}"
             );
-            assert!(error.contains("scripts/build-libghostty-macos.sh"));
+            assert!(error.contains("PANEFLOW_LIBGHOSTTY_DIR"));
         }
         write_build_info(root.path(), &build_info)?;
         Ok(())
@@ -737,10 +425,7 @@ mod tests {
             .expect_err("a tampered bundled archive must be rejected")
             .to_string();
         assert!(error.contains("checksum"), "{error}");
-        assert!(
-            error.contains("scripts/build-libghostty-macos.sh"),
-            "{error}"
-        );
+        assert!(error.contains("PANEFLOW_LIBGHOSTTY_DIR"), "{error}");
         Ok(())
     }
 
@@ -757,10 +442,7 @@ mod tests {
             .expect_err("a truncated macOS bundle must be rejected");
         let error = error.to_string();
         assert!(error.contains("libghostty-vt.a"), "{error}");
-        assert!(
-            error.contains("scripts/build-libghostty-macos.sh"),
-            "{error}"
-        );
+        assert!(error.contains("PANEFLOW_LIBGHOSTTY_DIR"), "{error}");
         Ok(())
     }
 
