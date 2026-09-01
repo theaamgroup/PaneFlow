@@ -449,16 +449,87 @@ fn unknown_verb_error(verb: &str) -> String {
     format!("paneflow: unknown verb '{escaped}'; see `paneflow --help` for the verb list")
 }
 
+/// Default `RUST_LOG` when the environment sets none. Quiet by default: a
+/// plain `cargo run` (or a shipped binary) shows only warnings + errors.
+/// `RUST_LOG=info` restores the startup/runtime diagnostics (GPU selection,
+/// IPC, session restore, …) and `RUST_LOG=debug` adds the per-operation
+/// diff/git trace - matching the documented "RUST_LOG=info cargo run # with
+/// logging" workflow.
+///
+/// `gpui_macos::text_system` is pinned to `error`: it emits a per-glyph font
+/// fallback warning during normal rendering, which floods the default `warn`
+/// level. An explicit `RUST_LOG` still overrides it.
+const DEFAULT_LOG_FILTER: &str = "warn,wgpu_hal=off,naga=warn,gpui_macos::text_system=error,zbus=warn,zbus::proxy=error,tracing::span=warn";
+
+/// Whether the native chrome material may paint this frame.
+///
+/// macOS native fullscreen moves the window onto its own Space with a black
+/// backdrop, so AppKit's behind-window material has nothing to sample and
+/// the blur collapses into a flat, dead tint. Falling back to the opaque
+/// theme chrome keeps fullscreen readable. Tiled and maximized windows stay
+/// in the desktop Space and keep a live blur (verified on macOS 15), so this
+/// keys off `is_fullscreen`, never `is_maximized`. Both chrome sites in
+/// `render` (the AppKit view and the shell tint) resolve through here so they
+/// cannot disagree.
+fn chrome_material_for_frame(material_enabled: bool, is_fullscreen: bool) -> bool {
+    material_enabled && !is_fullscreen
+}
+
 #[cfg(test)]
 mod native_material_tests {
     use super::{
-        StartupSplashView, prepare_process_environment_before_threads,
-        should_extract_mcp_bridge_for_cli, should_load_login_shell_env_for_startup,
-        should_setup_hooks_for_cli,
+        DEFAULT_LOG_FILTER, StartupSplashView, chrome_material_for_frame,
+        prepare_process_environment_before_threads, should_extract_mcp_bridge_for_cli,
+        should_load_login_shell_env_for_startup, should_setup_hooks_for_cli,
     };
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    #[test]
+    fn default_log_filter_keeps_warn_and_pins_the_macos_text_system_to_error() {
+        let directives: Vec<&str> = DEFAULT_LOG_FILTER.split(',').collect();
+        assert_eq!(directives.first(), Some(&"warn"));
+        assert!(
+            directives.contains(&"gpui_macos::text_system=error"),
+            "gpui_macos::text_system emits a per-glyph fallback warning during normal \
+             rendering, which floods the default warn level: {DEFAULT_LOG_FILTER}"
+        );
+    }
+
+    #[test]
+    fn fullscreen_suppresses_the_chrome_material_for_the_frame() {
+        assert!(chrome_material_for_frame(true, false));
+        assert!(!chrome_material_for_frame(true, true));
+        assert!(!chrome_material_for_frame(false, false));
+        assert!(!chrome_material_for_frame(false, true));
+    }
+
+    #[test]
+    fn both_chrome_material_reads_in_render_go_through_the_fullscreen_aware_helper() {
+        // The AppKit material view and the shell tint are two separate
+        // decisions in `render`; a bare config read at either site lets them
+        // disagree in fullscreen. Pin both to the helper, not just the rule.
+        // The needles are composed at runtime: `include_str!` captures this
+        // test's own source too, and a literal anchor would match itself.
+        let anchor = format!("impl Render for {} {{", "PaneFlowApp");
+        let render = include_str!("main.rs")
+            .split_once(anchor.as_str())
+            .map(|(_, rest)| rest)
+            .unwrap();
+        for prefix in ["macos", "cockpit"] {
+            let getter = format!("{prefix}_chrome_material_enabled()");
+            let before = render
+                .split_once(getter.as_str())
+                .map(|(before, _)| before)
+                .unwrap();
+            let call = before.rfind("chrome_material_for_frame(").unwrap_or(0);
+            assert!(
+                call > 0 && !before[call..].contains(';'),
+                "{getter} must be an argument of chrome_material_for_frame(), not a bare read"
+            );
+        }
     }
 
     #[test]
@@ -1563,7 +1634,10 @@ impl Render for PaneFlowApp {
         #[cfg(target_os = "macos")]
         crate::window_chrome::macos_backdrop::sync_subtle_sidebar_material(
             theme.background.l > 0.5,
-            self.cached_config.macos_chrome_material_enabled(),
+            chrome_material_for_frame(
+                self.cached_config.macos_chrome_material_enabled(),
+                window.is_fullscreen(),
+            ),
         );
         // Every mode is cockpit now (Agents first, then Cli, then Diff): the
         // title bar floats above the full window and the right panel reserves
@@ -1592,7 +1666,10 @@ impl Render for PaneFlowApp {
         // cards) off the arc, since GPUI does NOT clip children to the radius.
         // The Cli pane grid keeps the terminal background on each pane card.
         // Diff and Settings use the opaque application surface.
-        let chrome_material_active = self.cached_config.cockpit_chrome_material_enabled();
+        let chrome_material_active = chrome_material_for_frame(
+            self.cached_config.cockpit_chrome_material_enabled(),
+            window.is_fullscreen(),
+        );
         let native_material_active = chrome_material_active;
         let is_window_active = window.is_window_active();
         let shell_color = if is_window_active {
@@ -2532,15 +2609,9 @@ fn main() {
     // async executors, and any app-owned thread.
     unsafe { agents::parent_guard::scrub_claudecode_env_before_threads() };
 
-    // Quiet by default: a plain `cargo run` (or a shipped binary) shows only
-    // warnings + errors. `RUST_LOG=info` restores the startup/runtime
-    // diagnostics (GPU selection, IPC, session restore, …) and `RUST_LOG=debug`
-    // adds the per-operation diff/git trace - matching the documented
-    // "RUST_LOG=info cargo run # with logging" workflow.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-        "warn,wgpu_hal=off,naga=warn,zbus=warn,zbus::proxy=error,tracing::span=warn",
-    ))
-    .init();
+    // Quiet by default; see `DEFAULT_LOG_FILTER` for the directive set and why.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER))
+        .init();
 
     // Adopt the login-shell PATH only for the real GUI path, then apply the
     // static per-user additions. This phase completes before any initializer
