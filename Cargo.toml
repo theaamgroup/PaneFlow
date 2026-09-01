@@ -4,11 +4,14 @@ members = [
     "crates/paneflow-agent-config",
     "crates/paneflow-ai-hook",
     "crates/paneflow-config",
+    "crates/paneflow-ghostty-smoke",
     "crates/paneflow-ipc-client",
+    "crates/paneflow-libghostty-sys",
     "crates/paneflow-mcp",
     "crates/paneflow-mcp-install",
     "crates/paneflow-process",
     "crates/paneflow-shim",
+    "crates/paneflow-terminal-ghostty",
     "src-app",
 ]
 # Scope bare `cargo run` / `cargo build` / `cargo test` to the desktop app.
