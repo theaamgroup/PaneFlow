@@ -10,8 +10,8 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, ParentElement, StatefulInteractiveElement, Styled, Window, deferred,
-    div, hsla, px,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled,
+    Window, deferred, div, hsla, px,
 };
 
 use crate::agent_launcher::TerminalAgent;
@@ -885,7 +885,19 @@ impl PaneFlowApp {
             .bg(hsla(0., 0., 0., 0.45))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // Issue #183: the second half of the double-click that
+                    // OPENED this modal lands here - the tab x that took the
+                    // first click is under this occluding backdrop by the time
+                    // the second click arrives. Cancelling on it would flash
+                    // the confirmation open and shut. A deliberate dismissal
+                    // click starts a fresh gesture at count 1 (click_count
+                    // only accumulates within the double-click interval and a
+                    // few pixels of the previous click), so this gate never
+                    // blocks one.
+                    if event.click_count >= 2 {
+                        return;
+                    }
                     this.cancel_pending_close(window, cx);
                 }),
             )
@@ -1447,37 +1459,84 @@ mod tests {
         );
     }
 
-    /// The two INLINE paths (R4), and nothing else. Both have to route the
-    /// click decision through the shared pure helper rather than re-deriving
-    /// "is this the second click?" locally, and neither may keep a direct
-    /// unguarded route into the close.
+    /// Issue #183: the sidebar tab X routes through the SAME modal chokepoint
+    /// as Cmd+W and the tab context menu's Close - on the FIRST click. The old
+    /// inline arm-then-confirm (issue #83) needed two clicks and threw a
+    /// double-click's second half away (`click_count >= 2`) or re-armed it
+    /// (`ARM_SETTLE`, 350 ms, under the macOS double-click interval), so a
+    /// live-agent tab often took three clicks to close.
+    ///
+    /// `every_modal_close_path_routes_through_the_guard` pins Cmd+W and the
+    /// context menu to `request_close_workspace_tab` + `ConfirmStyle::Modal`;
+    /// requiring the same callee here is what makes the three gestures one
+    /// path: an idle tab closes immediately, a live-agent tab gets the modal.
     #[test]
-    fn both_inline_close_paths_route_through_the_click_helper() {
+    fn the_sidebar_tab_x_routes_through_the_modal_chokepoint() {
         let sidebar = include_str!("sidebar/mod.rs");
         let tab_x = sidebar
-            .split("let close_armed = self.pending_close")
+            .split("\"tab-close-{tab_id}\"")
             .nth(1)
             .and_then(|rest| rest.split("let row_shell =").next())
             .expect("sidebar tab close button");
         assert!(
-            tab_x.contains("click_outcome(") && tab_x.contains("ConfirmStyle::Inline"),
-            "the sidebar tab x must arm inline through the shared helper: {tab_x}"
-        );
-        assert!(
-            tab_x.contains("confirm_pending_close_tab"),
-            "a second click on the same tab's x must confirm: {tab_x}"
+            tab_x.contains("request_close_workspace_tab") && tab_x.contains("ConfirmStyle::Modal"),
+            "the tab x must call the same guarded chokepoint as Cmd+W, modally: {tab_x}"
         );
         assert!(
             !tab_x.contains("this.close_workspace_tab("),
             "the sidebar tab x must not keep a second, unguarded route into the close: {tab_x}"
         );
-        // R3: arming has to be visible, and without an inline hex.
+        for leftover in [
+            "click_outcome(",
+            "confirm_pending_close_tab",
+            "vc_deleted",
+            "Click again to close",
+        ] {
+            assert!(
+                !tab_x.contains(leftover),
+                "the arm control is gone from the tab x (issue #183); `{leftover}` must not \
+                 come back: {tab_x}"
+            );
+        }
+        // And nothing else in the sidebar arms inline: with the tab x on the
+        // modal path, `ConfirmStyle::Inline` belongs to the pane header alone,
+        // and the armed-state render read goes with it.
         assert!(
-            tab_x.contains("ui.vc_deleted") && tab_x.contains("Click again to close"),
-            "an armed x that looks and reads like an unarmed one is worse than no guard, because \
-             the first click silently does nothing: {tab_x}"
+            !sidebar.contains("ConfirmStyle::Inline"),
+            "the sidebar must not arm inline anywhere (issue #183)"
         );
 
+        // The chokepoint's own contract is what makes one click enough: no
+        // qualifying agent means close IMMEDIATELY, otherwise arm the modal
+        // and close nothing until it is answered.
+        let request = include_str!("close_confirm.rs")
+            .split("pub(crate) fn request_close_workspace_tab(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn arm_pending_close_pane(").next())
+            .expect("request_close_workspace_tab body");
+        assert!(
+            request.contains("agent_needing_confirmation"),
+            "the chokepoint must decide off the live-agent predicate: {request}"
+        );
+        let close_at = request
+            .find("self.close_workspace_tab(")
+            .expect("an idle tab must close on the first click, with no modal");
+        let arm_at = request
+            .find("self.set_pending_close(")
+            .expect("a live-agent tab must arm the confirmation instead of closing");
+        assert!(
+            close_at < arm_at,
+            "the immediate close is the no-agent early return; arming comes after: {request}"
+        );
+    }
+
+    /// The pane header X is now the ONLY inline arm-then-confirm path (R4
+    /// minus the sidebar half, which issue #183 moved onto the modal
+    /// chokepoint). It has to route the click decision through the shared pure
+    /// helper rather than re-deriving "is this the second click?" locally, and
+    /// it may not keep a direct unguarded route into the close.
+    #[test]
+    fn the_pane_header_is_the_only_inline_close_path() {
         let handlers = include_str!("event_handlers.rs");
         let close_requested = handlers
             .split("pane::PaneEvent::CloseRequested => {")
@@ -1500,24 +1559,30 @@ mod tests {
         );
     }
 
-    /// The belt to [`crate::app::close_guard::ARM_SETTLE`]'s braces.
-    ///
     /// GPUI fires an `on_click` listener for BOTH clicks of a double-click -
     /// the sidebar row's own double-click-to-rename works only because it
-    /// does - so a double-click on either inline X used to arm and then
-    /// immediately confirm, killing an agent's whole process group behind a
-    /// confirmation painted for one frame nobody can perceive. Neither button
-    /// may act on a click that arrives with `click_count >= 2`.
+    /// does - so neither close button may act on a click that arrives with
+    /// `click_count >= 2`.
+    ///
+    /// For the pane header X the guard is the belt to
+    /// [`crate::app::close_guard::ARM_SETTLE`]'s braces: without it a
+    /// double-click arms and confirms in one gesture. For the sidebar tab X
+    /// (on the modal path since issue #183) the first click either closed an
+    /// idle tab - the rows below slide up, so the gesture's second half lands
+    /// on the NEXT row's x and would close a second tab - or opened the modal,
+    /// and a second half delivered before the modal's occluding backdrop
+    /// paints would re-request the same close. Either way the tail of the
+    /// gesture must do nothing.
     ///
     /// Scanned rather than driven: both listeners are GPUI closures with no
     /// test seam, and the pane header's X reaches the guard indirectly (it
     /// emits `PaneEvent::CloseRequested`, which is where the click count is
     /// already gone - `pane.rs` is the only place that still has it).
     #[test]
-    fn neither_inline_close_button_acts_on_the_second_click_of_a_double_click() {
+    fn neither_close_button_acts_on_the_second_click_of_a_double_click() {
         let sidebar = include_str!("sidebar/mod.rs");
         let tab_x = sidebar
-            .split("let close_armed = self.pending_close")
+            .split("\"tab-close-{tab_id}\"")
             .nth(1)
             .and_then(|rest| rest.split("let row_shell =").next())
             .expect("sidebar tab close button");
@@ -1534,10 +1599,48 @@ mod tests {
         ] {
             assert!(
                 body.contains("click_count >= 2"),
-                "{label} must drop the second click of a double-click, or it arms and \
-                 confirms in one gesture: {body}"
+                "{label} must drop the second click of a double-click, or one gesture acts \
+                 twice: {body}"
             );
         }
+    }
+
+    /// Issue #183: one click on a live-agent tab's X opens the modal, and the
+    /// SECOND half of that double-click lands on whatever painted under the
+    /// pointer by then - which is the modal's own occluding backdrop. The
+    /// backdrop cancels on mouse-down, so without a click-count gate a
+    /// double-click would flash the confirmation open and shut, costing
+    /// exactly the third click the issue was filed about. A deliberate
+    /// dismissal click starts a fresh gesture at count 1, so the gate never
+    /// blocks one.
+    ///
+    /// The stray click can never CONFIRM: the destructive default is reachable
+    /// only through the dialog's own Enter handler and its accept button, and
+    /// both sit inside an `.occlude()`d dialog that stops mouse-down
+    /// propagation - the backdrop is the only surface the gesture's tail can
+    /// reach, and all it could do there was cancel.
+    #[test]
+    fn the_modal_backdrop_ignores_the_tail_of_the_double_click_that_opened_it() {
+        let src = include_str!("close_confirm.rs");
+        let render = src
+            .split("pub(crate) fn render_close_confirm_dialog(")
+            .nth(1)
+            .and_then(|rest| rest.split("deferred(backdrop)").next())
+            .expect("render_close_confirm_dialog body");
+        let backdrop = render
+            .split("\"close-confirm-backdrop\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"close-confirm-dialog\"").next())
+            .expect("backdrop element, up to the dialog it wraps");
+        assert!(
+            backdrop.contains("cancel_pending_close"),
+            "the backdrop must still cancel on a deliberate click: {backdrop}"
+        );
+        assert!(
+            backdrop.contains("click_count >= 2"),
+            "the backdrop's cancel must ignore the second half of the double-click that \
+             opened the modal: {backdrop}"
+        );
     }
 
     /// R6: Escape stands an inline arm down, through the one mutator, and
@@ -1643,10 +1746,13 @@ mod tests {
     /// leaves the window naming an unmounted focus handle - exactly the state
     /// the four commits before this branch each fixed.
     ///
-    /// The sidebar's inline x calls the very same method, and there nothing
-    /// took focus: restoring would move focus to the ACTIVE workspace's first
-    /// pane, out from under whatever the user is typing. So both restores are
-    /// gated on the style, and neither may be reachable without the gate.
+    /// The gate reads the pending close's own style rather than trusting the
+    /// call site: the sidebar's inline x used to call this very method with
+    /// nothing focused (restoring would have moved focus to the ACTIVE
+    /// workspace's first pane, out from under whatever the user is typing).
+    /// Issue #183 moved that x onto the modal chokepoint, so today every tab
+    /// pending is `Modal` - but the style is data, and a future non-modal
+    /// caller must not inherit an unconditional restore by accident.
     #[test]
     fn confirming_a_modal_tab_close_hands_focus_back_and_an_inline_one_does_not() {
         let src = include_str!("close_confirm.rs");
