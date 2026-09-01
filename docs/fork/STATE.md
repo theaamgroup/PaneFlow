@@ -289,13 +289,13 @@ even though signed release DMGs are also available.
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.1.3.** First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. |
+| Version | **0.2.0** (the libghostty-vt engine; #184). Before it, **0.1.3.** First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. |
 
 ## Verified green, and how to reproduce it
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 2444 names at the Phase 4 head (2026-09-01); re-count after the audit fixes land
+cargo test --workspace                       # 2473 names, 0 failed, 2 ignored (2026-09-01, #184 through the audit + the 0.2.0 cut)
 cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
