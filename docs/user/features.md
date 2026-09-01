@@ -87,7 +87,10 @@ switching tabs brings each tab's dock back the way you left it. Closing a tab
 closes its dock; the dock never follows a tab into a session restore. When a
 right-hand rail is open or the window is narrow, the dock shrinks to fit the
 space the panes can spare and returns to the width you chose as soon as the
-room comes back.
+room comes back; dragging its edge while it is squeezed never narrows that
+choice unless you drag it narrower than the room allows. When there is no room
+for a readable dock beside a pane at all, the panes win and the dock steps
+aside until there is.
 
 ## Projects
 

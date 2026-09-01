@@ -39,22 +39,28 @@ use crate::workspace::Workspace;
 const PANE_GRID_RESERVED_WIDTH: f32 =
     crate::layout::MIN_PANE_SIZE + 2. * crate::layout::PANE_GUTTER_PX;
 
-/// How the dock fits inside `available` px of main panel: `(render, max)`.
+/// How the dock fits inside `available` px of main panel: `Some((render, max))`,
+/// or `None` when the panel cannot hold the dock's floor width beside a
+/// minimum pane. Below that the pane grid wins and the dock is not rendered at
+/// all - its state stays where it is, so a rail closing or the window growing
+/// brings it straight back. Rendering the floor into a panel that small would
+/// shrink the `flex_1().min_w_0()` grid to nothing and clip the dock instead.
 ///
 /// The stored width is a *preference*, not a layout fact: opening a right rail
 /// (Files, Sessions) or narrowing the window shrinks the panel under a dock
 /// that was sized for the wide one. Clamping at render rather than writing the
 /// preference back means the dock returns to its full width when the rail
-/// closes or the window grows again. The ceiling travels with it so a resize
-/// drag started under a rail cannot store a width the panel could not show.
+/// closes or the window grows again. The resize drag reads the same ceiling on
+/// every move (`PaneFlowApp::drag_diff_dock_resize`), so a drag started under
+/// a rail cannot store a width the panel could not show.
 ///
 /// Pure: `preferred` is taken by value and never written anywhere. The only
-/// writer of `DiffDockState::width` is the resize drag
-/// (`PaneFlowApp::drag_diff_dock_resize`), which records a user gesture.
-fn diff_dock_fit(preferred: f32, available: f32) -> (f32, f32) {
-    let max = (available - PANE_GRID_RESERVED_WIDTH - crate::layout::PANE_GUTTER_PX)
-        .max(DIFF_DOCK_PANEL_MIN_WIDTH);
-    (preferred.min(max), max)
+/// writer of `DiffDockState::width` is the resize drag, which records a user
+/// gesture - and only a value the user actually chose
+/// (`diff_dock::diff_dock_drag_preference`).
+fn diff_dock_fit(preferred: f32, available: f32) -> Option<(f32, f32)> {
+    let max = available - PANE_GRID_RESERVED_WIDTH - crate::layout::PANE_GUTTER_PX;
+    (max >= DIFF_DOCK_PANEL_MIN_WIDTH).then_some((preferred.min(max), max))
 }
 
 /// The dock state one session owns, parked while another session is on screen.
@@ -115,6 +121,29 @@ fn park_dock_slot(parked: &mut HashMap<u64, DiffDockSlot>, owner: Option<u64>, s
 /// Drop the slots of sessions that no longer exist in `workspaces`.
 fn prune_parked_dock_slots(parked: &mut HashMap<u64, DiffDockSlot>, workspaces: &[Workspace]) {
     parked.retain(|id, _| session_is_live(workspaces, *id));
+}
+
+/// Re-key the dock session `from` owns onto tab `to`: its parked slot moves
+/// under the new id and, when it is the live owner, the owner is renamed. For
+/// a tab whose *content* moved into a freshly minted tab (a lone pane dragged
+/// to another folder row closes its tab and reopens as a new one), so the dock
+/// follows the content instead of dying with an id nothing resolves any more.
+/// `to` is a fresh tab and holds no slot of its own.
+fn rehome_dock_session(
+    owner: &mut Option<u64>,
+    parked: &mut HashMap<u64, DiffDockSlot>,
+    from: u64,
+    to: u64,
+) {
+    if from == to {
+        return;
+    }
+    if let Some(slot) = parked.remove(&from) {
+        parked.insert(to, slot);
+    }
+    if *owner == Some(from) {
+        *owner = Some(to);
+    }
 }
 
 /// The dock tabs a session owns, wherever they are: on screen when it is the
@@ -246,6 +275,23 @@ impl PaneFlowApp {
         }
     }
 
+    /// The dock of tab `from` now belongs to tab `to`. For the one gesture
+    /// that moves a tab's content into a new tab rather than moving the tab:
+    /// a lone pane dragged to another folder row (`move_pane_to_new_tab`)
+    /// closes the tab it *was* and reopens the pane as a fresh tab. The dock
+    /// followed that pane's tab, so it follows the pane - the alternative is
+    /// the next reconcile pruning a slot whose id nothing resolves, and the
+    /// dock's terminals (an agent, as likely as not) dying with it, silently
+    /// and un-undoably. Must run before the next paint.
+    pub(crate) fn rehome_diff_dock_for_tab(&mut self, from: u64, to: u64) {
+        rehome_dock_session(
+            &mut self.diff_dock.owner,
+            &mut self.diff_dock.parked,
+            from,
+            to,
+        );
+    }
+
     /// Live CWDs of terminal tabs in both the mounted and parked diff docks.
     /// These terminals are not represented by workspace panes.
     pub(crate) fn diff_dock_terminal_cwds(&self, cx: &App) -> Vec<std::path::PathBuf> {
@@ -281,6 +327,12 @@ impl PaneFlowApp {
     /// the dock follows one fact - which session is visible - so it reconciles
     /// against that fact instead of asking every caller to remember it.
     fn sync_diff_dock_session(&mut self, cx: &mut Context<Self>) {
+        // Above the early return, so a slot whose tab vanished is caught on
+        // the next paint whether or not the visible session moved. Free in the
+        // common case (nothing parked); otherwise a handful of id compares.
+        if !self.diff_dock.parked.is_empty() {
+            self.prune_parked_diff_docks();
+        }
         let active = self.active_session_id();
         if self.diff_dock.owner == active {
             return;
@@ -288,7 +340,6 @@ impl PaneFlowApp {
         let previous = self.diff_dock.owner;
         self.diff_dock.owner = active;
         self.park_live_diff_dock(previous, cx);
-        self.prune_parked_diff_docks();
         self.restore_diff_dock(active, cx);
     }
 
@@ -301,9 +352,12 @@ impl PaneFlowApp {
 
     /// Drop the slots of sessions that no longer exist. The explicit teardowns
     /// ([`Self::drop_diff_dock_for_tab`], [`Self::drop_diff_dock_for_workspace`])
-    /// cover the close paths; this catches a tab that vanished some other way,
-    /// such as an empty placeholder tab replaced in place by
-    /// [`Workspace::open_tab`].
+    /// cover the close paths and [`Self::rehome_diff_dock_for_tab`] the
+    /// pane-drag one; this catches a tab that vanished some other way, such
+    /// as an empty placeholder tab replaced in place by [`Workspace::open_tab`].
+    /// Runs at the top of every [`Self::sync_diff_dock_session`] - once per
+    /// frame, before its early return - so it does not wait for the visible
+    /// session to change.
     pub(crate) fn prune_parked_diff_docks(&mut self) {
         prune_parked_dock_slots(&mut self.diff_dock.parked, &self.workspaces);
     }
@@ -406,7 +460,8 @@ impl PaneFlowApp {
     ///
     /// `available_width` is the main panel's live width between the rails; the
     /// dock renders at [`diff_dock_fit`] of it and its stored preference, which
-    /// this never writes.
+    /// this never writes - and not at all when the panel cannot hold the
+    /// dock's floor beside a minimum pane.
     pub(crate) fn wrap_cli_diff_dock(
         &mut self,
         body: AnyElement,
@@ -419,27 +474,40 @@ impl PaneFlowApp {
         if !self.diff_dock_visible() {
             return body;
         }
+        let Some((width, max_width)) = diff_dock_fit(self.diff_dock.width, available_width) else {
+            // Below the floor the pane grid wins. The dock keeps its state
+            // (open, tabs, snapshot) and is back the moment there is room for
+            // both; only a drag anchored on the edge that just left the screen
+            // is dropped, or it would resume on the dock's return.
+            self.diff_dock.resize = None;
+            self.diff_dock.h_scroll_drag = None;
+            return body;
+        };
         let ui = crate::theme::ui_colors();
-        let (width, max_width) = diff_dock_fit(self.diff_dock.width, available_width);
         div()
             .size_full()
             .flex()
             .flex_row()
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _w, cx| {
-                if this.diff_dock.h_scroll_drag.is_some() {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.drag_diff_dock_h_scrollbar(event.position.x, cx);
-                    } else {
-                        this.end_diff_dock_h_scrollbar_drag(cx);
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _w, cx| {
+                    if this.diff_dock.h_scroll_drag.is_some() {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            this.drag_diff_dock_h_scrollbar(event.position.x, cx);
+                        } else {
+                            this.end_diff_dock_h_scrollbar_drag(cx);
+                        }
+                    } else if this.diff_dock.resize.is_some() {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            // This frame's ceiling, not the one at mouse-down: the
+                            // panel can change under a drag (a rail toggled by
+                            // its chord), and the drag must not store past it.
+                            this.drag_diff_dock_resize(f32::from(event.position.x), max_width, cx);
+                        } else {
+                            this.end_diff_dock_resize(cx);
+                        }
                     }
-                } else if this.diff_dock.resize.is_some() {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.drag_diff_dock_resize(f32::from(event.position.x), cx);
-                    } else {
-                        this.end_diff_dock_resize(cx);
-                    }
-                }
-            }))
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &gpui::MouseUpEvent, _w, cx| {
@@ -460,7 +528,7 @@ impl PaneFlowApp {
                     .pt(px(crate::layout::PANE_GUTTER_PX))
                     .pb(px(crate::layout::PANE_GUTTER_PX))
                     .pr(px(crate::layout::PANE_GUTTER_PX))
-                    .child(self.render_diff_dock_panel(width, max_width, ui, cx)),
+                    .child(self.render_diff_dock_panel(width, ui, cx)),
             )
             .into_any_element()
     }
@@ -471,6 +539,7 @@ mod tests {
     use gpui::AppContext as _;
 
     use super::*;
+    use crate::app::diff_dock::{DIFF_DOCK_PANEL_MAX_WIDTH, diff_dock_drag_preference};
     use crate::workspace::Tab;
 
     fn slot(open: bool, picked: bool, tabs: usize) -> DiffDockSlot {
@@ -500,11 +569,17 @@ mod tests {
 
     // --- width fit -------------------------------------------------------
 
+    /// The rendered width of the dock, or `None` when the panel is too narrow
+    /// to show it at all.
+    fn rendered(preferred: f32, available: f32) -> Option<f32> {
+        diff_dock_fit(preferred, available).map(|(width, _)| width)
+    }
+
     #[test]
     fn a_wide_panel_leaves_the_preferred_dock_width_alone() {
         // 1920px of panel: the dock has no reason to give ground, and the
         // preference is what the user dragged it to.
-        assert_eq!(diff_dock_fit(880., 1920.).0, 880.);
+        assert_eq!(rendered(880., 1920.), Some(880.));
     }
 
     #[test]
@@ -513,7 +588,7 @@ mod tests {
         // must fit inside it with the pane grid's reserve, not overflow the
         // panel's clip by the difference.
         let available = 970.;
-        let (width, max) = diff_dock_fit(880., available);
+        let (width, max) = diff_dock_fit(880., available).expect("970px holds the dock");
         assert!(width < 880., "the dock must give ground: {width}");
         assert_eq!(width, max, "a clamped dock renders at its ceiling");
         assert!(
@@ -522,14 +597,67 @@ mod tests {
         );
     }
 
+    /// S3 (#193 audit): below the floor the grid wins. The dock used to stop
+    /// at its 360 px floor with nothing left for the panes - at the app's
+    /// 800 px minimum window with the sidebar and a right rail open the panel
+    /// is ~196 px, so the grid shrank to zero and the dock was clipped. Now
+    /// the dock is simply not rendered until there is room for both.
     #[test]
-    fn a_panel_too_narrow_for_the_floor_stops_at_the_floor() {
-        // Past this point something has to be clipped; the dock stays readable
-        // rather than collapsing to a sliver.
+    fn a_panel_too_narrow_for_the_floor_hides_the_dock_and_keeps_the_grid() {
+        let floor =
+            DIFF_DOCK_PANEL_MIN_WIDTH + PANE_GRID_RESERVED_WIDTH + crate::layout::PANE_GUTTER_PX;
+        assert_eq!(floor, 464.);
+        assert_eq!(rendered(880., 196.), None, "the 800px-window case");
+        assert_eq!(rendered(880., 200.), None);
+        assert_eq!(rendered(880., floor - 1.), None, "one pixel short is short");
+        // Exactly at the floor the dock renders at its minimum and the grid
+        // keeps exactly its reserve.
         assert_eq!(
-            diff_dock_fit(880., 200.),
-            (DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MIN_WIDTH)
+            diff_dock_fit(880., floor),
+            Some((DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MIN_WIDTH))
         );
+    }
+
+    /// S3 (#193 audit): the dock's floor must never be paid for by the pane
+    /// grid. At the app's 800 px minimum window with the sidebar and a right
+    /// rail open the panel is ~196 px; a 360 px dock in it shrinks the
+    /// `flex_1().min_w_0()` grid to zero and clips the dock. Whatever fits,
+    /// the grid keeps at least one minimum pane plus its gutters.
+    #[test]
+    fn the_pane_grid_never_renders_below_its_minimum_beside_the_dock() {
+        let floor =
+            DIFF_DOCK_PANEL_MIN_WIDTH + PANE_GRID_RESERVED_WIDTH + crate::layout::PANE_GUTTER_PX;
+        for preferred in [DIFF_DOCK_PANEL_MIN_WIDTH, 880., DIFF_DOCK_PANEL_MAX_WIDTH] {
+            for available in (0..=3000).map(|px| px as f32) {
+                let fit = diff_dock_fit(preferred, available);
+                if available < floor {
+                    assert_eq!(
+                        fit, None,
+                        "{available}px cannot hold the dock floor beside a minimum pane: the \
+                         grid wins and the dock is not rendered"
+                    );
+                    continue;
+                }
+                let Some((width, max)) = fit else {
+                    panic!("{available}px holds the floor, so the dock renders");
+                };
+                let grid = available - width - crate::layout::PANE_GUTTER_PX;
+                assert!(
+                    grid >= PANE_GRID_RESERVED_WIDTH,
+                    "preferred {preferred} in {available}px: dock {width} leaves the grid {grid}px, \
+                     below its {PANE_GRID_RESERVED_WIDTH}px reserve"
+                );
+                assert!(
+                    width >= DIFF_DOCK_PANEL_MIN_WIDTH,
+                    "{width} is below the floor"
+                );
+                assert!(
+                    width <= preferred,
+                    "{width} exceeds the preference {preferred}"
+                );
+                assert!(width <= max, "{width} exceeds the ceiling {max}");
+            }
+        }
     }
 
     /// #184 Phase 4: the rendered width is `min(stored, remainder)` with the
@@ -539,7 +667,7 @@ mod tests {
     fn the_rendered_width_is_the_smaller_of_preference_and_remainder() {
         let stored = 880.;
         let remainder = 700.;
-        let (narrow, _) = diff_dock_fit(stored, remainder);
+        let narrow = rendered(stored, remainder).expect("700px holds the dock");
         assert_eq!(
             narrow,
             remainder - PANE_GRID_RESERVED_WIDTH - crate::layout::PANE_GUTTER_PX,
@@ -548,8 +676,8 @@ mod tests {
         assert!(narrow >= DIFF_DOCK_PANEL_MIN_WIDTH);
         // The same preference, once the panel is wide again: nothing was lost.
         assert_eq!(
-            diff_dock_fit(stored, 1920.).0,
-            stored,
+            rendered(stored, 1920.),
+            Some(stored),
             "the preference survives a narrow spell untouched"
         );
     }
@@ -597,6 +725,64 @@ mod tests {
         assert!(
             !include_str!("diff_dock/render.rs").contains("diff_dock.width ="),
             "the resize handle only anchors; it must not write the width"
+        );
+    }
+
+    // --- resize drag -----------------------------------------------------
+
+    /// S2 (#193 audit), the sequence from issue #184: a wide preference
+    /// clamped under a rail must survive a drag that pins at the ceiling.
+    /// Stored 880 -> a rail opens (836 px of panel: 732 px ceiling, rendered
+    /// 732) -> a drag toward wider pins at 732 -> the rail closes -> 880.
+    #[test]
+    fn a_drag_pinned_at_the_ceiling_leaves_a_wider_preference_alone() {
+        let mut stored = 880.;
+        let (on_screen, ceiling) = diff_dock_fit(stored, 836.).expect("836px holds the dock");
+        assert_eq!((on_screen, ceiling), (732., 732.));
+        // Anchored on the rendered edge, the cursor moves 40 px further left.
+        stored = diff_dock_drag_preference(stored, on_screen + 40., ceiling);
+        assert_eq!(
+            stored, 880.,
+            "a drag pinned at the ceiling asks for 'at least this wide', which 880 already is"
+        );
+        // A 1 px nudge wider is the same gesture.
+        stored = diff_dock_drag_preference(stored, on_screen + 1., ceiling);
+        assert_eq!(stored, 880.);
+        assert_eq!(
+            rendered(stored, 1920.),
+            Some(880.),
+            "closing the rail restores the width the user chose"
+        );
+    }
+
+    #[test]
+    fn a_genuine_narrow_drag_stores_the_narrower_width() {
+        let (on_screen, ceiling) = diff_dock_fit(880., 836.).expect("836px holds the dock");
+        let stored = diff_dock_drag_preference(880., on_screen - 132., ceiling);
+        assert_eq!(
+            stored, 600.,
+            "600 is below the ceiling, so the user chose it"
+        );
+        assert_eq!(rendered(stored, 1920.), Some(600.));
+    }
+
+    #[test]
+    fn a_drag_pinned_at_the_ceiling_raises_a_narrower_preference_to_it() {
+        // Stored 600 under a 732 px ceiling: dragging past the ceiling means
+        // "at least 732", which 600 does not satisfy.
+        assert_eq!(diff_dock_drag_preference(600., 800., 732.), 732.);
+        // The drag never stores below the floor or above the cap.
+        assert_eq!(
+            diff_dock_drag_preference(600., 100., 732.),
+            DIFF_DOCK_PANEL_MIN_WIDTH
+        );
+        assert_eq!(
+            diff_dock_drag_preference(600., 5000., 5000.),
+            DIFF_DOCK_PANEL_MAX_WIDTH
+        );
+        assert_eq!(
+            diff_dock_drag_preference(DIFF_DOCK_PANEL_MAX_WIDTH, 5000., 5000.),
+            DIFF_DOCK_PANEL_MAX_WIDTH
         );
     }
 
@@ -797,6 +983,97 @@ mod tests {
         assert_eq!(ids(&for_other), ids(&foreign_terminal));
     }
 
+    /// B1 (#193 audit): a pane dragged to another folder row when it *is* its
+    /// tab closes that tab and reopens the pane as a freshly minted tab of the
+    /// destination. The dock followed the pane's tab, so it follows the pane:
+    /// re-keyed to the new id, it is still reachable (and still counted by
+    /// the close guard) through the new tab, rather than pruned - terminal
+    /// and all - the moment the old id stops resolving. Modelled on the slot
+    /// map like the test above, because a `PaneFlowApp` cannot be
+    /// constructed in a test.
+    #[gpui::test]
+    fn dragging_a_lone_pane_to_another_folder_takes_its_dock_along(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut source = workspace_with_tabs(1, "/tmp/a", &["lone"]);
+        let mut dest = workspace_with_tabs(2, "/tmp/b", &["home"]);
+        let old = tab_ids(&source)[0];
+        let bystander = tab_ids(&dest)[0];
+
+        // The lone tab is the visible session, so it owns the live dock (with
+        // an agent in a terminal tab); the destination's own tab has a parked
+        // dock of its own.
+        let live_tabs = vec![DiffDockTab::Changes, terminal_tab(cx)];
+        let agent = dock_terminals(live_tabs.iter());
+        let mut owner = Some(old);
+        let mut parked = HashMap::new();
+        parked.insert(bystander, terminal_slot(cx));
+        let bystander_terminal = dock_terminals(parked[&bystander].tabs.iter());
+
+        // The gesture on the model: the pane was the whole tab, so the tab
+        // goes (the FR-01 placeholder takes its place) and the pane lands in
+        // a new tab of the destination.
+        let vacated = source.close_tab(0).expect("the lone tab detaches");
+        assert_eq!(vacated.id, old);
+        assert!(dest.open_tab(Tab::new("", None)));
+        let new = dest.active_tab().id;
+        assert_ne!(new, old, "the pane lands in a freshly minted tab");
+        let workspaces = [source, dest];
+        assert!(
+            !session_is_live(&workspaces, old),
+            "the vacated id resolves nothing: without a re-home the next \
+             reconcile prunes its dock"
+        );
+
+        rehome_dock_session(&mut owner, &mut parked, old, new);
+        assert_eq!(owner, Some(new), "the live dock now belongs to the new tab");
+        prune_parked_dock_slots(&mut parked, &workspaces);
+
+        // The close guard sees the agent through the new tab, nothing through
+        // the old id, and the bystander's dock is untouched.
+        let for_new = dock_terminals(dock_tabs_for_session(owner, &live_tabs, &parked, new));
+        assert_eq!(
+            ids(&for_new),
+            ids(&agent),
+            "the dock terminal survives the move"
+        );
+        assert!(dock_terminals(dock_tabs_for_session(owner, &live_tabs, &parked, old)).is_empty());
+        let for_bystander =
+            dock_terminals(dock_tabs_for_session(owner, &live_tabs, &parked, bystander));
+        assert_eq!(ids(&for_bystander), ids(&bystander_terminal));
+    }
+
+    /// The parked half of the same re-home: a dock parked under the vacated
+    /// id (the frame between a switch and the next paint) moves under the
+    /// new id, and the prune keeps it. Nothing else in the map moves.
+    #[test]
+    fn rehoming_a_parked_dock_moves_its_slot_under_the_new_tab_id() {
+        let mut source = workspace_with_tabs(1, "/tmp/a", &["lone", "staying"]);
+        let mut dest = workspace_with_tabs(2, "/tmp/b", &["home"]);
+        let (old, staying) = (tab_ids(&source)[0], tab_ids(&source)[1]);
+        let mut owner = Some(staying);
+        let mut parked = HashMap::new();
+        park_dock_slot(&mut parked, Some(old), slot(true, true, 3));
+
+        source.close_tab(0).expect("the lone tab detaches");
+        assert!(dest.open_tab(Tab::new("", None)));
+        let new = dest.active_tab().id;
+        rehome_dock_session(&mut owner, &mut parked, old, new);
+        prune_parked_dock_slots(&mut parked, &[source, dest]);
+
+        assert_eq!(owner, Some(staying), "a different owner is left alone");
+        assert!(
+            !parked.contains_key(&old),
+            "nothing is left under the dead id"
+        );
+        let moved = parked.get(&new).expect("the slot moved under the new id");
+        assert!(moved.open && moved.picked && moved.tabs.len() == 3);
+        assert_eq!(parked.len(), 1);
+
+        // A no-op re-home (same id) changes nothing.
+        rehome_dock_session(&mut owner, &mut parked, new, new);
+        assert!(parked.contains_key(&new));
+    }
+
     #[test]
     fn tab_close_has_an_explicit_parked_dock_teardown() {
         let src = include_str!("cli_diff_dock.rs");
@@ -825,6 +1102,63 @@ mod tests {
         assert!(
             closer.contains("drop_diff_dock_for_tab("),
             "close_workspace_tab must tear the closed tab's dock down explicitly: {closer}"
+        );
+
+        // Every `close_tab` site in the tab ops is paired, inside the same
+        // method, with one of: the explicit teardown, the re-home that hands
+        // the dock to the tab the content moved into, or re-opening the very
+        // same `Tab` (`open_tab(tab)`: same id, so the dock keys stay live).
+        // An unpaired site is the #193 audit's B1: the tab id stops resolving,
+        // the next reconcile prunes the slot, and its terminals die silently.
+        let sites: Vec<usize> = ops.match_indices(".close_tab(").map(|(at, _)| at).collect();
+        assert!(
+            sites.len() >= 3,
+            "expected the three tab-removal sites in workspace_ops/tab.rs, found {sites:?}"
+        );
+        for at in sites {
+            let fn_start = ops[..at]
+                .rfind("\n    pub(crate) fn ")
+                .into_iter()
+                .chain(ops[..at].rfind("\n    fn "))
+                .max()
+                .expect("a `.close_tab(` site inside a method");
+            let name = ops[fn_start..]
+                .split("fn ")
+                .nth(1)
+                .and_then(|rest| rest.split('(').next())
+                .unwrap_or_default();
+            let fn_end = at + ops[at..].find("\n    }\n").expect("end of the method");
+            let tail = &ops[at..fn_end];
+            let paired = tail.contains("drop_diff_dock_for_tab(")
+                || tail.contains("rehome_diff_dock_for_tab(")
+                || tail.contains(".open_tab(tab)");
+            assert!(
+                paired,
+                "`{name}` removes a tab for good without a dock teardown or re-home: {tail}"
+            );
+        }
+    }
+
+    /// N5 (#193 audit): the prune is only a safety net if it runs whether or
+    /// not the visible session changed. It must sit above the early return.
+    #[test]
+    fn the_parked_dock_prune_runs_every_frame_before_the_session_early_return() {
+        let src = include_str!("cli_diff_dock.rs");
+        let sync = src
+            .split("fn sync_diff_dock_session(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("session reconcile");
+        let prune_at = sync
+            .find("prune_parked_diff_docks(")
+            .expect("the reconcile must prune dead slots");
+        let early_return_at = sync
+            .find("if self.diff_dock.owner == active")
+            .expect("the reconcile's early return");
+        assert!(
+            prune_at < early_return_at,
+            "the prune must run before the `owner == active` early return, or a slot whose \
+             tab vanished waits for the next session switch: {sync}"
         );
     }
 

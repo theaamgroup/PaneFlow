@@ -535,6 +535,10 @@ impl PaneFlowApp {
             }
             return;
         }
+        // The id of the tab the pane vacates, when it was the whole tab: the
+        // tab's dock (#184 Phase 4: parked per tab) follows the pane into the
+        // tab it lands in, below.
+        let mut vacated_tab_id = None;
         match pruned {
             Some(rest) => {
                 if let Some(tab) = self.workspaces[src_ws_idx].tab_mut(src_tab_idx) {
@@ -546,6 +550,10 @@ impl PaneFlowApp {
             // (FR-01), which `open_tab` fills in place when the destination is
             // this same workspace.
             None => {
+                vacated_tab_id = self.workspaces[src_ws_idx]
+                    .tabs()
+                    .get(src_tab_idx)
+                    .map(|tab| tab.id);
                 self.workspaces[src_ws_idx].close_tab(src_tab_idx);
                 // Every tab after the closed one slid up by one, and so did the
                 // gap the line pointed at.
@@ -579,8 +587,23 @@ impl PaneFlowApp {
             if !reattached {
                 log::error!("pane move: dropped pane could not be re-attached");
             }
+            // The vacated tab is gone for good and there is no tab to hand its
+            // dock to: tear it down explicitly rather than leave it for the
+            // render-time prune.
+            if let Some(tab_id) = vacated_tab_id {
+                self.drop_diff_dock_for_tab(tab_id, cx);
+            }
             cx.notify();
             return;
+        }
+
+        // The pane *was* the tab's content, so the dock that followed that
+        // tab follows the pane into its new one - re-keyed before the next
+        // paint, or the reconcile would prune the slot (terminals and all)
+        // the moment the vacated id stopped resolving.
+        if let Some(from) = vacated_tab_id {
+            let to = self.workspaces[dest_ws_idx].active_tab().id;
+            self.rehome_diff_dock_for_tab(from, to);
         }
 
         // `open_tab` appends; slide the newcomer to the gap the line marked.

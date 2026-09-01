@@ -197,8 +197,10 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
 │   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs); parked per TAB
 │   │                                     (`cli_diff_dock.rs` keys slots by `Tab::id`, never by workspace);
-│   │                                     rendered width = min(stored, main-panel remainder), stored width
-│   │                                     only written by the resize drag
+│   │                                     rendered width = min(stored, main-panel remainder), and the dock is
+│   │                                     not rendered at all below the floor (remainder < 360 px dock +
+│   │                                     one minimum pane); stored width only written by the resize drag,
+│   │                                     and a drag pinned at the render ceiling leaves a wider preference alone
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
 │   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
 │   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus; footer mode tabs

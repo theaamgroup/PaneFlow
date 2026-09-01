@@ -17,12 +17,12 @@ use crate::settings::components::with_alpha;
 use crate::ui_primitives::{AnimatedHoverExt, ROW_RADIUS, squircle_skin};
 
 /// The thin, column-resize hit target straddling the panel's left border.
-/// Captures the drag anchor `(cursor_x, width_at_grab, max_width)`; the resize
-/// math runs in the CLI dock wrapper's `on_mouse_move` (a wide capture surface,
-/// so the drag survives the cursor leaving the dock).
+/// Captures the drag anchor `(cursor_x, width_at_grab)`; the resize math runs
+/// in the CLI dock wrapper's `on_mouse_move` (a wide capture surface, so the
+/// drag survives the cursor leaving the dock), which supplies each frame's
+/// ceiling itself.
 pub(super) fn render_diff_resize_handle(
     width: f32,
-    max_width: f32,
     ui: crate::theme::UiColors,
     cx: &mut Context<PaneFlowApp>,
 ) -> AnyElement {
@@ -42,7 +42,7 @@ pub(super) fn render_diff_resize_handle(
                 // while a right rail clamps the dock, a drag must continue from
                 // the edge the cursor grabbed instead of jumping to a width
                 // that is not on screen.
-                this.diff_dock.resize = Some((f32::from(event.position.x), width, max_width));
+                this.diff_dock.resize = Some((f32::from(event.position.x), width));
                 cx.notify();
             }),
         )

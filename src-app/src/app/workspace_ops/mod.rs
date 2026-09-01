@@ -3976,6 +3976,21 @@ mod tests {
         ] {
             assert!(closer.contains(helper), "shared closer must call {helper}");
         }
+        // The dock teardown resolves the closing workspace's tab ids from
+        // `self.workspaces`, so it has to run before the workspace is removed
+        // - the ordering `closing_a_workspace_prunes_the_undo_stack_and_stands_
+        // down_its_pending_close` pins for the undo prune.
+        let dock_at = closer
+            .find("drop_diff_dock_for_workspace(")
+            .expect("the close must tear the docks down");
+        let remove_at = closer
+            .find("self.workspaces.remove(idx)")
+            .expect("the close must remove the workspace");
+        assert!(
+            dock_at < remove_at,
+            "the dock teardown reads the workspace being destroyed, so it has to run \
+             before it is dropped: {closer}"
+        );
     }
 
     #[test]
