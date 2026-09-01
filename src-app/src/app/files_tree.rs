@@ -3,12 +3,13 @@
 //!
 //! Holds the in-memory tree state ([`FilesTreeState`]) and the
 //! interaction-time directory read ([`read_dir_sorted`]), plus the pure
-//! functions the render path leans on: the markdown-actionability predicate
-//! ([`is_markdown`]), the folders-first comparator ([`compare_nodes`]), and the
-//! flatten that turns (root + expanded set + cached listings) into the ordered
-//! list of visible rows ([`flatten_visible`]). The pure functions carry the
-//! crate's `cargo test` coverage; the render + watch wiring lives in
-//! `files_sidebar.rs`.
+//! functions the render path leans on: the folders-first comparator
+//! ([`compare_nodes`]) and the flatten that turns (root + expanded set +
+//! cached listings) into the ordered list of visible rows
+//! ([`flatten_visible`]). Markdown is not special-cased here any more: every
+//! file, `.md` included, opens as source in the dock editor. The pure
+//! functions carry the crate's `cargo test` coverage; the render + watch
+//! wiring lives in `files_sidebar/`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -106,18 +107,6 @@ impl FilesTreeState {
             children,
         }
     }
-}
-
-/// Case-insensitive `.md` / `.markdown` / `.mdx` predicate. Gates
-/// click-to-open + drag actionability - everything else is inert in v1.
-pub(crate) fn is_markdown(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            let e = e.to_ascii_lowercase();
-            e == "md" || e == "markdown" || e == "mdx"
-        })
-        .unwrap_or(false)
 }
 
 /// Extensions whose bytes are binary by construction. Presentation-only
@@ -412,27 +401,6 @@ mod tests {
 
         let hydrated = FilesTreeState::hydrated(root, &[]);
         assert!(hydrated.root_listing_ready());
-    }
-
-    #[test]
-    fn is_markdown_matches_known_extensions() {
-        assert!(is_markdown(Path::new("README.md")));
-        assert!(is_markdown(Path::new("notes.markdown")));
-        assert!(is_markdown(Path::new("doc.mdx")));
-    }
-
-    #[test]
-    fn is_markdown_is_case_insensitive() {
-        assert!(is_markdown(Path::new("README.MD")));
-        assert!(is_markdown(Path::new("Doc.Markdown")));
-    }
-
-    #[test]
-    fn is_markdown_rejects_non_markdown_and_extensionless() {
-        assert!(!is_markdown(Path::new("main.rs")));
-        assert!(!is_markdown(Path::new("notes.txt")));
-        assert!(!is_markdown(Path::new("Makefile")));
-        assert!(!is_markdown(Path::new("LICENSE")));
     }
 
     #[test]

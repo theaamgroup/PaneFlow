@@ -74,10 +74,12 @@ pane. Stop retyping your build, test, or lint invocation on every loop.
 ## File tree sidebar
 
 Open a sidebar on the current workspace to browse the full file tree of
-your codebase. Send any file into its own pane - open a markdown spec or
-a PRD right next to a Claude Code session so the document stays in view
-while the agent works. Copy any file's absolute or relative path in one
-click, ready to paste into a prompt or a command.
+your codebase. Click any file - a markdown spec or a PRD included - and it
+opens as source in the dock editor next to your Claude Code session, so the
+document stays in view while the agent works. The sidebar is per tab: opening
+it in one tab leaves your other tabs as they were, and it steps aside while
+you are in Review or Settings. Copy any file's absolute or relative path in
+one click, ready to paste into a prompt or a command.
 
 ## Projects
 

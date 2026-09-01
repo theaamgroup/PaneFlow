@@ -5,17 +5,26 @@
 //! `toggle_files_sidebar` action (`secondary-alt-f`), mutually exclusive with
 //! the sessions sidebar (one right column). The pane header carries no Files
 //! button: the tree is keyboard/command-driven only. Renders a lazily-expanded,
-//! folders-first tree of the active workspace's `cwd`. Markdown rows open into
-//! the active pane (the WCAG 2.5.7 single-pointer alternative to the EP-003
-//! drag); since US-019 of `prd-file-editor-2026-Q3` every other file opens in
-//! the diff dock's editor, leaving only editor-refused files (binary or over
-//! `MAX_FILE_BYTES`) muted; gitignored/hidden entries are filtered out before
-//! rendering.
+//! folders-first tree of the active workspace's `cwd`. Since US-019 of
+//! `prd-file-editor-2026-Q3` every file opens in the diff dock's editor, and
+//! markdown is no longer the exception: a `.md` row reads as source there like
+//! any other file rather than opening a rendered pane of its own (rendered
+//! Markdown panes still come from an OSC path click and from session
+//! restore). Only editor-refused files (binary or over `MAX_FILE_BYTES`) stay
+//! muted; gitignored/hidden entries are filtered out before rendering. Rows
+//! carry no drag: the EP-003 markdown drag-to-pane is gone, so a click is the
+//! sidebar's only gesture and the dock editor its only destination.
+//!
+//! Wanting the rail belongs to the workspace tab that asked for it
+//! (`Tab::files_sidebar_open`); the app-level `files_sidebar_open` is a live
+//! mirror of the visible tab's flag, reconciled by `sync_files_sidebar_session`.
+//! The rail is hosted by the CLI cockpit only: Review and Settings unmount it
+//! (`files_sidebar_host_visible`).
 //!
 //! This module holds the state mutations (open/close, re-root, expand/collapse,
-//! open-markdown, open-in-dock) + the container render; the header/body/row
-//! rendering lives in `view.rs`, the type-to-filter matcher in `filter.rs`, and
-//! the pure tree model + fs helpers in `files_tree.rs`.
+//! open-in-dock) + the container render; the header/body/row rendering lives in
+//! `view.rs`, the type-to-filter matcher in `filter.rs`, and the pure tree model
+//! + fs helpers in `files_tree.rs`.
 
 mod context_menu;
 mod filter;
@@ -28,8 +37,10 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Styled, Window,
-    div, prelude::*, px,
+    div, px,
 };
+
+use paneflow_config::schema::AppMode;
 
 use crate::app::files_tree::{self, FilesTreeState};
 use crate::{PaneFlowApp, ToggleFilesSidebar};
@@ -52,7 +63,52 @@ pub(super) const ROW_GAP: f32 = 12.;
 /// Extra opacity knock-down for gitignored / hidden rows (US-004 second tier).
 pub(super) const DIMMED_OPACITY: f32 = 0.55;
 
+/// Whether the surface that hosts the Files rail is on screen: the CLI cockpit
+/// with Settings closed. The tree's rows open into the dock's editor, which
+/// only exists there, so Review (`AppMode::Diff`) and Settings unmount the rail
+/// instead of painting a tree whose clicks would land nowhere.
+pub(crate) fn files_rail_host_visible(settings_open: bool, mode: AppMode) -> bool {
+    !settings_open && matches!(mode, AppMode::Cli)
+}
+
+/// What reconciling the live rail with the visible tab has to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilesSidebarSync {
+    /// The visible tab wants the rail and it is down: open it. Opening
+    /// hydrates from the active workspace's `cwd`, so no re-root follows.
+    Open,
+    /// The visible tab does not want the rail and it is up: close it.
+    Close,
+    /// Tab and rail agree; only the root can be stale (a workspace switch
+    /// between two tabs that both want the tree), so re-root if it moved.
+    Reroot,
+}
+
+/// The one decision `sync_files_sidebar_session` makes, kept pure so the
+/// truth table is testable without a window.
+pub(crate) fn files_sidebar_sync_step(tab_wants_open: bool, rail_open: bool) -> FilesSidebarSync {
+    match (tab_wants_open, rail_open) {
+        (true, false) => FilesSidebarSync::Open,
+        (false, true) => FilesSidebarSync::Close,
+        _ => FilesSidebarSync::Reroot,
+    }
+}
+
 impl PaneFlowApp {
+    /// Whether the surface that hosts the Files rail is on screen, whatever
+    /// `files_sidebar_open` says.
+    ///
+    /// The open flag alone is not enough, exactly like the diff dock's own: it
+    /// survives a mode switch and a trip through Settings. The tree belongs to
+    /// the CLI cockpit - its rows open into the dock's editor, which does not
+    /// exist on the full-screen Review surface or behind Settings - so `render`
+    /// unmounts the rail off the cockpit and the surviving flag is what brings
+    /// the same tree back on return. Also gates the toggle, so the chord cannot
+    /// flip a rail the user cannot see.
+    pub(crate) fn files_sidebar_host_visible(&self) -> bool {
+        files_rail_host_visible(self.settings_section.is_some(), self.mode)
+    }
+
     /// Toggle the Files sidebar. Opening resolves the active workspace's `cwd`
     /// to the tree root, reads + auto-expands it, and closes the sessions
     /// sidebar (mutual exclusion). Re-clicking closes and releases the tree.
@@ -62,6 +118,11 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Inert off the cockpit: the rail is unmounted there, so a toggle would
+        // only flip a flag the user cannot see.
+        if !self.files_sidebar_host_visible() {
+            return;
+        }
         if !self.files_sidebar_open {
             self.files_surface_id = self
                 .workspaces
@@ -159,6 +220,13 @@ impl PaneFlowApp {
         let now = std::time::Instant::now();
         let from_width = self.files_sidebar_width_at(now);
         self.files_sidebar_open = open;
+        // The rail is one app-level surface, but wanting it belongs to the
+        // session looking at it. Recording that here - the single funnel every
+        // open and close goes through - is what keeps a sibling tab from
+        // inheriting a tree it never asked for.
+        if let Some(ws) = self.active_workspace_mut() {
+            ws.active_tab_mut().files_sidebar_open = open;
+        }
         let to_width = if open { FILES_SIDEBAR_WIDTH } else { 0. };
 
         self.files_sidebar_animation =
@@ -188,6 +256,32 @@ impl PaneFlowApp {
         self.files_dir_refresh_seq.clear();
     }
 
+    /// Reconcile the live rail with the session (workspace tab) on screen.
+    ///
+    /// Two things can be stale after a session change: whether the rail should
+    /// be up at all (the visible tab's own flag) and, when both sessions want
+    /// it, which `cwd` it is rooted on. Idempotent and cheap on the steady
+    /// path, so `render` can call it every frame - which is what makes this
+    /// correct without every tab mutation (switch, close, reorder, cross-
+    /// workspace move) having to remember the rail exists. Inert off the
+    /// cockpit, where the rail is unmounted anyway: the live state is left
+    /// alone there and reconciled on the way back.
+    pub(crate) fn sync_files_sidebar_session(&mut self, cx: &mut Context<Self>) {
+        if !self.files_sidebar_host_visible() {
+            return;
+        }
+        let wanted = self
+            .active_workspace()
+            .is_some_and(|ws| ws.active_tab().files_sidebar_open);
+        match files_sidebar_sync_step(wanted, self.files_sidebar_open) {
+            // Opening hydrates from the active workspace's `cwd`, so the
+            // re-root has nothing left to do on this path.
+            FilesSidebarSync::Open => self.toggle_files_sidebar(cx),
+            FilesSidebarSync::Close => self.close_files_sidebar(cx),
+            FilesSidebarSync::Reroot => self.reroot_files_tree(cx),
+        }
+    }
+
     /// Re-root the tree on the active workspace's `cwd` when it changed while
     /// the sidebar is open (US-002 workspace-switch). No-op when closed or when
     /// the root is unchanged. Restores the new workspace's expansion (US-007)
@@ -199,10 +293,12 @@ impl PaneFlowApp {
         let Some(ws) = self.workspaces.get(self.active_idx) else {
             return;
         };
-        let root = PathBuf::from(&ws.cwd);
-        if self.files_tree.root == root {
+        // Borrowed compare: this runs on the render path every frame the rail
+        // is up, and the owning `PathBuf` is only worth building on a miss.
+        if self.files_tree.root == *Path::new(&ws.cwd) {
             return;
         }
+        let root = PathBuf::from(&ws.cwd);
         let persisted = ws.files_expanded.clone();
         // US-018: re-root off the render thread.
         self.spawn_files_hydration(root, persisted, cx);
@@ -234,16 +330,16 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    /// US-019: open a non-markdown file in the diff dock's editor.
+    /// US-019: open a file in the diff dock's editor. Every file goes here,
+    /// markdown included - a `.md` row opens as source, not as a preview.
     ///
     /// The dock is the editor's only host, so a click from the sidebar has to
     /// put it on screen first. `wrap_cli_diff_dock` only mounts the panel when
-    /// all three of its conditions hold, and the Files sidebar is a layout
-    /// child of the root row - reachable from every mode and from behind
-    /// Settings via the global `toggle_files_sidebar` chord - so satisfying
-    /// `open` alone would leave the click opening a tab nobody can
-    /// see. Settings is dismissed and the app returns to Cli mode before the
-    /// tab is pushed.
+    /// all three of its conditions hold, so satisfying `open` alone would
+    /// leave the click opening a tab nobody can see. The rail itself is only
+    /// mounted on the CLI cockpit (`files_sidebar_host_visible`), so the
+    /// Settings dismissal and the return to Cli mode below are idempotent
+    /// belt-and-braces rather than a path a click can reach today.
     ///
     /// `open_diff_file_tab` owns the rest of the lifecycle: a file already open
     /// activates its tab instead of being duplicated, and a file the editor
@@ -273,39 +369,6 @@ impl PaneFlowApp {
         self.open_diff_file_tab(path, window, cx);
     }
 
-    /// Open a markdown file from the Files sidebar.
-    ///
-    /// EP-002 US-007: a pane holds a single surface, so the file opens as a new
-    /// workspace tab of the active workspace rather than being appended next to
-    /// a running terminal. The sidebar stays open.
-    fn open_markdown_in_active_pane(
-        &mut self,
-        path: PathBuf,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ws_idx = self.active_idx;
-        let Some(ws_id) = self.workspaces.get(ws_idx).map(|ws| ws.id) else {
-            return;
-        };
-        // The tree answered the dock's "Open a file" invitation - just not in
-        // the dock. Leaving the placeholder up would keep asking for a click
-        // the user has already made.
-        self.discard_pending_file_tab(cx);
-        let markdown = cx.new(|cx| crate::markdown::MarkdownView::open(path, cx));
-        let pane = self.create_pane_with_existing_surface(
-            crate::pane::PaneSurface::Markdown(markdown),
-            ws_id,
-            cx,
-        );
-        if !self.open_pane_in_new_workspace_tab(ws_idx, pane.clone(), cx) {
-            return;
-        }
-        self.pending_pane_focus = Some(pane);
-        self.save_session(cx);
-        cx.notify();
-    }
-
     /// Render the docked Files sidebar. Only called when `files_sidebar_open`.
     pub(crate) fn render_files_sidebar(
         &self,
@@ -333,5 +396,229 @@ impl PaneFlowApp {
             .child(self.files_sidebar_header(ui, cx))
             .child(self.files_sidebar_body(ui, cx))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use paneflow_config::schema::AppMode;
+
+    use super::{FilesSidebarSync, files_rail_host_visible, files_sidebar_sync_step};
+
+    /// The production half of a source file: everything before its test
+    /// module. Files without one come back whole.
+    fn production(src: &str) -> &str {
+        src.split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source")
+    }
+
+    /// The text between two unique markers, so an assertion pins one function
+    /// body instead of the whole file.
+    fn between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        src.split(start)
+            .nth(1)
+            .and_then(|rest| rest.split(end).next())
+            .unwrap_or_else(|| panic!("source between {start:?} and {end:?}"))
+    }
+
+    fn app_render() -> &'static str {
+        between(
+            include_str!("../../main.rs"),
+            "impl Render for PaneFlowApp {",
+            "fn register_focus_lost_fallback",
+        )
+    }
+
+    /// #184 Phase 4: the rail lives on the CLI cockpit only. Review and
+    /// Settings unmount it.
+    #[test]
+    fn files_rail_is_hosted_only_by_the_cli_cockpit_without_settings() {
+        assert!(files_rail_host_visible(false, AppMode::Cli));
+        assert!(
+            !files_rail_host_visible(true, AppMode::Cli),
+            "Settings unmounts the rail"
+        );
+        assert!(
+            !files_rail_host_visible(false, AppMode::Diff),
+            "Review unmounts the rail"
+        );
+        assert!(!files_rail_host_visible(true, AppMode::Diff));
+    }
+
+    #[test]
+    fn session_sync_follows_the_visible_tabs_flag() {
+        assert_eq!(files_sidebar_sync_step(true, false), FilesSidebarSync::Open);
+        assert_eq!(
+            files_sidebar_sync_step(false, true),
+            FilesSidebarSync::Close
+        );
+        assert_eq!(
+            files_sidebar_sync_step(true, true),
+            FilesSidebarSync::Reroot
+        );
+        assert_eq!(
+            files_sidebar_sync_step(false, false),
+            FilesSidebarSync::Reroot,
+            "a closed rail nobody wants only needs the (no-op) re-root check"
+        );
+    }
+
+    /// Two tabs must not share the open state: the ONE funnel every open and
+    /// close goes through records the flag on the active tab, and `render`
+    /// reconciles the live rail from that flag every frame - which is what
+    /// makes a tab switch, close, reorder or cross-workspace move correct
+    /// without each of them remembering the rail exists.
+    #[test]
+    fn open_state_is_recorded_on_the_active_tab_and_reconciled_every_frame() {
+        let sidebar = production(include_str!("mod.rs"));
+        let set_open = between(
+            sidebar,
+            "fn set_files_sidebar_open(",
+            "fn clear_files_sidebar_state(",
+        );
+        assert!(
+            set_open.contains("ws.active_tab_mut().files_sidebar_open = open;"),
+            "the open/close funnel must record the flag on the active tab: {set_open}"
+        );
+        let sync = between(
+            sidebar,
+            "pub(crate) fn sync_files_sidebar_session(",
+            "pub(crate) fn reroot_files_tree(",
+        );
+        assert!(
+            sync.contains("ws.active_tab().files_sidebar_open"),
+            "reconciliation reads the visible tab's own flag: {sync}"
+        );
+        assert!(
+            sync.contains("files_sidebar_sync_step("),
+            "reconciliation goes through the tested decision helper: {sync}"
+        );
+        assert!(
+            app_render().contains("self.sync_files_sidebar_session(cx);"),
+            "render must reconcile the rail with the visible tab every frame"
+        );
+    }
+
+    /// The Settings and Review surfaces do not render the Files rail at all,
+    /// and the chord cannot flip a rail the user cannot see.
+    #[test]
+    fn review_and_settings_unmount_the_files_rail() {
+        let render = app_render();
+        assert!(
+            render.contains("let files_sidebar_host_visible = self.files_sidebar_host_visible();"),
+            "render must ask whether the rail's host is on screen"
+        );
+        assert!(
+            render.contains(
+                "let files_sidebar_mounted = files_sidebar_host_visible\n            \
+                 && (self.files_sidebar_open || self.files_sidebar_animation.is_some());"
+            ),
+            "the rail mounts only on the cockpit, whatever the open flag says"
+        );
+        assert!(
+            render.contains(
+                "if files_sidebar_host_visible {\n            self.sync_files_sidebar_session(cx);"
+            ),
+            "off the cockpit the live state is left alone and reconciled on return"
+        );
+
+        let sidebar = production(include_str!("mod.rs"));
+        let host = between(
+            sidebar,
+            "pub(crate) fn files_sidebar_host_visible(",
+            "pub(crate) fn handle_toggle_files_sidebar(",
+        );
+        assert!(
+            host.contains("files_rail_host_visible(self.settings_section.is_some(), self.mode)"),
+            "the app-level check must be the tested truth table: {host}"
+        );
+        let toggle = between(
+            sidebar,
+            "pub(crate) fn handle_toggle_files_sidebar(",
+            "pub(crate) fn toggle_files_sidebar(",
+        );
+        assert!(
+            toggle.contains("if !self.files_sidebar_host_visible() {\n            return;"),
+            "the chord is inert off the cockpit: {toggle}"
+        );
+    }
+
+    /// A `.md` row is a file like any other: a click (or Enter) opens it as
+    /// source in the dock editor, and rows carry no drag. The markdown
+    /// drag-to-pane path is gone from the row, the payload, the pane's drop
+    /// targets and the app's event handler.
+    #[test]
+    fn markdown_rows_open_as_source_in_the_dock_editor_and_carry_no_drag() {
+        let row = production(include_str!("row.rs"));
+        for forbidden in [
+            "MarkdownFileDrag",
+            ".on_drag(",
+            "is_markdown",
+            "open_markdown_in_active_pane",
+        ] {
+            assert!(
+                !row.contains(forbidden),
+                "row.rs must not contain {forbidden:?}"
+            );
+        }
+        assert!(
+            row.contains("this.open_file_in_diff_dock(click_path.clone(), window, cx);"),
+            "a row click opens the file in the dock editor"
+        );
+
+        let keyboard = production(include_str!("keyboard.rs"));
+        for forbidden in ["is_markdown", "open_markdown_in_active_pane"] {
+            assert!(
+                !keyboard.contains(forbidden),
+                "keyboard.rs must not contain {forbidden:?}"
+            );
+        }
+        assert!(
+            keyboard.contains("self.open_file_in_diff_dock(path, window, cx);"),
+            "Enter on a row opens the file in the dock editor"
+        );
+
+        let sidebar = production(include_str!("mod.rs"));
+        assert!(
+            !sidebar.contains("fn open_markdown_in_active_pane"),
+            "the sidebar no longer opens rendered markdown panes"
+        );
+
+        let pane_drag = production(include_str!("../../pane_drag.rs"));
+        assert!(
+            !pane_drag.contains("MarkdownFileDrag"),
+            "the markdown drag payload is gone"
+        );
+        let pane = production(include_str!("../../pane.rs"));
+        for forbidden in ["MarkdownFileDrag", "DropMarkdownSplit"] {
+            assert!(
+                !pane.contains(forbidden),
+                "pane.rs must not contain {forbidden:?}"
+            );
+        }
+        let handlers = production(include_str!("../event_handlers.rs"));
+        assert!(
+            !handlers.contains("DropMarkdownSplit"),
+            "the app no longer handles a markdown drop"
+        );
+    }
+
+    /// Rendered Markdown panes are not gone: an OSC path click in a terminal
+    /// and a session restore still build a `PaneSurface::Markdown`.
+    #[test]
+    fn rendered_markdown_panes_still_come_from_osc_click_and_session_restore() {
+        let handlers = production(include_str!("../event_handlers.rs"));
+        let osc = between(
+            handlers,
+            "fn open_markdown_in_pane(",
+            "fn workspace_idx_for_terminal(",
+        );
+        assert!(osc.contains("crate::markdown::MarkdownView::open(path, cx)"));
+        assert!(osc.contains("crate::pane::PaneSurface::Markdown(markdown)"));
+
+        let session = include_str!("../session.rs");
+        assert!(session.contains("surface.surface_type.as_deref() == Some(\"markdown\")"));
+        assert!(session.contains("return Some(crate::pane::PaneSurface::Markdown(markdown));"));
     }
 }
