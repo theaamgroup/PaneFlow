@@ -121,7 +121,9 @@ pub enum ImageCompression {
 impl ImageCompression {
     fn from_raw(raw: sys::GhosttyKittyImageCompression) -> Result<Self> {
         match raw {
-            sys::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE => Ok(Self::None),
+            sys::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE => {
+                Ok(Self::None)
+            }
             sys::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_ZLIB_DEFLATE => {
                 Ok(Self::ZlibDeflate)
             }
@@ -234,7 +236,11 @@ impl DisplayTerminal {
     /// to read, and they stay off. Inline payloads still work, and PNG
     /// payloads additionally need a decoder installed with
     /// [`crate::set_png_decoder`].
-    pub fn enable_kitty_graphics(&mut self, storage_bytes: u64, command_bytes: usize) -> Result<()> {
+    pub fn enable_kitty_graphics(
+        &mut self,
+        storage_bytes: u64,
+        command_bytes: usize,
+    ) -> Result<()> {
         // SAFETY: the terminal handle is live and each option's documented
         // input type is the one being passed.
         unsafe {
@@ -398,7 +404,8 @@ impl<'terminal> KittyImage<'terminal> {
         let mut width = 0u32;
         let mut height = 0u32;
         let mut format = sys::GhosttyKittyImageFormat_GHOSTTY_KITTY_IMAGE_FORMAT_RGBA;
-        let mut compression = sys::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE;
+        let mut compression =
+            sys::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE;
         let mut len = 0usize;
         let mut generation = 0u64;
         use sys as s;
@@ -411,7 +418,10 @@ impl<'terminal> KittyImage<'terminal> {
                 self.raw,
                 sys::ghostty_kitty_graphics_image_get_multi,
                 [
-                    Slot::new(s::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_ID, &mut id),
+                    Slot::new(
+                        s::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_ID,
+                        &mut id,
+                    ),
                     Slot::new(
                         s::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_NUMBER,
                         &mut number,
@@ -851,7 +861,9 @@ mod tests {
         );
 
         let mut enabled = terminal(20, 5);
-        enabled.feed(&red_image()).expect("image command must parse");
+        enabled
+            .feed(&red_image())
+            .expect("image command must parse");
         let graphics = enabled
             .kitty_graphics()
             .expect("storage query")
@@ -862,7 +874,9 @@ mod tests {
     #[test]
     fn a_transmitted_image_is_stored_decoded_and_placed() {
         let mut terminal = terminal(20, 5);
-        terminal.feed(&red_image()).expect("image command must parse");
+        terminal
+            .feed(&red_image())
+            .expect("image command must parse");
         let graphics = terminal
             .kitty_graphics()
             .expect("storage query")
@@ -889,7 +903,9 @@ mod tests {
     #[test]
     fn geometry_helpers_agree_with_the_batched_render_info() {
         let mut terminal = terminal(20, 5);
-        terminal.feed(&red_image()).expect("image command must parse");
+        terminal
+            .feed(&red_image())
+            .expect("image command must parse");
         let graphics = terminal
             .kitty_graphics()
             .expect("storage query")
@@ -967,7 +983,9 @@ mod tests {
     #[test]
     fn the_storage_generation_only_moves_on_content_changes() {
         let mut terminal = terminal(20, 5);
-        terminal.feed(&red_image()).expect("image command must parse");
+        terminal
+            .feed(&red_image())
+            .expect("image command must parse");
         let first = terminal
             .kitty_graphics()
             .expect("storage query")
@@ -976,7 +994,9 @@ mod tests {
             .expect("generation");
 
         // Scrolling moves the placement without changing what is stored.
-        terminal.feed(b"\r\n\r\n\r\n\r\n\r\n\r\n").expect("newlines");
+        terminal
+            .feed(b"\r\n\r\n\r\n\r\n\r\n\r\n")
+            .expect("newlines");
         terminal.scroll(Scroll::Top);
         let after_scroll = terminal
             .kitty_graphics()
@@ -1003,7 +1023,9 @@ mod tests {
     #[test]
     fn a_scrolled_out_placement_reports_no_viewport_position() {
         let mut terminal = terminal(20, 3);
-        terminal.feed(&red_image()).expect("image command must parse");
+        terminal
+            .feed(&red_image())
+            .expect("image command must parse");
         for _ in 0..40 {
             terminal.feed(b"\r\nfiller").expect("filler must parse");
         }
@@ -1027,13 +1049,17 @@ mod tests {
     #[test]
     fn disabling_the_protocol_drops_the_storage() {
         let mut terminal = terminal(20, 5);
-        terminal.feed(&red_image()).expect("image command must parse");
+        terminal
+            .feed(&red_image())
+            .expect("image command must parse");
         assert!(terminal.kitty_graphics().expect("storage query").is_some());
 
         terminal
             .disable_kitty_graphics()
             .expect("protocol must disable");
-        terminal.feed(&red_image()).expect("image command must parse");
+        terminal
+            .feed(&red_image())
+            .expect("image command must parse");
         let graphics = terminal.kitty_graphics().expect("storage query");
         let placements = match graphics {
             None => 0,

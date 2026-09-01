@@ -236,11 +236,15 @@ fn command_type(value: sys::GhosttyOscCommandType) -> Result<OscCommandType> {
         s::GhosttyOscCommandType_GHOSTTY_OSC_COMMAND_KITTY_TEXT_SIZING => {
             OscCommandType::KittyTextSizing
         }
-        s::GhosttyOscCommandType_GHOSTTY_OSC_COMMAND_CONTEXT_SIGNAL => OscCommandType::ContextSignal,
+        s::GhosttyOscCommandType_GHOSTTY_OSC_COMMAND_CONTEXT_SIGNAL => {
+            OscCommandType::ContextSignal
+        }
         s::GhosttyOscCommandType_GHOSTTY_OSC_COMMAND_CONEMU_CHANGE_TAB_TITLE => {
             OscCommandType::ConemuChangeTabTitle
         }
-        s::GhosttyOscCommandType_GHOSTTY_OSC_COMMAND_CONEMU_COMMENT => OscCommandType::ConemuComment,
+        s::GhosttyOscCommandType_GHOSTTY_OSC_COMMAND_CONEMU_COMMENT => {
+            OscCommandType::ConemuComment
+        }
         s::GhosttyOscCommandType_GHOSTTY_OSC_COMMAND_CONEMU_GUIMACRO => {
             OscCommandType::ConemuGuimacro
         }
@@ -299,7 +303,10 @@ mod tests {
             parse(b"52;c;cGFuZWZsb3c=").kind,
             OscCommandType::ClipboardContents
         );
-        assert_eq!(parse(b"9;hello").kind, OscCommandType::ShowDesktopNotification);
+        assert_eq!(
+            parse(b"9;hello").kind,
+            OscCommandType::ShowDesktopNotification
+        );
         assert_eq!(
             parse(b"9;4;1;50").kind,
             OscCommandType::ConemuProgressReport

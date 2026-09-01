@@ -261,7 +261,10 @@ impl<'src> SnapshotDecoder<'src> {
         Self::wrap(raw, Some(source))
     }
 
-    fn wrap(raw: sys::GhosttySnapshotDecoder, source: Option<Box<BoxedSource<'src>>>) -> Result<Self> {
+    fn wrap(
+        raw: sys::GhosttySnapshotDecoder,
+        source: Option<Box<BoxedSource<'src>>>,
+    ) -> Result<Self> {
         if raw.is_null() {
             return Err(GhosttyError::AbiMismatch(
                 "snapshot decoder constructor returned a null handle".into(),
@@ -317,12 +320,20 @@ impl<'src> SnapshotDecoder<'src> {
     /// The terminal is immediately usable, including for live pty input, while
     /// [`Self::next_page`] prepends the remaining scrollback.
     pub fn ready(&mut self, restore: SnapshotRestore) -> Result<&mut DisplayTerminal> {
-        self.produce(restore, sys::ghostty_snapshot_decoder_ready, "snapshot_decoder_ready")
+        self.produce(
+            restore,
+            sys::ghostty_snapshot_decoder_ready,
+            "snapshot_decoder_ready",
+        )
     }
 
     /// Restore the whole snapshot, history included, in one call.
     pub fn decode(&mut self, restore: SnapshotRestore) -> Result<&mut DisplayTerminal> {
-        self.produce(restore, sys::ghostty_snapshot_decoder_decode, "snapshot_decoder_decode")
+        self.produce(
+            restore,
+            sys::ghostty_snapshot_decoder_decode,
+            "snapshot_decoder_decode",
+        )
     }
 
     fn produce(
@@ -429,23 +440,29 @@ impl<'src> SnapshotDecoder<'src> {
     /// After FINISH this is the offset of the first trailing byte, which is
     /// how a snapshot embedded in a larger stream is skipped.
     pub fn source_offset(&self) -> Result<usize> {
-        self.get("snapshot_decoder_source_offset",
+        self.get(
+            "snapshot_decoder_source_offset",
             sys::GhosttySnapshotDecoderData_GHOSTTY_SNAPSHOT_DECODER_DATA_SOURCE_OFFSET,
-            0usize)
+            0usize,
+        )
     }
 
     /// The continuation ceiling currently in force.
     pub fn max_continuation_bytes(&self) -> Result<usize> {
-        self.get("snapshot_decoder_max_continuation_bytes",
+        self.get(
+            "snapshot_decoder_max_continuation_bytes",
             sys::GhosttySnapshotDecoderData_GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_CONTINUATION_BYTES,
-            0usize)
+            0usize,
+        )
     }
 
     /// Whether restored terminals keep tracking their continuation.
     pub fn retains_continuation(&self) -> Result<bool> {
-        self.get("snapshot_decoder_retain_continuation",
+        self.get(
+            "snapshot_decoder_retain_continuation",
             sys::GhosttySnapshotDecoderData_GHOSTTY_SNAPSHOT_DECODER_DATA_RETAIN_CONTINUATION,
-            false)
+            false,
+        )
     }
 
     /// How many history rows the snapshot declares for `screen`.
@@ -803,9 +820,7 @@ mod tests {
             .expect("retention must apply");
         assert!(decoder.retains_continuation().expect("retention readback"));
         assert_eq!(
-            decoder
-                .max_continuation_bytes()
-                .expect("budget readback"),
+            decoder.max_continuation_bytes().expect("budget readback"),
             4096
         );
         decoder.decode(restore()).expect("snapshot must decode");
@@ -848,12 +863,9 @@ mod tests {
         restored
             .feed(b"\x1b]0;restored\x07")
             .expect("title report must parse");
-        assert!(
-            restored
-                .drain_events()
-                .iter()
-                .any(|event| matches!(event, crate::BackendEvent::Title(title) if title == "restored"))
-        );
+        assert!(restored.drain_events().iter().any(
+            |event| matches!(event, crate::BackendEvent::Title(title) if title == "restored")
+        ));
 
         restored
             .resize(WindowSize::new(20, 4, 8, 16).expect("valid size"))

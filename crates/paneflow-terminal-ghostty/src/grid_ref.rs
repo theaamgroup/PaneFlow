@@ -325,7 +325,9 @@ mod tests {
     #[test]
     fn cell_metadata_tracks_text_styling_and_width() {
         let mut terminal = terminal(10, 2);
-        terminal.feed(b"a\x1b[1mb\x1b[0m").expect("output must parse");
+        terminal
+            .feed(b"a\x1b[1mb\x1b[0m")
+            .expect("output must parse");
 
         let plain = terminal.cell_info(Point::new(0, 0)).expect("plain cell");
         assert_eq!(plain.codepoint, u32::from('a'));

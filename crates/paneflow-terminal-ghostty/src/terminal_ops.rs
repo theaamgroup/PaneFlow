@@ -144,8 +144,9 @@ impl DisplayTerminal {
         let mut activity = 0u64;
         // SAFETY: the terminal handle is live and `activity` is valid
         // writable storage.
-        let result =
-            unsafe { sys::ghostty_terminal_compression_activity(self.terminal.raw(), &mut activity) };
+        let result = unsafe {
+            sys::ghostty_terminal_compression_activity(self.terminal.raw(), &mut activity)
+        };
         check("terminal_compression_activity", result)?;
         Ok(activity)
     }
@@ -327,7 +328,8 @@ impl DisplayTerminal {
         let writer = crate::io::writer(&mut sink);
         // SAFETY: the terminal handle is live and `writer` borrows `sink` for
         // this synchronous call.
-        let result = unsafe { sys::ghostty_terminal_continuation_write(self.terminal.raw(), writer) };
+        let result =
+            unsafe { sys::ghostty_terminal_continuation_write(self.terminal.raw(), writer) };
         if result == sys::GhosttyResult_GHOSTTY_NO_VALUE
             || result == sys::GhosttyResult_GHOSTTY_INVALID_VALUE
         {
@@ -602,7 +604,10 @@ mod tests {
             "total rows count the scrollback plus the screen"
         );
         assert_eq!(scrollback, terminal.scrollback_rows().expect("scrollback"));
-        assert!(total_rows > 8, "the scrollback must count toward total rows");
+        assert!(
+            total_rows > 8,
+            "the scrollback must count toward total rows"
+        );
     }
 
     fn pty_writes(terminal: &mut DisplayTerminal) -> Vec<u8> {
@@ -670,7 +675,11 @@ mod tests {
     #[test]
     fn pasting_nothing_writes_nothing() {
         let mut terminal = terminal(20, 3);
-        assert!(!terminal.paste(&[], ClipboardLocation::Standard, false).expect("empty paste"));
+        assert!(
+            !terminal
+                .paste(&[], ClipboardLocation::Standard, false)
+                .expect("empty paste")
+        );
         assert!(pty_writes(&mut terminal).is_empty());
     }
 

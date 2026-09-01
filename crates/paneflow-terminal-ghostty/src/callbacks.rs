@@ -25,7 +25,8 @@ const _: sys::GhosttyTerminalProgressReportFn = Some(crate::callback_ffi::progre
 const _: sys::GhosttyTerminalSizeFn = Some(crate::callback_ffi::size);
 const _: sys::GhosttyTerminalColorSchemeFn = Some(crate::callback_ffi::color_scheme);
 const _: sys::GhosttyTerminalDeviceAttributesFn = Some(crate::callback_ffi::device_attributes);
-const _: sys::GhosttyTerminalDesktopNotificationFn = Some(crate::callback_ffi::desktop_notification);
+const _: sys::GhosttyTerminalDesktopNotificationFn =
+    Some(crate::callback_ffi::desktop_notification);
 const _: sys::GhosttyTerminalUnknownSequenceFn = Some(crate::callback_ffi::unknown_sequence);
 const _: sys::GhosttyTerminalClipboardReadFn = Some(crate::callback_ffi::clipboard_read);
 

@@ -41,7 +41,6 @@ impl WindowSize {
         })
     }
 
-    #[cfg(ghostty_native)]
     pub(crate) fn validate(self) -> Result<Self> {
         if self.cols == 0 || self.rows == 0 {
             return Err(GhosttyError::InvalidDimensions {

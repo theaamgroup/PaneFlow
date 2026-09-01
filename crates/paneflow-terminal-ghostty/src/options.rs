@@ -315,9 +315,10 @@ mod tests {
     }
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack.windows(needle.len()).any(|window| window == needle)
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
-
 
     #[test]
     fn the_embedder_palette_answers_osc4_queries() {
@@ -395,13 +396,17 @@ mod tests {
     fn a_terminfo_name_answers_xtgettcap_and_is_length_checked() {
         let mut terminal = terminal(20, 4);
         // "TN" hex-encoded, the capability an application probes for.
-        terminal.feed(b"\x1bP+q544e\x1b\\").expect("XTGETTCAP query");
+        terminal
+            .feed(b"\x1bP+q544e\x1b\\")
+            .expect("XTGETTCAP query");
         assert!(replies(&mut terminal).is_empty());
 
         terminal
             .set_terminfo_name("xterm-256color")
             .expect("name must apply");
-        terminal.feed(b"\x1bP+q544e\x1b\\").expect("XTGETTCAP query");
+        terminal
+            .feed(b"\x1bP+q544e\x1b\\")
+            .expect("XTGETTCAP query");
         // The reply echoes the capability name and the value, both in hex.
         assert!(contains(
             &replies(&mut terminal),
@@ -573,21 +578,9 @@ mod tests {
             .expect("glyph protocol must disable");
         terminal
             .set_appearance(TerminalAppearance::new(
-                Rgb {
-                    r: 1,
-                    g: 2,
-                    b: 3,
-                },
-                Rgb {
-                    r: 4,
-                    g: 5,
-                    b: 6,
-                },
-                Rgb {
-                    r: 7,
-                    g: 8,
-                    b: 9,
-                },
+                Rgb { r: 1, g: 2, b: 3 },
+                Rgb { r: 4, g: 5, b: 6 },
+                Rgb { r: 7, g: 8, b: 9 },
                 ColorScheme::Light,
             ))
             .expect("appearance must apply");

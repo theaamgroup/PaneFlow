@@ -185,7 +185,6 @@ impl DisplayTerminal {
         Ok(())
     }
 
-
     pub(crate) fn scrollback_rows(&self) -> Result<usize> {
         let value = terminal_get::<TerminalScrollbackRows>(self.terminal.raw())?;
         if value > MAX_SCROLLBACK_ROWS {
@@ -196,7 +195,6 @@ impl DisplayTerminal {
         }
         Ok(value)
     }
-
 }
 
 fn check_grid_cell_count(rows: usize, cols: usize) -> Result<()> {

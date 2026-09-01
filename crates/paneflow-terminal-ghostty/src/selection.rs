@@ -163,11 +163,7 @@ impl DisplayTerminal {
         // SAFETY: the terminal handle is live, the boundary slice outlives
         // the call, and `selection` is valid writable storage.
         let result = unsafe {
-            sys::ghostty_terminal_select_word_between(
-                self.terminal.raw(),
-                &options,
-                &mut selection,
-            )
+            sys::ghostty_terminal_select_word_between(self.terminal.raw(), &options, &mut selection)
         };
         if result == sys::GhosttyResult_GHOSTTY_NO_VALUE {
             return Ok(None);
@@ -356,12 +352,7 @@ impl DisplayTerminal {
         // SAFETY: the terminal handle is live, both selections reference it,
         // and `equal` is valid writable storage.
         let result = unsafe {
-            sys::ghostty_terminal_selection_equal(
-                self.terminal.raw(),
-                &current,
-                &other,
-                &mut equal,
-            )
+            sys::ghostty_terminal_selection_equal(self.terminal.raw(), &current, &other, &mut equal)
         };
         check("selection_equal", result)?;
         Ok(equal)

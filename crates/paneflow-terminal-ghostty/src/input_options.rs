@@ -110,9 +110,8 @@ impl DisplayTerminal {
 
     /// Set how the Option key is encoded.
     ///
-    /// Applies to every later [`Self::encode_key`] call. It is a no-op on
-    /// Linux and Windows, where no key reports itself as Option, so it can be
-    /// set unconditionally from configuration.
+    /// Applies to every later [`Self::encode_key`] call, so it can be set
+    /// unconditionally from configuration.
     pub fn set_option_as_alt(&mut self, option_as_alt: OptionAsAlt) {
         self.key_encoder_overrides.option_as_alt = option_as_alt;
         self.apply_key_encoder_overrides();
@@ -216,7 +215,11 @@ fn decode_key_action(value: sys::GhosttyKeyAction) -> Result<KeyAction> {
 }
 
 fn decode_mouse_action(value: sys::GhosttyMouseAction) -> Result<MouseAction> {
-    for candidate in [MouseAction::Press, MouseAction::Release, MouseAction::Motion] {
+    for candidate in [
+        MouseAction::Press,
+        MouseAction::Release,
+        MouseAction::Motion,
+    ] {
         if mouse_action(candidate) == value {
             return Ok(candidate);
         }
@@ -270,7 +273,9 @@ mod tests {
     #[test]
     fn a_mouse_event_reads_back_the_way_it_was_encoded() {
         let mut terminal = terminal();
-        terminal.feed(b"\x1b[?1006h\x1b[?1000h").expect("sgr mouse on");
+        terminal
+            .feed(b"\x1b[?1006h\x1b[?1000h")
+            .expect("sgr mouse on");
         terminal
             .encode_mouse(MouseInput {
                 action: MouseAction::Press,
@@ -297,20 +302,14 @@ mod tests {
 
     #[test]
     fn option_as_alt_is_accepted_and_survives_an_encode() {
-        // Off macOS no key reports itself as Option, so libghostty compiles
-        // the policy out and Alt is always Alt. On macOS the policy is real:
-        // with it off the key sends the text the layout produced instead of
-        // an Alt escape. The event carries no modifier side and libghostty
-        // defaults every modifier to its left side, so the left-only policy
-        // still treats this key as Alt. What all three pin down is that the
-        // option survives `setopt_from_terminal`, which rewrites the whole
-        // encoder on every key.
+        // With the policy off the key sends the text the layout produced
+        // instead of an Alt escape. The event carries no modifier side and
+        // libghostty defaults every modifier to its left side, so the
+        // left-only policy still treats this key as Alt. What all three pin
+        // down is that the option survives `setopt_from_terminal`, which
+        // rewrites the whole encoder on every key.
         let alt_escape = b"\x1ba".as_slice();
-        let layout_text: &[u8] = if cfg!(target_os = "macos") {
-            b"a"
-        } else {
-            alt_escape
-        };
+        let layout_text: &[u8] = b"a";
 
         let mut terminal = terminal();
         for (option_as_alt, expected) in [
@@ -354,7 +353,9 @@ mod tests {
     #[test]
     fn resetting_the_mouse_encoder_forgets_the_last_cell() {
         let mut terminal = terminal();
-        terminal.feed(b"\x1b[?1006h\x1b[?1003h").expect("any-motion on");
+        terminal
+            .feed(b"\x1b[?1006h\x1b[?1003h")
+            .expect("any-motion on");
         let motion = MouseInput {
             action: MouseAction::Motion,
             button: None,

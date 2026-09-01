@@ -298,7 +298,9 @@ mod tests {
 
         // A determinate report followed by an error report in the same drain
         // window: only the newest survives, the way a title report does.
-        terminal.feed(b"\x1b]9;4;1;42\x07").expect("determinate report");
+        terminal
+            .feed(b"\x1b]9;4;1;42\x07")
+            .expect("determinate report");
         terminal.feed(b"\x1b]9;4;2;80\x07").expect("error report");
 
         let reports = terminal
@@ -357,11 +359,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let expected = if cfg!(windows) {
-            r"C:\dev\path with space\é"
-        } else {
-            "/C:/dev/path with space/é"
-        };
+        let expected = "/C:/dev/path with space/é";
         assert_eq!(directories, [expected]);
     }
 
@@ -384,11 +382,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let expected = if cfg!(windows) {
-            r"C:\dev\recovered"
-        } else {
-            "/C:/dev/recovered"
-        };
+        let expected = "/C:/dev/recovered";
         assert_eq!(directories, [expected]);
     }
 }

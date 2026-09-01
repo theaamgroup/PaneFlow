@@ -35,9 +35,15 @@ impl GestureBehavior {
     fn raw(self) -> sys::GhosttySelectionGestureBehavior {
         use sys as s;
         match self {
-            Self::Cell => s::GhosttySelectionGestureBehavior_GHOSTTY_SELECTION_GESTURE_BEHAVIOR_CELL,
-            Self::Word => s::GhosttySelectionGestureBehavior_GHOSTTY_SELECTION_GESTURE_BEHAVIOR_WORD,
-            Self::Line => s::GhosttySelectionGestureBehavior_GHOSTTY_SELECTION_GESTURE_BEHAVIOR_LINE,
+            Self::Cell => {
+                s::GhosttySelectionGestureBehavior_GHOSTTY_SELECTION_GESTURE_BEHAVIOR_CELL
+            }
+            Self::Word => {
+                s::GhosttySelectionGestureBehavior_GHOSTTY_SELECTION_GESTURE_BEHAVIOR_WORD
+            }
+            Self::Line => {
+                s::GhosttySelectionGestureBehavior_GHOSTTY_SELECTION_GESTURE_BEHAVIOR_LINE
+            }
             Self::Output => {
                 s::GhosttySelectionGestureBehavior_GHOSTTY_SELECTION_GESTURE_BEHAVIOR_OUTPUT
             }
@@ -530,7 +536,10 @@ impl DisplayTerminal {
 
     /// Deepen the current selection one granularity step, the way a
     /// force-touch or a long press does.
-    pub fn gesture_deep_press(&mut self, word_boundaries: &[char]) -> Result<Option<SelectionRange>> {
+    pub fn gesture_deep_press(
+        &mut self,
+        word_boundaries: &[char],
+    ) -> Result<Option<SelectionRange>> {
         let mut event = GestureEvent::new(
             sys::GhosttySelectionGestureEventType_GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DEEP_PRESS,
         )?;
@@ -708,7 +717,9 @@ mod tests {
         terminal
             .gesture_press(Point::new(0, 7), &timed_press(0))
             .expect("first press");
-        terminal.gesture_release(Some(Point::new(0, 7))).expect("release");
+        terminal
+            .gesture_release(Some(Point::new(0, 7)))
+            .expect("release");
         terminal
             .gesture_press(Point::new(0, 7), &timed_press(SECOND / 4))
             .expect("second press");
@@ -754,7 +765,9 @@ mod tests {
         terminal
             .gesture_press(Point::new(0, 2), &timed_press(0))
             .expect("first press");
-        terminal.gesture_release(Some(Point::new(0, 2))).expect("release");
+        terminal
+            .gesture_release(Some(Point::new(0, 2)))
+            .expect("release");
         terminal
             .gesture_press(Point::new(0, 2), &timed_press(SECOND * 5))
             .expect("late press");

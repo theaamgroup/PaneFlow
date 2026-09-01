@@ -1,11 +1,3 @@
-#![cfg(all(
-    feature = "native",
-    any(
-        target_os = "linux",
-        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
-    )
-))]
-
 use paneflow_terminal_ghostty::{
     BackendEvent, Color, DisplayTerminal, FocusEvent, Key, KeyAction, KeyInput, Modifiers,
     MouseAction, MouseButton, MouseInput, Point, Rgb, Scroll, SelectionRange, TerminalAppearance,

@@ -442,7 +442,10 @@ mod tests {
             .extract_scrollback()
             .expect("history query")
             .expect("the replay must scroll content into history");
-        assert!(restored_history.contains("scrolled-away"), "got {restored_history:?}");
+        assert!(
+            restored_history.contains("scrolled-away"),
+            "got {restored_history:?}"
+        );
     }
 
     #[test]

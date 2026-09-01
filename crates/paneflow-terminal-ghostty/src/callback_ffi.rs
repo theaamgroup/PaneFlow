@@ -76,10 +76,7 @@ pub(crate) unsafe extern "C" fn title_changed(
     }
 }
 
-pub(crate) unsafe extern "C" fn pwd_changed(
-    terminal: sys::GhosttyTerminal,
-    userdata: *mut c_void,
-) {
+pub(crate) unsafe extern "C" fn pwd_changed(terminal: sys::GhosttyTerminal, userdata: *mut c_void) {
     // SAFETY: libghostty supplies the userdata pointer registered by
     // `callbacks::install`; the boxed state outlives the terminal callback.
     unsafe {
@@ -243,7 +240,8 @@ pub(crate) unsafe extern "C" fn unknown_sequence(
             // APC is the only tag libghostty reports today, and the value is a
             // union: reading the wrong arm for a tag added later would be
             // reading the wrong type.
-            if report.tag != sys::GhosttyTerminalUnknownSequenceTag_GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_APC
+            if report.tag
+                != sys::GhosttyTerminalUnknownSequenceTag_GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_APC
             {
                 return;
             }
@@ -362,7 +360,9 @@ fn escape_content(bytes: &[u8]) -> String {
         .chars()
         .flat_map(|character| {
             if character.is_control() {
-                format!("\\x{:02x}", character as u32).chars().collect::<Vec<_>>()
+                format!("\\x{:02x}", character as u32)
+                    .chars()
+                    .collect::<Vec<_>>()
             } else {
                 vec![character]
             }

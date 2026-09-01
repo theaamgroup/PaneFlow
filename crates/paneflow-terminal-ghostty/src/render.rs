@@ -160,19 +160,27 @@ mod tests {
         terminal.snapshot().expect("frame consumes the dirty state");
 
         terminal.refresh_render_state().expect("refresh");
-        assert_eq!(terminal.dirty_state().expect("dirty state"), DirtyState::Clean);
+        assert_eq!(
+            terminal.dirty_state().expect("dirty state"),
+            DirtyState::Clean
+        );
         assert!(terminal.dirty_rows().expect("dirty rows").is_empty());
     }
 
     #[test]
     fn marking_a_frame_clean_consumes_every_dirty_row() {
         let mut terminal = terminal(20, 4);
-        terminal.feed(b"one\r\ntwo\r\nthree").expect("output must parse");
+        terminal
+            .feed(b"one\r\ntwo\r\nthree")
+            .expect("output must parse");
         terminal.refresh_render_state().expect("refresh");
         assert!(!terminal.dirty_rows().expect("dirty rows").is_empty());
 
         terminal.mark_frame_clean().expect("clean");
-        assert_eq!(terminal.dirty_state().expect("dirty state"), DirtyState::Clean);
+        assert_eq!(
+            terminal.dirty_state().expect("dirty state"),
+            DirtyState::Clean
+        );
         assert!(terminal.dirty_rows().expect("dirty rows").is_empty());
     }
 

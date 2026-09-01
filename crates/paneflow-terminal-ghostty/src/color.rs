@@ -80,8 +80,7 @@ pub fn parse(value: &str) -> Result<Rgb> {
     let mut out = sys::GhosttyColorRgb { r: 0, g: 0, b: 0 };
     // SAFETY: the pointer and length describe `value`'s bytes, and `out` is
     // valid writable storage.
-    let result =
-        unsafe { sys::ghostty_color_parse(value.as_ptr().cast(), value.len(), &mut out) };
+    let result = unsafe { sys::ghostty_color_parse(value.as_ptr().cast(), value.len(), &mut out) };
     check("color_parse", result)?;
     Ok(out.into())
 }
@@ -196,8 +195,12 @@ pub fn x11_names() -> &'static [(&'static str, Rgb)] {
     NAMES.get_or_init(|| {
         // SAFETY: both accessors read immutable static data owned by the
         // library, so the table and its name strings live for the program.
-        let (entries, count) =
-            unsafe { (sys::ghostty_color_x11_names(), sys::ghostty_color_x11_name_count()) };
+        let (entries, count) = unsafe {
+            (
+                sys::ghostty_color_x11_names(),
+                sys::ghostty_color_x11_name_count(),
+            )
+        };
         if entries.is_null() {
             return Vec::new();
         }
@@ -232,14 +235,20 @@ pub fn encode_color_scheme_report(scheme: ColorScheme) -> Result<Vec<u8>> {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn hex_x11_and_palette_entries_all_parse() {
-        assert_eq!(parse("#282c34").expect("hex"), Rgb { r: 40, g: 44, b: 52 });
+        assert_eq!(
+            parse("#282c34").expect("hex"),
+            Rgb {
+                r: 40,
+                g: 44,
+                b: 52
+            }
+        );
         assert_eq!(
             parse_x11("cornflowerblue").expect("x11 name"),
             Rgb {
@@ -250,7 +259,14 @@ mod tests {
         );
         let (index, rgb) = parse_palette_entry("0x10=#282c34").expect("palette entry");
         assert_eq!(index, 16);
-        assert_eq!(rgb, Rgb { r: 40, g: 44, b: 52 });
+        assert_eq!(
+            rgb,
+            Rgb {
+                r: 40,
+                g: 44,
+                b: 52
+            }
+        );
         assert!(parse("not a color").is_err());
     }
 

@@ -87,4 +87,3 @@ fn cell_background(
         _ => style_color(style),
     }
 }
-

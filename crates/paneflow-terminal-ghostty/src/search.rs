@@ -147,7 +147,6 @@ fn push_match(
     }
 }
 
-#[cfg(ghostty_native)]
 impl crate::engine::DisplayTerminal {
     /// Copy a bounded slice of complete rows from the live grid for search
     /// outside the terminal worker.

@@ -133,7 +133,11 @@ pub fn set_log_sink(sink: Option<LogSink>) -> Result<()> {
     } else {
         std::ptr::null()
     };
-    set_option("sys_set_log", sys::GhosttySysOption_GHOSTTY_SYS_OPT_LOG, value)
+    set_option(
+        "sys_set_log",
+        sys::GhosttySysOption_GHOSTTY_SYS_OPT_LOG,
+        value,
+    )
 }
 
 /// Route libghostty's internal logs to stderr using the library's own

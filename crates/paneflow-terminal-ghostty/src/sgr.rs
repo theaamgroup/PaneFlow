@@ -285,13 +285,9 @@ fn attribute(raw: &mut sys::GhosttySgrAttribute) -> Result<SgrAttribute> {
             SgrAttribute::DirectColorBg(unsafe { value.direct_color_bg }.into())
         }
         // SAFETY: the tag says the `bg_8` field is active.
-        s::GhosttySgrAttributeTag_GHOSTTY_SGR_ATTR_BG_8 => {
-            SgrAttribute::Bg8(unsafe { value.bg_8 })
-        }
+        s::GhosttySgrAttributeTag_GHOSTTY_SGR_ATTR_BG_8 => SgrAttribute::Bg8(unsafe { value.bg_8 }),
         // SAFETY: the tag says the `fg_8` field is active.
-        s::GhosttySgrAttributeTag_GHOSTTY_SGR_ATTR_FG_8 => {
-            SgrAttribute::Fg8(unsafe { value.fg_8 })
-        }
+        s::GhosttySgrAttributeTag_GHOSTTY_SGR_ATTR_FG_8 => SgrAttribute::Fg8(unsafe { value.fg_8 }),
         s::GhosttySgrAttributeTag_GHOSTTY_SGR_ATTR_RESET_FG => SgrAttribute::ResetFg,
         s::GhosttySgrAttributeTag_GHOSTTY_SGR_ATTR_RESET_BG => SgrAttribute::ResetBg,
         // SAFETY: the tag says the `bright_bg_8` field is active.
@@ -358,7 +354,11 @@ mod tests {
     fn semicolon_separated_attributes_parse_in_order() {
         assert_eq!(
             parse("1;3;31"),
-            vec![SgrAttribute::Bold, SgrAttribute::Italic, SgrAttribute::Fg8(1)]
+            vec![
+                SgrAttribute::Bold,
+                SgrAttribute::Italic,
+                SgrAttribute::Fg8(1)
+            ]
         );
         assert_eq!(parse("0"), vec![SgrAttribute::Unset]);
     }

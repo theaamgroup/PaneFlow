@@ -178,14 +178,10 @@ pub enum ModeReportState {
 impl ModeReportState {
     fn raw(self) -> sys::GhosttyModeReportState {
         match self {
-            Self::NotRecognized => {
-                sys::GhosttyModeReportState_GHOSTTY_MODE_REPORT_NOT_RECOGNIZED
-            }
+            Self::NotRecognized => sys::GhosttyModeReportState_GHOSTTY_MODE_REPORT_NOT_RECOGNIZED,
             Self::Set => sys::GhosttyModeReportState_GHOSTTY_MODE_REPORT_SET,
             Self::Reset => sys::GhosttyModeReportState_GHOSTTY_MODE_REPORT_RESET,
-            Self::PermanentlySet => {
-                sys::GhosttyModeReportState_GHOSTTY_MODE_REPORT_PERMANENTLY_SET
-            }
+            Self::PermanentlySet => sys::GhosttyModeReportState_GHOSTTY_MODE_REPORT_PERMANENTLY_SET,
             Self::PermanentlyReset => {
                 sys::GhosttyModeReportState_GHOSTTY_MODE_REPORT_PERMANENTLY_RESET
             }

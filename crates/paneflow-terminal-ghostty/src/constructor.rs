@@ -51,8 +51,9 @@ impl DisplayTerminal {
         crate::abi::validate()?;
         let mut callbacks = Box::new(CallbackState::new(size, appearance.color_scheme));
         let mut raw_terminal = std::ptr::null_mut();
-        let result =
-            unsafe { sys::ghostty_terminal_new(allocator, &mut raw_terminal, size.cols, size.rows) };
+        let result = unsafe {
+            sys::ghostty_terminal_new(allocator, &mut raw_terminal, size.cols, size.rows)
+        };
         check("terminal_new", result)?;
         if raw_terminal.is_null() {
             return Err(GhosttyError::AbiMismatch(
@@ -268,7 +269,10 @@ pub(crate) fn configure_safety_limits(terminal: sys::GhosttyTerminal) -> Result<
 /// `ghostty_terminal_new` no longer takes a scrollback limit, so the line
 /// budget has to be set explicitly right after construction. libghostty keeps
 /// its own byte budget alongside it and prunes on whichever limit is hit first.
-pub(crate) fn configure_scrollback(terminal: sys::GhosttyTerminal, max_scrollback: usize) -> Result<()> {
+pub(crate) fn configure_scrollback(
+    terminal: sys::GhosttyTerminal,
+    max_scrollback: usize,
+) -> Result<()> {
     let result = unsafe {
         sys::ghostty_terminal_set(
             terminal,
