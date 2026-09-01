@@ -121,6 +121,7 @@ impl TerminalView {
         self.search_matches.clear();
         self.search_current = 0;
         self.search_regex_error = None;
+        self.search_truncated = false;
         self.search_input.update(cx, |input, cx| {
             input.clear(cx);
         });
@@ -172,6 +173,7 @@ impl TerminalView {
         self.search_matches.clear();
         self.search_current = 0;
         self.search_regex_error = None;
+        self.search_truncated = false;
         self.terminal.session_backend().scroll_to_bottom();
         cx.notify();
     }
@@ -213,6 +215,7 @@ impl TerminalView {
         if self.search_query.is_empty() {
             self.search_matches.clear();
             self.search_regex_error = None;
+            self.search_truncated = false;
             self.search_current = 0;
             return;
         }
@@ -252,6 +255,7 @@ impl TerminalView {
         self.search_cancellation = None;
         self.search_matches = result.matches;
         self.search_regex_error = result.regex_error;
+        self.search_truncated = result.truncated;
         self.search_current = 0;
         if !self.search_matches.is_empty() {
             self.scroll_to_current_match();

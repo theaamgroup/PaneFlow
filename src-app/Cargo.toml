@@ -54,13 +54,14 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "fecc3273
 # ToolSearch).size(IconSize::Small).color(Color::Muted)` etc.) instead of
 # hand-rolled svg() paths.
 
-# Alacritty terminal emulation (upstream crates.io - migrated from Zed fork in US-005)
-alacritty_terminal = "0.26"
-# EP-003 US-006: named directly because the `TeePty` byte tap implements
-# alacritty_terminal's public `tty::EventedReadWrite` traits, whose
-# signatures expose `polling` types (not re-exported by the crate). Same
-# semver line as alacritty_terminal's own dependency - one shared instance.
-polling = "3"
+# Terminal engine (#184): PaneFlow owns the PTY through portable-pty; the
+# vendored libghostty-vt archive (linked by paneflow-libghostty-sys) parses
+# bytes and owns the grid; GPUI paints the snapshots. One engine, no
+# fallback, no feature flag.
+portable-pty = "0.9.0"
+paneflow-terminal-ghostty = { path = "../crates/paneflow-terminal-ghostty" }
+# Kitty graphics: PNG decoding for placements the engine reports (terminal/kitty.rs).
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Internal crates
 paneflow-config = { path = "../crates/paneflow-config" }

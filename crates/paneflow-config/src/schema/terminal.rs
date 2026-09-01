@@ -65,23 +65,12 @@ pub enum CursorBlinkConfig {
     TerminalControlled,
 }
 
-/// Terminal engine requested for newly-created sessions. `Auto` always
-/// resolves to Alacritty.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalBackendConfig {
-    #[default]
-    Auto,
-    Alacritty,
-}
-
 // Manual `Deserialize` for the terminal enums. A derived `Deserialize` hard-
 // errors on an unrecognised variant; that error propagates up to
 // `parse_and_validate` (loader.rs), which discards the ENTIRE user config and
 // returns defaults. A typo (`"cursor_shape": "squiggle"`) would silently wipe
 // the theme, shell, shortcuts, and agent settings. Instead fall back with a
-// logged warning. Terminal backend typos fail safe to the explicit Alacritty
-// rollback rather than inheriting a future `auto` promotion.
+// logged warning.
 // `Serialize` stays derived (snake_case), so round-tripping a valid value is
 // unchanged.
 impl<'de> Deserialize<'de> for CursorShapeConfig {
@@ -134,29 +123,6 @@ impl<'de> Deserialize<'de> for CursorBlinkConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for TerminalBackendConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Ok(match raw.as_str() {
-            "auto" => Self::Auto,
-            "alacritty" => Self::Alacritty,
-            other => {
-                tracing::warn!(
-                    target: "paneflow_config::terminal",
-                    value = other,
-                    reason_code = "unknown_terminal_backend",
-                    fallback = "alacritty",
-                    "terminal.backend value not recognized, using the safe rollback backend",
-                );
-                Self::Alacritty
-            }
-        })
-    }
-}
-
 /// Memory budget profile for a terminal surface.
 ///
 /// Normal and Agent terminals keep the standard interactive scrollback default so
@@ -191,10 +157,6 @@ impl TerminalSurfaceProfile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TerminalConfig {
-    /// Backend requested for new sessions. `auto` always resolves to
-    /// Alacritty. `alacritty` is the explicit rollback.
-    #[serde(default, deserialize_with = "lenient_terminal_backend")]
-    pub backend: TerminalBackendConfig,
     /// Render programming-font ligatures (FiraCode `=>`, `!=`, …) when
     /// `Some(true)`. `None` and `Some(false)` both keep the historical
     /// behavior of disabling ligatures via GPUI's `FontFeatures`.
@@ -348,11 +310,4 @@ impl TerminalConfig {
         let base = self.resolved_scrollback_lines();
         profile.scrollback_cap().map_or(base, |cap| base.min(cap))
     }
-}
-
-fn lenient_terminal_backend<'de, D>(deserializer: D) -> Result<TerminalBackendConfig, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    TerminalBackendConfig::deserialize(deserializer)
 }

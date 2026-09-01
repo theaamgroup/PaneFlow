@@ -121,7 +121,6 @@ mod tests {
             qoder_button_visible: Some(true),
             openclaw_button_visible: Some(true),
             terminal: Some(TerminalConfig {
-                backend: TerminalBackendConfig::Auto,
                 ligatures: Some(false),
                 integrated_glyphs: Some(true),
                 color_emoji: Some(true),
@@ -677,36 +676,18 @@ mod tests {
     }
 
     #[test]
-    fn terminal_backend_serializes_and_fails_safe_on_unknown_values() {
-        let automatic: TerminalConfig = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(automatic.backend, TerminalBackendConfig::Auto);
-
-        let ghostty: TerminalConfig = serde_json::from_str(r#"{"backend":"ghostty"}"#).unwrap();
-        assert_eq!(ghostty.backend, TerminalBackendConfig::Alacritty);
-
-        let alacritty: TerminalConfig = serde_json::from_str(r#"{"backend":"alacritty"}"#).unwrap();
-        assert_eq!(alacritty.backend, TerminalBackendConfig::Alacritty);
-
-        assert_eq!(
-            serde_json::to_string(&TerminalBackendConfig::Auto).unwrap(),
-            r#""auto""#
+    fn leftover_terminal_backend_key_is_ignored() {
+        // The engine is not configurable (#184). An old paneflow.json that
+        // still carries `terminal.backend` must load, not be discarded, and the
+        // key must not round-trip back out.
+        let config: TerminalConfig =
+            serde_json::from_str(r#"{"backend":"ghostty","scrollback_lines":123}"#).unwrap();
+        assert_eq!(config.scrollback_lines, Some(123));
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            json.get("backend").is_none(),
+            "backend must not round-trip: {json}"
         );
-        assert_eq!(
-            serde_json::to_string(&TerminalBackendConfig::Alacritty).unwrap(),
-            r#""alacritty""#
-        );
-
-        let unknown: TerminalConfig =
-            serde_json::from_str(r#"{"backend":"future-engine"}"#).unwrap();
-        assert_eq!(unknown.backend, TerminalBackendConfig::Alacritty);
-
-        let legacy: PaneFlowConfig =
-            serde_json::from_str(r#"{"theme":"One Dark","terminal":{"scrollback_lines":4321}}"#)
-                .unwrap();
-        let terminal = legacy.terminal.expect("legacy terminal block");
-        assert_eq!(legacy.theme.as_deref(), Some("One Dark"));
-        assert_eq!(terminal.backend, TerminalBackendConfig::Auto);
-        assert_eq!(terminal.scrollback_lines, Some(4321));
     }
 
     #[test]

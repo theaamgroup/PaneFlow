@@ -1,6 +1,6 @@
 # CLAUDE.md - PaneFlow
 
-Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework and upstream `alacritty_terminal` (crates.io) for VT emulation. **This fork is macOS only.**
+Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework; VT emulation is Ghostty's `libghostty-vt`, statically linked from a vendored archive (`native/libghostty/`), with PaneFlow owning the PTY through `portable-pty`. **This fork is macOS only.**
 
 Fork context, decisions, the upstream leak register, and the traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.
 
@@ -22,8 +22,8 @@ rename was dropped). Version **0.1.3**. Origin `theaamgroup/paneflow` on
 `main`. Windows, Linux, the telemetry crate, the published
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The Ghostty engine, deleted on 2026-08-25, is
-being restored as the only engine by #184: Phase 1 (2026-08-31) vendored the
-crates and the darwin archive unwired; Alacritty still runs until Phase 2. The old hand-rolled updater remains **deleted**;
+back as the **only** engine since #184 Phase 2 (2026-08-31): Alacritty is gone,
+every pane runs on `libghostty-vt`, and `TERM_PROGRAM` is `ghostty`. The old hand-rolled updater remains **deleted**;
 Sparkle 2 performs silent hourly checks and installs verified updates only when
 the user quits. First signed GitHub Release is **v0.1.0** (Developer ID
 signed, notarized, stapled; #11 closed with `spctl` evidence). #13 closed on
@@ -224,12 +224,14 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── pane.rs / pane_drag.rs             ← Pane: tab strip + active terminal; drag-to-split
 ├── terminal/                          ← PTY session + VT emulation + rendering
 │   ├── view.rs                        ← TerminalView (Entity<Render>), 4 ms wakeup coalescing
-│   ├── pty_session.rs                 ← alacritty_terminal session, EventLoop I/O thread
-│   ├── listener.rs / input.rs         ← ZedListener, keystroke translation, clipboard
+│   ├── ghostty_session.rs             ← GhosttySession: runtime thread owns DisplayTerminal + PTY, publishes snapshots
+│   ├── pty_session.rs                 ← TerminalState: GPUI-facing host, env, pinned Drop ladder, scrollback
+│   ├── clipboard_gate.rs / input.rs   ← OSC 52 policy gate, key/mouse encoding through libghostty
+│   ├── kitty.rs                       ← Kitty graphics placements (PNG decode, 32 MiB/pane cap)
 │   ├── search.rs / marks.rs           ← find-in-buffer, shell-integration prompt marks
 │   ├── service_detector.rs / shell.rs ← dev-server detection, shell resolution
 │   ├── blink.rs / types.rs            ← cursor blink, shared terminal types
-│   ├── backend_corpus.rs              ← backend-parity corpus tests
+│   ├── bench_corpus.rs / ghostty_stress.rs ← corpus data + counters, runtime stress (#[ignore])
 │   └── element/                       ← low-level GPUI Element rendering
 │       ├── mod.rs                     ← TerminalElement: layout → prepaint → paint
 │       ├── color.rs                   ← ANSI→Hsla, APCA contrast
@@ -271,26 +273,28 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
-**libghostty-vt is coming back as the only engine (issue #184).** Stage 2a (2026-08-25) deleted `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/`, and leftover-removal (2026-08-26) deleted the compiled stubs (`auto_selects_ghostty_for_target`, `should_start_ghostty`, `GhosttyBuildDiagnostics`). #184 Phase 1 (2026-08-31) vendored the three crates and the `aarch64-apple-darwin` archive back from upstream v0.10.0 (`native/libghostty/`, stripped to macOS, linking unconditional, no stub) **without wiring them into `src-app`** - the app still runs Alacritty until Phase 2 swaps the session host. `fuzz/` stays deleted. Daily `cargo build` needs no Zig: the `-sys` build script verifies the vendored archive's hashes and links it. `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Remaining Ghostty identifiers in comments or tests that assert absence are leftover copy, not a live backend.
+**libghostty-vt is the only terminal engine (issue #184, 2026-08-31).** Stage 2a (2026-08-25) had deleted the Ghostty backend because upstream never reached it on macOS; upstream v0.10.0 made macOS a Ghostty target, and this fork ported that engine in three phases: the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates plus the `aarch64-apple-darwin` archive vendored from upstream v0.10.0 and stripped to macOS (`native/libghostty/`, linking unconditional, no stub), then the session-host swap that deleted `alacritty_terminal` and `polling` from `src-app`. Daily `cargo build` needs no Zig: the `-sys` build script verifies the vendored archive's hashes and links it. The model: **PaneFlow owns the PTY (`portable-pty`); libghostty-vt parses bytes and owns the grid; GPUI paints snapshots.** Ghostty does not render, does not talk Metal, and does not own the child. `terminal.backend` is gone from the config schema; a leftover key in `paneflow.json` is ignored. `alacritty_is_absent_from_the_app_crate` (`terminal/types.rs`) fails if the word comes back anywhere in `src-app` outside that file. `fuzz/` stays deleted. Linking prints `ld: duplicate symbol '_memset'` (`compiler_rt.o` vs `libghostty-vt-static_zcu.o`): a property of the vendored archive, benign, left for the archive-rebuild follow-up.
+
+**What the fork keeps on top of upstream's host (the close-guard trap).** Upstream's `terminate_child` was `kill(-pgid, TERM)` → 100 ms → `KILL` on one group from the runtime thread, unpinned. This fork's contract is stronger and lives in `TerminalState::Drop` (`terminal/pty_session.rs`): pin every live process group in the PTY session through an **app-owned `dup()` of the master** (`SpawnedGhostty::master_fd`, taken at spawn), SIGTERM them synchronously, drop the external guards, then `GhosttySession::shutdown()`, close the dup, and SIGKILL 100 ms later with start-time pins re-checked. **The runtime thread never signals**: on an app-initiated shutdown or a natural exit it only reaps (`reap_child_bounded`); `terminate_child` survives solely for the engine-failure paths (runtime failed, `waitid` failed, the startup and panic guards). `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session` pins the outcome with a live shell.
 
 ### Thread model
 
 - **Main thread**: GPUI event loop, owns all Entity state, rendering, input dispatch. No locks around UI state.
-- **PTY I/O threads**: one per terminal, spawned by `alacritty_terminal::EventLoop::spawn()`.
+- **Ghostty runtime thread** (`paneflow-ghostty-runtime`, one per terminal): owns the `!Send` `DisplayTerminal`, the PTY master and the child; drains the mailbox (input, resize, selection, shutdown) and publishes `Content` snapshots. A sibling **PTY reader thread** (`paneflow-ghostty-pty-reader`) feeds it 32 KiB chunks through a 4-buffer pool.
 - **IPC thread**: Unix socket server. The runtime dir resolves through a fallback chain (`runtime_paths.rs`): `$XDG_RUNTIME_DIR` → `dirs::runtime_dir()` (None on macOS) → `$TMPDIR` (the macOS path, usually `/var/folders/xx/.../T/`) → `dirs::cache_dir()/run`. Socket at `<runtime_dir>/<APP_SUBDIR>/<socket>`: `paneflow/paneflow.sock` in release, `paneflow-dev/paneflow-dev.sock` under `debug_assertions`. The composed path is rejected if it exceeds the `sockaddr_un.sun_path` ceiling (104 bytes on macOS). `PANEFLOW_SOCKET_PATH` overrides the computed path so an isolated debug instance and the panes it launches agree on one endpoint.
 - **Watcher threads**: config (notify, 300 ms debounce, 500 ms max-wait ceiling), theme, git state.
-- **Shared state**: `Arc<FairMutex<Term<ZedListener>>>` is the only cross-thread data (the terminal grid).
+- **Shared state**: `parking_lot::RwLock<SharedState>` (`Content` cells + modes + metrics + kitty placements) written by the runtime thread and read by the GPUI thread; `UiEventState` slots carry title/cwd/progress/notification/clipboard events. The libghostty C handle never leaves the runtime thread.
 
 ### Data flow: keystroke → pixel
 
 ```
-KeyDownEvent → TerminalView::handle_key_down() → keys::to_esc_str()
-→ write_to_pty() → Notifier → PTY EventLoop thread → shell
-→ shell output → AlacEventLoop reads PTY → vte parser → Term grid mutations
-→ ZedListener::send_event(Wakeup) → UnboundedChannel
-→ 4ms coalescing batch (terminal/view.rs) → sync() → dirty=true → cx.notify()
-→ TerminalElement::prepaint() → term.lock() → renderable_content()
-→ TerminalElement::paint() → paint_quad + shape_line → Metal
+KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
+→ write_ghostty_key() → RuntimeMessage::KeyInput → runtime thread → DisplayTerminal::encode_key() → PTY write
+→ shell output → pty-reader thread → RuntimeMessage::Output → DisplayTerminal::feed()
+→ update_shared_state(): snapshot → RwLock<SharedState>; queue_wakeup → GhosttyUiEvent::Wakeup
+→ 4ms coalescing batch (terminal/view.rs) → process_backend_wakeup() → dirty=true → cx.notify()
+→ TerminalElement::prepaint() → session_backend().render_content() (RwLock read + Arc<[Cell]> clone)
+→ TerminalElement::paint() → paint_quad + shape_line (+ kitty placements) → Metal
 ```
 
 ### Workspace crates
@@ -329,7 +333,7 @@ Cargo fetches GPUI from git automatically. **There is no local checkout and no p
 - `async-task` → `smol-rs/async-task` (specific git commit)
 - `calloop` → `zed-industries/calloop` fork
 
-Terminal emulation uses upstream `alacritty_terminal = "0.26"` from crates.io (`src-app/Cargo.toml:62`, resolved to 0.26.0 in `Cargo.lock`), migrated from Zed's fork. `polling = "3"` is named directly because the `TeePty` byte tap implements `alacritty_terminal`'s public `tty::EventedReadWrite` traits, whose signatures expose `polling` types the crate does not re-export.
+Terminal emulation is `paneflow-terminal-ghostty` (workspace crate, `src-app/Cargo.toml`), the safe wrapper over `paneflow-libghostty-sys`, whose build script links `native/libghostty/prebuilt/aarch64-apple-darwin/lib/libghostty-vt.a` after verifying every hash in `native/libghostty/manifest.toml`. `portable-pty = "0.9"` opens the PTY and spawns the child; `image` (PNG only) decodes Kitty graphics. `cargo deny` cannot see the static archive: `native/libghostty/THIRD_PARTY_NOTICES.md` is its license inventory and ships in the bundle as `ThirdPartyLicenses/libghostty.txt`.
 
 ## GPUI patterns
 
@@ -461,10 +465,10 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **GPUI is not on crates.io.** It is consumed from the pinned Zed git fork above. Never replace it with a crates.io dependency, and never assume there is a local checkout to edit.
 - **Never recommend iced** for this project. It was evaluated and rejected (unstable, custom WGPU glyph atlas too complex). The decision is final.
 - **`SplitDirection::Horizontal`** means a horizontal divider bar (panes stacked top/bottom), NOT side-by-side. Counterintuitive but consistent.
-- **`alacritty_terminal` is upstream** (crates.io `0.26`), migrated from Zed's fork. It still uses `ZedListener` and `FairMutex` from the GPUI integration layer, and its imports are confined to an allowlist enforced by the `alacritty_confined_to_backend_allowlist` test (`src-app/src/terminal/types.rs:993`). Separately, `src-app/tests/dependency_source_policy.rs` asserts every git source in `Cargo.lock` is pinned to an immutable revision, so a floating branch cannot sneak in.
+- **No engine type crosses the `terminal/` seam.** `terminal/types.rs` (`Point`, `Cell`, `Content`, `Modes`, `SelectionGeometry`) is the contract the renderer and input consume; `ghostty_session.rs` translates libghostty values into it. `alacritty_is_absent_from_the_app_crate` fails on the word `alacritty` anywhere in `src-app` except that file, and `src-app/tests/dependency_source_policy.rs` still asserts every git source in `Cargo.lock` is pinned to an immutable revision.
 - **`dirs` is a single workspace dependency at version 6** (`Cargo.toml` `[workspace.dependencies]`; both `src-app/Cargo.toml:119` and `crates/paneflow-config/Cargo.toml:14` use `dirs.workspace = true`). An older note about a 5.0/6 split between the two crates is stale.
 - **Config `default_shell` is wired**: `resolve_default_shell` (`terminal/shell.rs:214`) validates the configured path is present and executable, warns and falls back if not, then uses the `$SHELL` → `/bin/sh` chain.
-- **The `_io_thread` handle is discarded** (`terminal/pty_session.rs:1672`). PTY I/O threads run detached; shutdown is via `Msg::Shutdown` in `Drop`.
+- **Teardown is the app's, not the engine's.** `TerminalState::Drop` owns every signal (see the close-guard trap above); `GhosttySession::shutdown()` only asks the runtime to close the PTY and reap. Never move a `kill()` back onto the runtime thread.
 - **A GUI-launched app inherits launchd's minimal PATH, not the user's.** `login_shell_env.rs` runs the user's login shell once and adopts **only its `PATH`**, deliberately importing nothing else (a login profile that re-exports session variables would corrupt them). Without this, `/opt/homebrew/bin` is missing, terminals cannot find the user's tools, and agent-CLI detection (`which::which(...)`) comes up empty. Do not "simplify" it into a full env import.
 - **Every `US-NNN` comment in the Rust source is a dangling breadcrumb.** They point at PRD files that lived under `tasks/`, were gitignored upstream, never committed, and `tasks/` is now deleted. Same for every `prd-*.md` and `EP-NNN` reference in a comment. Roughly 2,200 such comments across ~190 files: treat them as historical noise, do not go looking for the document, and do not add new ones.
 - **Tests + CI exist**: run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`. UI changes still need manual verification.
@@ -499,9 +503,9 @@ Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork):
 
 ## Platform (macOS only)
 
-This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`.
+This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, libghostty-vt (vendored `aarch64-apple-darwin` archive), Unix-socket IPC, signed and notarized `.app` / `.dmg`.
 
-- Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, and no backend selector: one terminal engine only (Alacritty today, libghostty-vt after #184 Phase 2).
+- Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, and no backend selector: libghostty-vt is the one terminal engine; `src-app/build.rs` refuses any target but `aarch64-apple-darwin`.
 - **`#[cfg(unix)]` is not Linux-only.** It appears **150 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears **94** times. Both are live arms and both stay. Counted by the `./scripts/linux-census.sh` negative control (`cfg(unix)` / `cfg(macos)` live sites) - **re-run it before quoting these numbers**, since they drift with every pass and four different pairs are currently recorded across the fork docs.
 - **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:239`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition: it exits 1 with a `FAIL:` line when the STAGE 2c total is non-zero or the negative control reads 0, and `run_tests.yml::platform_census` runs it (and `win-census.sh`) on every push and PR. It prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. A zero cfg census is also blind to ungated Windows strings (`powershell` / `.exe` / `.cmd` / `.bat` / `.ps1` / `\\?\` / `%APPDATA%`); that class is a separate reported check in the same script (issue #103) and is **not** part of the STAGE 2c integer.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.

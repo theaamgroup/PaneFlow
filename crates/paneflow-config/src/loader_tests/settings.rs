@@ -23,7 +23,6 @@ fn test_terminal_ligatures_default_when_block_empty() {
     assert_eq!(
         from_empty.terminal,
         Some(TerminalConfig {
-            backend: Default::default(),
             ligatures: None,
             integrated_glyphs: None,
             color_emoji: None,
@@ -38,7 +37,6 @@ fn test_terminal_ligatures_default_when_block_empty() {
     assert_eq!(
         from_null.terminal,
         Some(TerminalConfig {
-            backend: Default::default(),
             ligatures: None,
             integrated_glyphs: None,
             color_emoji: None,
@@ -58,7 +56,6 @@ fn test_terminal_ligatures_true() {
     assert_eq!(
         config.terminal,
         Some(TerminalConfig {
-            backend: Default::default(),
             ligatures: Some(true),
             integrated_glyphs: None,
             color_emoji: None,
@@ -84,7 +81,6 @@ fn test_terminal_ligatures_false() {
     assert_eq!(
         config.terminal,
         Some(TerminalConfig {
-            backend: Default::default(),
             ligatures: Some(false),
             integrated_glyphs: None,
             color_emoji: None,
@@ -114,7 +110,6 @@ fn test_terminal_integrated_glyphs_default_on_and_false_opt_out() {
     assert_eq!(
         disabled.terminal,
         Some(TerminalConfig {
-            backend: Default::default(),
             ligatures: None,
             integrated_glyphs: Some(false),
             color_emoji: None,
@@ -152,7 +147,6 @@ fn test_terminal_color_emoji_default_on_and_false_opt_out() {
     assert_eq!(
         disabled.terminal,
         Some(TerminalConfig {
-            backend: Default::default(),
             ligatures: None,
             integrated_glyphs: None,
             color_emoji: Some(false),
@@ -187,7 +181,6 @@ fn test_terminal_scrollback_lines_resolves_to_default_when_absent() {
 #[test]
 fn test_terminal_scrollback_lines_clamps_out_of_range() {
     let tc = TerminalConfig {
-        backend: Default::default(),
         ligatures: None,
         integrated_glyphs: None,
         color_emoji: None,
@@ -203,7 +196,6 @@ fn test_terminal_scrollback_lines_clamps_out_of_range() {
         TerminalConfig::MIN_SCROLLBACK_LINES
     );
     let tc = TerminalConfig {
-        backend: Default::default(),
         ligatures: None,
         integrated_glyphs: None,
         color_emoji: None,
