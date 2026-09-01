@@ -48,7 +48,7 @@ Task 12 still replaced *upstream's* identity so this fork is not signed as
 
 | Requirement | State |
 |---|---|
-| rustup + rustc 1.96.1 (pinned by `rust-toolchain.toml`) | installed 2026-08-25 |
+| rustup + rustc 1.98.0 (pinned by `rust-toolchain.toml`; bumped from 1.96.1 on 2026-08-31 for the libghostty port, issue #184) | installed 2026-08-31 |
 | Full Xcode, for the Metal shader compiler that GPUI needs at build time | Xcode 26.6 installed 2026-08-25. **Two separate steps, and the second is easy to miss.** Command Line Tools alone are not enough (`xcrun -f metal` fails outright under CLT), and installing Xcode alone is also not enough: Xcode 26 ships the Metal toolchain as a downloadable component, so `xcrun metal` still fails with `cannot execute tool 'metal' due to missing Metal Toolchain` until you run `xcodebuild -downloadComponent MetalToolchain`. Verify with an actual compile, not with `xcrun -f metal`, which resolves the path successfully even when the toolchain is absent. |
 | cmake | already present via Homebrew |
 | zig | not needed once the Ghostty backend is gone |
@@ -60,7 +60,7 @@ Verified load-bearing. Each of these looks like cruft and is not.
 - `schemas/paneflow.schema.json`: two tests in `crates/paneflow-config/src/schema.rs` (lines 1685, 1778) read it off disk. Drift fails the suite.
 - `examples/review-pipeline.flow.toml`: `include_str!` target at `src-app/src/cli/flow_spec.rs:749`. Deleting it breaks the build. `examples/TASK.md` is its fixture.
 - `clippy.toml`: the `allow-unwrap-in-tests` escape hatch for the workspace lint policy in `Cargo.toml`. Without it, test code starts warning.
-- `rust-toolchain.toml`: the 1.96.1 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
+- `rust-toolchain.toml`: the 1.98.0 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
 - `LICENSE`: GPL-3.0-or-later, mandatory. GPUI is a Zed fork.
 - `CLAUDE.md`: the single most useful file in the repo. Real build and test commands, annotated module tree, thread model, keystroke-to-pixel data flow, and a Gotchas section with hard-won GPUI behaviour.
 - `ARCHITECTURE.md`, `docs/hooks.md`, `docs/mcp-bridge.md`, `docs/debugging-rendering.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
