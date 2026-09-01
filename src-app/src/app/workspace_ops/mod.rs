@@ -2475,11 +2475,16 @@ impl PaneFlowApp {
 /// with the file highlighted, but the PRD explicitly mandates `open <path>`;
 /// callers that want reveal-with-highlight pass the parent directory.
 ///
+/// Spawns `/usr/bin/open` by absolute path, never a PATH lookup: startup
+/// prepends writable user directories (`~/.local/bin`, ...) to PATH, and
+/// `open` has no legitimate user-install story to justify honoring a shadow
+/// there (issue #206). `open_is_spawned_by_absolute_path_only` pins this.
+///
 /// Returns `Err(message)` on spawn failure where `message` is already
 /// phrased for a user-visible toast (US-011 AC7, AC9).
 pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
     validate_reveal_path(path)?;
-    spawn_detached(std::process::Command::new("open").arg(path))
+    spawn_detached(std::process::Command::new("/usr/bin/open").arg(path))
         .map_err(|err| format!("Could not open Finder: {err}"))
 }
 
@@ -2819,6 +2824,69 @@ mod tests {
         assert!(
             err.ends_with("is not a folder"),
             "toast copy drifted: {err}"
+        );
+    }
+
+    /// `open` is a macOS system utility with no legitimate user-install
+    /// story, yet GUI startup prepends writable user directories
+    /// (`~/.bun/bin`, `~/.cargo/bin`, `~/.local/bin`) to PATH before any
+    /// spawn happens (`runtime_paths.rs`). A spawn naming bare `open` would
+    /// resolve a user-writable shadow ahead of the system binary and
+    /// run it inside the app (issue #206), so every production spawn must
+    /// name `/usr/bin/open` absolutely. Git is exempt on purpose: the PATH
+    /// prepend order is a documented design decision so user-installed git
+    /// wins (`runtime_paths.rs`).
+    #[test]
+    fn open_is_spawned_by_absolute_path_only() {
+        use std::path::{Path, PathBuf};
+
+        // Built at runtime so this test's own source never matches the scan.
+        let bare_open = format!("Command::new({q}open{q})", q = '"');
+        let absolute_open = format!("Command::new({q}/usr/bin/open{q})", q = '"');
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut violations = Vec::new();
+        let mut absolute_sites = 0usize;
+        let mut stack: Vec<PathBuf> = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (i, line) in text.lines().enumerate() {
+                    if line.contains(&bare_open) {
+                        violations.push(format!("{rel}:{}", i + 1));
+                    }
+                    if line.contains(&absolute_open) {
+                        absolute_sites += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "bare `open` spawns resolve through a PATH that starts with \
+             writable user directories; spawn /usr/bin/open instead:\n{}",
+            violations.join("\n")
+        );
+        // Negative control: the reveal-in-Finder site must still exist, or
+        // the scan is matching nothing.
+        assert!(
+            absolute_sites >= 1,
+            "no /usr/bin/open spawn found at all - the scan is broken or the \
+             Finder reveal path was removed without updating this guard"
         );
     }
 
