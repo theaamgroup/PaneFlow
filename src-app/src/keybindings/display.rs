@@ -286,6 +286,69 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
     entries
 }
 
+/// The action that currently owns `new_key` and silently loses it when
+/// `rebound_action` takes the chord, as its display description (issue #196).
+///
+/// Rebinding onto an occupied chord evicts the prior owner in two places, and
+/// neither warns: the config writer's `merge_shortcut` removes a user
+/// `shortcuts` entry on the same physical chord, and `apply_keybindings` drops
+/// a default sharing a user-claimed chord. This mirrors both so the settings
+/// page can name the shadowed action in a warn-and-proceed toast. Comparison
+/// is normalization-aware ([`keystrokes_conflict`]). Returns `None` when the
+/// chord is free, explicitly unbound (`"none"`), or already owned by
+/// `rebound_action` itself.
+///
+/// Must be computed from the config BEFORE the rebind is saved - the save is
+/// exactly what erases the evidence.
+pub fn displaced_action_description(
+    user_shortcuts: &HashMap<String, String>,
+    new_key: &str,
+    rebound_action: &str,
+) -> Option<String> {
+    use super::apply::keystrokes_conflict;
+
+    // A live user entry on the same physical chord loses it (merge_shortcut).
+    if let Some(owner) = user_shortcuts
+        .iter()
+        .filter(|(k, _)| keystrokes_conflict(k, new_key))
+        .map(|(_, v)| v.as_str())
+        .find(|v| *v != "none" && *v != rebound_action && ACTIONS.iter().any(|a| a.name == *v))
+    {
+        return Some(action_description(owner).to_string());
+    }
+
+    // The chord may instead be claimed by a `"none"` unbind or by the action's
+    // own previous entry; either way the matching default was already
+    // suppressed, so this save displaces nothing. (An entry naming an
+    // unregistered action claims nothing - `apply_keybindings` ignores it -
+    // so it does not shield the default below.)
+    if user_shortcuts.iter().any(|(k, v)| {
+        keystrokes_conflict(k, new_key)
+            && (v == "none" || v == rebound_action || ACTIONS.iter().any(|a| a.name == v))
+    }) {
+        return None;
+    }
+
+    // No user entry claims the chord: a default sharing it is dropped by
+    // `apply_keybindings`' `is_user_claimed` filter - unless its action was
+    // already remapped elsewhere by the user, which makes the default key
+    // dead before this rebind.
+    let remapped: HashSet<&str> = user_shortcuts
+        .values()
+        .filter(|v| v.as_str() != "none")
+        .map(|v| v.as_str())
+        .collect();
+    DEFAULTS
+        .iter()
+        .chain(MACOS_ONLY_DEFAULTS.iter())
+        .find(|d| {
+            d.action_name != rebound_action
+                && !remapped.contains(d.action_name)
+                && keystrokes_conflict(d.key, new_key)
+        })
+        .map(|d| action_description(d.action_name).to_string())
+}
+
 /// Returns `true` if the keystroke is a bare modifier press (no actual key).
 pub fn is_bare_modifier(keystroke: &Keystroke) -> bool {
     matches!(
@@ -635,6 +698,75 @@ mod tests {
                 "{group:?} has no rows, so its header would render empty"
             );
         }
+    }
+
+    /// Issue #196: recording a chord another action holds silently drops that
+    /// action's binding (config-level eviction in `merge_shortcut`,
+    /// registry-level suppression in `apply_keybindings`). The settings page
+    /// warns by name; this pins the lookup that feeds the warning.
+    #[test]
+    fn displaced_action_is_named_for_both_eviction_sites() {
+        // The issue's example: recording ⌘Q for another action kills Quit.
+        // (`cmd-q` is a MACOS_ONLY_DEFAULTS binding for `quit`.)
+        assert_eq!(
+            displaced_action_description(&HashMap::new(), "cmd-q", "split_horizontally"),
+            Some("Quit".to_string()),
+            "a displaced default must be named"
+        );
+        // A generic default is found too, normalization-aware.
+        assert_eq!(
+            displaced_action_description(&HashMap::new(), "cmd+shift+w", "split_horizontally"),
+            Some("Close pane".to_string()),
+            "plus-separated spelling must still find the secondary-shift-w default"
+        );
+        // A user-level entry on the chord is the config-side eviction.
+        let mut user = HashMap::new();
+        user.insert("ctrl-alt-p".to_string(), "close_pane".to_string());
+        assert_eq!(
+            displaced_action_description(&user, "ctrl+alt+p", "split_horizontally"),
+            Some("Close pane".to_string()),
+            "a displaced user override must be named"
+        );
+    }
+
+    #[test]
+    fn no_displacement_is_reported_for_a_free_or_own_chord() {
+        // A free chord displaces nothing.
+        assert_eq!(
+            displaced_action_description(&HashMap::new(), "ctrl-alt-shift-9", "quit"),
+            None
+        );
+        // Re-recording the action's own chord is not a conflict - neither its
+        // default nor its own user entry.
+        assert_eq!(
+            displaced_action_description(&HashMap::new(), "cmd-q", "quit"),
+            None,
+            "an action re-taking its own default is not a displacement"
+        );
+        let mut user = HashMap::new();
+        user.insert("ctrl-alt-p".to_string(), "close_pane".to_string());
+        assert_eq!(
+            displaced_action_description(&user, "ctrl-alt-p", "close_pane"),
+            None,
+            "an action re-taking its own override is not a displacement"
+        );
+        // An explicitly unbound chord already suppressed its default.
+        let mut unbound = HashMap::new();
+        unbound.insert("cmd-q".to_string(), "none".to_string());
+        assert_eq!(
+            displaced_action_description(&unbound, "cmd-q", "split_horizontally"),
+            None,
+            "an unbound chord has no owner to displace"
+        );
+        // A default whose action the user already moved elsewhere left its
+        // default chord dead - taking that chord displaces nothing.
+        let mut remapped = HashMap::new();
+        remapped.insert("ctrl-alt-q".to_string(), "quit".to_string());
+        assert_eq!(
+            displaced_action_description(&remapped, "cmd-q", "split_horizontally"),
+            None,
+            "a remapped action's abandoned default chord is free"
+        );
     }
 
     #[test]

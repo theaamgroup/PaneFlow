@@ -130,7 +130,7 @@ fn managed_guard_install_and_drop_roundtrip_in_clone_dir() {
             merge_codebuddy_hooks,
             remove_paneflow_hooks,
         ),
-        InvalidJsonPolicy::Replace,
+        InvalidJsonPolicy::Refuse,
     )
     .expect("install in fresh dir must succeed");
 

@@ -40,6 +40,7 @@ fn test_serialization_roundtrip() {
         shell_integration: None,
         agent_stall_detection: None,
         agent_stall_threshold_secs: None,
+        crash_reporting: None,
         review_enabled: None,
         new_pane_shows_sessions: None,
         review_prefill_delay_ms: None,

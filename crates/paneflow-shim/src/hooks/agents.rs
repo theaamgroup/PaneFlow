@@ -186,7 +186,9 @@ impl ManagedHookConfigGuard {
         Self::install_anchored(
             &env::current_dir()?.join(spec.directory_name),
             spec,
-            InvalidJsonPolicy::Replace,
+            // #202: project-local configs get the same protection as the
+            // home-scope ones - refuse a parse failure, never clobber.
+            InvalidJsonPolicy::Refuse,
         )
     }
 

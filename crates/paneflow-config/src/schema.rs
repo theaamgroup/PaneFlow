@@ -95,6 +95,7 @@ mod tests {
             shell_integration: Some(true),
             agent_stall_detection: Some(true),
             agent_stall_threshold_secs: Some(300),
+            crash_reporting: Some(true),
             review_enabled: Some(true),
             new_pane_shows_sessions: Some(false),
             review_prefill_delay_ms: Some(2000),
@@ -400,6 +401,43 @@ mod tests {
             ..Default::default()
         };
         assert!(!off.new_pane_shows_sessions());
+    }
+
+    #[test]
+    fn crash_reporting_defaults_on_and_respects_kill_switch() {
+        // Issue #204: crash reporting must have a config opt-out published in
+        // the public schema. `None`-is-on, matching the other master switches
+        // (`shell_integration`, `agent_stall_detection`, `review_enabled`).
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schemas/paneflow.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
+        assert!(
+            schema["properties"].get("crash_reporting").is_some(),
+            "the public JSON schema must expose the crash_reporting opt-out"
+        );
+
+        assert!(PaneFlowConfig::default().crash_reporting_enabled());
+        let off = PaneFlowConfig {
+            crash_reporting: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.crash_reporting_enabled());
+        let on = PaneFlowConfig {
+            crash_reporting: Some(true),
+            ..Default::default()
+        };
+        assert!(on.crash_reporting_enabled());
+
+        // The kill switch travels through the public JSON shape.
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"crash_reporting": false}"#).expect("valid config");
+        assert!(!cfg.crash_reporting_enabled());
+        // Absent -> None -> enabled (an upgrade must not silently change
+        // behaviour for existing configs).
+        let cfg: PaneFlowConfig = serde_json::from_str("{}").expect("empty config");
+        assert!(cfg.crash_reporting.is_none());
+        assert!(cfg.crash_reporting_enabled());
     }
 
     #[test]

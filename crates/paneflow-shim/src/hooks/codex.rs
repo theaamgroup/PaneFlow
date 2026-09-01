@@ -77,7 +77,9 @@ impl CodexHookConfigGuard {
             "hooks.json",
             "Codex",
             merge_codex_hooks,
-            InvalidJsonPolicy::Replace,
+            // #202: a present-but-unparseable hooks.json must refuse,
+            // never be replaced with `{}` plus PaneFlow hooks.
+            InvalidJsonPolicy::Refuse,
         )?;
         let mut guard = Self {
             hooks_path: installed.path,
@@ -292,6 +294,34 @@ mod tests {
         drop(live);
         sweep_orphan_codex_feature_flag(&feature);
         assert!(!feature.exists());
+    }
+
+    #[test]
+    fn install_refuses_unparseable_project_hooks_and_leaves_feature_flag_off() {
+        // Issue #202: a malformed .codex/hooks.json must refuse the install
+        // and stay byte-identical instead of being replaced with `{}` plus
+        // PaneFlow hooks; the global feature flag must stay untouched too.
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join(".codex");
+        std::fs::create_dir_all(&project).unwrap();
+        let hooks = project.join("hooks.json");
+        let original = "{ \"hooks\": {";
+        std::fs::write(&hooks, original).unwrap();
+        let feature = temp.path().join("config.toml");
+
+        assert!(
+            CodexHookConfigGuard::install_at(&project, Some(&feature)).is_err(),
+            "install must refuse an unparseable hooks.json"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hooks).unwrap(),
+            original,
+            "malformed project hooks must stay byte-identical"
+        );
+        assert!(
+            !feature.exists(),
+            "the feature flag must not be enabled when the hooks install is refused"
+        );
     }
 
     #[test]

@@ -86,9 +86,12 @@ scan.
 Safety properties shared by every ephemeral installer: idempotent merge,
 ownership detection by command basename (`paneflow-ai-hook`), orphan sweep on
 the next launch after a SIGKILL, and refusal paths that protect user files -
-a symlinked config dir, an unparseable PRIMARY config (`opencode.json`,
-`~/.hermes/config.yaml` with an existing `hooks:` key), or a `.jsonc`-only
-OpenCode setup all skip the install instead of clobbering. The TS bridges are
+a symlinked config dir, any present-but-unparseable JSON config (the
+project-local `settings.local.json` / `hooks.json` files included, left
+byte-identical - the agent still launches, hookless), an unparseable PRIMARY
+config (`opencode.json`, `~/.hermes/config.yaml` with an existing `hooks:`
+key), or a `.jsonc`-only OpenCode setup all skip the install instead of
+clobbering. The TS bridges are
 env-gated on `PANEFLOW_SOCKET_PATH`, so they are inert when the CLI runs
 outside a PaneFlow terminal.
 

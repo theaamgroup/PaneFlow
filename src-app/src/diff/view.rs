@@ -97,9 +97,13 @@ const MIN_SPLIT_COLUMN_PX: f32 = 360.0;
 /// re-diff per window, short enough to feel live (US-015).
 const REFRESH_DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// After a reload, ignore further watcher events for this long. Prevents a
+/// After a reload, coalesce further watcher events for this long. Prevents a
 /// reload's own churn (or a concurrent build) from immediately re-triggering and
-/// starving the in-flight load (the perpetual "Computing diff…" loop).
+/// starving the in-flight load (the perpetual "Computing diff…" loop). Events
+/// arriving during the cooldown are not dropped: a relevant one sets a dirty
+/// bit, and a dirty expiry revalidates once and starts a fresh cooldown, so the
+/// trailing edge (e.g. the final write of an atomic save) still lands while
+/// refresh frequency stays bounded to one per period (issue #209).
 const REFRESH_COOLDOWN: Duration = Duration::from_millis(1000);
 
 /// Syntax highlighting (prd-diff-syntax-highlight-2026-Q3.md). ON.

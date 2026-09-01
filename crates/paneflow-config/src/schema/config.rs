@@ -128,6 +128,15 @@ pub struct PaneFlowConfig {
     /// effective detection latency is threshold + up to 30 s.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub agent_stall_threshold_secs: Option<u64>,
+    /// Issue #204: master switch for Sentry crash reporting. `None`/`true`
+    /// = enabled (default): a GUI launch initializes crash reporting at
+    /// startup, with `send_default_pii` disabled so reports never carry
+    /// default PII. `false` = crash reporting is never initialized. Read
+    /// once at startup, so changing it requires a restart; CLI invocations
+    /// (`paneflow mcp|hooks|<verb>`) never initialize crash reporting
+    /// regardless of this value.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub crash_reporting: Option<bool>,
     /// Master switch for the Review surface. `None`/`true` = enabled
     /// (default): the git review view, its sidebar rail, and the
     /// `OpenDiffView` chord all work. `false` = the mode is unreachable -
@@ -444,6 +453,13 @@ impl PaneFlowConfig {
     /// was already using disappear.
     pub fn review_view_enabled(&self) -> bool {
         self.review_enabled.unwrap_or(true)
+    }
+
+    /// Issue #204: resolve the crash-reporting master switch. Absent means
+    /// enabled, matching the other `None`-is-on switches here
+    /// (`shell_integration`, `agent_stall_detection`, `review_enabled`).
+    pub fn crash_reporting_enabled(&self) -> bool {
+        self.crash_reporting.unwrap_or(true)
     }
 
     /// Resolve whether a Tab-placement New pane picker should show the

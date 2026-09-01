@@ -1,4 +1,4 @@
-use super::owned_files::PANEFLOW_TS_BASENAME;
+use super::owned_files::{remove_created_file, PANEFLOW_TS_BASENAME};
 use super::{
     home_unavailable, paneflow_ipc_reachable, refuse_symlink, with_last_lease, with_orphan_lease,
     HookInstall, HookInstallResult, HookInstallSkip, HookLease,
@@ -49,7 +49,8 @@ pub(crate) struct OpenCodePluginGuard {
     plugin_path: PathBuf,
     config_path: PathBuf,
     created_config: bool,
-    lease: HookLease,
+    plugin_lease: HookLease,
+    config_lease: HookLease,
 }
 
 impl OpenCodePluginGuard {
@@ -81,11 +82,23 @@ impl OpenCodePluginGuard {
                 "OpenCode plugin path is not valid Unicode",
             )
         })?;
-        let mut lease = HookLease::acquire(&plugin_path)?;
+        let mut plugin_lease = HookLease::acquire(&plugin_path)?;
         with_config_lock(&plugin_path, || {
-            write_text_atomic(&plugin_path, OPENCODE_PLUGIN_SOURCE)
+            let created_plugin = !plugin_path.exists();
+            write_text_atomic(&plugin_path, OPENCODE_PLUGIN_SOURCE)?;
+            if created_plugin {
+                plugin_lease.mark_created()?;
+            }
+            Ok(())
         })?;
 
+        let mut config_lease = match HookLease::acquire(&config_path) {
+            Ok(lease) => lease,
+            Err(error) => {
+                rollback_plugin_file(&plugin_path, &mut plugin_lease);
+                return Err(error);
+            }
+        };
         let result = with_config_lock(&config_path, || {
             let existing = read_optional_text(&config_path)?;
             let created_config = existing.is_none();
@@ -97,20 +110,14 @@ impl OpenCodePluginGuard {
             merge_opencode_plugin_entry(&mut root, plugin_config_path)?;
             write_json_atomic(&config_path, &root)?;
             if created_config {
-                lease.mark_created()?;
+                config_lease.mark_created()?;
             }
             Ok(created_config)
         });
         let created_config = match result {
             Ok(created) => created,
             Err(error) => {
-                let _ = with_last_lease(&plugin_path, &mut lease, |_| {
-                    match std::fs::remove_file(&plugin_path) {
-                        Ok(()) => Ok(()),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                        Err(error) => Err(error),
-                    }
-                });
+                rollback_plugin_file(&plugin_path, &mut plugin_lease);
                 return Err(error);
             }
         };
@@ -119,15 +126,18 @@ impl OpenCodePluginGuard {
             plugin_path,
             config_path,
             created_config,
-            lease,
+            plugin_lease,
+            config_lease,
         })
     }
 
     fn sweep_orphan(directory: &Path) {
         let plugin_path = directory.join("plugins").join(PANEFLOW_TS_BASENAME);
         let config_path = directory.join("opencode.json");
-        let _ = with_orphan_lease(&plugin_path, &config_path, |created_config| {
-            let _ = std::fs::remove_file(&plugin_path);
+        let _ = with_orphan_lease(&plugin_path, &plugin_path, |created_plugin| {
+            remove_created_file(&plugin_path, created_plugin)
+        });
+        let _ = with_orphan_lease(&config_path, &config_path, |created_config| {
             let Some(content) = read_optional_text(&config_path)? else {
                 return Ok(());
             };
@@ -150,24 +160,41 @@ impl OpenCodePluginGuard {
 
 impl Drop for OpenCodePluginGuard {
     fn drop(&mut self) {
-        let _ = with_last_lease(&self.config_path, &mut self.lease, |lease_created_config| {
-            let _ = std::fs::remove_file(&self.plugin_path);
-            let Some(content) = read_optional_text(&self.config_path)? else {
-                return Ok(());
-            };
-            let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
-                return Ok(());
-            };
-            remove_opencode_plugin_entry(&mut root)?;
-            if (self.created_config || lease_created_config)
-                && root.as_object().is_some_and(serde_json::Map::is_empty)
-            {
-                std::fs::remove_file(&self.config_path)
-            } else {
-                write_json_atomic(&self.config_path, &root)
-            }
-        });
+        let _ = with_last_lease(
+            &self.plugin_path,
+            &mut self.plugin_lease,
+            |created_plugin| remove_created_file(&self.plugin_path, created_plugin),
+        );
+        let _ = with_last_lease(
+            &self.config_path,
+            &mut self.config_lease,
+            |lease_created_config| {
+                let Some(content) = read_optional_text(&self.config_path)? else {
+                    return Ok(());
+                };
+                let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
+                    return Ok(());
+                };
+                remove_opencode_plugin_entry(&mut root)?;
+                if (self.created_config || lease_created_config)
+                    && root.as_object().is_some_and(serde_json::Map::is_empty)
+                {
+                    std::fs::remove_file(&self.config_path)
+                } else {
+                    write_json_atomic(&self.config_path, &root)
+                }
+            },
+        );
     }
+}
+
+/// Undo a partially finished install: remove the plugin file only when this
+/// session's lease shows PaneFlow created it and no other session still
+/// holds it.
+fn rollback_plugin_file(plugin_path: &Path, plugin_lease: &mut HookLease) {
+    let _ = with_last_lease(plugin_path, plugin_lease, |created_plugin| {
+        remove_created_file(plugin_path, created_plugin)
+    });
 }
 
 fn merge_opencode_plugin_entry(
@@ -287,6 +314,27 @@ mod tests {
 
         assert!(OpenCodePluginGuard::install_at(&directory).is_err());
         assert_eq!(std::fs::read(config).unwrap(), [0xff]);
+    }
+
+    #[test]
+    fn preexisting_plugin_file_survives_cleanup() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("opencode");
+        let plugins = directory.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let plugin = plugins.join(PANEFLOW_TS_BASENAME);
+        std::fs::write(&plugin, "// user-managed copy\n").unwrap();
+
+        drop(OpenCodePluginGuard::install_at(&directory).unwrap());
+
+        assert!(
+            plugin.exists(),
+            "cleanup must not delete a plugin file PaneFlow did not create"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&plugin).unwrap(),
+            OPENCODE_PLUGIN_SOURCE
+        );
     }
 
     #[test]

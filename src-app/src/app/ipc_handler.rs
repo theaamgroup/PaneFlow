@@ -4167,10 +4167,16 @@ fn upsert_session_state_with_start(
     // recycled PID is a new session with no source to defer to) and after the
     // watermark (a stale frame is stale whoever sent it): a lower-ranked
     // source only takes over once the higher-ranked one has been silent for
-    // `SOURCE_TAKEOVER_SILENCE`.
+    // `SOURCE_TAKEOVER_SILENCE` - except over a held `WaitingForInput`, which
+    // stays until an equal-or-stronger source moves it (issue #196: an
+    // unanswered permission prompt outlives any silence ceiling).
     if let Some(existing) = sessions.get(&key)
         && !ai_types::accepts_source(
-            Some((existing.source, existing.last_activity.elapsed())),
+            Some((
+                &existing.state,
+                existing.source,
+                existing.last_activity.elapsed(),
+            )),
             source,
         )
     {

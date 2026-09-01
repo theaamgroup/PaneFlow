@@ -414,6 +414,16 @@ fn debug_durable_install_refusal(command: &str) -> Option<String> {
     }
 }
 
+/// Issue #204: crash-report client options. One construction site so the
+/// PII policy cannot drift: `send_default_pii` stays OFF, so events never
+/// carry the IP address / request / user defaults Sentry would otherwise
+/// attach.
+fn crash_reporting_options() -> sentry::ClientOptions {
+    sentry::ClientOptions::new()
+        .maybe_release(sentry::release_name!())
+        .send_default_pii(false)
+}
+
 /// Top-level `--help`/`-h` text. Built as a function so tests can assert the
 /// CLI verb list without spawning GPUI. Unknown-verb errors point here.
 fn global_help_text() -> String {
@@ -684,6 +694,68 @@ mod help_tests {
         assert!(!error.contains('\r'));
         assert!(!error.contains('\u{1b}'));
         assert!(error.contains("bad\\n\\u{1b}[31mverb\\r"));
+    }
+}
+
+#[cfg(test)]
+mod crash_reporting_tests {
+    use super::crash_reporting_options;
+
+    #[test]
+    fn crash_reporting_never_sends_default_pii() {
+        // Issue #204: `send_default_pii` must stay off - crash reports must
+        // not carry the IP address / request / user defaults Sentry attaches
+        // when it is on. The whole file is also checked so the flag cannot be
+        // re-enabled at a second construction site (needle composed at
+        // runtime: `include_str!` captures this test's own source too).
+        assert!(!crash_reporting_options().send_default_pii);
+        let source = include_str!("main.rs");
+        let pii_on = format!("send_default_pii({})", "true");
+        assert!(
+            !source.contains(&pii_on),
+            "crash reporting must never enable send_default_pii"
+        );
+    }
+
+    #[test]
+    fn crash_reporting_initializes_only_on_the_gui_path_behind_the_config_switch() {
+        // Issue #204: the single Sentry init site sits inside `fn main()`
+        // AFTER every CLI intercept has exited (`mcp`, `hooks`, the
+        // scriptable verbs, the unknown-verb error), so `paneflow mcp ...`,
+        // `paneflow hooks ...`, and `paneflow <verb>` never start crash
+        // reporting - and the init is gated on the config's
+        // `crash_reporting` master switch. Anchors are composed at runtime
+        // because `include_str!` captures this test's own source too.
+        let source = include_str!("main.rs");
+        let anchor = format!("fn {}() {{", "main");
+        let main_body = source
+            .split_once(anchor.as_str())
+            .map(|(_, rest)| rest)
+            .expect("fn main() exists");
+        let needle = format!("{}::init", "sentry");
+        let init_at = main_body
+            .find(needle.as_str())
+            .expect("crash reporting is maintainer-intended (d1b7c3fb); do not remove the init");
+        assert!(
+            !main_body[init_at + needle.len()..].contains(needle.as_str()),
+            "crash reporting must have exactly one init site"
+        );
+        let before_init = &main_body[..init_at];
+        for intercept in [
+            "paneflow_mcp_install::run_cli(",
+            "run_hooks_cli(",
+            "cli::run()",
+            "unknown_verb_error(",
+        ] {
+            assert!(
+                before_init.contains(intercept),
+                "the {intercept} intercept must exit before crash reporting initializes"
+            );
+        }
+        assert!(
+            before_init.contains(".crash_reporting_enabled()"),
+            "the init must be gated on the crash_reporting config switch"
+        );
     }
 }
 
@@ -2775,15 +2847,6 @@ fn main() {
         runtime_paths::augment_path_for_gui_launch,
     );
 
-    // Keep the guard alive for the entire process so panic events are flushed
-    // before Paneflow exits. The DSN is intentionally part of the binary.
-    let _sentry_guard = sentry::init((
-        "https://51b669778f3bb5da02eefb8ee8794ccb@o4510421488173056.ingest.us.sentry.io/4512005402656768",
-        sentry::ClientOptions::new()
-            .maybe_release(sentry::release_name!())
-            .send_default_pii(true),
-    ));
-
     // US-003: install the process-wide kill-on-parent-death guard BEFORE any
     // agent CLI or ConPTY spawns so children inherit the Job Object (Windows).
     match agents::parent_guard::install_process_job() {
@@ -2878,6 +2941,23 @@ fn main() {
         eprintln!("{}", unknown_verb_error(verb));
         std::process::exit(2);
     }
+
+    // Issue #204: crash reporting initializes here - after every CLI
+    // intercept above (`mcp`, `hooks`, the scriptable verbs, the
+    // unknown-verb error) has already exited - so only a real GUI launch
+    // ever starts Sentry. The `crash_reporting` config switch (`None`-is-on,
+    // like `review_enabled`) is the user's opt-out, and
+    // `crash_reporting_options()` keeps `send_default_pii` off. Keep the
+    // guard alive for the entire process so panic events are flushed before
+    // Paneflow exits. The DSN is intentionally part of the binary.
+    let _sentry_guard = paneflow_config::loader::load_config()
+        .crash_reporting_enabled()
+        .then(|| {
+            sentry::init((
+                "https://51b669778f3bb5da02eefb8ee8794ccb@o4510421488173056.ingest.us.sentry.io/4512005402656768",
+                crash_reporting_options(),
+            ))
+        });
 
     // Issue #85: preserve every agent launcher that an existing installation
     // would have shown under the old PATH-only default, then let fresh configs

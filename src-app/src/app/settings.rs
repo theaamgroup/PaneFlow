@@ -461,6 +461,15 @@ impl PaneFlowApp {
         // so a ConfigWatcher deposit stamped before it cannot be applied over
         // the config reloaded just below.
         let new_key = recorded_shortcut_key(keystroke);
+        // Issue #196: name the chord's current owner BEFORE the save erases
+        // the evidence - `merge_shortcut` evicts a user entry on the same
+        // physical chord and `apply_keybindings` drops the matching default,
+        // both silently. Warn-and-proceed: the rebind still lands.
+        let displaced = keybindings::displaced_action_description(
+            &paneflow_config::loader::load_config().shortcuts,
+            &new_key,
+            action_name,
+        );
         let flight = self.begin_config_persist();
         let saved = config_writer::save_shortcut_checked(&new_key, action_name);
         drop(flight);
@@ -479,6 +488,15 @@ impl PaneFlowApp {
         // The rows carry indices into `effective_shortcuts` and render its key
         // text, so they are stale the moment it is replaced.
         self.rebuild_shortcut_rows(cx);
+        if let Some(displaced) = displaced {
+            self.show_toast(
+                format!(
+                    "{} taken from {displaced}",
+                    keybindings::format_keystroke(&new_key)
+                ),
+                cx,
+            );
+        }
         cx.notify();
     }
 }

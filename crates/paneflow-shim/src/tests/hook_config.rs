@@ -244,6 +244,31 @@ fn install_refuses_non_array_event_without_rewriting_the_file() {
 }
 
 #[test]
+fn install_refuses_unparseable_settings_without_rewriting_the_file() {
+    // Issue #202: a project's settings.local.json commonly carries the
+    // user's permission grants. A parse failure (trailing comma, JSONC,
+    // partial write) must refuse the install and leave the bytes intact,
+    // never replace the file with `{}` plus PaneFlow hooks.
+    let td = tempfile::TempDir::new().unwrap();
+    let claude_dir = td.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let settings_path = claude_dir.join("settings.local.json");
+    let original = r#"{"permissions":{"allow":["Bash(ls:*)"]},}"#;
+    std::fs::write(&settings_path, original).unwrap();
+
+    let error = match HookConfigGuard::install_at(&claude_dir) {
+        Ok(_) => panic!("install must refuse an unparseable settings.local.json"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        std::fs::read_to_string(settings_path).unwrap(),
+        original,
+        "malformed project settings must stay byte-identical"
+    );
+}
+
+#[test]
 fn cleanup_removes_managed_entries_even_when_marker_was_stripped() {
     // Simulate Claude Code re-serializing and stripping the
     // `_paneflow_managed` marker from the inner hook object. The
@@ -329,20 +354,26 @@ fn cleanup_preserves_preexisting_empty_config_file() {
 }
 
 #[test]
-fn install_at_tolerates_corrupt_existing_json() {
-    // A corrupt settings file (mid-edit save, interrupted write)
-    // shouldn't abort the shim - we overwrite and proceed.
+fn install_at_refuses_corrupt_existing_json_without_rewriting_it() {
+    // A corrupt settings file (mid-edit save, interrupted write) used to
+    // be overwritten with `{}` plus PaneFlow hooks so the shim could
+    // proceed. Issue #202: that erased unrelated permissions and hooks
+    // with no way back. The install is refused instead - the agent still
+    // launches hookless - and the user's bytes survive for recovery.
     let td = tempfile::TempDir::new().unwrap();
     let claude_dir = td.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(claude_dir.join("settings.local.json"), "{not json}").unwrap();
+    let settings_path = claude_dir.join("settings.local.json");
+    std::fs::write(&settings_path, "{not json}").unwrap();
 
-    let guard =
-        HookConfigGuard::install_at(&claude_dir).expect("corrupt JSON must not prevent install");
-    let root = read_settings(&claude_dir);
-    assert_eq!(count_paneflow_entries(&root, "UserPromptSubmit"), 1);
-
-    drop(guard);
+    assert!(
+        HookConfigGuard::install_at(&claude_dir).is_err(),
+        "corrupt JSON must refuse the install instead of overwriting"
+    );
+    assert_eq!(
+        std::fs::read_to_string(settings_path).unwrap(),
+        "{not json}"
+    );
 }
 
 #[test]
