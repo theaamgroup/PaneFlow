@@ -291,6 +291,42 @@ mod tests {
     }
 
     #[test]
+    fn install_enables_disabled_entry_with_current_command() {
+        // Issue #214: a disabled entry whose command already matched used
+        // to report AlreadyCurrent while status kept saying NeedsRepair.
+        // The advertised repair must proceed and enable the managed entry.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "[mcp_servers.paneflow]\ncommand = \"/data/paneflow-mcp\"\nargs = []\nenv_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"]\nenabled = false\n",
+        )
+        .unwrap();
+        let w = test_writer(p.clone());
+
+        assert!(matches!(
+            w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
+            StatusOutcome::NeedsRepair { .. }
+        ));
+        assert_eq!(
+            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
+            InstallOutcome::Updated
+        );
+        let doc = std::fs::read_to_string(&p)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["paneflow"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert!(matches!(
+            w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
+            StatusOutcome::Installed { .. }
+        ));
+    }
+
+    #[test]
     fn install_repairs_missing_env_forwards_and_preserves_custom_ones() {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("config.toml");
