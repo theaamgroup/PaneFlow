@@ -2327,7 +2327,7 @@ mod tests {
         );
     }
 
-    /// EP-002 US-007: an edgeless drop (`DropSessionSplit` with `edge: None`,
+    /// an edgeless drop (`DropSessionSplit` with `edge: None`,
     /// i.e. the center band) opens a NEW workspace tab. The
     /// pane it was dropped on is mono-surface, so this proves the drop never
     /// evicts the surface already running there.

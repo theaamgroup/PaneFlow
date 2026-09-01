@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use gpui::{Context, KeyDownEvent, Keystroke, ScrollHandle, Window};
 
+use crate::widgets::scrollbar;
 use crate::{PaneFlowApp, SettingsSection, config_writer, keybindings};
 
 /// Guard that keeps a settings persist marked in-flight until the off-thread
@@ -140,7 +141,12 @@ impl PaneFlowApp {
         // stray click on reopen into "every binding erased, no undo".
         self.clear_shortcut_filters(cx);
         self.collapsed_shortcut_groups.clear();
-        self.shortcut_reset_pending = false;
+        self.set_shortcut_reset_arm(None, cx);
+        // A thumb drag released off the list never reached the list's
+        // `on_mouse_up`. Ending it here, through the handle so the list's
+        // lazy measurement unfreezes, is what keeps a reopened page from
+        // scrolling under a bare hover.
+        scrollbar::end_drag(&self.shortcut_list, self.shortcut_drag.take());
         self.font_dropdown_open = false;
         self.font_search.clear();
         self.theme_dropdown_open = false;
@@ -162,6 +168,9 @@ impl PaneFlowApp {
     pub(crate) fn reset_settings_scroll(&mut self) {
         self.settings_scroll = ScrollHandle::new();
         self.settings_drag = None;
+        // The Shortcuts list keeps its `ListState` across remounts, so its
+        // drag has to be ended, not just dropped (see `close_settings`).
+        scrollbar::end_drag(&self.shortcut_list, self.shortcut_drag.take());
     }
 
     /// Reset the nav search box. Shared by open/close so a reopened settings
@@ -360,33 +369,55 @@ impl PaneFlowApp {
             return false;
         }
 
-        // Rebind recording takes precedence: the row is already armed.
-        if self.recording_shortcut_idx.is_some() {
-            self.handle_shortcut_recording(keystroke, window, cx);
-            cx.notify();
-            return true;
-        }
+        let search_focused = self
+            .shortcut_search_input
+            .read(cx)
+            .focus_handle
+            .is_focused(window);
+        match route_shortcut_keystroke(
+            search_focused,
+            self.recording_shortcut_idx.is_some(),
+            self.shortcut_capture_active,
+        ) {
+            ShortcutKeyRoute::Pass => {
+                if search_focused {
+                    // The field took focus under an armed row or live
+                    // capture: the user clicked into it to type, so both
+                    // stand down instead of eating the letters. Capture
+                    // leaves through `set_shortcut_capture` so the match
+                    // rule flips back to substring for what is about to be
+                    // typed.
+                    self.disarm_shortcut_recording(cx);
+                    self.set_shortcut_capture(false, cx);
+                }
+                false
+            }
+            // Rebind recording takes precedence: the row is already armed.
+            ShortcutKeyRoute::Record => {
+                self.handle_shortcut_recording(keystroke, window, cx);
+                cx.notify();
+                true
+            }
+            ShortcutKeyRoute::Capture => {
+                if keystroke.key == "escape" {
+                    self.set_shortcut_capture(false, cx);
+                    cx.notify();
+                    return true;
+                }
 
-        if !self.shortcut_capture_active {
-            return false;
+                // The chord goes straight into the search field: seeing what
+                // was pressed is the whole point, and it keeps one visible
+                // filter state rather than a hidden second one.
+                // `format_keystroke` expects the `-`-separated spelling,
+                // which is what `recorded_shortcut_key` gives.
+                let formatted = keybindings::format_keystroke(&recorded_shortcut_key(keystroke));
+                self.shortcut_search_input.update(cx, |input, cx| {
+                    input.set_value(formatted, cx);
+                });
+                cx.notify();
+                true
+            }
         }
-
-        if keystroke.key == "escape" {
-            self.set_shortcut_capture(false, cx);
-            cx.notify();
-            return true;
-        }
-
-        // The chord goes straight into the search field: seeing what was
-        // pressed is the whole point, and it keeps one visible filter state
-        // rather than a hidden second one. `format_keystroke` expects the
-        // `-`-separated spelling, which is what `recorded_shortcut_key` gives.
-        let formatted = keybindings::format_keystroke(&recorded_shortcut_key(keystroke));
-        self.shortcut_search_input.update(cx, |input, cx| {
-            input.set_value(formatted, cx);
-        });
-        cx.notify();
-        true
     }
 
     /// Record `keystroke` as the new binding of the armed row.
@@ -452,6 +483,53 @@ impl PaneFlowApp {
     }
 }
 
+impl PaneFlowApp {
+    /// Stand an armed rebind row down without recording anything. The row's
+    /// own Escape, a click that lands anywhere else, and the search field
+    /// taking focus all end here.
+    pub(crate) fn disarm_shortcut_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording_shortcut_idx.take().is_some() {
+            cx.notify();
+        }
+    }
+}
+
+/// Where an intercepted chord goes on the Shortcuts page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShortcutKeyRoute {
+    /// Not the page's: let GPUI dispatch it to the focused field or as an
+    /// action.
+    Pass,
+    /// The armed row records it as its new binding.
+    Record,
+    /// Capture mode writes it into the search field as the filter.
+    Capture,
+}
+
+/// Decide what [`PaneFlowApp::intercept_shortcut_keystroke`] does with a
+/// chord, pure so the rule is testable without a `Window`.
+///
+/// Recording wins over capture (arming a row disarms capture, so both being
+/// set is transient). A focused search field wins over both: the interceptor
+/// runs before GPUI can deliver the key to the field, so consuming there
+/// meant a user who clicked into the field under an armed row typed a letter
+/// and rebound the row to it instead.
+pub(crate) fn route_shortcut_keystroke(
+    search_focused: bool,
+    recording: bool,
+    capture_active: bool,
+) -> ShortcutKeyRoute {
+    if search_focused {
+        ShortcutKeyRoute::Pass
+    } else if recording {
+        ShortcutKeyRoute::Record
+    } else if capture_active {
+        ShortcutKeyRoute::Capture
+    } else {
+        ShortcutKeyRoute::Pass
+    }
+}
+
 fn normalized_shell_setting(shell: Option<&str>) -> &str {
     shell.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("")
 }
@@ -474,8 +552,109 @@ pub(crate) fn recorded_shortcut_key(keystroke: &Keystroke) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::recorded_shortcut_key;
+    use super::{ShortcutKeyRoute, recorded_shortcut_key, route_shortcut_keystroke};
     use gpui::Keystroke;
+
+    /// The text of `name`'s body: from its `fn` line to `end`.
+    fn body<'a>(src: &'a str, name: &str, end: &str) -> &'a str {
+        let start = src
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} must exist"));
+        let rest = &src[start..];
+        let stop = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("{end} must follow {name}"));
+        &rest[..stop]
+    }
+
+    /// Item 2 of the Phase 4 audit. The interceptor runs before GPUI can hand
+    /// a key to the focused field, so an armed row (or live capture) ate the
+    /// letters a user typed after clicking into the search box. A focused
+    /// search field is the field's, whatever else is armed.
+    #[test]
+    fn interceptor_leaves_every_chord_to_a_focused_search_field() {
+        for (recording, capture) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                route_shortcut_keystroke(true, recording, capture),
+                ShortcutKeyRoute::Pass,
+                "recording={recording} capture={capture}: a focused search field must get the key"
+            );
+        }
+        // Away from the field the page's modes apply, recording first.
+        assert_eq!(
+            route_shortcut_keystroke(false, true, false),
+            ShortcutKeyRoute::Record
+        );
+        assert_eq!(
+            route_shortcut_keystroke(false, true, true),
+            ShortcutKeyRoute::Record,
+            "an armed row outranks capture; arming one disarms the other anyway"
+        );
+        assert_eq!(
+            route_shortcut_keystroke(false, false, true),
+            ShortcutKeyRoute::Capture
+        );
+        assert_eq!(
+            route_shortcut_keystroke(false, false, false),
+            ShortcutKeyRoute::Pass
+        );
+    }
+
+    /// The route is what the interceptor actually consults - a second `if`
+    /// chain next to it would be the drift this test exists to catch.
+    #[test]
+    fn interceptor_consults_the_route_and_disarms_for_a_focused_field() {
+        let src = include_str!("settings.rs");
+        let interceptor = body(
+            src,
+            "fn intercept_shortcut_keystroke(",
+            "/// Record `keystroke` as the new binding",
+        );
+        assert!(
+            interceptor.contains(".is_focused(window)"),
+            "the interceptor must ask whether the search field holds focus: {interceptor}"
+        );
+        assert!(
+            interceptor.contains("route_shortcut_keystroke("),
+            "the interceptor must route through the tested decision: {interceptor}"
+        );
+        assert!(
+            interceptor.contains("self.disarm_shortcut_recording(cx)"),
+            "a chord passed to the focused field must also stand the armed row down: {interceptor}"
+        );
+    }
+
+    /// Item 3 of the Phase 4 audit: a scrollbar-thumb drag released off the
+    /// list never reached the list's `on_mouse_up`, so `shortcut_drag` stayed
+    /// set across a close and a reopen. Both settle points end it, the way
+    /// `reset_settings_scroll` already ends the sibling `settings_drag`.
+    #[test]
+    fn closing_or_remounting_settings_ends_a_stale_shortcut_thumb_drag() {
+        let src = include_str!("settings.rs");
+        let close = body(src, "fn close_settings(", "/// Drop stale scroll geometry");
+        assert!(
+            close.contains("shortcut_drag"),
+            "close_settings must end a shortcut-list thumb drag: {close}"
+        );
+        let remount = body(
+            src,
+            "fn reset_settings_scroll(",
+            "/// Reset the nav search box",
+        );
+        assert!(
+            remount.contains("shortcut_drag"),
+            "reset_settings_scroll must end a shortcut-list thumb drag: {remount}"
+        );
+        for site in [close, remount] {
+            assert!(
+                site.contains(
+                    "scrollbar::end_drag(&self.shortcut_list, self.shortcut_drag.take())"
+                ),
+                "the drag must be ended through the handle so the list's lazy \
+                 measurement unfreezes, not merely cleared: {site}"
+            );
+        }
+    }
 
     #[test]
     fn recorded_shortcut_key_round_trips_through_keystroke_parse() {

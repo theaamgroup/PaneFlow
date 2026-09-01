@@ -124,7 +124,7 @@ impl PaneFlowApp {
         }
     }
 
-    /// Keyboard twin of the row click (US-019): directories toggle, every file
+    /// Keyboard twin of the row click : directories toggle, every file
     /// (markdown included) opens as source in the diff dock's editor.
     fn activate_files_path(
         &mut self,

@@ -34,8 +34,8 @@ mod tabs;
 
 pub(crate) use branch::DiffBranchMenuState;
 pub(crate) use model::{
-    DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_WIDTH, DiffDockData, DiffDockHScrollDrag,
-    DiffDockTab,
+    DIFF_DOCK_PANEL_MAX_WIDTH, DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_WIDTH, DiffDockData,
+    DiffDockHScrollDrag, DiffDockTab,
 };
 
 use gpui::{
@@ -46,7 +46,7 @@ use gpui::{
 
 use self::branch::render_diff_branch_chip;
 use self::git::build_diff_dock;
-use self::model::{DIFF_DOCK_PANEL_MAX_WIDTH, DiffChrome};
+use self::model::DiffChrome;
 use self::render::{
     diff_file_header_path, diff_panel_centered, render_diff_file_header, render_diff_files_toolbar,
     render_diff_resize_handle, render_diff_tab_strip,
@@ -60,6 +60,27 @@ use crate::diff::{
     split_right_side_at_x,
 };
 use crate::ui_primitives::squircle::{squircle_border, squircle_fill};
+
+/// What a resize drag commits to the stored width preference. `dragged` is
+/// the width the cursor asks for, anchored on the *rendered* width, and
+/// `ceiling` is what the panel can show this frame.
+///
+/// Issue #184: the render fit never writes its clamped value back, and the
+/// drag must not do so by proxy. A result strictly below the ceiling is a
+/// width the user chose, so it is stored. A result pinned at the ceiling only
+/// says "at least this wide": a stored preference that already satisfies that
+/// (a wide dock clamped under a rail) is left alone, so closing the rail
+/// restores it; a narrower one is raised to the ceiling. Either way the stored
+/// value stays within `[DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MAX_WIDTH]`.
+pub(crate) fn diff_dock_drag_preference(stored: f32, dragged: f32, ceiling: f32) -> f32 {
+    let ceiling = ceiling.clamp(DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MAX_WIDTH);
+    let dragged = dragged.clamp(DIFF_DOCK_PANEL_MIN_WIDTH, ceiling);
+    if dragged < ceiling {
+        dragged
+    } else {
+        stored.max(ceiling)
+    }
+}
 
 impl PaneFlowApp {
     /// Open the Codex-style diff dock on `cwd`, computing the diff off-thread.
@@ -299,13 +320,13 @@ impl PaneFlowApp {
     /// The docked diff panel: a header over the body. Reads the live snapshot
     /// from state (cloned cheaply) so the caller keeps its `self` borrow short.
     ///
-    /// `width` is the width the dock renders at and `max_width` the widest the
-    /// main panel can give it (see `cli_diff_dock::diff_dock_fit`) - neither is
-    /// `self.diff_dock.width`, which is only the user's preference.
+    /// `width` is the width the dock renders at (see
+    /// `cli_diff_dock::diff_dock_fit`) - not `self.diff_dock.width`, which is
+    /// only the user's preference. The ceiling stays with the dock host, which
+    /// feeds it to the resize drag on every move.
     pub(crate) fn render_diff_dock_panel(
         &mut self,
         width: f32,
-        max_width: f32,
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -314,7 +335,7 @@ impl PaneFlowApp {
         // pane-header toggle - the Agents dock is opened from its own chrome,
         // already on a chosen surface, and must never inherit the question.
         if self.diff_dock.picker && matches!(self.mode, paneflow_config::schema::AppMode::Cli) {
-            return self.render_diff_dock_picker(width, max_width, ui, cx);
+            return self.render_diff_dock_picker(width, ui, cx);
         }
         self.refresh_diff_dock_if_theme_changed(cx);
         let data = self.diff_dock.data.clone();
@@ -384,7 +405,7 @@ impl PaneFlowApp {
             .flex()
             .flex_col()
             .child(squircle_fill(radius, ui.base))
-            .child(render_diff_resize_handle(width, max_width, ui, cx))
+            .child(render_diff_resize_handle(width, ui, cx))
             .child(header)
             .children(toolbar)
             .child(body)
@@ -399,7 +420,6 @@ impl PaneFlowApp {
     fn render_diff_dock_picker(
         &mut self,
         width: f32,
-        max_width: f32,
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -412,7 +432,7 @@ impl PaneFlowApp {
             .flex()
             .flex_col()
             .child(squircle_fill(radius, ui.base))
-            .child(render_diff_resize_handle(width, max_width, ui, cx))
+            .child(render_diff_resize_handle(width, ui, cx))
             .child(render_diff_picker_header(ui, cx))
             .child(render_diff_surface_picker(ui, cx))
             .child(squircle_border(radius, px(1.), ui.border))
@@ -422,19 +442,27 @@ impl PaneFlowApp {
     /// Apply a live resize drag: set the dock width so its left edge tracks the
     /// cursor. Driven by the CLI dock wrapper's `on_mouse_move` (a full-height
     /// capture surface, so the drag survives the cursor leaving the dock for the
-    /// pane grid beside it). No-op when no drag is in progress.
-    pub(crate) fn drag_diff_dock_resize(&mut self, cursor_x: f32, cx: &mut Context<Self>) {
-        if let Some((anchor_x, anchor_w, max_w)) = self.diff_dock.resize {
+    /// pane grid beside it), which passes `ceiling` - the width the panel can
+    /// show *this frame* (`cli_diff_dock::diff_dock_fit`), re-read on every
+    /// move rather than frozen at mouse-down. No-op when no drag is in progress.
+    pub(crate) fn drag_diff_dock_resize(
+        &mut self,
+        cursor_x: f32,
+        ceiling: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((anchor_x, anchor_w)) = self.diff_dock.resize {
             // The panel docks right and the handle is on its left edge, so
             // dragging left (cursor_x shrinks) widens the dock. The stored
             // width never passes the ceiling the panel can render: letting it
             // run past what is on screen would leave the handle unresponsive
             // until the cursor came back over the overshoot. This is the one
             // writer of the preference, and it records a user gesture - the
-            // render-time fit (`cli_diff_dock::diff_dock_fit`) never writes.
+            // render-time fit never writes, and a drag pinned at the ceiling
+            // does not write the clamp back either (`diff_dock_drag_preference`).
             let delta = anchor_x - cursor_x;
-            let ceiling = max_w.clamp(DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MAX_WIDTH);
-            self.diff_dock.width = (anchor_w + delta).clamp(DIFF_DOCK_PANEL_MIN_WIDTH, ceiling);
+            self.diff_dock.width =
+                diff_dock_drag_preference(self.diff_dock.width, anchor_w + delta, ceiling);
             cx.notify();
         }
     }

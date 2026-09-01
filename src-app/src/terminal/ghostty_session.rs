@@ -49,14 +49,6 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
 /// `reap_child_bounded`); `TerminalState::Drop` SIGKILLs at 100 ms.
 const REAP_BUDGET: Duration = Duration::from_secs(2);
 
-/// What a reader of a pane gets (#184 Phase 3.6): the retained history and,
-/// after it, the screen the program is painting right now. Either half is
-/// `None` when it is blank.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct Transcript {
-    pub history: Option<String>,
-    pub screen: Option<String>,
-}
 const MAX_CLIPBOARD_EVENTS: usize = 8;
 const MAX_NOTIFICATION_EVENTS: usize = 8;
 
@@ -382,14 +374,26 @@ enum RuntimeMessage {
     ExtractScrollback(SyncSender<Result<Option<String>, String>>),
     /// Capture the screen and its recent history as VT sequences, which keep
     /// the styling, modes, and cursor that plain text drops.
-    // Constructed once the styled undo replay wires `capture_replay`
-    // (#184 follow-up).
+    // Constructed once the styled undo replay wires `capture_replay` (#195).
     #[allow(dead_code)]
     CaptureReplay(SyncSender<Result<Vec<u8>, String>>),
-    /// One consistent read of the retained history and the screen being
-    /// painted, taken under a single message so live output cannot tear the
-    /// boundary between the two halves.
-    Transcript(SyncSender<Result<Transcript, String>>),
+    /// One page of the retained history followed by the screen being
+    /// painted (#184 Phase 3.6), read under a single message so live output
+    /// cannot tear the boundary between the two halves, and windowed in the
+    /// engine so only the rows the page covers are read (issue #29).
+    Transcript {
+        lines: usize,
+        offset: usize,
+        reply: SyncSender<Result<ghostty::TranscriptWindow, String>>,
+    },
+    /// The screen half on its own, so a test can pin what a windowed read
+    /// appends after the history.
+    #[cfg(test)]
+    ExtractScreen(SyncSender<Result<Option<String>, String>>),
+    /// Full emulator reset, what a program-emitted RIS (`ESC c`) does: modes,
+    /// screen, scrollback, tab stops. Runs against the grid; nothing reaches
+    /// the PTY.
+    Reset,
     /// Restore of saved scrollback. `reply` fires once the grid reflects the
     /// text, so a caller can read the snapshot right after.
     RestoreScrollback {
@@ -1817,18 +1821,46 @@ impl GhosttySession {
             .flatten()
     }
 
-    /// Retained history plus the screen being painted, read together.
+    /// One page of the retained history plus the screen being painted.
     ///
     /// [`Self::extract_scrollback`] deliberately stops at the viewport, so
     /// on its own it returns nothing for a full-screen TUI, which is where
     /// the agent CLIs live. The two halves come back from one runtime
     /// message so a line cannot be duplicated or lost at the boundary while
-    /// output is still arriving.
-    pub(super) fn transcript(&self) -> Option<Transcript> {
-        self.request(RuntimeMessage::Transcript)
-            .and_then(Result::ok)
+    /// output is still arriving, and the engine cuts the page itself so a
+    /// 200-line read never walks 4000 rows (issue #29).
+    ///
+    /// `None` when the runtime did not answer: the mailbox is full or closed,
+    /// or no reply came within a second. `Some(Err)` is an engine error.
+    /// Neither is a blank pane, and callers must not read them as one.
+    pub(super) fn transcript(
+        &self,
+        lines: usize,
+        offset: usize,
+    ) -> Option<Result<ghostty::TranscriptWindow, String>> {
+        self.request(|reply| RuntimeMessage::Transcript {
+            lines,
+            offset,
+            reply,
+        })
     }
 
+    /// The screen half of a transcript on its own, trailing blank rows
+    /// trimmed; `None` when blank or unanswered.
+    #[cfg(test)]
+    pub(super) fn screen_text(&self) -> Option<String> {
+        self.request(RuntimeMessage::ExtractScreen)
+            .and_then(Result::ok)
+            .flatten()
+    }
+
+    /// Reset the emulator the way a program-emitted RIS does. A runtime
+    /// command against the grid: nothing is written to the PTY.
+    pub(super) fn reset(&self) {
+        let _ = self.inner.mailbox.try_send_control(RuntimeMessage::Reset);
+    }
+
+    // Wired by the styled undo replay (#195).
     #[allow(dead_code)]
     pub(super) fn capture_replay(&self) -> Option<Vec<u8>> {
         self.request(RuntimeMessage::CaptureReplay)
@@ -2533,11 +2565,18 @@ fn handle_terminal_command(
             }
         }
         RuntimeMessage::ClearScrollback => {
-            if let Err(error) = terminal.clear_screen_and_scrollback() {
-                log::warn!(
+            match terminal.clear_screen_and_scrollback() {
+                Ok(true) => {}
+                // A full-screen program owns the alternate screen and would
+                // not know to repaint it; the engine leaves that frame alone.
+                Ok(false) => log::debug!(
+                    target: "paneflow::terminal::ghostty",
+                    "Ghostty scrollback clear skipped: the alternate screen is active"
+                ),
+                Err(error) => log::warn!(
                     target: "paneflow::terminal::ghostty",
                     "Ghostty scrollback clear failed: {error}"
-                );
+                ),
             }
             let _ = refresh_shared_state(inner, terminal);
         }
@@ -2599,13 +2638,29 @@ fn handle_terminal_command(
                     .map_err(|error| error.to_string()),
             );
         }
-        RuntimeMessage::Transcript(reply) => {
-            let transcript = terminal.extract_scrollback().and_then(|history| {
+        RuntimeMessage::Transcript {
+            lines,
+            offset,
+            reply,
+        } => {
+            let _ = reply.send(
                 terminal
-                    .extract_screen()
-                    .map(|screen| Transcript { history, screen })
-            });
-            let _ = reply.send(transcript.map_err(|error| error.to_string()));
+                    .transcript_window(lines, offset)
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        #[cfg(test)]
+        RuntimeMessage::ExtractScreen(reply) => {
+            let _ = reply.send(terminal.extract_screen().map_err(|error| error.to_string()));
+        }
+        RuntimeMessage::Reset => {
+            terminal.reset();
+            if let Err(error) = refresh_shared_state(inner, terminal) {
+                log::warn!(
+                    target: "paneflow::terminal::ghostty",
+                    "Ghostty reset could not republish the grid: {error}"
+                );
+            }
         }
         RuntimeMessage::CaptureReplay(reply) => {
             let _ = reply.send(terminal.capture_replay().map_err(|error| error.to_string()));
@@ -3339,22 +3394,57 @@ fn reap_child_bounded(child: &mut dyn portable_pty::Child) {
     }
 }
 
+/// Why the SIGTERM grace in [`terminate_child`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupExit {
+    /// No member answers `kill(-pgid, 0)` any more: there is nothing left to
+    /// escalate against, and the pgid may already belong to someone else.
+    Gone,
+    /// A member outlived the grace; the caller escalates to SIGKILL.
+    StillRunning,
+}
+
+/// Poll `group_exists` every 10 ms until it reports the group gone or
+/// `deadline` passes. The first probe runs before any sleep, so a group that
+/// is already gone costs nothing.
+fn await_group_exit(deadline: Instant, mut group_exists: impl FnMut() -> bool) -> GroupExit {
+    loop {
+        if !group_exists() {
+            return GroupExit::Gone;
+        }
+        if Instant::now() >= deadline {
+            return GroupExit::StillRunning;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether any member of process group `pgid` still exists. EPERM counts as
+/// existing: the member is there, this process just may not signal it.
+fn process_group_exists(pgid: i32) -> bool {
+    // SAFETY: signal 0 performs no delivery; it only probes whether any
+    // member of the process group still exists.
+    let reachable = unsafe { libc::kill(-pgid, 0) } == 0;
+    reachable || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Only the engine-failure paths (runtime failed, `waitid` failed, the
 /// startup and panic guards) still terminate the child from this thread:
 /// there the app side may never learn the child is orphaned.
+///
+/// SIGTERM the group, wait [`SHUTDOWN_GRACE`], and escalate to SIGKILL only
+/// while a member is still there. Once the group is gone its pgid is free to
+/// be reused, so a SIGKILL (or the leader-only SIGHUP `Child::kill` sends)
+/// could only land on a stranger: the leader is reaped and that is all.
 fn terminate_child(child: &mut dyn portable_pty::Child, process_group_id: ChildTerminationTarget) {
     if let Some(pid) = process_group_id {
         unsafe {
             libc::kill(-pid, libc::SIGTERM);
         }
         let deadline = Instant::now() + SHUTDOWN_GRACE;
-        while Instant::now() < deadline {
-            let group_exists = unsafe { libc::kill(-pid, 0) == 0 }
-                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-            if !group_exists {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        if await_group_exit(deadline, || process_group_exists(pid)) == GroupExit::Gone {
+            reap_child_bounded(child);
+            return;
         }
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
@@ -4812,6 +4902,70 @@ mod tests {
             "strsignal must name the signal; {signal:?} is the null-pointer fallback"
         );
         let _ = child.wait();
+    }
+
+    /// The escalation ladder must stop at "the group is gone": a SIGKILL
+    /// after that could only land on whoever reused the pgid.
+    #[test]
+    fn group_exit_wait_ends_at_the_first_probe_that_finds_the_group_gone() {
+        let mut probes = 0;
+        let started = Instant::now();
+        let outcome = await_group_exit(started + SHUTDOWN_GRACE, || {
+            probes += 1;
+            false
+        });
+        assert_eq!(outcome, GroupExit::Gone);
+        assert_eq!(
+            probes, 1,
+            "a group that is already gone is not polled again"
+        );
+        assert!(
+            started.elapsed() < SHUTDOWN_GRACE,
+            "no sleep before the first probe"
+        );
+
+        let grace = Duration::from_millis(30);
+        let started = Instant::now();
+        assert_eq!(
+            await_group_exit(started + grace, || true),
+            GroupExit::StillRunning
+        );
+        assert!(
+            started.elapsed() >= grace,
+            "a live group gets the whole grace before SIGKILL"
+        );
+    }
+
+    /// On macOS an unreaped zombie still answers `kill(-pgid, 0)`, so a
+    /// group only reads as gone once its leader has been reaped - which is
+    /// exactly when the pgid is free to be handed to a stranger. That is the
+    /// state the ladder must not escalate into.
+    #[cfg(unix)]
+    #[test]
+    fn terminate_child_reaps_without_escalating_once_the_group_is_gone() {
+        // The probe must still be alive when its group is read: an `exit 0`
+        // probe can already be a zombie by then, and a zombie reports no
+        // group (that race failed once under the full parallel suite).
+        let (_master, mut child, pid) = spawn_posix_lifecycle_probe("sleep 30");
+        let group = verified_process_group(pid).expect("probe must lead its own process group");
+        // SAFETY: `pid` is the child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+        let _ = child.wait();
+        assert!(
+            !process_group_exists(group),
+            "fixture: a reaped leader leaves no group behind"
+        );
+
+        let started = Instant::now();
+        terminate_child(child.as_mut(), Some(group));
+        assert!(
+            started.elapsed() < SHUTDOWN_GRACE,
+            "a gone group is not waited on for the grace"
+        );
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            "the leader stays reaped"
+        );
     }
 
     #[cfg(unix)]

@@ -37,9 +37,12 @@ pub(crate) const MAX_LINE_BYTES: u64 = 64 * 1024;
 /// [`MAX_SESSION_SIZE_BYTES`], which is sized from this × panes × workspaces.
 pub(crate) const MAX_CHARS: usize = 400_000;
 
-/// Maximum history rows session persistence and IPC `surface.read` /
-/// `surface.search` will walk. `wait`/`flow` request 500 lines and must not
-/// materialize this many rows on every GPUI tick (issue #29).
+/// Maximum history rows a transcript read spans. Session persistence walks
+/// up to this many; IPC `surface.read` clamps its `lines` to it, and the
+/// engine (`DisplayTerminal::transcript_window`) then reads only the screen
+/// plus the rows the requested window covers, so a `wait`/`flow` poll for
+/// 500 lines costs 500 rows, not this many, on every GPUI tick (issue #29).
+/// `surface.search` chunks the grid on its own budget.
 pub(crate) const MAX_SCROLLBACK_EXTRACT_LINES: usize = 4000;
 
 /// Cap on an OSC52 clipboard payload, applied on BOTH the Store (write) and

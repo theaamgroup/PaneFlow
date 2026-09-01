@@ -2921,14 +2921,22 @@ impl PaneFlowApp {
                 let output_generation = terminal.read(cx).terminal.output_generation;
                 let sid = terminal.entity_id().as_u64();
                 let read_started = std::time::Instant::now();
-                // Windowed extract of the history followed by the live screen
-                // (#184 Phase 3.6): wait/flow ask for 500 lines and must not
-                // pay a 4000-line String (issue #29), and a full-screen TUI
-                // has no history, so the screen is what a reader gets.
-                let (text, returned, total, eof) = terminal
+                // The engine cuts the window (`DisplayTerminal::transcript_window`):
+                // it reads the screen plus the `lines` rows the page covers,
+                // never the whole 4000-row history, so a wait/flow poll costs
+                // what it asks for (issue #29). The rows are the history
+                // followed by the live screen (#184 Phase 3.6): a full-screen
+                // TUI has no history, so the screen is what a reader gets.
+                // `None` is a runtime that did not answer - an error, not a
+                // blank pane, or wait/flow would settle on a wedged runtime.
+                let Some((text, returned, total, eof)) = terminal
                     .read(cx)
                     .terminal
-                    .extract_scrollback_window(lines, offset);
+                    .extract_scrollback_window(lines, offset)
+                else {
+                    return JsonRpcError::internal_error("terminal runtime did not answer")
+                        .into_value();
+                };
                 let extract_elapsed = read_started.elapsed();
                 let total_elapsed = read_started.elapsed();
                 if total_elapsed >= std::time::Duration::from_millis(10) {
@@ -5271,6 +5279,10 @@ mod tests {
         assert!(
             !arm.contains("paginate_scrollback("),
             "pagination is applied in the windowed extract, not after a full String"
+        );
+        assert!(
+            arm.contains("internal_error(\"terminal runtime did not answer\")"),
+            "a runtime that did not answer is an error, not an empty read at eof"
         );
     }
 

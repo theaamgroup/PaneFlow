@@ -1097,13 +1097,18 @@ struct DiffDockState {
     /// left edge. Clamped to `[DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MAX_WIDTH]`.
     /// The *rendered* width is `min(this, main-panel remainder)` computed at
     /// render (`cli_diff_dock::diff_dock_fit`) and never written back here, so
-    /// a rail closing or the window growing restores the chosen width.
+    /// a rail closing or the window growing restores the chosen width; below
+    /// the floor (a remainder that cannot hold `DIFF_DOCK_PANEL_MIN_WIDTH`
+    /// beside a minimum pane) the dock is not rendered at all. The resize drag
+    /// is the only writer, and a drag pinned at the render ceiling leaves a
+    /// wider preference alone (`diff_dock::diff_dock_drag_preference`).
     pub(crate) width: f32,
-    /// Live drag anchor `(cursor_x, rendered_width_at_grab, max_width)` while
-    /// the dock's left edge is being dragged to resize; `None` when not
-    /// resizing. The ceiling travels with the drag so it cannot store a width
-    /// the panel could not show.
-    pub(crate) resize: Option<(f32, f32, f32)>,
+    /// Live drag anchor `(cursor_x, rendered_width_at_grab)` while the dock's
+    /// left edge is being dragged to resize; `None` when not resizing. The
+    /// ceiling is not part of the anchor: the dock host re-reads it from the
+    /// live fit on every move, so the drag cannot store a width the panel
+    /// could not show even if the panel changed under it.
+    pub(crate) resize: Option<(f32, f32)>,
     /// Live horizontal-scrollbar drag inside the dock's shared diff body.
     pub(crate) h_scroll_drag: Option<crate::app::diff_dock::DiffDockHScrollDrag>,
     /// Per-file horizontal scroll offsets (px) for the diff dock, indexed by
@@ -2020,7 +2025,7 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_ws7))
             .on_action(cx.listener(Self::handle_ws8))
             .on_action(cx.listener(Self::handle_ws9))
-            // US-012: macOS menu-bar actions. `Quit` is the single "close the
+            // macOS menu-bar actions. `Quit` is the single "close the
             // app" path (issue #184 dropped the `CloseWindow` twin: the
             // title-bar close emits `TitleBarEvent::CloseRequested`, which
             // lands on the same `quit_after_session_save`).

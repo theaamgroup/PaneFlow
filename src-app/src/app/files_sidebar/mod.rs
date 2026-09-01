@@ -5,21 +5,23 @@
 //! `toggle_files_sidebar` action (`secondary-alt-f`), mutually exclusive with
 //! the sessions sidebar (one right column). The pane header carries no Files
 //! button: the tree is keyboard/command-driven only. Renders a lazily-expanded,
-//! folders-first tree of the active workspace's `cwd`. Since US-019 of
-//! `prd-file-editor-2026-Q3` every file opens in the diff dock's editor, and
+//! folders-first tree of the active workspace's `cwd`. Every file opens in
+//! the diff dock's editor, and
 //! markdown is no longer the exception: a `.md` row reads as source there like
 //! any other file rather than opening a rendered pane of its own (rendered
 //! Markdown panes still come from an OSC path click and from session
 //! restore). Only editor-refused files (binary or over `MAX_FILE_BYTES`) stay
 //! muted; gitignored/hidden entries are filtered out before rendering. Rows
-//! carry no drag: the EP-003 markdown drag-to-pane is gone, so a click is the
+//! carry no drag: the markdown drag-to-pane is gone, so a click is the
 //! sidebar's only gesture and the dock editor its only destination.
 //!
 //! Wanting the rail belongs to the workspace tab that asked for it
 //! (`Tab::files_sidebar_open`); the app-level `files_sidebar_open` is a live
 //! mirror of the visible tab's flag, reconciled by `sync_files_sidebar_session`.
-//! The rail is hosted by the CLI cockpit only: Review and Settings unmount it
-//! (`files_sidebar_host_visible`).
+//! The rail is hosted by the CLI cockpit only: Review and Settings unmount its
+//! *element* (`files_sidebar_host_visible`), so no focus or keyboard work
+//! happens there, while the tree, its watcher and any background `read_dir`
+//! stay warm underneath - which is why coming back is instant.
 //!
 //! This module holds the state mutations (open/close, re-root, expand/collapse,
 //! open-in-dock) + the container render; the header/body/row rendering lives in
@@ -65,8 +67,10 @@ pub(super) const DIMMED_OPACITY: f32 = 0.55;
 
 /// Whether the surface that hosts the Files rail is on screen: the CLI cockpit
 /// with Settings closed. The tree's rows open into the dock's editor, which
-/// only exists there, so Review (`AppMode::Diff`) and Settings unmount the rail
-/// instead of painting a tree whose clicks would land nowhere.
+/// only exists there, so Review (`AppMode::Diff`) and Settings unmount the
+/// rail's element instead of painting a tree whose clicks would land nowhere.
+/// Only the element: the tree and its watcher keep running underneath (see
+/// `PaneFlowApp::files_sidebar_host_visible`).
 pub(crate) fn files_rail_host_visible(settings_open: bool, mode: AppMode) -> bool {
     !settings_open && matches!(mode, AppMode::Cli)
 }
@@ -102,9 +106,16 @@ impl PaneFlowApp {
     /// survives a mode switch and a trip through Settings. The tree belongs to
     /// the CLI cockpit - its rows open into the dock's editor, which does not
     /// exist on the full-screen Review surface or behind Settings - so `render`
-    /// unmounts the rail off the cockpit and the surviving flag is what brings
-    /// the same tree back on return. Also gates the toggle, so the chord cannot
-    /// flip a rail the user cannot see.
+    /// unmounts the rail's element off the cockpit and the surviving flag is
+    /// what brings the same tree back on return.
+    ///
+    /// Unmounting is the element and its focus/keyboard handling, nothing
+    /// more: the tree, the `notify` watcher, its 50 ms drain loop in
+    /// `bootstrap.rs` and any in-flight background `read_dir` keep running
+    /// (`watch.rs`),
+    /// which is why the return is instant rather than a re-hydration. Only
+    /// `close_files_sidebar` drops them. Also gates the toggle, so the chord
+    /// cannot flip a rail the user cannot see.
     pub(crate) fn files_sidebar_host_visible(&self) -> bool {
         files_rail_host_visible(self.settings_section.is_some(), self.mode)
     }
@@ -118,8 +129,8 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Inert off the cockpit: the rail is unmounted there, so a toggle would
-        // only flip a flag the user cannot see.
+        // Inert off the cockpit: the rail's element is unmounted there, so a
+        // toggle would only flip a flag the user cannot see.
         if !self.files_sidebar_host_visible() {
             return;
         }
@@ -330,7 +341,7 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    /// US-019: open a file in the diff dock's editor. Every file goes here,
+    /// open a file in the diff dock's editor. Every file goes here,
     /// markdown included - a `.md` row opens as source, not as a preview.
     ///
     /// The dock is the editor's only host, so a click from the sidebar has to
@@ -431,7 +442,7 @@ mod tests {
     }
 
     /// #184 Phase 4: the rail lives on the CLI cockpit only. Review and
-    /// Settings unmount it.
+    /// Settings unmount its element; the tree and watcher stay warm.
     #[test]
     fn files_rail_is_hosted_only_by_the_cli_cockpit_without_settings() {
         assert!(files_rail_host_visible(false, AppMode::Cli));
@@ -500,8 +511,13 @@ mod tests {
         );
     }
 
-    /// The Settings and Review surfaces do not render the Files rail at all,
-    /// and the chord cannot flip a rail the user cannot see.
+    /// The Settings and Review surfaces do not render the Files rail's
+    /// element at all - no focus or keyboard work happens there - and the
+    /// chord cannot flip a rail the user cannot see. Only the element goes:
+    /// the tree, the `notify` watcher and its drain loop stay warm
+    /// (`watch.rs`), which is why the rail is back instantly on return and
+    /// why `close_files_sidebar` is the only thing that drops them. This
+    /// pins the mount gate; it does not claim the watcher stops.
     #[test]
     fn review_and_settings_unmount_the_files_rail() {
         let render = app_render();

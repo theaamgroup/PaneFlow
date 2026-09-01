@@ -37,6 +37,22 @@ pub fn run() -> BuildResult<()> {
         manifest.bindings_sha256(),
         "canonical libghostty bindings",
     )?;
+    for (path, digest, label) in [
+        (
+            manifest.notice_path(),
+            manifest.notice_sha256(),
+            "libghostty third-party notice",
+        ),
+        (
+            manifest.sbom_path(),
+            manifest.sbom_sha256(),
+            "libghostty SBOM",
+        ),
+    ] {
+        let path = workspace.join(path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        verify_workspace_text(workspace, &path, digest, label)?;
+    }
     println!(
         "cargo:rustc-env=PANEFLOW_GHOSTTY_BINDINGS_PATH={}",
         canonical_bindings.display()

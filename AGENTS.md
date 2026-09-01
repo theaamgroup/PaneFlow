@@ -15,7 +15,7 @@ Run all commands from the repository root.
 - `cargo clippy --workspace -- -D warnings` treats lint warnings as errors.
 - `cargo fmt --check` verifies formatting.
 
-GPUI and the Alacritty VT crate are **not** local path dependencies. GPUI and `gpui_platform` are git dependencies pinned by exact `rev` to `zed-industries/zed` (`src-app/Cargo.toml:39-40`, plus a test-support `gpui` in `[dev-dependencies]` at `:253`) - three git deps in total, and there are no `collections` / `markdown` / `theme` / `ui` dependencies. Never reintroduce an `arthjean/zed` pin, and `alacritty_terminal` comes from crates.io (`src-app/Cargo.toml:62`). Cargo fetches both automatically, so no checkout has to be kept on disk. Never swap the Zed git deps for crates.io versions: GPUI is not published there.
+GPUI and `gpui_platform` are **not** local path dependencies. They are git dependencies pinned by exact `rev` to `zed-industries/zed` (`src-app/Cargo.toml:39-40`, plus a test-support `gpui` in `[dev-dependencies]` at `:265`) - three git deps in total, and there are no `collections` / `markdown` / `theme` / `ui` dependencies. Never reintroduce an `arthjean/zed` pin. The terminal engine is `paneflow-terminal-ghostty` (`src-app/Cargo.toml:62`), a workspace path dependency wrapping the vendored `libghostty-vt` archive under `native/libghostty/`; there is no `alacritty_terminal` (issue #184). Cargo fetches the Zed deps automatically, so no checkout has to be kept on disk. Never swap them for crates.io versions: GPUI is not published there.
 
 Build prerequisites (Rust 1.98.0, full Xcode, and the separately downloaded Metal toolchain) are documented in `CLAUDE.md`. They are non-obvious and a missing one fails the build in a confusing way.
 
@@ -46,7 +46,7 @@ ISSUES.md, ROADMAP.md, FIXES.md, or other markdown lists of open work, and do
 not append remaining work to `docs/fork/STATE.md`.
 
 ## Platform
-macOS only. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`. There is no Linux or Windows target in this fork: do not add `#[cfg(target_os = "linux")]` or `#[cfg(windows)]` branches back, and do not reintroduce the Ghostty backend. Config lives at `~/Library/Application Support/paneflow/paneflow.json`.
+macOS only. Metal, AppKit, vendored `libghostty-vt` (the one and only terminal engine, issue #184), Unix-socket IPC, signed and notarized `.app` / `.dmg`. There is no Linux or Windows target in this fork: do not add `#[cfg(target_os = "linux")]` or `#[cfg(windows)]` branches back, and do not reintroduce a backend selector or `alacritty_terminal`. Config lives at `~/Library/Application Support/paneflow/paneflow.json`.
 
 ## Deeper reference
 `CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. Open work lives in GitHub issues. `docs/fork/STATE.md` is the living handoff (landed work, verification commands, method rules). `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and the traps register. Read those before touching platform code. Do not duplicate their content here.

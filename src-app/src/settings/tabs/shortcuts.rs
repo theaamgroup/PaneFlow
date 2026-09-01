@@ -23,9 +23,11 @@
 //! `effective_shortcuts`, because that is what the rebind keys off.
 //!
 //! "Reset to defaults" rewrites `paneflow.json` with no undo, so it is a
-//! two-step inline confirm ([`step_reset_confirm`]); the confirming click goes
-//! through `config_writer::reset_shortcuts_checked`, the same checked writer
-//! the flat page used.
+//! two-step inline confirm ([`step_reset_confirm`]) behind a settle delay
+//! ([`RESET_ARM_SETTLE`]) so a double-click cannot confirm through its own
+//! arm; the confirming click copies the file to `paneflow.json.before-reset`
+//! first and then goes through `config_writer::reset_shortcuts_checked`, the
+//! same checked writer the flat page used.
 //!
 //! ## Why this page is virtualized and the other six are not
 //!
@@ -64,6 +66,8 @@ use gpui::{
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::keybindings::ShortcutGroup;
 use crate::settings::components::{
@@ -208,22 +212,106 @@ pub(crate) enum ResetOutcome {
     Reset(bool),
 }
 
+/// How long the armed "Reset" confirm has to have been on screen before a
+/// click on it counts as the decision to erase every binding.
+///
+/// Same number, same reason as [`crate::app::close_guard::ARM_SETTLE`]: a
+/// double-click delivers BOTH clicks to whatever is under the pointer, and
+/// the "Reset" confirm is painted on the same row as the "Reset to defaults"
+/// button that arms it. Without the delay the second click of a double-click
+/// confirmed through an armed state that had existed for one frame. That
+/// guard protects an agent; this one protects a file with no undo.
+pub(crate) const RESET_ARM_SETTLE: Duration = crate::app::close_guard::ARM_SETTLE;
+
+/// When the "Reset" confirm was armed, or `None` while it is not.
+///
+/// The instant is what the settle rule needs and what the `bool` the toolbar
+/// renders from (`shortcut_reset_pending`) cannot carry. It lives in a GPUI
+/// global, the same mechanism as `terminal::blink::BlinkPhaseGlobal`, and is
+/// written only through [`PaneFlowApp::set_shortcut_reset_arm`], which keeps
+/// the flag and the instant in step. The two failure modes are not symmetric:
+/// a flag that says "armed" over a missing instant merely arms again, but a
+/// stale instant under a cleared flag would let a "first" click confirm.
+#[derive(Default)]
+struct ShortcutResetArm(Option<Instant>);
+
+impl gpui::Global for ShortcutResetArm {}
+
 /// The two-step "Reset to defaults" confirm as a pure state machine.
 ///
-/// `pending` is whether the confirm is currently armed. `reset` - the checked
+/// `pending` is when the confirm was armed, or `None`. `reset` - the checked
 /// writer - is only ever called on the confirming click, which is the whole
 /// point: resetting rewrites every binding in `paneflow.json` with no undo, so
 /// a single stray click must not be able to do it. Returns the next `pending`
 /// value and what happened.
+///
+/// A click inside `settle` of the arm re-arms rather than confirming, the
+/// same rule as `close_guard::click_outcome`: a double-click delivers both of
+/// its clicks, so the settle delay is what makes the armed state a perception
+/// gate instead of a single unperceivable frame. Re-arming restarts the
+/// window, so a burst of clicks never accumulates into a reset either.
 pub(crate) fn step_reset_confirm(
-    pending: bool,
+    pending: Option<Instant>,
+    now: Instant,
+    settle: Duration,
     reset: impl FnOnce() -> bool,
-) -> (bool, ResetOutcome) {
-    if pending {
-        (false, ResetOutcome::Reset(reset()))
-    } else {
-        (true, ResetOutcome::Armed)
+) -> (Option<Instant>, ResetOutcome) {
+    match pending {
+        Some(armed_at) if now.duration_since(armed_at) >= settle => {
+            (None, ResetOutcome::Reset(reset()))
+        }
+        _ => (Some(now), ResetOutcome::Armed),
     }
+}
+
+/// Copy `paneflow.json` to `paneflow.json.before-reset` beside it, so the
+/// bindings a reset erases can be put back by hand.
+///
+/// Returns the backup's path, `None` when there is no config file to save,
+/// and the error when the copy failed - in which case the reset must not run:
+/// a file that cannot be read for a copy cannot be rewritten either, and one
+/// that can should not be erased without its backup. `paneflow.json` is the
+/// user's own text (comments and all in the worst case), so this is a byte
+/// copy rather than a re-serialisation.
+fn backup_config_before_reset(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".before-reset");
+    let backup = path.with_file_name(name);
+    std::fs::copy(path, &backup)?;
+    Ok(Some(backup))
+}
+
+/// The confirming click's writer: back the config up, then erase the
+/// bindings through the checked writer. `config_writer` has no backup helper
+/// of its own (the `.bak` one in `paneflow-mcp-install` is for agent configs),
+/// so the copy lives here, next to the only caller that needs it.
+fn reset_shortcuts_with_backup() -> bool {
+    if let Some(path) = paneflow_config::loader::config_path() {
+        match backup_config_before_reset(&path) {
+            Ok(Some(backup)) => {
+                log::info!(
+                    "shortcuts: backed up {} to {}",
+                    path.display(),
+                    backup.display()
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!(
+                    "shortcuts: could not back up {} before reset: {error}; not resetting",
+                    path.display()
+                );
+                return false;
+            }
+        }
+    }
+    config_writer::reset_shortcuts_checked()
 }
 
 /// A fresh, empty list state. The page seeds it on every rebuild, so only the
@@ -257,6 +345,19 @@ impl PaneFlowApp {
             .value()
             .trim()
             .to_lowercase()
+    }
+
+    /// Whether a filter query is set: the answer without the lowercased
+    /// copy, for the callers that only need the answer - `render` asks every
+    /// frame. (`TextInput::value` still hands out an owned `String`; the
+    /// widget has no borrowed accessor.)
+    fn shortcut_filtering(&self, cx: &App) -> bool {
+        !self
+            .shortcut_search_input
+            .read(cx)
+            .value()
+            .trim()
+            .is_empty()
     }
 
     /// Rows surviving the active filter, flattened for the virtualized list.
@@ -320,21 +421,37 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// The instant the "Reset" confirm was armed, if it is. See
+    /// [`ShortcutResetArm`].
+    fn shortcut_reset_armed_at(&self, cx: &App) -> Option<Instant> {
+        cx.try_global::<ShortcutResetArm>().and_then(|arm| arm.0)
+    }
+
+    /// Arm (`Some(now)`) or stand down (`None`) the "Reset" confirm. The only
+    /// writer of `shortcut_reset_pending`: see [`ShortcutResetArm`] for why
+    /// the flag and the instant must never be set separately.
+    pub(crate) fn set_shortcut_reset_arm(&mut self, armed_at: Option<Instant>, cx: &mut App) {
+        self.shortcut_reset_pending = armed_at.is_some();
+        cx.set_global(ShortcutResetArm(armed_at));
+    }
+
     /// One click on the reset control - either the "Reset to defaults" button
     /// (arms) or the "Reset" confirm (fires). Both route through
-    /// [`step_reset_confirm`] so the arm-then-fire order is the one thing that
-    /// decides whether `config_writer::reset_shortcuts_checked` runs.
+    /// [`step_reset_confirm`] so the arm-then-settle-then-fire order is the
+    /// one thing that decides whether [`reset_shortcuts_with_backup`] runs.
     fn shortcut_reset_clicked(&mut self, cx: &mut Context<Self>) {
         // The write is synchronous, but it still goes through the persist
         // guard: a ConfigWatcher deposit stamped before this write must not
         // be applied over the config we are about to reload.
         let flight = self.begin_config_persist();
-        let (pending, outcome) = step_reset_confirm(
-            self.shortcut_reset_pending,
-            config_writer::reset_shortcuts_checked,
+        let (armed_at, outcome) = step_reset_confirm(
+            self.shortcut_reset_armed_at(cx),
+            Instant::now(),
+            RESET_ARM_SETTLE,
+            reset_shortcuts_with_backup,
         );
         drop(flight);
-        self.shortcut_reset_pending = pending;
+        self.set_shortcut_reset_arm(armed_at, cx);
         match outcome {
             ResetOutcome::Armed => {}
             ResetOutcome::Reset(false) => {
@@ -364,7 +481,7 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ui = crate::theme::ui_colors();
-        let filtering = !self.shortcut_query(cx).is_empty();
+        let filtering = self.shortcut_filtering(cx);
 
         let hint = if self.shortcut_capture_active {
             "Press a chord to find what owns it. Escape to leave capture mode."
@@ -512,6 +629,18 @@ impl PaneFlowApp {
             .min_h_0()
             .pr(scrollbar::SCROLLBAR_GUTTER)
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                // A move with no button held is not a drag, whatever
+                // `shortcut_drag` says. GPUI fires the `on_mouse_up` below
+                // only over this region, so a thumb released off the panel
+                // left the drag set: bare hover then scrolled the list, and
+                // the `ListState`'s lazy measurement stayed frozen. End it
+                // here, through the handle, rather than scroll on it.
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    if scrollbar::end_drag(&this.shortcut_list, this.shortcut_drag.take()) {
+                        cx.notify();
+                    }
+                    return;
+                }
                 if let Some(drag) = this.shortcut_drag
                     && let Some(off) =
                         scrollbar::drag_offset(&this.shortcut_list, &drag, ev.position.y)
@@ -569,7 +698,7 @@ impl PaneFlowApp {
         // has already consumed the key.
         .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
             if ev.keystroke.key == "escape" {
-                if this.shortcut_query(cx).is_empty() {
+                if !this.shortcut_filtering(cx) {
                     this.close_settings(cx);
                 } else {
                     this.clear_shortcut_filters(cx);
@@ -665,7 +794,7 @@ impl PaneFlowApp {
                         "Cancel",
                         ui,
                         cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.shortcut_reset_pending = false;
+                            this.set_shortcut_reset_arm(None, cx);
                             cx.notify();
                         }),
                     ))
@@ -707,19 +836,18 @@ impl PaneFlowApp {
         }
 
         // Offer whichever action actually changes something: if every visible
-        // section is already folded, the only useful verb is "expand".
-        let visible_groups: Vec<ShortcutGroup> = self
-            .shortcut_rows
-            .iter()
-            .filter_map(|row| match row {
-                ShortcutListRow::Header { group, .. } => Some(*group),
-                ShortcutListRow::Binding { .. } => None,
-            })
-            .collect();
-        let all_collapsed = !visible_groups.is_empty()
-            && visible_groups
+        // section is already folded, the only useful verb is "expand". Every
+        // section on the page opens with its header, so a non-empty row set
+        // has at least one header to ask about - no need to collect them.
+        let all_collapsed = !self.shortcut_rows.is_empty()
+            && self
+                .shortcut_rows
                 .iter()
-                .all(|group| self.collapsed_shortcut_groups.contains(group));
+                .filter_map(|row| match row {
+                    ShortcutListRow::Header { group, .. } => Some(*group),
+                    ShortcutListRow::Binding { .. } => None,
+                })
+                .all(|group| self.collapsed_shortcut_groups.contains(&group));
         let (label, collapse) = if all_collapsed {
             ("Expand all", false)
         } else {
@@ -893,6 +1021,17 @@ impl PaneFlowApp {
             this.settings_focus.focus(window, cx);
             cx.notify();
         }))
+        .when(is_recording, |row| {
+            // A click anywhere else is the user moving on - to the search
+            // field, another row, the reset control - and a row left armed
+            // behind them would swallow the next chord they typed there.
+            // Only a mounted row can listen, so an armed row scrolled out
+            // of the viewport relies on the interceptor's focused-field
+            // rule instead (`route_shortcut_keystroke`).
+            row.on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                this.disarm_shortcut_recording(cx);
+            }))
+        })
         .child(
             div()
                 .flex_1()
@@ -1121,6 +1260,18 @@ mod tests {
         );
     }
 
+    /// The text of `name`'s body: from its `fn` line to `end`.
+    fn body<'a>(src: &'a str, name: &str, end: &str) -> &'a str {
+        let start = src
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} must exist"));
+        let rest = &src[start..];
+        let stop = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("{end} must follow {name}"));
+        &rest[..stop]
+    }
+
     #[test]
     fn first_reset_click_arms_and_second_fires() {
         let calls = Cell::new(0);
@@ -1129,24 +1280,216 @@ mod tests {
             true
         };
 
-        let (pending, outcome) = step_reset_confirm(false, reset);
+        let armed_at = Instant::now();
+        let (pending, outcome) = step_reset_confirm(None, armed_at, RESET_ARM_SETTLE, reset);
         assert_eq!(outcome, ResetOutcome::Armed);
-        assert!(pending, "the first click arms the confirm");
+        assert_eq!(pending, Some(armed_at), "the first click arms the confirm");
         assert_eq!(calls.get(), 0, "the first click must not reset anything");
 
-        let (pending, outcome) = step_reset_confirm(pending, reset);
+        // A deliberate second click: the armed state has been on screen for
+        // the whole settle window.
+        let (pending, outcome) = step_reset_confirm(
+            pending,
+            armed_at + RESET_ARM_SETTLE,
+            RESET_ARM_SETTLE,
+            reset,
+        );
         assert_eq!(outcome, ResetOutcome::Reset(true));
-        assert!(!pending, "the confirm disarms once it has fired");
+        assert_eq!(pending, None, "the confirm disarms once it has fired");
         assert_eq!(calls.get(), 1, "the second click resets exactly once");
+    }
+
+    /// The reason [`RESET_ARM_SETTLE`] exists, mirroring
+    /// `close_guard::a_second_click_inside_the_settle_delay_re_arms_instead_of_confirming`.
+    /// "Reset to defaults" and its "Reset" confirm are painted on the same
+    /// row, so a double-click on the control delivers its second click to the
+    /// confirm - and without the delay that erased every binding in
+    /// `paneflow.json`, no undo, behind an armed state painted for one frame.
+    #[test]
+    fn a_second_reset_click_inside_the_settle_delay_re_arms_instead_of_confirming() {
+        let calls = Cell::new(0);
+        let reset = || {
+            calls.set(calls.get() + 1);
+            true
+        };
+
+        let armed_at = Instant::now();
+        for early in [
+            Duration::from_millis(0),
+            Duration::from_millis(100),
+            RESET_ARM_SETTLE - Duration::from_millis(1),
+        ] {
+            let now = armed_at + early;
+            let (pending, outcome) =
+                step_reset_confirm(Some(armed_at), now, RESET_ARM_SETTLE, reset);
+            assert_eq!(
+                outcome,
+                ResetOutcome::Armed,
+                "a click {early:?} after the arm is the tail of a double-click, not a decision"
+            );
+            assert_eq!(
+                pending,
+                Some(now),
+                "the re-arm restarts the window, so a burst of clicks never adds up to a reset"
+            );
+        }
+        assert_eq!(calls.get(), 0, "nothing inside the settle window may write");
+
+        // Past the delay the armed state has been on screen long enough to
+        // read, so the second click means what it says.
+        for late in [RESET_ARM_SETTLE, Duration::from_millis(500)] {
+            let (pending, outcome) =
+                step_reset_confirm(Some(armed_at), armed_at + late, RESET_ARM_SETTLE, reset);
+            assert_eq!(
+                outcome,
+                ResetOutcome::Reset(true),
+                "a deliberate second click {late:?} after the arm must still confirm"
+            );
+            assert_eq!(pending, None);
+        }
+        assert_eq!(calls.get(), 2);
     }
 
     #[test]
     fn reset_confirm_reports_a_failed_write() {
         // The outcome carries the writer's verdict so the page can toast
         // instead of silently claiming a reset that never reached disk.
-        let (pending, outcome) = step_reset_confirm(true, || false);
+        let armed_at = Instant::now();
+        let (pending, outcome) = step_reset_confirm(
+            Some(armed_at),
+            armed_at + RESET_ARM_SETTLE,
+            RESET_ARM_SETTLE,
+            || false,
+        );
         assert_eq!(outcome, ResetOutcome::Reset(false));
-        assert!(!pending);
+        assert_eq!(pending, None);
+    }
+
+    /// A reset is unrecoverable from inside the app, so the bindings it erases
+    /// are copied beside the config first. The copy is the state before *this*
+    /// reset, so a later one overwrites it; and a missing file has nothing to
+    /// save.
+    #[test]
+    fn reset_backs_the_config_up_beside_it_before_erasing_the_bindings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        let first = r#"{"shortcuts":{"cmd-k":"none"}}"#;
+        std::fs::write(&path, first).unwrap();
+
+        let backup = backup_config_before_reset(&path)
+            .expect("copy succeeds")
+            .expect("there is a file to save");
+        assert_eq!(backup, dir.path().join("paneflow.json.before-reset"));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), first);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            first,
+            "the backup is a copy; the config itself is the writer's to change"
+        );
+
+        let second = r#"{"shortcuts":{"cmd-j":"none"}}"#;
+        std::fs::write(&path, second).unwrap();
+        backup_config_before_reset(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            second,
+            "each reset saves the bindings it is about to erase"
+        );
+
+        assert_eq!(
+            backup_config_before_reset(&dir.path().join("missing.json")).unwrap(),
+            None,
+            "no config file means nothing to back up and nothing to refuse"
+        );
+    }
+
+    /// The confirming click goes through the backup on its way to the checked
+    /// writer, and the click handler feeds the state machine the real clock
+    /// and the shared settle constant - a hand-rolled `bool` here would be the
+    /// original bug back.
+    #[test]
+    fn the_confirming_click_backs_up_before_it_resets() {
+        let src = include_str!("shortcuts.rs");
+
+        let writer = body(src, "fn reset_shortcuts_with_backup(", "\n}\n");
+        let backup_at = writer
+            .find("backup_config_before_reset(")
+            .expect("the writer must back the config up");
+        let reset_at = writer
+            .find("config_writer::reset_shortcuts_checked()")
+            .expect("the writer must then reset through the checked writer");
+        assert!(
+            backup_at < reset_at,
+            "the backup must be taken before the reset, not after: {writer}"
+        );
+
+        let click = body(
+            src,
+            "fn shortcut_reset_clicked(",
+            "/// The whole Shortcuts page",
+        );
+        for needle in [
+            "reset_shortcuts_with_backup",
+            "RESET_ARM_SETTLE",
+            "Instant::now()",
+            "self.set_shortcut_reset_arm(",
+        ] {
+            assert!(
+                click.contains(needle),
+                "shortcut_reset_clicked must use `{needle}`: {click}"
+            );
+        }
+    }
+
+    /// Item 2 of the Phase 4 audit: an armed row swallowed every chord, so a
+    /// user who clicked into the search field and typed rebound the row to
+    /// the first letter. A click anywhere but the armed row now disarms it.
+    #[test]
+    fn an_armed_row_disarms_when_a_click_lands_elsewhere() {
+        let src = include_str!("shortcuts.rs");
+        let row = body(
+            src,
+            "fn render_shortcut_row(",
+            "/// The section card, sliced",
+        );
+        let armed = body(row, ".when(is_recording,", "})");
+        assert!(
+            armed.contains("on_mouse_down_out("),
+            "the armed row must listen for a click outside itself: {armed}"
+        );
+        assert!(
+            armed.contains("disarm_shortcut_recording("),
+            "and that click must disarm the row: {armed}"
+        );
+    }
+
+    /// Item 3 of the Phase 4 audit: GPUI fires the list's `on_mouse_up` only
+    /// over the list, so a thumb drag released off the panel left
+    /// `shortcut_drag` set - bare hover then scrolled the list, and the
+    /// `ListState`'s lazy measurement stayed frozen. A move with no button
+    /// held ends the drag instead of continuing it.
+    #[test]
+    fn a_move_with_no_button_held_ends_a_thumb_drag() {
+        let src = include_str!("shortcuts.rs");
+        let region = body(
+            src,
+            "fn shortcut_list_region(",
+            "/// Search field + key-capture toggle",
+        );
+        let on_move = body(region, ".on_mouse_move(", ".on_mouse_up(");
+        assert!(
+            on_move.contains("pressed_button != Some(MouseButton::Left)"),
+            "the move listener must check that a button is held: {on_move}"
+        );
+        let heal = body(
+            on_move,
+            "pressed_button != Some(MouseButton::Left)",
+            "return;",
+        );
+        assert!(
+            heal.contains("scrollbar::end_drag(&this.shortcut_list, this.shortcut_drag.take())"),
+            "a stale drag must be ended, not merely ignored: {heal}"
+        );
     }
 
     /// A `List` lays every item out as its own layout root, so an `auto` width

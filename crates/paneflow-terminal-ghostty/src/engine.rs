@@ -112,12 +112,27 @@ impl DisplayTerminal {
         self.snapshot_cache.invalidate();
     }
 
+    /// Whether a full-screen program currently owns the alternate screen
+    /// (DEC private modes 47, 1047 and 1049 all switch to it).
+    pub fn alternate_screen_active(&self) -> Result<bool> {
+        Ok(self.mode(47)? || self.mode(1047)? || self.mode(1049)?)
+    }
+
     /// Clear the viewport, scrollback, and cursor position without performing
     /// a full terminal reset, so negotiated modes remain intact.
-    pub fn clear_screen_and_scrollback(&mut self) -> Result<()> {
+    ///
+    /// A no-op that returns `Ok(false)` while the alternate screen is active:
+    /// that frame belongs to the full-screen program painting it, which would
+    /// not know to repaint, and the alternate screen has no scrollback to
+    /// drop in the first place. `Ok(true)` when the primary screen was
+    /// cleared.
+    pub fn clear_screen_and_scrollback(&mut self) -> Result<bool> {
+        if self.alternate_screen_active()? {
+            return Ok(false);
+        }
         self.feed(CLEAR_SCREEN_AND_SCROLLBACK)?;
         self.snapshot_cache.invalidate();
-        Ok(())
+        Ok(true)
     }
 
     pub fn drain_events(&mut self) -> Vec<BackendEvent> {
@@ -126,7 +141,7 @@ impl DisplayTerminal {
 
     pub fn modes(&self) -> Result<Modes> {
         Ok(Modes {
-            alternate_screen: self.mode(47)? || self.mode(1047)? || self.mode(1049)?,
+            alternate_screen: self.alternate_screen_active()?,
             application_cursor: self.mode(1)?,
             application_keypad: self.mode(66)?,
             bracketed_paste: self.mode(2004)?,
@@ -234,15 +249,60 @@ mod tests {
                 .bracketed_paste
         );
 
-        terminal
-            .clear_screen_and_scrollback()
-            .expect("grid clear must succeed");
+        assert!(
+            terminal
+                .clear_screen_and_scrollback()
+                .expect("grid clear must succeed")
+        );
         let content = terminal.snapshot().expect("snapshot after clear");
 
         assert_eq!(content.history_size, 0);
         assert!(content.cells.iter().all(|cell| cell.character == ' '));
         assert_eq!(content.cursor.point, crate::Point::new(0, 0));
         assert!(terminal.modes().expect("modes after clear").bracketed_paste);
+    }
+
+    /// A full-screen program owns the alternate screen and will not know to
+    /// repaint it, so the clear behind Cmd+K must leave that frame alone.
+    #[test]
+    fn clear_screen_and_scrollback_leaves_the_alternate_screen_alone() {
+        let size = WindowSize::new(10, 2, 8, 16).expect("valid terminal size");
+        let mut terminal = DisplayTerminal::new(size, 100, crate::TerminalAppearance::default())
+            .expect("terminal must initialize");
+        terminal
+            .feed(b"one\r\ntwo\r\nthree")
+            .expect("fixture output must parse");
+        terminal
+            .feed(b"\x1b[?1049h\x1b[HTUI")
+            .expect("alternate screen must parse");
+        assert!(terminal.modes().expect("modes").alternate_screen);
+
+        assert!(
+            !terminal
+                .clear_screen_and_scrollback()
+                .expect("the clear must not error on the alternate screen"),
+            "the clear must report that it left the alternate screen alone"
+        );
+        assert_eq!(
+            terminal.extract_screen().expect("screen").as_deref(),
+            Some("TUI"),
+            "the alternate screen belongs to the program painting it"
+        );
+
+        terminal
+            .feed(b"\x1b[?1049l")
+            .expect("leaving the alternate screen must parse");
+        assert!(!terminal.modes().expect("modes").alternate_screen);
+        assert!(terminal.snapshot().expect("snapshot").history_size > 0);
+        assert!(
+            terminal
+                .clear_screen_and_scrollback()
+                .expect("grid clear must succeed"),
+            "back on the primary screen the clear runs"
+        );
+        let content = terminal.snapshot().expect("snapshot after clear");
+        assert_eq!(content.history_size, 0);
+        assert!(content.cells.iter().all(|cell| cell.character == ' '));
     }
 
     #[test]

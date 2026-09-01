@@ -567,11 +567,14 @@ pub(crate) fn capture_closed_pane_record(
 /// PTYs at the recorded cwds.
 ///
 /// Bounded to [`UNDO_SCROLLBACK_LINES`] rows per leaf rather than the full
-/// 4000: this runs synchronously on the GPUI thread, once per leaf, under each
-/// terminal's mutex, and `enforce_closed_pane_scrollback_budget` strips the
-/// result back to [`MAX_CLOSED_PANE_SCROLLBACK_BYTES`] milliseconds later
-/// anyway. A `Cmd+W` on a [`crate::layout::MAX_PANES`]-leaf tab was taking 32
-/// locks and materializing ~128 000 rows to throw most of it away.
+/// 4000: this runs synchronously on the GPUI thread, once per leaf, as a
+/// blocking request to each terminal's runtime, and the engine reads only
+/// the rows the bound covers (`DisplayTerminal::transcript_window`) - it
+/// used to walk the whole history and slice afterwards. What survives,
+/// `enforce_closed_pane_scrollback_budget` strips back to
+/// [`MAX_CLOSED_PANE_SCROLLBACK_BYTES`] milliseconds later anyway. A `Cmd+W`
+/// on a [`crate::layout::MAX_PANES`]-leaf tab was taking 32 round trips and
+/// materializing ~128 000 rows to throw most of it away.
 ///
 /// A leaf holding a Diff surface serializes with an empty surface list and is
 /// pruned out here, matching `capture_closed_pane_record`'s refusal to record
@@ -3976,6 +3979,21 @@ mod tests {
         ] {
             assert!(closer.contains(helper), "shared closer must call {helper}");
         }
+        // The dock teardown resolves the closing workspace's tab ids from
+        // `self.workspaces`, so it has to run before the workspace is removed
+        // - the ordering `closing_a_workspace_prunes_the_undo_stack_and_stands_
+        // down_its_pending_close` pins for the undo prune.
+        let dock_at = closer
+            .find("drop_diff_dock_for_workspace(")
+            .expect("the close must tear the docks down");
+        let remove_at = closer
+            .find("self.workspaces.remove(idx)")
+            .expect("the close must remove the workspace");
+        assert!(
+            dock_at < remove_at,
+            "the dock teardown reads the workspace being destroyed, so it has to run \
+             before it is dropped: {closer}"
+        );
     }
 
     #[test]

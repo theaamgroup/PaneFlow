@@ -322,9 +322,9 @@ impl PaneFlowApp {
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let records = smol::unblock(move || {
                     let records = claude_session_registry::read_live_sessions(&dir);
-                    // The ancestor walk reads `/proc` (or the platform
-                    // equivalent), so it belongs on this thread with the
-                    // directory read rather than in a second hop.
+                    // The ancestor walk goes through libproc, so it belongs
+                    // on this thread with the directory read rather than in a
+                    // second hop.
                     records
                         .into_iter()
                         .map(|record| {

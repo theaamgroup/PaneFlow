@@ -458,7 +458,7 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_broadcast_groups",
         context: None,
     },
-    // EP-002 (cli-cockpit): Attention Queue + Launch Pad. The queue used to sit
+    // Attention Queue + Launch Pad. The queue used to sit
     // on `secondary-shift-k`, which the terminal convention wants for
     // `clear_scroll_history` (see that binding above; issue #184); `a` for
     // "attention" is the mnemonic and shadows no shell/readline/TUI chord,

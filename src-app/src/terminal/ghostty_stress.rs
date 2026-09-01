@@ -371,7 +371,7 @@ fn assert_resource_recovery(
 }
 
 #[test]
-#[ignore = "EP-004 promotion gate: 200 PTY cycles with 200 resizes each"]
+#[ignore = " promotion gate: 200 PTY cycles with 200 resizes each"]
 fn ghostty_spawn_resize_close_stress_has_no_residual_growth() {
     for warmup in 0..WARMUP_CYCLES {
         let _ = run_cycle(warmup as u64);

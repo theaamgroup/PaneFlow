@@ -2,11 +2,12 @@
 
 Paneflow is a native GPU-accelerated terminal workspace for running CLI coding
 agents in parallel. One user-facing Rust binary, no web runtime: the UI is
-built on a pinned Paneflow branch of
+built on a pinned revision of
 [Zed's GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) and
-terminal emulation is provided by upstream
-[`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) from
-crates.io. Paneflow owns PTY lifecycle orchestration, rendering, and
+terminal emulation is provided by a vendored
+[`libghostty-vt`](https://github.com/ghostty-org/ghostty) static archive
+(Ghostty `f2d5758f`, wrapped by the `paneflow-terminal-ghostty` crate; issue
+#184). Paneflow owns the PTY through `portable-pty`, rendering, and
 integration with agent tracking, IPC, and the MCP bridge.
 
 This fork is **macOS only**. Metal, AppKit, Unix-socket IPC, a signed and
@@ -54,17 +55,19 @@ own crate and never links GPUI.
 ┌───────┴────────┐  ┌────────┴───────┐  ┌─────────┴────────┐
 │ Terminal       │  │ IPC thread     │  │ Watcher threads  │
 │ workers        │  │ JSON-RPC 2.0   │  │ config, theme,   │
-│ (Alacritty)    │  │ socket server  │  │ git state        │
+│ (libghostty)   │  │ socket server  │  │ git state        │
 └────────────────┘  └────────────────┘  └──────────────────┘
 ```
 
 - **Main thread**: the GPUI event loop. All UI state lives in `Entity<T>`
   values mutated through GPUI contexts; there are no locks around UI state.
-- **Terminal workers**: one per session. Each Alacritty session owns an
-  `alacritty_terminal::EventLoop` I/O thread and a shared terminal grid
-  (`Arc<FairMutex<Term<ZedListener>>>`, the only cross-thread data in the app).
-  Sessions publish backend-neutral events to the view and owned render
-  snapshots through `TerminalSessionBackend`.
+- **Terminal workers**: one `paneflow-ghostty-runtime` thread per session. It
+  owns the `!Send` libghostty `DisplayTerminal`, the PTY master, and the
+  child, and publishes owned snapshots through an `Arc<RwLock<SharedState>>`
+  (the only cross-thread terminal data) plus backend-neutral events to the
+  view through `TerminalSessionBackend`. The runtime only reaps the child;
+  every signal a user close sends comes from the app thread through the
+  fork's pinned process-group path.
 - **IPC thread**: accepts connections on a Unix socket. Stateless methods
   reply in place; stateful methods are dispatched to the main thread through a
   bounded channel and drained by the 50 ms app poll loop
@@ -82,9 +85,9 @@ The full input/output pipeline, end to end:
 KeyDownEvent
   → TerminalView::handle_key_down()
   → keys::to_esc_str() escape-sequence translation
-  → PTY writer → Notifier → shell / agent CLI
-  → output bytes → alacritty_terminal VTE parser → Term grid mutations
-  → ZedListener::send_event(Wakeup) → TerminalBackendEvent
+  → GhosttySession::write (runtime mailbox) → PTY master → shell / agent CLI
+  → output bytes → libghostty-vt parser → DisplayTerminal grid mutations
+  → SharedState snapshot + Wakeup → TerminalBackendEvent
   → 4 ms coalescing batch → sync() → cx.notify()
   → TerminalSessionBackend::render_content() → owned neutral Content
   → TerminalElement::prepaint()
@@ -107,26 +110,28 @@ keystroke at ingress and reports time-to-pixel.
 ## The terminal engine boundary
 
 `TerminalSessionBackend` is the renderer-facing facade for the terminal
-engine. There is exactly one implementation: upstream `alacritty_terminal`.
-The facade is still worth keeping, because it is what stops borrowed terminal
-state from leaking into GPUI. The rest of the app consumes Paneflow-owned
-points, mode flags, cells, events, and `Content` snapshots rather than reaching
-into the `Term` grid, so the render path never holds the terminal lock across a
-frame.
+engine. There is exactly one implementation: the vendored `libghostty-vt`
+archive, wrapped by `paneflow-terminal-ghostty` and hosted by
+`src-app/src/terminal/ghostty_session.rs`. The facade is what stops borrowed
+terminal state from leaking into GPUI: the rest of the app consumes
+Paneflow-owned points, mode flags, cells, events, and `Content` snapshots
+rather than reaching into the engine, so the render path never blocks on the
+runtime thread.
 
-Alacritty imports are confined to an explicit allowlist enforced by a test,
-`alacritty_confined_to_backend_allowlist` in
-`src-app/src/terminal/types.rs`, which keeps the VT crate from spreading
-beyond the `terminal/` module (plus `search.rs`). Separately,
+No engine type crosses the `terminal/` seam. `src-app/src/terminal/types.rs` is
+the contract; `ghostty_session.rs` translates libghostty values into it.
+`alacritty_is_absent_from_the_app_crate` (`terminal/types.rs`) fails if
+`alacritty` reappears under `src-app/src/`. Separately,
 `src-app/tests/dependency_source_policy.rs` asserts every git source in
-`Cargo.lock` is pinned to an immutable revision.
+`Cargo.lock` is pinned to an immutable revision, and the libghostty build
+script hash-verifies the archive, the bindings, the third-party notice, and
+the SBOM against `native/libghostty/manifest.toml`.
 
-Upstream shipped a second engine (a statically linked `libghostty-vt` backend)
-that was the default only on Linux and Windows x64 MSVC. macOS always used
-`alacritty_terminal`, no macOS code path could reach the Ghostty backend, and
-the backend is removed from this fork. The `terminal.backend` config key and
-its `Ghostty` variant may survive in the JSON schema as an accepted no-op;
-treat any request for it as "use Alacritty".
+Stage 2a (2026-08-25) deleted a Ghostty backend that no macOS code path could
+reach at the time. Upstream v0.10.0 made macOS a Ghostty target, and issue
+#184 (2026-08-31) brought libghostty-vt back as the sole engine, deleting
+`alacritty_terminal` and the `terminal.backend` selector. A leftover
+`"backend"` key in an old config is ignored.
 
 ## Agent lifecycle tracking
 
@@ -189,8 +194,8 @@ One target: macOS on Apple Silicon.
 |---|---|
 | GPU | Metal (GPUI compiles its Metal shaders at build time, so a full Metal toolchain is a build prerequisite) |
 | Windowing | AppKit, with client-side decorations by default |
-| Terminal engine | upstream `alacritty_terminal` from crates.io |
-| PTY | `alacritty_terminal::tty` |
+| Terminal engine | vendored `libghostty-vt` (`native/libghostty`, Ghostty `f2d5758f`) via `paneflow-terminal-ghostty` |
+| PTY | `portable-pty`, owned by Paneflow; libghostty only parses |
 | IPC | Unix socket under `$TMPDIR` |
 | Font enumeration | Core Text (`src-app/src/fonts.rs`) |
 | Config | `~/Library/Application Support/paneflow/paneflow.json` |

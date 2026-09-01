@@ -168,3 +168,73 @@ actions!(
         TogglePrimarySidebar
     ]
 );
+
+#[cfg(test)]
+mod tests {
+    /// `CLAUDE.md` quotes the size of the `actions!` block twice - "N GPUI
+    /// action types" in the architecture tree and "N actions total" under
+    /// Keybindings - and both were left behind when `ShowSystemInfo` landed
+    /// (#190). Count the real block and read the real doc off disk, so the
+    /// next action cannot drift the number again.
+    #[test]
+    fn claude_md_action_count_matches_the_actions_macro() {
+        let declared = actions_macro_entries(include_str!("actions.rs"));
+        assert!(declared > 0, "the actions! block must have entries");
+
+        let claude_md = include_str!("../../../CLAUDE.md");
+        for phrase in ["GPUI action types", "actions total"] {
+            let quoted = number_before(claude_md, phrase)
+                .unwrap_or_else(|| panic!("CLAUDE.md must say `N {phrase}`"));
+            assert_eq!(
+                quoted, declared,
+                "CLAUDE.md says `{quoted} {phrase}` but `actions!` declares {declared}"
+            );
+        }
+    }
+
+    /// Identifier lines inside the `actions!` list, comma-independent (the
+    /// last entry has no trailing comma) and comment-blind.
+    fn actions_macro_entries(src: &str) -> usize {
+        let start = src.find("actions!(").expect("an actions! block");
+        let block = &src[start..];
+        let open = block.find('[').expect("the action list opens with [");
+        // The list's own closer, not a `]` inside a comment ("`[`/`]` step
+        // hunks") - the macro invocation ends with `]\n);`.
+        let close = block
+            .find("]\n);")
+            .expect("the action list closes with ]\\n);");
+        block[open + 1..close]
+            .lines()
+            .map(|line| {
+                line.split("//")
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(',')
+            })
+            .filter(|ident| !ident.is_empty())
+            .inspect(|ident| {
+                assert!(
+                    ident.chars().all(|c| c.is_ascii_alphanumeric()),
+                    "not an action identifier: {ident}"
+                );
+            })
+            .count()
+    }
+
+    /// The integer immediately before `phrase`, e.g. `91` in "91 GPUI action
+    /// types".
+    fn number_before(text: &str, phrase: &str) -> Option<usize> {
+        let at = text.find(phrase)?;
+        let digits: String = text[..at]
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(char::is_ascii_digit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        digits.parse().ok()
+    }
+}

@@ -1,6 +1,6 @@
 //! Single Files-tree row render: indent + chevron + icon + name, with the
-//! editor-refusal styling (US-019), click-to-open / expand (US-003/004), and
-//! the right-click copy-path menu trigger (US-009). Rows carry no drag: every
+//! editor-refusal styling , click-to-open / expand , and
+//! the right-click copy-path menu trigger . Rows carry no drag: every
 //! file opens in the dock editor, so the sidebar has a single gesture. Split
 //! out of `view.rs` to keep each file under the 250-line budget.
 
@@ -165,8 +165,8 @@ impl PaneFlowApp {
             }
         }));
 
-        // Whole row toggles a directory (US-003) or opens any file, markdown
-        // included, in the diff dock's editor (US-019). Markdown gets no
+        // Whole row toggles a directory or opens any file, markdown
+        // included, in the diff dock's editor . Markdown gets no
         // surface of its own from here: a click reads it as source next to
         // every other file, and no row carries a drag.
         let click_path = path.clone();

@@ -1044,8 +1044,7 @@ impl TerminalView {
             return;
         };
 
-        // US-021: file(s) copied in the OS file manager (Nautilus/Finder/
-        // Explorer/Thunar) arrive as `ExternalPaths`. Insert the shell-quoted
+        // File(s) copied in the Finder arrive as `ExternalPaths`. Insert the shell-quoted
         // path(s). Checked BEFORE `clipboard.text()`, which falls back to
         // unquoted path display strings - those would break on spaces. Iterate
         // all entries (some backends emit a String entry alongside the paths)

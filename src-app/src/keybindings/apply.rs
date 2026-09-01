@@ -511,6 +511,40 @@ mod tests {
         );
     }
 
+    /// The rule every per-chord test above instantiates once, stated for the
+    /// whole table: within one key context a chord belongs to exactly one
+    /// action, because GPUI resolves two bindings on the same chord in the
+    /// same context order-dependently and the loser is silently dead. The
+    /// same chord in different contexts is fine (context precedence, not a
+    /// collision), and `None` - global - is a context of its own. Chords are
+    /// compared through `keystrokes_conflict`, so `secondary-`, `cmd-`, and
+    /// modifier order cannot hide a duplicate.
+    #[test]
+    fn no_two_default_actions_claim_the_same_chord_in_the_same_context() {
+        use super::super::defaults::{DEFAULTS, DefaultBinding, MACOS_ONLY_DEFAULTS};
+
+        let table: Vec<&DefaultBinding> =
+            DEFAULTS.iter().chain(MACOS_ONLY_DEFAULTS.iter()).collect();
+        let mut collisions = Vec::new();
+        for (i, a) in table.iter().enumerate() {
+            for b in &table[i + 1..] {
+                if a.context == b.context
+                    && a.action_name != b.action_name
+                    && keystrokes_conflict(a.key, b.key)
+                {
+                    collisions.push(format!(
+                        "{} -> {} and {} -> {} (context {:?})",
+                        a.key, a.action_name, b.key, b.action_name, a.context
+                    ));
+                }
+            }
+        }
+        assert!(
+            collisions.is_empty(),
+            "a chord may map to one action per context; found {collisions:#?}"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn us010_cmd_c_parses_as_binding() {

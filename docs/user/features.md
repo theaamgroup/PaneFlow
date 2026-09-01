@@ -87,7 +87,10 @@ switching tabs brings each tab's dock back the way you left it. Closing a tab
 closes its dock; the dock never follows a tab into a session restore. When a
 right-hand rail is open or the window is narrow, the dock shrinks to fit the
 space the panes can spare and returns to the width you chose as soon as the
-room comes back.
+room comes back; dragging its edge while it is squeezed never narrows that
+choice unless you drag it narrower than the room allows. When there is no room
+for a readable dock beside a pane at all, the panes win and the dock steps
+aside until there is.
 
 ## Projects
 
@@ -126,6 +129,16 @@ and choose which CLI drives each one: Claude Code, Codex, OpenCode, Pi,
 Hermes, Openclaw, Factory's Droid, or anything else on your `PATH`. Mix
 them per thread, so one thread can plan with Codex while another
 implements with Claude Code, side by side in the same project.
+
+## System Info
+
+**Help ▸ System Info…** opens a small dialog with the environment block a
+bug report needs - PaneFlow version, install format, macOS version, chip,
+GPU and renderer, and the terminal engine's version - and a **Copy**
+button that puts it on the clipboard. It carries no project path and no
+environment variables, so it is safe to paste as-is. See
+[Troubleshooting](troubleshooting.md#what-should-i-capture-for-a-bug)
+for what else to include.
 
 ## Keep exploring
 
