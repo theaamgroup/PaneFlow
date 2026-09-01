@@ -48,6 +48,15 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
 /// How long the runtime waits to reap a child the app is killing (see
 /// `reap_child_bounded`); `TerminalState::Drop` SIGKILLs at 100 ms.
 const REAP_BUDGET: Duration = Duration::from_secs(2);
+
+/// What a reader of a pane gets (#184 Phase 3.6): the retained history and,
+/// after it, the screen the program is painting right now. Either half is
+/// `None` when it is blank.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Transcript {
+    pub history: Option<String>,
+    pub screen: Option<String>,
+}
 const MAX_CLIPBOARD_EVENTS: usize = 8;
 const MAX_NOTIFICATION_EVENTS: usize = 8;
 
@@ -373,12 +382,14 @@ enum RuntimeMessage {
     ExtractScrollback(SyncSender<Result<Option<String>, String>>),
     /// Capture the screen and its recent history as VT sequences, which keep
     /// the styling, modes, and cursor that plain text drops.
-    // Constructed once #184 Phase 3.6 wires `screen_text` / `capture_replay`.
+    // Constructed once the styled undo replay wires `capture_replay`
+    // (#184 follow-up).
     #[allow(dead_code)]
     CaptureReplay(SyncSender<Result<Vec<u8>, String>>),
-    /// The active screen as plain text, alternate screen included.
-    #[allow(dead_code)]
-    ScreenText(SyncSender<Result<String, String>>),
+    /// One consistent read of the retained history and the screen being
+    /// painted, taken under a single message so live output cannot tear the
+    /// boundary between the two halves.
+    Transcript(SyncSender<Result<Transcript, String>>),
     /// Restore of saved scrollback. `reply` fires once the grid reflects the
     /// text, so a caller can read the snapshot right after.
     RestoreScrollback {
@@ -1806,15 +1817,15 @@ impl GhosttySession {
             .flatten()
     }
 
-    /// The active screen as plain text.
+    /// Retained history plus the screen being painted, read together.
     ///
-    /// Unlike [`Self::extract_scrollback`] this reads the screen the program
-    /// is actually painting, which is the only way to see an alternate-screen
-    /// TUI: that screen has no scrollback at all.
-    // Wired by #184 Phase 3.6; see `TerminalState::screen_text`.
-    #[allow(dead_code)]
-    pub(super) fn screen_text(&self) -> Option<String> {
-        self.request(RuntimeMessage::ScreenText)
+    /// [`Self::extract_scrollback`] deliberately stops at the viewport, so
+    /// on its own it returns nothing for a full-screen TUI, which is where
+    /// the agent CLIs live. The two halves come back from one runtime
+    /// message so a line cannot be duplicated or lost at the boundary while
+    /// output is still arriving.
+    pub(super) fn transcript(&self) -> Option<Transcript> {
+        self.request(RuntimeMessage::Transcript)
             .and_then(Result::ok)
     }
 
@@ -2588,12 +2599,13 @@ fn handle_terminal_command(
                     .map_err(|error| error.to_string()),
             );
         }
-        RuntimeMessage::ScreenText(reply) => {
-            let _ = reply.send(
+        RuntimeMessage::Transcript(reply) => {
+            let transcript = terminal.extract_scrollback().and_then(|history| {
                 terminal
-                    .format(ghostty::FormatterOptions::plain_text())
-                    .map_err(|error| error.to_string()),
-            );
+                    .extract_screen()
+                    .map(|screen| Transcript { history, screen })
+            });
+            let _ = reply.send(transcript.map_err(|error| error.to_string()));
         }
         RuntimeMessage::CaptureReplay(reply) => {
             let _ = reply.send(terminal.capture_replay().map_err(|error| error.to_string()));

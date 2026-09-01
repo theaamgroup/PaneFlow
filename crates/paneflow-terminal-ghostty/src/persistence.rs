@@ -29,6 +29,25 @@ impl DisplayTerminal {
         Ok((!text.is_empty()).then_some(text))
     }
 
+    /// The rows the program is painting, history excluded: the alternate
+    /// screen while it is active, the viewport otherwise. This is the half
+    /// of a pane [`Self::extract_scrollback`] leaves out, and for a
+    /// full-screen TUI it is the only half there is. Trailing blank rows are
+    /// dropped; `None` when the screen is blank.
+    pub fn extract_screen(&self) -> Result<Option<String>> {
+        let geometry = self.grid_geometry()?;
+        let history_rows = usize::try_from(geometry.scrollback).unwrap_or(0);
+        let mut lines: Vec<String> = self
+            .grid_lines(Some(history_rows..geometry.total_rows))?
+            .into_iter()
+            .map(|line| line.text.trim_end().to_owned())
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        Ok((!lines.is_empty()).then(|| lines.join("\n")))
+    }
+
     pub fn restore_scrollback(&mut self, text: &str) -> Result<()> {
         let mut lines: Vec<String> = bounded_recent_text(text, MAX_SCROLLBACK_CHARS)
             .split('\n')
