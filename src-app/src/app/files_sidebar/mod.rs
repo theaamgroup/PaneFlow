@@ -415,6 +415,7 @@ mod tests {
     use paneflow_config::schema::AppMode;
 
     use super::{FilesSidebarSync, files_rail_host_visible, files_sidebar_sync_step};
+    use crate::source_probe::source_slice;
 
     /// The production half of a source file: everything before its test
     /// module. Files without one come back whole.
@@ -427,10 +428,7 @@ mod tests {
     /// The text between two unique markers, so an assertion pins one function
     /// body instead of the whole file.
     fn between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        src.split(start)
-            .nth(1)
-            .and_then(|rest| rest.split(end).next())
-            .unwrap_or_else(|| panic!("source between {start:?} and {end:?}"))
+        source_slice(src, start, end)
     }
 
     fn app_render() -> &'static str {

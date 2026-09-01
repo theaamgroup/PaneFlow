@@ -2681,6 +2681,7 @@ mod tests {
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
+    use crate::source_probe::source_slice;
     use crate::terminal::ServiceInfo;
     use crate::workspace::Tab;
     use gpui::{
@@ -2718,11 +2719,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production sidebar source");
-        let workspace_row = production
-            .split("fn render_workspace_row(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("fn render_tab_row(\n").next())
-            .expect("workspace row renderer");
+        let workspace_row = source_slice(
+            production,
+            "fn render_workspace_row(\n",
+            "fn render_tab_row(\n",
+        );
 
         assert!(
             workspace_row.contains("text_color(ui.text.opacity(tone.title_opacity))"),
@@ -3230,12 +3231,15 @@ mod tests {
         // The workspace row has the same guard: the dim is a text treatment,
         // and applied to the shell it would make a whole background workspace
         // look disabled rather than backgrounded.
-        let tab_row = include_str!("mod.rs")
+        let production = include_str!("mod.rs")
             .split("#[cfg(test)]")
             .next()
-            .and_then(|production| production.split("fn render_tab_row(\n").nth(1))
-            .and_then(|rest| rest.split("fn render_workspace_meta_row(\n").next())
-            .expect("tab row renderer");
+            .expect("production half of the module");
+        let tab_row = source_slice(
+            production,
+            "fn render_tab_row(\n",
+            "fn render_workspace_meta_row(\n",
+        );
         // Whitespace-stripped, because rustfmt is free to wrap a builder chain
         // and the rule under test is about which binding the dim lands on, not
         // about where the line breaks.
@@ -3561,16 +3565,16 @@ mod tests {
         // The trailing `(\n` matters: `fn render_workspace_row` is also a
         // prefix of `fn render_workspace_rows`, the plural that renders the
         // whole rail, and slicing on the bare name lands in the wrong body.
-        let workspace_row = production
-            .split("fn render_workspace_row(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("fn render_tab_row(\n").next())
-            .expect("workspace row renderer");
-        let tab_row = production
-            .split("fn render_tab_row(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("fn render_workspace_meta_row(\n").next())
-            .expect("tab row renderer");
+        let workspace_row = source_slice(
+            production,
+            "fn render_workspace_row(\n",
+            "fn render_tab_row(\n",
+        );
+        let tab_row = source_slice(
+            production,
+            "fn render_tab_row(\n",
+            "fn render_workspace_meta_row(\n",
+        );
 
         for (label, body) in [("workspace row", workspace_row), ("tab row", tab_row)] {
             assert!(
@@ -3627,13 +3631,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the module");
-        let meta = production
-            .split("fn render_workspace_meta_row(")
-            .nth(1)
-            .expect("render_workspace_meta_row")
-            .split("\n    pub(crate) fn ")
-            .next()
-            .expect("meta row body");
+        let meta = source_slice(
+            production,
+            "fn render_workspace_meta_row(",
+            "\n    pub(crate) fn ",
+        );
         assert!(
             meta.contains("icons/git-branch-sidebar.svg"),
             "workspace meta row must paint the git branch icon"
@@ -3663,20 +3665,13 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the sidebar module");
-        let begin_workspace_rename = sidebar
-            .split("fn begin_workspace_rename(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("begin_workspace_rename body");
+        let begin_workspace_rename =
+            source_slice(sidebar, "fn begin_workspace_rename(\n", "\n    }");
         let tab_ops = include_str!("../workspace_ops/tab.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the tab-ops module");
-        let begin_tab_rename = tab_ops
-            .split("fn begin_tab_rename(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("begin_tab_rename body");
+        let begin_tab_rename = source_slice(tab_ops, "fn begin_tab_rename(\n", "\n    }");
 
         for (label, body) in [
             ("begin_workspace_rename", begin_workspace_rename),
@@ -3699,11 +3694,7 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the tab-ops module");
-        let begin_tab_rename = tab_ops
-            .split("fn begin_tab_rename(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("begin_tab_rename body");
+        let begin_tab_rename = source_slice(tab_ops, "fn begin_tab_rename(\n", "\n    }");
         assert!(
             begin_tab_rename.contains("tab_row_title(tab, tab_idx, cx)"),
             "the rename buffer must seed from the title the sidebar actually displays - which is \
@@ -3714,11 +3705,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the sidebar module");
-        let tab_row = production
-            .split("fn render_tab_row(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("fn render_workspace_meta_row(\n").next())
-            .expect("tab row renderer");
+        let tab_row = source_slice(
+            production,
+            "fn render_tab_row(\n",
+            "fn render_workspace_meta_row(\n",
+        );
         assert!(
             tab_row.contains("on_mouse_down_out(cx.listener(|this, _, window, cx|")
                 && tab_row.contains("this.commit_inline_rename(window, cx);"),
@@ -3740,11 +3731,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the module");
-        let workspace_row = production
-            .split("fn render_workspace_row(\n")
-            .nth(1)
-            .and_then(|rest| rest.split("fn render_tab_row(\n").next())
-            .expect("workspace row renderer");
+        let workspace_row = source_slice(
+            production,
+            "fn render_workspace_row(\n",
+            "fn render_tab_row(\n",
+        );
 
         let capture = workspace_row
             .find("let was_renaming")
@@ -3789,11 +3780,7 @@ mod tests {
         // these on, so assert the seam that IS reachable - the bodies as
         // written.
         let src = include_str!("../workspace_ops/mod.rs");
-        let dismiss = src
-            .split("pub(crate) fn dismiss_transient_surfaces")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("dismiss_transient_surfaces body");
+        let dismiss = source_slice(src, "pub(crate) fn dismiss_transient_surfaces", "\n    }");
         for field in ["renaming_idx", "renaming_tab", "rename_text"] {
             assert!(
                 !dismiss.contains(field),
@@ -3802,11 +3789,7 @@ mod tests {
             );
         }
 
-        let cancel = src
-            .split("pub(crate) fn cancel_inline_rename(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("cancel_inline_rename body");
+        let cancel = source_slice(src, "pub(crate) fn cancel_inline_rename(", "\n    }");
         for clear in [
             "self.renaming_idx = None;",
             "self.renaming_tab = None;",

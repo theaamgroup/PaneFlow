@@ -944,6 +944,7 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_probe::source_slice;
 
     /// Every `.rs` file under `src-app/src`, read off disk at test time.
     ///
@@ -1178,11 +1179,7 @@ mod tests {
     #[test]
     fn every_modal_close_path_routes_through_the_guard() {
         let tab_src = include_str!("workspace_ops/tab.rs");
-        let close_tab = tab_src
-            .split("pub(crate) fn handle_close_tab")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("handle_close_tab body");
+        let close_tab = source_slice(tab_src, "pub(crate) fn handle_close_tab", "\n    }");
         assert!(
             close_tab.contains("request_close_workspace_tab")
                 && close_tab.contains("ConfirmStyle::Modal"),
@@ -1199,21 +1196,17 @@ mod tests {
         // on - by which point the region has run 17 lines into
         // `render_pane_context_menu`, and the assertions below would be
         // reading the wrong menu item.
-        let tab_menu = menu_src
-            .split("\"tab-context-close\".into()")
-            .nth(1)
-            .and_then(|rest| rest.split(".into_any_element()").next())
-            .expect("tab context menu Close item");
+        let tab_menu = source_slice(
+            menu_src,
+            "\"tab-context-close\".into()",
+            ".into_any_element()",
+        );
         assert!(
             tab_menu.contains("request_close_workspace_tab")
                 && tab_menu.contains("ConfirmStyle::Modal"),
             "the tab context menu's Close must go through the guard: {tab_menu}"
         );
-        let pane_menu = menu_src
-            .split("\"pane-context-close\".into()")
-            .nth(1)
-            .and_then(|rest| rest.split("));").next())
-            .expect("pane context menu Close Pane item");
+        let pane_menu = source_slice(menu_src, "\"pane-context-close\".into()", "));");
         assert!(
             pane_menu.contains("request_close_pane") && pane_menu.contains("ConfirmStyle::Modal"),
             "the pane context menu's Close Pane must go through the guard, and MODALLY - the \
@@ -1226,11 +1219,7 @@ mod tests {
         );
 
         let ops_src = include_str!("workspace_ops/mod.rs");
-        let close_pane = ops_src
-            .split("pub(crate) fn handle_close_pane")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("handle_close_pane body");
+        let close_pane = source_slice(ops_src, "pub(crate) fn handle_close_pane", "\n    }");
         assert!(
             close_pane.contains("arm_pending_close_pane")
                 && close_pane.contains("ConfirmStyle::Modal"),
@@ -1242,11 +1231,7 @@ mod tests {
     #[test]
     fn workspace_guard_includes_off_tree_terminal_owners() {
         let src = include_str!("close_confirm.rs");
-        let states = src
-            .split("fn workspace_close_states(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// `(workspace id").next())
-            .expect("workspace close-state collector");
+        let states = source_slice(src, "fn workspace_close_states(", "/// `(workspace id");
         assert!(
             states.contains("diff_dock_terminals_for_workspace"),
             "diff-dock agents die with their workspace and must arm confirmation: {states}"
@@ -1268,11 +1253,7 @@ mod tests {
     #[test]
     fn tab_guard_includes_its_own_dock_terminals_only() {
         let src = include_str!("close_confirm.rs");
-        let states = src
-            .split("fn tab_close_states(")
-            .nth(1)
-            .and_then(|rest| rest.split("fn workspace_close_states(").next())
-            .expect("tab close-state collector");
+        let states = source_slice(src, "fn tab_close_states(", "fn workspace_close_states(");
         assert!(
             states.contains("tab_off_tree_close_states(tab.id"),
             "the tab guard must fold in the tab's own dock terminals, by tab id: {states}"
@@ -1287,11 +1268,11 @@ mod tests {
             "a tab close must not count sibling tabs' docks or Review terminals: {states}"
         );
 
-        let request = src
-            .split("pub(crate) fn request_close_workspace_tab(")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn arm_pending_close_pane(").next())
-            .expect("tab close request");
+        let request = source_slice(
+            src,
+            "pub(crate) fn request_close_workspace_tab(",
+            "pub(crate) fn arm_pending_close_pane(",
+        );
         assert!(
             request.contains("tab_off_tree_close_states(tab_id, cx).is_empty()"),
             "the tab modal must stop promising dock sessions back when the tab has some: {request}"
@@ -1304,14 +1285,11 @@ mod tests {
     #[test]
     fn every_workspace_close_path_requires_confirmation_and_captures_undo() {
         let ops = include_str!("workspace_ops/mod.rs");
-        let shortcut = ops
-            .split("pub(crate) fn handle_close_workspace(")
-            .nth(1)
-            .and_then(|rest| {
-                rest.split("pub(crate) fn handle_copy_workspace_path(")
-                    .next()
-            })
-            .expect("CloseWorkspace action handler");
+        let shortcut = source_slice(
+            ops,
+            "pub(crate) fn handle_close_workspace(",
+            "pub(crate) fn handle_copy_workspace_path(",
+        );
         assert!(
             shortcut.contains("request_close_workspace")
                 && shortcut.contains("ConfirmStyle::Modal"),
@@ -1322,11 +1300,11 @@ mod tests {
             "the shortcut must not retain an unguarded route: {shortcut}"
         );
         let bootstrap = include_str!("bootstrap.rs");
-        let menu_fallback = bootstrap
-            .split("cx.on_action(|_: &CloseWorkspace")
-            .nth(1)
-            .and_then(|rest| rest.split("cx.on_action(|_: &NextWorkspace").next())
-            .expect("macOS CloseWorkspace action fallback");
+        let menu_fallback = source_slice(
+            bootstrap,
+            "cx.on_action(|_: &CloseWorkspace",
+            "cx.on_action(|_: &NextWorkspace",
+        );
         assert!(
             menu_fallback.contains("request_close_workspace")
                 && menu_fallback.contains("ConfirmStyle::Modal"),
@@ -1335,11 +1313,7 @@ mod tests {
         assert!(!menu_fallback.contains("close_workspace_at("));
 
         let sidebar = include_str!("sidebar/mod.rs");
-        let row_x = sidebar
-            .split("ws-close-{ws_id}")
-            .nth(1)
-            .and_then(|rest| rest.split("let row =").next())
-            .expect("workspace row close button");
+        let row_x = source_slice(sidebar, "ws-close-{ws_id}", "let row =");
         assert!(
             row_x.contains("request_close_workspace") && row_x.contains("ConfirmStyle::Modal"),
             "the workspace row x must ask before closing: {row_x}"
@@ -1347,11 +1321,7 @@ mod tests {
         assert!(!row_x.contains("close_workspace_at("));
 
         let menu = include_str!("sidebar/context_menu.rs");
-        let menu_close = menu
-            .split("workspace-context-close")
-            .nth(1)
-            .and_then(|rest| rest.split("into_any_element()").next())
-            .expect("workspace context menu close item");
+        let menu_close = source_slice(menu, "workspace-context-close", "into_any_element()");
         assert!(
             menu_close.contains("request_close_workspace")
                 && menu_close.contains("ConfirmStyle::Modal"),
@@ -1360,22 +1330,18 @@ mod tests {
         assert!(!menu_close.contains("close_workspace_at("));
 
         let ipc = include_str!("ipc_handler.rs");
-        let ipc_close = ipc
-            .split("\"workspace.close\"")
-            .nth(1)
-            .and_then(|rest| rest.split("\"workspace.restore_layout\"").next())
-            .expect("workspace.close IPC arm");
+        let ipc_close = source_slice(ipc, "\"workspace.close\"", "\"workspace.restore_layout\"");
         assert!(
             ipc_close.contains("request_close_workspace_without_window"),
             "IPC must ask in-app rather than closing agents remotely: {ipc_close}"
         );
         assert!(!ipc_close.contains("close_workspace_at_without_window"));
 
-        let closer = ops
-            .split("fn close_workspace_at_inner(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    /// Move a workspace").next())
-            .expect("workspace closer");
+        let closer = source_slice(
+            ops,
+            "fn close_workspace_at_inner(",
+            "\n    /// Move a workspace",
+        );
         let capture_at = closer
             .find("capture_closed_workspace_record(")
             .expect("workspace close must capture an undo record");
@@ -1395,27 +1361,21 @@ mod tests {
     #[test]
     fn workspace_close_request_never_closes_before_the_modal() {
         let src = include_str!("close_confirm.rs");
-        let request = src
-            .split("pub(crate) fn request_close_workspace(")
-            .nth(1)
-            .and_then(|rest| {
-                rest.split("pub(crate) fn request_close_workspace_without_window(")
-                    .next()
-            })
-            .expect("request_close_workspace body");
+        let request = source_slice(
+            src,
+            "pub(crate) fn request_close_workspace(",
+            "pub(crate) fn request_close_workspace_without_window(",
+        );
         assert!(
             !request.contains("close_workspace_at_inner"),
             "the folder X must not remove the workspace before the modal is answered: {request}"
         );
 
-        let arm = src
-            .split("fn arm_pending_close_workspace(")
-            .nth(1)
-            .and_then(|rest| {
-                rest.split("/// The single entry point for UI workspace-close gestures.")
-                    .next()
-            })
-            .expect("arm_pending_close_workspace body");
+        let arm = source_slice(
+            src,
+            "fn arm_pending_close_workspace(",
+            "/// The single entry point for UI workspace-close gestures.",
+        );
         assert!(
             !arm.contains("return Some(false)"),
             "a workspace with no live agent must still arm the modal, not skip it: {arm}"
@@ -1434,24 +1394,21 @@ mod tests {
              undo copy must key off their presence, not off a live-agent scan: {arm}"
         );
 
-        let windowless = src
-            .split("pub(crate) fn request_close_workspace_without_window(")
-            .nth(1)
-            .and_then(|rest| {
-                rest.split("/// The one entry point every user-initiated tab close")
-                    .next()
-            })
-            .expect("request_close_workspace_without_window body");
+        let windowless = source_slice(
+            src,
+            "pub(crate) fn request_close_workspace_without_window(",
+            "/// The one entry point every user-initiated tab close",
+        );
         assert!(
             !windowless.contains("close_workspace_at_inner"),
             "IPC must not close a workspace without the in-app modal: {windowless}"
         );
 
-        let render = src
-            .split("pub(crate) fn render_close_confirm_dialog(")
-            .nth(1)
-            .and_then(|rest| rest.split("deferred(backdrop)").next())
-            .expect("render_close_confirm_dialog body");
+        let render = source_slice(
+            src,
+            "pub(crate) fn render_close_confirm_dialog(",
+            "deferred(backdrop)",
+        );
         assert!(
             render.contains("workspace_close_confirm_body("),
             "a no-agent workspace close must use the folder copy, not name a fictitious agent: \
@@ -1473,11 +1430,7 @@ mod tests {
     #[test]
     fn the_sidebar_tab_x_routes_through_the_modal_chokepoint() {
         let sidebar = include_str!("sidebar/mod.rs");
-        let tab_x = sidebar
-            .split("\"tab-close-{tab_id}\"")
-            .nth(1)
-            .and_then(|rest| rest.split("let row_shell =").next())
-            .expect("sidebar tab close button");
+        let tab_x = source_slice(sidebar, "\"tab-close-{tab_id}\"", "let row_shell =");
         assert!(
             tab_x.contains("request_close_workspace_tab") && tab_x.contains("ConfirmStyle::Modal"),
             "the tab x must call the same guarded chokepoint as Cmd+W, modally: {tab_x}"
@@ -1509,11 +1462,11 @@ mod tests {
         // The chokepoint's own contract is what makes one click enough: no
         // qualifying agent means close IMMEDIATELY, otherwise arm the modal
         // and close nothing until it is answered.
-        let request = include_str!("close_confirm.rs")
-            .split("pub(crate) fn request_close_workspace_tab(")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn arm_pending_close_pane(").next())
-            .expect("request_close_workspace_tab body");
+        let request = source_slice(
+            include_str!("close_confirm.rs"),
+            "pub(crate) fn request_close_workspace_tab(",
+            "pub(crate) fn arm_pending_close_pane(",
+        );
         assert!(
             request.contains("agent_needing_confirmation"),
             "the chokepoint must decide off the live-agent predicate: {request}"
@@ -1538,11 +1491,11 @@ mod tests {
     #[test]
     fn the_pane_header_is_the_only_inline_close_path() {
         let handlers = include_str!("event_handlers.rs");
-        let close_requested = handlers
-            .split("pane::PaneEvent::CloseRequested => {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n            }").next())
-            .expect("PaneEvent::CloseRequested arm");
+        let close_requested = source_slice(
+            handlers,
+            "pane::PaneEvent::CloseRequested => {",
+            "\n            }",
+        );
         assert!(
             close_requested.contains("click_outcome(")
                 && close_requested.contains("ConfirmStyle::Inline"),
@@ -1581,17 +1534,13 @@ mod tests {
     #[test]
     fn neither_close_button_acts_on_the_second_click_of_a_double_click() {
         let sidebar = include_str!("sidebar/mod.rs");
-        let tab_x = sidebar
-            .split("\"tab-close-{tab_id}\"")
-            .nth(1)
-            .and_then(|rest| rest.split("let row_shell =").next())
-            .expect("sidebar tab close button");
+        let tab_x = source_slice(sidebar, "\"tab-close-{tab_id}\"", "let row_shell =");
         let pane_src = include_str!("../pane.rs");
-        let header_x = pane_src
-            .split("fn render_close_button(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    /// Close this pane").next())
-            .expect("render_close_button body");
+        let header_x = source_slice(
+            pane_src,
+            "fn render_close_button(",
+            "\n    /// Close this pane",
+        );
 
         for (label, body) in [
             ("the sidebar tab x", tab_x),
@@ -1622,16 +1571,16 @@ mod tests {
     #[test]
     fn the_modal_backdrop_ignores_the_tail_of_the_double_click_that_opened_it() {
         let src = include_str!("close_confirm.rs");
-        let render = src
-            .split("pub(crate) fn render_close_confirm_dialog(")
-            .nth(1)
-            .and_then(|rest| rest.split("deferred(backdrop)").next())
-            .expect("render_close_confirm_dialog body");
-        let backdrop = render
-            .split("\"close-confirm-backdrop\"")
-            .nth(1)
-            .and_then(|rest| rest.split("\"close-confirm-dialog\"").next())
-            .expect("backdrop element, up to the dialog it wraps");
+        let render = source_slice(
+            src,
+            "pub(crate) fn render_close_confirm_dialog(",
+            "deferred(backdrop)",
+        );
+        let backdrop = source_slice(
+            render,
+            "\"close-confirm-backdrop\"",
+            "\"close-confirm-dialog\"",
+        );
         assert!(
             backdrop.contains("cancel_pending_close"),
             "the backdrop must still cancel on a deliberate click: {backdrop}"
@@ -1657,11 +1606,7 @@ mod tests {
     #[test]
     fn escape_stands_an_inline_arm_down_and_consumes_only_that_key() {
         let src = include_str!("../main.rs");
-        let capture = src
-            .split(".capture_key_down(cx.listener(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n            }))").next())
-            .expect("root capture_key_down body");
+        let capture = source_slice(src, ".capture_key_down(cx.listener(", "\n            }))");
         assert!(
             capture.contains("escape_consumes_inline_arm(")
                 && capture.contains("set_pending_close(None"),
@@ -1756,11 +1701,7 @@ mod tests {
     #[test]
     fn confirming_a_modal_tab_close_hands_focus_back_and_an_inline_one_does_not() {
         let src = include_str!("close_confirm.rs");
-        let body = src
-            .split("pub(crate) fn confirm_pending_close_tab(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("confirm_pending_close_tab body");
+        let body = source_slice(src, "pub(crate) fn confirm_pending_close_tab(", "\n    }");
         let closes_at = body
             .find("self.close_workspace_tab(")
             .expect("the confirm path's close call");
@@ -1788,11 +1729,7 @@ mod tests {
         // The premise this rests on. If the gate below ever goes away, the
         // restore above becomes redundant rather than wrong - re-read both.
         let tab_src = include_str!("workspace_ops/tab.rs");
-        let close_tab = tab_src
-            .split("pub(crate) fn close_workspace_tab(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }").next())
-            .expect("close_workspace_tab body");
+        let close_tab = source_slice(tab_src, "pub(crate) fn close_workspace_tab(", "\n    }");
         assert!(
             close_tab.contains("if ws_idx == self.active_idx"),
             "the close's own re-focus is gated on the active workspace: {close_tab}"
@@ -1817,19 +1754,15 @@ mod tests {
         // process is already gone, so there is nothing to confirm and nothing
         // to undo.
         let handlers = include_str!("event_handlers.rs");
-        let remove_arm = handlers
-            .split("pane::PaneEvent::Remove => {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n            }").next())
-            .expect("PaneEvent::Remove arm");
+        let remove_arm = source_slice(handlers, "pane::PaneEvent::Remove => {", "\n            }");
         // The arm itself is eight lines - this branch moved its body into
         // `remove_pane_from_tree` - so scanning only the arm would sail past a
         // `push_closed_record` added one call deeper. Follow the call.
-        let removal = handlers
-            .split("pub(crate) fn remove_pane_from_tree(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    pub(crate) fn handle_pane_event(").next())
-            .expect("remove_pane_from_tree body");
+        let removal = source_slice(
+            handlers,
+            "pub(crate) fn remove_pane_from_tree(",
+            "\n    pub(crate) fn handle_pane_event(",
+        );
         for (label, body) in [
             ("the PaneEvent::Remove arm", remove_arm),
             ("remove_pane_from_tree, which it delegates to", removal),

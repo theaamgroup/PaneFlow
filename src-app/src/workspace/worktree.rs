@@ -1438,18 +1438,14 @@ pub fn teardown_all(worktrees: Vec<ManagedWorktree>, protected_session_ids: Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_probe::source_slice;
     use tracing_test::traced_test;
 
     #[test]
     fn run_git_sets_git_terminal_prompt_off() {
         let source = include_str!("worktree.rs");
-        let run_git_body = source
-            .split_once("fn run_git(")
-            .expect("run_git helper")
-            .1
-            .split_once("/// `git worktree list --porcelain`")
-            .expect("end of run_git helper")
-            .0;
+        let run_git_body =
+            source_slice(source, "fn run_git(", "/// `git worktree list --porcelain`");
 
         assert!(
             run_git_body.contains(".env(\"GIT_TERMINAL_PROMPT\", \"0\")"),
@@ -1705,14 +1701,14 @@ mod tests {
     #[test]
     fn worktree_has_live_process_cwd_respects_deadline() {
         let source = include_str!("worktree.rs");
-        let start = source
-            .find("fn worktree_has_live_process_cwd(")
-            .expect("worktree_has_live_process_cwd");
-        let scan = &source[start..];
-        let scan = scan
-            .split_once("\npub fn prune(")
-            .map(|(body, _)| body)
-            .unwrap_or(scan);
+        // Issue #219: the old `.unwrap_or(scan)` fallback silently widened
+        // the region to end-of-file (this test module included) if the end
+        // anchor ever moved; a missing anchor now panics instead.
+        let scan = source_slice(
+            source,
+            "fn worktree_has_live_process_cwd(",
+            "\npub fn prune(",
+        );
 
         assert!(
             scan.contains("GIT_DEADLINE") || scan.contains("deadline"),
@@ -1727,11 +1723,7 @@ mod tests {
             budget_hits >= 2,
             "enumeration and CWD probes must both consult the deadline, found {budget_hits}"
         );
-        let first_loop = scan
-            .split("for pid in &pids")
-            .nth(1)
-            .and_then(|rest| rest.split("for pid in parents.keys()").next())
-            .expect("first PID loop");
+        let first_loop = source_slice(scan, "for pid in &pids", "for pid in parents.keys()");
         let getsid_at = first_loop
             .find("libc::getsid")
             .expect("getsid in first PID loop");

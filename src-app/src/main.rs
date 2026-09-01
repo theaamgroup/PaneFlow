@@ -54,6 +54,8 @@ mod runtime_paths;
 mod search;
 mod settings;
 mod sidebar_title;
+#[cfg(test)]
+mod source_probe;
 mod sparkle;
 mod system_info;
 mod terminal;
@@ -513,6 +515,7 @@ mod native_material_tests {
         prepare_process_environment_before_threads, should_extract_mcp_bridge_for_cli,
         should_load_login_shell_env_for_startup, should_setup_hooks_for_cli,
     };
+    use crate::source_probe::source_slice;
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_string()).collect()
@@ -544,11 +547,10 @@ mod native_material_tests {
         // disagree in fullscreen. Pin both to the helper, not just the rule.
         // The needles are composed at runtime: `include_str!` captures this
         // test's own source too, and a literal anchor would match itself.
+        // The slice ends at the impl's column-0 closing brace (issue #219:
+        // unbounded, it ran through every test module after the impl).
         let anchor = format!("impl Render for {} {{", "PaneFlowApp");
-        let render = include_str!("main.rs")
-            .split_once(anchor.as_str())
-            .map(|(_, rest)| rest)
-            .unwrap();
+        let render = source_slice(include_str!("main.rs"), &anchor, "\n}\n");
         for prefix in ["macos", "cockpit"] {
             let getter = format!("{prefix}_chrome_material_enabled()");
             let before = render
@@ -707,6 +709,7 @@ mod help_tests {
 #[cfg(test)]
 mod crash_reporting_tests {
     use super::crash_reporting_options;
+    use crate::source_probe::source_slice;
 
     #[test]
     fn crash_reporting_never_sends_default_pii() {
@@ -732,13 +735,11 @@ mod crash_reporting_tests {
         // `paneflow hooks ...`, and `paneflow <verb>` never start crash
         // reporting - and the init is gated on the config's
         // `crash_reporting` master switch. Anchors are composed at runtime
-        // because `include_str!` captures this test's own source too.
+        // because `include_str!` captures this test's own source too, and
+        // the slice ends at main's column-0 closing brace (issue #219).
         let source = include_str!("main.rs");
         let anchor = format!("fn {}() {{", "main");
-        let main_body = source
-            .split_once(anchor.as_str())
-            .map(|(_, rest)| rest)
-            .expect("fn main() exists");
+        let main_body = source_slice(source, &anchor, "\n}\n");
         let needle = format!("{}::init", "sentry");
         let init_at = main_body
             .find(needle.as_str())

@@ -2638,15 +2638,16 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_probe::source_slice;
 
     #[test]
     fn undo_close_pane_refuses_split_when_zoomed_and_keeps_record() {
         let src = include_str!("mod.rs");
-        let restore = src
-            .split("fn restore_closed_pane(")
-            .nth(1)
-            .and_then(|rest| rest.split("fn restore_closed_tab_record(").next())
-            .expect("restore_closed_pane body");
+        let restore = source_slice(
+            src,
+            "fn restore_closed_pane(",
+            "fn restore_closed_tab_record(",
+        );
         let zoom_guard = restore
             .find("active_tab().is_zoomed()")
             .expect("undo-close must inspect the destination tab's zoom state");
@@ -3417,20 +3418,12 @@ mod tests {
         );
 
         let src = include_str!("mod.rs");
-        let layout_capture = src
-            .split("fn capture_closed_tab_layout_with_budget(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}").next())
-            .expect("budgeted capture body");
+        let layout_capture = source_slice(src, "fn capture_closed_tab_layout_with_budget(", "\n}");
         assert!(
             layout_capture.contains("prune_unrestorable(tree.serialize_with_scrollback_budget("),
             "capture must prune the serialized tree before storing it"
         );
-        let record_capture = src
-            .split("fn capture_closed_tab_record(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}").next())
-            .expect("capture_closed_tab_record body");
+        let record_capture = source_slice(src, "fn capture_closed_tab_record(", "\n}");
         assert!(
             record_capture.contains("capture_closed_tab_layout(tab, cx)?"),
             "tab capture must keep routing through the pruning helper"
@@ -3629,11 +3622,7 @@ mod tests {
                 "pub(crate) fn handle_new_workspace(",
             ),
         ] {
-            let body = src
-                .split(start)
-                .nth(1)
-                .and_then(|rest| rest.split(end).next())
-                .unwrap_or_else(|| panic!("{start} body"));
+            let body = source_slice(src, start, end);
             // `.show_toast(` rather than `self.show_toast(`: the shared
             // re-push helper inside `restore_closed_tab_record` toasts through
             // its own `&mut Self` binding, and a needle that missed it would
@@ -3690,11 +3679,11 @@ mod tests {
     #[test]
     fn closing_a_workspace_prunes_the_undo_stack_and_stands_down_its_pending_close() {
         let src = include_str!("mod.rs");
-        let body = src
-            .split("fn close_workspace_at_inner(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    /// Move a workspace").next())
-            .expect("close_workspace_at_inner body");
+        let body = source_slice(
+            src,
+            "fn close_workspace_at_inner(",
+            "\n    /// Move a workspace",
+        );
         let prune_at = body
             .find("drop_closed_records_for_workspace(")
             .expect("the close must prune the undo stack");
@@ -3718,21 +3707,17 @@ mod tests {
     #[test]
     fn workspace_close_defers_managed_worktree_teardown_until_undo_retires() {
         let src = include_str!("mod.rs");
-        let close = src
-            .split("fn close_workspace_at_inner(")
-            .nth(1)
-            .and_then(|rest| rest.split("fn reorder_workspace(").next())
-            .expect("workspace close body");
+        let close = source_slice(src, "fn close_workspace_at_inner(", "fn reorder_workspace(");
         assert!(
             !close.contains("std::mem::take(&mut self.workspaces[idx].managed_worktrees)"),
             "an undoable workspace record must keep ownership instead of racing a remover: {close}"
         );
 
-        let restore = src
-            .split("fn restore_closed_workspace_record(")
-            .nth(1)
-            .and_then(|rest| rest.split("fn handle_new_workspace(").next())
-            .expect("workspace restore body");
+        let restore = source_slice(
+            src,
+            "fn restore_closed_workspace_record(",
+            "fn handle_new_workspace(",
+        );
         assert!(
             restore.contains("workspace.managed_worktrees = managed_worktrees;"),
             "undo must return lifecycle ownership to the restored workspace: {restore}"
@@ -3751,11 +3736,11 @@ mod tests {
     #[test]
     fn restore_closed_pane_has_no_silent_early_return() {
         let src = include_str!("mod.rs");
-        let body = src
-            .split("fn restore_closed_pane(")
-            .nth(1)
-            .and_then(|rest| rest.split("fn restore_closed_tab_record(").next())
-            .expect("restore_closed_pane body");
+        let body = source_slice(
+            src,
+            "fn restore_closed_pane(",
+            "fn restore_closed_tab_record(",
+        );
         assert_eq!(
             body.matches("return;").count(),
             body.matches("push_closed_record(").count()
@@ -3877,11 +3862,11 @@ mod tests {
     #[test]
     fn workspace_capture_uses_one_global_scrollback_budget() {
         let src = include_str!("mod.rs");
-        let capture = src
-            .split("fn capture_closed_workspace_record(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// Locate the workspace").next())
-            .expect("workspace capture body");
+        let capture = source_slice(
+            src,
+            "fn capture_closed_workspace_record(",
+            "/// Locate the workspace",
+        );
         assert!(capture.contains("Cell::new(MAX_CLOSED_PANE_SCROLLBACK_BYTES)"));
         assert!(capture.contains("capture_closed_tab_layout_with_budget"));
     }
@@ -3889,11 +3874,11 @@ mod tests {
     #[test]
     fn completed_worktree_retirement_clears_its_journal_durably() {
         let src = include_str!("mod.rs");
-        let completion = src
-            .split("fn spawn_persisted_worktree_teardown(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// Resume the retirement journal").next())
-            .expect("worktree completion path");
+        let completion = source_slice(
+            src,
+            "fn spawn_persisted_worktree_teardown(",
+            "/// Resume the retirement journal",
+        );
         let remove_at = completion
             .find(".retain(|worktree| !completed_paths.contains(&worktree.path))")
             .expect("remove completed ownership");
@@ -3915,14 +3900,11 @@ mod tests {
     #[test]
     fn live_worktree_scan_includes_every_pane_terminal_cwd() {
         let src = include_str!("mod.rs");
-        let scan = src
-            .split("pub(crate) fn live_workspace_uses_worktree(")
-            .nth(1)
-            .and_then(|rest| {
-                rest.split("/// Whether a candidate CWD is inside a checkout")
-                    .next()
-            })
-            .expect("live worktree scan");
+        let scan = source_slice(
+            src,
+            "pub(crate) fn live_workspace_uses_worktree(",
+            "/// Whether a candidate CWD is inside a checkout",
+        );
         assert!(scan.contains("workspace.collect_panes()"), "{scan}");
         assert!(scan.contains(".terminals()"), "{scan}");
         assert!(scan.contains("current_cwd"), "{scan}");
@@ -3936,11 +3918,11 @@ mod tests {
     #[test]
     fn worker_cwd_gate_captures_every_terminal_host_before_spawn() {
         let src = include_str!("mod.rs");
-        let capture = src
-            .split("fn live_terminal_session_ids(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// Whether any live workspace").next())
-            .expect("terminal session capture");
+        let capture = source_slice(
+            src,
+            "fn live_terminal_session_ids(",
+            "/// Whether any live workspace",
+        );
         for required in [
             "self.workspaces",
             "all_diff_dock_terminals",
@@ -3950,11 +3932,11 @@ mod tests {
             assert!(capture.contains(required), "missing {required}: {capture}");
         }
 
-        let teardown = src
-            .split("fn spawn_persisted_worktree_teardown(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// Resume the retirement journal").next())
-            .expect("worker teardown handoff");
+        let teardown = source_slice(
+            src,
+            "fn spawn_persisted_worktree_teardown(",
+            "/// Resume the retirement journal",
+        );
         let sessions = teardown
             .find("live_terminal_session_ids(cx)")
             .expect("PTY session capture");
@@ -4005,11 +3987,11 @@ mod tests {
     #[test]
     fn dynamic_ui_split_checks_pending_before_terminal_spawn() {
         let src = include_str!("mod.rs");
-        let split = src
-            .split("pub(crate) fn split_with_target(")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn split_pane").next())
-            .expect("targeted split body");
+        let split = source_slice(
+            src,
+            "pub(crate) fn split_with_target(",
+            "pub(crate) fn split_pane",
+        );
         let gate = split
             .find("pending_worktree_teardown_conflicts")
             .expect("pending retirement gate");
@@ -4075,11 +4057,7 @@ mod tests {
     #[test]
     fn close_workspace_shared_closer_runs_composer_and_diff_teardown() {
         let src = include_str!("mod.rs");
-        let closer = src
-            .split("fn close_workspace_at_inner")
-            .nth(1)
-            .and_then(|rest| rest.split("fn reorder_workspace").next())
-            .expect("shared closer");
+        let closer = source_slice(src, "fn close_workspace_at_inner", "fn reorder_workspace");
         for helper in [
             "drop_diff_dock_for_workspace",
             "drop_diff_review_terminals_for_workspace",
