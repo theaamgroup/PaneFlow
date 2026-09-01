@@ -182,8 +182,23 @@ impl AgentConfigWriter for ClaudeCode {
         }
         if self.cli_available() {
             io::backup(path)?;
-            if let Ok(()) = self.invoke_cli(&["mcp", "remove", "paneflow"]) {
-                return Ok(UninstallOutcome::Removed);
+            // Same scope as install (`-s user`): without it the CLI can act
+            // on a different scope and still exit 0. Like install, trust the
+            // on-disk postcondition, not the CLI's exit status (issue #215).
+            match self.invoke_cli(&["mcp", "remove", "-s", "user", "paneflow"]) {
+                Ok(()) => match self.status(None)? {
+                    StatusOutcome::NotInstalled => return Ok(UninstallOutcome::Removed),
+                    _ => {
+                        log::warn!(
+                            "paneflow mcp: `claude mcp remove` exited 0 but ~/.claude.json still carries the paneflow entry; falling back to direct removal"
+                        );
+                    }
+                },
+                Err(e) => {
+                    log::warn!(
+                        "paneflow mcp: `claude mcp remove` failed ({e:#}); falling back to direct ~/.claude.json removal"
+                    );
+                }
             }
         }
         support::json_uninstall(path, CONTAINER)
@@ -450,6 +465,62 @@ mod tests {
             v["mcpServers"]["paneflow"]["command"],
             json!("/data/paneflow-mcp")
         );
+    }
+
+    #[test]
+    fn uninstall_cli_success_falls_back_when_entry_still_present() {
+        // Issue #215: `claude mcp remove` can exit 0 without removing the
+        // entry from the watched file (wrong scope, different config dir).
+        // Uninstall must verify the postcondition and fall back to the
+        // locked direct edit, and the remove must carry install's scope.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join(".claude.json");
+        std::fs::write(
+            &p,
+            serde_json::to_vec(&json!({
+                "numStartups": 42,
+                "mcpServers": {
+                    "github": { "command": "gh-mcp" },
+                    "paneflow": {
+                        "type": "stdio",
+                        "command": "/data/paneflow-mcp",
+                        "args": []
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_h = Rc::clone(&calls);
+        let w = ClaudeCode {
+            config_path: Some(p.clone()),
+            allow_cli: true,
+            cli: Some(Box::new(move |args| {
+                record_args(&calls_h, args);
+                Ok(()) // exit 0 without touching the file
+            })),
+        };
+
+        assert_eq!(w.uninstall().unwrap(), UninstallOutcome::Removed);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[vec![
+                "mcp".to_string(),
+                "remove".to_string(),
+                "-s".to_string(),
+                "user".to_string(),
+                "paneflow".to_string(),
+            ]],
+            "uninstall must pass the same scope install uses (-s user)"
+        );
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert!(
+            v["mcpServers"].get("paneflow").is_none(),
+            "fallback must remove the entry the CLI left behind: {v}"
+        );
+        assert_eq!(v["numStartups"], json!(42));
+        assert_eq!(v["mcpServers"]["github"]["command"], json!("gh-mcp"));
     }
 
     #[test]

@@ -166,8 +166,23 @@ impl AgentConfigWriter for Codex {
         }
         if self.cli_available() {
             io::backup(path)?;
-            if let Ok(()) = self.invoke_cli(&["mcp", "remove", "paneflow"]) {
-                return Ok(UninstallOutcome::Removed);
+            // Like install, trust the on-disk postcondition, not the CLI's
+            // exit status (issue #215): `codex mcp remove` can exit 0 while
+            // the watched file still carries the entry.
+            match self.invoke_cli(&["mcp", "remove", "paneflow"]) {
+                Ok(()) => match self.status(None)? {
+                    StatusOutcome::NotInstalled => return Ok(UninstallOutcome::Removed),
+                    _ => {
+                        log::warn!(
+                            "paneflow mcp: `codex mcp remove` exited 0 but ~/.codex/config.toml still carries the paneflow entry; falling back to direct edit"
+                        );
+                    }
+                },
+                Err(e) => {
+                    log::warn!(
+                        "paneflow mcp: `codex mcp remove` failed ({e:#}); falling back to direct ~/.codex/config.toml edit"
+                    );
+                }
             }
         }
         support::toml_uninstall(path)
@@ -504,6 +519,51 @@ mod tests {
         assert_eq!(
             doc["mcp_servers"]["paneflow"]["command"].as_str(),
             Some("/data/paneflow-mcp")
+        );
+    }
+
+    #[test]
+    fn uninstall_cli_success_falls_back_when_entry_still_present() {
+        // Issue #215: `codex mcp remove` can exit 0 without removing the
+        // entry from the watched file (e.g. it edited a different
+        // `$CODEX_HOME`). Uninstall must verify the postcondition and fall
+        // back to the locked direct edit instead of reporting Removed.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "# codex config\nmodel = \"gpt-5\"\n\n[mcp_servers.github]\ncommand = \"gh-mcp\"\n\n[mcp_servers.paneflow]\ncommand = \"/data/paneflow-mcp\"\nargs = []\n",
+        )
+        .unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_h = Rc::clone(&calls);
+        let w = Codex {
+            config_path: Some(p.clone()),
+            allow_cli: true,
+            cli: Some(Box::new(move |args| {
+                record_args(&calls_h, args);
+                Ok(()) // exit 0 without touching the file
+            })),
+        };
+
+        assert_eq!(w.uninstall().unwrap(), UninstallOutcome::Removed);
+        assert!(
+            calls
+                .borrow()
+                .iter()
+                .any(|args| args.windows(2).any(|pair| pair == ["mcp", "remove"])),
+            "expected mcp remove: {:?}",
+            calls.borrow()
+        );
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert!(txt.contains("# codex config"));
+        assert!(txt.contains("gh-mcp"), "sibling server preserved");
+        let doc = txt.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(
+            doc.get("mcp_servers")
+                .and_then(|t| t.get("paneflow"))
+                .is_none(),
+            "fallback must remove the entry the CLI left behind: {txt}"
         );
     }
 
