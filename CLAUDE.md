@@ -269,7 +269,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
-The Ghostty backend is gone: `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/` were all deleted in stage 2a. Leftover-removal (2026-08-26) also deleted the compiled stubs (`auto_selects_ghostty_for_target`, `should_start_ghostty`, `GhosttyBuildDiagnostics`). `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Remaining Ghostty identifiers in comments or tests that assert absence are leftover copy, not a live backend.
+**libghostty-vt is coming back as the only engine (issue #184).** Stage 2a (2026-08-25) deleted `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/`, and leftover-removal (2026-08-26) deleted the compiled stubs (`auto_selects_ghostty_for_target`, `should_start_ghostty`, `GhosttyBuildDiagnostics`). #184 Phase 1 (2026-08-31) vendored the three crates and the `aarch64-apple-darwin` archive back from upstream v0.10.0 (`native/libghostty/`, stripped to macOS, linking unconditional, no stub) **without wiring them into `src-app`** - the app still runs Alacritty until Phase 2 swaps the session host. `fuzz/` stays deleted. Daily `cargo build` needs no Zig: the `-sys` build script verifies the vendored archive's hashes and links it. `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Remaining Ghostty identifiers in comments or tests that assert absence are leftover copy, not a live backend.
 
 ### Thread model
 
@@ -304,6 +304,9 @@ KeyDownEvent → TerminalView::handle_key_down() → keys::to_esc_str()
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
 | `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |
+| `paneflow-libghostty-sys` | `crates/paneflow-libghostty-sys/` | Library | Raw libghostty-vt FFI; `build.rs` verifies and links `native/libghostty/prebuilt/aarch64-apple-darwin` (no Zig) |
+| `paneflow-terminal-ghostty` | `crates/paneflow-terminal-ghostty/` | Library | Safe `DisplayTerminal` wrapper over the FFI (unwired until #184 Phase 2) |
+| `paneflow-ghostty-smoke` | `crates/paneflow-ghostty-smoke/` | Binary | Headless PTY smoke against the linked archive |
 
 There is **no** `paneflow-telemetry` crate. It was deleted in the post-2c
 grind. Zed lockfile crates named `telemetry` / `telemetry_events` belong

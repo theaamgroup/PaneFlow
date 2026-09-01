@@ -12,13 +12,13 @@
     ],
     "component": {
       "type": "application",
-      "bom-ref": "paneflow-libghostty-windows",
-      "name": "Paneflow libghostty Windows integration",
+      "bom-ref": "paneflow-libghostty-macos",
+      "name": "PaneFlow libghostty macOS integration",
       "version": "0.1.0-dev+f2d5758f6",
       "properties": [
         {
           "name": "paneflow:rust-target",
-          "value": "x86_64-pc-windows-msvc"
+          "value": "aarch64-apple-darwin"
         },
         {
           "name": "paneflow:linkage",
@@ -178,7 +178,7 @@
   ],
   "dependencies": [
     {
-      "ref": "paneflow-libghostty-windows",
+      "ref": "paneflow-libghostty-macos",
       "dependsOn": [
         "libghostty-vt@f2d5758f6305867dc36b36293c6165d8152b853e",
         "zig-runtime@0.16.0",

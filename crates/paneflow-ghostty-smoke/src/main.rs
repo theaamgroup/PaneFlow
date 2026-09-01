@@ -1,7 +1,5 @@
-// The PTY smoke runs on every POSIX shipping target. Linux and macOS drive
-// the same `/bin/sh`, the same `stty size` resize probe, and the same
-// `libc::kill` reaping check, so keeping two copies would only let them drift.
-#[cfg(unix)]
+// The PTY smoke drives a real `/bin/sh` through a native PTY: a marker
+// round-trip, a `stty size` resize probe, and a `libc::kill` reaping check.
 mod posix {
     use std::io::{Read, Write};
     use std::sync::mpsc;
@@ -130,93 +128,10 @@ mod posix {
     }
 }
 
-#[cfg(target_os = "windows")]
-mod windows {
-    use anyhow::{Result, bail};
-    use paneflow_terminal_ghostty::{
-        Color, DisplayTerminal, Key, KeyAction, KeyInput, Modifiers, TerminalAppearance, WindowSize,
-    };
-
-    const MARKER: &str = "PANEFLOW_GHOSTTY_WINDOWS_HEADLESS_OK";
-
-    pub(super) fn run() -> Result<()> {
-        let initial_size = WindowSize::new(80, 24, 8, 16)?;
-        for iteration in 0..32 {
-            let mut terminal =
-                DisplayTerminal::new(initial_size, 4_000, TerminalAppearance::default())?;
-            terminal.feed(b"\x1b]52;c;not-base64!\x07\xff")?;
-            terminal.feed(
-                format!(
-                    "\x1b[?1049h\x1b[2J\x1b[H\x1b[38;5;196m\x1b[48;5;42m{MARKER}-{iteration:02}-Ω"
-                )
-                .as_bytes(),
-            )?;
-            terminal.resize(WindowSize::new(101, 41, 8, 16)?)?;
-
-            let snapshot = terminal.snapshot()?;
-            let rendered = snapshot
-                .cells
-                .iter()
-                .map(|cell| cell.character)
-                .collect::<String>();
-            if !rendered.contains(MARKER)
-                || !snapshot.cells.iter().any(|cell| cell.character == 'Ω')
-                || !snapshot
-                    .cells
-                    .iter()
-                    .any(|cell| cell.background == Color::Palette(42))
-                || !terminal.modes()?.alternate_screen
-            {
-                bail!("headless snapshot did not preserve the deterministic VT fixture")
-            }
-
-            let encoded = terminal.encode_key(&KeyInput {
-                key: Key::Enter,
-                action: KeyAction::Press,
-                modifiers: Modifiers::empty(),
-                consumed_modifiers: Modifiers::empty(),
-                text: String::new(),
-                unshifted_codepoint: None,
-                composing: false,
-            })?;
-            if encoded != b"\r" {
-                bail!("headless key encoder returned unexpected bytes")
-            }
-        }
-
-        if DisplayTerminal::new(
-            WindowSize::new(80, 24, 8, 16)?,
-            usize::MAX,
-            TerminalAppearance::default(),
-        )
-        .is_ok()
-        {
-            bail!("headless constructor accepted an intentionally invalid scrollback limit")
-        }
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
 fn main() {
     if let Err(error) = posix::run() {
         eprintln!("libghostty package smoke failed: {error:#}");
         std::process::exit(1);
     }
     println!("libghostty package smoke passed");
-}
-
-#[cfg(target_os = "windows")]
-fn main() {
-    if let Err(error) = windows::run() {
-        eprintln!("libghostty Windows headless smoke failed: {error:#}");
-        std::process::exit(1);
-    }
-    println!("libghostty Windows headless smoke passed");
-}
-
-#[cfg(not(any(unix, windows)))]
-fn main() {
-    eprintln!("libghostty package smoke is available only on POSIX or Windows");
-    std::process::exit(2);
 }

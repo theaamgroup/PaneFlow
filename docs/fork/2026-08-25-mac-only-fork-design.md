@@ -18,7 +18,7 @@ and dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 |---|---|---|
 | Fork model | Keep all 1035 commits, keep `upstream` remote | `git blame` works, upstream fixes are cherry-pickable, `.git` stays 60M (no history rewrite, since `filter-repo` would destroy the merge base) |
 | Cut depth | Deep. Strip non-Mac `cfg` branches from shared source | Readable Mac-only source. Every future upstream merge conflicts across roughly 80 files. Accepted knowingly. |
-| Ghostty backend | Delete entirely | Verified unreachable on macOS. See Verification below. |
+| Ghostty backend | Delete entirely (2026-08-25); **being restored as the only engine by #184** | Verified unreachable on macOS at the time (see Verification below). Upstream v0.10.0 made macOS a Ghostty target; Phase 1 (2026-08-31) vendored the crates and darwin archive unwired, Phase 2 swaps the session host and deletes Alacritty. |
 | Self-update | **Sparkle 2, added by #119.** The deleted hand-rolled updater stays deleted | Hourly background checks, EdDSA + Developer ID verification, silent download, install on ordinary quit, no forced relaunch or update UI. No minisign and no `src-app/src/update/`. |
 | Telemetry | **Deleted** (post-2c grind). Do not resurrect PostHog | Never set `POSTHOG_API_KEY`. Crate, app module, consent UI, and `build.rs` env directives are gone. |
 | Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server, conductor skill and `PANEFLOW_*` stay. See `docs/fork/2026-08-25-post-2c-plan.md` |
