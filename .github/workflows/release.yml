@@ -50,6 +50,13 @@ jobs:
     name: Build aarch64-apple-darwin
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     environment: release
+    # `contents: write` stays on this job only because the signed-appcast
+    # step's `gh api --method POST .../releases/generate-notes` call is
+    # classified under "Contents" write for the GITHUB_TOKEN; with
+    # `contents: read` that step 403s on every tag-push release. Nothing in
+    # this job pushes to the repository, and the token reaches only that
+    # step's `env:` — checkout below does not persist it (issue #207).
+    # src-app/tests/release_workflow_policy.rs pins both invariants.
     permissions:
       contents: write
     runs-on: macos-15
@@ -58,6 +65,10 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ env.RELEASE_REF }}
+          # No step in this job performs an authenticated git operation, so
+          # never leave the GITHUB_TOKEN in .git/config while Cargo build
+          # scripts and the test suite execute (issue #207).
+          persist-credentials: false
 
       - name: Select Xcode 16.4 and verify Metal compiler
         run: |
