@@ -299,35 +299,12 @@ fn render_diff_tab(
     chip.into_any_element()
 }
 
-/// Icon for a file tab, derived from the basename (US-017). Mirrors the diff
-/// body's language mapping over the bundled `icons/languages` set, but falls
-/// back to `icons/file-text.svg` rather than the diff's generic file glyph, so
-/// an unknown extension still reads as "a document" in the strip.
+/// Icon for a file tab, derived from the basename (US-017). Shares the diff
+/// body's language mapping (`crate::file_icons::language_icon`, issue #220),
+/// but falls back to `icons/file-text.svg` rather than the diff's generic file
+/// glyph, so an unknown extension still reads as "a document" in the strip.
 pub(super) fn file_tab_icon(name: &str) -> &'static str {
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "dockerfile" => return "icons/languages/docker.svg",
-        "makefile" => return "icons/languages/makefile.svg",
-        _ => {}
-    }
-    let ext = lower.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
-    match ext {
-        "rs" => "icons/languages/rust-small.svg",
-        "ts" | "tsx" | "mts" | "cts" => "icons/languages/typescript.svg",
-        "js" | "jsx" | "mjs" | "cjs" => "icons/languages/react.svg",
-        "json" | "jsonc" => "icons/languages/json.svg",
-        "toml" => "icons/languages/toml.svg",
-        "md" | "markdown" | "mdx" => "icons/languages/markdown.svg",
-        "py" | "pyi" => "icons/languages/python.svg",
-        "go" => "icons/languages/go.svg",
-        "rb" => "icons/languages/ruby.svg",
-        "swift" => "icons/languages/swift.svg",
-        "css" | "scss" | "sass" | "less" => "icons/languages/css.svg",
-        "log" => "icons/languages/log.svg",
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => "icons/languages/image.svg",
-        "txt" | "text" => "icons/languages/text.svg",
-        _ => "icons/file-text.svg",
-    }
+    crate::file_icons::language_icon(name).unwrap_or("icons/file-text.svg")
 }
 
 /// Whether an icon asset carries its own colors.
@@ -582,7 +559,8 @@ mod tests {
     #[test]
     fn the_tab_icon_follows_the_extension_and_falls_back() {
         assert_eq!(file_tab_icon("main.rs"), "icons/languages/rust-small.svg");
-        assert_eq!(file_tab_icon("view.TSX"), "icons/languages/typescript.svg");
+        // Issue #220: TSX is React here too, as in the diff body and Files tree.
+        assert_eq!(file_tab_icon("view.TSX"), "icons/languages/react.svg");
         assert_eq!(file_tab_icon("Cargo.toml"), "icons/languages/toml.svg");
         // Extension-less well-known names are matched whole.
         assert_eq!(file_tab_icon("Dockerfile"), "icons/languages/docker.svg");
@@ -595,6 +573,24 @@ mod tests {
         assert_eq!(file_tab_icon("LICENSE"), "icons/file-text.svg");
         assert_eq!(file_tab_icon("notes.xyz"), "icons/file-text.svg");
         assert_eq!(file_tab_icon(""), "icons/file-text.svg");
+    }
+
+    /// Issue #220: the tab strip and the diff body / Files tree share one
+    /// language policy; only the unknown-file fallback may differ.
+    #[test]
+    fn the_tab_icon_agrees_with_the_shared_language_policy() {
+        for (name, expected) in crate::file_icons::cases::CASES {
+            assert_eq!(
+                file_tab_icon(name),
+                expected.unwrap_or("icons/file-text.svg"),
+                "tab icon for {name:?}"
+            );
+            assert_eq!(
+                crate::file_icons::language_icon_path(name),
+                expected.unwrap_or("icons/languages/file.svg"),
+                "body/tree icon for {name:?}"
+            );
+        }
     }
 
     /// The `icons/languages/` assets ship their own `fill`, so every icon

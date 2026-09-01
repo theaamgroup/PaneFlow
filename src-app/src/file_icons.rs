@@ -5,18 +5,21 @@
 //! painted as images (`img()` / `ImgResourceLoader`), never through `svg()`,
 //! which recolors the whole glyph with the element's text color.
 
-/// Map a file's basename to its language icon asset path.
+/// Map a file's basename to its language icon asset path, or `None` for a
+/// name no language claims.
 ///
-/// Full-name matches win over extensions (`Dockerfile`, `Makefile`,
-/// `angular.json`), and the React Native platform suffixes are checked before
-/// the plain `.ts`/`.js` families. Unknown names fall back to the generic
-/// document.
-pub(crate) fn language_icon_path(basename: &str) -> &'static str {
+/// This is the single icon policy for every surface (Files tree, diff body,
+/// diff-dock tab strip); callers supply only their own unknown-file fallback
+/// (issue #220). Full-name matches win over extensions (`Dockerfile`,
+/// `Makefile`, `angular.json`), and the React Native platform suffixes are
+/// checked before the plain `.ts`/`.js` families. There is no JavaScript
+/// asset, so the `.js` family borrows the React glyph.
+pub(crate) fn language_icon(basename: &str) -> Option<&'static str> {
     let basename = basename.trim().to_ascii_lowercase();
     match basename.as_str() {
-        "angular.json" => return "icons/languages/angular.svg",
-        "dockerfile" | "containerfile" => return "icons/languages/docker.svg",
-        "makefile" => return "icons/languages/makefile.svg",
+        "angular.json" => return Some("icons/languages/angular.svg"),
+        "dockerfile" | "containerfile" => return Some("icons/languages/docker.svg"),
+        "makefile" => return Some("icons/languages/makefile.svg"),
         _ => {}
     }
 
@@ -35,36 +38,89 @@ pub(crate) fn language_icon_path(basename: &str) -> &'static str {
             || name.ends_with(".android.ts")
             || name.ends_with(".android.tsx")
     ) {
-        return "icons/languages/react-native.svg";
+        return Some("icons/languages/react-native.svg");
     }
 
-    let Some(ext) = basename.rsplit('.').next().filter(|ext| *ext != basename) else {
-        return "icons/languages/file.svg";
-    };
+    let ext = basename.rsplit('.').next().filter(|ext| *ext != basename)?;
 
     match ext {
-        "css" => "icons/languages/css.svg",
-        "go" => "icons/languages/go.svg",
+        "css" | "less" | "sass" | "scss" => Some("icons/languages/css.svg"),
+        "go" => Some("icons/languages/go.svg"),
         "apng" | "avif" | "bmp" | "gif" | "heic" | "heif" | "ico" | "jpe" | "jpeg" | "jpg"
-        | "png" | "svg" | "tif" | "tiff" | "webp" => "icons/languages/image.svg",
-        "json" => "icons/languages/json.svg",
-        "jsx" | "tsx" => "icons/languages/react.svg",
-        "log" => "icons/languages/log.svg",
-        "markdown" | "md" | "mdx" => "icons/languages/markdown.svg",
-        "py" | "pyi" | "pyw" => "icons/languages/python.svg",
-        "rb" | "rake" => "icons/languages/ruby.svg",
-        "rs" => "icons/languages/rust-small.svg",
-        "swift" => "icons/languages/swift.svg",
-        "txt" => "icons/languages/text.svg",
-        "toml" => "icons/languages/toml.svg",
-        "cts" | "mts" | "ts" => "icons/languages/typescript.svg",
-        _ => "icons/languages/file.svg",
+        | "png" | "svg" | "tif" | "tiff" | "webp" => Some("icons/languages/image.svg"),
+        "json" | "jsonc" => Some("icons/languages/json.svg"),
+        "cjs" | "js" | "jsx" | "mjs" | "tsx" => Some("icons/languages/react.svg"),
+        "log" => Some("icons/languages/log.svg"),
+        "markdown" | "md" | "mdx" => Some("icons/languages/markdown.svg"),
+        "py" | "pyi" | "pyw" => Some("icons/languages/python.svg"),
+        "rb" | "rake" => Some("icons/languages/ruby.svg"),
+        "rs" => Some("icons/languages/rust-small.svg"),
+        "swift" => Some("icons/languages/swift.svg"),
+        "text" | "txt" => Some("icons/languages/text.svg"),
+        "toml" => Some("icons/languages/toml.svg"),
+        "cts" | "mts" | "ts" => Some("icons/languages/typescript.svg"),
+        _ => None,
     }
+}
+
+/// [`language_icon`] with the generic document as the unknown-file fallback,
+/// as the Files tree and the diff body paint it.
+pub(crate) fn language_icon_path(basename: &str) -> &'static str {
+    language_icon(basename).unwrap_or("icons/languages/file.svg")
+}
+
+/// Cross-surface expectations shared by the `file_icons` tests and the diff
+/// dock's `file_tab_icon` tests (issue #220). `None` is "unknown file": each
+/// surface supplies its own fallback there and must agree everywhere else.
+#[cfg(test)]
+pub(crate) mod cases {
+    pub(crate) const CASES: &[(&str, Option<&str>)] = &[
+        // TSX/JSX are React on every surface; the tab strip used to say TypeScript.
+        ("view.TSX", Some("icons/languages/react.svg")),
+        ("Button.jsx", Some("icons/languages/react.svg")),
+        // There is no javascript.svg: the JS family borrows React's glyph.
+        ("app.js", Some("icons/languages/react.svg")),
+        ("index.mjs", Some("icons/languages/react.svg")),
+        ("config.cjs", Some("icons/languages/react.svg")),
+        ("index.ts", Some("icons/languages/typescript.svg")),
+        ("Button.ios.tsx", Some("icons/languages/react-native.svg")),
+        ("Dockerfile", Some("icons/languages/docker.svg")),
+        ("Containerfile", Some("icons/languages/docker.svg")),
+        ("angular.json", Some("icons/languages/angular.svg")),
+        ("Makefile", Some("icons/languages/makefile.svg")),
+        ("logo.png", Some("icons/languages/image.svg")),
+        ("photo.HEIC", Some("icons/languages/image.svg")),
+        ("styles.css", Some("icons/languages/css.svg")),
+        ("styles.scss", Some("icons/languages/css.svg")),
+        ("tsconfig.jsonc", Some("icons/languages/json.svg")),
+        ("notes.text", Some("icons/languages/text.svg")),
+        ("tasks.rake", Some("icons/languages/ruby.svg")),
+        ("script.pyw", Some("icons/languages/python.svg")),
+        ("main.rs", Some("icons/languages/rust-small.svg")),
+        ("LICENSE", None),
+        ("notes.xyz", None),
+        (".gitignore", None),
+        ("", None),
+    ];
 }
 
 #[cfg(test)]
 mod tests {
-    use super::language_icon_path;
+    use super::{cases::CASES, language_icon, language_icon_path};
+
+    /// Issue #220: the shared table is the policy; `language_icon_path` only
+    /// adds the generic-document fallback on top of it.
+    #[test]
+    fn the_shared_table_is_the_language_policy() {
+        for (name, expected) in CASES {
+            assert_eq!(language_icon(name), *expected, "language_icon({name:?})");
+            assert_eq!(
+                language_icon_path(name),
+                expected.unwrap_or("icons/languages/file.svg"),
+                "language_icon_path({name:?})"
+            );
+        }
+    }
 
     #[test]
     fn full_names_win_over_extensions() {
