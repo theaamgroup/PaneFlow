@@ -534,3 +534,31 @@ fn repeated_headless_contract_survives_malformed_input_and_releases_every_termin
         assert_eq!(encoded, b"\r");
     }
 }
+
+/// `extract_scrollback` stops at the viewport; `extract_screen` is the other
+/// half, and on the alternate screen it is the only half there is.
+#[test]
+fn extract_screen_returns_the_painted_rows_after_history() {
+    let mut terminal = terminal(32, 3);
+    assert_eq!(
+        terminal.extract_screen().unwrap(),
+        None,
+        "a blank screen is None"
+    );
+
+    terminal
+        .feed(b"first\r\nsecond\r\nthird\r\nfourth\r\nfifth")
+        .unwrap();
+    assert_eq!(
+        terminal.extract_scrollback().unwrap().as_deref(),
+        Some("first\nsecond")
+    );
+    assert_eq!(
+        terminal.extract_screen().unwrap().as_deref(),
+        Some("third\nfourth\nfifth")
+    );
+
+    // A full-screen TUI paints the alternate screen, which has no history.
+    terminal.feed(b"\x1b[?1049h\x1b[HTUI").unwrap();
+    assert_eq!(terminal.extract_screen().unwrap().as_deref(), Some("TUI"));
+}

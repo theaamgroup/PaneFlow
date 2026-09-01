@@ -1729,7 +1729,9 @@ impl TerminalState {
         self.ghostty.extract_scrollback()
     }
 
-    /// [`Self::extract_scrollback`] bounded to the newest `lines` rows.
+    /// [`Self::extract_scrollback_window`] bounded to the newest `lines`
+    /// rows: the tail of the history followed by the screen, so the undo
+    /// shows what was on screen when the pane closed.
     ///
     /// The undo-close record (issue #83) takes this instead of the full
     /// extract: undo replays it as inert text into a brand-new PTY, and
@@ -1748,21 +1750,26 @@ impl TerminalState {
         }
     }
 
-    /// Windowed history extract for `surface.read` (issue #29).
+    /// Windowed extract for `surface.read` (issue #29).
     ///
-    /// `offset` skips lines from the newest end; `lines` is the window size.
-    /// `total` is the retained history length (viewport excluded, trailing
-    /// empty rows trimmed, capped at [`crate::limits::MAX_SCROLLBACK_EXTRACT_LINES`]).
+    /// The rows are the retained history followed by the screen the program
+    /// is painting (#184 Phase 3.6: a full-screen TUI has no history at all,
+    /// so without the screen a reader saw nothing). `offset` skips lines
+    /// from the newest end; `lines` is the window size. `total` is the row
+    /// count (trailing empty rows trimmed, capped at
+    /// [`crate::limits::MAX_SCROLLBACK_EXTRACT_LINES`]).
     /// Returns `(text, returned, total, eof)`.
     pub(crate) fn extract_scrollback_window(
         &self,
         lines: usize,
         offset: usize,
     ) -> (String, usize, usize, bool) {
-        let Some(history) = self.ghostty.extract_scrollback() else {
+        let Some(transcript) = self.ghostty.transcript() else {
             return (String::new(), 0, 0, true);
         };
-        let rows: Vec<&str> = history.lines().collect();
+        let history = transcript.history.unwrap_or_default();
+        let screen = transcript.screen.unwrap_or_default();
+        let rows: Vec<&str> = history.lines().chain(screen.lines()).collect();
         let mut last = rows.len();
         while last > 0 && rows[last - 1].trim().is_empty() {
             last -= 1;
@@ -1778,19 +1785,14 @@ impl TerminalState {
         (window.join("\n"), window.len(), total, win_start == 0)
     }
 
-    /// The active screen as plain text, trailing blank lines trimmed.
+    /// The screen half of a read on its own, trailing blank rows trimmed.
     ///
-    /// [`Self::extract_scrollback`] deliberately stops at the viewport, so it
-    /// returns nothing at all for a full-screen TUI, which is where the agent
-    /// CLIs live. This is the other half of reading a pane.
-    // `screen_text` / `capture_replay` / `restore_replay` are wired by #184
-    // Phase 3.6 (`surface.read` history + live screen) and the styled undo
-    // replay; until then they are engine plumbing with no caller.
-    #[allow(dead_code)]
+    /// `surface.read` takes both halves through one
+    /// [`GhosttySession::transcript`] so they cannot tear; tests use this to
+    /// pin what that read appends after the history.
+    #[cfg(test)]
     pub fn screen_text(&self) -> Option<String> {
-        let text = self.ghostty.screen_text()?;
-        let trimmed = text.trim_end_matches(['\n', ' ']);
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        self.ghostty.transcript()?.screen
     }
 
     /// Capture the screen and its recent history as VT sequences.
@@ -1799,6 +1801,8 @@ impl TerminalState {
     /// and the cursor, so a restored pane looks like the one that was closed
     /// rather than like a transcript of it. The bytes are produced by
     /// libghostty's own formatter over this process's terminal.
+    // `capture_replay` / `restore_replay` are wired by the styled undo replay
+    // (#184 follow-up); until then they are engine plumbing with no caller.
     #[allow(dead_code)]
     pub fn capture_replay(&self) -> Option<Vec<u8>> {
         self.ghostty.capture_replay()
@@ -3828,15 +3832,24 @@ mod tests {
         state
     }
 
+    /// The string-level spec `extract_scrollback_window` is checked against:
+    /// retained history followed by the screen (#184 Phase 3.6).
+    fn transcript(state: &TerminalState) -> String {
+        let history = state.extract_scrollback().unwrap_or_default();
+        match state.screen_text() {
+            Some(screen) if history.is_empty() => screen,
+            Some(screen) => format!("{history}\n{screen}"),
+            None => history,
+        }
+    }
+
     /// Windowed extract returns the last N history lines and a row-span
     /// `total` matching `extract_scrollback` + `paginate_scrollback`, without
     /// joining the full 4000-line persistence string first.
     #[test]
     fn extract_scrollback_window_returns_last_n_without_full_buffer() {
         let state = seed_numbered_history(4, 40, 80);
-        let full = state
-            .extract_scrollback()
-            .expect("numbered restore should leave history");
+        let full = transcript(&state);
         let (expected, returned, total, eof) =
             crate::app::ipc_handler::paginate_scrollback(&full, 5, 0);
         assert!(
@@ -3857,7 +3870,7 @@ mod tests {
         let last = full.rsplit('\n').next().unwrap();
         assert!(
             text.ends_with(last),
-            "offset 0 must end on the newest history line {last:?}; got {text:?}"
+            "offset 0 must end on the newest row (the bottom of the screen) {last:?}; got {text:?}"
         );
     }
 
@@ -3867,7 +3880,9 @@ mod tests {
     #[test]
     fn extract_scrollback_capped_returns_only_the_newest_lines() {
         let state = seed_numbered_history(4, 40, 500);
-        let full = state.extract_scrollback().expect("history");
+        // History followed by the screen: the newest rows are the ones on
+        // screen when the pane closed (#184 Phase 3.6).
+        let full = transcript(&state);
         let capped = state.extract_scrollback_capped(100).expect("history");
 
         assert!(
@@ -3890,10 +3905,38 @@ mod tests {
         );
     }
 
+    /// #184 Phase 3.6: a full-screen TUI has no history at all, so a read of
+    /// the pane is its retained history followed by the screen the program is
+    /// painting right now.
+    #[test]
+    fn extract_scrollback_window_appends_the_live_screen_after_history() {
+        let state = seed_numbered_history(4, 40, 80);
+        let history = state.extract_scrollback().expect("history");
+        let screen = state
+            .screen_text()
+            .expect("the newest numbered rows are on the screen");
+        assert!(
+            !history.ends_with(&screen),
+            "fixture: the history extract stops at the viewport"
+        );
+
+        let (text, returned, total, eof) =
+            state.extract_scrollback_window(crate::limits::MAX_SCROLLBACK_EXTRACT_LINES, 0);
+        let expected = format!("{history}\n{screen}");
+        assert_eq!(text, expected);
+        assert_eq!(returned, expected.lines().count());
+        assert_eq!(total, returned);
+        assert!(eof);
+
+        // A one-row window is the bottom screen row, not the newest history row.
+        let (tail, ..) = state.extract_scrollback_window(1, 0);
+        assert_eq!(tail, screen.rsplit('\n').next().unwrap());
+    }
+
     #[test]
     fn extract_scrollback_window_offset_matches_paginate() {
         let state = seed_numbered_history(4, 40, 80);
-        let full = state.extract_scrollback().expect("history");
+        let full = transcript(&state);
         for &(lines, offset) in &[(5, 0), (5, 5), (10, 20), (3, 40), (200, 0)] {
             let expected = crate::app::ipc_handler::paginate_scrollback(&full, lines, offset);
             let got = state.extract_scrollback_window(lines, offset);

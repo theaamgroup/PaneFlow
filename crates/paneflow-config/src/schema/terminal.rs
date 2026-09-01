@@ -178,9 +178,9 @@ pub struct TerminalConfig {
     /// Maximum scrollback history in lines (`max_scroll_history_lines`).
     /// `None` resolves to
     /// [`TerminalConfig::DEFAULT_SCROLLBACK_LINES`]; values are clamped
-    /// to `[100, 100_000]`. Alacritty exposes a line-count limit rather
-    /// than Ghostty's byte-count `scrollback-limit`, so the default stays
-    /// conservative while advanced users can opt into a larger line budget.
+    /// to `[100, 100_000]`. Ghostty's own knob is a byte-count
+    /// `scrollback-limit`, so PaneFlow keeps a line-count budget in the
+    /// config and converts it at spawn time (1 KiB per line, 128 MiB cap).
     /// Read once at PTY spawn time; changing this value takes effect on
     /// the next new terminal.
     #[serde(default, deserialize_with = "lenient_opt_usize")]

@@ -121,6 +121,18 @@ impl Tab {
 
     /// Every pane of this tab, the zoom-saved tree included, in traversal
     /// order and without duplicates.
+    /// Every terminal surface under this tab, by entity id (#184 Phase 3.8:
+    /// the agent-status path asks whether an observed pane is on screen).
+    pub fn surface_ids(&self, cx: &gpui::App) -> std::collections::HashSet<u64> {
+        let mut ids = std::collections::HashSet::new();
+        for pane in self.collect_panes() {
+            for terminal in pane.read(cx).terminals() {
+                ids.insert(terminal.entity_id().as_u64());
+            }
+        }
+        ids
+    }
+
     pub fn collect_panes(&self) -> Vec<Entity<Pane>> {
         let mut panes = Vec::new();
         if let Some(root) = &self.root {

@@ -14,7 +14,7 @@ launching the app.
 | Verb                                       | Primary method or engine           | Writes to panes?           | Use                                    |
 | ------------------------------------------ | ---------------------------------- | -------------------------- | -------------------------------------- |
 | `ls [--human]`                             | `surface.list`                     | No                         | List terminal surfaces                 |
-| `read <target>`                            | `surface.read`                     | No                         | Read pane scrollback                   |
+| `read <target>`                            | `surface.read`                     | No                         | Read pane scrollback + screen          |
 | `search <target> <pattern>`                | `surface.search`                   | No                         | Search pane scrollback                 |
 | `ps [--json]`                              | `fleet.list`                       | No                         | List detected agents across workspaces |
 | `status <target> [--json]`                 | `surface.status`                   | No                         | Read one surface's agent state         |

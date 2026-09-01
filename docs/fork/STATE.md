@@ -1,7 +1,7 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-08-31, through #184 Phase 2 (the
-libghostty-vt session-host swap). The prior entry covered the 2026-08-28
+Living handoff record. Updated 2026-08-31, through #184 Phase 3 (the
+libghostty-vt session-host swap and the engine-product features on it). The prior entry covered the 2026-08-28
 five-agent deep review and the `v0.1.1` cut.
 
 **2026-08-31 #184: libghostty-vt is the only engine.** Landed as a stack of
@@ -276,6 +276,7 @@ even though signed release DMGs are also available.
 | 2a. Ghostty removal | **Done.** Roughly 11,600 lines. 338 stale cfg sites reduced to zero. |
 | #184 Phase 1: libghostty returns | **Done 2026-08-31.** `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` and the `aarch64-apple-darwin` archive vendored from upstream v0.10.0 (hashes on the issue) and stripped to macOS; linking unconditional, no stub; wired by Phase 2 the same day. |
 | #184 Phase 2: session-host swap | **Done 2026-08-31.** `src-app` runs on libghostty-vt; Alacritty and `polling` deleted; the fork's pinned teardown re-attached on top of upstream's host; Kitty graphics, OSC 9/777, the 9;4 chip and `TERM_PROGRAM=ghostty` ride along. 0.2.0 waits for the signed-DMG smoke. |
+| #184 Phase 3: engine product | **Done 2026-08-31.** 3.5 (scrollback doc), 3.6 (`surface.read` = history followed by the live screen, one atomic `Transcript` runtime read; the undo record carries the screen too), 3.7 (rode along in Phase 2), 3.8 (`AgentStateSource` ranking `Terminal < SessionRegistry < Hook`, 20 s takeover silence, Claude session-registry sweep at 400 ms, OSC 9;4 / 9 / 777 pane observations). Upstream's 18 tests for it carried by name plus `extract_screen_returns_the_painted_rows_after_history` and `extract_scrollback_window_appends_the_live_screen_after_history`. |
 | 2b. Windows unwind | **Done.** 71 files, +264/-6767, 13 commits. The real scope was 396 sites across 59 files, not the 158 recorded here: `#[cfg(windows)]` short form is the same predicate and 25 files carried ONLY that spelling. |
 | 2c. Linux unwind | **Done.** 20 commits, 77 files, +832/-9559. Census zero-condition 134 -> 0. Four orchestrator increments (updater collapse to DMG-only, Linux port scanners, the Wayland/X11 backdrop, pty_session), then **twelve delegated grok batches**: eight covering all 85 census sites, then four more driven by an adversarial audit that ran after the census hit zero. Also took the last Windows residue - the WSL launcher AND its `WSLENV` environment bridge, `cmd.exe` support, `.exe`/backslash path mechanics, the NTSTATUS Ctrl+C exit code, and `UpdateError`'s AppImage/FUSE/pkexec/msiexec surface - all of it UNGATED and compiling into the macOS binary. |
 | Config-schema pass | **Done.** Ghostty and `windows_*_material` dropped from the published schema, Rust struct, and docs. Loader still accepts leftover keys; `"backend":"ghostty"` maps to Alacritty. |
@@ -291,7 +292,7 @@ even though signed release DMGs are also available.
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 2371 names, 0 failed, 2 ignored (2026-08-31, #184 Phase 2)
+cargo test --workspace                       # 2391 names, 0 failed, 2 ignored (2026-08-31, #184 Phase 3)
 cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0

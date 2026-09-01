@@ -15,7 +15,7 @@ This page is the compact reference for [Conductor](../conductor.md). It names th
 | `ps [--json]`                              | `fleet.list`                                        | List detected agents across workspaces                             |
 | `status <target> [--json]`                 | `surface.status`                                    | Read one pane's agent state                                        |
 | `watch [--surface <sel>] [--type <event>]` | `events.subscribe`                                  | Stream lifecycle events and surface changes                        |
-| `read <target>`                            | `surface.read`                                      | Read pane scrollback                                               |
+| `read <target>`                            | `surface.read`                                      | Read pane scrollback + screen                                      |
 | `send <target> <text>`                     | `surface.send_text`                                 | Stage or submit text to a pane                                     |
 | `wait --match <sel>`                       | `surface.read`, event stream when idle mode is used | Block until idle state, a regex, or both                           |
 | `up <file>`                                | workspace orchestration                             | Create a declarative agent workspace                               |

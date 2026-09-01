@@ -25,6 +25,7 @@ mod ai_hooks;
 mod ai_types;
 mod app;
 mod assets;
+mod claude_session_registry;
 mod claude_sessions;
 mod cli;
 mod codex_sessions;
@@ -1377,6 +1378,11 @@ struct PaneFlowApp {
     /// "only one close can be pending" is true by construction. Written ONLY
     /// through `set_pending_close`.
     pending_close: Option<app::close_guard::PendingClose>,
+    /// What the Claude Code session registry said last tick, per pid. The
+    /// CLI writes that file on transition but PaneFlow reads it on a clock, so
+    /// without a watermark the same state would be re-applied every tick and
+    /// keep resetting the stall clock. See `app::agent_status`.
+    claude_registry_seen: app::agent_status::RegistryWatermark,
     /// Focus handle routing key events to the close-confirm modal while open.
     pending_close_focus: FocusHandle,
     /// Set when a modal close confirmation is armed; the next render claims
