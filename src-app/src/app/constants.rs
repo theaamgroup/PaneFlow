@@ -29,7 +29,16 @@ pub(crate) const PANEL_CORNER_RADIUS: Pixels = WINDOW_CORNER_RADIUS;
 pub(crate) const PANE_CARD_RADIUS: Pixels = px(20.);
 /// Inner CLI content inset. Combined with the pane's reserved 1px border,
 /// this places the header row and terminal cells 4px from the main panel edge.
+/// Inner CLI content inset. Combined with the pane's reserved 1px border,
+/// this places the header row and terminal cells 4px from the main panel edge.
 pub(crate) const PANE_CONTENT_INSET: f32 = 3.;
+/// Horizontal inset of the cell grid inside a pane card, applied to both
+/// edges. Upstream v0.10.0 paints 10 px; this fork keeps its 3 px gutter.
+pub(crate) const PANE_CONTENT_INSET_X: f32 = PANE_CONTENT_INSET;
+/// Vertical inset of the cell grid inside a pane card. Zero: the fork never
+/// inset rows (upstream v0.10.0 uses 6 px), and the card's own padding is
+/// the visual breathing room.
+pub(crate) const PANE_CONTENT_INSET_Y: f32 = 0.;
 /// Selected rows carry a stronger lift than hover rows so current navigation
 /// remains legible without a separate indicator. macOS keeps its native material.
 const DARK_SIDEBAR_TAB_TINT: u32 = 0xffffff;

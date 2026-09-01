@@ -18,17 +18,96 @@ use paneflow_config::schema::{TerminalConfig, TerminalSurfaceProfile};
 
 use super::TerminalState;
 use super::element::TerminalElement;
-use super::pty_session::{ClipboardOp, raw_os_error_from_anyhow};
+use super::pty_session::{
+    TerminalBackendFailureDiagnostics, TerminalBackendFailurePhase, raw_os_error_from_anyhow,
+};
 use super::service_detector::ServiceInfo;
 use super::types::{
     CopyModeCursorState, CursorShape, HyperlinkZone, Line, Modes, Point, SearchHighlight,
-    TerminalWindowSize, terminal_metric_to_u16,
+    TerminalWindowSize,
 };
-use crate::limits::MAX_OSC52_BYTES;
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 
-enum BackgroundSpawnOutcome {
-    Alacritty(anyhow::Result<super::pty_session::SpawnedPty>),
+use super::ghostty_session::GhosttyStartError;
+
+/// Where a [`GhosttyStartError`] leaves the pane.
+///
+/// There is no second engine to fall back to, so every startup failure ends
+/// the same way: the pane becomes a static error surface. `child_pid` is
+/// carried for the log line only, and is `Some` exactly when a child already
+/// existed when the failure happened.
+struct GhosttyStartFailure {
+    child_pid: Option<u32>,
+    diagnostics: TerminalBackendFailureDiagnostics,
+}
+
+/// Map a Ghostty startup failure to its structured diagnostics. Pure, so the
+/// macOS and Windows claims are asserted by their own CI legs rather than
+/// inferred from the Linux behavior of the same code.
+fn classify_ghostty_start_error(error: GhosttyStartError) -> GhosttyStartFailure {
+    let (phase, reason_code, source) = match error {
+        GhosttyStartError::Initialization(error) => (
+            TerminalBackendFailurePhase::Initialization,
+            TerminalBackendFailureDiagnostics::GHOSTTY_INITIALIZATION_FAILED,
+            error,
+        ),
+        GhosttyStartError::OpenPty(error) => (
+            TerminalBackendFailurePhase::OpenPty,
+            TerminalBackendFailureDiagnostics::GHOSTTY_OPEN_PTY_FAILED,
+            error,
+        ),
+        GhosttyStartError::Spawn(error) => (
+            TerminalBackendFailurePhase::Spawn,
+            TerminalBackendFailureDiagnostics::GHOSTTY_SPAWN_FAILED,
+            error,
+        ),
+        GhosttyStartError::PostSpawn { child_pid, error } => {
+            return GhosttyStartFailure {
+                child_pid: Some(child_pid),
+                diagnostics: TerminalBackendFailureDiagnostics::new(
+                    TerminalBackendFailurePhase::PostSpawn,
+                    TerminalBackendFailureDiagnostics::GHOSTTY_POST_SPAWN_FAILED,
+                    raw_os_error_from_anyhow(&error),
+                ),
+            };
+        }
+    };
+    GhosttyStartFailure {
+        child_pid: None,
+        diagnostics: TerminalBackendFailureDiagnostics::new(
+            phase,
+            reason_code,
+            raw_os_error_from_anyhow(&source),
+        ),
+    }
+}
+
+/// The leading engine wakeup is held until the 4 ms batch closes. Upstream
+/// renders it immediately on Linux only; on macOS the coalesced path is the
+/// one that was measured (see `process_backend_wakeup`).
+const RENDER_WAKEUP_IMMEDIATELY: bool = false;
+
+/// Set by the first pane that fails to start the engine, so a broken artifact
+/// costs one error line per process rather than one per pane (FR-05).
+static BACKEND_START_FAILED_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Claim the single process-lifetime report slot. Returns `true` exactly once
+/// per flag; later callers log the same failure at debug level, so no per-pane
+/// detail is lost while the error count stays at one.
+fn claim_backend_failure_report(reported: &std::sync::atomic::AtomicBool) -> bool {
+    !reported.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The level a startup failure is logged at: error for the first occurrence in
+/// the process, debug for every later one. A pane whose engine failed to start
+/// is dead, so the first one has to stay visible at the default log level.
+fn backend_failure_level(reported: &std::sync::atomic::AtomicBool) -> log::Level {
+    if claim_backend_failure_report(reported) {
+        log::Level::Error
+    } else {
+        log::Level::Debug
+    }
 }
 
 fn log_backend_diagnostics(terminal: &TerminalState) {
@@ -51,21 +130,39 @@ pub(crate) fn probe_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("PANEFLOW_LATENCY_PROBE").as_deref() == Ok("1"))
 }
 
-/// Human-readable in-pane message for a failed PTY spawn - written into the
-/// display-only placeholder kept by the US-012 background-spawn path (and the
-/// old synchronous fallback). ANSI-formatted; `\r\n` because there is no PTY to
-/// translate bare `\n`.
-fn spawn_error_message(e: &anyhow::Error) -> String {
+/// Human-readable in-pane message for a failed engine start - written into the
+/// display-only surface [`TerminalState::report_spawn_failure`] swaps in.
+/// ANSI-formatted; `\r\n` because there is no PTY to translate bare `\n`.
+fn spawn_error_message(failure: &TerminalBackendFailureDiagnostics) -> String {
     format!(
-        "\x1b[1;31mError\x1b[0m: failed to start shell.\r\n\
+        "\x1b[1;31mError\x1b[0m: failed to start the terminal.\r\n\
          \r\n\
          Common causes:\r\n\
          \x20 \x20- PTY pool exhausted\r\n\
          \x20 \x20- Shell binary not found ($SHELL / default_shell)\r\n\
          \x20 \x20- Permission denied on /dev/ptmx\r\n\
          \r\n\
-         \x1b[2m{e:#}\x1b[0m\r\n",
+         \x1b[2mfailure_phase={} reason_code={} os_error={:?}\x1b[0m\r\n",
+        failure.phase.as_str(),
+        failure.reason_code,
+        failure.os_error,
     )
+}
+
+/// Map a renderer cursor shape onto the four libghostty knows.
+///
+/// Paneflow draws two shapes libghostty has no name for, so each falls back
+/// to the engine shape it is a variation of.
+fn engine_cursor_shape(shape: CursorShape) -> paneflow_terminal_ghostty::CursorShape {
+    use paneflow_terminal_ghostty::CursorShape as Engine;
+    match shape {
+        // Hidden is a renderer state, not a shape libghostty resets to, so it
+        // falls back to the block it would otherwise draw.
+        CursorShape::Block | CursorShape::Vintage | CursorShape::Hidden => Engine::Block,
+        CursorShape::Beam => Engine::Bar,
+        CursorShape::Underline | CursorShape::DoubleUnderline => Engine::Underline,
+        CursorShape::HollowBlock => Engine::HollowBlock,
+    }
 }
 
 fn renderer_cursor_shape_from_config(
@@ -169,7 +266,7 @@ pub struct TerminalView {
     pub(super) search_query: String,
     /// Monotonic token used to discard stale async local-search results.
     pub(super) search_generation: u64,
-    /// Cooperative cancellation flag for the scan currently in flight.
+    /// Cooperative cancellation flag for the currently running scan.
     pub(super) search_cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Cached search matches (grid coordinates)
     pub(super) search_matches: Vec<crate::search::SearchMatch>,
@@ -179,6 +276,10 @@ pub struct TerminalView {
     pub(super) search_regex_mode: bool,
     /// Regex compilation error message (None when valid or plain text mode)
     pub(super) search_regex_error: Option<String>,
+    /// Whether the active scan stopped at its cell or match budget.
+    pub(super) search_truncated: bool,
+    /// Last theme generation propagated to the native terminal engine.
+    appearance_theme_generation: u64,
     /// Whether Alt key is treated as Meta (ESC prefix). Read from config.
     pub(super) option_as_meta: bool,
     /// US-008: cursor blink override (On / Off / TerminalControlled). Read
@@ -196,6 +297,8 @@ pub struct TerminalView {
     /// effect on the next new terminal, consistent with the other terminal
     /// settings here.
     pub(super) scroll_multiplier: f32,
+    /// Platform appearance switch: default terminal backgrounds become
+    /// transparent so the native window material can show through.
     /// Renderer switch: block elements use Paneflow's built-in quad renderer
     /// instead of font glyphs.
     pub(super) integrated_glyphs_enabled: bool,
@@ -212,6 +315,15 @@ pub struct TerminalView {
     /// Focus subscriptions update the clipboard gate at event time, before
     /// queued terminal output can reach the GPUI event drain.
     focus_subscriptions: Option<(gpui::Subscription, gpui::Subscription)>,
+    /// Key presses accepted by Ghostty and therefore eligible for a matching
+    /// release event. Prevents app-consumed shortcuts from leaking key-up data.
+    pub(super) ghostty_pressed_keys:
+        std::collections::HashMap<String, paneflow_terminal_ghostty::KeyInput>,
+    /// Printable key metadata held until GPUI commits the final text. This
+    /// keeps IME as the single text source while still giving Kitty encoding
+    /// the logical key, modifiers, repeat action, and matching release.
+    pub(super) ghostty_pending_text_key:
+        Option<(gpui::Keystroke, paneflow_terminal_ghostty::KeyAction, bool)>,
     /// Last hovered cell position for URL regex detection (US-015).
     pub(super) hovered_cell: Option<Point>,
     /// Active hyperlink under Ctrl+hover - drives underline rendering and Ctrl+click.
@@ -241,20 +353,6 @@ impl TerminalView {
             .terminal_window_size
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn current_window_size(&self) -> TerminalWindowSize {
-        if let Some(size) = self.recorded_window_size() {
-            return size;
-        }
-
-        let (cols, rows) = self.terminal.session_backend().grid_size();
-        TerminalWindowSize::new(
-            cols,
-            rows,
-            terminal_metric_to_u16(self.cell_width.as_f32()),
-            terminal_metric_to_u16(self.line_height.as_f32()),
-        )
     }
 
     fn process_dirty_terminal(&mut self, cx: &mut Context<Self>) {
@@ -293,6 +391,20 @@ impl TerminalView {
         self.needs_initial_clear
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.terminal.restore_scrollback(text);
+    }
+
+    /// Replay a capture this process took of a pane it closed.
+    ///
+    /// See [`crate::terminal::TerminalState::restore_replay`]: the bytes go in
+    /// verbatim so the styling survives, which makes this valid only for an
+    /// in-process capture.
+    // Styled undo replay (#184, allowed as better inert replay) lands with
+    // Phase 3; the fork's undo still restores plain text.
+    #[allow(dead_code)]
+    pub(crate) fn restore_replay(&self, replay: &[u8]) {
+        self.needs_initial_clear
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.terminal.restore_replay(replay);
     }
 
     pub(crate) fn set_integrated_glyphs_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -400,18 +512,12 @@ impl TerminalView {
         // creates a window where a pending spawn is invisible and its checkout
         // can be removed before the child forks.
         terminal.current_cwd = Some(params.cwd.to_string_lossy().into_owned());
-        let requested_backend = paneflow_config::loader::load_config()
-            .terminal
-            .unwrap_or_default()
-            .backend;
-        terminal.set_backend_request(requested_backend);
         // Route the Drop-time force-kill timer through GPUI's background
-        // executor instead of a detached OS thread (Zed parity, prevents a
-        // thread leak per closed pane under heavy use).
+        // executor instead of a detached OS thread (no thread leak per closed
+        // pane under heavy use).
         terminal.set_background_executor(cx.background_executor().clone());
-        // The background `EventLoop` attaches to this same shared `term` + event
-        // channel, so the placeholder's event loop keeps working after promotion
-        // - no view-side rewiring needed.
+        let ghostty = terminal.ghostty_session();
+        let ghostty_pending = pending.ghostty;
         // Capture the foreground signal mask on the MAIN thread so the
         // background-spawned child still gets correct Ctrl-C / Ctrl-Z (US-012).
         let signal_mask = crate::terminal::pty_session::capture_foreground_signal_mask();
@@ -421,41 +527,45 @@ impl TerminalView {
         let executor = cx.background_executor().clone();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                // Blocking PTY open (`tty::new` forks) runs off the render thread.
+                // The blocking PTY open runs off the render thread, so an
+                // N-pane restore never serializes N spawns on the main thread.
                 let outcome = executor
                     .spawn(async move {
-                        {
-                            BackgroundSpawnOutcome::Alacritty(
-                                TerminalState::open_pty_and_eventloop(
-                                    params,
-                                    pending,
-                                    signal_mask,
-                                ),
-                            )
-                        }
+                        let max_scrollback = paneflow_config::loader::load_config()
+                            .terminal
+                            .unwrap_or_default()
+                            .resolved_scrollback_lines_for_profile(params.profile);
+                        ghostty
+                            .start(ghostty_pending, params, signal_mask, max_scrollback)
+                            .map_err(classify_ghostty_start_error)
                     })
                     .await;
                 let _ = this.update(cx, |view, cx| {
                     match outcome {
-                        BackgroundSpawnOutcome::Alacritty(Ok(spawned)) => {
-                            view.terminal.promote(spawned);
+                        Ok(spawned) => {
+                            view.terminal.promote_ghostty(spawned);
                             if let Some(size) = view.recorded_window_size() {
                                 view.terminal.notify_window_size(size);
                             }
                         }
-                        BackgroundSpawnOutcome::Alacritty(Err(error)) => {
-                            // Spawn failed: keep the display-only placeholder and
-                            // surface the error in-pane (no orphan, no panic - same
-                            // outcome as the old synchronous fallback).
-                            log::error!(
+                        Err(failure) => {
+                            let after_child = match failure.child_pid {
+                                Some(pid) => format!(" after child creation (pid={pid})"),
+                                None => String::new(),
+                            };
+                            log::log!(
                                 target: "paneflow::terminal::backend",
-                                "Alacritty startup failed: reason_code=alacritty_startup_failed os_error={:?}",
-                                raw_os_error_from_anyhow(&error),
+                                backend_failure_level(&BACKEND_START_FAILED_LOGGED),
+                                "Ghostty startup failed{after_child}: failure_phase={} reason_code={} os_error={:?}",
+                                failure.diagnostics.phase.as_str(),
+                                failure.diagnostics.reason_code,
+                                failure.diagnostics.os_error,
                             );
                             view.needs_initial_clear
                                 .store(false, std::sync::atomic::Ordering::Relaxed);
+                            let message = spawn_error_message(&failure.diagnostics);
                             view.terminal
-                                .write_output(spawn_error_message(&error).as_bytes());
+                                .report_spawn_failure(failure.diagnostics, &message);
                         }
                     }
                     log_backend_diagnostics(&view.terminal);
@@ -486,28 +596,46 @@ impl TerminalView {
 
         // Backend event coalescing:
         // Phase 1: Block until first event (zero CPU when idle)
-        // Phase 2: 4 ms / 100-event window (dedup Wakeup) so a PTY burst
-        // becomes one entity update.
+        // Phase 2: Render the leading Linux wakeup immediately. Windows waits
+        // 4ms (max 100, dedup Wakeup) so ConPTY cannot expose a partial
+        // multi-write terminal frame.
         // Phase 3: Process batch, yield to other GPUI tasks
         let events_rx = terminal.take_backend_events();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let mut events_rx = events_rx;
-                loop {
-                    // Phase 1: Block until first event arrives (zero CPU when idle)
-                    let Some(first_event) = events_rx.next().await else {
-                        break; // Channel closed
-                    };
-
-                    // Phase 2: Wait 4 ms (max 100 events). Wakeups are folded
-                    // into `had_wakeup`; other events stay in `batch`.
+                let mut immediate_ghostty_wakeup_burst_active = false;
+                // Phase 1: Block until an event arrives (zero CPU when idle); the
+                // loop ends when the runtime drops its sender.
+                while let Some(first_event) = events_rx.next().await {
+                    // Phase 2: Keep the existing low-latency path for Linux PTYs. Windows
+                    // holds its first wakeup until the batch closes because ConPTY can split
+                    // or normalize the synchronized-output sequence around TUI redraws.
                     let mut batch = Vec::with_capacity(32);
                     let mut dequeued = 1usize;
+                    let render_wakeup_immediately = RENDER_WAKEUP_IMMEDIATELY;
                     let mut had_wakeup = first_event.is_wakeup();
-                    if !had_wakeup {
+                    let leading_immediate_wakeup = render_wakeup_immediately
+                        && had_wakeup
+                        && !immediate_ghostty_wakeup_burst_active;
+                    if leading_immediate_wakeup {
+                        immediate_ghostty_wakeup_burst_active = true;
+                        let result = cx.update(|cx| {
+                            this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
+                                view.terminal.process_backend_wakeup();
+                                view.process_dirty_terminal(cx);
+                            })
+                        });
+                        if result.is_err() {
+                            break;
+                        }
+                        had_wakeup = false;
+                    }
+                    if !had_wakeup && !leading_immediate_wakeup {
                         batch.push(first_event);
                     }
 
+                    let mut batch_window_elapsed = false;
                     {
                         let timer = futures::FutureExt::fuse(smol::Timer::after(
                             std::time::Duration::from_millis(4),
@@ -530,10 +658,14 @@ impl TerminalView {
                                     if dequeued >= 100 { break; }
                                 }
                                 _ = timer => {
+                                    batch_window_elapsed = true;
                                     break;
                                 },
                             }
                         }
+                    }
+                    if batch_window_elapsed {
+                        immediate_ghostty_wakeup_burst_active = false;
                     }
 
                     // Phase 3: Process the batch in a single entity update
@@ -541,6 +673,11 @@ impl TerminalView {
                         this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
                             let old_title = view.terminal.title.clone();
                             let old_cwd = view.terminal.current_cwd.clone();
+                            // `progress` is `None` for OSC 9;4 "remove" and
+                            // `Some` for every live state, so its presence is
+                            // the busy bit. Sampled around the whole batch so
+                            // a burst that starts and ends busy emits nothing.
+                            let was_busy = view.terminal.progress.is_some();
                             view.terminal.sync_channels();
                             if had_wakeup {
                                 view.terminal.process_backend_wakeup();
@@ -552,43 +689,34 @@ impl TerminalView {
                             // Execute deferred clipboard operations (OSC 52)
                             let clipboard_ops =
                                 std::mem::take(&mut view.terminal.pending_clipboard_ops);
-                            for op in clipboard_ops {
-                                match op {
-                                    ClipboardOp::Store(text) => {
-                                        // U-023: sanitize untrusted PTY output before it
-                                        // reaches the system clipboard - symmetric with the
-                                        // Load path below, so an embedded CR/ESC can't commit
-                                        // a hidden command when the user later pastes it.
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            sanitize_osc52(&text),
-                                        ));
-                                    }
-                                    ClipboardOp::Load(format_fn) => {
-                                        // Match the OSC 52 Store cap (100 KiB) on
-                                        // Load responses too - without this, a
-                                        // very large clipboard (multi-MB) would
-                                        // be base64-encoded and streamed into
-                                        // the PTY in one shot. Cap centralized
-                                        // in `crate::limits` (US-013).
-                                        let mut text = cx
-                                            .read_from_clipboard()
-                                            .and_then(|c| c.text())
-                                            .unwrap_or_default();
-                                        if text.len() > MAX_OSC52_BYTES {
-                                            // Truncate on a UTF-8 boundary so
-                                            // the response remains valid text.
-                                            let mut cut = MAX_OSC52_BYTES;
-                                            while cut > 0 && !text.is_char_boundary(cut) {
-                                                cut -= 1;
-                                            }
-                                            text.truncate(cut);
-                                        }
-                                        // U-023: same shared control-char filter as the Store
-                                        // path (now also strips CR / other C0 / DEL, not just
-                                        // ESC + C1).
-                                        let response = format_fn(&sanitize_osc52(&text));
-                                        view.terminal.write_to_pty_silent(response.into_bytes());
-                                    }
+                            for text in clipboard_ops {
+                                // U-023: sanitize untrusted PTY output before it reaches
+                                // the system clipboard, so an embedded CR/ESC cannot commit
+                                // a hidden command when the user later pastes it.
+                                cx.write_to_clipboard(ClipboardItem::new_string(sanitize_osc52(
+                                    &text,
+                                )));
+                            }
+
+                            // Desktop notifications the program asked for
+                            // with OSC 9 or OSC 777.
+                            let notifications =
+                                std::mem::take(&mut view.terminal.pending_notifications);
+                            if !notifications.is_empty() {
+                                let pane_title = view.terminal.title.clone();
+                                for notification in notifications {
+                                    cx.emit(TerminalEvent::AgentAttention {
+                                        title: notification.title.clone(),
+                                        body: notification.body.clone(),
+                                    });
+                                    crate::agents::notifications::fire_program_notification(
+                                        crate::agents::notifications::program_notification(
+                                            notification.title,
+                                            notification.body,
+                                            &pane_title,
+                                        ),
+                                        cx.background_executor().clone(),
+                                    );
                                 }
                             }
 
@@ -600,14 +728,14 @@ impl TerminalView {
                             // OpenAI Codex CLI, which then dropped its
                             // input-bar background tint silently.
 
-                            // Cap pending TextAreaSize replies to keep a runaway TUI
-                            // from accumulating thousands of pending responders.
-                            // Keep the most recent entries - older replies would
-                            // race the writer that requested them and are
-                            // effectively stale by the time we'd answer.
-                            let size = view.current_window_size();
-                            for response in view.terminal.drain_size_responses(size) {
-                                view.terminal.write_to_pty_silent(response.into_bytes());
+                            // Ahead of the exit check below on purpose: a
+                            // dying child clears its progress, and reporting
+                            // that as a turn boundary after the pane has
+                            // already been torn down would re-create the
+                            // session the teardown just purged.
+                            let is_busy = view.terminal.progress.is_some();
+                            if is_busy != was_busy && view.terminal.exited.is_none() {
+                                cx.emit(TerminalEvent::AgentProgressChanged { busy: is_busy });
                             }
 
                             // US-002: close only on a user-initiated or clean
@@ -650,7 +778,7 @@ impl TerminalView {
         // cursor visibility tracks the shared toggle. Replaces the
         // per-terminal `smol::Timer` loop that previously lived here.
         // Short-circuit preserved: skip when the PTY has exited; force visible
-        // when alacritty disabled blinking (DECSCUSR / VT100 cursor style).
+        // when the program disabled blinking (DECSCUSR / VT100 cursor style).
         //
         // `try_global` rather than `global` so a future code path that
         // constructs a TerminalView outside `PaneFlowApp::new` (test
@@ -691,6 +819,15 @@ impl TerminalView {
         let default_cursor_shape =
             renderer_cursor_shape_from_config(terminal_config.cursor_shape.unwrap_or_default());
         let cursor_color_override = cursor_color_override_from_config(&terminal_config);
+        // The renderer's fallback covers a program that never picks a cursor;
+        // this covers the one that explicitly resets it with `CSI 0 q`.
+        terminal.session_backend().set_default_cursor(
+            engine_cursor_shape(default_cursor_shape),
+            matches!(
+                cursor_blink_mode,
+                paneflow_config::schema::CursorBlinkConfig::On
+            ),
+        );
         let integrated_glyphs_enabled = terminal_config.resolved_integrated_glyphs();
         let color_emoji_enabled = terminal_config.resolved_color_emoji();
 
@@ -714,6 +851,8 @@ impl TerminalView {
             search_current: 0,
             search_regex_mode: false,
             search_regex_error: None,
+            search_truncated: false,
+            appearance_theme_generation: crate::theme::theme_generation(),
             option_as_meta: config
                 .option_as_meta
                 .unwrap_or_else(crate::keys::default_option_as_meta),
@@ -728,6 +867,8 @@ impl TerminalView {
             copy_mode_frozen_offset: 0,
             was_focused: false,
             focus_subscriptions: None,
+            ghostty_pressed_keys: std::collections::HashMap::new(),
+            ghostty_pending_text_key: None,
             hovered_cell: None,
             ctrl_hovered_link: None,
             hover_link_cache: None,
@@ -740,7 +881,14 @@ impl TerminalView {
 
     #[cfg(test)]
     pub(crate) fn display_only_for_test(workspace_id: u64, cx: &mut Context<Self>) -> Self {
-        let terminal = TerminalState::new_display_only(24, 80);
+        let mut terminal = TerminalState::new_display_only(24, 80);
+        // Drop the engine event channel before the view wires its coalescing
+        // task to it. The display runtime owns a real OS thread, and GPUI's
+        // test scheduler aborts the process when a foreign thread wakes a task
+        // it did not spawn. Layout and workspace tests only need a mounted
+        // surface, never its output, so an event stream that stays pending is
+        // exactly what they want.
+        drop(terminal.take_backend_events());
         Self::from_terminal_state(workspace_id, terminal, cx)
     }
 }
@@ -753,6 +901,9 @@ impl TerminalView {
     /// Set preedit text during IME composition.
     pub fn set_marked_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.ime_marked_text = text;
+        {
+            self.ghostty_pending_text_key = None;
+        }
         cx.notify();
     }
 
@@ -764,8 +915,47 @@ impl TerminalView {
 
     /// Commit composed text to the PTY.
     pub fn commit_text(&mut self, text: &str, _cx: &mut Context<Self>) {
+        let was_composing = !self.ime_marked_text.is_empty();
         self.ime_marked_text.clear();
-        self.terminal.write_to_pty(text.as_bytes().to_vec());
+        {
+            let pending = if was_composing {
+                self.ghostty_pending_text_key.take();
+                None
+            } else {
+                self.ghostty_pending_text_key.take()
+            };
+            let release_id = pending
+                .as_ref()
+                .map(|(keystroke, _, _)| keystroke.key.clone());
+            let input = pending
+                .as_ref()
+                .map(|(keystroke, action, prefer_character_input)| {
+                    super::input::ghostty_text_key_input(
+                        keystroke,
+                        *action,
+                        *prefer_character_input,
+                        text,
+                    )
+                })
+                .unwrap_or_else(|| paneflow_terminal_ghostty::KeyInput {
+                    key: paneflow_terminal_ghostty::Key::Unidentified,
+                    action: paneflow_terminal_ghostty::KeyAction::Press,
+                    modifiers: paneflow_terminal_ghostty::Modifiers::empty(),
+                    consumed_modifiers: paneflow_terminal_ghostty::Modifiers::empty(),
+                    text: text.to_string(),
+                    unshifted_codepoint: None,
+                    composing: false,
+                });
+            let mut release = input.clone();
+            release.action = paneflow_terminal_ghostty::KeyAction::Release;
+            release.text.clear();
+            let result = self.terminal.write_ghostty_key(input);
+            if result == super::pty_session::BackendInputResult::Accepted
+                && let Some(release_id) = release_id
+            {
+                self.ghostty_pressed_keys.insert(release_id, release);
+            }
+        }
     }
 
     /// Send arbitrary text to the PTY (no bracketed paste wrapping).
@@ -1038,6 +1228,22 @@ pub enum TerminalEvent {
     /// pane of every workspace off the render thread and opens the fleet
     /// results overlay.
     FleetSearchRequested { query: String, regex: bool },
+    /// The OSC 9;4 progress state of this pane flipped between "something is
+    /// running" and "nothing is". Claude Code publishes `indeterminate` for
+    /// the whole of a turn and clears it when the prompt comes back, so on a
+    /// pane running an agent this is a turn boundary reported by the agent
+    /// itself - no hook involved. Emitted only on a change, never per report.
+    // Read by `PaneFlowApp` once #184 Phase 3.8 (agent status without hooks)
+    // lands; the notification itself already fires in `process_backend_wakeup`.
+    #[allow(dead_code)]
+    AgentProgressChanged { busy: bool },
+    /// The program in this pane asked for the user's attention through OSC 9
+    /// or OSC 777. Already routed to a desktop notification; the receiver
+    /// (`PaneFlowApp`) additionally reads it as agent state when the pane is
+    /// running an agent, because that is the one thing Claude Code still says
+    /// out loud when its hooks are switched off.
+    #[allow(dead_code)]
+    AgentAttention { title: String, body: String },
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -1131,6 +1337,8 @@ impl TerminalView {
             (String::new(), ui.muted)
         } else if !has_matches {
             ("No results".to_string(), ui.muted)
+        } else if self.search_truncated {
+            (format!("{current_match}/{match_count}+"), ui.muted)
         } else {
             (format!("{current_match}/{match_count}"), ui.muted)
         };
@@ -1306,6 +1514,9 @@ impl TerminalView {
         }
 
         self.terminal.set_terminal_focused(focused);
+        if !focused {
+            self.release_ghostty_pressed_keys();
+        }
         let reports_focus = self
             .terminal
             .session_backend()
@@ -1314,8 +1525,11 @@ impl TerminalView {
         if reports_focus {
             // This protocol write is not user input. It must not mark a failed
             // spawn as interactive merely because its pane received focus.
-            let report = if focused { b"\x1b[I" } else { b"\x1b[O" };
-            self.terminal.write_to_pty_silent(report.to_vec());
+            self.terminal.write_ghostty_focus(if focused {
+                paneflow_terminal_ghostty::FocusEvent::Gained
+            } else {
+                paneflow_terminal_ghostty::FocusEvent::Lost
+            });
         }
         self.was_focused = focused;
     }
@@ -1340,6 +1554,10 @@ impl Render for TerminalView {
         let focused = self.focus_handle.is_focused(window);
         self.apply_terminal_focus(focused);
         let backend = self.terminal.session_backend();
+        let theme_generation = crate::theme::theme_generation();
+        if self.appearance_theme_generation != theme_generation && backend.refresh_appearance() {
+            self.appearance_theme_generation = theme_generation;
+        }
         let terminal_mode = backend.modes();
 
         // Update cell dimensions for mouse → grid mapping
@@ -1554,9 +1772,6 @@ impl Render for TerminalView {
             .child(terminal_body);
 
         if search_active {
-            // The "Search" key context is layered onto `key_ctx` above, before the
-            // single `.key_context(..)` call - re-setting it here would replace the
-            // Terminal context wholesale.
             el = el.child(self.render_search_overlay(cx));
         }
 
@@ -1608,45 +1823,63 @@ fn resolve_cursor_visible(
 mod tests {
     use super::*;
     use crate::terminal::pty_session::strip_partial_ansi_tail;
-    use paneflow_config::schema::TerminalBackendConfig;
 
     #[test]
-    fn auto_and_explicit_alacritty_are_the_only_backends() {
-        // Published schema is Auto | Alacritty. Ghostty deserializes to Alacritty
-        // in paneflow-config; this view never branches on a second backend.
-        let auto = TerminalBackendConfig::Auto;
-        let alacritty = TerminalBackendConfig::Alacritty;
-        assert_ne!(format!("{auto:?}"), "");
-        assert_eq!(format!("{alacritty:?}"), "Alacritty");
+    fn ghostty_start_errors_carry_their_phase_and_reason_code() {
+        // Every pre-child failure reports without a pid; a post-child failure
+        // carries the pid it already created, so the log line can name it.
+        for (error, phase, reason_code) in [
+            (
+                GhosttyStartError::Initialization(anyhow::anyhow!("engine")),
+                TerminalBackendFailurePhase::Initialization,
+                TerminalBackendFailureDiagnostics::GHOSTTY_INITIALIZATION_FAILED,
+            ),
+            (
+                GhosttyStartError::OpenPty(anyhow::anyhow!("pty")),
+                TerminalBackendFailurePhase::OpenPty,
+                TerminalBackendFailureDiagnostics::GHOSTTY_OPEN_PTY_FAILED,
+            ),
+            (
+                GhosttyStartError::Spawn(anyhow::anyhow!("spawn")),
+                TerminalBackendFailurePhase::Spawn,
+                TerminalBackendFailureDiagnostics::GHOSTTY_SPAWN_FAILED,
+            ),
+        ] {
+            let failure = classify_ghostty_start_error(error);
+            assert_eq!(failure.child_pid, None);
+            assert_eq!(failure.diagnostics.phase, phase);
+            assert_eq!(failure.diagnostics.reason_code, reason_code);
+        }
+
+        let os_error = anyhow::Error::new(std::io::Error::from_raw_os_error(5));
+        let failure = classify_ghostty_start_error(GhosttyStartError::PostSpawn {
+            child_pid: 4321,
+            error: os_error,
+        });
+        assert_eq!(failure.child_pid, Some(4321));
+        assert_eq!(
+            failure.diagnostics.phase,
+            TerminalBackendFailurePhase::PostSpawn
+        );
+        assert_eq!(
+            failure.diagnostics.reason_code,
+            TerminalBackendFailureDiagnostics::GHOSTTY_POST_SPAWN_FAILED
+        );
+        assert_eq!(failure.diagnostics.os_error, Some(5));
     }
 
     #[test]
-    fn pending_terminal_publishes_cwd_before_background_spawn() {
-        let src = include_str!("view.rs");
-        let constructor = src
-            .split("pub fn with_cwd_env_and_profile(")
-            .nth(1)
-            .and_then(|body| body.split("pub fn ").next())
-            .expect("terminal constructor");
-        let publish = constructor
-            .find("terminal.current_cwd = Some(params.cwd")
-            .expect("pending CWD publication");
-        let spawn = constructor.find("cx.spawn(").expect("background spawn");
-        assert!(publish < spawn, "{constructor}");
-    }
+    fn backend_start_failure_reports_once_per_process() {
+        // FR-05: N failing panes cost one error line, with the per-pane detail
+        // preserved at debug level.
+        let reported = std::sync::atomic::AtomicBool::new(false);
+        assert!(claim_backend_failure_report(&reported));
+        assert!(!claim_backend_failure_report(&reported));
 
-    #[test]
-    fn ghostty_helpers_are_gone_and_alacritty_is_unconditional() {
-        // Runtime: Auto does not record a backend failure (the old Ghostty
-        // unavailable path). Diagnostics are requested / effective / target.
-        let state = TerminalState::new_display_only(24, 80);
-        let d = state.backend_diagnostics();
-        assert_eq!(d.effective, "alacritty");
-        assert_eq!(d.target_triple, env!("PANEFLOW_TARGET_TRIPLE"));
-        let formatted = d.to_string();
-        assert!(formatted.contains("effective=alacritty"));
-        assert!(!formatted.contains("ghostty"));
-        assert!(!formatted.contains("failure_phase"));
+        let fresh = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(backend_failure_level(&fresh), log::Level::Error);
+        assert_eq!(backend_failure_level(&fresh), log::Level::Debug);
+        assert_eq!(backend_failure_level(&fresh), log::Level::Debug);
     }
 
     // --- send_keystroke submission guard (US-005, orchestration-v2) ---
@@ -1695,7 +1928,62 @@ mod tests {
         assert!(clean.contains('\t') && clean.contains('\n'), "TAB/LF kept");
     }
 
-    // --- strip_partial_ansi_tail tests (US-012 / US-015) ---
+    // --- extract_scrollback / restore_scrollback tests (US-011 / US-015) ---
+
+    #[test]
+    fn scrollback_round_trip() {
+        // EP-002 US-004: the mockable PtyBackend is gone; a display-only
+        // TerminalState has a real `Term` (no PTY) and is the right harness for
+        // the grid-only history round-trip.
+        let state = TerminalState::new_display_only(3, 80);
+
+        state.restore_scrollback("history one\nhistory two\nvisible three\nvisible four");
+
+        let scrollback = state.extract_scrollback();
+        assert!(scrollback.is_some(), "Expected scrollback content");
+        let text = scrollback.unwrap();
+        assert!(
+            text.contains("history one"),
+            "Missing 'history one' in: {text}"
+        );
+        assert!(
+            text.contains("history two"),
+            "Missing 'history two' in: {text}"
+        );
+        assert!(!text.contains("visible three"), "Leaked viewport: {text}");
+        assert!(!text.contains("visible four"), "Leaked viewport: {text}");
+    }
+
+    #[test]
+    fn extract_scrollback_empty_terminal_returns_none() {
+        let state = TerminalState::new_display_only(24, 80);
+        // Fresh terminal with no content beyond the initial blank grid
+        // `extract_scrollback` documents `None` for empty history (the
+        // viewport is excluded, so the blank grid contributes nothing).
+        // Pin that, so a `Some("")` or a leaked viewport fails here.
+        let scrollback = state.extract_scrollback();
+        assert!(
+            scrollback.is_none(),
+            "Expected None for an empty history, got: {scrollback:?}"
+        );
+    }
+
+    #[test]
+    fn pending_terminal_publishes_cwd_before_background_spawn() {
+        let src = include_str!("view.rs");
+        let constructor = src
+            .split("pub fn with_cwd_env_and_profile(")
+            .nth(1)
+            .and_then(|body| body.split("pub fn ").next())
+            .expect("terminal constructor");
+        let publish = constructor
+            .find("terminal.current_cwd = Some(params.cwd")
+            .expect("pending CWD publication");
+        let spawn = constructor.find("cx.spawn(").expect("background spawn");
+        assert!(publish < spawn, "{constructor}");
+    }
+
+    // --- strip_partial_ansi_tail tests ---
 
     #[test]
     fn strip_ansi_plain_text_unchanged() {
@@ -1733,46 +2021,6 @@ mod tests {
         let mut s = "prompt\x1b]7;file://host/dir".to_string();
         strip_partial_ansi_tail(&mut s);
         assert_eq!(s, "prompt");
-    }
-
-    // --- extract_scrollback / restore_scrollback tests (US-011 / US-015) ---
-
-    #[test]
-    fn scrollback_round_trip() {
-        // EP-002 US-004: the mockable PtyBackend is gone; a display-only
-        // TerminalState has a real `Term` (no PTY) and is the right harness for
-        // the grid-only history round-trip.
-        let state = TerminalState::new_display_only(3, 80);
-
-        state.restore_scrollback("history one\nhistory two\nvisible three\nvisible four");
-
-        let scrollback = state.extract_scrollback();
-        assert!(scrollback.is_some(), "Expected scrollback content");
-        let text = scrollback.unwrap();
-        assert!(
-            text.contains("history one"),
-            "Missing 'history one' in: {text}"
-        );
-        assert!(
-            text.contains("history two"),
-            "Missing 'history two' in: {text}"
-        );
-        assert!(!text.contains("visible three"), "Leaked viewport: {text}");
-        assert!(!text.contains("visible four"), "Leaked viewport: {text}");
-    }
-
-    #[test]
-    fn extract_scrollback_empty_terminal_returns_none() {
-        let state = TerminalState::new_display_only(24, 80);
-        // Fresh terminal with no content beyond the initial blank grid.
-        // `extract_scrollback` documents `None` for empty history (the
-        // viewport is excluded, so the blank grid contributes nothing).
-        // Pin that, so a `Some("")` or a leaked viewport fails here.
-        let scrollback = state.extract_scrollback();
-        assert!(
-            scrollback.is_none(),
-            "Expected None for an empty history, got: {scrollback:?}"
-        );
     }
 
     #[test]

@@ -14,14 +14,16 @@ use gpui::{
     Window,
 };
 
+use paneflow_terminal_ghostty as ghostty;
+
 use crate::keys::TerminalKeySequence;
-use crate::mouse;
 use crate::terminal::types::{
-    HyperlinkSource, HyperlinkZone, Modes, Point, SelectionKind, SelectionSide, ShellQuoting,
+    HyperlinkSource, HyperlinkZone, Modes, Point, SelectionGeometry, SelectionKind, ShellQuoting,
 };
 
 #[cfg(debug_assertions)]
 use super::probe_enabled;
+use super::pty_session::BackendInputResult;
 use super::{TerminalEvent, TerminalView};
 
 /// Returns true when the "open link" modifier is held: Cmd on macOS.
@@ -64,6 +66,112 @@ pub(super) fn wrap_bracketed_paste(text: &str) -> String {
     format!("\x1b[200~{}\x1b[201~", sanitize_bracketed_paste(text))
 }
 
+fn ghostty_modifiers(modifiers: gpui::Modifiers) -> ghostty::Modifiers {
+    let mut result = ghostty::Modifiers::empty();
+    if modifiers.shift {
+        result = result | ghostty::Modifiers::SHIFT;
+    }
+    if modifiers.control {
+        result = result | ghostty::Modifiers::CONTROL;
+    }
+    if modifiers.alt {
+        result = result | ghostty::Modifiers::ALT;
+    }
+    if modifiers.platform {
+        result = result | ghostty::Modifiers::SUPER;
+    }
+    result
+}
+
+fn ghostty_key(key: &str, key_char: Option<&str>) -> Option<ghostty::Key> {
+    let named = match key {
+        "enter" => Some(ghostty::Key::Enter),
+        "tab" => Some(ghostty::Key::Tab),
+        "backspace" => Some(ghostty::Key::Backspace),
+        "delete" => Some(ghostty::Key::Delete),
+        "escape" => Some(ghostty::Key::Escape),
+        "up" => Some(ghostty::Key::Up),
+        "down" => Some(ghostty::Key::Down),
+        "left" => Some(ghostty::Key::Left),
+        "right" => Some(ghostty::Key::Right),
+        "home" => Some(ghostty::Key::Home),
+        "end" => Some(ghostty::Key::End),
+        "pageup" => Some(ghostty::Key::PageUp),
+        "pagedown" => Some(ghostty::Key::PageDown),
+        "insert" => Some(ghostty::Key::Insert),
+        "space" => Some(ghostty::Key::Character(' ')),
+        _ => None,
+    };
+    if named.is_some() {
+        return named;
+    }
+    if let Some(number) = key.strip_prefix('f').and_then(|value| value.parse().ok())
+        && (1..=25).contains(&number)
+    {
+        return Some(ghostty::Key::Function(number));
+    }
+    key.chars()
+        .next()
+        .filter(|_| key.chars().count() == 1)
+        .or_else(|| {
+            let value = key_char?;
+            value.chars().next().filter(|_| value.chars().count() == 1)
+        })
+        .map(ghostty::Key::Character)
+}
+
+fn ghostty_key_input(
+    keystroke: &gpui::Keystroke,
+    action: ghostty::KeyAction,
+) -> Option<ghostty::KeyInput> {
+    let key = ghostty_key(&keystroke.key, keystroke.key_char.as_deref())?;
+    let unshifted_codepoint = keystroke
+        .key
+        .chars()
+        .next()
+        .filter(|_| keystroke.key.chars().count() == 1);
+    Some(ghostty::KeyInput {
+        key,
+        action,
+        modifiers: ghostty_modifiers(keystroke.modifiers),
+        consumed_modifiers: ghostty::Modifiers::empty(),
+        text: String::new(),
+        unshifted_codepoint,
+        composing: false,
+    })
+}
+
+pub(super) fn ghostty_text_key_input(
+    keystroke: &gpui::Keystroke,
+    action: ghostty::KeyAction,
+    prefer_character_input: bool,
+    text: &str,
+) -> ghostty::KeyInput {
+    let mut input = ghostty_key_input(keystroke, action).unwrap_or(ghostty::KeyInput {
+        key: ghostty::Key::Unidentified,
+        action,
+        modifiers: ghostty_modifiers(keystroke.modifiers),
+        consumed_modifiers: ghostty::Modifiers::empty(),
+        text: String::new(),
+        unshifted_codepoint: None,
+        composing: false,
+    });
+    let mut consumed = ghostty::Modifiers::empty();
+    if keystroke.modifiers.shift {
+        consumed = consumed | ghostty::Modifiers::SHIFT;
+    }
+    if prefer_character_input && keystroke.modifiers.control && keystroke.modifiers.alt {
+        consumed = consumed | ghostty::Modifiers::CONTROL | ghostty::Modifiers::ALT;
+    }
+    input.consumed_modifiers = consumed;
+    input.text = text.to_owned();
+    input
+}
+
+fn ghostty_release_id(keystroke: &gpui::Keystroke) -> String {
+    keystroke.key.clone()
+}
+
 #[derive(Clone, Copy)]
 enum ReportedMouseAction {
     Press,
@@ -82,10 +190,6 @@ enum ReportedMouseButton {
 
 struct ReportedMouseInput {
     position: gpui::Point<gpui::Pixels>,
-    point: Point,
-    button: u8,
-    pressed: bool,
-    mode: Modes,
     action: ReportedMouseAction,
     reported_button: Option<ReportedMouseButton>,
     modifiers: gpui::Modifiers,
@@ -111,9 +215,9 @@ impl ReportedMouseButton {
 /// `\r` verbatim, which the shell treats as Enter.
 ///
 /// Only a conservative ASCII path subset is left unquoted; metacharacters like
-/// `;`, `&`, `$`, spaces, and quotes are always quoted. pwsh panes (Homebrew)
-/// get the PowerShell single-quote form; POSIX shells get POSIX quoting.
-/// Shared by `handle_file_drop` and `handle_paste`.
+/// `;`, `&`, `$`, spaces, and quotes are always quoted. A pwsh shell gets the
+/// PowerShell single-quote form. Shared by `handle_file_drop` and
+/// `handle_paste`.
 fn paths_to_pty_text(paths: &[std::path::PathBuf], shell_quoting: ShellQuoting) -> Option<String> {
     let quoted: Vec<String> = paths
         .iter()
@@ -155,14 +259,14 @@ fn posix_unquoted_path_char(c: char) -> bool {
 }
 
 fn quote_powershell_path(path: &str) -> String {
-    if path.chars().all(windows_unquoted_path_char) {
+    if path.chars().all(powershell_unquoted_path_char) {
         path.to_string()
     } else {
         format!("'{}'", path.replace('\'', "''"))
     }
 }
 
-fn windows_unquoted_path_char(c: char) -> bool {
+fn powershell_unquoted_path_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | ':')
 }
 
@@ -266,6 +370,8 @@ impl TerminalView {
         // Get current TermMode for key mapping (APP_CURSOR, etc.)
         let mode = self.terminal.session_backend().modes();
 
+        self.ghostty_pending_text_key = None;
+
         // Special keys / modifiers → write the escape sequence directly.
         // Printable characters are NOT handled here: GPUI's InputHandler
         // (replace_text_in_range) is the single source of truth for them on
@@ -277,7 +383,7 @@ impl TerminalView {
             self.option_as_meta,
             event.prefer_character_input,
         ) {
-            let (seq, _encode_with_backend) = match mapped_sequence {
+            let (seq, encode_with_backend) = match mapped_sequence {
                 TerminalKeySequence::Protocol(seq) => (seq, true),
                 TerminalKeySequence::Literal(seq) => (seq, false),
             };
@@ -292,13 +398,52 @@ impl TerminalView {
                     self.scroll_remainder = 0.0;
                 }
             }
-            match seq {
-                Cow::Borrowed(s) => {
-                    self.terminal.write_to_pty(Cow::Borrowed(s.as_bytes()));
+            // A `Literal` sequence is written verbatim: it is already the
+            // exact bytes the mode asked for, and re-encoding it through the
+            // engine's key model would change them.
+            let backend_key = if encode_with_backend {
+                ghostty_key_input(
+                    keystroke,
+                    if event.is_held {
+                        ghostty::KeyAction::Repeat
+                    } else {
+                        ghostty::KeyAction::Press
+                    },
+                )
+            } else {
+                None
+            };
+            match backend_key {
+                Some(input) => {
+                    let mut release = input.clone();
+                    release.action = ghostty::KeyAction::Release;
+                    release.text.clear();
+                    release.composing = false;
+                    if self.terminal.write_ghostty_key(input) == BackendInputResult::Accepted {
+                        self.ghostty_pressed_keys
+                            .insert(ghostty_release_id(keystroke), release);
+                    }
                 }
-                Cow::Owned(s) => {
-                    self.terminal.write_to_pty(s.into_bytes());
-                }
+                None => match seq {
+                    Cow::Borrowed(s) => {
+                        self.terminal.write_to_pty(Cow::Borrowed(s.as_bytes()));
+                    }
+                    Cow::Owned(s) => {
+                        self.terminal.write_to_pty(s.into_bytes());
+                    }
+                },
+            }
+        } else {
+            if ghostty_key(&keystroke.key, keystroke.key_char.as_deref()).is_some() {
+                self.ghostty_pending_text_key = Some((
+                    keystroke.clone(),
+                    if event.is_held {
+                        ghostty::KeyAction::Repeat
+                    } else {
+                        ghostty::KeyAction::Press
+                    },
+                    event.prefer_character_input,
+                ));
             }
         }
 
@@ -325,102 +470,118 @@ impl TerminalView {
         if self.search_active || self.copy_mode_active {
             return;
         }
-        let _ = event;
+        let release_id = ghostty_release_id(&event.keystroke);
+        if let Some(input) = self.ghostty_pressed_keys.remove(&release_id)
+            && self.terminal.write_ghostty_key(input) == BackendInputResult::Rejected
+        {
+            log::warn!(
+                target: "paneflow::terminal::ghostty",
+                "Ghostty rejected a key release"
+            );
+        }
+    }
+
+    pub(super) fn release_ghostty_pressed_keys(&mut self) {
+        self.ghostty_pending_text_key = None;
+        for (_, input) in std::mem::take(&mut self.ghostty_pressed_keys) {
+            if self.terminal.write_ghostty_key(input) == BackendInputResult::Rejected {
+                log::warn!(
+                    target: "paneflow::terminal::ghostty",
+                    "Ghostty rejected a key release during focus loss"
+                );
+            }
+        }
     }
 
     // --- Pixel → grid coordinate conversion ---
 
-    pub(super) fn pixel_to_grid(&self, pos: gpui::Point<gpui::Pixels>) -> (Point, SelectionSide) {
+    pub(super) fn pixel_to_grid(&self, pos: gpui::Point<gpui::Pixels>) -> Point {
+        self.selection_geometry().cell_at(self.pane_relative(pos))
+    }
+
+    /// The pointer measured from the grid's own top-left corner.
+    ///
+    /// Negative values, and values past the grid, are the pointer having left
+    /// the pane. That is exactly what the selection engine reads to decide it
+    /// should autoscroll, so they are handed over unclamped.
+    fn pane_relative(&self, pos: gpui::Point<gpui::Pixels>) -> (f32, f32) {
         // Poison-safe: if a panic happened inside paint() while holding the
         // lock, the inner Point is still a valid value - recover and continue.
         let origin = *self
             .element_origin
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let relative_x = (pos.x - origin.x).max(gpui::px(0.0));
-        let relative_y = (pos.y - origin.y).max(gpui::px(0.0));
-
-        let col_f = relative_x / self.cell_width;
-        let half_cell = self.cell_width / 2.0;
-        let cell_x = relative_x % self.cell_width;
-        let side = if cell_x > half_cell {
-            SelectionSide::Right
-        } else {
-            SelectionSide::Left
-        };
-
-        let metrics = self.terminal.session_backend().grid_metrics();
-        let max_col = metrics.columns.saturating_sub(1);
-        let max_line = metrics.screen_lines.saturating_sub(1) as i32;
-
-        let col = (col_f as usize).min(max_col);
-        let line = ((relative_y / self.line_height) as i32).min(max_line);
-
-        (Point::new(line - metrics.display_offset as i32, col), side)
+        (f32::from(pos.x - origin.x), f32::from(pos.y - origin.y))
     }
 
-    /// Convert pixel position to viewport grid coordinates (for mouse reporting).
-    /// Unlike `pixel_to_grid`, this returns 0-based viewport coordinates without
-    /// the scrollback display_offset subtraction.
-    pub(super) fn pixel_to_viewport(&self, pos: gpui::Point<gpui::Pixels>) -> Point {
-        let origin = *self
-            .element_origin
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let relative_x = (pos.x - origin.x).max(gpui::px(0.0));
-        let relative_y = (pos.y - origin.y).max(gpui::px(0.0));
-        let col_f = relative_x / self.cell_width;
-        let metrics = self.terminal.session_backend().grid_metrics();
-        let max_col = metrics.columns.saturating_sub(1);
-        let max_line = metrics.screen_lines.saturating_sub(1) as i32;
-        let col = (col_f as usize).min(max_col);
-        let line = ((relative_y / self.line_height) as i32).min(max_line);
-        Point::new(line, col)
+    /// The cell under the pointer, or `None` when the pointer is not over the
+    /// grid at all. A release wants that distinction: the selection engine
+    /// records "no cell" rather than the edge cell a clamp would invent.
+    fn grid_cell_at(&self, pos: gpui::Point<gpui::Pixels>) -> Option<Point> {
+        let geometry = self.selection_geometry();
+        let position = self.pane_relative(pos);
+        let inside = position.0 >= 0.0
+            && position.1 >= 0.0
+            && position.0 < geometry.cell_width * geometry.columns as f32
+            && position.1 < geometry.height();
+        inside.then(|| geometry.cell_at(position))
     }
 
-    /// Write a mouse report to the PTY using the appropriate encoding format.
+    /// Where the grid sits, as one snapshot for the pointer event in hand.
+    fn selection_geometry(&self) -> SelectionGeometry {
+        self.terminal
+            .session_backend()
+            .selection_geometry(f32::from(self.cell_width), f32::from(self.line_height))
+    }
+
+    /// Hand a mouse event to the engine, which owns the report encoding
+    /// (SGR vs normal/UTF-8) and the release-code rules for the active mode.
     fn write_mouse_report(&self, report: ReportedMouseInput) {
         let ReportedMouseInput {
             position,
-            point,
-            button,
-            pressed,
-            mode,
             action,
             reported_button,
             modifiers,
             any_button_pressed,
             repeat,
         } = report;
-        let format = mouse::MouseFormat::from_mode(mode);
-        let legacy = match format {
-            mouse::MouseFormat::Sgr => {
-                Some(mouse::sgr_mouse_report(point, button, pressed).into_bytes())
-            }
-            mouse::MouseFormat::Normal { utf8 } => {
-                // Normal/UTF-8 encoding: release always uses button code 3 (no per-button release)
-                let btn = if pressed { button } else { 3 };
-                mouse::normal_mouse_report(point, btn, utf8)
-            }
-        };
-        let _ = (
-            position,
-            action,
-            reported_button,
-            modifiers,
-            any_button_pressed,
-        );
-        let Some(bytes) = legacy else {
-            return;
-        };
-        if repeat == 1 {
-            self.terminal.write_to_pty(bytes);
-        } else {
-            let mut repeated = Vec::with_capacity(bytes.len().saturating_mul(repeat));
-            for _ in 0..repeat {
-                repeated.extend_from_slice(&bytes);
-            }
-            self.terminal.write_to_pty(repeated);
+        {
+            let origin = *self
+                .element_origin
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let metrics = self.terminal.session_backend().grid_metrics();
+            let screen_width = (metrics.columns as f32 * self.cell_width.as_f32())
+                .max(1.0)
+                .min(u32::MAX as f32) as u32;
+            let screen_height = (metrics.screen_lines as f32 * self.line_height.as_f32())
+                .max(1.0)
+                .min(u32::MAX as f32) as u32;
+            let input = ghostty::MouseInput {
+                action: match action {
+                    ReportedMouseAction::Press => ghostty::MouseAction::Press,
+                    ReportedMouseAction::Release => ghostty::MouseAction::Release,
+                    ReportedMouseAction::Motion => ghostty::MouseAction::Motion,
+                },
+                button: reported_button.map(|button| match button {
+                    ReportedMouseButton::Left => ghostty::MouseButton::Left,
+                    ReportedMouseButton::Middle => ghostty::MouseButton::Middle,
+                    ReportedMouseButton::Right => ghostty::MouseButton::Right,
+                    ReportedMouseButton::WheelUp => ghostty::MouseButton::Four,
+                    ReportedMouseButton::WheelDown => ghostty::MouseButton::Five,
+                }),
+                modifiers: ghostty_modifiers(modifiers),
+                x: (position.x - origin.x).max(gpui::px(0.0)).as_f32(),
+                y: (position.y - origin.y).max(gpui::px(0.0)).as_f32(),
+                screen_width,
+                screen_height,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_left: 0,
+                padding_right: 0,
+                any_button_pressed,
+            };
+            self.terminal.write_ghostty_mouse(input, repeat);
         }
     }
 
@@ -529,10 +690,11 @@ impl TerminalView {
             && self.ctrl_hovered_link.is_some()
         {
             self.mouse_down_link = self.ctrl_hovered_link.clone();
-            let (point, side) = self.pixel_to_grid(event.position);
-            self.terminal
-                .session_backend()
-                .start_selection(SelectionKind::Simple, point, side);
+            self.terminal.session_backend().press_selection(
+                SelectionKind::Simple,
+                self.pixel_to_grid(event.position),
+                self.pane_relative(event.position),
+            );
             self.selecting = true;
             cx.notify();
             return;
@@ -545,16 +707,11 @@ impl TerminalView {
         if mode.intersects(Modes::MOUSE_MODE) && !event.modifiers.shift {
             // Side/Navigate mouse buttons have no terminal report encoding;
             // skip them instead of injecting a phantom Left click.
-            if let Some(button) = mouse::mouse_button_code(event.button, event.modifiers) {
-                let point = self.pixel_to_viewport(event.position);
+            if let Some(reported_button) = ReportedMouseButton::from_gpui(event.button) {
                 self.write_mouse_report(ReportedMouseInput {
                     position: event.position,
-                    point,
-                    button,
-                    pressed: true,
-                    mode,
                     action: ReportedMouseAction::Press,
-                    reported_button: ReportedMouseButton::from_gpui(event.button),
+                    reported_button: Some(reported_button),
                     modifiers: event.modifiers,
                     any_button_pressed: true,
                     repeat: 1,
@@ -568,8 +725,6 @@ impl TerminalView {
             return;
         }
 
-        let (point, side) = self.pixel_to_grid(event.position);
-
         let selection_type = match event.click_count {
             1 => SelectionKind::Simple,
             2 => SelectionKind::Semantic,
@@ -577,9 +732,11 @@ impl TerminalView {
             _ => return,
         };
 
-        self.terminal
-            .session_backend()
-            .start_selection(selection_type, point, side);
+        self.terminal.session_backend().press_selection(
+            selection_type,
+            self.pixel_to_grid(event.position),
+            self.pane_relative(event.position),
+        );
 
         self.selecting = true;
         cx.notify();
@@ -623,26 +780,18 @@ impl TerminalView {
         {
             // Skip motion reports for side/Navigate buttons - they have no
             // terminal mouse-report encoding.
-            let button_base = match event.pressed_button {
-                Some(btn) => match mouse::mouse_button_code(btn, event.modifiers) {
-                    Some(b) => b,
+            let reported_button = match event.pressed_button {
+                Some(button) => match ReportedMouseButton::from_gpui(button) {
+                    Some(reported) => Some(reported),
                     None => return,
                 },
-                None => 3, // no button held = release code in motion reports
+                // No button held: a bare motion report.
+                None => None,
             };
-            let point = self.pixel_to_viewport(event.position);
-            // Motion events add +32 to the button code per protocol spec
-            let button = button_base + 32;
             self.write_mouse_report(ReportedMouseInput {
                 position: event.position,
-                point,
-                button,
-                pressed: true,
-                mode,
                 action: ReportedMouseAction::Motion,
-                reported_button: event
-                    .pressed_button
-                    .and_then(ReportedMouseButton::from_gpui),
+                reported_button,
                 modifiers: event.modifiers,
                 any_button_pressed: event.pressed_button.is_some(),
                 repeat: 1,
@@ -652,7 +801,7 @@ impl TerminalView {
 
         // Track hovered cell for URL regex detection (US-015).
         // Save the prior cell so we can throttle the per-frame rescan below.
-        let (hover_point, _) = self.pixel_to_grid(event.position);
+        let hover_point = self.pixel_to_grid(event.position);
         let prev_hovered_cell = self.hovered_cell;
         self.hovered_cell = Some(hover_point);
 
@@ -684,15 +833,19 @@ impl TerminalView {
             return;
         }
 
-        let (point, side) = self.pixel_to_grid(event.position);
-
-        // macOS has no PRIMARY selection buffer, so the formatted in-progress
-        // selection this returns is unused; `finish_selection` writes the
-        // committed value to the clipboard on mouse-up.
-        let _ = self
-            .terminal
-            .session_backend()
-            .update_selection(point, side);
+        // Alt is the block-selection modifier every terminal uses, and the
+        // engine draws the rectangle: the renderer already paints a block
+        // range. Formatting the in-progress text would mean blocking GPUI on
+        // the runtime thread for every pointer event, so PRIMARY is written
+        // once on mouse-up instead.
+        let geometry = self.selection_geometry();
+        let position = self.pane_relative(event.position);
+        self.terminal.session_backend().drag_selection(
+            geometry.cell_at(position),
+            position,
+            geometry,
+            event.modifiers.alt,
+        );
 
         cx.notify();
     }
@@ -801,16 +954,11 @@ impl TerminalView {
             // here so it cannot phantom-open on a later plain click once mouse
             // mode ends.
             self.mouse_down_link = None;
-            if let Some(button) = mouse::mouse_button_code(event.button, event.modifiers) {
-                let point = self.pixel_to_viewport(event.position);
+            if let Some(reported_button) = ReportedMouseButton::from_gpui(event.button) {
                 self.write_mouse_report(ReportedMouseInput {
                     position: event.position,
-                    point,
-                    button,
-                    pressed: false,
-                    mode,
                     action: ReportedMouseAction::Release,
-                    reported_button: ReportedMouseButton::from_gpui(event.button),
+                    reported_button: Some(reported_button),
                     modifiers: event.modifiers,
                     any_button_pressed: false,
                     repeat: 1,
@@ -836,8 +984,11 @@ impl TerminalView {
         let down_link = self.mouse_down_link.take();
 
         // Clear empty selections, or auto-copy non-empty selections (tmux-style):
-        // write to the clipboard (Cmd+V), then clear the selection so the
-        // disappearing highlight signals the copy.
+        // write to both PRIMARY (middle-click paste) and CLIPBOARD (Ctrl+V),
+        // then clear the selection so the disappearing highlight signals the copy.
+        self.terminal
+            .session_backend()
+            .release_selection(self.grid_cell_at(event.position));
         let (selection_empty, copied) = self.terminal.session_backend().finish_selection();
 
         // US-012: open on a genuine click (empty selection = no drag).
@@ -884,9 +1035,8 @@ impl TerminalView {
     }
 
     pub(super) fn handle_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // See `handle_copy`. This one is the dangerous half: without bracketed
-        // paste, `write_paste_text` rewrites `\n` -> `\r`, so pasting into a
-        // focused find bar EXECUTED the clipboard's newlines in the shell.
+        // See `handle_copy`. This one is the dangerous half: pasting into a
+        // focused find bar must never reach the shell.
         if !self.focus_handle(cx).is_focused(window) {
             return;
         }
@@ -894,13 +1044,13 @@ impl TerminalView {
             return;
         };
 
-        // US-021: file(s) copied in Finder arrive as `ExternalPaths`.
-        // Insert the shell-quoted path(s). Checked BEFORE
-        // `clipboard.text()`, which falls back to unquoted path display
-        // strings - those would break on spaces. Iterate all entries
-        // (some backends emit a String entry alongside the paths) and
-        // fall through to text() when no `ExternalPaths` is present
-        // (e.g. a `file://` URI copied as text instead).
+        // US-021: file(s) copied in the OS file manager (Nautilus/Finder/
+        // Explorer/Thunar) arrive as `ExternalPaths`. Insert the shell-quoted
+        // path(s). Checked BEFORE `clipboard.text()`, which falls back to
+        // unquoted path display strings - those would break on spaces. Iterate
+        // all entries (some backends emit a String entry alongside the paths)
+        // and fall through to text() when no `ExternalPaths` is present (e.g.
+        // Wayland compositors that copy a `file://` URI as text instead).
         for entry in clipboard.entries() {
             if let ClipboardEntry::ExternalPaths(ext_paths) = entry
                 && let Some(text) =
@@ -945,17 +1095,17 @@ impl TerminalView {
         }
     }
 
+    /// The engine owns the `ESC[200~` / `ESC[201~` framing: it wraps the
+    /// payload itself when the surface has bracketed paste active. Only the
+    /// non-bracketed newline rewrite stays here, because that one is an
+    /// interactive-paste convention, not a protocol rule.
     pub(super) fn write_paste_text(&self, text: &str, mode: Modes) {
-        let (paste_payload, paste_text) = if mode.contains(Modes::BRACKETED_PASTE) {
-            let payload = sanitize_bracketed_paste(text);
-            let wrapped = format!("\x1b[200~{payload}\x1b[201~");
-            (payload, wrapped)
+        let payload = if mode.contains(Modes::BRACKETED_PASTE) {
+            sanitize_bracketed_paste(text)
         } else {
-            let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
-            (normalized.clone(), normalized)
+            text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        let _ = paste_payload;
-        self.terminal.write_to_pty(paste_text.into_bytes());
+        self.terminal.write_ghostty_paste(payload);
     }
 
     /// EP-001 US-001 (agent-control-plane-hardening): deliver an automation /
@@ -1001,20 +1151,9 @@ impl TerminalView {
             }
             self.scroll_remainder -= lines as f32;
 
-            let point = self.pixel_to_viewport(event.position);
-            let direction = if lines > 0 {
-                mouse::ScrollDirection::Up
-            } else {
-                mouse::ScrollDirection::Down
-            };
-            let button = mouse::scroll_button_code(direction, event.modifiers);
             let count = lines.unsigned_abs() as usize;
             self.write_mouse_report(ReportedMouseInput {
                 position: event.position,
-                point,
-                button,
-                pressed: true,
-                mode,
                 action: ReportedMouseAction::Press,
                 reported_button: Some(if lines > 0 {
                     ReportedMouseButton::WheelUp
@@ -1171,6 +1310,28 @@ mod tests {
     use super::{paths_to_pty_text, wrap_bracketed_paste};
     use crate::terminal::types::{Modes, ShellQuoting};
     use std::path::PathBuf;
+
+    #[test]
+    fn printable_altgr_commit_preserves_key_metadata_and_consumes_ctrl_alt() {
+        let keystroke = gpui::Keystroke::parse("ctrl-alt-0").unwrap();
+        let input = super::ghostty_text_key_input(
+            &keystroke,
+            paneflow_terminal_ghostty::KeyAction::Press,
+            true,
+            "@",
+        );
+
+        assert_eq!(input.key, paneflow_terminal_ghostty::Key::Character('0'));
+        assert!(input.modifiers.contains(
+            paneflow_terminal_ghostty::Modifiers::CONTROL
+                | paneflow_terminal_ghostty::Modifiers::ALT
+        ));
+        assert!(input.consumed_modifiers.contains(
+            paneflow_terminal_ghostty::Modifiers::CONTROL
+                | paneflow_terminal_ghostty::Modifiers::ALT
+        ));
+        assert_eq!(input.text, "@");
+    }
 
     #[test]
     fn character_preferred_altgr_bypasses_control_escape_routing() {

@@ -73,6 +73,10 @@ const EMBED_BINARIES: [&str; 3] = ["paneflow-shim", "paneflow-ai-hook", "paneflo
 fn main() {
     println!("cargo:rerun-if-env-changed=PANEFLOW_SKIP_EMBED_BUILD");
 
+    // 1. One engine, one archive (#184): libghostty-vt is vendored for
+    //    aarch64-apple-darwin only, so any other target has nothing to link.
+    assert_ghostty_target_is_supported();
+
     // 2. US-008 - stage the AI-hook binaries into a dir that
     //    `assets::Bins` (rust-embed) will ingest.
     let target = std::env::var("TARGET").expect("cargo always sets TARGET for build scripts");
@@ -299,4 +303,19 @@ fn enforce_embed_size_budget(embed_dir: &Path) {
             embed_dir.display()
         );
     }
+}
+
+/// libghostty-vt is the only terminal engine and its archive is vendored for
+/// exactly one target (`native/libghostty/prebuilt/aarch64-apple-darwin`).
+/// Fail the build outright anywhere else instead of producing a binary whose
+/// every pane is dead. (#184)
+fn assert_ghostty_target_is_supported() {
+    let cfg = |key: &str| std::env::var(key).unwrap_or_default();
+    let supported =
+        cfg("CARGO_CFG_TARGET_OS") == "macos" && cfg("CARGO_CFG_TARGET_ARCH") == "aarch64";
+    assert!(
+        supported,
+        "paneflow-app has no libghostty archive for target {}: Ghostty is the only terminal engine, so this target cannot be built (see native/libghostty/README.md)",
+        std::env::var("TARGET").unwrap_or_default()
+    );
 }

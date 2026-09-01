@@ -6,9 +6,9 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
-    Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Point, SharedString,
-    StrikethroughStyle, Style, UnderlineStyle, Window, px, relative,
+    App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Font, FontStyle, FontWeight,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseMoveEvent,
+    Pixels, Point, SharedString, StrikethroughStyle, Style, UnderlineStyle, Window, px, relative,
 };
 
 use crate::terminal::TerminalSessionBackend;
@@ -211,7 +211,7 @@ fn resolved_cell_background(
 
     if matches!(raw_bg, Color::Named(NamedColor::Background)) {
         // Default-background cells paint nothing: the pane card behind the
-        // element owns the fill, and only it carries the card silhouette.
+        // element owns the fill, and only it is clipped to the card radius.
         gpui::transparent_black()
     } else {
         terminal_panel_background(raw_bg, convert_color(raw_bg, theme), theme)
@@ -529,7 +529,7 @@ fn focused_copy_mode_cursor(
 /// neutral [`Content`] snapshot ([`content_from_term`]) plus the content mask;
 /// the golden-frame net fills it from a fixed fixture so the entire layout is
 /// reproducible with no display. The cells are the backend-neutral
-/// [`crate::terminal::types::Cell`] (EP-003) - no alacritty types reach here.
+/// [`crate::terminal::types::Cell`] (EP-003) - no engine types reach here.
 pub(crate) struct LayoutInputs<'a> {
     pub cells: Arc<[Cell]>,
     /// Cursor as snapshotted from the grid (before the copy-mode / selection
@@ -648,6 +648,8 @@ pub struct TerminalElement {
     /// snapshotted by the view at render time (empty when no search).
     /// Painted as decimated ticks on the scrollbar track.
     search_rail_lines: Vec<usize>,
+    /// When active, default terminal backgrounds are painted transparent so
+    /// the parent surface/window material can show through.
     /// When enabled, block-element glyphs are rendered as built-in quads.
     integrated_glyphs_enabled: bool,
     /// When enabled, emoji glyphs are rendered through GPUI's color path.
@@ -725,10 +727,14 @@ impl TerminalElement {
         let dims = self.frame_metrics.dimensions;
         let theme = crate::theme::active_theme();
 
-        // Keep the terminal grid aligned with the tab strip. The Pane's
-        // reserved 1px border completes the shared 8px visual inset.
-        let gutter = px(crate::app::constants::PANE_CONTENT_INSET);
-        let available_width = (bounds.size.width - gutter).max(px(0.0));
+        // Ghostty's window padding model (`src/renderer/size.zig`): the inset
+        // is subtracted from the viewport on BOTH edges of each axis before the
+        // grid is sized, so the cells sit the same distance from every side of
+        // the pane card instead of hugging the right and bottom edges.
+        let inset_x = px(crate::app::constants::PANE_CONTENT_INSET_X);
+        let inset_y = px(crate::app::constants::PANE_CONTENT_INSET_Y);
+        let available_width = (bounds.size.width - inset_x * 2.).max(px(0.0));
+        let available_height = (bounds.size.height - inset_y * 2.).max(px(0.0));
         // `next_up().floor()` guards against f32 rounding error: when pixel
         // bounds are an exact multiple of the cell metric (24 lines × 16 px),
         // direct `.floor()` can drop one cell because the division yields
@@ -741,7 +747,7 @@ impl TerminalElement {
         // `.max(1.0)` mirrors `desired_cols` above (U-046): on a zero/near-zero
         // -height pane this keeps the row count ≥ 1 so no downstream consumer
         // can underflow a `desired_rows - 1` or index a 0-len boundary array.
-        let desired_rows = (bounds.size.height / dims.line_height)
+        let desired_rows = (available_height / dims.line_height)
             .next_up()
             .floor()
             .max(1.0) as usize;
@@ -753,19 +759,21 @@ impl TerminalElement {
         let content_mask = window.content_mask();
         let visible_top = content_mask.bounds.origin.y;
         let visible_bottom = visible_top + content_mask.bounds.size.height;
-        let first_visible_row = ((visible_top - bounds.origin.y) / dims.line_height)
+        // Row 0 starts one vertical inset below the element's own top edge, so
+        // the culling range is measured from the grid origin, not from `bounds`.
+        let grid_top = bounds.origin.y + inset_y;
+        let first_visible_row = ((visible_top - grid_top) / dims.line_height)
             .floor()
             .max(0.0) as i32;
-        let last_visible_row = ((visible_bottom - bounds.origin.y) / dims.line_height)
+        let last_visible_row = ((visible_bottom - grid_top) / dims.line_height)
             .ceil()
             .max(0.0) as i32;
 
-        // Snapshot the grid into neutral owned data. Alacritty resizes under
-        // the same lock and therefore returns the requested dimensions here.
-        // Ghostty applies the resize on its runtime thread, so it can return the
-        // previous complete grid for one frame before its wakeup publishes the
-        // resized snapshot. The layout below must use the snapshot dimensions,
-        // never combine old cells with the newly requested GPUI dimensions.
+        // Snapshot the grid into neutral owned data. Ghostty applies a resize
+        // on its runtime thread, so it can return the previous complete grid
+        // for one frame before its wakeup publishes the resized snapshot. The
+        // layout below must use the snapshot dimensions, never combine old
+        // cells with the newly requested GPUI dimensions.
         let cursor_color = self.cursor_color_override.unwrap_or(theme.cursor);
         let window_size = TerminalWindowSize::new(
             desired_cols,
@@ -880,8 +888,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
     } = inputs;
 
     // The terminal never fills its own bounds. Its host pane card carries the
-    // background and rounded silhouette; a base fill here would repaint the
-    // corners square because GPUI does not clip children to a parent radius.
+    // background and the rounded corners; a base fill here would repaint the
+    // arcs square (GPUI does not clip children to a parent radius).
     let background_color = gpui::transparent_black();
     let selection_color = theme.selection;
 
@@ -1027,10 +1035,11 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
             fg = theme.selection_foreground;
         }
 
-        // Background rect - retain one for every cell so batching and cursor
-        // inversion stay deterministic. Default-background cells are
-        // transparent because the pane card owns the fill and its silhouette;
-        // explicit ANSI/application backgrounds stay painted.
+        // Background rect - paint for ALL cells. Default-bg cells normally use
+        // ansi_background (the theme's actual background) to contrast with the
+        // slightly darker widget fill, creating visible depth for TUI content.
+        // With terminal material enabled, only those default backgrounds become
+        // transparent; explicit ANSI/app backgrounds stay opaque.
         let cell_cols = if flags.contains(CellFlags::WIDE_CHAR) {
             2
         } else {
@@ -1117,8 +1126,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
         // Build cell style for batching comparison
         let mut font = base_font.clone();
         // OSC 8 hyperlinks must render with an underline even when the cell
-        // flags don't carry `UNDERLINE` - alacritty 0.26 does not auto-set
-        // the flag on OSC 8 cells, so without this we'd lose the visual
+        // flags don't carry `UNDERLINE` - the engine does not auto-set the
+        // flag on OSC 8 cells, so without this we'd lose the visual
         // affordance until Ctrl/Cmd is held. Matches Zed
         // `terminal_element.rs:580`.
         let is_underline = flags.contains(CellFlags::UNDERLINE)
@@ -1181,7 +1190,7 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
     let rects = merge_background_regions(rects);
 
     // Build selection highlight rects from the SelectionRange.
-    // SelectionRange carries alacritty grid-line coords (scrollback = negative);
+    // SelectionRange carries absolute grid-line coords (scrollback = negative);
     // convert to viewport-line coords to match the cell coordinate system.
     let mut selection_rects = Vec::new();
     if let Some(sel) = &selection_range {
@@ -1390,7 +1399,7 @@ impl BatchAccumulator {
     }
 
     fn append_zerowidth(&mut self, chars: &[char]) {
-        // If alacritty hands us combining marks before any base char has been
+        // If the engine hands us combining marks before any base char has been
         // appended (rare, but the grid layout could change in future versions),
         // silently drop them rather than panicking in debug. The previous
         // `debug_assert!` could trip during legitimate render flows that the
@@ -1465,6 +1474,47 @@ impl BatchAccumulator {
 // Element trait implementation
 // ---------------------------------------------------------------------------
 
+impl TerminalElement {
+    /// Keep a selection drag alive once the pointer leaves the pane.
+    ///
+    /// GPUI delivers `on_mouse_move` only while the pointer is over the
+    /// hitbox, so the view's handler goes quiet exactly when the engine most
+    /// needs the position: a pointer held past the edge is what tells it to
+    /// scroll the viewport and keep extending. Positions inside the element
+    /// are left to the view, which already sees them.
+    fn track_drag_beyond_the_pane(
+        &self,
+        bounds: Bounds<Pixels>,
+        origin: Point<Pixels>,
+        cell_width: Pixels,
+        line_height: Pixels,
+        window: &mut Window,
+    ) {
+        let backend = self.backend.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, _cx| {
+            if phase != DispatchPhase::Bubble
+                || event.pressed_button != Some(MouseButton::Left)
+                || bounds.contains(&event.position)
+            {
+                return;
+            }
+            // A no-op unless a press is open, so a drag started anywhere else
+            // in the window cannot select in this pane.
+            let geometry = backend.selection_geometry(cell_width.into(), line_height.into());
+            let position = (
+                f32::from(event.position.x - origin.x),
+                f32::from(event.position.y - origin.y),
+            );
+            backend.drag_selection(
+                geometry.cell_at(position),
+                position,
+                geometry,
+                event.modifiers.alt,
+            );
+        });
+    }
+}
+
 impl Element for TerminalElement {
     type RequestLayoutState = ();
     type PrepaintState = Option<LayoutState>;
@@ -1525,18 +1575,18 @@ impl Element for TerminalElement {
         };
 
         let cell_width = layout.dimensions.cell_width;
-        let gutter = px(crate::app::constants::PANE_CONTENT_INSET);
-        // Offset the grid origin by the same fixed inset reserved in layout.
+        // Offset the grid origin by the same fixed insets reserved in layout,
+        // on both axes (Ghostty's `padding.left` / `padding.top`).
         let mut origin = Point {
-            x: bounds.origin.x + gutter,
-            y: bounds.origin.y,
+            x: bounds.origin.x + px(crate::app::constants::PANE_CONTENT_INSET_X),
+            y: bounds.origin.y + px(crate::app::constants::PANE_CONTENT_INSET_Y),
         };
         // US-017: snap the origin to physical-pixel boundaries so the grid
         // doesn't shiver between sub-pixel positions while resizing the window
         // or a pane divider on a HiDPI display. Snap the ORIGIN ONLY - never
         // cell_width / line_height (Zed reverted metric-snapping in #54836; it
         // breaks scroll math when rows × snapped_line_height ≠ viewport height).
-        // At scale 1.0 this floors the gutter-adjusted origin to whole pixels,
+        // At scale 1.0 this floors the inset-adjusted origin to whole pixels,
         // which is also the right thing (no regression). Mirrors Zed
         // terminal_element.rs:1062-1070 (PR #47195). `.max(1.0)` guards against
         // a 0.0 scale on headless/test windows (would divide by zero).
@@ -1544,7 +1594,7 @@ impl Element for TerminalElement {
         let snap_px = |v: Pixels| px((f32::from(v) * scale_factor).floor() / scale_factor);
         origin.x = snap_px(origin.x);
         origin.y = snap_px(origin.y);
-        // Store the gutter-adjusted, SNAPPED origin for mouse → grid coordinate
+        // Store the inset-adjusted, SNAPPED origin for mouse → grid coordinate
         // conversion so hit-testing stays coherent with what was painted.
         // Poison-safe: a prior panic inside paint() could have poisoned the
         // Mutex. The inner Point is still a valid value; recover and continue.
@@ -1560,6 +1610,12 @@ impl Element for TerminalElement {
             cell_width,
             line_height,
         };
+
+        self.track_drag_beyond_the_pane(bounds, origin, cell_width, line_height, window);
+
+        // Resolved and uploaded on the session runtime thread; this is a
+        // refcount bump, not a walk of the placement iterator.
+        let kitty_placements = self.backend.kitty_placements();
 
         // PANEFLOW_PIXEL_PROBE: log the per-frame origin once, before any
         // glyph/background record carries it implicitly. Pairs with the
@@ -1615,8 +1671,14 @@ impl Element for TerminalElement {
                 window,
             );
 
+            // 2f. Kitty graphics under the text.
+            paint::kitty::paint_below_text(&kitty_placements, &geom, window);
+
             // 3. Batched text runs
             paint::text::paint_text_runs(&layout, &geom, base_font, font_size, window, cx);
+
+            // 3-bis. Kitty graphics over the text.
+            paint::kitty::paint_above_text(&kitty_placements, &geom, window);
 
             // 3a. PANEFLOW_PIXEL_PROBE_OVERLAY: draw thin red cell borders
             // above the text. Independent of `PANEFLOW_PIXEL_PROBE`; opt-in
