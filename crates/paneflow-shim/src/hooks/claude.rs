@@ -116,7 +116,9 @@ impl HookConfigGuard {
             "settings.local.json",
             "Claude Code",
             merge_paneflow_hooks,
-            InvalidJsonPolicy::Replace,
+            // #202: settings.local.json carries the user's permission
+            // grants; a parse failure must refuse, never clobber.
+            InvalidJsonPolicy::Refuse,
         )?;
         Ok(Self {
             path: installed.path,

@@ -379,6 +379,25 @@ mod tests {
     }
 
     #[test]
+    fn no_hook_installer_opts_into_replacing_malformed_json() {
+        // Issue #202: `InvalidJsonPolicy::Replace` silently rewrote a
+        // present-but-unparseable user config as `{}` plus PaneFlow hooks,
+        // erasing unrelated permissions and hooks. Every installer call
+        // site must refuse instead (the shim degrades gracefully: the
+        // agent still launches, the failure lands in the diagnostic log).
+        for (name, source) in [
+            ("hooks/claude.rs", include_str!("hooks/claude.rs")),
+            ("hooks/codex.rs", include_str!("hooks/codex.rs")),
+            ("hooks/agents.rs", include_str!("hooks/agents.rs")),
+        ] {
+            assert!(
+                !source.contains("InvalidJsonPolicy::Replace"),
+                "{name} must not opt into InvalidJsonPolicy::Replace (issue #202)"
+            );
+        }
+    }
+
+    #[test]
     fn quoted_hook_commands_round_trip() {
         assert_eq!(
             command_program_token("'/tmp/Pane Flow/paneflow-ai-hook' Stop").as_deref(),
