@@ -129,10 +129,7 @@ pub(crate) fn parse_workspace_pane_plan(
     spec: &serde_json::Value,
 ) -> Result<PlannedPane, JsonRpcError> {
     let cwd = match spec.get("cwd").and_then(|c| c.as_str()) {
-        Some(raw) => match canonicalize_workspace_cwd(raw) {
-            Ok(p) => Some(p),
-            Err(e) => return Err(e),
-        },
+        Some(raw) => Some(canonicalize_workspace_cwd(raw)?),
         None => None,
     };
     Ok(PlannedPane {
