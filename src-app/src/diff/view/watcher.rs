@@ -4,8 +4,9 @@
 //! string literals containing `/` silently misses Windows events.
 
 use std::ffi::OsStr;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -152,6 +153,83 @@ pub(super) fn build(
     Some(watcher)
 }
 
+/// Debounce/cooldown driver for the watcher task, extracted so tests can drive
+/// it with an injected event stream and timer instead of a real
+/// [`RecommendedWatcher`] and `smol::Timer` (issue #209).
+///
+/// `revalidate` is called at most once per [`REFRESH_COOLDOWN`] period and
+/// returns whether the view is still alive (false stops the loop). A relevant
+/// event arriving during the cooldown sets a dirty bit; when the cooldown
+/// expires dirty, the loop revalidates immediately and enters a fresh cooldown,
+/// so the trailing edge is never dropped while reload churn still costs at most
+/// one deferred refresh per period, never a tight loop.
+async fn drive_refresh_loop<S, T, TF, R>(mut events: S, mut make_timer: T, mut revalidate: R)
+where
+    S: futures::Stream<Item = notify::Result<Event>> + Unpin,
+    T: FnMut(Duration) -> TF,
+    TF: Future + Unpin,
+    R: FnMut() -> bool,
+{
+    let mut relevant_events = 0u64;
+    loop {
+        // Idle: block until the next relevant event.
+        loop {
+            let Some(result) = events.next().await else {
+                return;
+            };
+            if event_relevant(&result) {
+                relevant_events += 1;
+                if let Ok(event) = &result {
+                    log::debug!(
+                        "diff: watcher relevant event #{relevant_events} ({:?} {:?}) -> debounce",
+                        event.kind,
+                        event.paths.first()
+                    );
+                }
+                break;
+            }
+        }
+
+        // Debounce: a fixed window that coalesces the burst into one refresh.
+        let mut timer = make_timer(REFRESH_DEBOUNCE);
+        loop {
+            match futures::future::select(events.next(), timer).await {
+                Either::Left((Some(_), rest)) => timer = rest,
+                Either::Left((None, _)) => return,
+                Either::Right(_) => break,
+            }
+        }
+
+        // Revalidate, then cool down. A relevant event arriving during the
+        // cooldown sets `dirty`; a dirty expiry revalidates immediately and
+        // enters a fresh cooldown (trailing edge, still bounded to one refresh
+        // per cooldown period).
+        loop {
+            if !revalidate() {
+                return;
+            }
+            let mut dirty = false;
+            let mut timer = make_timer(REFRESH_COOLDOWN);
+            loop {
+                match futures::future::select(events.next(), timer).await {
+                    Either::Left((Some(result), rest)) => {
+                        timer = rest;
+                        if event_relevant(&result) {
+                            dirty = true;
+                        }
+                    }
+                    Either::Left((None, _)) => return,
+                    Either::Right(_) => break,
+                }
+            }
+            if !dirty {
+                break;
+            }
+            log::debug!("diff: watcher dirty during cooldown -> trailing revalidate");
+        }
+    }
+}
+
 impl DiffView {
     pub(super) fn start_watchers(&mut self, cx: &mut gpui::Context<Self>) {
         let mut worktrees: Vec<PathBuf> = self
@@ -164,7 +242,7 @@ impl DiffView {
         worktrees.dedup();
         let repo_root = self.repo_root.clone();
         let epoch = self.watch_epoch;
-        let (tx, mut rx) = mpsc::unbounded::<notify::Result<Event>>();
+        let (tx, rx) = mpsc::unbounded::<notify::Result<Event>>();
 
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
@@ -189,33 +267,8 @@ impl DiffView {
                     return;
                 }
 
-                let mut relevant_events = 0u64;
-                while let Some(result) = rx.next().await {
-                    if !event_relevant(&result) {
-                        continue;
-                    }
-                    relevant_events += 1;
-                    if let Ok(event) = &result {
-                        log::debug!(
-                            "diff: watcher relevant event #{relevant_events} ({:?} {:?}) -> debounce",
-                            event.kind,
-                            event.paths.first()
-                        );
-                    }
-                    let deadline = Instant::now() + REFRESH_DEBOUNCE;
-                    loop {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            break;
-                        }
-                        match futures::future::select(rx.next(), smol::Timer::after(remaining)).await
-                        {
-                            Either::Left((Some(_), _)) => {}
-                            Either::Left((None, _)) => return,
-                            Either::Right(_) => break,
-                        }
-                    }
-                    let alive = cx.update(|cx| {
+                drive_refresh_loop(rx, smol::Timer::after, move || {
+                    cx.update(|cx| {
                         this.update(cx, |view: &mut Self, cx| {
                             if view.watch_epoch != epoch {
                                 return false;
@@ -224,24 +277,9 @@ impl DiffView {
                             true
                         })
                         .unwrap_or(false)
-                    });
-                    if !alive {
-                        break;
-                    }
-                    let cooldown = Instant::now() + REFRESH_COOLDOWN;
-                    loop {
-                        let remaining = cooldown.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            break;
-                        }
-                        match futures::future::select(rx.next(), smol::Timer::after(remaining)).await
-                        {
-                            Either::Left((Some(_), _)) => {}
-                            Either::Left((None, _)) => return,
-                            Either::Right(_) => break,
-                        }
-                    }
-                }
+                    })
+                })
+                .await;
             },
         )
         .detach();
@@ -433,5 +471,184 @@ mod tests {
         assert!(event_relevant(&event(
             ["repo", ".git", "refs", "heads", "main"].iter().collect()
         )));
+    }
+
+    use std::cell::Cell;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    /// Manually released fake timer: ticket `n` completes once the harness has
+    /// released more than `n` timers, so the test controls exactly when each
+    /// debounce/cooldown window "expires".
+    struct ManualTimer {
+        ticket: usize,
+        released: Rc<Cell<usize>>,
+    }
+
+    impl Future for ManualTimer {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            if self.ticket < self.released.get() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    struct Harness {
+        tx: Option<mpsc::UnboundedSender<notify::Result<Event>>>,
+        fut: Pin<Box<dyn Future<Output = ()>>>,
+        released: Rc<Cell<usize>>,
+        revalidations: Rc<Cell<usize>>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let (tx, rx) = mpsc::unbounded();
+            let released = Rc::new(Cell::new(0usize));
+            let created = Rc::new(Cell::new(0usize));
+            let revalidations = Rc::new(Cell::new(0usize));
+            let make_timer = {
+                let released = released.clone();
+                move |_duration: Duration| {
+                    let ticket = created.get();
+                    created.set(ticket + 1);
+                    ManualTimer {
+                        ticket,
+                        released: released.clone(),
+                    }
+                }
+            };
+            let revalidate = {
+                let revalidations = revalidations.clone();
+                move || {
+                    revalidations.set(revalidations.get() + 1);
+                    true
+                }
+            };
+            Self {
+                tx: Some(tx),
+                fut: Box::pin(drive_refresh_loop(rx, make_timer, revalidate)),
+                released,
+                revalidations,
+            }
+        }
+
+        fn send(&self, path: PathBuf) {
+            self.tx
+                .as_ref()
+                .expect("sender dropped")
+                .unbounded_send(event(path))
+                .expect("send event");
+        }
+
+        /// Expire the next outstanding fake timer.
+        fn expire_timer(&self) {
+            self.released.set(self.released.get() + 1);
+        }
+
+        fn poll(&mut self) -> Poll<()> {
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            self.fut.as_mut().poll(&mut cx)
+        }
+
+        fn revalidations(&self) -> usize {
+            self.revalidations.get()
+        }
+    }
+
+    fn relevant_path() -> PathBuf {
+        ["repo", "src", "main.rs"].iter().collect()
+    }
+
+    #[test]
+    fn event_during_cooldown_triggers_exactly_one_trailing_revalidate() {
+        let mut harness = Harness::new();
+
+        // Leading event -> debounce window opens (timer #0).
+        harness.send(relevant_path());
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 0);
+
+        // Debounce expires -> first revalidate, cooldown (timer #1) starts.
+        harness.expire_timer();
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+
+        // A relevant event lands during the cooldown: consumed, no refresh yet.
+        harness.send(["repo", "src", "lib.rs"].iter().collect());
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+
+        // Cooldown expires dirty -> exactly one trailing revalidate, and a
+        // fresh cooldown (timer #2) starts.
+        harness.expire_timer();
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 2);
+
+        // The fresh cooldown expires clean -> back to idle, no extra refresh.
+        harness.expire_timer();
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 2);
+
+        // Stream end terminates the task with no further revalidation.
+        harness.tx = None;
+        assert!(harness.poll().is_ready());
+        assert_eq!(harness.revalidations(), 2);
+    }
+
+    #[test]
+    fn clean_cooldown_returns_to_idle_without_extra_revalidate() {
+        let mut harness = Harness::new();
+
+        harness.send(relevant_path());
+        assert!(harness.poll().is_pending());
+        harness.expire_timer(); // debounce expires
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+
+        // No events during the cooldown: expiry returns to idle silently.
+        harness.expire_timer();
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+
+        // A later leading event still starts a fresh debounce cycle.
+        harness.send(relevant_path());
+        assert!(harness.poll().is_pending());
+        harness.expire_timer(); // debounce expires
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 2);
+
+        harness.tx = None;
+        assert!(harness.poll().is_ready());
+        assert_eq!(harness.revalidations(), 2);
+    }
+
+    #[test]
+    fn irrelevant_event_during_cooldown_does_not_mark_dirty() {
+        let mut harness = Harness::new();
+
+        harness.send(relevant_path());
+        assert!(harness.poll().is_pending());
+        harness.expire_timer(); // debounce expires
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+
+        // Noise (build churn under target/) during the cooldown must not
+        // schedule a trailing revalidate.
+        harness.send(["repo", "target", "debug", "paneflow"].iter().collect());
+        assert!(harness.poll().is_pending());
+        harness.expire_timer(); // cooldown expires clean
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+
+        harness.tx = None;
+        assert!(harness.poll().is_ready());
+        assert_eq!(harness.revalidations(), 1);
     }
 }
