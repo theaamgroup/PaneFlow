@@ -379,19 +379,7 @@ fn sidebar_action_button(
     icon_size: f32,
     ui: crate::theme::UiColors,
 ) -> gpui::Stateful<gpui::Div> {
-    sidebar_action_button_tinted(id, icon, icon_size, ui.muted)
-}
-
-/// [`sidebar_action_button`] with an explicit glyph tint, for the one button
-/// that has to leave the resting `ui.muted`: the armed tab `x` (issue #83),
-/// which paints `ui.vc_deleted` so "one more click kills a live agent" is
-/// visible rather than silent. There is no `ui.danger` field.
-fn sidebar_action_button_tinted(
-    id: SharedString,
-    icon: &'static str,
-    icon_size: f32,
-    tint: gpui::Hsla,
-) -> gpui::Stateful<gpui::Div> {
+    let tint = ui.muted;
     // The row underneath is already at the hover tint when this button is
     // reachable, so the button hovers into the active tint - one step further,
     // or it would be invisible against its own row.
@@ -1815,17 +1803,6 @@ impl PaneFlowApp {
         // it would eat the title on every row to serve a hover-only control.
         // An empty tab has no cards, so it reserves the button's own width
         // instead, or the `x` would land on the title's tail.
-        //
-        // Issue #83: read here, not next to the button, because the swap has
-        // TWO sides. The armed `x` drops its hover gate (below), so the cards
-        // have to drop theirs too - their hide is gated on hover, and an armed
-        // row with the pointer elsewhere would otherwise paint a bare red glyph
-        // (`sidebar_action_button_tinted` has no background at rest) on top of
-        // a pane card. That is the DEFAULT armed appearance, not an edge case.
-        let close_armed = self.pending_close.as_ref().is_some_and(|pending| {
-            pending.style == crate::app::close_guard::ConfirmStyle::Inline
-                && pending.targets_tab(ws_id, tab_id)
-        });
         match render_tab_pane_icons(
             &pane_icons,
             &format!("tab-{tab_id}"),
@@ -1841,19 +1818,7 @@ impl PaneFlowApp {
                         // element phases must agree within the frame the hover
                         // flips. It also stops the hidden lane from holding its
                         // tooltip open under the close button.
-                        //
-                        // While armed the gate is not applied at all (the
-                        // `pane.rs` header slot's idiom) rather than applied
-                        // and overridden: the `x` opposite is permanently
-                        // revealed, so this lane's occupant is permanently
-                        // gone.
-                        .map(|lane| {
-                            if close_armed {
-                                lane.invisible()
-                            } else {
-                                lane.group_hover(tab_group.clone(), |style| style.invisible())
-                            }
-                        })
+                        .group_hover(tab_group.clone(), |style| style.invisible())
                         .child(cluster),
                 );
             }
@@ -1867,35 +1832,22 @@ impl PaneFlowApp {
         // leaves an empty tab behind and never closes the workspace (FR-01) -
         // the folder row's own `x` is what closes that.
         //
-        // Issue #83: this `x` is the INLINE half of the close guard. The first
-        // click on a tab running a live agent arms it - red glyph, changed
-        // tooltip, and permanently revealed - and only the second click closes.
-        // A tab with nothing live still closes on one click, exactly as before.
-        // `close_armed` is read above the pane-card lane, which shares this
-        // lane and has to drop its own hover gate in the same state.
+        // Issue #183: one click routes through the SAME modal chokepoint as
+        // Cmd+W and the tab context menu's Close. A tab with nothing live
+        // closes immediately; a live-agent tab gets the confirmation window.
+        // The old inline arm-then-confirm (#83) needed two clicks and threw a
+        // double-click's second half away, so closing often took three.
         let close_actions = sidebar_hover_actions(tab_group.clone());
-        // An armed button that is only painted while the row is hovered is not
-        // painted at all the moment the pointer leaves: the user would be left
-        // with a tab that closes on one click and no sign of why.
-        let close_actions = if close_armed {
-            close_actions.visible()
-        } else {
-            close_actions
-        };
         title_row = title_row.child(
             close_actions.child(
-                sidebar_action_button_tinted(
+                sidebar_action_button(
                     SharedString::from(format!("tab-close-{tab_id}")),
                     "icons/close.svg",
                     12.,
-                    if close_armed { ui.vc_deleted } else { ui.muted },
+                    ui,
                 )
                 .delayed_tooltip({
-                    let label = SharedString::from(if close_armed {
-                        "Click again to close"
-                    } else {
-                        "Close tab"
-                    });
+                    let label = SharedString::from("Close tab");
                     move |_w, cx| {
                         cx.new(|_| SidebarTooltip {
                             label: label.clone(),
@@ -1904,12 +1856,14 @@ impl PaneFlowApp {
                     }
                 })
                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                    // Issue #83: a double-click delivers BOTH clicks to this
-                    // listener (the row's own double-click-to-rename below
-                    // works only because it does), so without this the second
-                    // half of one would confirm an arm the user never saw.
-                    // The settle delay in `click_outcome` is the real guard;
-                    // this is the belt to its braces.
+                    // A double-click delivers BOTH clicks to this listener
+                    // (the row's own double-click-to-rename below works only
+                    // because it does). The first click already acted: an idle
+                    // tab closed - the rows below slide up, so the gesture's
+                    // second half would land on the NEXT row's x - or the
+                    // modal opened, and a second half delivered before its
+                    // occluding backdrop paints would re-request the same
+                    // close. Either way the tail must do nothing.
                     if matches!(e, ClickEvent::Mouse(m) if m.down.click_count >= 2) {
                         cx.stop_propagation();
                         return;
@@ -1929,31 +1883,13 @@ impl PaneFlowApp {
                         })
                     {
                         this.commit_inline_rename(window, cx);
-                        let target = crate::app::close_guard::CloseTarget::Tab {
-                            workspace_id: ws_id,
-                            tab_id,
-                        };
-                        match crate::app::close_guard::click_outcome(
-                            this.pending_close.as_ref(),
-                            &target,
-                            std::time::Instant::now(),
-                        ) {
-                            // Re-resolves the stable ids itself, so a tab that
-                            // moved between the two clicks still closes the
-                            // right one.
-                            crate::app::close_guard::ClickOutcome::Confirm => {
-                                this.confirm_pending_close_tab(window, cx);
-                            }
-                            crate::app::close_guard::ClickOutcome::Arm => {
-                                this.request_close_workspace_tab(
-                                    at_ws,
-                                    at_tab,
-                                    crate::app::close_guard::ConfirmStyle::Inline,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        }
+                        this.request_close_workspace_tab(
+                            at_ws,
+                            at_tab,
+                            crate::app::close_guard::ConfirmStyle::Modal,
+                            window,
+                            cx,
+                        );
                     }
                     cx.stop_propagation();
                 })),
