@@ -199,6 +199,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees
 │   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus; footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
+│   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
 │   ├── attention_queue.rs             ← "which agent needs me" queue
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── fleet_search.rs                ← cross-pane search
@@ -260,7 +261,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
 ├── widgets/                           ← text_input, text_area, scrollbar, callout
 ├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
-├── ai_types.rs                        ← AiToolState enum shared by workspace/event_handlers
+├── ai_types.rs                        ← AiToolState, AgentStateSource ranking, lifecycle reducer
+├── claude_session_registry.rs         ← reads Claude Code's sessions/<pid>.json (state without hooks)
 ├── ipc.rs / ipc_events.rs             ← JSON-RPC server over `interprocess`, event bus
 ├── keys.rs / mouse.rs                 ← key/mouse translation
 ├── search.rs                          ← find-in-buffer UI glue
@@ -444,7 +446,7 @@ Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thre
 | `system.ping` / `capabilities` / `identify` | Socket | Stateless health checks |
 | `workspace.list` / `current` / `create` / `select` / `close` | GPUI | Workspace management; `close` uses the same live-agent confirmation gate as the UI and can return a pending-confirmation response |
 | `workspace.up` / `restore_layout` | GPUI | Declarative bring-up, layout restore |
-| `surface.list` / `read` / `search` / `status` | GPUI | Read pane state and scrollback |
+| `surface.list` / `read` / `search` / `status` | GPUI | Read pane state; `read` returns the retained history followed by the live screen (#184 Phase 3.6), so a full-screen TUI is readable |
 | `surface.send_text` / `send_keystroke` | GPUI | Write into a pane (scripting-gated) |
 | `surface.split` / `focus` / `rename` | GPUI | Pane operations |
 | `fleet.list` | GPUI | Every surface across every workspace |
@@ -452,6 +454,8 @@ Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thre
 | `ai.session_start` / `prompt_submit` / `tool_use` / `notification` / `stop` / `exit` / `session_end` | GPUI | Agent lifecycle notifications from `paneflow-ai-hook` |
 
 Stateful methods dispatch to the GPUI main thread via a channel drained by `PaneFlowApp::process_automation_tick`, which runs on a **50 ms** poll loop (`app/bootstrap.rs`, `app/ipc_handler.rs`). That same tick drains IPC requests, then surface-change broadcasts, then config reloads, so its ordering is a contract, not an accident. There is no in-app update-check.
+
+**Agent state has three sources** (#184 Phase 3.8), ranked `Terminal < SessionRegistry < Hook` (`ai_types::AgentStateSource`): a pane's own OSC 9;4 progress and OSC 9 / 777 notifications (only for a pane whose process scan already resolved an agent), Claude Code's session registry (`<CLAUDE_CONFIG_DIR|~/.claude>/sessions/<pid>.json`, swept every **400 ms** by `app/agent_status.rs`, and only while some pane runs Claude Code), and the `ai.*` hooks. `ipc_handler::upsert_session_state` stays the single choke point; after the PID-recycle check and the `emitted_at_ms` watermark it applies `accepts_source`: a lower-ranked source only takes a session over once the higher-ranked one has been silent for `SOURCE_TAKEOVER_SILENCE` (20 s). That is what keeps the sidebar live on a machine whose managed settings disabled hooks, without an escape sequence ever talking over a hook's permission prompt.
 
 ## Styling conventions
 
