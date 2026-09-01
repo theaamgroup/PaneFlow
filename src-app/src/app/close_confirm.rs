@@ -316,7 +316,17 @@ impl PaneFlowApp {
         else {
             return Vec::new();
         };
-        Self::surface_close_states(&tab.collect_panes(), cx)
+        let mut states = Self::surface_close_states(&tab.collect_panes(), cx);
+        states.extend(self.tab_off_tree_close_states(tab.id, cx));
+        states
+    }
+
+    /// The diff-dock terminals that die with tab `tab_id` (#184 Phase 4: the
+    /// dock is parked per tab). Review terminals belong to the repo, not the
+    /// tab, so a tab close never reaches them.
+    fn tab_off_tree_close_states(&self, tab_id: u64, cx: &App) -> Vec<SurfaceCloseState> {
+        let off_tree = self.diff_dock_terminals_for_tab(tab_id);
+        Self::terminal_close_states(off_tree, cx)
     }
 
     fn workspace_close_states(&self, ws_idx: usize, cx: &App) -> Vec<SurfaceCloseState> {
@@ -455,6 +465,9 @@ impl PaneFlowApp {
         }) else {
             return;
         };
+        // The tab's dock terminals die with it and are not on the tab undo
+        // record, whether or not they host a live agent.
+        let loses_off_tree_sessions = !self.tab_off_tree_close_states(tab_id, cx).is_empty();
         self.set_pending_close(
             Some(PendingClose {
                 target: CloseTarget::Tab {
@@ -464,7 +477,7 @@ impl PaneFlowApp {
                 style,
                 agent: Some(agent),
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
-                loses_off_tree_sessions: false,
+                loses_off_tree_sessions,
                 label: confirm_label(&label),
                 armed_at: now,
             }),
@@ -1233,6 +1246,43 @@ mod tests {
         assert!(
             states.contains("terminal_close_states(off_tree"),
             "off-tree terminals must use the same live-agent predicate: {states}"
+        );
+    }
+
+    /// #184 Phase 4: the dock is parked per tab, so a tab close kills that
+    /// tab's dock terminals and must arm confirmation for an agent in one -
+    /// and only that tab's: a sibling tab's dock, and the repo's Review
+    /// terminals, are not on a tab close's kill list.
+    #[test]
+    fn tab_guard_includes_its_own_dock_terminals_only() {
+        let src = include_str!("close_confirm.rs");
+        let states = src
+            .split("fn tab_close_states(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn workspace_close_states(").next())
+            .expect("tab close-state collector");
+        assert!(
+            states.contains("tab_off_tree_close_states(tab.id"),
+            "the tab guard must fold in the tab's own dock terminals, by tab id: {states}"
+        );
+        assert!(
+            states.contains("diff_dock_terminals_for_tab(tab_id)"),
+            "dock terminals are resolved per tab, never per workspace: {states}"
+        );
+        assert!(
+            !states.contains("diff_dock_terminals_for_workspace")
+                && !states.contains("diff_review_terminals_for_workspace"),
+            "a tab close must not count sibling tabs' docks or Review terminals: {states}"
+        );
+
+        let request = src
+            .split("pub(crate) fn request_close_workspace_tab(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn arm_pending_close_pane(").next())
+            .expect("tab close request");
+        assert!(
+            request.contains("tab_off_tree_close_states(tab_id, cx).is_empty()"),
+            "the tab modal must stop promising dock sessions back when the tab has some: {request}"
         );
     }
 

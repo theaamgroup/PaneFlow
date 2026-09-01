@@ -241,12 +241,21 @@ impl PaneFlowApp {
             .tabs()
             .get(tab_idx)
             .and_then(|tab| capture_closed_tab_record(tab, tab_idx, ws.id, cx));
+        let closed_tab_id = ws.tabs().get(tab_idx).map(|tab| tab.id);
 
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             return;
         };
         if ws.close_tab(tab_idx).is_none() {
             return;
+        }
+        // The dock is parked per tab (#184 Phase 4) and its slot is not on the
+        // undo record: a restored tab gets a fresh id. Tear it down here, not
+        // at render - a background tab closes without moving the visible
+        // session, so the dock's own reconcile never runs and the slot (and
+        // the terminals in it) would outlive the session it belonged to.
+        if let Some(tab_id) = closed_tab_id {
+            self.drop_diff_dock_for_tab(tab_id, cx);
         }
         if let Some(record) = record {
             self.push_closed_record(ClosedRecord::Tab(record), cx);

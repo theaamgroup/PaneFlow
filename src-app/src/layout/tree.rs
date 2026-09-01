@@ -62,8 +62,9 @@ pub enum LayoutTree {
 pub(super) const DIVIDER_PX: f32 = 8.0;
 /// Centered grab band for drag-to-resize, independent of the visual gap above.
 pub(super) const DIVIDER_HIT_PX: f32 = 7.0;
-/// Minimum pane size in pixels. No pane may be resized below this.
-pub(super) const MIN_PANE_SIZE: f32 = 80.0;
+/// Minimum pane size in pixels. No pane may be resized below this. Re-exported
+/// from the layout root: the CLI diff dock reserves one of these beside itself.
+pub(crate) const MIN_PANE_SIZE: f32 = 80.0;
 
 /// Re-normalize ratios so they sum to 1.0 (proportional scaling).
 pub(super) fn normalize_ratios(children: &[LayoutChild]) {
