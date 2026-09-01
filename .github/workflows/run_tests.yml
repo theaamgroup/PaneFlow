@@ -104,6 +104,11 @@ jobs:
               - 'schemas/**'
               - 'docs/user/configuration/schema.md'
               - 'examples/**'
+              # The -sys build script and its tests read native/libghostty
+              # (manifest, bindings, header, archive, build-info) and the
+              # tests pin their hashes; an archive- or manifest-only PR is
+              # not docs-only.
+            - 'native/**'
             ci:
               - '.github/workflows/**'
               - 'scripts/**'
@@ -436,6 +441,13 @@ jobs:
       # the test run exercises the real macOS codepath.
       - name: cargo test --workspace
         run: cargo test --workspace --locked --target aarch64-apple-darwin
+
+      # The libghostty PTY smoke is a binary, not a #[test]: it opens a real
+      # PTY, drives /bin/sh through the linked archive, and checks the
+      # snapshot, the resize probe and the reap. Run it so the vendored
+      # archive is exercised end to end, not only linked.
+      - name: libghostty PTY smoke
+        run: cargo run --locked --target aarch64-apple-darwin -p paneflow-ghostty-smoke
 
       # cargo check must exit 0 with no linker errors.
       - name: cargo check (aarch64-apple-darwin)

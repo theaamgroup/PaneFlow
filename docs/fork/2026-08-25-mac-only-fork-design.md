@@ -51,7 +51,7 @@ Task 12 still replaced *upstream's* identity so this fork is not signed as
 | rustup + rustc 1.98.0 (pinned by `rust-toolchain.toml`; bumped from 1.96.1 on 2026-08-31 for the libghostty port, issue #184) | installed 2026-08-31 |
 | Full Xcode, for the Metal shader compiler that GPUI needs at build time | Xcode 26.6 installed 2026-08-25. **Two separate steps, and the second is easy to miss.** Command Line Tools alone are not enough (`xcrun -f metal` fails outright under CLT), and installing Xcode alone is also not enough: Xcode 26 ships the Metal toolchain as a downloadable component, so `xcrun metal` still fails with `cannot execute tool 'metal' due to missing Metal Toolchain` until you run `xcodebuild -downloadComponent MetalToolchain`. Verify with an actual compile, not with `xcrun -f metal`, which resolves the path successfully even when the toolchain is absent. |
 | cmake | already present via Homebrew |
-| zig | not needed once the Ghostty backend is gone |
+| zig | not needed: the libghostty-vt archive is vendored prebuilt under `native/libghostty/prebuilt/aarch64-apple-darwin` and hash-verified by the `-sys` build script (#184 Phase 1); rebuilding it is a deferred CI job, not a build step |
 
 ## Do not delete
 
@@ -86,7 +86,7 @@ Cruft: `tasks/` (4M including a 3.8M demo mp4), `CHANGELOG.md`, `BUILD_WEEK.md`,
 `ABOUT.md`, `llms.txt`, `context7.json`, `assets/images/`,
 `assets/icons/master/paneflow-icon-1024.png`, `assets/PaneFlow.ico`,
 `assets/paneflow.desktop`, `assets/io.github.arthurdev44.paneflow.metainfo.xml`,
-`assets/badges/`, `native/libghostty/prebuilt/`.
+`assets/badges/`, `native/libghostty/prebuilt/` (deleted 2026-08-25; the darwin subtree was restored by #184 Phase 1 on 2026-08-31).
 
 Scripts: the 5 PowerShell files, `bundle-appimage.sh`, `bundle-tarball.sh`,
 `tarball-install.sh`, `build-libghostty-linux.sh`, `verify-libghostty-package.sh`,

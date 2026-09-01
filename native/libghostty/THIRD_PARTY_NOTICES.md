@@ -91,8 +91,8 @@ SOFTWARE.
 
 Source: <https://github.com/ziglang/zig/tree/0.16.0>
 
-Ghostty enables `bundle_compiler_rt`, which places `compiler_rt.o` or
-`compiler_rt.obj` in each distributed archive.
+Ghostty enables `bundle_compiler_rt`, which places `compiler_rt.o`
+in the distributed archive.
 
 ```text
 The MIT License (Expat)

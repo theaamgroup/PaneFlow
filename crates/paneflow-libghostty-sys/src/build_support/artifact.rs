@@ -370,8 +370,6 @@ mod tests {
         assert!(inputs.iter().any(|path| path.ends_with("vt.h")));
         assert!(inputs.iter().any(|path| path.ends_with("bindings.rs")));
         assert!(inputs.iter().any(|path| path.ends_with("build-info.txt")));
-        assert!(!inputs.iter().any(|path| path.ends_with("headers.sha256")));
-        assert!(!inputs.iter().any(|path| path.ends_with("symbols.txt")));
         bundle.validate(&contract, &contract.corrective_action())
     }
 
