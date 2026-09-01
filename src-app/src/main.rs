@@ -1065,19 +1065,21 @@ struct DiffDockState {
     pub(crate) diff_new_tab_menu_open: bool,
     /// Whether the dock is currently showing its surface picker instead of a
     /// tab (see `diff_dock::surface_picker`). Set by the pane-header toggle on
-    /// the workspace's first open of the dock.
+    /// the session's first open of the dock.
     pub(crate) picker: bool,
-    /// Whether the picker has been answered at least once *for the workspace
-    /// that owns the live dock*. Once it has, opening the dock there restores
-    /// the last active tab rather than asking again.
+    /// Whether the picker has been answered at least once *for the session
+    /// (workspace tab) that owns the live dock*. Once it has, opening the dock
+    /// there restores the last active tab rather than asking again.
     pub(crate) picked: bool,
-    /// Which workspace the live dock fields above describe. `None` until the
-    /// dock is first opened. [`PaneFlowApp::sync_diff_dock_workspace`] parks and
-    /// swaps them whenever this drifts from the active workspace.
+    /// Which session (a `Tab::id`, unique across workspaces) the live dock
+    /// fields above describe. `None` until the dock is first opened.
+    /// `PaneFlowApp::sync_diff_dock_session` parks and swaps them whenever this
+    /// drifts from the visible tab.
     pub(crate) owner: Option<u64>,
-    /// Dock state parked per workspace id, for every workspace that is not
-    /// [`Self::owner`]. The dock is detached per workspace: opening it
-    /// in one project leaves the next one untouched.
+    /// Dock state parked per tab id, for every session that is not
+    /// [`Self::owner`]. The dock is detached per tab (#184 Phase 4): opening it
+    /// in one tab leaves a sibling tab of the same folder untouched. Never
+    /// persisted; a restored tab starts with the dock closed.
     pub(crate) parked: std::collections::HashMap<u64, crate::app::cli_diff_dock::DiffDockSlot>,
     /// The dock's tabs. Index 0 is always the permanent `Changes` diff; the
     /// rest are terminals opened from the `+` menu, closable from their tab.
@@ -1091,12 +1093,17 @@ struct DiffDockState {
     /// Open branch picker anchored to the diff dock's toolbar chip; `None` when
     /// closed. Holds the branch list, the search field and the focus to restore.
     pub(crate) diff_branch_menu: Option<crate::app::diff_dock::DiffBranchMenuState>,
-    /// Width in px of the diff dock; user-resizable by dragging its left edge.
-    /// Clamped to `[DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MAX_WIDTH]`.
+    /// Preferred width in px of the diff dock; user-resizable by dragging its
+    /// left edge. Clamped to `[DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MAX_WIDTH]`.
+    /// The *rendered* width is `min(this, main-panel remainder)` computed at
+    /// render (`cli_diff_dock::diff_dock_fit`) and never written back here, so
+    /// a rail closing or the window growing restores the chosen width.
     pub(crate) width: f32,
-    /// Live drag anchor `(cursor_x, width_at_grab)` while the dock's left edge is
-    /// being dragged to resize; `None` when not resizing.
-    pub(crate) resize: Option<(f32, f32)>,
+    /// Live drag anchor `(cursor_x, rendered_width_at_grab, max_width)` while
+    /// the dock's left edge is being dragged to resize; `None` when not
+    /// resizing. The ceiling travels with the drag so it cannot store a width
+    /// the panel could not show.
+    pub(crate) resize: Option<(f32, f32, f32)>,
     /// Live horizontal-scrollbar drag inside the dock's shared diff body.
     pub(crate) h_scroll_drag: Option<crate::app::diff_dock::DiffDockHScrollDrag>,
     /// Per-file horizontal scroll offsets (px) for the diff dock, indexed by
@@ -1795,6 +1802,24 @@ impl Render for PaneFlowApp {
         let main_panel_left_inset = crate::app::constants::PANEL_INSET * panel_edge_share;
         let pane_grid_left_gutter = crate::layout::PANE_GUTTER_PX * panel_edge_share;
         let main_panel_corner_mask_bg = panel_corner_mask_bg;
+        // The two right rails are mutually exclusive layout children, so the
+        // main panel loses exactly one of their widths.
+        let right_rail_width = if sessions_sidebar_mounted {
+            sessions_sidebar_width
+        } else if files_sidebar_mounted {
+            files_sidebar_width
+        } else {
+            0.
+        };
+        // Room the main panel actually has between the rails, for children
+        // sized in absolute px (the CLI diff dock). The window shell's own
+        // client-side inset is not subtracted here: the dock's reserve for the
+        // pane grid is an order of magnitude larger than it.
+        let main_panel_width = f32::from(window.viewport_size().width)
+            - primary_sidebar_width
+            - right_rail_width
+            - main_panel_left_inset
+            - crate::app::constants::PANEL_INSET;
 
         // EP-003 US-009: focus the pane created by a drop-to-split. Deferred
         // here from the `DropSplit` subscription handler (no `Window` there).
@@ -1923,7 +1948,7 @@ impl Render for PaneFlowApp {
         };
         // The right diff dock rides beside the CLI pane grid, opened from a
         // pane header. A no-op in every other mode.
-        let main_content = self.wrap_cli_diff_dock(main_content, cx);
+        let main_content = self.wrap_cli_diff_dock(main_content, main_panel_width, cx);
         // Update title bar with current workspace name.
         let ws_name = if self.settings_section.is_some() {
             // Settings open: the title-bar center is left empty (the section

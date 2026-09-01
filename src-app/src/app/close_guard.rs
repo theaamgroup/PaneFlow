@@ -136,8 +136,9 @@ pub(crate) struct PendingClose {
     /// armed so the copy can say "and 2 other agents" instead of naming one
     /// and killing three. Zero when [`Self::agent`] is `None`.
     pub(crate) extra_agents: usize,
-    /// A workspace close also destroys qualifying dock/Review terminals that
-    /// are not captured by workspace Undo. The modal must not promise those
+    /// A workspace close also destroys qualifying dock/Review terminals, and a
+    /// tab close its own tab's dock terminals (the dock is parked per tab),
+    /// none of which are captured by Undo. The modal must not promise those
     /// sessions or their scrollback will return.
     pub(crate) loses_off_tree_sessions: bool,
     /// Tab title (or pane title) shown in the modal copy. Empty is allowed.

@@ -81,6 +81,14 @@ it in one tab leaves your other tabs as they were, and it steps aside while
 you are in Review or Settings. Copy any file's absolute or relative path in
 one click, ready to paste into a prompt or a command.
 
+The dock itself is per tab too. Two tabs of the same folder each get their
+own dock - open a shell or a diff in one and the other stays as it was - and
+switching tabs brings each tab's dock back the way you left it. Closing a tab
+closes its dock; the dock never follows a tab into a session restore. When a
+right-hand rail is open or the window is narrow, the dock shrinks to fit the
+space the panes can spare and returns to the width you chose as soon as the
+room comes back.
+
 ## Projects
 
 Point PaneFlow at a codebase folder and it becomes a project: the file

@@ -195,7 +195,10 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
-│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs)
+│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs); parked per TAB
+│   │                                     (`cli_diff_dock.rs` keys slots by `Tab::id`, never by workspace);
+│   │                                     rendered width = min(stored, main-panel remainder), stored width
+│   │                                     only written by the resize drag
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
 │   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
 │   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus; footer mode tabs

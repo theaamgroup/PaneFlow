@@ -25,6 +25,7 @@ mod tree;
 
 pub use navigation::{FocusDirection, FocusNav};
 pub(crate) use render::SplitPreview;
+pub(crate) use tree::MIN_PANE_SIZE;
 pub use tree::{LayoutTree, SplitDirection};
 
 /// Hard cap on leaf panes in a single workspace's layout tree (US-054: single
