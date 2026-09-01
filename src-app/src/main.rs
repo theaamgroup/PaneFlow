@@ -2155,6 +2155,18 @@ impl Render for PaneFlowApp {
                     this.open_system_info_dialog(window, cx);
                 }),
             )
+            // Issue #228: PaneFlow > Report an Issue. Menu-only; the AppKit
+            // fallback in `install_macos_menu_action_fallbacks` is the other
+            // half of the pair.
+            .on_action(
+                cx.listener(|_this: &mut Self, _: &ReportIssue, _window, _cx| {
+                    if let Err(e) = crate::external_open::open_http_url(
+                        "https://github.com/theaamgroup/paneflow/issues/new",
+                    ) {
+                        log::warn!("PaneFlow > Report an Issue: could not open browser: {e}");
+                    }
+                }),
+            )
             .on_action(cx.listener(Self::handle_toggle_files_sidebar))
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))

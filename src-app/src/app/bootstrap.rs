@@ -985,17 +985,21 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
 
     use crate::{
         About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
-        OpenSettings, Paste, Quit, SelectAll, ZoomWindow,
+        OpenSettings, Paste, Quit, ReportIssue, SelectAll, ZoomWindow,
     };
 
     cx.set_menus(vec![
         Menu::new("PaneFlow").items(vec![
             MenuItem::action("About PaneFlow", About),
             // Issue #105: Settings gets a first-class menu route. It sits
-            // above the separator with About, leaving Quit alone below it.
-            // No `Cmd+,`: a global default on that chord would swallow the
-            // comma from every focused terminal.
+            // above the separator with About. No `Cmd+,`: a global default
+            // on that chord would swallow the comma from every focused
+            // terminal.
             MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            // Issue #228: GitHub new-issue form. Second separator keeps Quit
+            // visually last and isolated (macOS convention).
+            MenuItem::action("Report an Issue", ReportIssue),
             MenuItem::separator(),
             MenuItem::action("Quit PaneFlow", Quit),
         ]),
@@ -1207,8 +1211,8 @@ unsafe fn set_menu_item_image_by_title(menu: cocoa::base::id, title: &str, image
 pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     use crate::{
         About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
-        OpenSettings, PaneFlowApp, Paste, Quit, SelectAll, TerminalCopy, TerminalPaste,
-        TerminalSelectAll, ZoomWindow,
+        OpenSettings, PaneFlowApp, Paste, Quit, ReportIssue, SelectAll, TerminalCopy,
+        TerminalPaste, TerminalSelectAll, ZoomWindow,
     };
 
     fn with_active_paneflow_window(
@@ -1286,6 +1290,19 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     cx.on_action(|_: &crate::ShowSystemInfo, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
             app.open_system_info_dialog(window, cx);
+        });
+    });
+
+    // Issue #228: after OpenHelp (the NextWorkspace fallback test splits on
+    // that handler). Toast on failure, same as Help > PaneFlow Help.
+    cx.on_action(|_: &ReportIssue, cx| {
+        with_active_paneflow_window(cx, |app, _window, cx| {
+            if let Err(e) = crate::external_open::open_http_url(
+                "https://github.com/theaamgroup/paneflow/issues/new",
+            ) {
+                log::warn!("PaneFlow > Report an Issue: could not open browser: {e}");
+                app.show_toast(format!("Could not open GitHub: {e}"), cx);
+            }
         });
     });
 
@@ -1418,6 +1435,22 @@ mod tests {
         assert!(
             settings_at < separator_at,
             "Settings... sits above the separator, beside About PaneFlow"
+        );
+
+        let report_at = paneflow_menu
+            .find("MenuItem::action(\"Report an Issue\", ReportIssue)")
+            .expect("PaneFlow > Report an Issue must exist and dispatch ReportIssue");
+        let quit_at = paneflow_menu
+            .find("MenuItem::action(\"Quit PaneFlow\", Quit)")
+            .expect("PaneFlow > Quit PaneFlow");
+        assert!(
+            separator_at < report_at && report_at < quit_at,
+            "Report an Issue sits after the first separator and above Quit"
+        );
+        let between_report_and_quit = &paneflow_menu[report_at..quit_at];
+        assert!(
+            between_report_and_quit.contains("MenuItem::separator()"),
+            "a second separator isolates Quit below Report an Issue"
         );
 
         assert!(
@@ -1648,6 +1681,56 @@ mod tests {
         assert!(
             !fallback.contains("active_idx + 1") && !fallback.contains("select_workspace("),
             "storage-order arithmetic diverges from the rendered sidebar: {fallback}"
+        );
+    }
+
+    /// Issue #228: Report an Issue is on the PaneFlow menu (not Help), wired
+    /// at the render root *and* as an app-global fallback so AppKit does not
+    /// grey it out while a terminal is focused.
+    #[test]
+    fn paneflow_menu_report_an_issue_is_wired_at_the_root_and_as_a_fallback() {
+        let production = include_str!("bootstrap.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let fallbacks = production
+            .split("pub(crate) fn install_macos_menu_action_fallbacks")
+            .nth(1)
+            .expect("install_macos_menu_action_fallbacks body");
+        let fallback = fallbacks
+            .split("cx.on_action(|_: &ReportIssue, cx|")
+            .nth(1)
+            .and_then(|rest| rest.split("cx.on_action(").next())
+            .expect("missing app-global fallback for ReportIssue; the item would grey out");
+        assert!(
+            fallback.contains("https://github.com/theaamgroup/paneflow/issues/new"),
+            "the fallback must open the new-issue form: {fallback}"
+        );
+        assert!(
+            fallback.contains("open_http_url"),
+            "the fallback must go through open_http_url: {fallback}"
+        );
+
+        let main = include_str!("../main.rs");
+        assert!(
+            main.contains("_: &ReportIssue, _window, _cx|")
+                && main.contains("https://github.com/theaamgroup/paneflow/issues/new"),
+            "main.rs must carry the render-root `.on_action` for ReportIssue"
+        );
+    }
+
+    /// Menu-only, like `About` / `OpenHelp` / `OpenSettings` / `ShowSystemInfo`.
+    #[test]
+    fn report_issue_stays_out_of_the_shortcut_registry() {
+        let registry = include_str!("../keybindings/registry.rs");
+        assert!(
+            !registry.contains("ReportIssue"),
+            "ReportIssue must not be listed in keybindings::registry::ACTIONS"
+        );
+        let defaults = include_str!("../keybindings/defaults.rs");
+        assert!(
+            !defaults.contains("report_issue") && !defaults.contains("ReportIssue"),
+            "ReportIssue must have no default chord"
         );
     }
 

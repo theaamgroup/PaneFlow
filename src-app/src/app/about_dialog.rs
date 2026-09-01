@@ -199,9 +199,48 @@ impl PaneFlowApp {
                     }),
             );
 
-        // Deliberately inert - no id, no hover, no cursor change. Its whole job
-        // is to invite the next person into this file to add their own plate.
-        let contributors = div()
+        // Issue #226: a text button, not a GitHub mark (none is bundled).
+        // Same hover recipe as OK; click opens this fork and leaves About open.
+        let github_button = div()
+            .id("about-github")
+            .flex_none()
+            .mt(px(14.))
+            .h(px(28.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.))
+            .border_1()
+            .border_color(rgb(0x666666))
+            .bg(rgb(0x2d2d2d))
+            .text_size(px(12.))
+            .text_color(ui.text)
+            .cursor_pointer()
+            .animated_hover(move |style, delta| {
+                style.bg(lerp_color(
+                    gpui::Hsla::from(rgb(0x2d2d2d)),
+                    button_hover_bg,
+                    delta,
+                ));
+            })
+            .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
+                if let Err(e) =
+                    crate::external_open::open_http_url("https://github.com/theaamgroup/paneflow")
+                {
+                    log::warn!("About: could not open GitHub: {e}");
+                }
+                cx.stop_propagation();
+            }))
+            .child("View on GitHub");
+
+        // Issue #227: attribution link to the original project. Replaces the
+        // inert contributors placeholder. Does not restore an Arthur Jean
+        // copyright line; the AAM line and the David Ayers plate stay as-is.
+        let upstream_border = ui.muted.opacity(0.4);
+        let upstream_hover = ui.muted;
+        let upstream = div()
+            .id("about-upstream")
             .flex_none()
             .mt(px(10.))
             .h(px(36.))
@@ -212,17 +251,29 @@ impl PaneFlowApp {
             .rounded(px(8.))
             .border_1()
             .border_dashed()
-            .border_color(ui.muted.opacity(0.4))
+            .border_color(upstream_border)
             .text_size(px(11.))
-            .text_color(ui.muted.opacity(0.6))
-            .child("Add Contributors Here");
+            .text_color(ui.muted)
+            .cursor_pointer()
+            .animated_hover(move |style, delta| {
+                style.border_color(lerp_color(upstream_border, upstream_hover, delta));
+            })
+            .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
+                if let Err(e) =
+                    crate::external_open::open_http_url("https://github.com/arthjean/paneflow")
+                {
+                    log::warn!("About: could not open the original project: {e}");
+                }
+                cx.stop_propagation();
+            }))
+            .child("Original project: arthjean/paneflow");
 
         let body = div()
             .w_full()
-            // Grown from 225 to seat the two plates under the copyright while
-            // the whole stack stays optically centered. Fixed, not auto, to
-            // keep the dialog a constant size like the rest of this chrome.
-            .h(px(320.))
+            // Grown from 320 to seat the GitHub button between Version and
+            // copyright. Fixed, not auto, to keep the dialog a constant size
+            // like the rest of this chrome.
+            .h(px(362.))
             .flex()
             .flex_col()
             .items_center()
@@ -249,6 +300,7 @@ impl PaneFlowApp {
                     .text_size(px(12.))
                     .child(format!("Version {version}")),
             )
+            .child(github_button)
             .child(
                 div()
                     .mt(px(14.))
@@ -257,7 +309,7 @@ impl PaneFlowApp {
                     .child("© 2026 AAM USA, Inc. All rights reserved."),
             )
             .child(credit)
-            .child(contributors);
+            .child(upstream);
 
         let ok_button = div()
             .id("about-ok")
@@ -339,5 +391,91 @@ impl PaneFlowApp {
         )
         .with_priority(10)
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn production_source() -> &'static str {
+        include_str!("about_dialog.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of about_dialog.rs")
+    }
+
+    /// Issue #226: About exposes a View on GitHub control that opens this
+    /// fork through `open_http_url` and does not dismiss the dialog.
+    #[test]
+    fn about_dialog_links_this_forks_github() {
+        let src = production_source();
+        assert!(
+            src.contains("id(\"about-github\")"),
+            "About must carry an about-github control"
+        );
+        assert!(
+            src.contains("\"https://github.com/theaamgroup/paneflow\""),
+            "About GitHub button must open this fork's repository"
+        );
+        assert!(
+            src.contains("open_http_url"),
+            "About web links must go through open_http_url, not open_url"
+        );
+        assert!(
+            !src.contains("Add Contributors Here"),
+            "the inert contributors placeholder must be gone"
+        );
+        let github_click = src
+            .split("id(\"about-github\")")
+            .nth(1)
+            .and_then(|rest| rest.split("id(\"about-upstream\")").next())
+            .expect("about-github click handler");
+        assert!(
+            !github_click.contains("show_about_dialog = false"),
+            "View on GitHub must leave About open: {github_click}"
+        );
+        assert!(
+            github_click.contains("open_http_url"),
+            "View on GitHub must call open_http_url: {github_click}"
+        );
+    }
+
+    /// Issue #227: the inert contributors plate is an original-credit button.
+    /// The David Ayers plate stays.
+    #[test]
+    fn about_dialog_credits_the_original_project() {
+        let src = production_source();
+        assert!(
+            src.contains("id(\"about-upstream\")"),
+            "About must carry an about-upstream control"
+        );
+        assert!(
+            src.contains("\"https://github.com/arthjean/paneflow\""),
+            "original-credit button must open arthjean/paneflow"
+        );
+        assert!(
+            src.contains("id(\"about-credit\")"),
+            "the David Ayers credit plate must stay"
+        );
+        assert!(
+            src.contains("\"https://github.com/evilchinesefood\""),
+            "the David Ayers plate URL must stay"
+        );
+        assert!(
+            !src.contains("Add Contributors Here"),
+            "the inert contributors placeholder must be gone"
+        );
+        let upstream_click = src
+            .split("id(\"about-upstream\")")
+            .nth(1)
+            .and_then(|rest| rest.split("let body =").next())
+            .expect("about-upstream click handler");
+        assert!(
+            !upstream_click.contains("show_about_dialog = false"),
+            "original-credit must leave About open: {upstream_click}"
+        );
+        assert!(
+            upstream_click.contains("open_http_url"),
+            "original-credit must call open_http_url: {upstream_click}"
+        );
     }
 }
