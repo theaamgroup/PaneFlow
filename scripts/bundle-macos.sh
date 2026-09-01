@@ -24,9 +24,7 @@
 # Signing, notarization, and .dmg creation are intentionally out of scope -
 # see US-015 (codesign + notarytool) and US-016 (hdiutil .dmg).
 #
-# Portable enough to run on Linux for structural verification (the shell
-# logic doesn't depend on Darwin-only tools); the resulting bundle is only
-# *useful* on macOS.
+# Runs on macOS only: CI's macos-15 lanes and local release builds.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
@@ -123,8 +121,15 @@ ditto "$SPARKLE_DIST_DIR/Sparkle.framework" "$FRAMEWORKS_DIR/Sparkle.framework"
 mkdir -p "$RESOURCES_DIR/ThirdPartyLicenses"
 install -m 0644 "$SPARKLE_DIST_DIR/LICENSE" "$RESOURCES_DIR/ThirdPartyLicenses/Sparkle.txt"
 
+# libghostty-vt is statically linked into the binary, so `cargo deny` never
+# sees it; the reviewed notice in native/libghostty is its license inventory
+# and ships beside Sparkle's. `manifest.toml` pins the notice's hash.
+LIBGHOSTTY_NOTICE="$REPO_ROOT/native/libghostty/THIRD_PARTY_NOTICES.md"
+[ -f "$LIBGHOSTTY_NOTICE" ] || die "libghostty THIRD_PARTY_NOTICES.md not found at $LIBGHOSTTY_NOTICE"
+install -m 0644 "$LIBGHOSTTY_NOTICE" "$RESOURCES_DIR/ThirdPartyLicenses/libghostty.txt"
+
 # Substitute @VERSION@ in the Info.plist template. `sed -e` keeps the
-# command portable between BSD sed (macOS) and GNU sed (Linux CI).
+# command BSD-sed safe (macOS ships BSD sed).
 sed \
     -e "s|@VERSION@|$VERSION|g" \
     "$INFO_PLIST_SRC" > "$CONTENTS/Info.plist"

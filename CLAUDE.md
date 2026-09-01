@@ -17,11 +17,13 @@ method rules this project has already paid for. Read it before planning a
 pass so you do not redo finished work or repeat a falsified finding. Open
 work lives on GitHub issues, not in that file.
 
-**Where this fork stands (2026-08-30):** product is PaneFlow (the PanesCLI
+**Where this fork stands (2026-08-31):** product is PaneFlow (the PanesCLI
 rename was dropped). Version **0.1.3**. Origin `theaamgroup/paneflow` on
-`main`. Ghostty, Windows, Linux, telemetry crate, published Ghostty /
+`main`. Windows, Linux, the telemetry crate, the published
 `windows_*_material` schema, and community files (`SECURITY.md`,
-`CONTRIBUTING.md`) are gone. The old hand-rolled updater remains **deleted**;
+`CONTRIBUTING.md`) are gone. The Ghostty engine, deleted on 2026-08-25, is
+being restored as the only engine by #184: Phase 1 (2026-08-31) vendored the
+crates and the darwin archive unwired; Alacritty still runs until Phase 2. The old hand-rolled updater remains **deleted**;
 Sparkle 2 performs silent hourly checks and installs verified updates only when
 the user quits. First signed GitHub Release is **v0.1.0** (Developer ID
 signed, notarized, stapled; #11 closed with `spctl` evidence). #13 closed on
@@ -269,7 +271,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
-The Ghostty backend is gone: `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/` were all deleted in stage 2a. Leftover-removal (2026-08-26) also deleted the compiled stubs (`auto_selects_ghostty_for_target`, `should_start_ghostty`, `GhosttyBuildDiagnostics`). `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Remaining Ghostty identifiers in comments or tests that assert absence are leftover copy, not a live backend.
+**libghostty-vt is coming back as the only engine (issue #184).** Stage 2a (2026-08-25) deleted `terminal/ghostty_session.rs`, `terminal/ghostty_stress.rs`, the three `paneflow-{libghostty-sys,terminal-ghostty,ghostty-smoke}` crates and `fuzz/`, and leftover-removal (2026-08-26) deleted the compiled stubs (`auto_selects_ghostty_for_target`, `should_start_ghostty`, `GhosttyBuildDiagnostics`). #184 Phase 1 (2026-08-31) vendored the three crates and the `aarch64-apple-darwin` archive back from upstream v0.10.0 (`native/libghostty/`, stripped to macOS, linking unconditional, no stub) **without wiring them into `src-app`** - the app still runs Alacritty until Phase 2 swaps the session host. `fuzz/` stays deleted. Daily `cargo build` needs no Zig: the `-sys` build script verifies the vendored archive's hashes and links it. `TerminalBackendConfig` is `Auto | Alacritty` only (`crates/paneflow-config/src/schema.rs:538`). The published schema has no Ghostty variant and no `windows_*_material` keys. The loader still accepts leftover `"backend": "ghostty"` (maps to Alacritty) and leftover `windows_*_material` / `telemetry` keys so an old `paneflow.json` loads instead of being discarded. Remaining Ghostty identifiers in comments or tests that assert absence are leftover copy, not a live backend.
 
 ### Thread model
 
@@ -304,6 +306,9 @@ KeyDownEvent → TerminalView::handle_key_down() → keys::to_esc_str()
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
 | `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |
+| `paneflow-libghostty-sys` | `crates/paneflow-libghostty-sys/` | Library | Raw libghostty-vt FFI; `build.rs` verifies and links `native/libghostty/prebuilt/aarch64-apple-darwin` (no Zig) |
+| `paneflow-terminal-ghostty` | `crates/paneflow-terminal-ghostty/` | Library | Safe `DisplayTerminal` wrapper over the FFI (unwired until #184 Phase 2) |
+| `paneflow-ghostty-smoke` | `crates/paneflow-ghostty-smoke/` | Binary | Headless PTY smoke against the linked archive |
 
 There is **no** `paneflow-telemetry` crate. It was deleted in the post-2c
 grind. Zed lockfile crates named `telemetry` / `telemetry_events` belong
@@ -496,7 +501,7 @@ Anything that diverges from upstream uses the `(fork)` scope, e.g. `chore(fork):
 
 This fork targets macOS on Apple Silicon and nothing else. Metal, AppKit, `alacritty_terminal`, Unix-socket IPC, signed and notarized `.app` / `.dmg`.
 
-- Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, no Ghostty backend.
+- Do not add Linux or Windows code paths back. No `#[cfg(target_os = "linux")]`, no `#[cfg(windows)]`, and no backend selector: one terminal engine only (Alacritty today, libghostty-vt after #184 Phase 2).
 - **`#[cfg(unix)]` is not Linux-only.** It appears **150 times** and macOS needs nearly all of it - it is the single highest-risk distinction in this codebase. Do not prune unix-shared code because Linux code sat beside it. `#[cfg(target_os = "macos")]` appears **94** times. Both are live arms and both stay. Counted by the `./scripts/linux-census.sh` negative control (`cfg(unix)` / `cfg(macos)` live sites) - **re-run it before quoting these numbers**, since they drift with every pass and four different pairs are currently recorded across the fork docs.
 - **After stage 2c those two are the only *cross-platform* predicates left.** No `target_os = "linux"`, no `not(unix)`, no `not(target_os = "macos")`, no `windows`. A `[target.'cfg(target_os = "macos")'.dependencies]` table **is** allowed and exists (`src-app/Cargo.toml:239`, `libproc` / `core-text` / AppKit). `./scripts/linux-census.sh` enforces the zero-condition: it exits 1 with a `FAIL:` line when the STAGE 2c total is non-zero or the negative control reads 0, and `run_tests.yml::platform_census` runs it (and `win-census.sh`) on every push and PR. It prints the `cfg(unix)`/`cfg(macos)` counts first as a negative control, because a census reading 0 with a broken regex looks exactly like one reading 0 because the work is done. A zero cfg census is also blind to ungated Windows strings (`powershell` / `.exe` / `.cmd` / `.bat` / `.ps1` / `\\?\` / `%APPDATA%`); that class is a separate reported check in the same script (issue #103) and is **not** part of the STAGE 2c integer.
 - `#[cfg(all(unix, not(test)))]` still appears (in `terminal/pty_session.rs`). That is a test-isolation gate, not a platform gate. Leave it.

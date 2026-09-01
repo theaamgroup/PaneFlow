@@ -1,0 +1,20 @@
+[package]
+name = "paneflow-ghostty-smoke"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "paneflow-ghostty-smoke"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+paneflow-terminal-ghostty = { path = "../paneflow-terminal-ghostty" }
+portable-pty = "0.9.0"
+
+[lints]
+workspace = true

@@ -3,8 +3,11 @@ name: run_tests
 on:
   push:
     branches: [main]
+  # No base-branch filter on pull_request: #184 lands as a stack of PRs
+  # (each phase based on the previous one), and a stacked PR must get the
+  # same checks as one against main, or its "Done when" is only ever
+  # verified after the base merges.
   pull_request:
-    branches: [main]
 
 # Match Zed's pattern (run_tests.yml): on PR branches, collapse runs on the
 # same ref so a new push cancels any in-flight CI for that branch. On main,
@@ -104,6 +107,11 @@ jobs:
               - 'schemas/**'
               - 'docs/user/configuration/schema.md'
               - 'examples/**'
+              # The -sys build script and its tests read native/libghostty
+              # (manifest, bindings, header, archive, build-info) and the
+              # tests pin their hashes; an archive- or manifest-only PR is
+              # not docs-only.
+              - 'native/**'
             ci:
               - '.github/workflows/**'
               - 'scripts/**'
@@ -436,6 +444,13 @@ jobs:
       # the test run exercises the real macOS codepath.
       - name: cargo test --workspace
         run: cargo test --workspace --locked --target aarch64-apple-darwin
+
+      # The libghostty PTY smoke is a binary, not a #[test]: it opens a real
+      # PTY, drives /bin/sh through the linked archive, and checks the
+      # snapshot, the resize probe and the reap. Run it so the vendored
+      # archive is exercised end to end, not only linked.
+      - name: libghostty PTY smoke
+        run: cargo run --locked --target aarch64-apple-darwin -p paneflow-ghostty-smoke
 
       # cargo check must exit 0 with no linker errors.
       - name: cargo check (aarch64-apple-darwin)
