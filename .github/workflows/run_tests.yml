@@ -111,7 +111,7 @@ jobs:
               # (manifest, bindings, header, archive, build-info) and the
               # tests pin their hashes; an archive- or manifest-only PR is
               # not docs-only.
-            - 'native/**'
+              - 'native/**'
             ci:
               - '.github/workflows/**'
               - 'scripts/**'
