@@ -149,16 +149,32 @@ pub enum AgentStateSource {
 pub const SOURCE_TAKEOVER_SILENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Whether `incoming` may overwrite a session whose current state came from
-/// `existing` (its source, and how long that source has been silent).
+/// `existing` (the held state, its source, and how long that source has been
+/// silent).
+///
+/// A held [`AgentState::WaitingForInput`] is exempt from the silence-based
+/// takeover (issue #196): a permission prompt routinely sits unanswered past
+/// [`SOURCE_TAKEOVER_SILENCE`] - waiting for the user IS the state, so the
+/// source's silence is not evidence of a dead channel. Without the exemption a
+/// weaker source's first observation past 20 s (a registry `busy`, an OSC 9;4
+/// progress change) would flip the row back to `Thinking` and lose the thing
+/// the user has to act on - exactly what the source ordering exists to
+/// prevent. An equal-or-stronger source (the hook's own Stop/exit, the
+/// registry over the terminal) still moves it, and answering the prompt
+/// produces a hook frame that releases the row.
 ///
 /// Pure, so the precedence rule is unit-tested without a running app.
 pub fn accepts_source(
-    existing: Option<(AgentStateSource, std::time::Duration)>,
+    existing: Option<(&AgentState, AgentStateSource, std::time::Duration)>,
     incoming: AgentStateSource,
 ) -> bool {
     match existing {
         None => true,
-        Some((held, silence)) => incoming >= held || silence >= SOURCE_TAKEOVER_SILENCE,
+        Some((held_state, held, silence)) => {
+            incoming >= held
+                || (silence >= SOURCE_TAKEOVER_SILENCE
+                    && *held_state != AgentState::WaitingForInput)
+        }
     }
 }
 
@@ -856,11 +872,16 @@ mod tests {
         // A policy that disables hooks mid-session, or a SIGKILLed shim,
         // leaves the last hook frame in place forever otherwise.
         assert!(accepts_source(
-            Some((AgentStateSource::Hook, SOURCE_TAKEOVER_SILENCE)),
+            Some((
+                &AgentState::Thinking,
+                AgentStateSource::Hook,
+                SOURCE_TAKEOVER_SILENCE
+            )),
             AgentStateSource::Terminal
         ));
         assert!(!accepts_source(
             Some((
+                &AgentState::Thinking,
                 AgentStateSource::Hook,
                 SOURCE_TAKEOVER_SILENCE - std::time::Duration::from_millis(1)
             )),
@@ -880,15 +901,19 @@ mod tests {
         // OSC 9;4 has been `indeterminate` since the turn started. The
         // progress bit must not flip the sidebar off the thing to act on.
         assert!(!accepts_source(
-            Some((AgentStateSource::Hook, fresh)),
+            Some((&AgentState::Thinking, AgentStateSource::Hook, fresh)),
             AgentStateSource::Terminal
         ));
         assert!(!accepts_source(
-            Some((AgentStateSource::Hook, fresh)),
+            Some((&AgentState::Thinking, AgentStateSource::Hook, fresh)),
             AgentStateSource::SessionRegistry
         ));
         assert!(!accepts_source(
-            Some((AgentStateSource::SessionRegistry, fresh)),
+            Some((
+                &AgentState::Thinking,
+                AgentStateSource::SessionRegistry,
+                fresh
+            )),
             AgentStateSource::Terminal
         ));
 
@@ -899,13 +924,75 @@ mod tests {
             AgentStateSource::SessionRegistry,
             AgentStateSource::Hook,
         ] {
-            assert!(accepts_source(Some((held, fresh)), AgentStateSource::Hook));
-            assert!(accepts_source(Some((held, fresh)), held));
+            assert!(accepts_source(
+                Some((&AgentState::Thinking, held, fresh)),
+                AgentStateSource::Hook
+            ));
+            assert!(accepts_source(
+                Some((&AgentState::Thinking, held, fresh)),
+                held
+            ));
         }
         assert!(accepts_source(
-            Some((AgentStateSource::Terminal, fresh)),
+            Some((&AgentState::Thinking, AgentStateSource::Terminal, fresh)),
             AgentStateSource::SessionRegistry
         ));
+    }
+
+    #[test]
+    fn a_waiting_row_is_never_taken_over_by_a_weaker_source() {
+        // Issue #196: a permission prompt routinely sits unanswered past
+        // SOURCE_TAKEOVER_SILENCE (the user is elsewhere - that is the whole
+        // point of the attention queue). The silence escape hatch exists for a
+        // dead channel describing a RUNNING turn; it must not let a registry
+        // "busy" flip or an OSC 9;4 progress change move the row off the thing
+        // the user has to act on.
+        let long_silent = SOURCE_TAKEOVER_SILENCE * 2;
+        let waiting = AgentState::WaitingForInput;
+        assert!(!accepts_source(
+            Some((&waiting, AgentStateSource::Hook, long_silent)),
+            AgentStateSource::SessionRegistry
+        ));
+        assert!(!accepts_source(
+            Some((&waiting, AgentStateSource::Hook, long_silent)),
+            AgentStateSource::Terminal
+        ));
+        assert!(!accepts_source(
+            Some((&waiting, AgentStateSource::SessionRegistry, long_silent)),
+            AgentStateSource::Terminal
+        ));
+
+        // An equal-or-stronger source still moves it: the hook's own Stop /
+        // exit frames, and the registry's `waitReason` refreshing its own row.
+        assert!(accepts_source(
+            Some((&waiting, AgentStateSource::Hook, long_silent)),
+            AgentStateSource::Hook
+        ));
+        assert!(accepts_source(
+            Some((&waiting, AgentStateSource::SessionRegistry, long_silent)),
+            AgentStateSource::SessionRegistry
+        ));
+        assert!(accepts_source(
+            Some((&waiting, AgentStateSource::SessionRegistry, long_silent)),
+            AgentStateSource::Hook
+        ));
+
+        // Every other state keeps the silence handover (the escape hatch this
+        // rule was built for).
+        for held_state in [
+            AgentState::Thinking,
+            AgentState::Finished,
+            AgentState::Errored,
+            AgentState::Stalled,
+        ] {
+            assert!(
+                accepts_source(
+                    Some((&held_state, AgentStateSource::Hook, long_silent)),
+                    AgentStateSource::Terminal
+                ),
+                "{held_state:?} must still hand over after silence"
+            );
+        }
     }
 
     #[test]
