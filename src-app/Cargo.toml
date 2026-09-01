@@ -250,6 +250,16 @@ core-foundation = "0.10"
 raw-window-handle = "0.6"
 cocoa = "0.26"
 objc = "0.2"
+# Help > System Info (#184 Phase 4, upstream #37): GPUI's AppKit window
+# returns `None` from `Window::gpu_specs()`, so the report reads the adapter
+# from Metal itself. 0.3.2 is the version `Cargo.lock` already resolves, so
+# this adds no new resolution. Only the `MTLDevice` feature is enabled - it is
+# what gates `MTLCopyAllDevices` and `NSArray` indexing, and nothing else in
+# the crate is used.
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "MTLDevice",
+] }
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8", features = ["test-support", "profiler"] }

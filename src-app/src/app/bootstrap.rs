@@ -809,6 +809,7 @@ impl PaneFlowApp {
             closed_items: Vec::new(),
             pending_worktree_teardowns: restored_pending_worktree_teardowns,
             show_about_dialog: false,
+            system_info_dialog: None,
             show_theme_picker: false,
             theme_picker_query: String::new(),
             theme_picker_selected_idx: 0,
@@ -997,7 +998,13 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
         // points to an online doc/repo). Without one, Apple's HIG-conforming
         // users perceive the app as unfinished. "PaneFlow Help" dispatches
         // `OpenHelp` which opens the GitHub README in the default browser.
-        Menu::new("Help").items(vec![MenuItem::action("PaneFlow Help", OpenHelp)]),
+        Menu::new("Help").items(vec![
+            MenuItem::action("PaneFlow Help", OpenHelp),
+            MenuItem::separator(),
+            // #184 Phase 4: a copyable environment block for bug reports
+            // (`crate::system_info`). Menu-only, no default chord.
+            MenuItem::action("System Info…", crate::ShowSystemInfo),
+        ]),
     ]);
     apply_macos_app_menu_icons();
 }
@@ -1254,6 +1261,12 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
                 log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 app.show_toast(format!("Could not open help: {e}"), cx);
             }
+        });
+    });
+
+    cx.on_action(|_: &crate::ShowSystemInfo, cx| {
+        with_active_paneflow_window(cx, |app, window, cx| {
+            app.open_system_info_dialog(window, cx);
         });
     });
 

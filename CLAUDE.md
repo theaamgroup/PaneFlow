@@ -204,6 +204,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
+│   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
 ├── cli/                               ← `paneflow up|flow|watch|wait|send|read` over the IPC socket
 ├── window_chrome/
@@ -272,6 +273,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── config_writer.rs                   ← read-modify-write paneflow.json
 ├── window_state.rs / editor.rs / external_open.rs
 ├── sidebar_title.rs                   ← sidebar label cleanup
+├── system_info.rs                     ← Help ▸ System Info… collection: sysctl, Metal devices, install format, libghostty identity
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
@@ -372,7 +374,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 90 ac
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
-**The macOS menu bar** (`app/bootstrap.rs::install_macos_menu_bar`, `#[cfg(target_os = "macos")]`) is PaneFlow (`About PaneFlow`, `Settings…`, separator, `Quit PaneFlow`) / Edit / Window / Help. `Settings…` dispatches `OpenSettings` into `open_settings_window`. Theme selection lives in Settings → Appearance (and the title-bar profile menu's `Themes…` row, which calls `open_theme_picker` directly); there is no View menu. Every menu action needs BOTH a render-root `.on_action` in `main.rs` and an app-global fallback in `install_macos_menu_action_fallbacks`, or AppKit's `is_action_available` check paints the item permanently greyed while focus sits in a terminal. `OpenSettings` is deliberately absent from `keybindings/registry.rs::ACTIONS` (the `About` / `OpenHelp` precedent) so Settings → Keyboard Shortcuts does not grow permanently `Unassigned` rows, and **`Cmd+,` is deliberately unbound** (issue #105) - `no_default_binds_the_macos_preferences_chord` in `keybindings/apply.rs` fails if any default claims it. The sidebar's "Workspaces" header carries no `+`; New Workspace is `Cmd+Shift+N`, Window ▸ New Workspace, the profile menu, and the empty-state "Open folder" button. The sidebar footer carries **no Settings affordance at all** - the gear that survived issue #105 is gone, so `Settings…` on the menu bar and the title-bar profile menu are the only two entry points.
+**The macOS menu bar** (`app/bootstrap.rs::install_macos_menu_bar`, `#[cfg(target_os = "macos")]`) is PaneFlow (`About PaneFlow`, `Settings…`, separator, `Quit PaneFlow`) / Edit / Window / Help (`PaneFlow Help`, separator, `System Info…`). `Settings…` dispatches `OpenSettings` into `open_settings_window`. `System Info…` dispatches `ShowSystemInfo` into `open_system_info_dialog` (`app/system_info_dialog.rs`): a copyable environment block - version, install format, OS, CPU, GPU, renderer, libghostty version - with no project path and no environment dump, collected off the render thread by `system_info.rs` (`sysctl`, `MTLCopyAllDevices`, and `sparkle::bundled_framework_binary` for the install format). Like `About` / `OpenHelp` / `OpenSettings` it has no default chord and is absent from `keybindings/registry.rs::ACTIONS`. Theme selection lives in Settings → Appearance (and the title-bar profile menu's `Themes…` row, which calls `open_theme_picker` directly); there is no View menu. Every menu action needs BOTH a render-root `.on_action` in `main.rs` and an app-global fallback in `install_macos_menu_action_fallbacks`, or AppKit's `is_action_available` check paints the item permanently greyed while focus sits in a terminal. `OpenSettings` is deliberately absent from `keybindings/registry.rs::ACTIONS` (the `About` / `OpenHelp` precedent) so Settings → Keyboard Shortcuts does not grow permanently `Unassigned` rows, and **`Cmd+,` is deliberately unbound** (issue #105) - `no_default_binds_the_macos_preferences_chord` in `keybindings/apply.rs` fails if any default claims it. The sidebar's "Workspaces" header carries no `+`; New Workspace is `Cmd+Shift+N`, Window ▸ New Workspace, the profile menu, and the empty-state "Open folder" button. The sidebar footer carries **no Settings affordance at all** - the gear that survived issue #105 is gone, so `Settings…` on the menu bar and the title-bar profile menu are the only two entry points.
 
 | Key | Action | Context |
 |-----|--------|---------|

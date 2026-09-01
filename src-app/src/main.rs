@@ -55,6 +55,7 @@ mod search;
 mod settings;
 mod sidebar_title;
 mod sparkle;
+mod system_info;
 mod terminal;
 pub mod theme;
 mod ui_primitives;
@@ -1315,6 +1316,10 @@ struct PaneFlowApp {
     pending_worktree_teardowns: Vec<crate::workspace::worktree::ManagedWorktree>,
     /// Whether the "About PaneFlow" dialog is visible.
     show_about_dialog: bool,
+    /// Help > System Info… (#184 Phase 4): the System Info modal, absent when
+    /// closed. `Collecting` while the background probes run so the click
+    /// feels instant.
+    system_info_dialog: Option<crate::app::system_info_dialog::SystemInfoDialog>,
     /// Whether the command-palette-style theme picker is visible.
     show_theme_picker: bool,
     /// Typeahead filter for the theme picker (case-insensitive substring).
@@ -1971,6 +1976,14 @@ impl Render for PaneFlowApp {
                     log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 }
             }))
+            // Help > System Info… (#184 Phase 4). The collection takes the
+            // window (GPU adapter) here and pushes its blocking probes to the
+            // background executor - see `crate::system_info`.
+            .on_action(
+                cx.listener(|this: &mut Self, _: &ShowSystemInfo, window, cx| {
+                    this.open_system_info_dialog(window, cx);
+                }),
+            )
             .on_action(cx.listener(Self::handle_toggle_files_sidebar))
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
@@ -2303,6 +2316,10 @@ impl Render for PaneFlowApp {
 
         if self.show_about_dialog {
             app_content = app_content.child(self.render_about_dialog(cx));
+        }
+
+        if self.system_info_dialog.is_some() {
+            app_content = app_content.child(self.render_system_info_dialog(cx));
         }
 
         // Issue #83: close confirmation. Deliberately NOT mode-gated - it
