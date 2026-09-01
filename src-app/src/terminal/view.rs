@@ -392,10 +392,8 @@ impl TerminalView {
     ///
     /// See [`crate::terminal::TerminalState::restore_replay`]: the bytes go in
     /// verbatim so the styling survives, which makes this valid only for an
-    /// in-process capture.
-    // Wired by the styled undo replay (#195); until then the fork's undo
-    // restores plain text through `restore_scrollback`.
-    #[allow(dead_code)]
+    /// in-process capture. Undo-close (#195) prefers this over
+    /// [`Self::restore_scrollback`] whenever the record still holds a capture.
     pub(crate) fn restore_replay(&self, replay: &[u8]) {
         self.needs_initial_clear
             .store(false, std::sync::atomic::Ordering::Relaxed);

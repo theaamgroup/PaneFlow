@@ -100,6 +100,39 @@ impl TerminalExtra {
         }
     }
 
+    /// What an undo-close replay carries into a brand-new shell (#195).
+    ///
+    /// The replay is fed to the new pane verbatim, escapes included, so this
+    /// is the policy that decides what a closed pane's program can reach:
+    /// cell styling (always emitted by the VT format), OSC 8 hyperlinks that
+    /// were already live in the closed pane, and the cursor position, so the
+    /// new prompt appears where the old one stopped. Everything that would
+    /// program the *new* shell's session is left out: the working directory
+    /// (OSC 7 - the new PTY already spawned at the recorded cwd), the palette
+    /// (OSC 4 - the theme's, not a closed program's), every mode and keyboard
+    /// protocol (a TUI's mouse reporting or kitty keyboard state would break
+    /// input to a shell that never asked for it), the pending SGR, charsets,
+    /// scrolling region, tab stops, and DECSCA protection.
+    #[must_use]
+    pub fn replay() -> Self {
+        Self {
+            palette: false,
+            modes: false,
+            scrolling_region: false,
+            tabstops: false,
+            pwd: false,
+            keyboard: false,
+            screen: ScreenExtra {
+                cursor: true,
+                style: false,
+                hyperlink: true,
+                protection: false,
+                kitty_keyboard: false,
+                charsets: false,
+            },
+        }
+    }
+
     fn raw(self) -> sys::GhosttyFormatterTerminalExtra {
         sys::GhosttyFormatterTerminalExtra {
             size: std::mem::size_of::<sys::GhosttyFormatterTerminalExtra>(),
@@ -332,10 +365,13 @@ impl DisplayTerminal {
     /// Capture the screen and its recent history as VT sequences that replay
     /// it into another terminal.
     ///
-    /// Plain text loses the styling, the modes, and the cursor; these bytes
-    /// carry all three, which is what makes a restored pane look like the one
-    /// that was closed rather than like a transcript of it. History is capped
-    /// at [`MAX_REPLAY_HISTORY_ROWS`] rows, the same bound the text path has.
+    /// Plain text loses the styling and the cursor; these bytes carry both,
+    /// which is what makes a restored pane look like the one that was closed
+    /// rather than like a transcript of it. What else travels is decided by
+    /// [`TerminalExtra::replay`]: nothing that sets the new pane's clipboard,
+    /// working directory, title, modes, or keyboard protocol. History is
+    /// capped at [`MAX_REPLAY_HISTORY_ROWS`] rows, the same bound the text
+    /// path has.
     ///
     /// Feed the result back with [`Self::feed`].
     pub fn capture_replay(&self) -> Result<Vec<u8>> {
@@ -348,7 +384,7 @@ impl DisplayTerminal {
                 // Wrapping is part of what the screen looked like.
                 unwrap: false,
                 trim: true,
-                extra: TerminalExtra::all(),
+                extra: TerminalExtra::replay(),
             },
             Some(&selection),
         )?;
@@ -477,7 +513,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::{TerminalAppearance, WindowSize};
+    use crate::{BackendEvent, Color, TerminalAppearance, WindowSize};
 
     fn terminal(cols: usize, rows: usize) -> DisplayTerminal {
         let size = WindowSize::new(cols, rows, 8, 16).expect("valid terminal size");
@@ -538,6 +574,76 @@ mod tests {
             })
             .expect("html must format");
         assert!(html.contains('<'), "html output must carry markup");
+    }
+
+    /// A styled replay is fed into the pane undo brings back verbatim, so the
+    /// capture itself is the safety boundary (#195): [`TerminalExtra`] decides
+    /// what state travels. A program in the closed pane that set the
+    /// clipboard (OSC 52), the working directory (OSC 7), or the title
+    /// (OSC 0/2) must not be able to replay any of those into the new pane,
+    /// while the cell styling that plain text drops has to survive.
+    #[test]
+    fn capture_replay_keeps_styling_but_carries_no_clipboard_pwd_or_title() {
+        let mut source = terminal(20, 3);
+        source
+            .feed(
+                b"\x1b]52;c;UFdORUQ=\x07\
+                  \x1b]7;file://evil.example/pwned\x07\
+                  \x1b]0;PWNED\x07\x1b]2;PWNED\x07\
+                  \x1b[1;31mred\x1b[0m plain",
+            )
+            .expect("hostile output must parse");
+        source.drain_events();
+
+        let replay = source.capture_replay().expect("capture must succeed");
+        let text = String::from_utf8_lossy(&replay);
+        assert!(
+            text.contains("red") && text.contains("plain"),
+            "glyphs must survive; got {text:?}"
+        );
+        assert!(
+            text.contains("\x1b["),
+            "SGR styling must survive; got {text:?}"
+        );
+        for forbidden in [
+            "\x1b]52",
+            "\x1b]7;",
+            "\x1b]0;",
+            "\x1b]2;",
+            "PWNED",
+            "evil.example",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden:?} must not be replayed; got {text:?}"
+            );
+        }
+
+        let mut target = terminal(20, 3);
+        target.feed(&replay).expect("replay must parse");
+        let events = target.drain_events();
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                BackendEvent::ClipboardStore(_)
+                    | BackendEvent::Title(_)
+                    | BackendEvent::WorkingDirectory(_)
+            )),
+            "a replay must not drive the clipboard, the cwd, or the title: {events:?}"
+        );
+        let content = target.snapshot().expect("snapshot after replay");
+        let visible: String = content.cells.iter().map(|cell| cell.character).collect();
+        assert!(
+            visible.contains("red") && visible.contains("plain"),
+            "got {visible:?}"
+        );
+        let red = content
+            .cells
+            .iter()
+            .find(|cell| cell.character == 'r')
+            .expect("the styled glyph must be on screen");
+        assert_ne!(red.foreground, Color::Default, "foreground must survive");
+        assert!(red.flags.bold, "bold must survive");
     }
 
     #[test]

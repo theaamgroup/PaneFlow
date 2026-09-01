@@ -257,7 +257,14 @@ pub(crate) struct FilesContextMenu {
 pub(crate) enum ClosedSurfaceRecord {
     Terminal {
         cwd: Option<std::path::PathBuf>,
+        /// Plain-text extract: the fallback undo replays when `replay` is
+        /// absent or was released by the record budget.
         scrollback: Option<String>,
+        /// Styled VT capture of the same pane (#195), taken in this process
+        /// by libghostty's formatter under `TerminalExtra::replay`. Preferred
+        /// over `scrollback` on restore; counted against the same budget and
+        /// released first.
+        replay: Option<Vec<u8>>,
         custom_name: Option<String>,
         font_size: Option<f32>,
     },

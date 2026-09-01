@@ -217,14 +217,19 @@ pub(crate) fn push_closed_record(
     mut record: ClosedRecord,
 ) -> Vec<crate::workspace::worktree::ManagedWorktree> {
     match &mut record {
-        ClosedRecord::Pane(ClosedPaneRecord {
-            surface:
-                ClosedSurfaceRecord::Terminal {
-                    scrollback: Some(scrollback),
-                    ..
-                },
-            ..
-        }) => scrollback.shrink_to_fit(),
+        ClosedRecord::Pane(pane) => {
+            if let ClosedSurfaceRecord::Terminal {
+                scrollback, replay, ..
+            } = &mut pane.surface
+            {
+                if let Some(scrollback) = scrollback {
+                    scrollback.shrink_to_fit();
+                }
+                if let Some(replay) = replay {
+                    replay.shrink_to_fit();
+                }
+            }
+        }
         // A tab record is where the multi-megabyte strings actually live - it
         // can hold up to [`crate::layout::MAX_PANES`] leaves, each with its own
         // extract - and it was the half that never shrank.
@@ -236,7 +241,6 @@ pub(crate) fn push_closed_record(
                 }
             }
         }
-        ClosedRecord::Pane(_) => {}
     }
     let retired_worktrees = if records.len() >= MAX_CLOSED_PANES {
         take_closed_record_worktrees(records.remove(0))
@@ -331,13 +335,23 @@ fn enforce_closed_pane_scrollback_budget(records: &mut [ClosedRecord], budget: u
 fn release_record_scrollback(record: &mut ClosedRecord, total: &mut usize, budget: usize) {
     match record {
         ClosedRecord::Pane(pane) => {
-            if *total <= budget {
-                return;
-            }
-            if let ClosedSurfaceRecord::Terminal { scrollback, .. } = &mut pane.surface
-                && let Some(scrollback) = scrollback.take()
+            if let ClosedSurfaceRecord::Terminal {
+                scrollback, replay, ..
+            } = &mut pane.surface
             {
-                *total = total.saturating_sub(scrollback.len());
+                // The styled capture (#195) goes first: released, the record
+                // still restores its plain text, so it degrades to what undo
+                // did before the capture existed instead of to nothing.
+                if *total > budget
+                    && let Some(replay) = replay.take()
+                {
+                    *total = total.saturating_sub(replay.len());
+                }
+                if *total > budget
+                    && let Some(scrollback) = scrollback.take()
+                {
+                    *total = total.saturating_sub(scrollback.len());
+                }
             }
         }
         ClosedRecord::Tab(tab) => release_layout_scrollback(&mut tab.layout, total, budget),
@@ -505,8 +519,10 @@ fn closed_pane_scrollback_bytes(records: &[ClosedRecord]) -> usize {
         .iter()
         .map(|record| match record {
             ClosedRecord::Pane(pane) => match &pane.surface {
-                ClosedSurfaceRecord::Terminal { scrollback, .. } => {
-                    scrollback.as_ref().map_or(0, String::len)
+                ClosedSurfaceRecord::Terminal {
+                    scrollback, replay, ..
+                } => {
+                    scrollback.as_ref().map_or(0, String::len) + replay.as_ref().map_or(0, Vec::len)
                 }
                 ClosedSurfaceRecord::Markdown { .. } => 0,
             },
@@ -540,6 +556,10 @@ pub(crate) fn capture_closed_pane_record(
                     .map(std::path::PathBuf::from)
                     .or_else(|| tv_ref.terminal.cwd_now()),
                 scrollback: tv_ref.terminal.extract_scrollback(),
+                replay: bound_undo_replay(
+                    tv_ref.terminal.capture_replay(),
+                    MAX_CLOSED_PANE_SCROLLBACK_BYTES,
+                ),
                 custom_name: tv_ref.terminal.custom_name.clone(),
                 font_size: tv_ref.terminal.font_size_override,
             }
@@ -553,6 +573,18 @@ pub(crate) fn capture_closed_pane_record(
         surface,
         workspace_id,
     })
+}
+
+/// Byte bound on the styled undo capture (#195).
+///
+/// The formatter already caps the capture in rows (its
+/// `MAX_REPLAY_HISTORY_ROWS`); this applies the closed-pane byte budget on top
+/// so the capture introduces no ceiling of its own. A capture past `budget` is
+/// dropped whole rather than cut: a VT stream truncated mid-sequence is not a
+/// replay, and the plain-text extract beside it is the fallback undo already
+/// had.
+fn bound_undo_replay(replay: Option<Vec<u8>>, budget: usize) -> Option<Vec<u8>> {
+    replay.filter(|replay| replay.len() <= budget)
 }
 
 /// Snapshot a whole tab for undo. `None` when the tab holds nothing worth
@@ -704,8 +736,15 @@ fn active_idx_after_workspace_remove(active_idx: usize, removed_idx: usize, len:
 /// intact `ClosedPaneRecord` if a later step refuses:
 /// `handle_undo_close_pane` has already POPPED, so a refusal that could not
 /// hand the record back would destroy the only copy of the thing undo exists
-/// to protect. The scrollback - the one big field - is only read here, never
-/// moved, so borrowing costs nothing.
+/// to protect. The scrollback and the replay - the two big fields - are only
+/// read here, never moved, so borrowing costs nothing.
+///
+/// The styled capture (#195) is preferred: it goes into the new PTY before the
+/// shell's first prompt, verbatim, so the pane looks like the one that was
+/// closed. It was taken in this process under `TerminalExtra::replay`, which
+/// is what makes verbatim safe here and nowhere else; the plain extract is the
+/// fallback when the budget released the capture or the engine did not
+/// answer.
 fn restore_closed_surface_record(
     tab: &ClosedSurfaceRecord,
     ws_id: u64,
@@ -715,6 +754,7 @@ fn restore_closed_surface_record(
         ClosedSurfaceRecord::Terminal {
             cwd,
             scrollback,
+            replay,
             custom_name,
             font_size,
         } => {
@@ -723,7 +763,9 @@ fn restore_closed_surface_record(
                 view.terminal.custom_name = custom_name.clone();
                 view.terminal.font_size_override = *font_size;
             });
-            if let Some(scrollback) = scrollback {
+            if let Some(replay) = replay {
+                terminal.read(cx).restore_replay(replay);
+            } else if let Some(scrollback) = scrollback {
                 terminal.read(cx).restore_scrollback(scrollback);
             }
             cx.subscribe(&terminal, PaneFlowApp::handle_terminal_event)
@@ -2993,6 +3035,7 @@ mod tests {
             surface: ClosedSurfaceRecord::Terminal {
                 cwd: None,
                 scrollback: Some("x".repeat(len)),
+                replay: None,
                 custom_name: None,
                 font_size: None,
             },
@@ -3007,6 +3050,7 @@ mod tests {
             surface: ClosedSurfaceRecord::Terminal {
                 cwd: None,
                 scrollback: None,
+                replay: None,
                 custom_name: None,
                 font_size: None,
             },
@@ -3945,6 +3989,7 @@ mod tests {
             surface: ClosedSurfaceRecord::Terminal {
                 cwd: Some(worktree.join("src")),
                 scrollback: None,
+                replay: None,
                 custom_name: None,
                 font_size: None,
             },
@@ -4082,6 +4127,73 @@ mod tests {
             })
         ));
         assert_eq!(closed_pane_scrollback_bytes(&records), 0);
+    }
+
+    /// The styled capture (#195) is counted against the same budget as the
+    /// plain extract and released first, so a record over the ceiling drops
+    /// back to plain text before it drops to nothing.
+    #[test]
+    fn closed_pane_budget_counts_the_replay_and_releases_it_before_the_text() {
+        fn record(text: usize, replay: usize) -> ClosedRecord {
+            ClosedRecord::Pane(ClosedPaneRecord {
+                surface: ClosedSurfaceRecord::Terminal {
+                    cwd: None,
+                    scrollback: Some("x".repeat(text)),
+                    replay: Some(vec![b'y'; replay]),
+                    custom_name: None,
+                    font_size: None,
+                },
+                workspace_id: 0,
+            })
+        }
+        fn shape(record: &ClosedRecord) -> (Option<usize>, Option<usize>) {
+            match record {
+                ClosedRecord::Pane(ClosedPaneRecord {
+                    surface:
+                        ClosedSurfaceRecord::Terminal {
+                            scrollback, replay, ..
+                        },
+                    ..
+                }) => (
+                    scrollback.as_ref().map(String::len),
+                    replay.as_ref().map(Vec::len),
+                ),
+                other => panic!(
+                    "expected a terminal pane record, got workspace {}",
+                    other.workspace_id()
+                ),
+            }
+        }
+
+        let mut records = vec![record(100, 300), record(100, 300)];
+        assert_eq!(closed_pane_scrollback_bytes(&records), 800);
+
+        enforce_closed_pane_scrollback_budget(&mut records, 500);
+        assert_eq!(
+            shape(&records[0]),
+            (Some(100), None),
+            "the oldest record's replay goes first and its text survives"
+        );
+        assert_eq!(shape(&records[1]), (Some(100), Some(300)));
+        assert_eq!(closed_pane_scrollback_bytes(&records), 500);
+
+        enforce_closed_pane_scrollback_budget(&mut records, 150);
+        assert_eq!(shape(&records[0]), (None, None));
+        assert_eq!(
+            shape(&records[1]),
+            (Some(100), None),
+            "the newer record loses its replay but keeps its text"
+        );
+        assert_eq!(closed_pane_scrollback_bytes(&records), 100);
+    }
+
+    /// A capture past the byte budget is dropped whole, never cut: a VT
+    /// stream truncated mid-sequence is not a replay.
+    #[test]
+    fn oversized_undo_replay_is_dropped_rather_than_truncated() {
+        assert_eq!(bound_undo_replay(Some(vec![0u8; 4]), 4), Some(vec![0u8; 4]));
+        assert_eq!(bound_undo_replay(Some(vec![0u8; 5]), 4), None);
+        assert_eq!(bound_undo_replay(None, 4), None);
     }
 
     // ─── Per-OS path-list shape ────────────────────────────────────────
