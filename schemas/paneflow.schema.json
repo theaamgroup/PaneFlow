@@ -200,12 +200,6 @@
       "description": "Terminal-scoped settings.",
       "additionalProperties": false,
       "properties": {
-        "backend": {
-          "type": "string",
-          "description": "Terminal backend for newly-created sessions. auto and alacritty both use Alacritty. Unknown runtime values fail safe to alacritty. Applies only to new sessions.",
-          "enum": ["auto", "alacritty"],
-          "default": "auto"
-        },
         "ligatures": {
           "type": ["boolean", "null"],
           "description": "Render programming-font ligatures (FiraCode '=>', '!=', JetBrains Mono, Cascadia Code). Hot-reloaded.",

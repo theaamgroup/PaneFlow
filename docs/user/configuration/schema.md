@@ -132,7 +132,6 @@ preserved; an invalid config is left untouched.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `terminal.backend` | string or null | `auto` | `auto` or `alacritty`. Both use the `alacritty_terminal` engine. Unknown runtime values, including the retired `ghostty`, fail safe to `alacritty`. Applies only to new sessions. |
 | `terminal.ligatures` | boolean or null | `false` | Enables programming ligatures for fonts that ship them. |
 | `terminal.integrated_glyphs` | boolean or null | `true` | Draws built-in block-element glyphs as filled quads. |
 | `terminal.color_emoji` | boolean or null | `true` | Uses the platform color-emoji path. |

@@ -234,10 +234,10 @@ fn test_leftover_telemetry_key_is_ignored_and_rest_of_config_is_used() {
 }
 
 #[test]
-fn test_legacy_windows_material_and_ghostty_backend_still_load() {
+fn test_legacy_windows_material_and_backend_keys_still_load() {
     // Existing paneflow.json files may still carry the retired Windows
-    // material keys and `"backend": "ghostty"`. Those must load, not
-    // error, and ghostty must fail safe to Alacritty.
+    // material keys and a `"backend"` key from before #184 made the engine
+    // non-configurable. Those must load, not error; the key is ignored.
     let json = r#"{
         "theme": "One Dark",
         "windows_chrome_material": true,
@@ -247,22 +247,10 @@ fn test_legacy_windows_material_and_ghostty_backend_still_load() {
     let config = try_parse_and_validate(json)
         .expect("legacy windows material and ghostty backend must not fail to parse");
     assert_eq!(config.theme.as_deref(), Some("One Dark"));
-    assert_eq!(
-        config
-            .terminal
-            .expect("terminal block must survive")
-            .backend,
-        TerminalBackendConfig::Alacritty
-    );
+    assert!(config.terminal.is_some(), "terminal block must survive");
 
     let via_serde: PaneFlowConfig = serde_json::from_str(json).unwrap();
-    assert_eq!(
-        via_serde
-            .terminal
-            .expect("terminal block must survive")
-            .backend,
-        TerminalBackendConfig::Alacritty
-    );
+    assert!(via_serde.terminal.is_some(), "terminal block must survive");
 }
 
 #[test]
