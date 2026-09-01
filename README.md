@@ -62,7 +62,7 @@ into it at any time. Workspaces, git branches, titles, and session
 restore sit on top of that.
 
 **See what needs attention.** The sidebar, tab dots, desktop
-notifications, and the Attention Queue (`Cmd+Shift+K`) turn scattered
+notifications, and the Attention Queue (`Cmd+Shift+A`) turn scattered
 agent events into a queue: waiting, running, stalled, errored, or
 recently finished. `Cmd+Shift+J` jumps to the next pane whose agent is
 waiting on you, across workspaces.
@@ -109,11 +109,12 @@ else is in **Settings → Keyboard Shortcuts**.
 | `Cmd+1`–`Cmd+9` | Jump to workspace |
 | `Ctrl+Tab` | Next workspace |
 | `Alt+Arrow` | Move focus between panes |
-| `Cmd+Shift+K` / `Cmd+Shift+J` | Attention Queue / next waiting agent |
+| `Cmd+Shift+A` / `Cmd+Shift+J` | Attention Queue / next waiting agent |
 | `Cmd+Shift+G` | Review diffs |
 | `Cmd+Shift+L` | Launch an agent |
 | `Cmd+Alt+B` | Show / hide the sidebar (remembered next launch) |
 | `Cmd+C` / `Cmd+V` | Copy / paste in a terminal |
+| `Cmd+K` / `Cmd+Shift+R` | Clear scrollback / reset a terminal (`Cmd+Shift+K` also clears) |
 | `Cmd+=` / `Cmd+-` | Font size |
 
 Next-workspace is `Ctrl+Tab`, not `Cmd+Tab`: macOS owns `Cmd+Tab` for

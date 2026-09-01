@@ -10,7 +10,7 @@ would drift. The source of truth is:
 | What | Where |
 | --- | --- |
 | Default bindings | `DEFAULTS` in `src-app/src/keybindings/defaults.rs` |
-| macOS-only extras | `MACOS_ONLY_DEFAULTS` in the same file (`cmd-c`, `cmd-v`, `cmd-q`) |
+| macOS-only extras | `MACOS_ONLY_DEFAULTS` in the same file (`cmd-c`, `cmd-v`, `cmd-k`, `cmd-q`) |
 | Every bindable action name | `ACTIONS` in `src-app/src/keybindings/registry.rs` |
 | Wiring | `apply_keybindings()` in `src-app/src/keybindings/apply.rs` |
 | Rendered chord strings | `format_keystroke()` in `src-app/src/keybindings/display.rs` |

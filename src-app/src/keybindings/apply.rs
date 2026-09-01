@@ -292,6 +292,81 @@ mod tests {
         );
     }
 
+    /// Issue #184 (upstream v0.10.0 port): the Attention Queue gave up
+    /// `secondary-shift-k` and moved to `secondary-shift-a`, because ⇧⌘K is
+    /// what kitty and Ghostty use for "clear scrollback" and that action now
+    /// owns it. macOS also spells clear-scrollback as bare `cmd-k` (iTerm2,
+    /// Terminal.app), so that alias lives in `MACOS_ONLY_DEFAULTS`; both
+    /// reach `clear_scroll_history`. `secondary-shift-r` resets the terminal.
+    /// `close_window` is gone: closing the only window is `quit` here, and a
+    /// registry entry with no handler would only ever be an `Unassigned`
+    /// row. Every claimant list is exact, so the queue drifting back onto
+    /// ⇧⌘K, or a second action landing on any of these chords, fails loudly.
+    #[test]
+    fn attention_queue_is_cmd_shift_a_and_cmd_shift_k_clears_scrollback() {
+        use super::super::defaults::{DEFAULTS, MACOS_ONLY_DEFAULTS};
+
+        let claimants = |key: &str| -> Vec<(&'static str, Option<&'static str>)> {
+            DEFAULTS
+                .iter()
+                .chain(MACOS_ONLY_DEFAULTS.iter())
+                .filter(|d| keystrokes_conflict(d.key, key))
+                .map(|d| (d.action_name, d.context))
+                .collect()
+        };
+
+        for (key, action_name, context) in [
+            ("secondary-shift-a", "open_attention_queue", None),
+            (
+                "secondary-shift-k",
+                "clear_scroll_history",
+                Some("Terminal"),
+            ),
+            ("cmd-k", "clear_scroll_history", Some("Terminal")),
+            ("secondary-shift-r", "reset_terminal", Some("Terminal")),
+        ] {
+            assert_eq!(
+                context_for_action(action_name),
+                context,
+                "{action_name} must keep its registry context"
+            );
+            let action = action_from_name(action_name).expect("registered action");
+            assert!(
+                make_binding(key, action, context).is_some(),
+                "{key} must parse into a valid KeyBinding"
+            );
+            assert_eq!(
+                claimants(key),
+                vec![(action_name, context)],
+                "{key} must be claimed by {action_name} and nothing else"
+            );
+        }
+
+        let queue_on_shift_k = DEFAULTS.iter().chain(MACOS_ONLY_DEFAULTS.iter()).any(|d| {
+            d.action_name == "open_attention_queue"
+                && keystrokes_conflict(d.key, "secondary-shift-k")
+        });
+        assert!(
+            !queue_on_shift_k,
+            "open_attention_queue must not drift back onto secondary-shift-k"
+        );
+
+        let close_window_defaults: Vec<&str> = DEFAULTS
+            .iter()
+            .chain(MACOS_ONLY_DEFAULTS.iter())
+            .filter(|d| d.action_name == "close_window")
+            .map(|d| d.key)
+            .collect();
+        assert!(
+            close_window_defaults.is_empty(),
+            "close_window is quit; no default may name it, found {close_window_defaults:?}"
+        );
+        assert!(
+            action_from_name("close_window").is_none(),
+            "close_window must be gone from the registry, not merely unbound"
+        );
+    }
+
     /// Issue #105: Settings gained a menu-bar item but deliberately did NOT
     /// gain `Cmd+,`. The issue resolved that explicitly, and it is the right
     /// call here: a global default on that chord would swallow the comma from
