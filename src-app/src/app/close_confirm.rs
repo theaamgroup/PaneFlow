@@ -1363,7 +1363,7 @@ mod tests {
         let ipc_close = ipc
             .split("\"workspace.close\"")
             .nth(1)
-            .and_then(|rest| rest.split("\"surface.list\"").next())
+            .and_then(|rest| rest.split("\"workspace.restore_layout\"").next())
             .expect("workspace.close IPC arm");
         assert!(
             ipc_close.contains("request_close_workspace_without_window"),
