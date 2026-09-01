@@ -81,11 +81,11 @@ jobs:
       # branch (~350 commits matches Zed's pattern, comfortably covers
       # long-running feature branches); on a push to main HEAD~1 is
       # enough.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: ${{ github.event_name == 'pull_request' && 350 || 2 }}
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
           filters: |
@@ -257,7 +257,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: scripts/linux-census.sh
         run: ./scripts/linux-census.sh
@@ -300,7 +300,7 @@ jobs:
       needs.orchestrate.outputs.ci == 'true'
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 (master as of 2026-08-05)
         with:
@@ -308,7 +308,7 @@ jobs:
 
       # Same cache prefix-key as macos_check so rust-cache slots stay
       # in one family. cargo-deny only needs the lockfile resolve.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           prefix-key: "v1-rust"
           key: security-audit
@@ -365,7 +365,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # Fail fast if the runner image drifts away from the pinned Xcode
       # or the Metal compiler. GPUI compiles .metal shaders at build
@@ -420,7 +420,7 @@ jobs:
           # `targets:` is set.
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           prefix-key: "v1-rust"
           key: aarch64-apple-darwin
@@ -475,7 +475,7 @@ jobs:
       # they can `file`/`otool` locally if something downstream misbehaves.
       - name: Upload aarch64 binary artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: paneflow-aarch64-apple-darwin
           path: target/aarch64-apple-darwin/release/paneflow
@@ -531,10 +531,10 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Download paneflow binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: paneflow-aarch64-apple-darwin
           path: target/aarch64-apple-darwin/release/
@@ -629,7 +629,7 @@ jobs:
 
       - name: Upload visual smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos_render_smoke
           path: |
