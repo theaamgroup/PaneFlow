@@ -112,8 +112,9 @@ impl PaneFlowApp {
             .flex_none()
             .mt(px(18.))
             // Fixed height (8px padding + a 20px line + 8px padding) so this
-            // plate and the contributors plate below it are the same box even
-            // if VT323's metrics resolve differently from the fallback font.
+            // plate and the original-credit plate below it are the same box
+            // even if VT323's metrics resolve differently from the fallback
+            // font.
             .h(px(36.))
             .flex()
             .flex_row()
