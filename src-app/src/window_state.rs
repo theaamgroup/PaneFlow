@@ -1,7 +1,7 @@
 //! Durable main-window sizing across PaneFlow launches.
 
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use gpui::{App, Bounds, Pixels, Size, Window, px, size};
@@ -114,9 +114,62 @@ pub(crate) fn save() {
 
 fn load() -> Option<PersistedWindowSize> {
     let path = state_path()?;
-    let metadata = match std::fs::metadata(&path) {
-        Ok(metadata) => metadata,
+    load_from_path(&path)
+}
+
+fn load_from_path(path: &Path) -> Option<PersistedWindowSize> {
+    // `open(O_RDONLY)` on a FIFO with no writer blocks forever, so refuse
+    // anything that is not a regular file before the open. The size cap and
+    // the type check are applied again on the opened descriptor below, which
+    // is what closes the stat-to-read swap window (issue #258).
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            log::warn!("window state: rejected invalid file at {}", path.display());
+            return None;
+        }
+        Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            log::warn!(
+                "window state: failed to inspect {}: {error}",
+                path.display()
+            );
+            return None;
+        }
+    }
+
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            log::warn!("window state: failed to open {}: {error}", path.display());
+            return None;
+        }
+    };
+    let contents = read_capped(file, path)?;
+    match serde_json::from_str::<PersistedWindowSize>(&contents) {
+        Ok(state) if state.width.is_finite() && state.height.is_finite() => Some(state),
+        Ok(_) => {
+            log::warn!(
+                "window state: rejected non-finite size at {}",
+                path.display()
+            );
+            None
+        }
+        Err(error) => {
+            log::warn!("window state: invalid JSON at {}: {error}", path.display());
+            None
+        }
+    }
+}
+
+/// Read at most `MAX_WINDOW_STATE_BYTES` from an already-open descriptor. The
+/// type and size checks use the descriptor's own metadata, and the read is
+/// bounded by `take`, so a file replaced or grown after the path was inspected
+/// can neither be read unbounded nor block on a FIFO.
+fn read_capped(file: std::fs::File, path: &Path) -> Option<String> {
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
         Err(error) => {
             log::warn!(
                 "window state: failed to inspect {}: {error}",
@@ -130,24 +183,18 @@ fn load() -> Option<PersistedWindowSize> {
         return None;
     }
 
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            log::warn!("window state: failed to read {}: {error}", path.display());
-            return None;
-        }
-    };
-    match serde_json::from_str::<PersistedWindowSize>(&contents) {
-        Ok(state) if state.width.is_finite() && state.height.is_finite() => Some(state),
+    let mut contents = String::new();
+    match file
+        .take(MAX_WINDOW_STATE_BYTES + 1)
+        .read_to_string(&mut contents)
+    {
+        Ok(_) if contents.len() as u64 <= MAX_WINDOW_STATE_BYTES => Some(contents),
         Ok(_) => {
-            log::warn!(
-                "window state: rejected non-finite size at {}",
-                path.display()
-            );
+            log::warn!("window state: rejected invalid file at {}", path.display());
             None
         }
         Err(error) => {
-            log::warn!("window state: invalid JSON at {}: {error}", path.display());
+            log::warn!("window state: failed to read {}: {error}", path.display());
             None
         }
     }
@@ -206,5 +253,66 @@ mod tests {
                 "debug window-state must not be a sibling of the release file, got {path:?}"
             );
         }
+    }
+
+    fn padded_state_json(total_len: usize) -> String {
+        let mut json = String::from("{\"width\": 1024.0, \"height\": 640.0}");
+        while json.len() < total_len {
+            json.push(' ');
+        }
+        json
+    }
+
+    #[test]
+    fn load_from_path_accepts_regular_file_under_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("window-state.json");
+        std::fs::write(&path, padded_state_json(0)).expect("write");
+        let state = load_from_path(&path).expect("small regular file must load");
+        assert_eq!(state.width, 1024.0);
+        assert_eq!(state.height, 640.0);
+    }
+
+    #[test]
+    fn load_from_path_rejects_regular_file_over_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("window-state.json");
+        let oversize = usize::try_from(MAX_WINDOW_STATE_BYTES).expect("cap fits usize") + 1;
+        std::fs::write(&path, padded_state_json(oversize)).expect("write");
+        assert!(
+            load_from_path(&path).is_none(),
+            "a file over MAX_WINDOW_STATE_BYTES must be rejected"
+        );
+    }
+
+    #[test]
+    fn read_capped_rejects_file_that_grew_after_the_path_was_inspected() {
+        // Issue #258: the cap must be enforced on the opened descriptor, not
+        // on an earlier stat of the path. Open a small file, then grow it past
+        // the cap before reading, which is what a replace-between-stat-and-read
+        // looks like to the reader.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("window-state.json");
+        std::fs::write(&path, padded_state_json(0)).expect("write");
+        let file = std::fs::File::open(&path).expect("open");
+        let oversize = usize::try_from(MAX_WINDOW_STATE_BYTES).expect("cap fits usize") + 1;
+        std::fs::write(&path, padded_state_json(oversize)).expect("grow");
+        assert!(
+            read_capped(file, &path).is_none(),
+            "an open descriptor whose file grew past the cap must be rejected"
+        );
+    }
+
+    #[test]
+    fn read_capped_accepts_file_exactly_at_cap() {
+        // Boundary: `take(cap + 1)` must not turn a file of exactly `cap`
+        // bytes into a rejection.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("window-state.json");
+        let at_cap = usize::try_from(MAX_WINDOW_STATE_BYTES).expect("cap fits usize");
+        std::fs::write(&path, padded_state_json(at_cap)).expect("write");
+        let file = std::fs::File::open(&path).expect("open");
+        let contents = read_capped(file, &path).expect("a file exactly at the cap must load");
+        assert_eq!(contents.len(), at_cap);
     }
 }
