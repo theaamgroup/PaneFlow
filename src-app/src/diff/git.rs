@@ -393,14 +393,17 @@ pub struct ColumnFingerprint {
     head: String,
     base: String,
     diff_hash: u64,
-    untracked_hash: u64,
+    /// `None` when the untracked scan failed or timed out, so it can never
+    /// equal the hash of a genuinely empty untracked set.
+    untracked_hash: Option<u64>,
 }
 
 /// Compute a [`ColumnFingerprint`] for `worktree_dir` against `base_ref`. Runs
 /// git subprocesses, so callers invoke it off the GPUI main thread (inside the
 /// column build closure / a `smol::unblock`). Failed git reads yield empty or
-/// zero components, so unstable repo states fail closed by not matching a prior
-/// complete fingerprint.
+/// zero components, and a failed or timed-out untracked scan yields `None`
+/// (never the hash of a real empty set), so unstable repo states fail closed by
+/// not matching a prior complete fingerprint.
 pub fn column_fingerprint(worktree_dir: &Path, base_ref: &str) -> ColumnFingerprint {
     // Resolve the worktree's own root first, exactly as `compute_worktree_diff`
     // does. The seed `worktree_dir` may be a SUBDIRECTORY (the workspace opened
@@ -430,7 +433,7 @@ pub fn column_fingerprint(worktree_dir: &Path, base_ref: &str) -> ColumnFingerpr
         head: rev("HEAD"),
         base: rev(base_ref),
         diff_hash,
-        untracked_hash: hash_untracked_inputs(worktree_dir),
+        untracked_hash: hash_untracked_inputs(worktree_dir, GIT_DEADLINE),
     }
 }
 
@@ -442,12 +445,22 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-fn hash_untracked_inputs(worktree_dir: &Path) -> u64 {
+/// Hash the untracked inputs of `worktree_dir`, or `None` when the untracked
+/// scan fails or exceeds `deadline`: an exhausted scan must not fingerprint
+/// like an empty untracked set.
+fn hash_untracked_inputs(worktree_dir: &Path, deadline: Duration) -> Option<u64> {
     use std::hash::{Hash as _, Hasher as _};
     use std::io::Read as _;
 
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let (paths, truncated) = list_untracked_limited(worktree_dir, MAX_FILE_COUNT + 1);
+    let (paths, truncated) =
+        match list_untracked_limited_timed(worktree_dir, MAX_FILE_COUNT + 1, deadline) {
+            Ok(listing) => listing,
+            Err(e) => {
+                log::warn!("git: fingerprint untracked listing failed: {e}");
+                return None;
+            }
+        };
     truncated.hash(&mut h);
     for path in paths {
         path.hash(&mut h);
@@ -483,7 +496,7 @@ fn hash_untracked_inputs(worktree_dir: &Path) -> u64 {
             }
         }
     }
-    h.finish()
+    Some(h.finish())
 }
 
 /// Candidate base refs for the selector (US-013): local branches *and*
@@ -541,10 +554,6 @@ fn worktree_toplevel(dir: &Path) -> PathBuf {
         }
         Err(_) => dir.to_path_buf(),
     }
-}
-
-fn list_untracked_limited(dir: &Path, limit: usize) -> (Vec<String>, bool) {
-    list_untracked_limited_timed(dir, limit, GIT_DEADLINE).unwrap_or((Vec::new(), false))
 }
 
 fn list_untracked_limited_timed(
@@ -1078,15 +1087,14 @@ pub fn compute_worktree_diff(worktree_dir: &Path, base_ref: &str) -> WorktreeDif
 /// [`compute_worktree_diff`]: `merge-base(HEAD, base_ref)..working-tree`, plus
 /// untracked files. This is used for Review's sidebar/global counters so they
 /// match `git diff --numstat` instead of drifting with renderer hunk details.
+/// Returns `Err` (never an empty map) when a git read fails or times out.
 pub fn compute_worktree_file_stats(
     worktree_dir: &Path,
     base_ref: &str,
-) -> HashMap<String, FileDiffStat> {
+) -> Result<HashMap<String, FileDiffStat>, String> {
     let toplevel = worktree_toplevel(worktree_dir);
     let worktree_dir = toplevel.as_path();
-    let Ok(merge_base) = merge_base(worktree_dir, base_ref) else {
-        return HashMap::new();
-    };
+    let merge_base = merge_base(worktree_dir, base_ref)?;
     compute_file_stats_against(worktree_dir, &merge_base)
 }
 
@@ -1121,7 +1129,16 @@ pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
 /// Oversized / lockfile / over-count files are shown as stubs rather than
 /// loaded, bounding peak RAM.
 fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
-    let budget = GitBudget::for_column();
+    compute_diff_against_within(&GitBudget::for_column(), worktree_dir, base)
+}
+
+/// [`compute_diff_against`] charged against `budget`; an exhausted budget fails
+/// closed with `WorktreeDiff::error` set before any git subprocess spawns.
+fn compute_diff_against_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    base: &str,
+) -> WorktreeDiff {
     let name_status = match budget.run(
         worktree_dir,
         // `-M` enables rename detection so a moved file reads as one `R` record
@@ -1191,7 +1208,7 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
     }
     lookups.sort();
     lookups.dedup();
-    let blobs = match load_base_texts_batch(worktree_dir, base, &lookups, &budget) {
+    let blobs = match load_base_texts_batch(worktree_dir, base, &lookups, budget) {
         Ok(blobs) => blobs,
         Err(e) => {
             log::warn!("git: batched base load failed: {e}");
@@ -1281,20 +1298,35 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
     WorktreeDiff { files, error: None }
 }
 
-fn compute_file_stats_against(worktree_dir: &Path, base: &str) -> HashMap<String, FileDiffStat> {
-    let mut stats = run_git(
-        worktree_dir,
-        &["diff", "--numstat", "-z", "--no-color", base, "--"],
-    )
-    .map(|out| parse_numstat_z(&out))
-    .unwrap_or_default();
+fn compute_file_stats_against(
+    worktree_dir: &Path,
+    base: &str,
+) -> Result<HashMap<String, FileDiffStat>, String> {
+    compute_file_stats_against_within(&GitBudget::for_column(), worktree_dir, base)
+}
+
+/// [`compute_file_stats_against`] charged against `budget`. A failed or
+/// timed-out numstat or untracked scan is an `Err`, never a partial or empty
+/// map that reads as "no changes".
+fn compute_file_stats_against_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    base: &str,
+) -> Result<HashMap<String, FileDiffStat>, String> {
+    let mut stats = budget
+        .run(
+            worktree_dir,
+            &["diff", "--numstat", "-z", "--no-color", base, "--"],
+        )
+        .map(|out| parse_numstat_z(&out))?;
 
     let remaining = MAX_FILE_COUNT.saturating_sub(stats.len());
     if remaining == 0 {
-        return stats;
+        return Ok(stats);
     }
 
-    let (untracked, truncated) = list_untracked_limited(worktree_dir, remaining);
+    let (untracked, truncated) =
+        list_untracked_limited_timed(worktree_dir, remaining, budget.remaining()?)?;
     if truncated {
         log::debug!("git: untracked file stats truncated at {remaining}");
     }
@@ -1318,7 +1350,7 @@ fn compute_file_stats_against(worktree_dir: &Path, base: &str) -> HashMap<String
         stats.insert(path, FileDiffStat { added, removed: 0 });
     }
 
-    stats
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -1628,7 +1660,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
         std::fs::write(root.join("untracked.txt"), "alpha\nbeta\n").unwrap();
 
-        let stats = compute_worktree_file_stats(root, "HEAD");
+        let stats = compute_worktree_file_stats(root, "HEAD").expect("file stats");
         assert_eq!(
             stats.get("tracked.txt"),
             Some(&FileDiffStat {
@@ -1747,9 +1779,122 @@ pub(crate) mod tests {
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         std::fs::write(root.join("c.txt"), "c\n").unwrap();
 
-        let (paths, truncated) = list_untracked_limited(root, 2);
+        let (paths, truncated) =
+            list_untracked_limited_timed(root, 2, GIT_DEADLINE).expect("untracked listing");
         assert_eq!(paths.len(), 2);
         assert!(truncated);
+    }
+
+    #[test]
+    fn compute_diff_against_fails_closed_on_exhausted_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        std::fs::write(root.join("ghost.txt"), "x\n").unwrap();
+        // A live budget lists the untracked file.
+        let live = compute_diff_against_within(&GitBudget::for_column(), root, "HEAD");
+        assert_eq!(live.error, None);
+        assert!(live.files.iter().any(|f| f.path == "ghost.txt"));
+        // An exhausted budget is an error on the return value, not an empty
+        // listing, and spawns no git at all.
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let _ = take_git_commands();
+        let diff = compute_diff_against_within(&spent, root, "HEAD");
+        assert!(diff.files.is_empty());
+        let err = diff.error.expect("exhausted budget must fail closed");
+        assert!(err.contains("deadline"), "got {err}");
+        assert!(take_git_commands().is_empty());
+    }
+
+    #[test]
+    fn file_stats_fail_closed_on_exhausted_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        std::fs::write(root.join("ghost.txt"), "x\n").unwrap();
+        let live = compute_file_stats_against_within(&GitBudget::for_column(), root, "HEAD")
+            .expect("live budget");
+        assert_eq!(
+            live.get("ghost.txt"),
+            Some(&FileDiffStat {
+                added: 1,
+                removed: 0
+            })
+        );
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let _ = take_git_commands();
+        let err = compute_file_stats_against_within(&spent, root, "HEAD")
+            .expect_err("exhausted budget must not read as empty stats");
+        assert!(err.contains("deadline"), "got {err}");
+        assert!(take_git_commands().is_empty());
+    }
+
+    #[test]
+    fn untracked_hash_fails_closed_when_scan_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        // A genuinely empty untracked set hashes to a value; a timed-out scan
+        // must not produce that same value.
+        let empty = hash_untracked_inputs(root, GIT_DEADLINE);
+        assert!(empty.is_some());
+        assert_eq!(hash_untracked_inputs(root, Duration::from_secs(0)), None);
+        let complete = column_fingerprint(root, "HEAD");
+        assert_eq!(complete.untracked_hash, empty);
+        let timed_out = ColumnFingerprint {
+            untracked_hash: None,
+            ..complete.clone()
+        };
+        assert_ne!(complete, timed_out);
     }
 
     #[test]
