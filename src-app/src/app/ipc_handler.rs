@@ -1123,6 +1123,27 @@ fn surface_matches_workspace(surface: &SurfaceMeta, workspace_id: Option<u64>) -
     workspace_id.is_none_or(|expected| surface.workspace_id == Some(expected))
 }
 
+/// Root `pane_count` / `workspace` of a `surface.list` response, as
+/// `(pane_count, workspace_idx)`. Both describe the workspace the `surfaces`
+/// array was filtered to: the workspace whose stable id is
+/// `requested_workspace_id`, else the active one. `workspace_idx` is the
+/// 0-based `workspaces` index, the same id space the field always used. An
+/// unknown id matches no surfaces, so it reports zero panes and no index.
+fn surface_list_workspace_scope(
+    workspaces: &[Workspace],
+    active_idx: usize,
+    requested_workspace_id: Option<u64>,
+) -> (usize, Option<usize>) {
+    let idx = match requested_workspace_id {
+        None => Some(active_idx),
+        Some(id) => workspaces.iter().position(|ws| ws.id == id),
+    };
+    let count = idx
+        .and_then(|idx| workspaces.get(idx))
+        .map_or(0, Workspace::pane_count);
+    (count, idx)
+}
+
 /// Window a scrollback string by line. `offset` counts lines skipped from the
 /// most-recent end; `lines` is the window size. Returns
 /// `(text, returned_line_count, total_lines, eof)`, where `eof` is `true`
@@ -2948,7 +2969,9 @@ impl PaneFlowApp {
                 // (`pane_count`, `workspace`) for back-compat and add a
                 // per-surface `surfaces` array with disambiguated names. MCP
                 // callers pass the stable PTY workspace_id so filtering is
-                // owned by the same layer that owns workspace membership.
+                // owned by the same layer that owns workspace membership. The
+                // root fields follow the same filter, so they describe the
+                // workspace `surfaces` was scoped to, not the active one.
                 let requested_workspace_id = match requested_workspace_id(params) {
                     Ok(workspace_id) => workspace_id,
                     Err(error) => return error.into_value(),
@@ -2959,10 +2982,14 @@ impl PaneFlowApp {
                     .filter(|surface| surface_matches_workspace(surface, requested_workspace_id))
                     .map(surface_meta_value)
                     .collect();
-                let count = self.active_workspace().map_or(0, |ws| ws.pane_count());
+                let (count, workspace) = surface_list_workspace_scope(
+                    &self.workspaces,
+                    self.active_idx,
+                    requested_workspace_id,
+                );
                 serde_json::json!({
                     "pane_count": count,
-                    "workspace": self.active_idx,
+                    "workspace": workspace,
                     "surfaces": surfaces,
                 })
             }
@@ -6868,6 +6895,61 @@ mod tests {
         });
         assert_eq!(value["tab_id"], back_tab_id);
         assert_eq!(value["tab_title"], "background");
+    }
+
+    /// A `surface.list` filtered by `workspace_id` must report the root
+    /// `pane_count` and `workspace` of that workspace, not of the active one,
+    /// so every field in the response describes the same workspace.
+    #[gpui::test]
+    fn surface_list_root_fields_follow_the_workspace_filter(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let cx = cx.add_empty_window();
+        let make_pane = |cx: &mut gpui::VisualTestContext| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| Pane::new(terminal, 1, cx))
+        };
+
+        // Workspace 0 (active, id 10): one pane. Workspace 1 (id 20): two panes.
+        let active = Workspace::with_layout_and_id(
+            10,
+            "active",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(make_pane(cx)),
+        );
+        let mut background = Workspace::with_layout_and_id(
+            20,
+            "background",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(make_pane(cx)),
+        );
+        assert!(background.open_tab(crate::workspace::Tab::new(
+            "second",
+            Some(crate::layout::LayoutTree::Leaf(make_pane(cx))),
+        )));
+        let workspaces = vec![active, background];
+        assert_eq!(workspaces[0].pane_count(), 1);
+        assert_eq!(workspaces[1].pane_count(), 2);
+
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, None),
+            (1, Some(0)),
+            "unfiltered keeps describing the active workspace"
+        );
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, Some(20)),
+            (2, Some(1)),
+            "a background workspace_id must describe that workspace"
+        );
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, Some(10)),
+            (1, Some(0))
+        );
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, Some(99)),
+            (0, None),
+            "an unknown workspace_id matches no surfaces, so no panes and no index"
+        );
     }
 
     #[gpui::test]
