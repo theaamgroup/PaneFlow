@@ -1966,4 +1966,28 @@ mod capabilities_tests {
         super::set_ai_unrestricted(false);
         assert!(!super::ai_unrestricted());
     }
+
+    /// Issue #283: `set_ai_unrestricted` must run in `PaneFlowApp::new`
+    /// before the socket listener binds. Session restore sits between those
+    /// two calls and can take hundreds of ms; a client that treats socket
+    /// appearance as readiness (`paneflow flow run` with `submit = true`)
+    /// would otherwise see `scripting: false` even when `ai_unrestricted` is
+    /// on. The GPUI tick later opens the write gate - that restore-window
+    /// hole is the bug this pin guards.
+    #[test]
+    fn ai_unrestricted_is_seeded_before_the_socket_binds() {
+        let source = include_str!("app/bootstrap.rs");
+        let seed_offset = source
+            .find("crate::ipc::set_ai_unrestricted")
+            .expect("bootstrap seeds AI_UNRESTRICTED");
+        let bind_offset = source
+            .find("ipc::start_server()")
+            .expect("bootstrap binds the IPC socket");
+        assert!(
+            seed_offset < bind_offset,
+            "set_ai_unrestricted must run before the socket binds; seeding after \
+             restore leaves a window where system.capabilities reports scripting: false \
+             while ai_unrestricted is on"
+        );
+    }
 }

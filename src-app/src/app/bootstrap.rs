@@ -45,6 +45,14 @@ impl PaneFlowApp {
         // framework and return immediately.
         crate::sparkle::start_if_bundled();
 
+        // Issue #283: `system.capabilities` is answered on the socket thread
+        // from this process-wide mirror. Publish it before the listener
+        // exists so a client that treats socket appearance as readiness
+        // cannot see a closed write gate the GPUI tick would open.
+        crate::ipc::set_ai_unrestricted(
+            paneflow_config::loader::load_config().ai_unrestricted_enabled(),
+        );
+
         let title_bar = cx.new(title_bar::TitleBar::new);
         cx.subscribe(&title_bar, Self::handle_title_bar_event)
             .detach();
@@ -715,9 +723,6 @@ impl PaneFlowApp {
             .detach();
 
         let cached_config = paneflow_config::loader::load_config();
-        // Issue #283: the socket thread answers `system.capabilities` from
-        // this mirror; seed it before any client can probe the gate.
-        crate::ipc::set_ai_unrestricted(cached_config.ai_unrestricted_enabled());
         let effective_shortcuts = keybindings::effective_shortcuts(&cached_config.shortcuts);
         let theme_mode = crate::ThemeMode::from_config(
             cached_config.theme_mode.as_deref(),

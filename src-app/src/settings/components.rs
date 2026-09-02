@@ -216,12 +216,16 @@ pub fn toggle_pill(on: bool, ui: crate::theme::UiColors) -> impl IntoElement {
 /// The clickable wrapper around [`toggle_pill`] that every toggle row uses, and
 /// the one place its accessibility contract lives (issue #275): it is a
 /// `Role::Switch` named after the row's title, reports the setting's value as
-/// its toggled state, and is a focusable tab stop, so a click focuses it and
-/// Space / Enter fire the same `on_click` GPUI would fire for the pointer.
-/// Callers chain the `.on_click()` that writes the setting.
+/// its toggled state, and is a focusable tab stop. A mouse-down focuses it;
+/// GPUI then synthesizes `ClickEvent::Keyboard` from unmodified Space / Enter
+/// KeyUp on that focused `div` (`paint_mouse_listeners` in `div.rs`) and
+/// delivers it to the same `.on_click()` listeners the pointer uses. Do not
+/// add a second key handler here - it would double-toggle. Callers chain the
+/// `.on_click()` that writes the setting.
 ///
 /// The focus handle is GPUI's own per-element one (created from the `id`), so
-/// no focus state lives on `PaneFlowApp`; Settings still has no Tab ring and no
+/// no focus state lives on `PaneFlowApp`; Settings still has no Tab ring
+/// (`window.focus_next` is not bound; GPUI does not auto-bind Tab) and no
 /// visible focus ring - that is the wider focus model the issue leaves open.
 pub fn toggle_switch(
     id: impl Into<ElementId>,
