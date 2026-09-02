@@ -1489,9 +1489,15 @@ mod tests {
             run_git_src.contains("git_command()"),
             "production git Command must carry the isolation prelude or call git_command()"
         );
+        // Scan only the production `git_command()` body: the whole file also
+        // holds this test module, whose needle list would satisfy every check.
+        let git_command_body = source_slice(
+            include_str!("worktree.rs"),
+            "fn git_command() -> Command {",
+            "fn git_subcommand(",
+        );
         assert!(
-            source_has_git_isolation_prelude(source)
-                || source_has_git_isolation_prelude(include_str!("worktree.rs")),
+            source_has_git_isolation_prelude(git_command_body),
             "git_command() helper must pass -c core.fsmonitor= -c core.hooksPath=/dev/null \
              -c diff.external=, GIT_CONFIG_NOSYSTEM, and env_remove GIT_DIR/GIT_WORK_TREE/GIT_SSH_COMMAND"
         );
