@@ -40,7 +40,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
@@ -98,18 +98,39 @@ pub(crate) struct Entry<'a> {
     pub bytes: &'a [u8],
 }
 
-static VERIFIED_BIN_DIR: OnceLock<PathBuf> = OnceLock::new();
+static VERIFIED_BIN_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Cheap liveness probe for a memoized hit: the directory and every
+/// wrapper it was verified with must still be present. The cache lives
+/// under `dirs::cache_dir()` (`~/Library/Caches`), which macOS may purge
+/// while the app is running; a stale memo would otherwise prepend a
+/// missing directory to every new pane's PATH for the rest of the process.
+fn wrappers_present(dir: &Path) -> bool {
+    dir.is_dir()
+        && extract_plan()
+            .iter()
+            .all(|(out_name, _)| dir.join(out_name).is_file())
+}
 
 fn memoized_verified_path(
-    cache: &OnceLock<PathBuf>,
+    cache: &Mutex<Option<PathBuf>>,
+    still_present: impl Fn(&Path) -> bool,
     verify: impl FnOnce() -> Result<PathBuf>,
 ) -> Result<PathBuf> {
-    if let Some(path) = cache.get() {
-        return Ok(path.clone());
+    let mut slot = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(path) = slot.as_ref() {
+        if still_present(path) {
+            return Ok(path.clone());
+        }
+        // Purged since verification: drop the memo and re-extract.
+        *slot = None;
     }
 
     let path = verify()?;
-    Ok(cache.get_or_init(|| path).clone())
+    *slot = Some(path.clone());
+    Ok(path)
 }
 
 /// Materialize the AI-hook binaries into
@@ -123,12 +144,17 @@ fn memoized_verified_path(
 /// - Idempotent: if every file already exists with a matching SHA256,
 ///   returns the target dir without writing.
 /// - Process-memoized: after one successful verification, later terminal
-///   spawns reuse the verified path without hashing all wrappers again.
+///   spawns reuse the verified path without hashing all wrappers again,
+///   as long as the directory and its wrappers still exist on disk.
 ///
 /// Errors surface via `anyhow::Result` for log-and-skip handling in
 /// `src-app/src/terminal/pty_session.rs::inject_ai_hook_env` (US-009).
 pub fn ensure_binaries_extracted() -> Result<PathBuf> {
-    memoized_verified_path(&VERIFIED_BIN_DIR, ensure_binaries_extracted_uncached)
+    memoized_verified_path(
+        &VERIFIED_BIN_DIR,
+        wrappers_present,
+        ensure_binaries_extracted_uncached,
+    )
 }
 
 fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
@@ -530,15 +556,19 @@ mod tests {
 
     #[test]
     fn successful_verification_is_memoized_for_process_lifetime() {
-        let cache = OnceLock::new();
+        let cache = Mutex::new(None);
         let calls = std::cell::Cell::new(0);
         let expected = PathBuf::from("verified-bin-dir");
 
         for _ in 0..2 {
-            let actual = memoized_verified_path(&cache, || {
-                calls.set(calls.get() + 1);
-                Ok(expected.clone())
-            })
+            let actual = memoized_verified_path(
+                &cache,
+                |_| true,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(expected.clone())
+                },
+            )
             .unwrap();
             assert_eq!(actual, expected);
         }
@@ -547,20 +577,86 @@ mod tests {
     }
 
     #[test]
+    fn purged_directory_is_re_verified() {
+        // A memoized hit must not be trusted once the directory is gone
+        // (macOS may reclaim `~/Library/Caches` while the app is open).
+        let cache = Mutex::new(None);
+        let calls = std::cell::Cell::new(0);
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        let first = memoized_verified_path(
+            &cache,
+            |p| p.is_dir(),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(path.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(first, path);
+
+        drop(dir);
+        assert!(!path.exists());
+
+        let _ = memoized_verified_path(
+            &cache,
+            |p| p.is_dir(),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(path.clone())
+            },
+        );
+
+        assert_eq!(
+            calls.get(),
+            2,
+            "a purged directory must be re-verified, not served from the memo"
+        );
+    }
+
+    #[test]
+    fn wrappers_present_requires_dir_and_every_wrapper() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(
+            !wrappers_present(dir.path()),
+            "an empty directory has no wrappers"
+        );
+
+        for (out_name, _) in extract_plan() {
+            std::fs::write(dir.path().join(out_name), b"x").unwrap();
+        }
+        assert!(wrappers_present(dir.path()));
+
+        std::fs::remove_file(dir.path().join("claude")).unwrap();
+        assert!(
+            !wrappers_present(dir.path()),
+            "a missing wrapper must invalidate the memo"
+        );
+
+        let gone = dir.path().join("missing");
+        assert!(!wrappers_present(&gone), "a missing directory is not live");
+    }
+
+    #[test]
     fn failed_verification_is_retried() {
-        let cache = OnceLock::new();
+        let cache = Mutex::new(None);
         let calls = std::cell::Cell::new(0);
 
         for _ in 0..2 {
-            let result = memoized_verified_path(&cache, || {
-                calls.set(calls.get() + 1);
-                Err(anyhow!("transient extraction failure"))
-            });
+            let result = memoized_verified_path(
+                &cache,
+                |_| true,
+                || {
+                    calls.set(calls.get() + 1);
+                    Err(anyhow!("transient extraction failure"))
+                },
+            );
             assert!(result.is_err());
         }
 
         assert_eq!(calls.get(), 2, "a failed verification must not be cached");
-        assert!(cache.get().is_none());
+        assert!(cache.lock().unwrap().is_none());
     }
 
     #[test]
