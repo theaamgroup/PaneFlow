@@ -166,10 +166,26 @@ fn diagnose_to(message: &str, log_path: Option<&Path>) {
     let Some(log_path) = log_path else {
         return;
     };
+    // Same rule as `read_socket_path`: a relative path would resolve against
+    // the agent's cwd (the project tree), so it is never opened.
+    if !log_path.is_absolute() {
+        return;
+    }
+    // Only ever append to an existing regular file or create a new one;
+    // symlinks are not followed and anything else (directory, FIFO, device)
+    // is skipped rather than written to.
+    let mut options = OpenOptions::new();
+    options.append(true);
+    match std::fs::symlink_metadata(log_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            options.create_new(true);
+        }
+        Err(_) => return,
+    }
     let line = format!("paneflow-ai-hook: {message}\n");
-    let _ = OpenOptions::new()
-        .append(true)
-        .create(true)
+    let _ = options
         .open(log_path)
         .and_then(|mut file| file.write_all(line.as_bytes()));
 }
@@ -235,6 +251,36 @@ mod tests {
         assert_eq!(
             contents,
             "paneflow-ai-hook: first\npaneflow-ai-hook: second\n"
+        );
+    }
+
+    #[test]
+    fn relative_hook_log_does_not_create_a_file() {
+        let relative = PathBuf::from(format!(
+            "paneflow-ai-hook-relative-{}.log",
+            std::process::id()
+        ));
+        diagnose_to("ignored", Some(&relative));
+        let created = relative.exists();
+        let _ = std::fs::remove_file(&relative);
+        assert!(
+            !created,
+            "relative {HOOK_LOG_ENV} must not be opened against the cwd"
+        );
+    }
+
+    #[test]
+    fn symlinked_hook_log_is_not_followed() {
+        let directory = tempfile::TempDir::new().expect("temp directory");
+        let target = directory.path().join("target.log");
+        std::fs::write(&target, "").expect("create target");
+        let link = directory.path().join("hook.log");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        diagnose_to("ignored", Some(&link));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "",
+            "diagnostics must not follow a symlinked {HOOK_LOG_ENV}"
         );
     }
 }
