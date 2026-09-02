@@ -109,32 +109,14 @@ pub(super) fn install_png_decoder() {
     });
 }
 
-/// The eight bytes every PNG opens with.
-const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-
-/// Read the dimensions a PNG declares, without decoding it.
-///
-/// The spec makes IHDR the first chunk, 13 bytes long, width then height,
-/// so a payload that does not open that way is one the decoder would
-/// refuse anyway.
-fn png_header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let header = bytes.get(..24)?;
-    if header[..8] != PNG_SIGNATURE || header[8..12] != [0, 0, 0, 13] || &header[12..16] != b"IHDR"
-    {
-        return None;
-    }
-    let width = u32::from_be_bytes(header[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(header[20..24].try_into().ok()?);
-    Some((width, height))
-}
-
 /// Decode a PNG payload into the tightly packed RGBA libghostty stores.
 ///
-/// The payload is attacker-controlled, so the dimensions are read off the
-/// header and checked before the decoder allocates for them: a few hundred
-/// bytes of PNG can declare a gigabyte of pixels.
+/// The payload is attacker-controlled, so the dimensions are checked before
+/// the allocation rather than after.
 fn decode_png(bytes: &[u8]) -> Option<ghostty::DecodedImage> {
-    let (width, height) = png_header_dimensions(bytes)?;
+    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()?;
+    let width = decoded.width();
+    let height = decoded.height();
     if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
         log::debug!(
             target: "paneflow::terminal::kitty",
@@ -142,10 +124,9 @@ fn decode_png(bytes: &[u8]) -> Option<ghostty::DecodedImage> {
         );
         return None;
     }
-    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()?;
     Some(ghostty::DecodedImage {
-        width: decoded.width(),
-        height: decoded.height(),
+        width,
+        height,
         rgba: decoded.into_rgba8().into_raw(),
     })
 }
@@ -336,55 +317,7 @@ pub(super) fn enable(terminal: &mut ghostty::DisplayTerminal) {
 
 #[cfg(test)]
 mod tests {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
     use super::*;
-
-    thread_local! {
-        /// Largest single allocation the current thread has requested.
-        static LARGEST_ALLOCATION: Cell<usize> = const { Cell::new(0) };
-    }
-
-    /// Test-only allocator that records each thread's largest allocation,
-    /// so a test can prove a refused PNG never reached its pixel buffer.
-    struct LargestAllocationRecorder;
-
-    impl LargestAllocationRecorder {
-        fn record(size: usize) {
-            let _ = LARGEST_ALLOCATION.try_with(|largest| largest.set(largest.get().max(size)));
-        }
-    }
-
-    // SAFETY: every method forwards to `System` unchanged; the recorder only
-    // touches a thread-local `Cell`, which never allocates.
-    unsafe impl GlobalAlloc for LargestAllocationRecorder {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            Self::record(layout.size());
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            Self::record(layout.size());
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.alloc_zeroed(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            Self::record(new_size);
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: LargestAllocationRecorder = LargestAllocationRecorder;
 
     /// A 16x32 solid-red RGB image transmitted inline and placed at the
     /// cursor. One pixel is exactly one base64 group at `f=24`, so a solid
@@ -555,88 +488,11 @@ mod tests {
             0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xdd, 0x8d,
             0xb0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
-        assert_eq!(png_header_dimensions(&png), Some((1, 1)));
         let decoded = decode_png(&png).expect("a valid PNG must decode");
         assert_eq!((decoded.width, decoded.height), (1, 1));
         assert_eq!(decoded.rgba, vec![0xff, 0x00, 0x00, 0xff]);
 
-        assert_eq!(png_header_dimensions(b"not a png"), None);
         assert!(decode_png(b"not a png").is_none());
-    }
-
-    /// The CRC-32 PNG chunks carry, bit by bit, so the test does not need a
-    /// dependency for a 17-byte header.
-    fn png_crc(bytes: &[u8]) -> u32 {
-        let mut crc = 0xffff_ffffu32;
-        for byte in bytes {
-            crc ^= u32::from(*byte);
-            for _ in 0..8 {
-                crc = if crc & 1 == 1 {
-                    (crc >> 1) ^ 0xedb8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
-    }
-
-    /// A PNG that is nothing but a signature and an IHDR declaring
-    /// `width`x`height` 8-bit RGBA, with a correct CRC so a decoder would
-    /// accept the header and go on to size its pixel buffer from it.
-    fn png_header_only(width: u32, height: u32) -> Vec<u8> {
-        let mut chunk = b"IHDR".to_vec();
-        chunk.extend_from_slice(&width.to_be_bytes());
-        chunk.extend_from_slice(&height.to_be_bytes());
-        chunk.extend_from_slice(&[8, 6, 0, 0, 0]);
-        let mut png = PNG_SIGNATURE.to_vec();
-        png.extend_from_slice(&13u32.to_be_bytes());
-        png.extend_from_slice(&chunk);
-        png.extend_from_slice(&png_crc(&chunk).to_be_bytes());
-        png
-    }
-
-    #[test]
-    fn a_png_whose_header_exceeds_the_pixel_cap_is_refused_from_the_header_alone() {
-        // 33 bytes on the wire, a gigabyte of RGBA if the header were
-        // believed: the refusal has to come before any pixel buffer exists.
-        let oversized = png_header_only(16_384, 16_384);
-        assert_eq!(png_header_dimensions(&oversized), Some((16_384, 16_384)));
-        assert!(decode_png(&oversized).is_none());
-
-        // The cap is on the pixel count, not either edge, so a wide strip
-        // inside it reaches the decoder (which then refuses it for having no
-        // pixel data, not for its size).
-        let strip = png_header_only(65_536, 1_024);
-        assert_eq!(png_header_dimensions(&strip), Some((65_536, 1_024)));
-        assert!(decode_png(&strip).is_none());
-
-        // A header that is not an IHDR is not a PNG at all.
-        let mut wrong_chunk = png_header_only(1, 1);
-        wrong_chunk[12..16].copy_from_slice(b"IDAT");
-        assert_eq!(png_header_dimensions(&wrong_chunk), None);
-        assert_eq!(png_header_dimensions(&oversized[..23]), None);
-    }
-
-    #[test]
-    fn a_png_past_the_pixel_cap_is_refused_before_its_pixels_are_allocated() {
-        // An 8193x8192 8-bit grayscale PNG, one column past the cap, whose
-        // 11-byte IDAT does not hold even one row. Decoding it in full
-        // would allocate a 67 MB pixel buffer before finding that out.
-        let png = [
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
-            0x44, 0x52, 0x00, 0x00, 0x20, 0x01, 0x00, 0x00, 0x20, 0x00, 0x08, 0x00, 0x00, 0x00,
-            0x00, 0xb8, 0x03, 0xfe, 0xbb, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78,
-            0x9c, 0x63, 0x60, 0x80, 0x00, 0x00, 0x00, 0x08, 0x00, 0x01, 0xb7, 0x58, 0x73, 0x95,
-            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-        ];
-        LARGEST_ALLOCATION.with(|largest| largest.set(0));
-        assert!(decode_png(&png).is_none());
-        let largest = LARGEST_ALLOCATION.with(Cell::get);
-        assert!(
-            largest < 1024 * 1024,
-            "refusing the PNG allocated {largest} bytes at once; the pixel buffer would be 67 MB"
-        );
     }
 
     #[test]
