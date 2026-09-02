@@ -1,7 +1,8 @@
 use super::{
     cleanup_hook_config_file, install_hook_config_file, paneflow_ipc_reachable,
-    sweep_orphan_hook_config, with_last_lease, with_orphan_lease, HookInstall, HookInstallResult,
-    HookInstallSkip, HookLease, InvalidJsonPolicy,
+    refuse_symlinked_project_hook_file, sweep_orphan_hook_config, with_last_lease,
+    with_orphan_lease, HookInstall, HookInstallResult, HookInstallSkip, HookLease,
+    InvalidJsonPolicy,
 };
 use super::{hook_config_error, resolve_hook_command};
 use paneflow_agent_config::claude_hooks::{
@@ -72,6 +73,7 @@ impl CodexHookConfigGuard {
         project_dir: &Path,
         feature_path: Option<&Path>,
     ) -> std::io::Result<Self> {
+        refuse_symlinked_project_hook_file(&project_dir.join("hooks.json"), "Codex")?;
         let installed = install_hook_config_file(
             project_dir,
             "hooks.json",

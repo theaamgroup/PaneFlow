@@ -120,6 +120,24 @@ fn refuse_symlink(path: &Path, label: &str) -> std::io::Result<()> {
     }
 }
 
+/// Project-local hook files live in the checkout's own `.claude/` (or
+/// `.codex/`, `.codebuddy/`, ...) directory, so a FILE symlink there is under
+/// the repository's control, not the user's. `write_json_atomic` deliberately
+/// follows a symlinked HOME config (stow, chezmoi, yadm); followed from a
+/// cloned repo it would rewrite whatever user-owned file the link points at.
+/// Refuse it the way `config_dir_is_symlink` refuses a symlinked directory
+/// (#234). Home-scope callers do not go through this check.
+pub(crate) fn refuse_symlinked_project_hook_file(path: &Path, label: &str) -> std::io::Result<()> {
+    if config_dir_is_symlink(path) {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing to write {label} hooks through a symlinked project-local file"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) fn with_last_lease<T>(
     lock_path: &Path,
     lease: &mut HookLease,

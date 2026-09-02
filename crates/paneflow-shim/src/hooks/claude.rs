@@ -1,9 +1,9 @@
 use super::{
     cleanup_hook_config_file, install_hook_config_file, is_paneflow_hook_command,
     is_paneflow_matcher_group, merge_paneflow_hooks, paneflow_hook_program_token,
-    paneflow_ipc_reachable, remove_paneflow_hooks, safe_log_text, sweep_orphan_hook_config,
-    HookInstall, HookInstallResult, HookInstallSkip, HookLease, InvalidJsonPolicy,
-    CLAUDE_HOOK_EVENTS,
+    paneflow_ipc_reachable, refuse_symlinked_project_hook_file, remove_paneflow_hooks,
+    safe_log_text, sweep_orphan_hook_config, HookInstall, HookInstallResult, HookInstallSkip,
+    HookLease, InvalidJsonPolicy, CLAUDE_HOOK_EVENTS,
 };
 use paneflow_agent_config::{claude_settings_json, read_optional_text};
 use std::env;
@@ -111,6 +111,7 @@ impl HookConfigGuard {
     }
 
     pub(crate) fn install_at(directory: &Path) -> std::io::Result<Self> {
+        refuse_symlinked_project_hook_file(&directory.join("settings.local.json"), "Claude Code")?;
         let installed = install_hook_config_file(
             directory,
             "settings.local.json",
