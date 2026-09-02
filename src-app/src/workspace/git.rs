@@ -34,6 +34,7 @@ impl GitDiffStats {
     /// nonzero git exit this returns the empty (`is_empty()`) default - the
     /// "stats unavailable" state the badge renders.
     pub fn from_cwd(cwd: &str) -> Self {
+        let deadline_at = std::time::Instant::now() + GIT_DIFF_STAT_DEADLINE;
         let base = git_stdout(cwd, &["rev-parse", "--verify", "HEAD"])
             .map(|out| String::from_utf8_lossy(&out).trim().to_string())
             .filter(|base| !base.is_empty())
@@ -45,7 +46,7 @@ impl GitDiffStats {
                 Self::parse_shortstat(&text)
             })
             .unwrap_or_default();
-        stats.add_untracked(cwd);
+        stats.add_untracked(cwd, deadline_at);
         stats
     }
 
@@ -84,13 +85,14 @@ impl GitDiffStats {
         self.files_changed == 0 && self.insertions == 0 && self.deletions == 0
     }
 
-    fn add_untracked(&mut self, cwd: &str) {
+    fn add_untracked(&mut self, cwd: &str, deadline_at: std::time::Instant) {
         let Some(out) = git_stdout(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])
         else {
             return;
         };
         let text = String::from_utf8_lossy(&out);
         let mut paths = text.split('\0').filter(|p| !p.is_empty());
+        let mut to_read = Vec::new();
         for (idx, path) in paths
             .by_ref()
             .take(GIT_DIFF_STAT_UNTRACKED_PATH_CAP)
@@ -98,13 +100,57 @@ impl GitDiffStats {
         {
             self.files_changed += 1;
             if idx < GIT_DIFF_STAT_UNTRACKED_FILE_CAP {
-                self.insertions += untracked_insertions(cwd, path);
+                to_read.push(path.to_string());
             }
         }
         if paths.next().is_some() {
             self.files_changed += 1;
         }
+        self.insertions += untracked_insertions_within(cwd, to_read, deadline_at);
     }
+}
+
+/// Sum the line counts of `rel_paths`, sharing the git deadline (#269): the
+/// reads run on a helper thread that stops between files once `deadline_at`
+/// passes, and the caller keeps whatever was reported by then. A single
+/// `File::open` / `read` stalled in the kernel (dead network volume) cannot
+/// be interrupted, so the thread is abandoned rather than joined; it exits on
+/// its own once the stalled call returns and its send fails.
+fn untracked_insertions_within(
+    cwd: &str,
+    rel_paths: Vec<String>,
+    deadline_at: std::time::Instant,
+) -> usize {
+    if rel_paths.is_empty() {
+        return 0;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cwd = cwd.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("git-untracked-stats".to_string())
+        .spawn(move || {
+            for path in rel_paths {
+                if std::time::Instant::now() >= deadline_at
+                    || tx.send(untracked_insertions(&cwd, &path)).is_err()
+                {
+                    break;
+                }
+            }
+        });
+    if spawned.is_err() {
+        return 0;
+    }
+    let mut insertions = 0;
+    loop {
+        let remaining = deadline_at.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(count) => insertions += count,
+            // Disconnected: every file was read. Timeout: budget gone, keep
+            // the partial total and leave the helper to unwind by itself.
+            Err(_) => break,
+        }
+    }
+    insertions
 }
 
 fn git_stdout(cwd: &str, args: &[&str]) -> Option<Vec<u8>> {
@@ -768,6 +814,58 @@ mod tests {
         assert_eq!(stats.files_changed, 2);
         assert_eq!(stats.insertions, 3);
         assert_eq!(stats.deletions, 0);
+    }
+
+    #[test]
+    fn untracked_insertions_within_stops_at_deadline_on_stalled_file() {
+        // #269: git never lists a FIFO, but a regular file on a stalled volume
+        // blocks `File::open` the same way. Opening a reader-less FIFO is the
+        // portable stand-in: it blocks until a writer appears.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("first.txt"), "alpha\nbeta\n").unwrap();
+        std::fs::write(dir.path().join("last.txt"), "gamma\n").unwrap();
+        let fifo = dir.path().join("stalled");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let budget = std::time::Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let insertions = untracked_insertions_within(
+            dir.path().to_str().unwrap(),
+            vec![
+                "first.txt".to_string(),
+                "stalled".to_string(),
+                "last.txt".to_string(),
+            ],
+            started + budget,
+        );
+        let elapsed = started.elapsed();
+        // Release the abandoned helper: pairing a writer completes its open,
+        // it reads EOF, and its send fails because the receiver is gone.
+        let _writer = std::fs::OpenOptions::new().write(true).open(&fifo);
+
+        assert!(
+            elapsed < budget + std::time::Duration::from_secs(3),
+            "stalled untracked read overran the budget: {elapsed:?}"
+        );
+        assert_eq!(
+            insertions, 2,
+            "files read before the stall must still be counted"
+        );
+    }
+
+    #[test]
+    fn untracked_insertions_within_expired_deadline_reads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let insertions = untracked_insertions_within(
+            dir.path().to_str().unwrap(),
+            vec!["a.txt".into()],
+            expired,
+        );
+        assert_eq!(insertions, 0, "an exhausted budget must skip every read");
     }
 
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {
