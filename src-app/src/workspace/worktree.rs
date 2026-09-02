@@ -964,6 +964,12 @@ fn direct_child_pids(parent: u32) -> Result<Vec<u32>, String> {
     // `libproc`'s safe wrapper treats Darwin's zero-byte "no children" result
     // as an errno failure. Call the dedicated API directly so an empty leaf is
     // distinguishable from a real enumeration error.
+    //
+    // Unlike `proc_listpids`, `proc_listchildpids` already divides by
+    // `sizeof(pid_t)`: both the size query and the fill return a pid COUNT,
+    // never a byte count. Dividing again truncated one to three children to
+    // zero (issue #255), which is what the "returns 0 children" note in
+    // `ports.rs` actually observed.
     // SAFETY: the first call is the documented size query with a null buffer.
     let required = unsafe { libc::proc_listchildpids(parent, std::ptr::null_mut(), 0) };
     if required < 0 {
@@ -976,7 +982,7 @@ fn direct_child_pids(parent: u32) -> Result<Vec<u32>, String> {
         return Ok(Vec::new());
     }
     let item_size = std::mem::size_of::<u32>();
-    let capacity = (required as usize / item_size).saturating_add(32);
+    let capacity = (required as usize).saturating_add(32);
     let mut children = vec![0u32; capacity];
     let buffer_size = i32::try_from(children.len().saturating_mul(item_size))
         .map_err(|_| "child-process buffer exceeds c_int".to_string())?;
@@ -989,7 +995,7 @@ fn direct_child_pids(parent: u32) -> Result<Vec<u32>, String> {
             std::io::Error::last_os_error()
         ));
     }
-    children.truncate(read as usize / item_size);
+    children.truncate(read as usize);
     children.retain(|pid| *pid > 1);
     Ok(children)
 }
@@ -1815,6 +1821,30 @@ mod tests {
             worktree_has_live_process_cwd(tmp.path(), &[]),
             Ok(true),
             "an accessible same-UID survivor must block retirement even after its terminal entity is gone"
+        );
+    }
+
+    // Issue #255: `proc_listchildpids` returns a pid COUNT, not a byte
+    // count. Dividing it by `size_of::<u32>()` truncated one to three live
+    // children down to zero, so the post-snapshot descendant re-scan in
+    // `worktree_has_live_process_cwd` never saw a freshly spawned child.
+    #[test]
+    fn direct_child_pids_sees_a_single_live_child() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep child");
+        let child_pid = child.id();
+        // Let the kernel register the new process before we enumerate.
+        std::thread::sleep(Duration::from_millis(250));
+        let children = direct_child_pids(std::process::id());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let children = children.expect("enumerate direct children");
+        assert!(
+            children.contains(&child_pid),
+            "direct_child_pids must list live child {child_pid}; got {children:?}"
         );
     }
 
