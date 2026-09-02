@@ -1460,10 +1460,16 @@ struct PaneFlowApp {
     pending_worktree_teardowns: Vec<crate::workspace::worktree::ManagedWorktree>,
     /// Whether the "About PaneFlow" dialog is visible.
     show_about_dialog: bool,
+    /// Focus handle routing key events to the About dialog while open
+    /// (issue #244).
+    about_dialog_focus: FocusHandle,
     /// Help > System Info… (#184 Phase 4): the System Info modal, absent when
     /// closed. `Collecting` while the background probes run so the click
     /// feels instant.
     system_info_dialog: Option<crate::app::system_info_dialog::SystemInfoDialog>,
+    /// Focus handle routing key events to the System Info dialog while open
+    /// (issue #244).
+    system_info_dialog_focus: FocusHandle,
     /// Whether the command-palette-style theme picker is visible.
     show_theme_picker: bool,
     /// Typeahead filter for the theme picker (case-insensitive substring).
@@ -2147,9 +2153,8 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(|this: &mut Self, _: &Quit, _window, cx| {
                 this.quit_after_session_save(cx);
             }))
-            .on_action(cx.listener(|this: &mut Self, _: &About, _window, cx| {
-                this.show_about_dialog = true;
-                cx.notify();
+            .on_action(cx.listener(|this: &mut Self, _: &About, window, cx| {
+                this.open_about_dialog(window, cx);
             }))
             // Issue #105: `PaneFlow > Settings...`. Needs a real `&mut Window`
             // to move focus, so this binds the window parameter rather than

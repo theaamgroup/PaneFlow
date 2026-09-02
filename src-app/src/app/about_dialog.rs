@@ -1,9 +1,9 @@
 //! About PaneFlow modal, styled as a compact native application dialog.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton, ObjectFit,
-    ParentElement, Styled, deferred, div, hsla, img, linear_color_stop, linear_gradient,
-    prelude::*, px, rgb, svg,
+    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    ObjectFit, ParentElement, Styled, Window, deferred, div, hsla, img, linear_color_stop,
+    linear_gradient, prelude::*, px, rgb, svg,
 };
 
 use crate::{
@@ -12,6 +12,45 @@ use crate::{
 };
 
 impl PaneFlowApp {
+    /// Open About and move keyboard focus onto the card (issue #244). Without
+    /// the focus move the card only looked modal: every keystroke, Escape
+    /// included, still went into the focused PTY.
+    pub(crate) fn open_about_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_about_dialog = true;
+        self.about_dialog_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Dismiss About and hand focus back to the workspace the card took it
+    /// from. Every dismiss path (OK, the corner x, the backdrop, Escape) goes
+    /// through here so none can strand focus on an unmounted node.
+    pub(crate) fn close_about_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.show_about_dialog {
+            return;
+        }
+        self.show_about_dialog = false;
+        self.restore_focus_after_close_confirm(window, cx);
+        cx.notify();
+    }
+
+    /// Escape and Enter both dismiss: OK is the card's only button, so Enter
+    /// is the default-button gesture and Escape the cancel one. Consumed, so
+    /// neither reaches a binding underneath.
+    fn handle_about_dialog_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" | "enter" => {
+                self.close_about_dialog(window, cx);
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn render_about_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = crate::theme::ui_colors();
         let version = env!("CARGO_PKG_VERSION");
@@ -47,9 +86,8 @@ impl PaneFlowApp {
                     delta,
                 ));
             })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.show_about_dialog = false;
-                cx.notify();
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_about_dialog(window, cx);
                 cx.stop_propagation();
             }))
             .child(
@@ -332,9 +370,8 @@ impl PaneFlowApp {
                     delta,
                 ));
             })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.show_about_dialog = false;
-                cx.notify();
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_about_dialog(window, cx);
                 cx.stop_propagation();
             }))
             .child("OK");
@@ -355,6 +392,8 @@ impl PaneFlowApp {
         let dialog = div()
             .id("about-dialog")
             .occlude()
+            .track_focus(&self.about_dialog_focus)
+            .on_key_down(cx.listener(Self::handle_about_dialog_key_down))
             .w(px(382.))
             .flex()
             .flex_col()
@@ -383,9 +422,8 @@ impl PaneFlowApp {
                 .bg(hsla(0., 0., 0., 0.55))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.show_about_dialog = false;
-                        cx.notify();
+                    cx.listener(|this, _, window, cx| {
+                        this.close_about_dialog(window, cx);
                     }),
                 )
                 .child(dialog),
@@ -402,6 +440,60 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of about_dialog.rs")
+    }
+
+    /// Issue #244: About is a modal, so it owns the keyboard while it is up.
+    /// Every open path moves focus onto the card, Escape (and Enter, OK being
+    /// the only button) dismisses it, and dismissing hands focus back to the
+    /// pane the user was typing in. Before this, a keystroke aimed at the
+    /// dialog went into the focused PTY - including a live agent prompt.
+    #[test]
+    fn about_dialog_takes_focus_and_escape_dismisses_it() {
+        use crate::source_probe::source_slice;
+
+        let src = production_source();
+        let card = source_slice(src, "id(\"about-dialog\")", "id(\"about-dialog-backdrop\")");
+        assert!(
+            card.contains(".track_focus(&self.about_dialog_focus)"),
+            "the About card must track its own focus handle: {card}"
+        );
+        assert!(
+            card.contains(".on_key_down(cx.listener(Self::handle_about_dialog_key_down))"),
+            "the About card must route key events to its own handler: {card}"
+        );
+        let keys = source_slice(src, "fn handle_about_dialog_key_down(", "\n    }");
+        assert!(
+            keys.contains("\"escape\"") && keys.contains("self.close_about_dialog(window, cx)"),
+            "Escape must dismiss About: {keys}"
+        );
+        let open = source_slice(src, "pub(crate) fn open_about_dialog(", "\n    }");
+        assert!(
+            open.contains("self.about_dialog_focus.focus(window, cx)"),
+            "opening About must move focus onto the card: {open}"
+        );
+        let close = source_slice(src, "pub(crate) fn close_about_dialog(", "\n    }");
+        assert!(
+            close.contains("self.restore_focus_after_close_confirm(window, cx)"),
+            "dismissing About must hand focus back to the workspace: {close}"
+        );
+        // Every open path goes through `open_about_dialog`, so none can skip
+        // the focus move; every dismiss goes through `close_about_dialog`, so
+        // none can strand focus on an unmounted node.
+        for (name, file) in [
+            ("main.rs", include_str!("../main.rs")),
+            ("bootstrap.rs", include_str!("bootstrap.rs")),
+            ("profile_menu.rs", include_str!("profile_menu.rs")),
+        ] {
+            let production = file.split("#[cfg(test)]").next().expect("production half");
+            assert!(
+                !production.contains("show_about_dialog = true"),
+                "{name} must open About through open_about_dialog, not by flipping the flag"
+            );
+        }
+        assert!(
+            !src.contains("this.show_about_dialog = false"),
+            "every About dismiss must go through close_about_dialog so focus is handed back"
+        );
     }
 
     /// Issue #226: About exposes a View on GitHub control that opens this
