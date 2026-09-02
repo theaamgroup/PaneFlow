@@ -92,7 +92,10 @@ Relevant config keys:
 | `output_generation` | Monotonic counter advanced by pane output         |
 | `truncated`         | Whether the IPC byte cap omitted older output     |
 
-Defaults and limits: `lines` defaults to 200 and clamps to 1-4000.
+Defaults and limits: `lines` defaults to 200 and must be 1-4000. A `lines`,
+`offset`, or `max_matches` that is not a non-negative integer, or is out of
+range, and a `fenced` that is not a boolean, are invalid-params errors
+(-32602), the same rule the MCP tools apply.
 `offset` starts from the end of the buffer. Passing an out-of-range
 offset is an invalid-params error. If a requested window exceeds the IPC byte
 cap, the response preserves its newest complete rows, reports their count in

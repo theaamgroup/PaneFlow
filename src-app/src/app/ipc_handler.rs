@@ -1147,6 +1147,51 @@ fn requested_index(params: &serde_json::Value) -> Result<Option<usize>, JsonRpcE
         .ok_or_else(|| JsonRpcError::invalid_params("'index' must be a non-negative integer"))
 }
 
+/// Extract an optional bounded integer param, distinguishing ABSENT from
+/// MALFORMED or OUT OF RANGE.
+///
+/// `surface.read` and `surface.search` used to coerce a string, float,
+/// negative, or `null` to the default and clamp `0` or `4001` into range, so
+/// a conductor that sent a typo'd `lines` over JSON-RPC got a 200-line page
+/// and believed it was the requested window. The MCP bridge rejects the
+/// same inputs (`validate_limit` in `paneflow-mcp`); this mirrors it so the
+/// two contracts agree (issue #281). Mirrors [`requested_index`].
+fn requested_bounded(
+    params: &serde_json::Value,
+    key: &str,
+    min: usize,
+    max: usize,
+) -> Result<Option<usize>, JsonRpcError> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    let Some(n) = value.as_u64() else {
+        return Err(JsonRpcError::invalid_params(format!(
+            "'{key}' must be a non-negative integer"
+        )));
+    };
+    usize::try_from(n)
+        .ok()
+        .filter(|n| (min..=max).contains(n))
+        .map(Some)
+        .ok_or_else(|| {
+            JsonRpcError::invalid_params(format!("'{key}' must be between {min} and {max}"))
+        })
+}
+
+/// Extract the optional `fenced` param, distinguishing ABSENT (use the
+/// config default) from a non-boolean, which is rejected rather than
+/// silently mapped to the default (issue #281).
+fn requested_fenced(params: &serde_json::Value) -> Result<Option<bool>, JsonRpcError> {
+    let Some(value) = params.get("fenced") else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| JsonRpcError::invalid_params("'fenced' must be a boolean"))
+}
+
 fn surface_matches_workspace(surface: &SurfaceMeta, workspace_id: Option<u64>) -> bool {
     workspace_id.is_none_or(|expected| surface.workspace_id == Some(expected))
 }
@@ -3029,16 +3074,26 @@ impl PaneFlowApp {
                     Err(e) => return e.into_value(),
                 };
                 const DEFAULT_LINES: usize = 200;
-                let lines = params
-                    .get("lines")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| (n as usize).clamp(1, crate::limits::MAX_SCROLLBACK_EXTRACT_LINES))
-                    .unwrap_or(DEFAULT_LINES);
-                let offset = params
-                    .get("offset")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize)
-                    .unwrap_or(0);
+                // Issue #281: wrong-typed or out-of-range pagination params
+                // are -32602, matching the MCP `read_pane` tool, never
+                // coerced to the default or clamped into range.
+                let lines = match requested_bounded(
+                    params,
+                    "lines",
+                    1,
+                    crate::limits::MAX_SCROLLBACK_EXTRACT_LINES,
+                ) {
+                    Ok(lines) => lines.unwrap_or(DEFAULT_LINES),
+                    Err(e) => return e.into_value(),
+                };
+                let offset = match requested_bounded(params, "offset", 0, usize::MAX) {
+                    Ok(offset) => offset.unwrap_or(0),
+                    Err(e) => return e.into_value(),
+                };
+                let fenced = match requested_fenced(params) {
+                    Ok(fenced) => fenced,
+                    Err(e) => return e.into_value(),
+                };
                 // EP-001 US-003 (agent-control-plane): expose the output
                 // generation counter so a client detects pane-idle without a
                 // timer heuristic (kills the flow engine's settling poll).
@@ -3089,10 +3144,8 @@ impl PaneFlowApp {
                 // MCP bridge, which re-fences itself; the `flow`/`wait` poll
                 // loops) pass `fenced:false`, so this only changes the CLI/IPC
                 // read path a conductor uses directly, mirroring the MCP fence.
-                let fenced = params
-                    .get("fenced")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
+                let fenced =
+                    fenced.unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
                 let (text, returned, truncated) = truncate_ipc_text(text, returned);
                 let text = if fenced {
                     wrap_untrusted(
@@ -3141,11 +3194,10 @@ impl PaneFlowApp {
                 };
                 const DEFAULT_MAX: usize = 50;
                 const HARD_MAX: usize = 1000;
-                let max_matches = params
-                    .get("max_matches")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| (n as usize).clamp(1, HARD_MAX))
-                    .unwrap_or(DEFAULT_MAX);
+                let max_matches = match requested_bounded(params, "max_matches", 1, HARD_MAX) {
+                    Ok(max_matches) => max_matches.unwrap_or(DEFAULT_MAX),
+                    Err(e) => return e.into_value(),
+                };
                 let (matches, truncated) = terminal
                     .read(cx)
                     .terminal
@@ -4623,6 +4675,82 @@ mod tests {
                 requested_index(&malformed).is_err(),
                 "{malformed} must be rejected, not coerced to a default"
             );
+        }
+    }
+
+    /// Issue #281: `surface.read` / `surface.search` pagination params follow
+    /// the MCP `read_pane` / `search_pane` rules - absent is the default, a
+    /// valid integer in range is honoured, and everything else is -32602.
+    #[test]
+    fn requested_bounded_absent_is_none_and_in_range_is_honoured() {
+        let max = crate::limits::MAX_SCROLLBACK_EXTRACT_LINES;
+        assert_eq!(
+            requested_bounded(&serde_json::json!({}), "lines", 1, max).unwrap(),
+            None
+        );
+        assert_eq!(
+            requested_bounded(&serde_json::json!({"lines": 1}), "lines", 1, max).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            requested_bounded(&serde_json::json!({"lines": max}), "lines", 1, max).unwrap(),
+            Some(max)
+        );
+        assert_eq!(
+            requested_bounded(&serde_json::json!({"offset": 0}), "offset", 0, usize::MAX).unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn requested_bounded_rejects_wrong_type_and_out_of_range_instead_of_coercing() {
+        // Each of these used to become the default (`unwrap_or`) or be
+        // clamped into range, so a typo'd `lines` returned a 200-line page
+        // that looked like the requested window. MCP rejects them all.
+        let max = crate::limits::MAX_SCROLLBACK_EXTRACT_LINES;
+        for malformed in [
+            serde_json::json!({"lines": "lots"}),
+            serde_json::json!({"lines": 2.5}),
+            serde_json::json!({"lines": -1}),
+            serde_json::json!({"lines": null}),
+            serde_json::json!({"lines": []}),
+            serde_json::json!({"lines": 0}),
+            serde_json::json!({"lines": max + 1}),
+        ] {
+            let error = requested_bounded(&malformed, "lines", 1, max)
+                .err()
+                .unwrap_or_else(|| panic!("{malformed} must be rejected, not coerced"));
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
+        }
+        let error = requested_bounded(&serde_json::json!({"offset": "3"}), "offset", 0, usize::MAX)
+            .expect_err("a string offset must be rejected");
+        assert_eq!(error.code, JsonRpcError::INVALID_PARAMS);
+        let error = requested_bounded(
+            &serde_json::json!({"max_matches": 1001}),
+            "max_matches",
+            1,
+            1000,
+        )
+        .expect_err("max_matches above the hard cap must be rejected, not clamped");
+        assert_eq!(error.code, JsonRpcError::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn requested_fenced_absent_is_none_and_non_bool_is_rejected() {
+        assert_eq!(requested_fenced(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            requested_fenced(&serde_json::json!({"fenced": false})).unwrap(),
+            Some(false)
+        );
+        for malformed in [
+            serde_json::json!({"fenced": "false"}),
+            serde_json::json!({"fenced": 0}),
+            serde_json::json!({"fenced": null}),
+        ] {
+            let error = requested_fenced(&malformed)
+                .err()
+                .unwrap_or_else(|| panic!("{malformed} must be rejected, not defaulted"));
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
         }
     }
 
