@@ -2,8 +2,21 @@
 
 Living handoff record. Updated 2026-09-01, through #184 Phase 4 and its audit (the
 libghostty-vt session-host swap, the engine-product features on it, and the
-Phase 4 chrome work). The prior entry covered the 2026-08-28
-five-agent deep review and the `v0.1.1` cut.
+Phase 4 chrome work), plus the About / app-menu GitHub links (#226, #227,
+#228). The prior entry covered the 2026-08-28 five-agent deep review and the
+`v0.1.1` cut.
+
+**2026-09-01 #226 #227 #228: About and PaneFlow-menu GitHub links.** About
+shows a **View on GitHub** button (`https://github.com/theaamgroup/paneflow`)
+between Version and copyright, and an original-credit plate that opens
+`https://github.com/arthjean/paneflow`. The inert contributors placeholder is
+gone; the David Ayers CRT plate and AAM copyright stay. The PaneFlow menu is
+About / Settings… / separator / Report an Issue / separator / Quit; Report an
+Issue opens `https://github.com/theaamgroup/paneflow/issues/new` (`ReportIssue`,
+menu-only). Pinned by `about_dialog_links_this_forks_github`,
+`about_dialog_credits_the_original_project`,
+`paneflow_menu_report_an_issue_is_wired_at_the_root_and_as_a_fallback`, and
+`report_issue_stays_out_of_the_shortcut_registry`.
 
 **2026-08-31 #184: libghostty-vt is the only engine.** Landed as a stack of
 PRs (#185 toolchain 1.98.0 + chrome; #186 vendored crates + darwin archive;
@@ -83,12 +96,13 @@ pass. Twelve landed here, all gates green, test list name-diffed
 **2026-08-28 UI cluster (six items, from a single issue list).** Landed on
 top of the deep review, in three file-disjoint batches:
 
-- **About dialog** (`app/about_dialog.rs`) grew a retro CRT credit plate and a
-  dashed, deliberately inert "Add Contributors Here" placeholder; copyright is
-  now `© 2026 AAM USA, Inc. All rights reserved.`, and the dialog's own
-  "Paneflow" spellings were corrected to "PaneFlow". `VT323-Regular.ttf` +
-  its OFL are in `src-app/assets/fonts/` and need no code change to ship
-  (`Assets::load_fonts` iterates the embed registry).
+- **About dialog** (`app/about_dialog.rs`) grew a retro CRT credit plate
+  (`> made with ❤ by david ayers`) and `© 2026 AAM USA, Inc. All rights reserved.`;
+  the dialog's own "Paneflow" spellings were corrected to "PaneFlow".
+  `VT323-Regular.ttf` + its OFL are in `src-app/assets/fonts/` and need no
+  code change to ship (`Assets::load_fonts` iterates the embed registry).
+  The inert contributors placeholder from that cluster was replaced later
+  (#227); current About chrome is under **2026-09-01 #226 #227 #228** above.
 - **Inactive-workspace dim** reaches sidebar tab rows, on a *second* axis from
   the existing idle tone. Foreground only, one shared quiet step
   (`IDLE_WORKSPACE_TEXT_OPACITY`), guarded by a source-scraping test.

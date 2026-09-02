@@ -101,6 +101,12 @@ actions!(
         // does not grow an Unassigned row. Collection lives in
         // `crate::system_info`, the modal in `crate::app::system_info_dialog`.
         ShowSystemInfo,
+        // Issue #228: PaneFlow > Report an Issue. Menu-only, like About /
+        // OpenHelp / OpenSettings / ShowSystemInfo: absent from
+        // `keybindings::registry::ACTIONS` so Settings > Keyboard Shortcuts
+        // does not grow an Unassigned row. Opens this fork's GitHub new-issue
+        // form in the default browser.
+        ReportIssue,
         // US-022 (cmux port 2026-Q2) - markdown pane navigation. Scoped to
         // the `Markdown` key context (root) and `MarkdownSearch` (when the
         // find overlay is open). Defined as separate actions from terminal
