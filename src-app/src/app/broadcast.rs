@@ -162,8 +162,8 @@ impl PaneFlowApp {
         };
         let mut out = Vec::new();
         for ws in &self.workspaces {
-            if let Some(root) = &ws.active_tab().root {
-                for pane in root.collect_leaves() {
+            for tab in ws.tabs() {
+                for pane in tab.collect_panes() {
                     if group.members.contains(&pane.entity_id()) {
                         out.push(pane);
                     }
@@ -180,8 +180,8 @@ impl PaneFlowApp {
         let mut live: HashSet<gpui::EntityId> = HashSet::new();
         let mut leaves: Vec<gpui::Entity<Pane>> = Vec::new();
         for ws in &self.workspaces {
-            if let Some(root) = &ws.active_tab().root {
-                for pane in root.collect_leaves() {
+            for tab in ws.tabs() {
+                for pane in tab.collect_panes() {
                     live.insert(pane.entity_id());
                     leaves.push(pane);
                 }

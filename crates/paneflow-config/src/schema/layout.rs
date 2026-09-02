@@ -45,15 +45,15 @@ impl<'de> Deserialize<'de> for CommandDefinition {
             (Some(_), Some(_)) => {
                 return Err(serde::de::Error::custom(
                     "command must contain exactly one of `workspace` or `command`",
-                ))
+                ));
             }
             (None, Some(_)) => {
-                return Err(serde::de::Error::custom("shell command must not be blank"))
+                return Err(serde::de::Error::custom("shell command must not be blank"));
             }
             (None, None) => {
                 return Err(serde::de::Error::custom(
                     "command must contain either `workspace` or `command`",
-                ))
+                ));
             }
         }
         Ok(Self {
@@ -346,7 +346,7 @@ fn validate_node(node: &mut LayoutNode, leaf_budget: &mut usize) {
                         rs.len(),
                         n
                     );
-                    rs.resize(n, 1.0 / n as f64);
+                    *rs = sanitize_ratios(rs.clone(), n);
                 }
                 // Clamp individual values to [0.01, 1.0].
                 for r in rs.iter_mut() {

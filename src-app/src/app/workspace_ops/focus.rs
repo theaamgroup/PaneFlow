@@ -121,7 +121,7 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut order: Vec<(usize, gpui::Entity<crate::pane::Pane>, u64)> = Vec::new();
+        let mut order: Vec<(usize, usize, gpui::Entity<crate::pane::Pane>, u64)> = Vec::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
             let matching: std::collections::HashSet<u64> = ws
                 .agent_sessions
@@ -132,24 +132,26 @@ impl PaneFlowApp {
             if matching.is_empty() {
                 continue;
             }
-            if let Some(root) = &ws.active_tab().root {
-                for pane in root.collect_leaves() {
+            for (tab_idx, tab) in ws.tabs().iter().enumerate() {
+                for pane in tab.collect_panes() {
                     if let Some(t) = pane.read(cx).active_terminal_opt() {
                         let sid = t.entity_id().as_u64();
                         if matching.contains(&sid) {
-                            order.push((ws_idx, pane.clone(), sid));
+                            order.push((ws_idx, tab_idx, pane.clone(), sid));
                         }
                     }
                 }
             }
         }
-        let ids: Vec<u64> = order.iter().map(|(_, _, sid)| *sid).collect();
+        let ids: Vec<u64> = order.iter().map(|(_, _, _, sid)| *sid).collect();
         let Some(next) = next_in_cycle(&ids, self.jump_cursor) else {
             return;
         };
-        let Some((ws_idx, pane, sid)) = order.into_iter().find(|(_, _, s)| *s == next) else {
+        let Some((ws_idx, tab_idx, pane, sid)) = order.into_iter().find(|(_, _, _, s)| *s == next)
+        else {
             return;
         };
+        self.workspaces[ws_idx].set_active_tab(tab_idx);
         self.activate_workspace_at(ws_idx, WorkspaceFocusTarget::Pane { pane }, window, cx);
         self.jump_cursor = Some(sid);
     }

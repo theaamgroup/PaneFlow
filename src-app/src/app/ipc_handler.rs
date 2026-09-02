@@ -2864,7 +2864,10 @@ impl PaneFlowApp {
                 // same stable indices to automation, independent of how the
                 // sidebar is visually grouped or sorted.
                 let idx = match requested_index(params) {
-                    Ok(index) => index.unwrap_or(0),
+                    Ok(Some(index)) => index,
+                    Ok(None) => {
+                        return JsonRpcError::invalid_params("'index' is required").into_value();
+                    }
                     Err(error) => return error.into_value(),
                 };
                 if idx < self.workspaces.len() {

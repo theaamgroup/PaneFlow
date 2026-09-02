@@ -196,7 +196,14 @@ fn has_hooks_flag(content: &str) -> bool {
 }
 
 fn has_features_section(content: &str) -> bool {
-    content.lines().any(|line| line.trim() == "[features]")
+    content.lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            return false;
+        }
+        let header = line.split_once('#').map_or(line, |(value, _)| value);
+        header.trim() == "[features]"
+    })
 }
 
 struct StrippedCodexFeatureBlock {

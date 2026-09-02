@@ -373,7 +373,11 @@ impl CodeDocument {
                 if units >= target {
                     return byte;
                 }
-                units += ch.len_utf16();
+                let char_units = ch.len_utf16();
+                if units < target && units + char_units > target {
+                    return byte;
+                }
+                units += char_units;
                 byte += ch.len_utf8();
             }
             return byte;
@@ -499,6 +503,16 @@ mod tests {
         assert_eq!(d.line_count(), 3);
         assert_eq!(d.line_string(2).as_deref(), Some(""));
         assert_eq!(d.line(3), None);
+    }
+
+    #[test]
+    fn utf16_index_inside_a_non_bmp_scalar_maps_to_that_character_start() {
+        let d = doc("a😀b");
+        let emoji_start = d.byte_to_utf16(1);
+        assert_eq!(emoji_start, 1);
+        assert_eq!(d.utf16_to_byte(2), 1, "inside the surrogate pair");
+        assert_eq!(d.utf16_to_byte(d.byte_to_utf16(1)), 1);
+        assert_eq!(d.utf16_to_byte(d.byte_to_utf16(5)), 5);
     }
 
     #[test]

@@ -550,6 +550,33 @@ fn enable_codex_feature_flag_concurrent_no_duplicate_features() {
 }
 
 #[test]
+fn enable_codex_feature_flag_abstains_on_commented_features_header() {
+    let td = tempfile::TempDir::new().unwrap();
+    let path = td.path().join("config.toml");
+    std::fs::write(&path, "[features] # experimental\nfoo = true\n").unwrap();
+
+    let result = enable_codex_feature_flag(&path);
+    assert!(result.is_err());
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    let features = content
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            if line.starts_with('#') {
+                return false;
+            }
+            line.split_once('#').map_or(line, |(value, _)| value).trim() == "[features]"
+        })
+        .count();
+    assert_eq!(
+        features, 1,
+        "must not append a second [features]:\n{content}"
+    );
+    assert!(!content.contains("hooks = true"));
+}
+
+#[test]
 fn enable_codex_feature_flag_abstains_on_existing_features_section() {
     let td = tempfile::TempDir::new().unwrap();
     let path = td.path().join("config.toml");

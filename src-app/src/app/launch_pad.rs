@@ -27,7 +27,7 @@ use paneflow_config::schema::TerminalSurfaceProfile;
 
 use crate::PaneFlowApp;
 use crate::agent_launcher::TerminalAgent;
-use crate::layout::{MAX_PANES, SplitDirection};
+use crate::layout::{LayoutTree, MAX_PANES, SplitDirection};
 use crate::pane::Pane;
 use crate::terminal::TerminalView;
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
@@ -255,7 +255,7 @@ impl PaneFlowApp {
             self.launch_pad_set_error("Unzoom before splitting panes", cx);
             return;
         }
-        if ws.active_tab().root.is_none() || !ws.active_tab().can_add_pane() {
+        if !ws.active_tab().can_add_pane() {
             self.launch_pad_set_error(format!("Maximum pane count reached ({MAX_PANES})"), cx);
             return;
         }
@@ -529,9 +529,7 @@ impl PaneFlowApp {
         }
 
         // Re-check the pane budget - it may have filled during the run.
-        if self.workspaces[ws_idx].active_tab().root.is_none()
-            || !self.workspaces[ws_idx].active_tab().can_add_pane()
-        {
+        if !self.workspaces[ws_idx].active_tab().can_add_pane() {
             self.launch_pad_set_error(
                 format!(
                     "Maximum pane count reached ({MAX_PANES}) - worktree created at {}",
@@ -564,21 +562,26 @@ impl PaneFlowApp {
             )
         });
         let new_pane = self.create_pane(new_terminal.clone(), plan.ws_id, cx);
-        let Some(root) = self.workspaces[ws_idx].active_tab_mut().root.as_mut() else {
-            self.launch_pad_set_error("Workspace has no layout root", cx);
-            return;
-        };
-        // PRD: split in the active preset's direction, fallback Vertical.
-        // No active preset is tracked anywhere (LayoutPreset is a one-shot
-        // `workspace.up` input), so the documented fallback IS the default:
-        // Vertical = side-by-side, the natural cockpit arrangement.
-        match target {
-            Some(t) => {
-                if !root.split_at_pane(&t, SplitDirection::Vertical, new_pane.clone()) {
-                    root.split_first_leaf(SplitDirection::Vertical, new_pane.clone());
+        let tab = self.workspaces[ws_idx].active_tab_mut();
+        if tab.root.is_none() && tab.saved_layout.is_none() {
+            tab.root = Some(LayoutTree::Leaf(new_pane.clone()));
+        } else {
+            let Some(root) = tab.root.as_mut() else {
+                self.launch_pad_set_error("Workspace has no layout root", cx);
+                return;
+            };
+            // PRD: split in the active preset's direction, fallback Vertical.
+            // No active preset is tracked anywhere (LayoutPreset is a one-shot
+            // `workspace.up` input), so the documented fallback IS the default:
+            // Vertical = side-by-side, the natural cockpit arrangement.
+            match target {
+                Some(t) => {
+                    if !root.split_at_pane(&t, SplitDirection::Vertical, new_pane.clone()) {
+                        root.split_first_leaf(SplitDirection::Vertical, new_pane.clone());
+                    }
                 }
+                None => root.split_first_leaf(SplitDirection::Vertical, new_pane.clone()),
             }
-            None => root.split_first_leaf(SplitDirection::Vertical, new_pane.clone()),
         }
 
         new_terminal
