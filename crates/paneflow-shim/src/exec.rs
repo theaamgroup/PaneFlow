@@ -385,3 +385,7 @@ pub(crate) fn spawn_parent_death_guard(
         }
     });
 }
+
+#[cfg(all(test, unix))]
+#[path = "tests/interrupt.rs"]
+mod interrupt_tests;
