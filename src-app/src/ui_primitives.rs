@@ -18,7 +18,7 @@ pub(crate) mod squircle;
 use gpui::{
     AnimationExt, AnyElement, AnyView, App, Bounds, ClickEvent, CursorStyle, Div, Element,
     ElementId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement,
-    IntoElement, ParentElement, Pixels, Render, Rgba, SharedString, Stateful,
+    IntoElement, ParentElement, Pixels, Render, Rgba, Role, SharedString, Stateful,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::*, px, svg,
 };
 use std::time::{Duration, Instant};
@@ -565,12 +565,15 @@ fn icon_button(
     id: impl Into<ElementId>,
     outer: Pixels,
     icon: &'static str,
+    label: impl Into<SharedString>,
     icon_size: Pixels,
     icon_color: Hsla,
     hover_bg: Hsla,
 ) -> AnimatedHover {
     div()
         .id(id.into())
+        .role(Role::Button)
+        .aria_label(label)
         .flex_none()
         .flex()
         .items_center()
@@ -587,26 +590,30 @@ fn icon_button(
         )
 }
 
-/// 20×20 icon button (12px glyph). The caller chains `.on_click` / `.tooltip`
-/// and any resting-state `.bg(..)`.
+/// 20×20 icon button (12px glyph). `label` is the accessible name announced by
+/// assistive technology (usually the tooltip text). The caller chains
+/// `.on_click` / `.tooltip` and any resting-state `.bg(..)`.
 pub(crate) fn icon_button_sm(
     id: impl Into<ElementId>,
     icon: &'static str,
+    label: impl Into<SharedString>,
     icon_color: Hsla,
     hover_bg: Hsla,
 ) -> AnimatedHover {
-    icon_button(id, px(20.), icon, px(12.), icon_color, hover_bg)
+    icon_button(id, px(20.), icon, label, px(12.), icon_color, hover_bg)
 }
 
-/// 24×24 icon button (13px glyph). The caller chains `.on_click` / `.tooltip`
-/// and any resting-state `.bg(..)`.
+/// 24×24 icon button (13px glyph). `label` is the accessible name announced by
+/// assistive technology (usually the tooltip text). The caller chains
+/// `.on_click` / `.tooltip` and any resting-state `.bg(..)`.
 pub(crate) fn icon_button_md(
     id: impl Into<ElementId>,
     icon: &'static str,
+    label: impl Into<SharedString>,
     icon_color: Hsla,
     hover_bg: Hsla,
 ) -> AnimatedHover {
-    icon_button(id, px(24.), icon, px(13.), icon_color, hover_bg)
+    icon_button(id, px(24.), icon, label, px(13.), icon_color, hover_bg)
 }
 
 // ── Toolbar pill ─────────────────────────────────────────────────────────────
@@ -894,5 +901,41 @@ mod tests {
             progress.get() > 0.0,
             "hover progress stayed at zero after pointer entry"
         );
+    }
+
+    fn assert_button_a11y(button: &AnimatedHover, expected_label: &str) {
+        assert_eq!(
+            Element::a11y_role(button),
+            Some(gpui::accesskit::Role::Button),
+            "icon button did not expose Role::Button"
+        );
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        Element::write_a11y_info(button, &mut node);
+        assert_eq!(
+            node.label(),
+            Some(expected_label),
+            "icon button did not expose its accessible name"
+        );
+    }
+
+    #[test]
+    fn icon_buttons_expose_button_role_and_accessible_name() {
+        let sm = icon_button_sm(
+            "a11y-icon-sm",
+            "icons/terminal.svg",
+            "Open terminal",
+            gpui::black(),
+            gpui::white(),
+        );
+        assert_button_a11y(&sm, "Open terminal");
+
+        let md = icon_button_md(
+            "a11y-icon-md",
+            "icons/terminal.svg",
+            "Open terminal",
+            gpui::black(),
+            gpui::white(),
+        );
+        assert_button_a11y(&md, "Open terminal");
     }
 }
