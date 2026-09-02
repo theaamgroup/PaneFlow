@@ -165,6 +165,13 @@ pub(crate) fn sweep_orphan_hook_config(path: &Path, remove: fn(&mut serde_json::
     if path.parent().is_some_and(config_dir_is_symlink) {
         return;
     }
+    // #234: a FILE symlink is under the checkout's control, not the user's.
+    // Cleanup-only launches (`install()` when IPC is down, persistent-hook
+    // Alive) call this before `install_at`'s refuse, so a parent-dir check
+    // alone would still follow the link and rewrite a user-owned target.
+    if config_dir_is_symlink(path) {
+        return;
+    }
     let _ = with_orphan_lease(path, path, |created_file| {
         let Some(content) = read_optional_text(path)? else {
             return Ok(());
@@ -394,6 +401,41 @@ mod tests {
         let cleaned: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(cleaned, serde_json::json!({}));
+    }
+
+    #[test]
+    fn sweep_orphan_does_not_follow_a_project_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        // #234: cleanup-only launches sweep before install_at's refuse. A
+        // project-local FILE symlink to a user-owned JSON with PaneFlow
+        // hooks must be left alone - following it would rewrite the target.
+        let temp = tempfile::TempDir::new().unwrap();
+        let outside = temp.path().join("outside.json");
+        let mut root = serde_json::json!({});
+        merge_paneflow_hooks(&mut root).unwrap();
+        write_json_atomic(&outside, &root).unwrap();
+        let original = std::fs::read(&outside).unwrap();
+
+        let project_dir = temp.path().join(".claude");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let link = project_dir.join("settings.local.json");
+        symlink(&outside, &link).unwrap();
+
+        sweep_orphan_hook_config(&link, remove_paneflow_hooks);
+
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            original,
+            "the outside file must not be rewritten through the link"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself must be left in place"
+        );
     }
 
     #[test]
