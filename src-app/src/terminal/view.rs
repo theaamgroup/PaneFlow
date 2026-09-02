@@ -486,6 +486,10 @@ impl TerminalView {
         // open the PTY on the background executor and `promote()` the
         // placeholder in place when it resolves, so an N-pane restore never
         // serializes N blocking spawns on the main thread.
+        // Issue #298: snapshot the live config on the GPUI thread so the
+        // spawn (and its scrollback below) follow a settings change that has
+        // not finished its off-thread `paneflow.json` write yet.
+        let config = crate::config_writer::current_config(cx);
         let params = TerminalState::resolve_spawn_params_with_profile(
             cwd,
             workspace_id,
@@ -493,7 +497,12 @@ impl TerminalView {
             initial_size,
             user_env,
             profile,
+            &config,
         );
+        let max_scrollback = config
+            .terminal
+            .unwrap_or_default()
+            .resolved_scrollback_lines_for_profile(params.profile);
         let (mut terminal, pending) = TerminalState::new_pending_with_profile_and_shell_quoting(
             params.cols,
             params.rows,
@@ -524,10 +533,6 @@ impl TerminalView {
                 // N-pane restore never serializes N spawns on the main thread.
                 let outcome = executor
                     .spawn(async move {
-                        let max_scrollback = paneflow_config::loader::load_config()
-                            .terminal
-                            .unwrap_or_default()
-                            .resolved_scrollback_lines_for_profile(params.profile);
                         ghostty
                             .start(ghostty_pending, params, signal_mask, max_scrollback)
                             .map_err(classify_ghostty_start_error)
@@ -779,7 +784,7 @@ impl TerminalView {
             );
         }
 
-        let config = paneflow_config::loader::load_config();
+        let config = crate::config_writer::current_config(cx);
         let terminal_config = config.terminal.clone().unwrap_or_default();
         let scroll_multiplier = terminal_config.resolved_scroll_multiplier();
         let cursor_blink_mode = terminal_config.cursor_blink.unwrap_or_default();
@@ -1786,6 +1791,27 @@ fn resolve_cursor_visible(
 mod tests {
     use super::*;
     use crate::terminal::pty_session::strip_partial_ansi_tail;
+
+    /// Issue #298: the view-level terminal settings come from the in-memory
+    /// config snapshot, not from a re-read of `paneflow.json` that can still
+    /// hold the value a settings change is about to overwrite.
+    #[gpui::test]
+    fn terminal_view_reads_its_settings_from_the_in_memory_snapshot(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let option_as_meta = !crate::keys::default_option_as_meta();
+        let snapshot = paneflow_config::schema::PaneFlowConfig {
+            option_as_meta: Some(option_as_meta),
+            ..Default::default()
+        };
+        cx.update(|cx| crate::config_writer::publish_config_snapshot(cx, &snapshot));
+
+        let view = cx.update(|cx| cx.new(|cx| TerminalView::display_only_for_test(1, cx)));
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.option_as_meta),
+            option_as_meta
+        );
+    }
 
     #[test]
     fn ghostty_start_errors_carry_their_phase_and_reason_code() {

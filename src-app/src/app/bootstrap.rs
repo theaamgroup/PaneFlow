@@ -715,6 +715,7 @@ impl PaneFlowApp {
             .detach();
 
         let cached_config = paneflow_config::loader::load_config();
+        crate::config_writer::publish_config_snapshot(cx, &cached_config);
         let effective_shortcuts = keybindings::effective_shortcuts(&cached_config.shortcuts);
         let theme_mode = crate::ThemeMode::from_config(
             cached_config.theme_mode.as_deref(),

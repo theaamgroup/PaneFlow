@@ -29,6 +29,34 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// a restart, and is self-healed by the next write or external reload.
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Issue #298: the live in-memory config, mirrored from
+/// `PaneFlowApp::cached_config` every time that cache changes. Settings
+/// persist is cache-first and writes `paneflow.json` off the GPUI thread, so
+/// a surface built between the in-memory mutate and the completed disk write
+/// must resolve its spawn inputs (`default_shell`, `terminal.env`,
+/// `shell_integration`, scrollback) from this snapshot, never from a fresh
+/// `load_config()` that still sees the old file.
+pub(crate) struct ConfigSnapshotGlobal(pub(crate) paneflow_config::schema::PaneFlowConfig);
+
+impl gpui::Global for ConfigSnapshotGlobal {}
+
+/// Mirror `config` into [`ConfigSnapshotGlobal`]. Call wherever
+/// `PaneFlowApp::cached_config` is assigned or mutated.
+pub(crate) fn publish_config_snapshot(
+    cx: &mut gpui::App,
+    config: &paneflow_config::schema::PaneFlowConfig,
+) {
+    cx.set_global(ConfigSnapshotGlobal(config.clone()));
+}
+
+/// The config a new surface spawns against: the in-memory snapshot when the
+/// app has installed one, else the on-disk file (tests, headless tooling).
+pub(crate) fn current_config(cx: &gpui::App) -> paneflow_config::schema::PaneFlowConfig {
+    cx.try_global::<ConfigSnapshotGlobal>()
+        .map(|snapshot| snapshot.0.clone())
+        .unwrap_or_else(paneflow_config::loader::load_config)
+}
+
 /// Typed `paneflow.json` marker for issue #85's one-time compatibility pass.
 /// Once true, install detection is never allowed to promote a launcher again.
 const AGENT_BUTTON_VISIBILITY_MIGRATION_KEY: &str = "agent_button_visibility_defaults_migrated";

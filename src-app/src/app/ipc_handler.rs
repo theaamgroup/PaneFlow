@@ -1813,6 +1813,7 @@ impl PaneFlowApp {
             // pick up the reload without a per-frame `load_config()`. Last use
             // of `config` - move it in.
             self.cached_config = config;
+            crate::config_writer::publish_config_snapshot(cx, &self.cached_config);
             self.theme_mode = theme_mode;
             // Hot-reload the motion switch (GPUI refreshes the windows itself
             // when the value actually changes).

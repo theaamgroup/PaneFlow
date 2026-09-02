@@ -428,7 +428,7 @@ impl Pane {
         workspace_id: u64,
         cx: &mut Context<Self>,
     ) -> Self {
-        let cached_config = paneflow_config::loader::load_config();
+        let cached_config = crate::config_writer::current_config(cx);
         if let PaneSurface::Terminal(t) = &surface {
             Self::subscribe_terminal(t, cx);
             Self::apply_terminal_render_config(t, &cached_config, cx);
@@ -2271,6 +2271,29 @@ mod tests {
         MAX_SURFACE_TITLE_LEN, pane_card_background, peek_badge_line, progress_chip_label,
         truncate_surface_title,
     };
+
+    /// Issue #298: settings persist is cache-first, so a pane built right
+    /// after a change has to hydrate from the in-memory snapshot, not from a
+    /// `paneflow.json` whose off-thread write may not have landed yet.
+    #[gpui::test]
+    fn new_pane_hydrates_its_config_cache_from_the_in_memory_snapshot(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let snapshot = paneflow_config::schema::PaneFlowConfig {
+            default_shell: Some("/paneflow-test/in-memory-shell".to_string()),
+            ..Default::default()
+        };
+        cx.update(|cx| crate::config_writer::publish_config_snapshot(cx, &snapshot));
+
+        let pane = cx.update(|cx| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| super::Pane::new(terminal, 1, cx))
+        });
+
+        let shell = pane.read_with(cx, |pane, _| pane.cached_config.default_shell.clone());
+        assert_eq!(shell.as_deref(), Some("/paneflow-test/in-memory-shell"));
+    }
 
     #[test]
     fn progress_chip_label_prefers_the_percentage_and_names_every_other_state() {

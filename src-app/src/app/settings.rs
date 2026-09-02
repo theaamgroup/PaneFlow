@@ -202,6 +202,7 @@ impl PaneFlowApp {
                 != normalized_shell_setting(value.as_str());
         self.cached_config =
             config_writer::with_field(&self.cached_config, nested, key, value.clone());
+        config_writer::publish_config_snapshot(cx, &self.cached_config);
         if !nested && matches!(key, "macos_chrome_material") {
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
@@ -282,6 +283,7 @@ impl PaneFlowApp {
     ) {
         self.cached_config =
             config_writer::with_agent_panel_field(&self.cached_config, key, value.clone());
+        config_writer::publish_config_snapshot(cx, &self.cached_config);
         cx.notify();
         let seq = self
             .config_field_persist_seq

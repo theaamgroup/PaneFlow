@@ -1090,6 +1090,7 @@ impl TerminalState {
             initial_size,
             user_env,
             profile,
+            &paneflow_config::loader::load_config(),
         );
         let max_scrollback = resolved_scrollback_lines(params.profile);
         let (mut state, pending) = Self::new_pending_with_profile_and_shell_quoting(
@@ -1125,9 +1126,13 @@ impl TerminalState {
             initial_size,
             user_env,
             TerminalSurfaceProfile::Normal,
+            &paneflow_config::loader::load_config(),
         )
     }
 
+    /// `config` is the caller's snapshot of the live config (issue #298:
+    /// settings persist is cache-first, so a fresh `load_config()` here can
+    /// still read the value a change is about to overwrite on disk).
     pub(super) fn resolve_spawn_params_with_profile(
         working_directory: Option<std::path::PathBuf>,
         workspace_id: u64,
@@ -1135,10 +1140,10 @@ impl TerminalState {
         initial_size: Option<(usize, usize)>,
         user_env: Option<std::collections::HashMap<String, String>>,
         profile: TerminalSurfaceProfile,
+        config: &paneflow_config::schema::PaneFlowConfig,
     ) -> SpawnParams {
         // Fallback chain handled by `resolve_default_shell` (US-006):
         // config → $SHELL → /bin/sh
-        let config = paneflow_config::loader::load_config();
         let shell = {
             let configured = config
                 .default_shell
@@ -2726,6 +2731,37 @@ mod tests {
         assert_eq!((p.cols, p.rows), (100, 30));
         let d = TerminalState::resolve_spawn_params(None, 1, 1, None, None);
         assert_eq!((d.cols, d.rows), (120, 40));
+    }
+
+    #[test]
+    fn resolve_spawn_params_uses_the_supplied_config_snapshot() {
+        // Issue #298: the shell and the global `terminal.env` come from the
+        // caller's in-memory snapshot, not from a re-read of `paneflow.json`.
+        let config = paneflow_config::schema::PaneFlowConfig {
+            default_shell: Some("/bin/sh".to_string()),
+            terminal: Some(TerminalConfig {
+                env: Some(HashMap::from([(
+                    "PANEFLOW_TEST_SNAPSHOT_ENV".to_string(),
+                    "from-memory".to_string(),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let p = TerminalState::resolve_spawn_params_with_profile(
+            None,
+            1,
+            1,
+            None,
+            None,
+            TerminalSurfaceProfile::Normal,
+            &config,
+        );
+        assert_eq!(p.shell, "/bin/sh");
+        assert_eq!(
+            p.env.get("PANEFLOW_TEST_SNAPSHOT_ENV").map(String::as_str),
+            Some("from-memory")
+        );
     }
 
     #[cfg(unix)]
