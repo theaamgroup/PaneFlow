@@ -2,6 +2,7 @@
 //!
 //! All functions operate on raw JSON to preserve unknown fields and formatting.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -292,9 +293,31 @@ pub fn migrate_agent_button_visibility_defaults() -> bool {
 /// when the config path could not be resolved or the file write failed.
 ///
 /// Callers that need to surface persistence failures to the user use this
-/// variant.
-pub fn save_config_value_checked(key: &str, value: serde_json::Value) -> bool {
-    save_config_values_checked([(key, value)])
+/// variant. The write is skipped (returning `true`) when `seq` is no longer
+/// the newest generation [`FieldPersistSeq::bump`] handed out for `key`, so a
+/// stale captured value cannot land after a newer one (issue #242).
+pub fn save_config_value_checked(
+    key: &str,
+    value: serde_json::Value,
+    seqs: &FieldPersistSeq,
+    seq: u64,
+) -> bool {
+    let Some(path) = paneflow_config::loader::config_path() else {
+        log::warn!("config: cannot determine config path, not saving");
+        return false;
+    };
+    save_field_at_if_current(&path, FieldScope::TopLevel, key, value, seqs, seq)
+}
+
+/// Insert a top-level key, or remove it when `value` is `Null`.
+fn apply_top_level_field(json: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    if let Some(root) = json.as_object_mut() {
+        if value.is_null() {
+            root.remove(key);
+        } else {
+            root.insert(key.to_string(), value);
+        }
+    }
 }
 
 /// Save several top-level config fields in one read-modify-write cycle.
@@ -307,14 +330,8 @@ pub fn save_config_values_checked<const N: usize>(values: [(&str, serde_json::Va
     let Ok(mut json) = load_raw_config(&path) else {
         return false;
     };
-    if let Some(root) = json.as_object_mut() {
-        for (key, value) in values {
-            if value.is_null() {
-                root.remove(key);
-            } else {
-                root.insert(key.to_string(), value);
-            }
-        }
+    for (key, value) in values {
+        apply_top_level_field(&mut json, key, value);
     }
     write_config_checked(&path, &json)
 }
@@ -511,36 +528,108 @@ pub fn with_commands(
     next
 }
 
+/// Which `paneflow.json` block a single-field settings write targets. Field
+/// names are only unique within a block, so [`FieldPersistSeq`] scopes its
+/// generations by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FieldScope {
+    /// A top-level key.
+    TopLevel,
+    /// A key inside the `"terminal": { ... }` block.
+    Terminal,
+    /// A key inside the `"agent_panel": { ... }` block.
+    AgentPanel,
+}
+
+/// Per-field persist generations for the single-field settings writers
+/// (issue #242).
+///
+/// `persist_setting` captures a value at spawn time and writes it from
+/// `smol::unblock`, so two rapid persists of one field become two independent
+/// tasks and [`CONFIG_WRITE_LOCK`] alone still lets the older task acquire the
+/// lock last and publish its stale value. The caller bumps the field's
+/// generation on the main thread before spawning and the writer re-checks it
+/// while holding the lock. The generation is per field, not global, because a
+/// later write of a *different* field must not cancel this one.
+#[derive(Default)]
+pub struct FieldPersistSeq(Mutex<HashMap<(FieldScope, String), u64>>);
+
+impl FieldPersistSeq {
+    /// Mark a new pending write of `key` and return its generation.
+    pub fn bump(&self, scope: FieldScope, key: &str) -> u64 {
+        let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let seq = map.entry((scope, key.to_string())).or_insert(0);
+        *seq += 1;
+        *seq
+    }
+
+    fn is_current(&self, scope: FieldScope, key: &str, seq: u64) -> bool {
+        let map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        map.get(&(scope, key.to_string())) == Some(&seq)
+    }
+}
+
 /// Save a single field inside the `"terminal": { ... }` block in `paneflow.json`
 /// (US-016 Terminal settings tab). A `Null` value removes the key (restoring
 /// the schema default on next load); the `"terminal"` object itself is left in
-/// place (an empty block is harmless - `#[serde(default)]` handles it).
-pub fn save_terminal_field_checked(key: &str, value: serde_json::Value) -> bool {
+/// place (an empty block is harmless - `#[serde(default)]` handles it). The
+/// write is skipped (returning `true`) when `seq` has been superseded by a
+/// newer [`FieldPersistSeq::bump`] of the same key.
+pub fn save_terminal_field_checked(
+    key: &str,
+    value: serde_json::Value,
+    seqs: &FieldPersistSeq,
+    seq: u64,
+) -> bool {
     let Some(path) = paneflow_config::loader::config_path() else {
         log::warn!("config: cannot determine config path, not saving");
         return false;
     };
-    let _guard = config_write_guard();
-    let Ok(mut json) = load_raw_config(&path) else {
-        return false;
-    };
-    apply_terminal_field(&mut json, key, value);
-    write_config_checked(&path, &json)
+    save_field_at_if_current(&path, FieldScope::Terminal, key, value, seqs, seq)
 }
 
 /// Save a single field inside the `"agent_panel": { ... }` block in
 /// `paneflow.json`, preserving sibling agent-panel settings and unknown fields.
-pub fn save_agent_panel_field_checked(key: &str, value: serde_json::Value) -> bool {
+/// The write is skipped (returning `true`) when `seq` has been superseded by a
+/// newer [`FieldPersistSeq::bump`] of the same key.
+pub fn save_agent_panel_field_checked(
+    key: &str,
+    value: serde_json::Value,
+    seqs: &FieldPersistSeq,
+    seq: u64,
+) -> bool {
     let Some(path) = paneflow_config::loader::config_path() else {
         log::warn!("config: cannot determine config path, not saving");
         return false;
     };
+    save_field_at_if_current(&path, FieldScope::AgentPanel, key, value, seqs, seq)
+}
+
+/// Read-modify-write one field of `path` only when `seq` is still the newest
+/// generation for `(scope, key)`. The generation check happens while holding
+/// the shared config-write lock so an older task cannot overwrite a newer task
+/// that acquired the lock first (mirrors [`save_commands_at_if_current`]).
+fn save_field_at_if_current(
+    path: &Path,
+    scope: FieldScope,
+    key: &str,
+    value: serde_json::Value,
+    seqs: &FieldPersistSeq,
+    seq: u64,
+) -> bool {
     let _guard = config_write_guard();
-    let Ok(mut json) = load_raw_config(&path) else {
+    if !seqs.is_current(scope, key, seq) {
+        return true;
+    }
+    let Ok(mut json) = load_raw_config(path) else {
         return false;
     };
-    apply_agent_panel_field(&mut json, key, value);
-    write_config_checked(&path, &json)
+    match scope {
+        FieldScope::TopLevel => apply_top_level_field(&mut json, key, value),
+        FieldScope::Terminal => apply_terminal_field(&mut json, key, value),
+        FieldScope::AgentPanel => apply_agent_panel_field(&mut json, key, value),
+    }
+    write_config_checked(path, &json)
 }
 
 /// Save the full `commands` array only when this is still the newest workspace
@@ -588,10 +677,11 @@ fn save_commands_at_if_current(
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_BUTTON_VISIBILITY_MIGRATION_KEY, ConfigWritePrecondition, apply_agent_panel_field,
-        apply_reset_shortcuts, apply_terminal_field, load_raw_config, merge_shortcut,
-        migrate_agent_button_visibility_at, reset_shortcuts_at, save_commands_at_if_current,
-        with_commands, write_config_checked, write_config_checked_with_precondition,
+        AGENT_BUTTON_VISIBILITY_MIGRATION_KEY, ConfigWritePrecondition, FieldPersistSeq,
+        FieldScope, apply_agent_panel_field, apply_reset_shortcuts, apply_terminal_field,
+        load_raw_config, merge_shortcut, migrate_agent_button_visibility_at, reset_shortcuts_at,
+        save_commands_at_if_current, save_field_at_if_current, with_commands, write_config_checked,
+        write_config_checked_with_precondition,
     };
     use crate::agent_launcher::TerminalAgent;
     use paneflow_config::schema::CommandDefinition;
@@ -636,6 +726,114 @@ mod tests {
         assert_eq!(got["commands"], serde_json::to_value(&newer).unwrap());
         assert_eq!(cached.commands, newer);
         assert_eq!(save_seq.load(Ordering::SeqCst), 2);
+    }
+
+    /// Issue #242: persist A then persist B of one field, with A's task
+    /// acquiring the config-write lock last. B must stay on disk, for the
+    /// top-level, `terminal`, and `agent_panel` writers alike.
+    #[test]
+    fn stale_field_persist_does_not_overwrite_newer_value() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        let seqs = FieldPersistSeq::default();
+
+        for scope in [
+            FieldScope::TopLevel,
+            FieldScope::Terminal,
+            FieldScope::AgentPanel,
+        ] {
+            let seq_a = seqs.bump(scope, "font_size");
+            let seq_b = seqs.bump(scope, "font_size");
+            assert!(save_field_at_if_current(
+                &path,
+                scope,
+                "font_size",
+                json!(14.0),
+                &seqs,
+                seq_b
+            ));
+            assert!(save_field_at_if_current(
+                &path,
+                scope,
+                "font_size",
+                json!(13.0),
+                &seqs,
+                seq_a
+            ));
+        }
+
+        let got: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            got["font_size"],
+            json!(14.0),
+            "top-level: stale A must not win"
+        );
+        assert_eq!(
+            got["terminal"]["font_size"],
+            json!(14.0),
+            "terminal: stale A must not win"
+        );
+        assert_eq!(
+            got["agent_panel"]["font_size"],
+            json!(14.0),
+            "agent_panel: stale A must not win"
+        );
+    }
+
+    /// The generation is per field and per block: a newer write of another
+    /// key (or the same key in another block) must not cancel this one, or
+    /// this key would never reach disk. A `Null` value still removes the key.
+    #[test]
+    fn field_persist_seq_is_scoped_per_field() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        let seqs = FieldPersistSeq::default();
+
+        let font = seqs.bump(FieldScope::TopLevel, "font_size");
+        let opacity = seqs.bump(FieldScope::TopLevel, "opacity");
+        let nested = seqs.bump(FieldScope::Terminal, "opacity");
+        assert!(save_field_at_if_current(
+            &path,
+            FieldScope::Terminal,
+            "opacity",
+            json!(0.5),
+            &seqs,
+            nested
+        ));
+        assert!(save_field_at_if_current(
+            &path,
+            FieldScope::TopLevel,
+            "opacity",
+            json!(0.9),
+            &seqs,
+            opacity
+        ));
+        assert!(save_field_at_if_current(
+            &path,
+            FieldScope::TopLevel,
+            "font_size",
+            json!(15.0),
+            &seqs,
+            font
+        ));
+
+        let got: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(got["font_size"], json!(15.0));
+        assert_eq!(got["opacity"], json!(0.9));
+        assert_eq!(got["terminal"]["opacity"], json!(0.5));
+
+        let clear = seqs.bump(FieldScope::TopLevel, "font_size");
+        assert!(save_field_at_if_current(
+            &path,
+            FieldScope::TopLevel,
+            "font_size",
+            Value::Null,
+            &seqs,
+            clear
+        ));
+        let got: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(got.get("font_size").is_none());
+        assert_eq!(got["opacity"], json!(0.9));
     }
 
     #[test]

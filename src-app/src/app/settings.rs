@@ -219,13 +219,23 @@ impl PaneFlowApp {
             self.handle_default_shell_changed(cx);
         }
         cx.notify();
+        // Issue #242: `value` is captured at spawn time, so gate the write on
+        // this field's generation under the config-write lock; an older task
+        // that acquires the lock last must not publish its stale value.
+        let scope = if nested {
+            config_writer::FieldScope::Terminal
+        } else {
+            config_writer::FieldScope::TopLevel
+        };
+        let seq = self.config_field_persist_seq.bump(scope, key);
+        let seqs = Arc::clone(&self.config_field_persist_seq);
         let flight = self.begin_config_persist();
         cx.spawn(async move |this, cx| {
             let ok = smol::unblock(move || {
                 if nested {
-                    config_writer::save_terminal_field_checked(key, value)
+                    config_writer::save_terminal_field_checked(key, value, &seqs, seq)
                 } else {
-                    config_writer::save_config_value_checked(key, value)
+                    config_writer::save_config_value_checked(key, value, &seqs, seq)
                 }
             })
             .await;
@@ -273,11 +283,16 @@ impl PaneFlowApp {
         self.cached_config =
             config_writer::with_agent_panel_field(&self.cached_config, key, value.clone());
         cx.notify();
+        let seq = self
+            .config_field_persist_seq
+            .bump(config_writer::FieldScope::AgentPanel, key);
+        let seqs = Arc::clone(&self.config_field_persist_seq);
         let flight = self.begin_config_persist();
         cx.spawn(async move |this, cx| {
-            let ok =
-                smol::unblock(move || config_writer::save_agent_panel_field_checked(key, value))
-                    .await;
+            let ok = smol::unblock(move || {
+                config_writer::save_agent_panel_field_checked(key, value, &seqs, seq)
+            })
+            .await;
             drop(flight);
             if !ok {
                 log::warn!(

@@ -736,6 +736,9 @@ impl PaneFlowApp {
             workspace_commands_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
             )),
+            config_field_persist_seq: std::sync::Arc::new(
+                crate::config_writer::FieldPersistSeq::default(),
+            ),
             config_persist_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config_last_persist_gen,
             // US-014: hydrate the render-path config cache once at startup.

@@ -1240,6 +1240,11 @@ struct PaneFlowApp {
     /// separate from `config_persist_seq` because a later single-field write
     /// does not carry the commands snapshot and therefore cannot supersede it.
     workspace_commands_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Per-field generations for single-field settings writes (issue #242).
+    /// `persist_setting` bumps the field before spawning and the off-thread
+    /// writer skips its write under the config lock once superseded, so a
+    /// stale captured value cannot land last.
+    config_field_persist_seq: std::sync::Arc<config_writer::FieldPersistSeq>,
     /// Off-thread settings writes that have spawned but not finished. A
     /// ConfigWatcher reload is ignored while this is non-zero so write N's
     /// file cannot replace in-memory write N+1.
