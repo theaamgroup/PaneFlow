@@ -177,7 +177,11 @@ pub(crate) fn read_dir_sorted(root: &Path, dir: &Path) -> Vec<FileNode> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
+    // Cap the raw walk, not the surviving rows: otherwise a directory of
+    // thousands of ignored / hidden entries is read and gitignore-matched in
+    // full before the cap ever applies.
     let mut nodes: Vec<FileNode> = entries
+        .take(MAX_DIRECTORY_ENTRIES)
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
@@ -208,7 +212,6 @@ pub(crate) fn read_dir_sorted(root: &Path, dir: &Path) -> Vec<FileNode> {
                 size,
             })
         })
-        .take(MAX_DIRECTORY_ENTRIES)
         .collect();
     nodes.sort_by(compare_nodes);
     nodes
@@ -629,6 +632,37 @@ mod tests {
             nodes.len() <= MAX_DIRECTORY_ENTRIES,
             "listing contained {} entries",
             nodes.len()
+        );
+    }
+
+    /// The cap must bound the raw `read_dir` walk, not just the surviving
+    /// rows: a directory of `MAX_DIRECTORY_ENTRIES * 10` ignored files plus
+    /// ten visible ones must stop reading after the cap. If `take` sits after
+    /// the ignore filter, every ignored entry is read and gitignore-matched
+    /// and all ten visible files come back. Half the visible names sort first
+    /// and half last so a name-ordered readdir cannot place all ten inside
+    /// the capped window either.
+    #[test]
+    fn read_dir_sorted_caps_raw_entries_before_ignore_filter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join(".gitignore"), "*.log\n").expect("gitignore");
+        for index in 0..(MAX_DIRECTORY_ENTRIES * 10) {
+            std::fs::write(root.join(format!("ignored-{index:05}.log")), "").expect("ignored file");
+        }
+        for index in 0..5 {
+            std::fs::write(root.join(format!("aaa-visible-{index}.txt")), "").expect("visible");
+            std::fs::write(root.join(format!("zzz-visible-{index}.txt")), "").expect("visible");
+        }
+
+        let nodes = read_dir_sorted(root, root);
+
+        let names: Vec<String> = nodes.iter().map(node_name).collect();
+        assert!(
+            nodes.len() < 10,
+            "listing returned {} visible entries ({names:?}) from {} so the cap was applied after the ignore filter",
+            nodes.len(),
+            root.display()
         );
     }
 }
