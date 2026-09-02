@@ -79,6 +79,8 @@ struct ToolCall {
     name: String,
     #[serde(default = "empty_object")]
     arguments: Value,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -140,11 +142,12 @@ fn read_pane<T: IpcTransport + ?Sized>(
         .read_surface(surface_id, args.lines, args.offset)
         .map_err(|error| error.to_string())?;
     let header = format!(
-        "{} {} total_lines=\"{}\" eof=\"{}\"",
+        "{} {} total_lines=\"{}\" eof=\"{}\" truncated=\"{}\"",
         source_attr(&args.target.label()),
         bridge.scope().attr(),
         result.total_lines,
-        result.eof
+        result.eof,
+        result.truncated
     );
     Ok(wrap_untrusted(&header, &result.text))
 }
@@ -365,6 +368,45 @@ mod tests {
             read_params["workspace_id"], 42,
             "numeric-target surface.read must send workspace_id: {read_params}"
         );
+    }
+
+    #[test]
+    fn read_pane_header_includes_truncated() {
+        let transport = FakeTransport::new()
+            .with(
+                "surface.list",
+                json!({"surfaces": [surface(7, "vite", None)]}),
+            )
+            .with(
+                "surface.read",
+                json!({"text": "partial", "total_lines": 9, "eof": true, "truncated": true}),
+            );
+        let bridge = Bridge::new(&transport, BridgeScope::All);
+        let result = dispatch_call(
+            &json!({"name": "read_pane", "arguments": {"target": 7}}),
+            &bridge,
+        );
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("truncated=\"true\""), "{text}");
+    }
+
+    #[test]
+    fn tools_call_ignores_protocol_meta() {
+        let transport = FakeTransport::new().with(
+            "surface.list",
+            json!({"surfaces": [surface(7, "vite", None)]}),
+        );
+        let bridge = Bridge::new(&transport, BridgeScope::All);
+        let result = dispatch_call(
+            &json!({
+                "name": "list_panes",
+                "arguments": {},
+                "_meta": {"progressToken": "p1"}
+            }),
+            &bridge,
+        );
+        assert_eq!(result["isError"], false, "{result}");
     }
 
     #[test]
