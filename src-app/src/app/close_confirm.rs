@@ -718,7 +718,13 @@ impl PaneFlowApp {
         self.restore_focus_after_close_confirm(window, cx);
     }
 
-    fn restore_focus_after_close_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Also the restore behind the About and System Info modals (issue
+    /// #244), which take focus the same way this one does.
+    pub(crate) fn restore_focus_after_close_confirm(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let focused = match self.workspaces.get(self.active_idx) {
             Some(ws) => ws.focus_first(window, cx),
             None => false,

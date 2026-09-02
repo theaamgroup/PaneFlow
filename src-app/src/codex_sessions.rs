@@ -81,12 +81,24 @@ pub fn sessions_root() -> Option<PathBuf> {
     sessions_root_from(dirs::home_dir(), std::env::var_os("CODEX_HOME"))
 }
 
-/// `$CODEX_HOME` if set and non-empty, else `~/.codex`, then `sessions/`.
+/// `$CODEX_HOME` if set, non-empty and absolute, else `~/.codex`, then
+/// `sessions/`. A relative value is ignored (with one warning): the CLI
+/// resolves it against the pane's cwd, which this process does not share.
 /// Duplicated from `paneflow-mcp-install` (no shared crate for this helper).
 fn sessions_root_from(home: Option<PathBuf>, codex_home: Option<OsString>) -> Option<PathBuf> {
     codex_home
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| {
+            if p.is_absolute() {
+                return true;
+            }
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log::warn!("ignoring relative CODEX_HOME {p:?}; using ~/.codex");
+            });
+            false
+        })
         .or_else(|| home.map(|h| h.join(".codex")))
         .map(|h| h.join("sessions"))
 }
@@ -1021,6 +1033,17 @@ mod tests {
                 Some(dir.path().as_os_str().to_os_string()),
             ),
             Some(dir.path().join("sessions")),
+        );
+    }
+
+    #[test]
+    fn sessions_root_ignores_a_relative_codex_home() {
+        assert_eq!(
+            sessions_root_from(
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("cfg/codex")),
+            ),
+            Some(PathBuf::from("/home/alice/.codex/sessions")),
         );
     }
 

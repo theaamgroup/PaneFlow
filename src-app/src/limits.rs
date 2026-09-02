@@ -105,3 +105,36 @@ pub(crate) const MAX_UNTRUSTED_LABEL_CHARS: usize = 64;
 pub(crate) fn clamp_untrusted_label(raw: &str) -> String {
     crate::markdown::strip_bidi_zero_width(raw.chars().take(MAX_UNTRUSTED_LABEL_CHARS).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_UNTRUSTED_LABEL_CHARS, clamp_untrusted_label};
+
+    /// Guards the clamp-THEN-scrub order documented on `clamp_untrusted_label`.
+    /// A title padded with a cap's worth of zero-width characters must lose the
+    /// visible spoof hidden behind the padding; scrubbing first and clamping
+    /// second would keep it.
+    #[test]
+    fn clamp_untrusted_label_clamps_before_it_scrubs() {
+        let padding: String = std::iter::repeat_n('\u{200B}', MAX_UNTRUSTED_LABEL_CHARS).collect();
+        let padded = format!("{padding}rm -rf /");
+        assert_eq!(
+            clamp_untrusted_label(&padded),
+            "",
+            "zero-width padding up to the cap must hide nothing behind it"
+        );
+
+        // The mirror case: padding SHORT of the cap leaves the visible tail
+        // that fits, so the cap still describes the input, not the output.
+        let short_padding: String =
+            std::iter::repeat_n('\u{200B}', MAX_UNTRUSTED_LABEL_CHARS - 2).collect();
+        assert_eq!(clamp_untrusted_label(&format!("{short_padding}abcd")), "ab");
+
+        // Plain overlong input is still clamped to the cap.
+        let long: String = std::iter::repeat_n('x', MAX_UNTRUSTED_LABEL_CHARS + 40).collect();
+        assert_eq!(
+            clamp_untrusted_label(&long).chars().count(),
+            MAX_UNTRUSTED_LABEL_CHARS
+        );
+    }
+}

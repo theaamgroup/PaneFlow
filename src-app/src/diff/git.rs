@@ -266,6 +266,57 @@ fn deadline_exhausted(budget: &GitBudget, err: &str) -> bool {
     budget.remaining().is_err() || err.contains("exceeded its deadline")
 }
 
+/// Run a blocking working-tree filesystem call under `budget`. `std::fs` has
+/// no deadline of its own, so the call runs on a helper thread and the caller
+/// waits only for the budget's remaining time: an open or stat that never
+/// returns (a dead NFS mount, a FIFO with no writer) surfaces the column's
+/// deadline error instead of wedging the blocking-pool task. On timeout the
+/// helper is abandoned; it exits on its own once the kernel releases it.
+fn fs_within<T: Send + 'static>(
+    budget: &GitBudget,
+    what: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let deadline = budget.remaining()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("paneflow-diff-fs".to_string())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(|e| format!("{what} failed: {e}"))?;
+    rx.recv_timeout(deadline).map_err(|e| match e {
+        std::sync::mpsc::RecvTimeoutError::Timeout => "git diff exceeded its deadline".to_string(),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => format!("{what} failed"),
+    })
+}
+
+/// [`is_too_large`] charged against `budget` instead of blocking unbounded.
+fn is_too_large_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    rel_path: &str,
+) -> Result<bool, String> {
+    let dir = worktree_dir.to_path_buf();
+    let rel = rel_path.to_string();
+    fs_within(budget, "working-tree stat", move || {
+        is_too_large(&dir, &rel)
+    })
+}
+
+/// [`load_working_text`] charged against `budget` instead of blocking unbounded.
+fn load_working_text_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    rel_path: &str,
+) -> Result<(String, bool), String> {
+    let dir = worktree_dir.to_path_buf();
+    let rel = rel_path.to_string();
+    fs_within(budget, "working-tree read", move || {
+        load_working_text(&dir, &rel)
+    })
+}
+
 /// List all worktrees of the repository containing `repo_dir`. Live path:
 /// [`list_repo_worktrees`] calls this for the US-013 Worktree-scope "include
 /// worktrees not open as workspaces" enumeration.
@@ -330,12 +381,18 @@ pub fn ref_exists(worktree_dir: &Path, ref_name: &str) -> bool {
 
 /// Pick a sensible default base ref for `worktree_dir`: local `develop`, then
 /// the remote default branch, then common local and remote defaults. Returns
-/// `None` when none resolve.
+/// `None` when none resolve. Every probe draws on one shared [`GitBudget`]
+/// (issue #270), so the whole discovery cannot outlive a single
+/// [`GIT_DEADLINE`] even if every `rev-parse` hangs.
 pub fn default_base_ref(worktree_dir: &Path) -> Option<String> {
-    if ref_exists(worktree_dir, "develop") {
+    default_base_ref_within(&GitBudget::for_column(), worktree_dir)
+}
+
+fn default_base_ref_within(budget: &GitBudget, worktree_dir: &Path) -> Option<String> {
+    if ref_exists_within(budget, worktree_dir, "develop") {
         return Some("develop".to_string());
     }
-    if let Some(remote_head) = default_origin_head(worktree_dir) {
+    if let Some(remote_head) = default_origin_head(budget, worktree_dir) {
         return Some(remote_head);
     }
     for candidate in [
@@ -345,22 +402,35 @@ pub fn default_base_ref(worktree_dir: &Path) -> Option<String> {
         "origin/main",
         "origin/master",
     ] {
-        if ref_exists(worktree_dir, candidate) {
+        if ref_exists_within(budget, worktree_dir, candidate) {
             return Some(candidate.to_string());
         }
     }
     None
 }
 
-fn default_origin_head(worktree_dir: &Path) -> Option<String> {
-    let out = run_git(
-        worktree_dir,
-        &["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"],
-    )
-    .ok()?;
+/// [`ref_exists`] charged against `budget` instead of a fresh deadline.
+fn ref_exists_within(budget: &GitBudget, worktree_dir: &Path, ref_name: &str) -> bool {
+    budget
+        .run(
+            worktree_dir,
+            &["rev-parse", "--verify", "--quiet", ref_name],
+        )
+        .is_ok()
+}
+
+fn default_origin_head(budget: &GitBudget, worktree_dir: &Path) -> Option<String> {
+    let out = budget
+        .run(
+            worktree_dir,
+            &["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"],
+        )
+        .ok()?;
     let branch = String::from_utf8_lossy(&out).trim().to_string();
-    (!branch.is_empty() && branch != "origin/HEAD" && ref_exists(worktree_dir, &branch))
-        .then_some(branch)
+    (!branch.is_empty()
+        && branch != "origin/HEAD"
+        && ref_exists_within(budget, worktree_dir, &branch))
+    .then_some(branch)
 }
 
 /// Cheap content fingerprint of a worktree's diff inputs, used on diff-mode
@@ -374,14 +444,17 @@ pub struct ColumnFingerprint {
     head: String,
     base: String,
     diff_hash: u64,
-    untracked_hash: u64,
+    /// `None` when the untracked scan failed or timed out, so it can never
+    /// equal the hash of a genuinely empty untracked set.
+    untracked_hash: Option<u64>,
 }
 
 /// Compute a [`ColumnFingerprint`] for `worktree_dir` against `base_ref`. Runs
 /// git subprocesses, so callers invoke it off the GPUI main thread (inside the
 /// column build closure / a `smol::unblock`). Failed git reads yield empty or
-/// zero components, so unstable repo states fail closed by not matching a prior
-/// complete fingerprint.
+/// zero components, and a failed or timed-out untracked scan yields `None`
+/// (never the hash of a real empty set), so unstable repo states fail closed by
+/// not matching a prior complete fingerprint.
 pub fn column_fingerprint(worktree_dir: &Path, base_ref: &str) -> ColumnFingerprint {
     // Resolve the worktree's own root first, exactly as `compute_worktree_diff`
     // does. The seed `worktree_dir` may be a SUBDIRECTORY (the workspace opened
@@ -411,7 +484,7 @@ pub fn column_fingerprint(worktree_dir: &Path, base_ref: &str) -> ColumnFingerpr
         head: rev("HEAD"),
         base: rev(base_ref),
         diff_hash,
-        untracked_hash: hash_untracked_inputs(worktree_dir),
+        untracked_hash: hash_untracked_inputs(worktree_dir, GIT_DEADLINE),
     }
 }
 
@@ -423,12 +496,22 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-fn hash_untracked_inputs(worktree_dir: &Path) -> u64 {
+/// Hash the untracked inputs of `worktree_dir`, or `None` when the untracked
+/// scan fails or exceeds `deadline`: an exhausted scan must not fingerprint
+/// like an empty untracked set.
+fn hash_untracked_inputs(worktree_dir: &Path, deadline: Duration) -> Option<u64> {
     use std::hash::{Hash as _, Hasher as _};
     use std::io::Read as _;
 
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let (paths, truncated) = list_untracked_limited(worktree_dir, MAX_FILE_COUNT + 1);
+    let (paths, truncated) =
+        match list_untracked_limited_timed(worktree_dir, MAX_FILE_COUNT + 1, deadline) {
+            Ok(listing) => listing,
+            Err(e) => {
+                log::warn!("git: fingerprint untracked listing failed: {e}");
+                return None;
+            }
+        };
     truncated.hash(&mut h);
     for path in paths {
         path.hash(&mut h);
@@ -464,7 +547,7 @@ fn hash_untracked_inputs(worktree_dir: &Path) -> u64 {
             }
         }
     }
-    h.finish()
+    Some(h.finish())
 }
 
 /// Candidate base refs for the selector (US-013): local branches *and*
@@ -522,10 +605,6 @@ fn worktree_toplevel(dir: &Path) -> PathBuf {
         }
         Err(_) => dir.to_path_buf(),
     }
-}
-
-fn list_untracked_limited(dir: &Path, limit: usize) -> (Vec<String>, bool) {
-    list_untracked_limited_timed(dir, limit, GIT_DEADLINE).unwrap_or((Vec::new(), false))
 }
 
 fn list_untracked_limited_timed(
@@ -1059,15 +1138,14 @@ pub fn compute_worktree_diff(worktree_dir: &Path, base_ref: &str) -> WorktreeDif
 /// [`compute_worktree_diff`]: `merge-base(HEAD, base_ref)..working-tree`, plus
 /// untracked files. This is used for Review's sidebar/global counters so they
 /// match `git diff --numstat` instead of drifting with renderer hunk details.
+/// Returns `Err` (never an empty map) when a git read fails or times out.
 pub fn compute_worktree_file_stats(
     worktree_dir: &Path,
     base_ref: &str,
-) -> HashMap<String, FileDiffStat> {
+) -> Result<HashMap<String, FileDiffStat>, String> {
     let toplevel = worktree_toplevel(worktree_dir);
     let worktree_dir = toplevel.as_path();
-    let Ok(merge_base) = merge_base(worktree_dir, base_ref) else {
-        return HashMap::new();
-    };
+    let merge_base = merge_base(worktree_dir, base_ref)?;
     compute_file_stats_against(worktree_dir, &merge_base)
 }
 
@@ -1102,7 +1180,16 @@ pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
 /// Oversized / lockfile / over-count files are shown as stubs rather than
 /// loaded, bounding peak RAM.
 fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
-    let budget = GitBudget::for_column();
+    compute_diff_against_within(&GitBudget::for_column(), worktree_dir, base)
+}
+
+/// [`compute_diff_against`] charged against `budget`; an exhausted budget fails
+/// closed with `WorktreeDiff::error` set before any git subprocess spawns.
+fn compute_diff_against_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    base: &str,
+) -> WorktreeDiff {
     let name_status = match budget.run(
         worktree_dir,
         // `-M` enables rename detection so a moved file reads as one `R` record
@@ -1158,8 +1245,18 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
 
     let mut lookups = Vec::new();
     for (change, path, old_path) in &changes {
-        if is_skipped_name(path) || is_too_large(worktree_dir, path) {
+        if is_skipped_name(path) {
             continue;
+        }
+        match is_too_large_within(budget, worktree_dir, path) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => {
+                return WorktreeDiff {
+                    files: Vec::new(),
+                    error: Some(e),
+                };
+            }
         }
         if *change == FileChange::Added {
             continue;
@@ -1172,7 +1269,7 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
     }
     lookups.sort();
     lookups.dedup();
-    let blobs = match load_base_texts_batch(worktree_dir, base, &lookups, &budget) {
+    let blobs = match load_base_texts_batch(worktree_dir, base, &lookups, budget) {
         Ok(blobs) => blobs,
         Err(e) => {
             log::warn!("git: batched base load failed: {e}");
@@ -1197,7 +1294,20 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
         }
         // Skip lockfiles and oversized files: emit a stub, never load/diff/
         // highlight them. This is the primary OOM guard.
-        if is_skipped_name(&path) || is_too_large(worktree_dir, &path) {
+        let too_large = if is_skipped_name(&path) {
+            true
+        } else {
+            match is_too_large_within(budget, worktree_dir, &path) {
+                Ok(too_large) => too_large,
+                Err(e) => {
+                    return WorktreeDiff {
+                        files: Vec::new(),
+                        error: Some(e),
+                    };
+                }
+            }
+        };
+        if too_large {
             log::debug!("git: skip (lockfile/large) {path}");
             files.push(stub_file(path, change));
             continue;
@@ -1222,7 +1332,15 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
         };
         let (new_text, new_bin) = match change {
             FileChange::Deleted => (String::new(), false),
-            _ => load_working_text(worktree_dir, &path),
+            _ => match load_working_text_within(budget, worktree_dir, &path) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    return WorktreeDiff {
+                        files: Vec::new(),
+                        error: Some(e),
+                    };
+                }
+            },
         };
         // Post-load size guard. `is_too_large` only sees the working-tree side
         // via metadata, so a file that is huge at the merge-base but small or
@@ -1262,20 +1380,35 @@ fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
     WorktreeDiff { files, error: None }
 }
 
-fn compute_file_stats_against(worktree_dir: &Path, base: &str) -> HashMap<String, FileDiffStat> {
-    let mut stats = run_git(
-        worktree_dir,
-        &["diff", "--numstat", "-z", "--no-color", base, "--"],
-    )
-    .map(|out| parse_numstat_z(&out))
-    .unwrap_or_default();
+fn compute_file_stats_against(
+    worktree_dir: &Path,
+    base: &str,
+) -> Result<HashMap<String, FileDiffStat>, String> {
+    compute_file_stats_against_within(&GitBudget::for_column(), worktree_dir, base)
+}
+
+/// [`compute_file_stats_against`] charged against `budget`. A failed or
+/// timed-out numstat or untracked scan is an `Err`, never a partial or empty
+/// map that reads as "no changes".
+fn compute_file_stats_against_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    base: &str,
+) -> Result<HashMap<String, FileDiffStat>, String> {
+    let mut stats = budget
+        .run(
+            worktree_dir,
+            &["diff", "--numstat", "-z", "--no-color", base, "--"],
+        )
+        .map(|out| parse_numstat_z(&out))?;
 
     let remaining = MAX_FILE_COUNT.saturating_sub(stats.len());
     if remaining == 0 {
-        return stats;
+        return Ok(stats);
     }
 
-    let (untracked, truncated) = list_untracked_limited(worktree_dir, remaining);
+    let (untracked, truncated) =
+        list_untracked_limited_timed(worktree_dir, remaining, budget.remaining()?)?;
     if truncated {
         log::debug!("git: untracked file stats truncated at {remaining}");
     }
@@ -1299,7 +1432,7 @@ fn compute_file_stats_against(worktree_dir: &Path, base: &str) -> HashMap<String
         stats.insert(path, FileDiffStat { added, removed: 0 });
     }
 
-    stats
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -1536,6 +1669,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn load_working_text_within_fails_instead_of_hanging_on_blocking_path() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // A FIFO with no writer blocks `File::open` forever - the shape of a
+        // working-tree file on a dead NFS mount. The column budget, not the
+        // kernel, has to bound the read.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let fifo = std::ffi::CString::new(root.join("stuck").as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path for the call's duration.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let budget = GitBudget {
+            deadline_at: Instant::now() + Duration::from_millis(200),
+        };
+        // Watchdog: a regression here hangs forever, so wait on a channel
+        // instead of joining the worker.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_working_text_within(&budget, &root, "stuck"));
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("load_working_text_within hung on a blocking working-tree path");
+        assert_eq!(result, Err("git diff exceeded its deadline".to_string()));
+    }
+
+    #[test]
+    fn working_tree_reads_fail_closed_once_budget_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("small.txt"), b"hello\n").unwrap();
+        let live = GitBudget::for_column();
+        assert_eq!(is_too_large_within(&live, root, "small.txt"), Ok(false));
+        assert_eq!(
+            load_working_text_within(&live, root, "small.txt"),
+            Ok(("hello\n".to_string(), false))
+        );
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        assert!(is_too_large_within(&spent, root, "small.txt").is_err());
+        assert!(load_working_text_within(&spent, root, "small.txt").is_err());
+    }
+
+    #[test]
     fn numstat_z_parsing() {
         let raw = b"3\t1\tsrc/main.rs\0-\t-\timage.png\0";
         let parsed = parse_numstat_z(raw);
@@ -1609,7 +1788,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
         std::fs::write(root.join("untracked.txt"), "alpha\nbeta\n").unwrap();
 
-        let stats = compute_worktree_file_stats(root, "HEAD");
+        let stats = compute_worktree_file_stats(root, "HEAD").expect("file stats");
         assert_eq!(
             stats.get("tracked.txt"),
             Some(&FileDiffStat {
@@ -1643,6 +1822,65 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn default_base_ref_probes_share_one_deadline() {
+        // Issue #270: every probe in default-base discovery must draw on one
+        // GitBudget, not a fresh GIT_DEADLINE each, so a wedged git cannot
+        // stack eight 30 s timeouts before the column fails.
+        let src = include_str!("git.rs");
+        let body = src
+            .split("pub fn default_base_ref(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Cheap content fingerprint").next())
+            .expect("default_base_ref + default_origin_head bodies");
+        assert!(
+            !body.contains("ref_exists(") && !body.contains("run_git("),
+            "default_base_ref must not probe refs with a fresh per-call deadline: {body}"
+        );
+        assert!(
+            body.contains("GitBudget::for_column()"),
+            "default_base_ref must take exactly one GitBudget: {body}"
+        );
+    }
+
+    #[test]
+    fn default_base_ref_stops_probing_once_budget_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init", "-b", "develop"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        // A live budget resolves `develop` as before.
+        assert_eq!(
+            default_base_ref_within(&GitBudget::for_column(), root).as_deref(),
+            Some("develop")
+        );
+        // An exhausted budget fails closed: no probe may spawn git at all,
+        // let alone one per candidate with its own 30 s deadline.
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let _ = take_git_commands();
+        assert_eq!(default_base_ref_within(&spent, root), None);
+        assert!(
+            take_git_commands().is_empty(),
+            "no git probe may run after the shared deadline has passed"
+        );
+    }
+
+    #[test]
     fn compute_diff_against_surfaces_untracked_scan_timeout() {
         let src = include_str!("git.rs");
         let body = src
@@ -1669,9 +1907,122 @@ pub(crate) mod tests {
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         std::fs::write(root.join("c.txt"), "c\n").unwrap();
 
-        let (paths, truncated) = list_untracked_limited(root, 2);
+        let (paths, truncated) =
+            list_untracked_limited_timed(root, 2, GIT_DEADLINE).expect("untracked listing");
         assert_eq!(paths.len(), 2);
         assert!(truncated);
+    }
+
+    #[test]
+    fn compute_diff_against_fails_closed_on_exhausted_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        std::fs::write(root.join("ghost.txt"), "x\n").unwrap();
+        // A live budget lists the untracked file.
+        let live = compute_diff_against_within(&GitBudget::for_column(), root, "HEAD");
+        assert_eq!(live.error, None);
+        assert!(live.files.iter().any(|f| f.path == "ghost.txt"));
+        // An exhausted budget is an error on the return value, not an empty
+        // listing, and spawns no git at all.
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let _ = take_git_commands();
+        let diff = compute_diff_against_within(&spent, root, "HEAD");
+        assert!(diff.files.is_empty());
+        let err = diff.error.expect("exhausted budget must fail closed");
+        assert!(err.contains("deadline"), "got {err}");
+        assert!(take_git_commands().is_empty());
+    }
+
+    #[test]
+    fn file_stats_fail_closed_on_exhausted_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        std::fs::write(root.join("ghost.txt"), "x\n").unwrap();
+        let live = compute_file_stats_against_within(&GitBudget::for_column(), root, "HEAD")
+            .expect("live budget");
+        assert_eq!(
+            live.get("ghost.txt"),
+            Some(&FileDiffStat {
+                added: 1,
+                removed: 0
+            })
+        );
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let _ = take_git_commands();
+        let err = compute_file_stats_against_within(&spent, root, "HEAD")
+            .expect_err("exhausted budget must not read as empty stats");
+        assert!(err.contains("deadline"), "got {err}");
+        assert!(take_git_commands().is_empty());
+    }
+
+    #[test]
+    fn untracked_hash_fails_closed_when_scan_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        // A genuinely empty untracked set hashes to a value; a timed-out scan
+        // must not produce that same value.
+        let empty = hash_untracked_inputs(root, GIT_DEADLINE);
+        assert!(empty.is_some());
+        assert_eq!(hash_untracked_inputs(root, Duration::from_secs(0)), None);
+        let complete = column_fingerprint(root, "HEAD");
+        assert_eq!(complete.untracked_hash, empty);
+        let timed_out = ColumnFingerprint {
+            untracked_hash: None,
+            ..complete.clone()
+        };
+        assert_ne!(complete, timed_out);
     }
 
     #[test]

@@ -19,6 +19,19 @@ use crate::limits::MAX_LINE_BYTES;
 const MAX_WALK_DEPTH: usize = 10;
 const MAX_HEADER_LINES: usize = 256;
 
+/// Cap on directory entries examined by one walk of the session store (files
+/// and subdirectories alike), so a large or hostile `~/.pi/agent/sessions`
+/// cannot turn a sidebar refresh into an unbounded disk walk. Mirrors
+/// `MAX_DIRECTORY_ENTRIES` in `app/files_tree.rs`; the sidebar retains at most
+/// `SIDEBAR_SESSION_RETAINED_PER_SOURCE` of the results anyway.
+const MAX_WALK_ENTRIES: usize = 4_096;
+
+/// Per-file byte budget for the header scan, the same 1 MiB `TITLE_SCAN_BYTES`
+/// the Claude and Codex readers use. The line cap alone would allow
+/// [`MAX_HEADER_LINES`] x [`MAX_LINE_BYTES`] = 16 MiB per file, and draining an
+/// oversized line was unbounded; once the budget is spent the file is skipped.
+const HEADER_SCAN_BYTES: u64 = 1024 * 1024;
+
 pub(crate) fn sessions_root() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".pi").join("agent").join("sessions"))
 }
@@ -48,7 +61,8 @@ fn read_sessions_under_root(root: &Path, cwd: &str) -> (Vec<SessionMeta>, usize)
 fn jsonl_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
-    while let Some((dir, depth)) = queue.pop_front() {
+    let mut examined = 0usize;
+    'walk: while let Some((dir, depth)) = queue.pop_front() {
         if depth > MAX_WALK_DEPTH {
             continue;
         }
@@ -56,6 +70,16 @@ fn jsonl_files(root: &Path) -> Vec<PathBuf> {
             continue;
         };
         for entry in entries.flatten() {
+            if examined >= MAX_WALK_ENTRIES {
+                log::debug!(
+                    target: "paneflow_app::pi_sessions",
+                    "stopped the session walk under {} after {} entries",
+                    root.display(),
+                    MAX_WALK_ENTRIES,
+                );
+                break 'walk;
+            }
+            examined += 1;
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
@@ -75,9 +99,15 @@ fn read_session_meta(path: &Path) -> Option<SessionMeta> {
     let mut reader = BufReader::new(file);
     let mut header: Option<PiHeader> = None;
     let mut summary: Option<String> = None;
+    let mut budget = HEADER_SCAN_BYTES;
 
     for _ in 0..MAX_HEADER_LINES {
-        let line = match read_capped_line(&mut reader, path)? {
+        // Stop once the remaining budget can no longer hold a full line, so
+        // the exact `read == MAX_LINE_BYTES` oversized check below stays valid.
+        if budget < MAX_LINE_BYTES {
+            break;
+        }
+        let line = match read_capped_line(&mut reader, path, &mut budget)? {
             CappedLine::Eof => break,
             CappedLine::Oversized => continue,
             CappedLine::Line(line) => line,
@@ -160,7 +190,11 @@ enum CappedLine {
     Line(String),
 }
 
-fn read_capped_line<R: BufRead>(reader: &mut R, path: &Path) -> Option<CappedLine> {
+fn read_capped_line<R: BufRead>(
+    reader: &mut R,
+    path: &Path,
+    budget: &mut u64,
+) -> Option<CappedLine> {
     let mut line = String::new();
     let read = reader
         .by_ref()
@@ -170,6 +204,7 @@ fn read_capped_line<R: BufRead>(reader: &mut R, path: &Path) -> Option<CappedLin
     if read == 0 {
         return Some(CappedLine::Eof);
     }
+    *budget = budget.saturating_sub(read as u64);
 
     if read as u64 == MAX_LINE_BYTES && !line.ends_with('\n') {
         let more_follows = match reader.fill_buf() {
@@ -183,7 +218,7 @@ fn read_capped_line<R: BufRead>(reader: &mut R, path: &Path) -> Option<CappedLin
                 MAX_LINE_BYTES,
                 path.display(),
             );
-            drain_oversized_line(reader)?;
+            drain_oversized_line(reader, budget)?;
             return Some(CappedLine::Oversized);
         }
     }
@@ -191,8 +226,15 @@ fn read_capped_line<R: BufRead>(reader: &mut R, path: &Path) -> Option<CappedLin
     Some(CappedLine::Line(line))
 }
 
-fn drain_oversized_line<R: BufRead>(reader: &mut R) -> Option<()> {
+/// Discard the rest of an oversized line in bounded chunks, charging every
+/// byte against `budget`. Returns `None` (the caller skips the file) when the
+/// budget runs out before the newline, so a single huge line costs at most
+/// [`HEADER_SCAN_BYTES`] of I/O.
+fn drain_oversized_line<R: BufRead>(reader: &mut R, budget: &mut u64) -> Option<()> {
     loop {
+        if *budget == 0 {
+            return None;
+        }
         let chunk = match reader.fill_buf() {
             Ok(buf) => buf,
             Err(_) => return None,
@@ -202,10 +244,12 @@ fn drain_oversized_line<R: BufRead>(reader: &mut R) -> Option<()> {
         }
         if let Some(nl) = chunk.iter().position(|&b| b == b'\n') {
             reader.consume(nl + 1);
+            *budget = budget.saturating_sub(nl as u64 + 1);
             return Some(());
         }
         let consumed = chunk.len();
         reader.consume(consumed);
+        *budget = budget.saturating_sub(consumed as u64);
     }
 }
 
@@ -289,6 +333,42 @@ mod tests {
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].summary.as_deref(), Some("Still readable"));
+    }
+
+    #[test]
+    fn walk_stops_after_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_WALK_ENTRIES + 16) {
+            fs::write(dir.path().join(format!("{i:05}.jsonl")), "").unwrap();
+        }
+
+        let found = jsonl_files(dir.path());
+        assert_eq!(found.len(), MAX_WALK_ENTRIES);
+    }
+
+    #[test]
+    fn skips_file_when_oversized_line_outruns_scan_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let oversized = format!(
+            r#"{{"type":"noise","blob":"{}"}}"#,
+            "x".repeat(HEADER_SCAN_BYTES as usize + 4096)
+        );
+        fs::write(
+            &path,
+            format!(
+                "{oversized}\n{}\n",
+                r#"{"type":"session","version":3,"id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"2026-06-29T09:10:11Z","cwd":"/repo"}"#
+            ),
+        )
+        .unwrap();
+
+        let (sessions, omitted) = read_sessions_under_root(dir.path(), "/repo");
+        assert_eq!(omitted, 0);
+        assert!(
+            sessions.is_empty(),
+            "a line past the scan budget must skip the file, not drain it"
+        );
     }
 
     #[test]

@@ -413,6 +413,26 @@ mod tests {
             sent_frame(build_frame(HookEvent::Stop, context, json!({})).expect("valid stop frame"));
         assert_eq!(stop["params"]["event_source"], "interrupt");
 
+        // Exit and SessionEnd are the shim-synthesized interrupt frames
+        // (Ctrl+C / pane close); the server suppresses stop summaries on
+        // `event_source=interrupt`, so both must forward it.
+        let mut context = test_context();
+        context.event_source = Some(LifecycleEventSource::Interrupt);
+        let exit = sent_frame(
+            build_frame(HookEvent::Exit, context, json!({"exit_code": 130}))
+                .expect("valid exit frame"),
+        );
+        assert_eq!(exit["params"]["event_source"], "interrupt");
+        assert_eq!(exit["params"]["exit_code"], 130);
+
+        let mut context = test_context();
+        context.event_source = Some(LifecycleEventSource::Interrupt);
+        let session_end = sent_frame(
+            build_frame(HookEvent::SessionEnd, context, json!({}))
+                .expect("valid session end frame"),
+        );
+        assert_eq!(session_end["params"]["event_source"], "interrupt");
+
         let mut context = test_context();
         context.event_source = Some(LifecycleEventSource::Interrupt);
         let prompt = sent_frame(

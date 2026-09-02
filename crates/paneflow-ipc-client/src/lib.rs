@@ -506,8 +506,9 @@ pub fn subscribe_stream_timed(
 /// dependency, and the two must be kept in lockstep or the client dials an
 /// endpoint the server never bound (#217). In particular: the override is read
 /// as `OsString`, so a non-UTF-8 value is honoured like the server's; a
-/// non-UTF-8 `$TMPDIR` is treated as unset and falls through to the cache dir;
-/// and the composed path is rejected against the same `sun_path` ceiling.
+/// non-UTF-8 `$TMPDIR`, or one that is not an existing directory, is treated
+/// as unset and falls through to the cache dir; and the composed path is
+/// rejected against the same `sun_path` ceiling.
 pub fn resolve_socket_path() -> Option<PathBuf> {
     resolve_socket_path_from(&|key| std::env::var_os(key))
 }
@@ -553,6 +554,10 @@ fn default_socket_path_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -
         .and_then(|raw| raw.into_string().ok())
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+        // Same as the server (#289): a $TMPDIR that is not an existing
+        // directory (stale from a previous boot) reads as unset, because the
+        // server bound under the cache dir in that case.
+        .filter(|p| p.is_dir())
         // Last resort, mirroring the server's `dirs::cache_dir().join("run")`
         // (`runtime_paths::runtime_dir_from`). Without this, a client whose
         // $TMPDIR is stripped (launchd/cron) returned None - "IPC unreachable"
@@ -1074,11 +1079,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn overlong_default_path_returns_none_like_the_server() {
-        // 120-byte TMPDIR → joined path blows past 104. The value never
-        // touches the filesystem, so it does not need to exist.
-        let long = "/".to_string() + &"x".repeat(119);
-        assert_eq!(long.len(), 120);
-        let env = fake_env(vec![("TMPDIR", std::ffi::OsString::from(&long))]);
+        // A TMPDIR of at least 120 bytes → joined path blows past 104. It
+        // has to exist on disk, or the resolver reads it as unset and falls
+        // through to the cache dir instead of hitting the ceiling.
+        let _env = SocketEnvGuard::take();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let long_dir = tmp.path().join("x".repeat(120));
+        std::fs::create_dir(&long_dir).unwrap();
+        assert!(long_dir.as_os_str().len() >= 120);
+        let env = fake_env(vec![("TMPDIR", long_dir.into_os_string())]);
         assert!(
             resolve_socket_path_from(&env).is_none(),
             "an over-long sun_path must yield no endpoint, matching the server's refusal to bind"
@@ -1156,6 +1165,29 @@ mod tests {
         assert_eq!(
             resolve_socket_path(),
             Some(expected_socket_under(tmp.path()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_tmpdir_falls_back_to_cache_dir_like_the_server() {
+        // A stale $TMPDIR naming a path that no longer exists reads as unset
+        // on the server (`runtime_paths::runtime_dir_from`, #289), so the
+        // client must fall through to the same cache-dir endpoint or it
+        // dials a socket the server never bound.
+        let _env = SocketEnvGuard::take();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("gone");
+        assert!(!missing.exists(), "fixture must not exist");
+        let env = fake_env(vec![
+            ("TMPDIR", missing.clone().into_os_string()),
+            ("HOME", std::ffi::OsString::from("/Users/stub")),
+        ]);
+        let p = resolve_socket_path_from(&env).expect("cache fallback must resolve");
+        assert_eq!(
+            p,
+            expected_socket_under(Path::new("/Users/stub/Library/Caches/run")),
+            "a $TMPDIR that is not an existing directory is treated as unset"
         );
     }
 }

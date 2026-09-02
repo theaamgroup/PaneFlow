@@ -77,6 +77,11 @@ pub(crate) struct CustomButtonsModal {
     /// reload; we lookup the index lazily when we need to mutate).
     pub workspace_id: u64,
     pub view: ModalView,
+    /// Keyboard-selected row in `ModalView::List`: `0..len` is a button,
+    /// `len` is the trailing "New button" row. Up/Down move it, Enter opens
+    /// it, Delete/Backspace removes it, so the list is usable without a
+    /// pointer (Edit/Delete are otherwise hover-revealed).
+    pub selected: usize,
     /// Scroll state for the button list (`ModalView::List`).
     pub list_scroll: gpui::ScrollHandle,
     pub list_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
@@ -107,6 +112,36 @@ fn new_button_id() -> String {
     format!("b{millis:x}")
 }
 
+/// What a key press does in `ModalView::List`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListKeyAction {
+    Close,
+    Select(usize),
+    Edit(usize),
+    Delete(usize),
+    New,
+}
+
+/// Keyboard model for the list view. `selected` is the current row and `len`
+/// the number of buttons; row `len` is the "New button" row, so the list is
+/// never empty of selectable rows. A stale `selected` (after a deletion) is
+/// clamped onto the last row.
+fn list_key_action(key: &str, selected: usize, len: usize) -> Option<ListKeyAction> {
+    let selected = selected.min(len);
+    match key {
+        "escape" => Some(ListKeyAction::Close),
+        "up" => (selected > 0).then(|| ListKeyAction::Select(selected - 1)),
+        "down" => (selected < len).then(|| ListKeyAction::Select(selected + 1)),
+        "enter" => Some(if selected < len {
+            ListKeyAction::Edit(selected)
+        } else {
+            ListKeyAction::New
+        }),
+        "delete" | "backspace" => (selected < len).then_some(ListKeyAction::Delete(selected)),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PaneFlowApp impl
 // ---------------------------------------------------------------------------
@@ -126,6 +161,7 @@ impl PaneFlowApp {
         self.custom_buttons_modal = Some(CustomButtonsModal {
             workspace_id,
             view: ModalView::List,
+            selected: 0,
             list_scroll: gpui::ScrollHandle::new(),
             list_drag: None,
             form_scroll: gpui::ScrollHandle::new(),
@@ -284,8 +320,33 @@ impl PaneFlowApp {
 
         match &modal.view {
             ModalView::List => {
-                if key == "escape" {
-                    self.close_custom_buttons_modal(cx);
+                let buttons = self
+                    .target_workspace_idx()
+                    .map(|idx| self.workspaces[idx].custom_buttons.as_slice())
+                    .unwrap_or(&[]);
+                let len = buttons.len();
+                match list_key_action(key, modal.selected, len) {
+                    Some(ListKeyAction::Close) => self.close_custom_buttons_modal(cx),
+                    Some(ListKeyAction::Select(row)) => {
+                        if let Some(modal) = self.custom_buttons_modal.as_mut() {
+                            modal.selected = row;
+                        }
+                        cx.notify();
+                    }
+                    Some(ListKeyAction::Edit(row)) => {
+                        let id = buttons[row].id.clone();
+                        self.begin_edit_button(&id, window, cx);
+                    }
+                    Some(ListKeyAction::Delete(row)) => {
+                        let id = buttons[row].id.clone();
+                        self.delete_button(&id, cx);
+                        // Keep the selection on a real row after the removal.
+                        if let Some(modal) = self.custom_buttons_modal.as_mut() {
+                            modal.selected = row.min(len.saturating_sub(1));
+                        }
+                    }
+                    Some(ListKeyAction::New) => self.begin_new_button(window, cx),
+                    None => {}
                 }
             }
             ModalView::Form {
@@ -542,11 +603,13 @@ impl PaneFlowApp {
                         div()
                             .text_size(px(11.))
                             .text_color(ui.muted)
-                            .child("Click \"+ New button\" to create one."),
+                            .child("Press Enter or click \"+ New button\" to create one."),
                     ),
             );
         } else {
-            for btn in buttons {
+            let selected = modal.selected.min(buttons.len());
+            for (row_idx, btn) in buttons.iter().enumerate() {
+                let is_selected = row_idx == selected;
                 let btn_id = btn.id.clone();
                 let edit_id = btn.id.clone();
                 let del_id = btn.id.clone();
@@ -650,8 +713,12 @@ impl PaneFlowApp {
                                 ),
                         )
                         .animated_hover_element(move |row, delta| {
+                            // The keyboard-selected row is revealed at rest,
+                            // exactly as a hovered row is, so Edit/Delete are
+                            // reachable without a pointer.
+                            let reveal = if is_selected { 1.0 } else { delta };
                             row.style()
-                                .bg(lerp_color(ui.subtle.opacity(0.0), ui.subtle, delta));
+                                .bg(lerp_color(ui.subtle.opacity(0.0), ui.subtle, reveal));
                             let actions = div()
                                 .absolute()
                                 .top_0()
@@ -659,8 +726,8 @@ impl PaneFlowApp {
                                 .flex()
                                 .flex_row()
                                 .gap(px(10.))
-                                .opacity(delta)
-                                .when(delta <= f32::EPSILON, |actions| actions.hidden())
+                                .opacity(reveal)
+                                .when(reveal <= f32::EPSILON, |actions| actions.hidden())
                                 .child(edit_button)
                                 .child(delete_button);
                             let actions_slot = div()
@@ -677,7 +744,8 @@ impl PaneFlowApp {
         }
 
         // Quiet "New button" row (the Agents "New chat" language): no border,
-        // muted at rest, fill on hover.
+        // muted at rest, fill on hover or when keyboard-selected.
+        let new_selected = modal.selected >= buttons.len();
         let new_row = div()
             .id("cbtn-new")
             .mt(px(4.))
@@ -685,7 +753,12 @@ impl PaneFlowApp {
             .py(px(8.))
             .rounded(px(6.))
             .animated_hover(move |style, delta| {
-                style.bg(lerp_color(ui.subtle.opacity(0.0), ui.subtle, delta));
+                let resting = if new_selected {
+                    ui.subtle
+                } else {
+                    ui.subtle.opacity(0.0)
+                };
+                style.bg(lerp_color(resting, ui.subtle, delta));
             })
             .flex()
             .flex_row()
@@ -1018,5 +1091,64 @@ impl PaneFlowApp {
                     .font_family("monospace")
                     .child(input),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keyboard users must be able to reach every list action without a
+    /// pointer: Up/Down walk the rows (the trailing "New button" row
+    /// included), Enter opens the selected row, Delete/Backspace removes it.
+    #[test]
+    fn list_keys_walk_rows_and_open_or_delete_the_selected_one() {
+        // Three buttons: rows 0..3 are buttons, row 3 is "New button".
+        assert_eq!(
+            list_key_action("down", 0, 3),
+            Some(ListKeyAction::Select(1))
+        );
+        assert_eq!(
+            list_key_action("down", 2, 3),
+            Some(ListKeyAction::Select(3))
+        );
+        assert_eq!(list_key_action("down", 3, 3), None, "no row past New");
+        assert_eq!(list_key_action("up", 3, 3), Some(ListKeyAction::Select(2)));
+        assert_eq!(list_key_action("up", 0, 3), None, "no row above the first");
+        assert_eq!(list_key_action("enter", 1, 3), Some(ListKeyAction::Edit(1)));
+        assert_eq!(list_key_action("enter", 3, 3), Some(ListKeyAction::New));
+        assert_eq!(
+            list_key_action("delete", 1, 3),
+            Some(ListKeyAction::Delete(1))
+        );
+        assert_eq!(
+            list_key_action("backspace", 2, 3),
+            Some(ListKeyAction::Delete(2))
+        );
+        assert_eq!(
+            list_key_action("delete", 3, 3),
+            None,
+            "New row is not deletable"
+        );
+        assert_eq!(list_key_action("escape", 1, 3), Some(ListKeyAction::Close));
+        assert_eq!(list_key_action("x", 1, 3), None);
+    }
+
+    /// With no buttons the only row is "New button", so Enter creates and
+    /// nothing else moves.
+    #[test]
+    fn list_keys_on_an_empty_list_only_create() {
+        assert_eq!(list_key_action("enter", 0, 0), Some(ListKeyAction::New));
+        assert_eq!(list_key_action("down", 0, 0), None);
+        assert_eq!(list_key_action("up", 0, 0), None);
+        assert_eq!(list_key_action("delete", 0, 0), None);
+    }
+
+    /// A selection index that outlived a deletion is clamped onto the last
+    /// row rather than pointing past the list.
+    #[test]
+    fn list_keys_clamp_a_stale_selection() {
+        assert_eq!(list_key_action("enter", 9, 2), Some(ListKeyAction::New));
+        assert_eq!(list_key_action("up", 9, 2), Some(ListKeyAction::Select(1)));
     }
 }

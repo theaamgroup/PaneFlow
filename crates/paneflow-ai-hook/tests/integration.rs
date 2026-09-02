@@ -153,6 +153,18 @@ struct HookEnv<'a> {
 }
 
 fn run_hook(event: &str, hook_env: &HookEnv<'_>, stdin_bytes: &[u8]) -> std::process::ExitStatus {
+    run_hook_with_env(event, hook_env, &[], stdin_bytes)
+}
+
+/// `run_hook` plus extra `PANEFLOW_*` variables the shim sets only on the
+/// synthesized lifecycle frames (`PANEFLOW_AI_EXIT_CODE`,
+/// `PANEFLOW_AI_EVENT_SOURCE`).
+fn run_hook_with_env(
+    event: &str,
+    hook_env: &HookEnv<'_>,
+    extra_env: &[(&str, &str)],
+    stdin_bytes: &[u8],
+) -> std::process::ExitStatus {
     let mut command = Command::new(HOOK_BIN);
     command
         .arg(event)
@@ -172,6 +184,9 @@ fn run_hook(event: &str, hook_env: &HookEnv<'_>, stdin_bytes: &[u8]) -> std::pro
     }
     if let Some(log) = hook_env.hook_log {
         command.env("PANEFLOW_HOOK_LOG", log);
+    }
+    for (key, value) in extra_env {
+        command.env(key, value);
     }
 
     let mut child = command.spawn().expect("hook subprocess");
@@ -411,6 +426,87 @@ fn supported_events_dispatch_through_the_process_boundary() {
             assert!(params.get("notification_type").is_none());
         }
     }
+}
+
+#[test]
+fn shim_synthesized_exit_forwards_exit_code_and_interrupt_source() {
+    let server = MockServer::start();
+    let status = run_hook_with_env(
+        "Exit",
+        &HookEnv {
+            socket_path: Some(&server.socket_path),
+            workspace_id: 11,
+            tool: "claude",
+            pid: Some(4242),
+            hook_log: None,
+        },
+        &[
+            ("PANEFLOW_AI_EXIT_CODE", "130"),
+            ("PANEFLOW_AI_EVENT_SOURCE", "interrupt"),
+        ],
+        b"",
+    );
+
+    assert!(status.success());
+    let frame = server.expect_frame("shim_exit");
+    assert_eq!(frame["method"], "ai.exit");
+    let params = &frame["params"];
+    assert_eq!(params["workspace_id"], 11);
+    assert_eq!(params["pid"], 4242);
+    assert_eq!(params["exit_code"], 130);
+    assert_eq!(params["event_source"], "interrupt");
+    assert_eq!(params["hook_payload"]["exit_code"], 130);
+}
+
+#[test]
+fn exit_without_exit_code_env_logs_and_sends_no_frame() {
+    let server = MockServer::start();
+    let log_directory = tempfile::TempDir::new().expect("log directory");
+    let log_path = log_directory.path().join("hook.log");
+    let status = run_hook_with_env(
+        "Exit",
+        &HookEnv {
+            socket_path: Some(&server.socket_path),
+            workspace_id: 11,
+            tool: "claude",
+            pid: Some(4242),
+            hook_log: Some(&log_path),
+        },
+        &[("PANEFLOW_AI_EVENT_SOURCE", "interrupt")],
+        b"",
+    );
+
+    assert!(status.success());
+    assert!(server.try_recv(Duration::from_millis(250)).is_none());
+    assert!(std::fs::read_to_string(log_path)
+        .expect("hook log")
+        .contains("missing or invalid PANEFLOW_AI_EXIT_CODE"));
+}
+
+#[test]
+fn shim_synthesized_session_end_forwards_interrupt_source_with_empty_stdin() {
+    let server = MockServer::start();
+    let status = run_hook_with_env(
+        "SessionEnd",
+        &HookEnv {
+            socket_path: Some(&server.socket_path),
+            workspace_id: 11,
+            tool: "claude",
+            pid: Some(4242),
+            hook_log: None,
+        },
+        &[("PANEFLOW_AI_EVENT_SOURCE", "interrupt")],
+        b"",
+    );
+
+    assert!(status.success());
+    let frame = server.expect_frame("shim_session_end");
+    assert_eq!(frame["method"], "ai.session_end");
+    let params = &frame["params"];
+    assert_eq!(params["workspace_id"], 11);
+    assert_eq!(params["pid"], 4242);
+    assert_eq!(params["event_source"], "interrupt");
+    assert!(params.get("exit_code").is_none());
 }
 
 #[test]

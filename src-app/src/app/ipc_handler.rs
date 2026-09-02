@@ -96,24 +96,52 @@ pub(crate) struct PlannedPane {
     pub(crate) context: Option<String>,
 }
 
-/// Parse a JSON `{ "K": "V", … }` object into an env map, dropping non-string
-/// values. Returns `None` for absent/empty so the global `terminal.env` default
-/// still applies underneath (parity with `SurfaceDefinition::env`).
-fn parse_env_object(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
-    let obj = value?.as_object()?;
-    let map: HashMap<String, String> = obj
-        .iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-        .collect();
-    (!map.is_empty()).then_some(map)
+/// Parse a JSON `{ "K": "V", … }` object into an env map. Every value must be
+/// a string (a shell env value can only be a string); anything else is a
+/// `-32602` rather than a silently dropped entry, so a client never gets a
+/// pane missing the env it asked for. Returns `Ok(None)` for absent/`null`/
+/// empty so the global `terminal.env` default still applies underneath
+/// (parity with `SurfaceDefinition::env`).
+fn parse_env_object(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<HashMap<String, String>>, JsonRpcError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let Some(obj) = value.as_object() else {
+        return Err(JsonRpcError::invalid_params(
+            "env must be an object of string values",
+        ));
+    };
+    let mut map = HashMap::with_capacity(obj.len());
+    for (k, v) in obj {
+        let Some(s) = v.as_str() else {
+            return Err(JsonRpcError::invalid_params(format!(
+                "env value for {k:?} must be a string"
+            )));
+        };
+        map.insert(k.clone(), s.to_string());
+    }
+    Ok((!map.is_empty()).then_some(map))
 }
 
-fn parse_terminal_profile(value: Option<&serde_json::Value>) -> TerminalSurfaceProfile {
-    match value.and_then(|v| v.as_str()) {
-        Some("agent") => TerminalSurfaceProfile::Agent,
-        Some("review") => TerminalSurfaceProfile::Review,
-        Some("cached") => TerminalSurfaceProfile::Cached,
-        _ => TerminalSurfaceProfile::Normal,
+/// Parse an optional `profile` string. Absent/`null` is `Normal`; an unknown
+/// name or a non-string is a `-32602` instead of silently falling back.
+fn parse_terminal_profile(
+    value: Option<&serde_json::Value>,
+) -> Result<TerminalSurfaceProfile, JsonRpcError> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(TerminalSurfaceProfile::Normal),
+        Some(serde_json::Value::String(name)) => match name.as_str() {
+            "normal" => Ok(TerminalSurfaceProfile::Normal),
+            "agent" => Ok(TerminalSurfaceProfile::Agent),
+            "review" => Ok(TerminalSurfaceProfile::Review),
+            "cached" => Ok(TerminalSurfaceProfile::Cached),
+            other => Err(JsonRpcError::invalid_params(format!(
+                "unknown profile {other:?}; expected one of normal, agent, review, cached"
+            ))),
+        },
+        Some(_) => Err(JsonRpcError::invalid_params("profile must be a string")),
     }
 }
 
@@ -146,8 +174,8 @@ pub(crate) fn parse_workspace_pane_plan(
             .and_then(|c| c.as_str())
             .map(str::to_string),
         prompt: prompt.map(str::to_string),
-        env: parse_env_object(spec.get("env")),
-        profile: parse_terminal_profile(spec.get("profile")),
+        env: parse_env_object(spec.get("env"))?,
+        profile: parse_terminal_profile(spec.get("profile"))?,
         focus: spec.get("focus").and_then(|f| f.as_bool()).unwrap_or(false),
         label: spec
             .get("label")
@@ -645,10 +673,10 @@ fn normalized_shell_value(shell: Option<&str>) -> &str {
     shell.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("")
 }
 
-fn env_param_has_strings(value: Option<&serde_json::Value>) -> bool {
+fn env_param_is_nonempty_object(value: Option<&serde_json::Value>) -> bool {
     value
         .and_then(|v| v.as_object())
-        .is_some_and(|obj| obj.values().any(serde_json::Value::is_string))
+        .is_some_and(|obj| !obj.is_empty())
 }
 
 fn string_param_is_nonempty(value: Option<&serde_json::Value>) -> bool {
@@ -661,7 +689,7 @@ fn pane_spec_requires_orchestration(spec: &serde_json::Value) -> bool {
     string_param_is_nonempty(spec.get("command"))
         || string_param_is_nonempty(spec.get("prompt"))
         || string_param_is_nonempty(spec.get("context"))
-        || env_param_has_strings(spec.get("env"))
+        || env_param_is_nonempty_object(spec.get("env"))
         || spec
             .get("managed_worktree")
             .is_some_and(|value| !value.is_null())
@@ -1133,8 +1161,74 @@ fn requested_index(params: &serde_json::Value) -> Result<Option<usize>, JsonRpcE
         .ok_or_else(|| JsonRpcError::invalid_params("'index' must be a non-negative integer"))
 }
 
+/// Extract an optional bounded integer param, distinguishing ABSENT from
+/// MALFORMED or OUT OF RANGE.
+///
+/// `surface.read` and `surface.search` used to coerce a string, float,
+/// negative, or `null` to the default and clamp `0` or `4001` into range, so
+/// a conductor that sent a typo'd `lines` over JSON-RPC got a 200-line page
+/// and believed it was the requested window. The MCP bridge rejects the
+/// same inputs (`validate_limit` in `paneflow-mcp`); this mirrors it so the
+/// two contracts agree (issue #281). Mirrors [`requested_index`].
+fn requested_bounded(
+    params: &serde_json::Value,
+    key: &str,
+    min: usize,
+    max: usize,
+) -> Result<Option<usize>, JsonRpcError> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    let Some(n) = value.as_u64() else {
+        return Err(JsonRpcError::invalid_params(format!(
+            "'{key}' must be a non-negative integer"
+        )));
+    };
+    usize::try_from(n)
+        .ok()
+        .filter(|n| (min..=max).contains(n))
+        .map(Some)
+        .ok_or_else(|| {
+            JsonRpcError::invalid_params(format!("'{key}' must be between {min} and {max}"))
+        })
+}
+
+/// Extract the optional `fenced` param, distinguishing ABSENT (use the
+/// config default) from a non-boolean, which is rejected rather than
+/// silently mapped to the default (issue #281).
+fn requested_fenced(params: &serde_json::Value) -> Result<Option<bool>, JsonRpcError> {
+    let Some(value) = params.get("fenced") else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| JsonRpcError::invalid_params("'fenced' must be a boolean"))
+}
+
 fn surface_matches_workspace(surface: &SurfaceMeta, workspace_id: Option<u64>) -> bool {
     workspace_id.is_none_or(|expected| surface.workspace_id == Some(expected))
+}
+
+/// Root `pane_count` / `workspace` of a `surface.list` response, as
+/// `(pane_count, workspace_idx)`. Both describe the workspace the `surfaces`
+/// array was filtered to: the workspace whose stable id is
+/// `requested_workspace_id`, else the active one. `workspace_idx` is the
+/// 0-based `workspaces` index, the same id space the field always used. An
+/// unknown id matches no surfaces, so it reports zero panes and no index.
+fn surface_list_workspace_scope(
+    workspaces: &[Workspace],
+    active_idx: usize,
+    requested_workspace_id: Option<u64>,
+) -> (usize, Option<usize>) {
+    let idx = match requested_workspace_id {
+        None => Some(active_idx),
+        Some(id) => workspaces.iter().position(|ws| ws.id == id),
+    };
+    let count = idx
+        .and_then(|idx| workspaces.get(idx))
+        .map_or(0, Workspace::pane_count);
+    (count, idx)
 }
 
 /// Window a scrollback string by line. `offset` counts lines skipped from the
@@ -1733,6 +1827,7 @@ impl PaneFlowApp {
             // pick up the reload without a per-frame `load_config()`. Last use
             // of `config` - move it in.
             self.cached_config = config;
+            crate::config_writer::publish_config_snapshot(cx, &self.cached_config);
             self.theme_mode = theme_mode;
             // Hot-reload the motion switch (GPUI refreshes the windows itself
             // when the value actually changes).
@@ -2782,7 +2877,7 @@ impl PaneFlowApp {
                 // or buggy IPC clients (CWE-400). Matches the keyboard-action cap
                 // in `workspace_ops::create_workspace`.
                 if self.workspaces.len() >= MAX_WORKSPACES {
-                    return serde_json::json!({"error": "Workspace limit reached"});
+                    return JsonRpcError::invalid_params("Workspace limit reached").into_value();
                 }
                 // US-001: parse the optional `layout` param up-front so we can
                 // refuse a malformed payload with -32602 before mutating any
@@ -2891,7 +2986,7 @@ impl PaneFlowApp {
                     self.activate_workspace_without_window(idx, cx);
                     serde_json::json!({"selected": idx})
                 } else {
-                    serde_json::json!({"error": "Index out of bounds"})
+                    JsonRpcError::invalid_params("Index out of bounds").into_value()
                 }
             }
             "workspace.close" => {
@@ -2902,7 +2997,7 @@ impl PaneFlowApp {
                     return orchestration_disabled_error(method).into_value();
                 }
                 if self.workspaces.len() <= 1 {
-                    serde_json::json!({"error": "Cannot close last workspace"})
+                    JsonRpcError::invalid_params("Cannot close last workspace").into_value()
                 } else {
                     let idx = match requested_index(params) {
                         Ok(index) => index.unwrap_or(self.active_idx),
@@ -2917,7 +3012,7 @@ impl PaneFlowApp {
                             serde_json::json!({"confirmation_required": true, "workspace": idx})
                         }
                         crate::app::close_confirm::WorkspaceCloseOutcome::NotFound => {
-                            serde_json::json!({"error": "Index out of bounds"})
+                            JsonRpcError::invalid_params("Index out of bounds").into_value()
                         }
                     }
                 }
@@ -2927,12 +3022,13 @@ impl PaneFlowApp {
                     return serde_json::json!({"error": "Session restore in progress"});
                 }
                 let Some(layout_value) = params.get("layout") else {
-                    return serde_json::json!({"error": "Missing 'layout' parameter"});
+                    return JsonRpcError::invalid_params("Missing 'layout' parameter").into_value();
                 };
                 let mut layout: LayoutNode = match serde_json::from_value(layout_value.clone()) {
                     Ok(l) => l,
                     Err(e) => {
-                        return serde_json::json!({"error": format!("Invalid layout JSON: {e}")});
+                        return JsonRpcError::invalid_params(format!("Invalid layout JSON: {e}"))
+                            .into_value();
                     }
                 };
                 match self.apply_layout_from_json(&mut layout, cx) {
@@ -2940,7 +3036,7 @@ impl PaneFlowApp {
                         let panes = self.active_workspace().map_or(0, |ws| ws.pane_count());
                         serde_json::json!({"restored": true, "panes": panes})
                     }
-                    Err(e) => serde_json::json!({"error": e}),
+                    Err(e) => JsonRpcError::invalid_params(e).into_value(),
                 }
             }
             _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
@@ -2964,7 +3060,9 @@ impl PaneFlowApp {
                 // (`pane_count`, `workspace`) for back-compat and add a
                 // per-surface `surfaces` array with disambiguated names. MCP
                 // callers pass the stable PTY workspace_id so filtering is
-                // owned by the same layer that owns workspace membership.
+                // owned by the same layer that owns workspace membership. The
+                // root fields follow the same filter, so they describe the
+                // workspace `surfaces` was scoped to, not the active one.
                 let requested_workspace_id = match requested_workspace_id(params) {
                     Ok(workspace_id) => workspace_id,
                     Err(error) => return error.into_value(),
@@ -2975,10 +3073,14 @@ impl PaneFlowApp {
                     .filter(|surface| surface_matches_workspace(surface, requested_workspace_id))
                     .map(surface_meta_value)
                     .collect();
-                let count = self.active_workspace().map_or(0, |ws| ws.pane_count());
+                let (count, workspace) = surface_list_workspace_scope(
+                    &self.workspaces,
+                    self.active_idx,
+                    requested_workspace_id,
+                );
                 serde_json::json!({
                     "pane_count": count,
-                    "workspace": self.active_idx,
+                    "workspace": workspace,
                     "surfaces": surfaces,
                 })
             }
@@ -2990,16 +3092,26 @@ impl PaneFlowApp {
                     Err(e) => return e.into_value(),
                 };
                 const DEFAULT_LINES: usize = 200;
-                let lines = params
-                    .get("lines")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| (n as usize).clamp(1, crate::limits::MAX_SCROLLBACK_EXTRACT_LINES))
-                    .unwrap_or(DEFAULT_LINES);
-                let offset = params
-                    .get("offset")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize)
-                    .unwrap_or(0);
+                // Issue #281: wrong-typed or out-of-range pagination params
+                // are -32602, matching the MCP `read_pane` tool, never
+                // coerced to the default or clamped into range.
+                let lines = match requested_bounded(
+                    params,
+                    "lines",
+                    1,
+                    crate::limits::MAX_SCROLLBACK_EXTRACT_LINES,
+                ) {
+                    Ok(lines) => lines.unwrap_or(DEFAULT_LINES),
+                    Err(e) => return e.into_value(),
+                };
+                let offset = match requested_bounded(params, "offset", 0, usize::MAX) {
+                    Ok(offset) => offset.unwrap_or(0),
+                    Err(e) => return e.into_value(),
+                };
+                let fenced = match requested_fenced(params) {
+                    Ok(fenced) => fenced,
+                    Err(e) => return e.into_value(),
+                };
                 // EP-001 US-003 (agent-control-plane): expose the output
                 // generation counter so a client detects pane-idle without a
                 // timer heuristic (kills the flow engine's settling poll).
@@ -3050,10 +3162,8 @@ impl PaneFlowApp {
                 // MCP bridge, which re-fences itself; the `flow`/`wait` poll
                 // loops) pass `fenced:false`, so this only changes the CLI/IPC
                 // read path a conductor uses directly, mirroring the MCP fence.
-                let fenced = params
-                    .get("fenced")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
+                let fenced =
+                    fenced.unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
                 let (text, returned, truncated) = truncate_ipc_text(text, returned);
                 let text = if fenced {
                     wrap_untrusted(
@@ -3102,11 +3212,10 @@ impl PaneFlowApp {
                 };
                 const DEFAULT_MAX: usize = 50;
                 const HARD_MAX: usize = 1000;
-                let max_matches = params
-                    .get("max_matches")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| (n as usize).clamp(1, HARD_MAX))
-                    .unwrap_or(DEFAULT_MAX);
+                let max_matches = match requested_bounded(params, "max_matches", 1, HARD_MAX) {
+                    Ok(max_matches) => max_matches.unwrap_or(DEFAULT_MAX),
+                    Err(e) => return e.into_value(),
+                };
                 let (matches, truncated) = terminal
                     .read(cx)
                     .terminal
@@ -3152,10 +3261,11 @@ impl PaneFlowApp {
                 // and unlike `surface.send_*` - it does NOT require the
                 // `PANEFLOW_IPC_SCRIPTING` gate.
                 let Some(sid) = params.get("surface_id").and_then(|s| s.as_u64()) else {
-                    return serde_json::json!({"error": "Missing 'surface_id' parameter"});
+                    return JsonRpcError::invalid_params("Missing 'surface_id' parameter")
+                        .into_value();
                 };
                 let Some(loc) = find_pane_by_surface_id(&self.workspaces, sid, cx) else {
-                    return serde_json::json!({"error": "Surface not found"});
+                    return JsonRpcError::invalid_params("Surface not found").into_value();
                 };
                 let ws_idx = loc.workspace_idx;
                 let pane = loc.pane;
@@ -3461,7 +3571,14 @@ impl PaneFlowApp {
                 {
                     return err.into_value();
                 }
-                let spawn_profile = parse_terminal_profile(params.get("profile"));
+                let spawn_profile = match parse_terminal_profile(params.get("profile")) {
+                    Ok(profile) => profile,
+                    Err(err) => return err.into_value(),
+                };
+                let spawn_env_overrides = match parse_env_object(params.get("env")) {
+                    Ok(env) => env,
+                    Err(err) => return err.into_value(),
+                };
 
                 // US-002 (orchestration-v2): an optional `surface_id` targets
                 // the leaf hosting that surface - in whatever workspace it
@@ -3517,7 +3634,7 @@ impl PaneFlowApp {
                 // before spawn; a failure is a JSON-RPC error, not success.
                 let spawn_env = match stage_context_file(
                     params.get("context").and_then(|c| c.as_str()),
-                    parse_env_object(params.get("env")),
+                    spawn_env_overrides,
                     cx,
                 ) {
                     Ok(env) => env,
@@ -4582,6 +4699,82 @@ mod tests {
         }
     }
 
+    /// Issue #281: `surface.read` / `surface.search` pagination params follow
+    /// the MCP `read_pane` / `search_pane` rules - absent is the default, a
+    /// valid integer in range is honoured, and everything else is -32602.
+    #[test]
+    fn requested_bounded_absent_is_none_and_in_range_is_honoured() {
+        let max = crate::limits::MAX_SCROLLBACK_EXTRACT_LINES;
+        assert_eq!(
+            requested_bounded(&serde_json::json!({}), "lines", 1, max).unwrap(),
+            None
+        );
+        assert_eq!(
+            requested_bounded(&serde_json::json!({"lines": 1}), "lines", 1, max).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            requested_bounded(&serde_json::json!({"lines": max}), "lines", 1, max).unwrap(),
+            Some(max)
+        );
+        assert_eq!(
+            requested_bounded(&serde_json::json!({"offset": 0}), "offset", 0, usize::MAX).unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn requested_bounded_rejects_wrong_type_and_out_of_range_instead_of_coercing() {
+        // Each of these used to become the default (`unwrap_or`) or be
+        // clamped into range, so a typo'd `lines` returned a 200-line page
+        // that looked like the requested window. MCP rejects them all.
+        let max = crate::limits::MAX_SCROLLBACK_EXTRACT_LINES;
+        for malformed in [
+            serde_json::json!({"lines": "lots"}),
+            serde_json::json!({"lines": 2.5}),
+            serde_json::json!({"lines": -1}),
+            serde_json::json!({"lines": null}),
+            serde_json::json!({"lines": []}),
+            serde_json::json!({"lines": 0}),
+            serde_json::json!({"lines": max + 1}),
+        ] {
+            let error = requested_bounded(&malformed, "lines", 1, max)
+                .err()
+                .unwrap_or_else(|| panic!("{malformed} must be rejected, not coerced"));
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
+        }
+        let error = requested_bounded(&serde_json::json!({"offset": "3"}), "offset", 0, usize::MAX)
+            .expect_err("a string offset must be rejected");
+        assert_eq!(error.code, JsonRpcError::INVALID_PARAMS);
+        let error = requested_bounded(
+            &serde_json::json!({"max_matches": 1001}),
+            "max_matches",
+            1,
+            1000,
+        )
+        .expect_err("max_matches above the hard cap must be rejected, not clamped");
+        assert_eq!(error.code, JsonRpcError::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn requested_fenced_absent_is_none_and_non_bool_is_rejected() {
+        assert_eq!(requested_fenced(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            requested_fenced(&serde_json::json!({"fenced": false})).unwrap(),
+            Some(false)
+        );
+        for malformed in [
+            serde_json::json!({"fenced": "false"}),
+            serde_json::json!({"fenced": 0}),
+            serde_json::json!({"fenced": null}),
+        ] {
+            let error = requested_fenced(&malformed)
+                .err()
+                .unwrap_or_else(|| panic!("{malformed} must be rejected, not defaulted"));
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
+        }
+    }
+
     fn test_ipc_request(method: &str, cancelled: bool) -> crate::ipc::IpcRequest {
         let (response_tx, _response_rx) = mpsc::channel();
         let state = if cancelled {
@@ -4628,6 +4821,55 @@ mod tests {
         assert!(
             close_arm.contains("confirmation_required"),
             "a live-agent workspace must report that the in-app modal now owns the decision"
+        );
+    }
+
+    /// Issue #279: a client-caused refusal (cap hit, out-of-range index,
+    /// last-workspace close, malformed layout) must reach the wire as
+    /// `-32602`, the same code `workspace.up` already uses for the cap.
+    /// The legacy `{"error": <string>}` shape is promoted to `-32603` by
+    /// `promote_response`, which reads to automation as a server crash.
+    /// Only the transient "Session restore in progress" refusal keeps the
+    /// legacy shape.
+    #[test]
+    fn workspace_client_errors_are_invalid_params_not_internal() {
+        let src = include_str!("ipc_handler.rs");
+        let body = src
+            .split("fn handle_workspace_method(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn handle_surface_method(").next())
+            .expect("handle_workspace_method body");
+        let create_arm = body
+            .split("\"workspace.create\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"workspace.up\"").next())
+            .expect("workspace.create arm");
+        assert!(
+            create_arm.contains("JsonRpcError::invalid_params(\"Workspace limit reached\")"),
+            "workspace.create at MAX_WORKSPACES must be -32602 like workspace.up"
+        );
+        let select_arm = body
+            .split("\"workspace.select\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"workspace.close\"").next())
+            .expect("workspace.select arm");
+        assert!(
+            select_arm.contains("JsonRpcError::invalid_params(\"Index out of bounds\")"),
+            "workspace.select with an out-of-range index must be -32602"
+        );
+        let legacy: Vec<&str> = body
+            .lines()
+            .filter(|line| line.contains("json!({\"error\""))
+            .filter(|line| !line.contains("Session restore in progress"))
+            .collect();
+        assert!(
+            legacy.is_empty(),
+            "client-caused workspace refusals must not use the legacy -32603 shape: {legacy:?}"
+        );
+        assert_eq!(
+            JsonRpcError::invalid_params("Workspace limit reached").into_value()[JSONRPC_ERROR_KEY]
+                ["code"],
+            JsonRpcError::INVALID_PARAMS
         );
     }
 
@@ -4794,32 +5036,128 @@ mod tests {
         );
     }
 
-    // US-008: `workspace.up` env parsing. Non-string values are dropped (a
-    // shell env value can only be a string) and an absent/empty object yields
-    // `None` so the global `terminal.env` default still applies underneath.
+    // US-008: `workspace.up` env parsing. A shell env value can only be a
+    // string, so a non-string value is a `-32602` (never silently dropped),
+    // and an absent/empty object yields `None` so the global `terminal.env`
+    // default still applies underneath.
     #[test]
-    fn parse_env_object_keeps_strings_and_drops_the_rest() {
+    fn parse_env_object_keeps_strings_and_rejects_the_rest() {
         let env = parse_env_object(Some(&serde_json::json!({
             "RUST_LOG": "info",
-            "PORT": 8080,
-            "FLAG": true
+            "PORT": "8080"
         })))
+        .expect("all-string values parse")
         .expect("non-empty string map");
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
-        assert!(
-            !env.contains_key("PORT"),
-            "non-string value must be dropped"
-        );
-        assert!(!env.contains_key("FLAG"));
-        assert_eq!(env.len(), 1);
+        assert_eq!(env.get("PORT").map(String::as_str), Some("8080"));
+        assert_eq!(env.len(), 2);
+
+        for spec in [
+            serde_json::json!({ "RUST_LOG": "info", "PORT": 8080 }),
+            serde_json::json!({ "FLAG": true }),
+            serde_json::json!({ "NESTED": { "A": "b" } }),
+            serde_json::json!({ "NULL": null }),
+            serde_json::json!("PORT=8080"),
+            serde_json::json!(["PORT=8080"]),
+        ] {
+            let err = parse_env_object(Some(&spec))
+                .err()
+                .unwrap_or_else(|| panic!("must be rejected: {spec}"));
+            assert_eq!(err.code, JsonRpcError::INVALID_PARAMS, "{spec}");
+        }
     }
 
     #[test]
     fn parse_env_object_absent_or_empty_is_none() {
-        assert!(parse_env_object(None).is_none());
-        assert!(parse_env_object(Some(&serde_json::json!({}))).is_none());
-        // An object with only non-string values collapses to an empty map -> None.
-        assert!(parse_env_object(Some(&serde_json::json!({ "N": 1 }))).is_none());
+        assert!(parse_env_object(None).expect("absent is fine").is_none());
+        assert!(
+            parse_env_object(Some(&serde_json::Value::Null))
+                .expect("null is absent")
+                .is_none()
+        );
+        assert!(
+            parse_env_object(Some(&serde_json::json!({})))
+                .expect("empty object is fine")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_terminal_profile_accepts_known_names_and_rejects_the_rest() {
+        assert_eq!(
+            parse_terminal_profile(None).expect("absent"),
+            TerminalSurfaceProfile::Normal
+        );
+        assert_eq!(
+            parse_terminal_profile(Some(&serde_json::Value::Null)).expect("null"),
+            TerminalSurfaceProfile::Normal
+        );
+        for (name, expected) in [
+            ("normal", TerminalSurfaceProfile::Normal),
+            ("agent", TerminalSurfaceProfile::Agent),
+            ("review", TerminalSurfaceProfile::Review),
+            ("cached", TerminalSurfaceProfile::Cached),
+        ] {
+            assert_eq!(
+                parse_terminal_profile(Some(&serde_json::json!(name))).expect(name),
+                expected
+            );
+        }
+        for spec in [
+            serde_json::json!("bogus"),
+            serde_json::json!("Agent"),
+            serde_json::json!(""),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!({ "name": "agent" }),
+        ] {
+            let err = parse_terminal_profile(Some(&spec))
+                .err()
+                .unwrap_or_else(|| panic!("must be rejected: {spec}"));
+            assert_eq!(err.code, JsonRpcError::INVALID_PARAMS, "{spec}");
+        }
+    }
+
+    // A pane spec with a non-string env value or an unknown profile is a
+    // `-32602`, never a pane that silently lacks what the client asked for.
+    #[test]
+    fn parse_workspace_pane_plan_rejects_non_string_env_and_unknown_profile() {
+        let reject = |spec: serde_json::Value, what: &str| -> JsonRpcError {
+            match parse_workspace_pane_plan(&spec) {
+                Ok(_) => panic!("{what} must be rejected: {spec}"),
+                Err(err) => err,
+            }
+        };
+
+        let err = reject(
+            serde_json::json!({ "env": { "PORT": 3000 } }),
+            "non-string env value",
+        );
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("PORT"), "{}", err.message);
+
+        let err = reject(serde_json::json!({ "env": "PORT=3000" }), "non-object env");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+
+        let err = reject(serde_json::json!({ "profile": "bogus" }), "unknown profile");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("bogus"), "{}", err.message);
+
+        let plan = parse_workspace_pane_plan(&serde_json::json!({
+            "env": { "PORT": "3000" },
+            "profile": "normal"
+        }))
+        .unwrap_or_else(|err| {
+            panic!(
+                "all-string env and a known profile are accepted: {}",
+                err.message
+            )
+        });
+        assert_eq!(
+            plan.env.and_then(|e| e.get("PORT").cloned()).as_deref(),
+            Some("3000")
+        );
+        assert_eq!(plan.profile, TerminalSurfaceProfile::Normal);
     }
 
     // -----------------------------------------------------------------
@@ -5049,8 +5387,14 @@ mod tests {
         assert!(super::pane_spec_requires_orchestration(
             &serde_json::json!({"env": {"PROMPT_COMMAND": "date"}})
         ));
+        // A non-string env value is still an env request (it is rejected
+        // with -32602 at parse time rather than silently dropped), so it
+        // must not slip past the gate.
+        assert!(super::pane_spec_requires_orchestration(
+            &serde_json::json!({"env": {"NOT_A_STRING": 7}})
+        ));
         assert!(!super::pane_spec_requires_orchestration(
-            &serde_json::json!({"env": {"IGNORED": 7}})
+            &serde_json::json!({"env": {}})
         ));
         assert!(super::pane_spec_requires_orchestration(
             &serde_json::json!({"managed_worktree": {
@@ -6890,6 +7234,61 @@ mod tests {
         });
         assert_eq!(value["tab_id"], back_tab_id);
         assert_eq!(value["tab_title"], "background");
+    }
+
+    /// A `surface.list` filtered by `workspace_id` must report the root
+    /// `pane_count` and `workspace` of that workspace, not of the active one,
+    /// so every field in the response describes the same workspace.
+    #[gpui::test]
+    fn surface_list_root_fields_follow_the_workspace_filter(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let cx = cx.add_empty_window();
+        let make_pane = |cx: &mut gpui::VisualTestContext| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| Pane::new(terminal, 1, cx))
+        };
+
+        // Workspace 0 (active, id 10): one pane. Workspace 1 (id 20): two panes.
+        let active = Workspace::with_layout_and_id(
+            10,
+            "active",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(make_pane(cx)),
+        );
+        let mut background = Workspace::with_layout_and_id(
+            20,
+            "background",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(make_pane(cx)),
+        );
+        assert!(background.open_tab(crate::workspace::Tab::new(
+            "second",
+            Some(crate::layout::LayoutTree::Leaf(make_pane(cx))),
+        )));
+        let workspaces = vec![active, background];
+        assert_eq!(workspaces[0].pane_count(), 1);
+        assert_eq!(workspaces[1].pane_count(), 2);
+
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, None),
+            (1, Some(0)),
+            "unfiltered keeps describing the active workspace"
+        );
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, Some(20)),
+            (2, Some(1)),
+            "a background workspace_id must describe that workspace"
+        );
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, Some(10)),
+            (1, Some(0))
+        );
+        assert_eq!(
+            super::surface_list_workspace_scope(&workspaces, 0, Some(99)),
+            (0, None),
+            "an unknown workspace_id matches no surfaces, so no panes and no index"
+        );
     }
 
     #[gpui::test]

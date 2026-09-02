@@ -13,8 +13,8 @@
 
 use gpui::{
     AnyElement, AppContext as _, AsyncApp, ClickEvent, ClipboardItem, Context, CursorStyle,
-    FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Styled,
-    WeakEntity, Window, deferred, div, hsla, prelude::*, px, svg,
+    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Styled, WeakEntity, Window, deferred, div, hsla, prelude::*, px, svg,
 };
 
 use crate::PaneFlowApp;
@@ -57,9 +57,11 @@ pub(crate) enum SystemInfoDialog {
 impl PaneFlowApp {
     /// Help > System Info…: open the modal, then fill it in when the
     /// background probes answer.
-    pub(crate) fn open_system_info_dialog(&mut self, window: &Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_system_info_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let probe = SystemInfoProbe::capture(window);
         self.system_info_dialog = Some(SystemInfoDialog::Collecting);
+        // Issue #244: the card owns the keyboard while it is up.
+        self.system_info_dialog_focus.focus(window, cx);
         cx.notify();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -77,9 +79,28 @@ impl PaneFlowApp {
         .detach();
     }
 
-    pub(crate) fn close_system_info_dialog(&mut self, cx: &mut Context<Self>) {
+    /// Dismiss the modal and hand focus back to the workspace it took it
+    /// from. Every dismiss path (Close, the corner x, the backdrop, Escape)
+    /// goes through here.
+    pub(crate) fn close_system_info_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.system_info_dialog.take().is_some() {
+            self.restore_focus_after_close_confirm(window, cx);
             cx.notify();
+        }
+    }
+
+    /// Escape dismisses; consumed so it does not reach a binding underneath.
+    /// Enter is deliberately not a dismiss: the footer has two buttons (Close
+    /// and Copy) and neither is the default one.
+    fn handle_system_info_dialog_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key.as_str() == "escape" {
+            self.close_system_info_dialog(window, cx);
+            cx.stop_propagation();
         }
     }
 
@@ -124,8 +145,8 @@ impl PaneFlowApp {
                 .mt(px(-2.))
                 .mr(px(-6.))
                 .cursor(CursorStyle::PointingHand)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.close_system_info_dialog(cx);
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_system_info_dialog(window, cx);
                     cx.stop_propagation();
                 })),
             "system-info-close-skin",
@@ -247,8 +268,8 @@ impl PaneFlowApp {
                 "system-info-close-button",
                 "Close",
                 ui,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.close_system_info_dialog(cx);
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_system_info_dialog(window, cx);
                     cx.stop_propagation();
                 }),
             ))
@@ -276,6 +297,8 @@ impl PaneFlowApp {
         let card = div()
             .id("system-info-dialog")
             .occlude()
+            .track_focus(&self.system_info_dialog_focus)
+            .on_key_down(cx.listener(Self::handle_system_info_dialog_key_down))
             .relative()
             .w(DIALOG_WIDTH)
             .rounded(CARD_RADIUS)
@@ -311,8 +334,8 @@ impl PaneFlowApp {
                 .bg(hsla(0., 0., 0., 0.55))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.close_system_info_dialog(cx);
+                    cx.listener(|this, _, window, cx| {
+                        this.close_system_info_dialog(window, cx);
                     }),
                 )
                 .child(card),
@@ -388,6 +411,48 @@ mod tests {
         assert!(
             main.contains("self.render_system_info_dialog(cx)"),
             "main.rs must render the dialog from the app content tree"
+        );
+    }
+
+    /// Issue #244: System Info is a modal, so it owns the keyboard while it
+    /// is up. Opening moves focus onto the card, Escape dismisses it, and
+    /// dismissing hands focus back to the pane the user was typing in.
+    #[test]
+    fn system_info_dialog_takes_focus_and_escape_dismisses_it() {
+        use crate::source_probe::source_slice;
+
+        let src = include_str!("system_info_dialog.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of system_info_dialog.rs");
+        let card = source_slice(
+            src,
+            "id(\"system-info-dialog\")",
+            "id(\"system-info-backdrop\")",
+        );
+        assert!(
+            card.contains(".track_focus(&self.system_info_dialog_focus)"),
+            "the System Info card must track its own focus handle: {card}"
+        );
+        assert!(
+            card.contains(".on_key_down(cx.listener(Self::handle_system_info_dialog_key_down))"),
+            "the System Info card must route key events to its own handler: {card}"
+        );
+        let keys = source_slice(src, "fn handle_system_info_dialog_key_down(", "\n    }");
+        assert!(
+            keys.contains("\"escape\"")
+                && keys.contains("self.close_system_info_dialog(window, cx)"),
+            "Escape must dismiss System Info: {keys}"
+        );
+        let open = source_slice(src, "pub(crate) fn open_system_info_dialog(", "\n    }");
+        assert!(
+            open.contains("self.system_info_dialog_focus.focus(window, cx)"),
+            "opening System Info must move focus onto the card: {open}"
+        );
+        let close = source_slice(src, "pub(crate) fn close_system_info_dialog(", "\n    }");
+        assert!(
+            close.contains("self.restore_focus_after_close_confirm(window, cx)"),
+            "dismissing System Info must hand focus back to the workspace: {close}"
         );
     }
 

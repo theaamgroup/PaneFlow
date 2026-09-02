@@ -96,7 +96,7 @@ type ConflictWatcher = notify::RecommendedWatcher;
 type ConflictWatcher = notify::NullWatcher;
 
 use super::cursor::{self, CodeSelection};
-use super::document::{CodeDocument, ReadOnlyReason, normalize_newlines};
+use super::document::{CodeDocument, LineEnding, ReadOnlyReason, normalize_newlines};
 use super::edit::{self, EditGroup, IndentUnit};
 use super::element::{
     CODE_ROW_HEIGHT, CodeCaret, CodeColors, CodeElement, CodeGeometry, CodeHitMap, GutterMemo,
@@ -1836,6 +1836,12 @@ impl CodeView {
         {
             doc.set_read_only(Some(reason));
         }
+        // The splice normalizes the terminators away, so the disk's line
+        // ending has to be re-detected here or a rewrite that only changed
+        // LF to CRLF is adopted as text and reverted on the next save.
+        if let Some(doc) = self.state.document_mut() {
+            doc.set_line_ending(LineEnding::detect(text));
+        }
         if !replaced {
             return;
         }
@@ -3213,6 +3219,30 @@ mod tests {
                 text_of(view),
                 "one\ntwo\n",
                 "Ctrl+Z recovers what was replaced"
+            );
+        });
+    }
+
+    /// A rewrite that only changes the line endings (a git checkout or a
+    /// formatter) must be adopted as the file's encoding too, or the next
+    /// Ctrl+S silently puts the old terminators back.
+    #[gpui::test]
+    fn a_clean_reload_adopts_the_new_line_ending(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "one\r\ntwo\r\n").expect("agent write");
+        let stamp = FileStamp::read(&path);
+
+        view.update(cx, |view, cx| {
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some("one\r\ntwo\r\n".to_string()), cx);
+            assert_eq!(text_of(view), "one\ntwo\n", "the rope stays LF");
+            let doc = view.document().expect("document");
+            assert_eq!(doc.line_ending(), LineEnding::Crlf);
+            assert_eq!(
+                doc.to_disk_string(),
+                "one\r\ntwo\r\n",
+                "a save writes the terminators the disk now uses"
             );
         });
     }

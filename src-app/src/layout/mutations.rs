@@ -253,6 +253,162 @@ mod tests {
     }
 
     #[gpui::test]
+    fn split_first_leaf_wraps_a_leaf_root(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let a = test_pane(cx, 5);
+        let b = test_pane(cx, 5);
+        let mut tree = LayoutTree::Leaf(a.clone());
+
+        tree.split_first_leaf(SplitDirection::Vertical, b.clone());
+
+        match &tree {
+            LayoutTree::Container { direction, .. } => {
+                assert!(
+                    *direction == SplitDirection::Vertical,
+                    "wrong split direction"
+                );
+            }
+            LayoutTree::Leaf(_) => panic!("split should produce a container"),
+        }
+        assert_eq!(leaf_ids(&tree), vec![a.entity_id(), b.entity_id()]);
+        let ratios = child_ratios(&tree);
+        assert_eq!(ratios, vec![0.5, 0.5]);
+    }
+
+    #[gpui::test]
+    fn split_first_leaf_inserts_sibling_for_same_direction(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let a = test_pane(cx, 6);
+        let b = test_pane(cx, 6);
+        let c = test_pane(cx, 6);
+        let mut tree = LayoutTree::new_split(
+            SplitDirection::Vertical,
+            LayoutTree::Leaf(a.clone()),
+            LayoutTree::Leaf(b.clone()),
+        );
+
+        tree.split_first_leaf(SplitDirection::Vertical, c.clone());
+
+        assert_eq!(tree.leaf_count(), 3);
+        assert_eq!(
+            leaf_ids(&tree),
+            vec![a.entity_id(), c.entity_id(), b.entity_id()]
+        );
+        match &tree {
+            LayoutTree::Container { children, .. } => {
+                assert!(
+                    children
+                        .iter()
+                        .all(|c| matches!(c.node, LayoutTree::Leaf(_))),
+                    "same-direction split must stay flat"
+                );
+            }
+            LayoutTree::Leaf(_) => panic!("split should keep a container root"),
+        }
+        let ratios = child_ratios(&tree);
+        assert_eq!(ratios.len(), 3);
+        assert!((ratios[0] - 0.25).abs() < f32::EPSILON);
+        assert!((ratios[1] - 0.25).abs() < f32::EPSILON);
+        assert!((ratios[2] - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[gpui::test]
+    fn split_first_leaf_wraps_first_leaf_for_cross_direction(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let a = test_pane(cx, 7);
+        let b = test_pane(cx, 7);
+        let c = test_pane(cx, 7);
+        let mut tree = LayoutTree::new_split(
+            SplitDirection::Vertical,
+            LayoutTree::Leaf(a.clone()),
+            LayoutTree::Leaf(b.clone()),
+        );
+
+        tree.split_first_leaf(SplitDirection::Horizontal, c.clone());
+
+        assert_eq!(tree.leaf_count(), 3);
+        assert_eq!(
+            leaf_ids(&tree),
+            vec![a.entity_id(), c.entity_id(), b.entity_id()]
+        );
+        assert_eq!(child_ratios(&tree), vec![0.5, 0.5]);
+        match &tree {
+            LayoutTree::Container { children, .. } => {
+                match &children[0].node {
+                    LayoutTree::Container {
+                        direction,
+                        children: inner,
+                        ..
+                    } => {
+                        assert!(
+                            *direction == SplitDirection::Horizontal,
+                            "wrong split direction"
+                        );
+                        assert_eq!(inner.len(), 2);
+                        assert!(inner.iter().all(|c| matches!(c.node, LayoutTree::Leaf(_))));
+                    }
+                    LayoutTree::Leaf(_) => panic!("cross-direction split must nest"),
+                }
+                assert!(matches!(children[1].node, LayoutTree::Leaf(_)));
+            }
+            LayoutTree::Leaf(_) => panic!("split should keep a container root"),
+        }
+    }
+
+    #[gpui::test]
+    fn split_first_leaf_recurses_when_first_child_is_a_container(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let a = test_pane(cx, 8);
+        let b = test_pane(cx, 8);
+        let c = test_pane(cx, 8);
+        let d = test_pane(cx, 8);
+        // Vertical [ Horizontal [a, b], c ]
+        let mut tree = LayoutTree::new_split(
+            SplitDirection::Vertical,
+            LayoutTree::new_split(
+                SplitDirection::Horizontal,
+                LayoutTree::Leaf(a.clone()),
+                LayoutTree::Leaf(b.clone()),
+            ),
+            LayoutTree::Leaf(c.clone()),
+        );
+
+        // Same direction as the root, but the first child is not a leaf, so the
+        // split must descend and wrap `a` instead of inserting at the root.
+        tree.split_first_leaf(SplitDirection::Vertical, d.clone());
+
+        assert_eq!(
+            leaf_ids(&tree),
+            vec![a.entity_id(), d.entity_id(), b.entity_id(), c.entity_id()]
+        );
+        assert_eq!(child_ratios(&tree).len(), 2);
+        let LayoutTree::Container { children, .. } = &tree else {
+            panic!("split should keep a container root");
+        };
+        let LayoutTree::Container {
+            children: inner, ..
+        } = &children[0].node
+        else {
+            panic!("first child should remain a container");
+        };
+        assert_eq!(inner.len(), 2);
+        match &inner[0].node {
+            LayoutTree::Container {
+                direction,
+                children: wrapped,
+                ..
+            } => {
+                assert!(
+                    *direction == SplitDirection::Vertical,
+                    "wrong split direction"
+                );
+                assert_eq!(wrapped.len(), 2);
+            }
+            LayoutTree::Leaf(_) => panic!("first leaf should have been wrapped"),
+        }
+    }
+
+    #[gpui::test]
     fn swap_panes_refuses_absent_source(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
         let a = test_pane(cx, 3);

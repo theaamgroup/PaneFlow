@@ -963,9 +963,74 @@ fn session_corruption_info(
     }
 }
 
+/// Test-only stand-in for a dead network mount: `stat` on any path listed
+/// here stalls for [`STALLED_STAT_DELAY`] before answering "directory".
+#[cfg(test)]
+static STALLED_STAT_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+const STALLED_STAT_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `Path::is_dir` as the restore path sees it. Under test a path registered
+/// in [`STALLED_STAT_PATHS`] behaves like a cwd on an unmounted volume.
+fn persisted_dir_is_live(path: &Path) -> bool {
+    #[cfg(test)]
+    {
+        let stalled = STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|stalled| stalled == path);
+        if stalled {
+            std::thread::sleep(STALLED_STAT_DELAY);
+            return true;
+        }
+    }
+    path.is_dir()
+}
+
+/// Longest a persisted cwd probe may hold the restore frame step. A local
+/// directory answers in microseconds; only a dead network or cloud mount
+/// runs this out, and such a cwd is treated as unavailable rather than
+/// letting `stat` pin the render thread for the mount's own timeout.
+const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Probe a persisted cwd off the render thread with a deadline. `stat` on
+/// an unmounted SMB/NFS/iCloud volume can block for tens of seconds, and
+/// session restore runs on the GPUI frame step, so the probe runs on a
+/// helper thread and a late answer counts as "not a directory". As with
+/// the git untracked-stats helper, a stalled thread is left to unwind on
+/// its own once the filesystem finally answers.
+fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let probed = path.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("session-cwd-probe".to_string())
+        .spawn(move || {
+            let _ = tx.send(persisted_dir_is_live(&probed));
+        });
+    if let Err(err) = spawned {
+        log::warn!(
+            "session restore: could not spawn cwd probe for {}: {err}; treating it as unavailable",
+            path.display()
+        );
+        return false;
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(is_dir) => is_dir,
+        Err(_) => {
+            log::warn!(
+                "session restore: cwd {} did not answer stat within {timeout:?}; treating it as unavailable",
+                path.display()
+            );
+            false
+        }
+    }
+}
+
 fn restored_workspace_cwd(raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
-    if path.is_dir() {
+    if persisted_dir_is_live_within(&path, RESTORED_CWD_PROBE_TIMEOUT) {
         return path;
     }
     let fallback = launch_cwd::implicit_launch_cwd();
@@ -982,7 +1047,7 @@ fn resolved_surface_cwd(raw: Option<&str>, fallback_cwd: &Path) -> PathBuf {
         return fallback_cwd.to_path_buf();
     };
     let path = PathBuf::from(raw);
-    if path.is_dir() {
+    if persisted_dir_is_live_within(&path, RESTORED_CWD_PROBE_TIMEOUT) {
         return path;
     }
     log::warn!(
@@ -1216,8 +1281,16 @@ fn write_session_json_if_current(
 }
 
 fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::SessionState) -> bool {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
     if let Some(parent) = path.parent() {
-        match std::fs::create_dir_all(parent) {
+        // Owner-only: session.json stores absolute workspace cwds, tab titles,
+        // and custom-button commands. `mode` only applies to directories this
+        // call creates; a pre-existing parent keeps its mode.
+        match std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+        {
             Ok(()) => {}
             Err(e) => {
                 log::warn!(
@@ -1231,10 +1304,19 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
     match serde_json::to_string_pretty(state) {
         Ok(json) => {
             let tmp_path = session_tmp_path(path);
-            let write_result = std::fs::File::create(&tmp_path).and_then(|mut temporary| {
-                std::io::Write::write_all(&mut temporary, json.as_bytes())?;
-                temporary.sync_all()
-            });
+            let write_result = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .and_then(|mut temporary| {
+                    // `mode` is ignored for a path that already exists, so pin
+                    // the temp file 0600 before it is renamed into place.
+                    temporary.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                    std::io::Write::write_all(&mut temporary, json.as_bytes())?;
+                    temporary.sync_all()
+                });
             match write_result {
                 Ok(()) => {
                     if let Err(e) = std::fs::rename(&tmp_path, path) {
@@ -1813,6 +1895,50 @@ mod tests {
         );
     }
 
+    /// A persisted cwd on a dead network mount can stall `stat` for tens of
+    /// seconds. Restore runs on the GPUI frame step, so the helpers must
+    /// answer within a bounded window and fall back instead of hanging paint.
+    #[test]
+    fn restored_cwd_helpers_fall_back_when_stat_stalls() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stalled = tmp.path().join("unmounted-volume");
+        let stalled_str = stalled.to_string_lossy().into_owned();
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(stalled.clone());
+        let bound = STALLED_STAT_DELAY / 2;
+
+        let started = std::time::Instant::now();
+        let workspace_cwd = restored_workspace_cwd(&stalled_str);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < bound,
+            "workspace cwd probe blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+        assert_ne!(
+            workspace_cwd, stalled,
+            "a stalled workspace cwd must fall back, not be trusted"
+        );
+        assert!(workspace_cwd.is_dir());
+
+        let fallback = tmp.path().join("fallback");
+        std::fs::create_dir_all(&fallback).expect("fallback dir");
+        let started = std::time::Instant::now();
+        let surface_cwd = resolved_surface_cwd(Some(&stalled_str), &fallback);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < bound,
+            "surface cwd probe blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+        assert_eq!(surface_cwd, fallback);
+
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|path| path != &stalled);
+    }
+
     /// Write a `session.json` with deliberately broken JSON, run the
     /// path-parametrised loader, assert the corruption-info shape and
     /// the on-disk backup file. Covers AC1 (None fallback + info
@@ -2180,6 +2306,50 @@ mod tests {
             paneflow_config::schema::SESSION_SCHEMA_VERSION
         );
         assert!(loaded.workspaces.is_empty());
+    }
+
+    /// session.json carries absolute workspace cwds, tab titles, and
+    /// custom-button commands, so it must be owner-only on disk: 0600 for
+    /// the file (also when it replaces a looser pre-existing one) and 0700
+    /// for a parent directory this writer had to create.
+    #[test]
+    fn write_session_json_creates_owner_only_file_and_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent = tmp.path().join("paneflow");
+        let path = parent.join("session.json");
+        assert!(write_session_json(&path, &empty_session_state()));
+        let file_mode = std::fs::metadata(&path)
+            .expect("session written")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "session.json must be 0600, got {file_mode:o}"
+        );
+        let dir_mode = std::fs::metadata(&parent)
+            .expect("parent created")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "session parent must be 0700, got {dir_mode:o}"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen the existing session file");
+        assert!(write_session_json(&path, &empty_session_state()));
+        let rewritten_mode = std::fs::metadata(&path)
+            .expect("session rewritten")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            rewritten_mode, 0o600,
+            "rewriting session.json must leave it 0600, got {rewritten_mode:o}"
+        );
     }
 
     #[test]

@@ -337,9 +337,10 @@ pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
 /// `parent_pid` is captured BEFORE the spawn. On a detected reparent the agent
 /// is `SIGKILL`ed; the loop also exits once the agent is already gone, so the
 /// thread never outlives the work.
+/// `tests/exec.rs` drives this directly: a mismatched `parent_pid` must
+/// SIGKILL a live `sleep`, and a pre-set `child_reaped` must leave it alone.
 /// A macOS runtime smoke test (`kill -9` Paneflow, confirm no orphaned agent
-/// survives) is still required before this guard is trusted; it has only ever
-/// been compile-verified.
+/// survives) still covers the end-to-end reparent that no unit test can.
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_parent_death_guard(
     child_pid: u32,
@@ -384,3 +385,7 @@ pub(crate) fn spawn_parent_death_guard(
         }
     });
 }
+
+#[cfg(all(test, unix))]
+#[path = "tests/interrupt.rs"]
+mod interrupt_tests;

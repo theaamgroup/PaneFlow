@@ -87,6 +87,7 @@ impl FileStamp {
 /// as [`super::load::CodeLoadError::message`]: nothing here surfaces a
 /// debug-formatted `io::Error` to the user.
 pub(crate) fn save_blocking(path: &Path, contents: &str) -> Result<FileStamp, String> {
+    let path = &write_target(path)?;
     let parent = parent_dir(path);
     let existing = std::fs::metadata(path).ok();
 
@@ -119,6 +120,27 @@ pub(crate) fn save_blocking(path: &Path, contents: &str) -> Result<FileStamp, St
     temp.persist(path).map_err(|err| write_error(&err.error))?;
     FileStamp::read(path)
         .ok_or_else(|| "The file was written but could not be read back.".to_string())
+}
+
+/// Where the bytes actually go. Load follows a symlink (`std::fs::read`), so
+/// the user edited the target; renaming the temp file onto the link path
+/// would replace the link inode with a regular file and leave the target
+/// stale for every other tool. A live link resolves to its target; a dangling
+/// one is refused rather than silently replaced, the same policy as
+/// `crate::config_writer::config_write_target`.
+fn write_target(path: &Path) -> Result<PathBuf, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                "This file is a link to a file that no longer exists.".to_string()
+            } else {
+                write_error(&err)
+            }
+        }),
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(err) => Err(write_error(&err)),
+    }
 }
 
 /// Directory the temp file goes in: the target's own, falling back to the
@@ -215,6 +237,71 @@ mod tests {
             !second.differs(&second),
             "a stamp never differs from itself"
         );
+    }
+
+    /// A symlinked source file (pnpm, bazel, stow) is loaded through the link,
+    /// so the save must land on the target and leave the link standing rather
+    /// than replace the link inode with a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_writes_through_a_symlink_and_leaves_it_standing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real").join("main.rs");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&target, "old\n").expect("seed");
+        let link = dir.path().join("main.rs");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let stamp = save_blocking(&link, "new contents\n").expect("save");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "new contents\n",
+            "the target holds the new bytes"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("lstat")
+                .file_type()
+                .is_symlink(),
+            "the link is still a link"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("readlink"),
+            target,
+            "the link still points at the same target"
+        );
+        assert_eq!(stamp.len, "new contents\n".len() as u64);
+    }
+
+    /// A dangling symlink is refused with a written sentence and nothing is
+    /// created at the link path: replacing it would silently change where
+    /// the user's file lives.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_refuses_a_dangling_symlink_without_creating_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let link = dir.path().join("main.rs");
+        std::os::unix::fs::symlink(dir.path().join("gone.rs"), &link).expect("symlink");
+
+        let err = save_blocking(&link, "x").expect_err("dangling link");
+        assert!(err.ends_with('.'), "a sentence, not a debug dump: {err}");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("lstat")
+                .file_type()
+                .is_symlink(),
+            "the link was not replaced by a regular file"
+        );
+        assert!(
+            std::fs::metadata(&link).is_err(),
+            "nothing was created behind the link"
+        );
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "no temp file was left: {entries:?}");
     }
 
     /// US-015 AC: the original permissions survive the swap.

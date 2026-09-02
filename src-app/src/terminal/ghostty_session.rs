@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,11 @@ const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
 const FINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
+/// How long `start` waits for the runtime thread's first report before it
+/// gives up on the spawn. A PTY open or child exec that wedges (a cwd on an
+/// unresponsive volume, say) must not pin a background-executor worker for
+/// the life of the process. (#245)
+const STARTUP_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the runtime waits to reap a child the app is killing (see
 /// `reap_child_bounded`); `TerminalState::Drop` SIGKILLs at 100 ms.
 const REAP_BUDGET: Duration = Duration::from_secs(2);
@@ -1165,26 +1170,12 @@ impl GhosttySession {
             ));
         }
 
-        match startup_rx.recv() {
-            Ok(StartupReport::Started(spawned)) => Ok(spawned),
-            Ok(StartupReport::InitializationFailed(error)) => {
-                Err(GhosttyStartError::Initialization(error))
-            }
-            Ok(StartupReport::OpenPtyFailed(error)) => Err(GhosttyStartError::OpenPty(error)),
-            Ok(StartupReport::SpawnFailed(error)) => Err(GhosttyStartError::Spawn(error)),
-            Ok(StartupReport::PostSpawnFailed { child_pid, error }) => {
-                Err(GhosttyStartError::PostSpawn { child_pid, error })
-            }
-            Err(error) => {
-                let error =
-                    anyhow::anyhow!("Ghostty runtime exited before startup completed: {error}");
-                if let Some(child_pid) = startup_state.child_pid_if_spawned() {
-                    Err(GhosttyStartError::PostSpawn { child_pid, error })
-                } else {
-                    Err(GhosttyStartError::Initialization(error))
-                }
-            }
-        }
+        await_startup_report(
+            &startup_rx,
+            &startup_state,
+            &pending.mailbox,
+            STARTUP_REPORT_TIMEOUT,
+        )
     }
 
     /// Starts a runtime that owns a terminal grid but neither a PTY nor a
@@ -1210,12 +1201,18 @@ impl GhosttySession {
             ));
         }
 
-        match startup_rx.recv() {
+        match startup_rx.recv_timeout(STARTUP_REPORT_TIMEOUT) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(GhosttyStartError::Initialization(anyhow::anyhow!(error))),
-            Err(error) => Err(GhosttyStartError::Initialization(anyhow::anyhow!(
-                "Ghostty display runtime exited before startup completed: {error}"
-            ))),
+            Err(RecvTimeoutError::Timeout) => {
+                pending.mailbox.close();
+                Err(GhosttyStartError::Initialization(anyhow::anyhow!(
+                    "Ghostty display runtime did not report startup within {STARTUP_REPORT_TIMEOUT:?}"
+                )))
+            }
+            Err(error @ RecvTimeoutError::Disconnected) => Err(GhosttyStartError::Initialization(
+                anyhow::anyhow!("Ghostty display runtime exited before startup completed: {error}"),
+            )),
         }
     }
 
@@ -1972,6 +1969,74 @@ fn write_input_bytes<W: Write>(
                 )));
         }
         *runtime_failed = !expected_close;
+    }
+}
+
+/// Waits for the runtime thread's first [`StartupReport`], for at most
+/// `timeout`. A runtime that never reports (a wedged PTY open or child exec)
+/// gets its mailbox shut down and any child it already forked killed, so the
+/// caller's executor worker is released and the spawn-failure pane can be
+/// shown. Once `startup_rx` is dropped a late `Started` fails to send and the
+/// runtime thread terminates its own child on that path. (#245)
+fn await_startup_report(
+    startup_rx: &Receiver<StartupReport>,
+    startup_state: &StartupState,
+    mailbox: &RuntimeMailbox,
+    timeout: Duration,
+) -> Result<SpawnedGhostty, GhosttyStartError> {
+    let report = match startup_rx.recv_timeout(timeout) {
+        Ok(report) => Ok(report),
+        Err(RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
+            "Ghostty runtime exited before startup completed: receiving on a closed channel"
+        )),
+        // A report that landed as the deadline expired is still a real report.
+        Err(RecvTimeoutError::Timeout) => match startup_rx.try_recv() {
+            Ok(report) => Ok(report),
+            Err(_) => {
+                mailbox.close();
+                if let Some(child_pid) = startup_state.child_pid_if_spawned() {
+                    kill_unreported_child(child_pid);
+                }
+                Err(anyhow::anyhow!(
+                    "Ghostty runtime did not report startup within {timeout:?}"
+                ))
+            }
+        },
+    };
+    match report {
+        Ok(StartupReport::Started(spawned)) => Ok(spawned),
+        Ok(StartupReport::InitializationFailed(error)) => {
+            Err(GhosttyStartError::Initialization(error))
+        }
+        Ok(StartupReport::OpenPtyFailed(error)) => Err(GhosttyStartError::OpenPty(error)),
+        Ok(StartupReport::SpawnFailed(error)) => Err(GhosttyStartError::Spawn(error)),
+        Ok(StartupReport::PostSpawnFailed { child_pid, error }) => {
+            Err(GhosttyStartError::PostSpawn { child_pid, error })
+        }
+        Err(error) => {
+            if let Some(child_pid) = startup_state.child_pid_if_spawned() {
+                Err(GhosttyStartError::PostSpawn { child_pid, error })
+            } else {
+                Err(GhosttyStartError::Initialization(error))
+            }
+        }
+    }
+}
+
+/// Best-effort SIGKILL for a child whose runtime never reported startup. The
+/// runtime thread still owns the handle and reaps it once it unblocks; this
+/// only makes sure the process does not outlive the pane that gave up on it.
+fn kill_unreported_child(child_pid: u32) {
+    let Some(pid) = i32::try_from(child_pid).ok().filter(|pid| *pid > 0) else {
+        return;
+    };
+    let target = child_termination_target(child_pid)
+        .map(|group| -group)
+        .unwrap_or(pid);
+    // SAFETY: kill(2) on a pid (or verified process group) this session
+    // spawned and has not reaped yet, so it cannot have been recycled.
+    unsafe {
+        libc::kill(target, libc::SIGKILL);
     }
 }
 
@@ -3880,6 +3945,86 @@ mod tests {
     fn nfr_005_terminal_queue_caps_stay_below_budget() {
         assert_eq!(OUTPUT_POOL_BYTES, 128 * 1024);
         assert_eq!(MAX_QUEUED_INPUT_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn start_gives_up_when_the_runtime_never_reports_startup() {
+        // A runtime that never sends its StartupReport: the sender stays
+        // alive (so the channel is not disconnected) and never fires.
+        let (_startup_tx, startup_rx) = sync_channel::<StartupReport>(1);
+        let (result_tx, result_rx) = sync_channel(1);
+        std::thread::spawn(move || {
+            let mailbox = RuntimeMailbox::new();
+            let startup_state = StartupState::default();
+            let result = await_startup_report(
+                &startup_rx,
+                &startup_state,
+                &mailbox,
+                Duration::from_millis(50),
+            )
+            .map(|_| ())
+            .err();
+            let mailbox_closed = matches!(
+                mailbox.recv_timeout(Duration::ZERO),
+                Err(MailboxRecvError::Disconnected)
+            );
+            let _ = result_tx.send((result, mailbox_closed));
+        });
+        let (error, mailbox_closed) = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("start() blocked past its deadline on a runtime that never reported startup");
+        assert!(
+            matches!(error, Some(GhosttyStartError::Initialization(_))),
+            "expected an initialization error, got {error:?}"
+        );
+        assert!(
+            mailbox_closed,
+            "the runtime mailbox must be shut down on timeout"
+        );
+    }
+
+    #[test]
+    fn start_kills_a_spawned_child_when_the_runtime_never_reports_startup() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child.id();
+        let (_startup_tx, startup_rx) = sync_channel::<StartupReport>(1);
+        let mailbox = RuntimeMailbox::new();
+        let startup_state = StartupState::default();
+        startup_state.mark_child_spawned(child_pid);
+
+        let error = await_startup_report(
+            &startup_rx,
+            &startup_state,
+            &mailbox,
+            Duration::from_millis(50),
+        )
+        .map(|_| ())
+        .expect_err("a runtime that never reports startup must fail start()");
+        assert!(
+            matches!(error, GhosttyStartError::PostSpawn { child_pid: pid, .. } if pid == child_pid),
+            "expected a post-spawn error carrying the child pid, got {error:?}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child {child_pid} was not killed after the startup deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 
     #[test]

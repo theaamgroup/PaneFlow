@@ -42,6 +42,7 @@
 //! All filesystem work belongs off the GPUI main thread - call
 //! [`read_live_sessions`] from inside `smol::unblock`.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -200,16 +201,37 @@ pub fn pid_from_file_name(name: &str) -> Option<u32> {
 
 /// Absolute path of Claude Code's session-registry directory.
 ///
-/// `CLAUDE_CONFIG_DIR` wins when set, exactly as the CLI resolves it; the
-/// fallback is `~/.claude`. `None` when neither can be resolved, which is the
-/// ordinary answer on a machine with no Claude Code install.
+/// `CLAUDE_CONFIG_DIR` wins when set to an absolute path; the fallback is
+/// `~/.claude`. A relative override is ignored (with one warning): the CLI
+/// resolves it against the pane's cwd, which the GUI process does not share,
+/// so the two would name different directories. `None` when neither can be
+/// resolved, which is the ordinary answer on a machine with no Claude Code
+/// install.
 pub fn sessions_dir() -> Option<PathBuf> {
-    let base = match std::env::var_os("CLAUDE_CONFIG_DIR")
+    sessions_dir_from(dirs::home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+fn sessions_dir_from(
+    home: Option<PathBuf>,
+    claude_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    let base = match claude_config_dir
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
     {
-        Some(explicit) => explicit,
-        None => dirs::home_dir()?.join(".claude"),
+        Some(explicit) if explicit.is_absolute() => explicit,
+        Some(relative) => {
+            // This runs on every sweep, so say it once.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log::warn!(
+                    "ignoring relative CLAUDE_CONFIG_DIR {:?}; using ~/.claude",
+                    relative
+                );
+            });
+            home?.join(".claude")
+        }
+        None => home?.join(".claude"),
     };
     Some(base.join("sessions"))
 }
@@ -267,6 +289,31 @@ mod tests {
         "peerFeatures":["notify_idle","artifact_yield"],"kind":"interactive",
         "entrypoint":"cli","name":"paneflow-f4","nameSource":"derived",
         "status":"busy","updatedAt":1787916617655,"statusUpdatedAt":1787916617655}"#;
+
+    #[test]
+    fn a_relative_config_dir_override_is_ignored() {
+        // The GUI's cwd on a Finder launch is `/`; the CLI inside the pane
+        // resolves the same relative value against the project. Neither
+        // reading matches the other, so only an absolute override is honored.
+        let home = Some(PathBuf::from("/home/alice"));
+        assert_eq!(
+            sessions_dir_from(home.clone(), Some("cfg/claude".into())),
+            Some(PathBuf::from("/home/alice/.claude/sessions")),
+        );
+        assert_eq!(
+            sessions_dir_from(home.clone(), Some("/tmp/claude-cfg".into())),
+            Some(PathBuf::from("/tmp/claude-cfg/sessions")),
+        );
+        assert_eq!(
+            sessions_dir_from(home.clone(), Some("".into())),
+            Some(PathBuf::from("/home/alice/.claude/sessions")),
+        );
+        assert_eq!(
+            sessions_dir_from(home, None),
+            Some(PathBuf::from("/home/alice/.claude/sessions")),
+        );
+        assert_eq!(sessions_dir_from(None, Some("cfg/claude".into())), None);
+    }
 
     #[test]
     fn parses_the_real_record_shape() {

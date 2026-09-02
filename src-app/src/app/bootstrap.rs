@@ -722,6 +722,7 @@ impl PaneFlowApp {
             .detach();
 
         let cached_config = boot_config;
+        crate::config_writer::publish_config_snapshot(cx, &cached_config);
         let effective_shortcuts = keybindings::effective_shortcuts(&cached_config.shortcuts);
         let theme_mode = crate::ThemeMode::from_config(
             cached_config.theme_mode.as_deref(),
@@ -743,6 +744,9 @@ impl PaneFlowApp {
             workspace_commands_persist_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
             )),
+            config_field_persist_seq: std::sync::Arc::new(
+                crate::config_writer::FieldPersistSeq::default(),
+            ),
             config_persist_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config_last_persist_gen,
             // US-014: hydrate the render-path config cache once at startup.
@@ -835,7 +839,9 @@ impl PaneFlowApp {
             closed_items: Vec::new(),
             pending_worktree_teardowns: restored_pending_worktree_teardowns,
             show_about_dialog: false,
+            about_dialog_focus: cx.focus_handle(),
             system_info_dialog: None,
+            system_info_dialog_focus: cx.focus_handle(),
             show_theme_picker: false,
             theme_picker_query: String::new(),
             theme_picker_selected_idx: 0,
@@ -1244,9 +1250,8 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     });
 
     cx.on_action(|_: &About, cx| {
-        with_active_paneflow_window(cx, |app, _window, cx| {
-            app.show_about_dialog = true;
-            cx.notify();
+        with_active_paneflow_window(cx, |app, window, cx| {
+            app.open_about_dialog(window, cx);
         });
     });
 

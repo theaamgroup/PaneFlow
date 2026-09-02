@@ -101,10 +101,9 @@ impl PaneFlowApp {
             "About PaneFlow",
             None,
             ui,
-            cx.listener(|this, _: &ClickEvent, _w, cx| {
+            cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.profile_menu_open = None;
-                this.show_about_dialog = true;
-                cx.notify();
+                this.open_about_dialog(window, cx);
                 cx.stop_propagation();
             }),
         );

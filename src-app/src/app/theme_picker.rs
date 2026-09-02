@@ -92,6 +92,7 @@ impl PaneFlowApp {
         self.theme_mode = mode;
         self.cached_config.theme_mode = Some(mode.as_config_str().to_string());
         self.cached_config.theme = Some(name.to_string());
+        config_writer::publish_config_snapshot(cx, &self.cached_config);
         crate::theme::invalidate_theme_cache();
         cx.notify();
         true
@@ -130,6 +131,7 @@ impl PaneFlowApp {
         self.theme_mode = ThemeMode::Dark;
         self.cached_config.theme_mode = None;
         self.cached_config.theme = None;
+        config_writer::publish_config_snapshot(cx, &self.cached_config);
         crate::theme::invalidate_theme_cache();
         cx.notify();
     }

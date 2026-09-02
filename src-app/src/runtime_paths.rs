@@ -24,8 +24,9 @@
 //! re-implements this exact chain without the `dirs` dependency (that crate
 //! deliberately keeps its tree minimal), and the two must be kept in lockstep
 //! (#217). Any change here to the `PANEFLOW_SOCKET_PATH` handling (read as
-//! `OsString`, absolute-only), the `$TMPDIR` acceptance (non-UTF-8 or empty
-//! reads as unset), the fallback chain, or the `sun_path` ceiling must be
+//! `OsString`, absolute-only), the `$TMPDIR` acceptance (non-UTF-8, empty, or
+//! not an existing directory reads as unset), the fallback chain, or the
+//! `sun_path` ceiling must be
 //! mirrored there, or the CLI/MCP client dials an endpoint the server never
 //! bound.
 
@@ -91,7 +92,8 @@ impl IpcSocketPath {
 }
 
 /// Resolve the PaneFlow runtime directory. Fallback chain (macOS):
-/// 1. `$TMPDIR` - populated by launchd and shells (usually `/var/folders/xx/.../T/`).
+/// 1. `$TMPDIR` - populated by launchd and shells (usually `/var/folders/xx/.../T/`),
+///    used only when it names an existing directory.
 /// 2. `dirs::cache_dir().join("run")` - last-resort fallback (`~/Library/Caches/run`).
 ///
 /// `$XDG_RUNTIME_DIR` and `dirs::runtime_dir()` are **not** consulted. Finder
@@ -115,6 +117,14 @@ fn runtime_dir_from(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> 
         .and_then(|raw| raw.into_string().ok())
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+        // A stale value (a `/var/folders` slice from a previous boot, or a
+        // path that was never created) must not pin the socket under a
+        // directory that does not exist; treat it as unset so the cache-dir
+        // fallback below still gives the server somewhere to bind (#289).
+        // Existence-only on purpose: a write probe would leave droppings in
+        // a directory the resolver does not own, and `prepare_socket_parent`
+        // already reports an unwritable parent at bind time.
+        .filter(|p| p.is_dir())
         .or_else(|| dirs::cache_dir().map(|d| d.join("run")))
 }
 
@@ -451,29 +461,28 @@ mod tests {
 
     #[test]
     fn relative_socket_path_override_falls_through_to_tmpdir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp_str = tmp.path().to_str().expect("utf-8 tempdir");
         let env = [
             ("PANEFLOW_SOCKET_PATH", "relative-paneflow.sock"),
-            ("TMPDIR", "/tmp/macos-stub"),
+            ("TMPDIR", tmp_str),
         ];
         assert_eq!(
             socket_path_with(&env),
-            Some(PathBuf::from(format!(
-                "/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}"
-            ))),
+            Some(tmp.path().join(APP_SUBDIR).join(SOCKET_FILE)),
             "a non-absolute override is ignored, not honoured"
         );
     }
 
     #[test]
     fn xdg_runtime_dir_is_ignored_when_tmpdir_is_set() {
-        let env = [
-            ("XDG_RUNTIME_DIR", "/run/user/1000"),
-            ("TMPDIR", "/tmp/macos-stub"),
-        ];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp_str = tmp.path().to_str().expect("utf-8 tempdir");
+        let env = [("XDG_RUNTIME_DIR", "/run/user/1000"), ("TMPDIR", tmp_str)];
         let p = socket_path_with(&env).expect("runtime dir must resolve");
         assert_eq!(
             p,
-            PathBuf::from(format!("/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}")),
+            tmp.path().join(APP_SUBDIR).join(SOCKET_FILE),
             "GUI/CLI must agree on $TMPDIR even when $XDG_RUNTIME_DIR is set in the CLI"
         );
         assert!(
@@ -518,21 +527,63 @@ mod tests {
 
     #[test]
     fn tmpdir_used_when_set() {
-        let env = [("TMPDIR", "/tmp/macos-stub")];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp_str = tmp.path().to_str().expect("utf-8 tempdir");
+        let env = [("TMPDIR", tmp_str)];
         let p = socket_path_with(&env).expect("TMPDIR must resolve");
-        assert_eq!(
-            p,
-            PathBuf::from(format!("/tmp/macos-stub/{APP_SUBDIR}/{SOCKET_FILE}"))
+        assert_eq!(p, tmp.path().join(APP_SUBDIR).join(SOCKET_FILE));
+    }
+
+    #[test]
+    fn missing_tmpdir_falls_back_to_cache_dir() {
+        // A stale $TMPDIR (left over from a previous boot, or a
+        // `/var/folders` slice that was purged) names a path that no longer
+        // exists. It must read as unset so the server binds under the
+        // cache-dir fallback instead of disabling IPC (#289).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("gone");
+        assert!(!missing.exists(), "fixture must not exist");
+        let missing_str = missing.to_str().expect("utf-8 tempdir");
+        let env = [("TMPDIR", missing_str)];
+        let p = socket_path_with(&env).expect("cache dir must resolve");
+        assert!(
+            p.ends_with(format!("Library/Caches/run/{APP_SUBDIR}/{SOCKET_FILE}")),
+            "a $TMPDIR that is not an existing directory is treated as unset; got {}",
+            p.display()
+        );
+        assert!(
+            !p.starts_with(&missing),
+            "must not compose the socket under a missing $TMPDIR; got {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn tmpdir_that_is_a_file_falls_back_to_cache_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, b"").expect("fixture file");
+        let file_str = file.to_str().expect("utf-8 tempdir");
+        let env = [("TMPDIR", file_str)];
+        let p = socket_path_with(&env).expect("cache dir must resolve");
+        assert!(
+            p.ends_with(format!("Library/Caches/run/{APP_SUBDIR}/{SOCKET_FILE}")),
+            "a $TMPDIR that names a file is treated as unset; got {}",
+            p.display()
         );
     }
 
     #[test]
     fn overlong_path_returns_none() {
-        // 120-byte TMPDIR → joined path blows past 104. The value never
-        // touches the filesystem, so it does not need to exist.
-        let long = "/".to_string() + &"x".repeat(119);
-        assert_eq!(long.len(), 120);
-        let env = [("TMPDIR", long.as_str())];
+        // A TMPDIR of at least 120 bytes → joined path blows past 104. It
+        // has to exist on disk, or the resolver reads it as unset and falls
+        // through to the cache dir instead of hitting the ceiling.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let long_dir = tmp.path().join("x".repeat(120));
+        std::fs::create_dir(&long_dir).expect("long fixture dir");
+        let long = long_dir.to_str().expect("utf-8 tempdir");
+        assert!(long.len() >= 120);
+        let env = [("TMPDIR", long)];
         assert!(
             socket_path_with(&env).is_none(),
             "AC6: over-long sun_path must return None rather than a bind-time error"

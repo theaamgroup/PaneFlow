@@ -103,17 +103,22 @@ struct SearchPaneArgs {
     max_matches: Option<u64>,
 }
 
-pub fn dispatch_call<T: IpcTransport + ?Sized>(params: &Value, bridge: &Bridge<'_, T>) -> Value {
-    let outcome = decode::<ToolCall>(params).and_then(|call| match call.name.as_str() {
-        "list_panes" => {
-            decode::<ListPanesArgs>(&call.arguments)?;
-            list_panes(bridge)
-        }
-        "read_pane" => read_pane(decode(&call.arguments)?, bridge),
-        "search_pane" => search_pane(decode(&call.arguments)?, bridge),
-        other => Err(format!("unknown tool: {other}")),
-    });
-    tool_result(outcome)
+/// Runs a `tools/call`. `Err` is a protocol-level failure (the params do not
+/// decode as a tool call, or the tool does not exist) that the caller must
+/// surface as a JSON-RPC error; `Ok` is the tool result, with `isError` set
+/// for failures after a known tool was selected.
+pub fn dispatch_call<T: IpcTransport + ?Sized>(
+    params: &Value,
+    bridge: &Bridge<'_, T>,
+) -> Result<Value, String> {
+    let call: ToolCall = decode_params(params)?;
+    let outcome = match call.name.as_str() {
+        "list_panes" => decode::<ListPanesArgs>(&call.arguments).and_then(|_| list_panes(bridge)),
+        "read_pane" => decode(&call.arguments).and_then(|args| read_pane(args, bridge)),
+        "search_pane" => decode(&call.arguments).and_then(|args| search_pane(args, bridge)),
+        other => return Err(format!("unknown tool: {other}")),
+    };
+    Ok(tool_result(outcome))
 }
 
 fn list_panes<T: IpcTransport + ?Sized>(bridge: &Bridge<'_, T>) -> Result<String, String> {
@@ -180,6 +185,10 @@ fn search_pane<T: IpcTransport + ?Sized>(
 
 fn decode<T: DeserializeOwned>(value: &Value) -> Result<T, String> {
     serde_json::from_value(value.clone()).map_err(|error| format!("invalid arguments: {error}"))
+}
+
+fn decode_params<T: DeserializeOwned>(value: &Value) -> Result<T, String> {
+    serde_json::from_value(value.clone()).map_err(|error| format!("invalid params: {error}"))
 }
 
 fn validate_limit(name: &str, value: Option<u64>, maximum: u64) -> Result<(), String> {
@@ -285,7 +294,8 @@ mod tests {
             json!({"surfaces": [surface(7, "cargo-run", Some(42))]}),
         );
         let bridge = Bridge::new(&transport, BridgeScope::Workspace(42));
-        let result = dispatch_call(&json!({"name": "list_panes", "arguments": {}}), &bridge);
+        let result =
+            dispatch_call(&json!({"name": "list_panes", "arguments": {}}), &bridge).unwrap();
 
         assert_eq!(result["isError"], false);
         let text = result["content"][0]["text"].as_str().unwrap();
@@ -308,7 +318,8 @@ mod tests {
         let result = dispatch_call(
             &json!({"name": "read_pane", "arguments": {"target": "vite", "lines": 20}}),
             &bridge,
-        );
+        )
+        .unwrap();
 
         assert_eq!(result["isError"], false);
         let params = transport.last_params("surface.read").unwrap();
@@ -330,8 +341,22 @@ mod tests {
             json!({"name": "search_pane", "arguments": {"target": 1, "pattern": ""}}),
             json!({"name": "read_pane", "arguments": null}),
         ] {
-            let result = dispatch_call(&params, &bridge);
+            let result = dispatch_call(&params, &bridge).unwrap();
             assert_eq!(result["isError"], true, "params: {params}");
+        }
+        assert!(transport.calls().is_empty());
+    }
+
+    #[test]
+    fn unknown_tool_or_undecodable_call_is_a_protocol_error() {
+        let transport = FakeTransport::new();
+        let bridge = Bridge::new(&transport, BridgeScope::All);
+        for params in [
+            json!({"name": "not_a_tool", "arguments": {}}),
+            json!({"arguments": {}}),
+            json!({"name": "list_panes", "arguments": {}, "bogus": 1}),
+        ] {
+            assert!(dispatch_call(&params, &bridge).is_err(), "params: {params}");
         }
         assert!(transport.calls().is_empty());
     }
@@ -349,7 +374,8 @@ mod tests {
             );
         let bridge = Bridge::new(&transport, BridgeScope::Workspace(42));
 
-        let listed = dispatch_call(&json!({"name": "list_panes", "arguments": {}}), &bridge);
+        let listed =
+            dispatch_call(&json!({"name": "list_panes", "arguments": {}}), &bridge).unwrap();
         assert_eq!(listed["isError"], false);
         let list_params = transport.last_params("surface.list").unwrap();
         assert_eq!(
@@ -360,7 +386,8 @@ mod tests {
         let read = dispatch_call(
             &json!({"name": "read_pane", "arguments": {"target": 7}}),
             &bridge,
-        );
+        )
+        .unwrap();
         assert_eq!(read["isError"], false);
         let read_params = transport.last_params("surface.read").unwrap();
         assert_eq!(read_params["surface_id"], 7);
@@ -385,7 +412,8 @@ mod tests {
         let result = dispatch_call(
             &json!({"name": "read_pane", "arguments": {"target": 7}}),
             &bridge,
-        );
+        )
+        .unwrap();
         assert_eq!(result["isError"], false);
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("truncated=\"true\""), "{text}");
@@ -405,7 +433,8 @@ mod tests {
                 "_meta": {"progressToken": "p1"}
             }),
             &bridge,
-        );
+        )
+        .unwrap();
         assert_eq!(result["isError"], false, "{result}");
     }
 
@@ -422,7 +451,8 @@ mod tests {
         let result = dispatch_call(
             &json!({"name": "search_pane", "arguments": {"target": 7, "pattern": "error"}}),
             &bridge,
-        );
+        )
+        .unwrap();
 
         assert_eq!(result["isError"], false);
         let text = result["content"][0]["text"].as_str().unwrap();
