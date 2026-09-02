@@ -143,6 +143,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_pane_uri_accepts_only_the_documented_id_grammar() {
+        let cases: &[(&str, Option<u64>)] = &[
+            ("pane://surface/3/content", Some(3)),
+            ("pane://surface/0/content", Some(0)),
+            (
+                "pane://surface/18446744073709551615/content",
+                Some(u64::MAX),
+            ),
+            ("pane://surface/18446744073709551616/content", None),
+            ("pane://surface/99999999999999999999999999/content", None),
+            ("pane://surface//content", None),
+            ("pane://surface/content", None),
+            ("pane://surface/3", None),
+            ("pane://surface/3/", None),
+            ("pane://surface/3/content/", None),
+            ("pane://surface/3/content/extra", None),
+            ("pane://surface/3/extra/content", None),
+            ("pane://surface/abc/content", None),
+            ("pane://surface/3a/content", None),
+            ("pane://surface/a3/content", None),
+            ("pane://surface/-3/content", None),
+            ("pane://surface/+3/content", None),
+            ("pane://surface/ 3/content", None),
+            ("pane://surface/3 /content", None),
+            ("pane://surface/\u{663}/content", None),
+            ("pane://surface/3/Content", None),
+            ("PANE://surface/3/content", None),
+            ("pane://Surface/3/content", None),
+            ("pane:/surface/3/content", None),
+            ("file://nope", None),
+            ("", None),
+        ];
+        for (uri, expected) in cases {
+            assert_eq!(parse_pane_uri(uri), *expected, "uri {uri:?}");
+        }
+    }
+
+    #[test]
     fn list_surfaces_ipc_failure_is_not_hidden_as_an_empty_list() {
         let transport = FakeTransport::new().with_err("surface.list", "socket down");
         let bridge = Bridge::new(&transport, BridgeScope::All);
