@@ -18,6 +18,12 @@
 //! Properties:
 //! - **skipped on a terminal launch** (stdin is a TTY) - PATH was already
 //!   inherited correctly;
+//! - **skipped when PATH was set explicitly** - anything other than launchd's
+//!   stock `/usr/bin:/bin:/usr/sbin:/sbin` (e.g. `open --env PATH=...` or
+//!   `launchctl setenv PATH`) is honoured as-is;
+//! - **rejects a captured PATH without `/usr/bin` or `/bin`** - a profile that
+//!   assigns `PATH=$HOME/bin` instead of appending must not strip the system
+//!   dirs from the GUI process;
 //! - **portable** - uses POSIX `env` (not GNU `env -0`)
 //!   and falls back to `/bin/sh` for shells whose `-l -i -c`
 //!   can't run the POSIX capture script (nushell, tcsh, xonsh, …); `/bin/sh`
@@ -47,6 +53,18 @@ pub fn load_login_shell_env() {
     // launchd) lack a controlling TTY on stdin.
     // SAFETY: `isatty` is a side-effect-free query on a file descriptor.
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+        return;
+    }
+
+    // A PATH that differs from launchd's stock GUI environment was set on
+    // purpose (`open --env PATH=...`, `launchctl setenv PATH`, a wrapper
+    // script) - honour it instead of replacing it with the login shell's.
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    if !is_launchd_default_path(&inherited) {
+        log::info!(
+            "login-shell env: PATH was set explicitly ({} bytes); keeping it",
+            inherited.len()
+        );
         return;
     }
 
@@ -141,6 +159,11 @@ pub fn load_login_shell_env() {
     };
 
     match extract_path(&buf, MARKER.as_bytes()) {
+        Some(path) if !captured_path_has_system_bin(&path) => {
+            log::warn!(
+                "login-shell env: PATH captured from {capture_shell:?} lacks /usr/bin and /bin ({path:?}); keeping the inherited PATH"
+            );
+        }
         Some(path) if !path.is_empty() => {
             // SAFETY: main thread, before GPUI / any worker thread is spawned;
             // the reader thread was joined above. We import ONLY PATH - see the
@@ -188,6 +211,30 @@ fn terminate_login_shell_capture(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+/// Whether the inherited PATH is launchd's stock GUI environment (every entry
+/// is one of the four system dirs, or PATH is empty/unset). Anything else was
+/// set explicitly and must be honoured.
+#[cfg(unix)]
+fn is_launchd_default_path(path: &str) -> bool {
+    const LAUNCHD_DEFAULT_DIRS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .all(|dir| {
+            LAUNCHD_DEFAULT_DIRS
+                .iter()
+                .any(|d| dir == std::path::Path::new(d))
+        })
+}
+
+/// Whether a captured PATH still carries a system bin dir (`/usr/bin` or
+/// `/bin`). A login profile that assigns `PATH=$HOME/bin` instead of appending
+/// would otherwise strip the system dirs from the GUI process.
+#[cfg(unix)]
+fn captured_path_has_system_bin(path: &str) -> bool {
+    std::env::split_paths(path)
+        .any(|dir| dir == std::path::Path::new("/usr/bin") || dir == std::path::Path::new("/bin"))
+}
+
 /// Extract the `PATH=` value from newline-delimited `env` output that follows
 /// `marker`. PATH never contains a newline, so line-splitting is safe even when
 /// some other variable's value spans multiple lines.
@@ -215,7 +262,10 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{extract_path, find_subslice, is_posix_capture_shell};
+    use super::{
+        captured_path_has_system_bin, extract_path, find_subslice, is_launchd_default_path,
+        is_posix_capture_shell,
+    };
 
     #[test]
     fn find_subslice_locates_marker() {
@@ -241,6 +291,35 @@ mod tests {
         // A variable whose value contains a newline must not corrupt parsing.
         let out = b"__M__\nSCRIPT=line1\nline2\nPATH=/usr/bin\n";
         assert_eq!(extract_path(out, b"__M__").as_deref(), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn explicit_inherited_path_is_not_launchd_default() {
+        // launchd's stock GUI PATH (and an unset/empty one) still triggers capture.
+        assert!(is_launchd_default_path("/usr/bin:/bin:/usr/sbin:/sbin"));
+        assert!(is_launchd_default_path("/usr/bin:/bin"));
+        assert!(is_launchd_default_path(""));
+        // A PATH that was set explicitly (e.g. `open --env PATH=...`) is kept.
+        assert!(!is_launchd_default_path("/custom/bin:/usr/bin:/bin"));
+        assert!(!is_launchd_default_path(
+            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+        ));
+        assert!(!is_launchd_default_path("/custom/bin"));
+    }
+
+    #[test]
+    fn captured_path_without_system_bin_is_rejected() {
+        assert!(captured_path_has_system_bin(
+            "/usr/bin:/bin:/usr/sbin:/sbin"
+        ));
+        assert!(captured_path_has_system_bin("/opt/homebrew/bin:/usr/bin"));
+        assert!(captured_path_has_system_bin("/Users/me/bin:/bin"));
+        // A `.zshrc` that sets PATH=$HOME/bin without appending drops /usr/bin.
+        assert!(!captured_path_has_system_bin("/Users/me/bin"));
+        assert!(!captured_path_has_system_bin(
+            "/Users/me/bin:/opt/homebrew/bin"
+        ));
+        assert!(!captured_path_has_system_bin(""));
     }
 
     #[test]
