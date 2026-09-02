@@ -394,26 +394,48 @@ mod tests {
     /// US-020: a user who already bound `secondary-]` to something else keeps
     /// it. `apply_keybindings` drops the default sharing a user-claimed chord
     /// before registering it, so no ambiguous double binding - and no
-    /// error-level conflict - is produced.
-    #[test]
-    fn user_override_of_a_tab_shortcut_wins_over_the_default() {
+    /// error-level conflict - is produced. Issue #304: this drives the real
+    /// `apply_keybindings` against a live GPUI keymap with a user chord that
+    /// actually collides (`cmd+]` is `secondary-]` on macOS), then reads the
+    /// registered bindings back, so removing the user-claimed filter fails
+    /// here instead of leaving `next_tab` silently dead on the user's chord.
+    #[gpui::test]
+    fn user_override_of_a_tab_shortcut_wins_over_the_default(cx: &mut gpui::TestAppContext) {
         use super::super::defaults::DEFAULTS;
 
-        let user_key = "ctrl+]";
+        let user_key = "cmd+]";
+        let user_action = "split_horizontally";
         let user_claimed = canonical_keystroke(user_key).expect("a parsable user chord");
-        let dropped: Vec<&str> = DEFAULTS
+
+        // The premise: the user's chord really is the `next_tab` default.
+        let colliding: Vec<&str> = DEFAULTS
             .iter()
             .filter(|d| canonical_keystroke(d.key).is_some_and(|k| k == user_claimed))
             .map(|d| d.action_name)
             .collect();
-        // `secondary` is Cmd here, so a user's `ctrl+]` never collides with the
-        // `secondary-]` default and nothing is dropped.
-        assert!(dropped.is_empty());
+        assert_eq!(
+            colliding,
+            vec!["next_tab"],
+            "{user_key} must collide with exactly the next_tab default"
+        );
 
-        // Either way the user's own binding is registrable.
-        assert!(
-            make_binding(user_key, Box::new(SplitHorizontally), None).is_some(),
-            "the user override must produce a valid binding"
+        let user_shortcuts: HashMap<String, String> =
+            HashMap::from([(user_key.to_string(), user_action.to_string())]);
+        cx.update(|cx| apply_keybindings(cx, &user_shortcuts));
+
+        let bound: Vec<&'static str> = cx
+            .update(|cx| cx.all_bindings_for_input(std::slice::from_ref(&user_claimed)))
+            .iter()
+            .map(|binding| binding.action().name())
+            .collect();
+        let expected = action_from_name(user_action)
+            .expect("registered action")
+            .name();
+        assert_eq!(
+            bound,
+            vec![expected],
+            "{user_key} must reach only the user's {user_action}; the next_tab default \
+             sharing that chord must be dropped, got {bound:?}"
         );
     }
 
