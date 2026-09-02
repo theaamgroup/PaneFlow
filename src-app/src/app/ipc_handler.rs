@@ -2765,7 +2765,7 @@ impl PaneFlowApp {
                 // or buggy IPC clients (CWE-400). Matches the keyboard-action cap
                 // in `workspace_ops::create_workspace`.
                 if self.workspaces.len() >= MAX_WORKSPACES {
-                    return serde_json::json!({"error": "Workspace limit reached"});
+                    return JsonRpcError::invalid_params("Workspace limit reached").into_value();
                 }
                 // US-001: parse the optional `layout` param up-front so we can
                 // refuse a malformed payload with -32602 before mutating any
@@ -2874,7 +2874,7 @@ impl PaneFlowApp {
                     self.activate_workspace_without_window(idx, cx);
                     serde_json::json!({"selected": idx})
                 } else {
-                    serde_json::json!({"error": "Index out of bounds"})
+                    JsonRpcError::invalid_params("Index out of bounds").into_value()
                 }
             }
             "workspace.close" => {
@@ -2885,7 +2885,7 @@ impl PaneFlowApp {
                     return orchestration_disabled_error(method).into_value();
                 }
                 if self.workspaces.len() <= 1 {
-                    serde_json::json!({"error": "Cannot close last workspace"})
+                    JsonRpcError::invalid_params("Cannot close last workspace").into_value()
                 } else {
                     let idx = match requested_index(params) {
                         Ok(index) => index.unwrap_or(self.active_idx),
@@ -2900,7 +2900,7 @@ impl PaneFlowApp {
                             serde_json::json!({"confirmation_required": true, "workspace": idx})
                         }
                         crate::app::close_confirm::WorkspaceCloseOutcome::NotFound => {
-                            serde_json::json!({"error": "Index out of bounds"})
+                            JsonRpcError::invalid_params("Index out of bounds").into_value()
                         }
                     }
                 }
@@ -2910,12 +2910,13 @@ impl PaneFlowApp {
                     return serde_json::json!({"error": "Session restore in progress"});
                 }
                 let Some(layout_value) = params.get("layout") else {
-                    return serde_json::json!({"error": "Missing 'layout' parameter"});
+                    return JsonRpcError::invalid_params("Missing 'layout' parameter").into_value();
                 };
                 let mut layout: LayoutNode = match serde_json::from_value(layout_value.clone()) {
                     Ok(l) => l,
                     Err(e) => {
-                        return serde_json::json!({"error": format!("Invalid layout JSON: {e}")});
+                        return JsonRpcError::invalid_params(format!("Invalid layout JSON: {e}"))
+                            .into_value();
                     }
                 };
                 match self.apply_layout_from_json(&mut layout, cx) {
@@ -2923,7 +2924,7 @@ impl PaneFlowApp {
                         let panes = self.active_workspace().map_or(0, |ws| ws.pane_count());
                         serde_json::json!({"restored": true, "panes": panes})
                     }
-                    Err(e) => serde_json::json!({"error": e}),
+                    Err(e) => JsonRpcError::invalid_params(e).into_value(),
                 }
             }
             _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
@@ -3135,10 +3136,11 @@ impl PaneFlowApp {
                 // and unlike `surface.send_*` - it does NOT require the
                 // `PANEFLOW_IPC_SCRIPTING` gate.
                 let Some(sid) = params.get("surface_id").and_then(|s| s.as_u64()) else {
-                    return serde_json::json!({"error": "Missing 'surface_id' parameter"});
+                    return JsonRpcError::invalid_params("Missing 'surface_id' parameter")
+                        .into_value();
                 };
                 let Some(loc) = find_pane_by_surface_id(&self.workspaces, sid, cx) else {
-                    return serde_json::json!({"error": "Surface not found"});
+                    return JsonRpcError::invalid_params("Surface not found").into_value();
                 };
                 let ws_idx = loc.workspace_idx;
                 let pane = loc.pane;
@@ -4608,6 +4610,55 @@ mod tests {
         assert!(
             close_arm.contains("confirmation_required"),
             "a live-agent workspace must report that the in-app modal now owns the decision"
+        );
+    }
+
+    /// Issue #279: a client-caused refusal (cap hit, out-of-range index,
+    /// last-workspace close, malformed layout) must reach the wire as
+    /// `-32602`, the same code `workspace.up` already uses for the cap.
+    /// The legacy `{"error": <string>}` shape is promoted to `-32603` by
+    /// `promote_response`, which reads to automation as a server crash.
+    /// Only the transient "Session restore in progress" refusal keeps the
+    /// legacy shape.
+    #[test]
+    fn workspace_client_errors_are_invalid_params_not_internal() {
+        let src = include_str!("ipc_handler.rs");
+        let body = src
+            .split("fn handle_workspace_method(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn handle_surface_method(").next())
+            .expect("handle_workspace_method body");
+        let create_arm = body
+            .split("\"workspace.create\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"workspace.up\"").next())
+            .expect("workspace.create arm");
+        assert!(
+            create_arm.contains("JsonRpcError::invalid_params(\"Workspace limit reached\")"),
+            "workspace.create at MAX_WORKSPACES must be -32602 like workspace.up"
+        );
+        let select_arm = body
+            .split("\"workspace.select\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"workspace.close\"").next())
+            .expect("workspace.select arm");
+        assert!(
+            select_arm.contains("JsonRpcError::invalid_params(\"Index out of bounds\")"),
+            "workspace.select with an out-of-range index must be -32602"
+        );
+        let legacy: Vec<&str> = body
+            .lines()
+            .filter(|line| line.contains("json!({\"error\""))
+            .filter(|line| !line.contains("Session restore in progress"))
+            .collect();
+        assert!(
+            legacy.is_empty(),
+            "client-caused workspace refusals must not use the legacy -32603 shape: {legacy:?}"
+        );
+        assert_eq!(
+            JsonRpcError::invalid_params("Workspace limit reached").into_value()[JSONRPC_ERROR_KEY]
+                ["code"],
+            JsonRpcError::INVALID_PARAMS
         );
     }
 
