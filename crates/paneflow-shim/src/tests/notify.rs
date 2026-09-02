@@ -42,3 +42,76 @@ fn synthesized_hook_tolerates_child_stdout() {
         .expect("a hook that writes to stdout must not fail the bounded run");
     assert!(out.status.success());
 }
+
+/// The shim's interrupt set drives the `interrupted` flag on `ai.exit`;
+/// `state_for_exit` on the app side classifies the same codes as a human
+/// interruption rather than `Errored`.
+#[test]
+fn interrupt_exit_codes_are_hup_int_kill_and_term() {
+    for code in [129, 130, 137, 143] {
+        assert!(
+            is_interrupt_exit_code(code),
+            "128+signal code {code} is an interrupt"
+        );
+    }
+    for code in [0, 1, 2, 127, 134, 139, -1] {
+        assert!(
+            !is_interrupt_exit_code(code),
+            "code {code} is not an interrupt"
+        );
+    }
+}
+
+/// Extract the codes in the `matches!(exit_code, a | b | …)` arm of a
+/// `fn <name>(exit_code: i32) -> bool` predicate, sorted.
+fn interrupt_codes_in(source: &str, fn_name: &str) -> Vec<i32> {
+    let start = source
+        .find(&format!("fn {fn_name}(exit_code: i32) -> bool"))
+        .expect("predicate signature must be present in the source");
+    let arm = source[start..]
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("matches!(exit_code,")
+                .and_then(|rest| rest.strip_suffix(')'))
+        })
+        .expect("predicate must be a single `matches!(exit_code, …)` arm");
+    let mut codes: Vec<i32> = arm
+        .split('|')
+        .map(|code| {
+            code.trim()
+                .parse()
+                .expect("every arm entry is an integer exit code")
+        })
+        .collect();
+    codes.sort_unstable();
+    codes
+}
+
+/// Drift pin against `src-app/src/ai_types.rs::is_human_interruption_exit`.
+/// `src-app` is a bin-only crate, so the shim cannot import the app
+/// predicate; the two sets are compared as source text instead. Changing
+/// either copy without the other fails here.
+#[test]
+fn interrupt_exit_codes_match_app_human_interruption_set() {
+    let shim = interrupt_codes_in(include_str!("../main.rs"), "is_interrupt_exit_code");
+    let app = interrupt_codes_in(
+        include_str!("../../../../src-app/src/ai_types.rs"),
+        "is_human_interruption_exit",
+    );
+    assert!(!shim.is_empty(), "the shim arm must list at least one code");
+    assert_eq!(
+        shim, app,
+        "paneflow-shim::is_interrupt_exit_code and paneflow-app::ai_types::is_human_interruption_exit must agree"
+    );
+    // Control: the parsed set is the one the shim actually executes, so a
+    // parser that silently reads the wrong arm cannot turn this test into a
+    // no-op.
+    for code in -1..=255 {
+        assert_eq!(
+            is_interrupt_exit_code(code),
+            shim.contains(&code),
+            "parsed arm and runtime predicate disagree on {code}"
+        );
+    }
+}
