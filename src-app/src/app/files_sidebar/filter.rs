@@ -400,9 +400,11 @@ mod tests {
     /// `CARGO_PROFILE_TEST_OPT_LEVEL=2 cargo test -p paneflow-app --bin
     /// paneflow files_sidebar::filter` (it re-optimizes only this crate, not
     /// the dependency graph); the pass measures well under 1 ms there.
-    /// An unoptimized `cargo test` run - the CI gate - is roughly 17 ms for the
-    /// same work, so it keeps a wider ceiling that still catches an
-    /// order-of-magnitude regression rather than silently skipping the check.
+    /// An unoptimized `cargo test` run is roughly 17 ms locally. GitHub
+    /// Actions macos-15 debug runs have been observed at ~77 ms, so a 64 ms
+    /// ceiling is inside runner noise. The debug budget is 160 ms (about 10x
+    /// the unoptimized cost) so it still catches an order-of-magnitude
+    /// regression rather than silently skipping the check.
     #[test]
     fn fifty_thousand_entries_filter_under_the_frame_budget() {
         let root = PathBuf::from("/w");
@@ -422,7 +424,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(rows.len(), 500);
-        let budget_ms = if cfg!(debug_assertions) { 64 } else { 16 };
+        let budget_ms = if cfg!(debug_assertions) { 160 } else { 16 };
         assert!(
             elapsed < std::time::Duration::from_millis(budget_ms),
             "filtering 50 000 entries took {:.2}ms, over the {budget_ms}ms budget",

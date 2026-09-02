@@ -429,7 +429,7 @@ fn release_layout_scrollback(
 /// not restorable at all. So the leaf goes, and the tree closes over the gap:
 /// a split left with one child collapses into that child, a split left with
 /// none disappears, and a tree that prunes away entirely yields `None`.
-fn prune_unrestorable(node: LayoutNode) -> Option<LayoutNode> {
+pub(crate) fn prune_unrestorable(node: LayoutNode) -> Option<LayoutNode> {
     match node {
         LayoutNode::Pane { surfaces } => {
             if surfaces.is_empty() {

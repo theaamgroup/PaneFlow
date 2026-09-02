@@ -24,7 +24,7 @@
 
 use gpui::{
     ClickEvent, Context, CursorStyle, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Rgba, SharedString, Styled, div, prelude::*, px,
+    ParentElement, Rgba, Role, SharedString, Styled, div, prelude::*, px,
 };
 use serde_json::{Value, json};
 
@@ -32,7 +32,7 @@ use paneflow_config::schema::{CursorShapeConfig, normalize_hex_color};
 
 use crate::settings::components::{
     SETTINGS_CONTROL_CORNER_RADIUS, deferred_select_menu, hairline, section_header, select_chevron,
-    select_item, select_menu, select_trigger_with_hover, setting_card, setting_text, toggle_pill,
+    select_item, select_menu, select_trigger_with_hover, setting_card, setting_text, toggle_switch,
 };
 use crate::ui_primitives::AnimatedHoverExt;
 
@@ -712,15 +712,11 @@ impl PaneFlowApp {
             .px(px(12.))
             .py(px(10.))
             .child(setting_text(ui, title, description))
-            .child(
-                div()
-                    .id(SharedString::from(id))
-                    .flex_shrink_0()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.persist_setting(nested, config_key, Value::Bool(target_value), cx);
-                    }))
-                    .child(toggle_pill(current, ui)),
-            )
+            .child(toggle_switch(id, title, current, ui).on_click(cx.listener(
+                move |this, _: &ClickEvent, _window, cx| {
+                    this.persist_setting(nested, config_key, Value::Bool(target_value), cx);
+                },
+            )))
             .into_any_element()
     }
 
@@ -756,7 +752,7 @@ impl PaneFlowApp {
             this.persist_setting(false, config_key, json!(round(value + step)), cx);
         });
 
-        let button = |btn_id: String, glyph: &'static str, disabled: bool| {
+        let button = |btn_id: String, glyph: &'static str, label: String, disabled: bool| {
             let hover_bg = if disabled {
                 ui.subtle
             } else {
@@ -764,6 +760,8 @@ impl PaneFlowApp {
             };
             div()
                 .id(SharedString::from(btn_id))
+                .role(Role::Button)
+                .aria_label(label)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -793,8 +791,13 @@ impl PaneFlowApp {
                     .items_center()
                     .gap(px(6.))
                     .child(
-                        button(format!("{id}-dec"), "−", at_min)
-                            .when(!at_min, move |b| b.on_click(dec)),
+                        button(
+                            format!("{id}-dec"),
+                            "−",
+                            format!("Decrease {title}"),
+                            at_min,
+                        )
+                        .when(!at_min, move |b| b.on_click(dec)),
                     )
                     .child(
                         div()
@@ -807,8 +810,13 @@ impl PaneFlowApp {
                             .child(format!("{value:.decimals$}")),
                     )
                     .child(
-                        button(format!("{id}-inc"), "+", at_max)
-                            .when(!at_max, move |b| b.on_click(inc)),
+                        button(
+                            format!("{id}-inc"),
+                            "+",
+                            format!("Increase {title}"),
+                            at_max,
+                        )
+                        .when(!at_max, move |b| b.on_click(inc)),
                     ),
             )
     }

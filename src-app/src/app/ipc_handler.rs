@@ -163,16 +163,17 @@ pub(crate) fn parse_workspace_pane_plan(
         Some(raw) => Some(canonicalize_workspace_cwd(raw)?),
         None => None,
     };
+    let prompt = spec.get("prompt").and_then(|c| c.as_str());
+    if let Some(prompt) = prompt {
+        validate_prefill_prompt(prompt)?;
+    }
     Ok(PlannedPane {
         cwd,
         command: spec
             .get("command")
             .and_then(|c| c.as_str())
             .map(str::to_string),
-        prompt: spec
-            .get("prompt")
-            .and_then(|c| c.as_str())
-            .map(str::to_string),
+        prompt: prompt.map(str::to_string),
         env: parse_env_object(spec.get("env"))?,
         profile: parse_terminal_profile(spec.get("profile"))?,
         focus: spec.get("focus").and_then(|f| f.as_bool()).unwrap_or(false),
@@ -731,6 +732,19 @@ fn resolve_paste_mode(
 
 fn text_contains_submit_byte(text: &str) -> bool {
     text.contains('\r') || text.contains('\n')
+}
+
+/// Issue #236: a `workspace.up` / `surface.split` `prompt` is prefilled through
+/// a verbatim `send_text` and documented as "never submitted", so a CR or LF
+/// inside it would submit under the orchestration gate alone, without the
+/// scripting write gate `surface.send_text` enforces. Refuse it up front.
+fn validate_prefill_prompt(prompt: &str) -> Result<(), JsonRpcError> {
+    if text_contains_submit_byte(prompt) {
+        return Err(JsonRpcError::invalid_params(
+            "prompt contains CR or LF; a prefilled prompt is never submitted, use surface.send_text",
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_send_text_body_mode(
@@ -1818,6 +1832,9 @@ impl PaneFlowApp {
             // Hot-reload the motion switch (GPUI refreshes the windows itself
             // when the value actually changes).
             crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
+            // Issue #283: keep the socket thread's `system.capabilities`
+            // answer in step with the write gate this reload just changed.
+            crate::ipc::set_ai_unrestricted(self.cached_config.ai_unrestricted_enabled());
             // A hand edit that switches Review off while it is the live
             // mode has to demote here: the footer tab that would let the
             // user out stops rendering on the very next frame.
@@ -3286,9 +3303,7 @@ impl PaneFlowApp {
                 if !send_text_gate_open(ipc_scripting_enabled(), unrestricted) {
                     return JsonRpcError {
                         code: -32601,
-                        message:
-                            "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 to enable"
-                                .to_string(),
+                        message: "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 or enable ai_unrestricted to use".to_string(),
                     }
                     .into_value();
                 }
@@ -3551,6 +3566,11 @@ impl PaneFlowApp {
                     .and_then(|p| p.as_str())
                     .filter(|p| !p.is_empty())
                     .map(str::to_string);
+                if let Some(prompt) = spawn_prompt.as_deref()
+                    && let Err(err) = validate_prefill_prompt(prompt)
+                {
+                    return err.into_value();
+                }
                 let spawn_profile = match parse_terminal_profile(params.get("profile")) {
                     Ok(profile) => profile,
                     Err(err) => return err.into_value(),
@@ -5297,8 +5317,7 @@ mod tests {
         // (b) JSON-RPC envelope shape returned by the handler.
         let err = JsonRpcError {
             code: -32601,
-            message: "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 to enable"
-                .to_string(),
+            message: "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 or enable ai_unrestricted to use".to_string(),
         };
         let envelope = promote_response(err.into_value(), serde_json::json!(42));
         assert_eq!(envelope["error"]["code"], -32601);
@@ -5324,6 +5343,23 @@ mod tests {
             "free-access mode opens it without the env gate"
         );
         assert!(super::send_text_gate_open(true, true));
+    }
+
+    /// Issue #283: the `scripting` capability the socket thread advertises
+    /// must be the same truth table as the write gate the GPUI tick applies,
+    /// or a client that probes `system.capabilities` refuses a write the
+    /// server would accept.
+    #[test]
+    fn advertised_scripting_capability_matches_the_write_gate() {
+        for env in [None, Some(""), Some("0"), Some("true"), Some("1")] {
+            for unrestricted in [false, true] {
+                assert_eq!(
+                    crate::ipc::scripting_capability_from(env, unrestricted),
+                    super::send_text_gate_open(super::scripting_enabled_from(env), unrestricted),
+                    "env={env:?} unrestricted={unrestricted}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5480,6 +5516,43 @@ mod tests {
         assert!(
             resolve_send_text_body_mode("line one\nline two", Some(false), false, true).is_err(),
             "explicit paste=false must not bypass the CR/LF guard"
+        );
+    }
+
+    #[test]
+    fn prefill_prompt_with_cr_or_lf_is_rejected_as_invalid_params() {
+        // Issue #236: `workspace.up` / `surface.split` prompts are prefilled
+        // "never submitted" through a verbatim `send_text`, so a CR/LF inside
+        // the prompt would auto-submit under the orchestration gate alone.
+        // Refuse them with -32602 before anything is spawned.
+        for prompt in ["fix the bug\nplease", "fix the bug\r", "fix\r\nthe bug"] {
+            let spec = serde_json::json!({ "prompt": prompt });
+            match parse_workspace_pane_plan(&spec) {
+                Err(err) => assert_eq!(err.code, JsonRpcError::INVALID_PARAMS),
+                Ok(_) => panic!("prompt {prompt:?} carries a submit byte and must be refused"),
+            }
+        }
+        let spec = serde_json::json!({ "prompt": "fix the bug" });
+        assert_eq!(
+            parse_workspace_pane_plan(&spec)
+                .expect("single-line prompt")
+                .prompt
+                .as_deref(),
+            Some("fix the bug")
+        );
+        // The same guard fronts the spawn-capable `surface.split` prompt.
+        assert!(validate_prefill_prompt("fix the bug").is_ok());
+        assert!(validate_prefill_prompt("fix\nthe bug").is_err());
+        assert!(validate_prefill_prompt("fix\rthe bug").is_err());
+        let src = include_str!("ipc_handler.rs");
+        let split_arm = src
+            .split("\"surface.split\" => {")
+            .nth(1)
+            .and_then(|rest| rest.split("schedule_prompt_prefill(&new_terminal").next())
+            .expect("surface.split arm");
+        assert!(
+            split_arm.contains("validate_prefill_prompt(prompt)"),
+            "surface.split must refuse a CR/LF prompt before spawning"
         );
     }
 

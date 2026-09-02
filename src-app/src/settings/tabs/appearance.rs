@@ -9,7 +9,7 @@ use crate::PaneFlowApp;
 use crate::settings::components::{
     deferred_select_menu, secondary_button, section_header, section_header_with_action,
     select_chevron, select_item, select_menu, select_trigger, setting_card, setting_text,
-    toggle_pill, with_alpha,
+    toggle_switch, with_alpha,
 };
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 
@@ -93,18 +93,16 @@ impl PaneFlowApp {
                 "Settle hover transitions and the sidebar slide instantly instead of animating them.",
             ))
             .child(
-                div()
-                    .id("reduce-motion-toggle")
-                    .flex_shrink_0()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                toggle_switch("reduce-motion-toggle", "Reduce motion", reduce_motion, ui).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         this.persist_setting(
                             false,
                             "reduce_motion",
                             serde_json::Value::Bool(!reduce_motion),
                             cx,
                         );
-                    }))
-                    .child(toggle_pill(reduce_motion, ui)),
+                    }),
+                ),
             );
 
         let content = div()
@@ -156,21 +154,22 @@ impl PaneFlowApp {
                     "Show the native macOS Sidebar material in the navigation card.",
                 ))
                 .child(
-                    div()
-                        .id("macos-chrome-material-toggle")
-                        .flex_shrink_0()
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    toggle_switch(
+                        "macos-chrome-material-toggle",
+                        "Sidebar transparency",
+                        sidebar_material,
+                        ui,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _window, cx| {
                             this.persist_setting(
                                 false,
                                 "macos_chrome_material",
                                 serde_json::Value::Bool(!sidebar_material),
                                 cx,
                             );
-                        }))
-                        .child(crate::settings::components::toggle_pill(
-                            sidebar_material,
-                            ui,
-                        )),
+                        },
+                    )),
                 );
 
             let macos_card = setting_card(ui).child(sidebar_material_row);

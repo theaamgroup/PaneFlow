@@ -14,6 +14,8 @@
 //!   cards to split rows.
 //! - **toggle_pill** - Codex/iOS switch: a 36x22 pill, solid `#339cff` track
 //!   when on / soft neutral when off, with a white thumb.
+//! - **toggle_switch** - the clickable, focusable `Role::Switch` wrapper every
+//!   toggle row puts around `toggle_pill`; callers chain their `.on_click()`.
 //! - **secondary_button** - filled, agents cancel-button style
 //!   (`ui.subtle` bg, no border).
 //! - **destructive_button** - the same silhouette in system red with a white
@@ -25,12 +27,12 @@
 //!
 //! All helpers return `impl IntoElement` or `Div`. Apart from `secondary_button`
 //! and `toggle_row`, they take no listeners - parent rows wire their own
-//! `.id()` and `.on_click()`.
+//! `.id()` and `.on_click()` (a toggle row chains it onto `toggle_switch`).
 
 use gpui::{
     AnyElement, ClickEvent, CursorStyle, Div, ElementId, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled, deferred,
-    div, img, prelude::*, px, svg,
+    ParentElement, Pixels, Role, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    Toggled, deferred, div, img, prelude::*, px, svg,
 };
 
 use crate::ui_primitives::{
@@ -154,13 +156,11 @@ pub fn toggle_row(
         description,
         icon,
         ui,
-        div()
-            .id(SharedString::from(id))
-            .flex_shrink_0()
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+        toggle_switch(id, title, current, ui).on_click(cx.listener(
+            move |this, _: &ClickEvent, _window, cx| {
                 this.persist_setting(false, config_key, serde_json::Value::Bool(target_value), cx);
-            }))
-            .child(toggle_pill(current, ui)),
+            },
+        )),
     )
 }
 
@@ -211,6 +211,41 @@ pub fn toggle_pill(on: bool, ui: crate::theme::UiColors) -> impl IntoElement {
         .child(div().w(px(18.)).h(px(18.)).rounded_full().bg(gpui::white()));
 
     div().flex_shrink_0().child(track)
+}
+
+/// The clickable wrapper around [`toggle_pill`] that every toggle row uses, and
+/// the one place its accessibility contract lives (issue #275): it is a
+/// `Role::Switch` named after the row's title, reports the setting's value as
+/// its toggled state, and is a focusable tab stop. A mouse-down focuses it;
+/// GPUI then synthesizes `ClickEvent::Keyboard` from unmodified Space / Enter
+/// KeyUp on that focused `div` (`paint_mouse_listeners` in `div.rs`) and
+/// delivers it to the same `.on_click()` listeners the pointer uses. Do not
+/// add a second key handler here - it would double-toggle. Callers chain the
+/// `.on_click()` that writes the setting.
+///
+/// The focus handle is GPUI's own per-element one (created from the `id`), so
+/// no focus state lives on `PaneFlowApp`; Settings still has no Tab ring
+/// (`window.focus_next` is not bound; GPUI does not auto-bind Tab) and no
+/// visible focus ring - that is the wider focus model the issue leaves open.
+pub fn toggle_switch(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    on: bool,
+    ui: crate::theme::UiColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .role(Role::Switch)
+        .aria_label(label)
+        .aria_toggled(switch_toggled(on))
+        .tab_index(0)
+        .child(toggle_pill(on, ui))
+}
+
+/// The accesskit toggled state a switch reports for a boolean setting.
+pub fn switch_toggled(on: bool) -> Toggled {
+    if on { Toggled::True } else { Toggled::False }
 }
 
 /// Standard "title + description" left column used by every setting row.
@@ -371,6 +406,7 @@ pub fn select_trigger_with_hover(
 ) -> AnimatedHover {
     div()
         .id(id.into())
+        .role(Role::ComboBox)
         .relative()
         .flex()
         .flex_row()
@@ -593,4 +629,85 @@ pub fn deferred_select_menu(menu: SelectMenu) -> AnyElement {
     )
     .with_priority(1)
     .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The switch's `aria-checked` equivalent tracks the config value it
+    /// renders: a screen reader must hear "on" for a `true` setting.
+    #[test]
+    fn switch_toggled_mirrors_the_setting_value() {
+        assert_eq!(switch_toggled(true), Toggled::True);
+        assert_eq!(switch_toggled(false), Toggled::False);
+    }
+
+    /// Issue #275: every Settings toggle used to be a bare `.id()` +
+    /// `.on_click()` wrapper around the visual pill - no role, no state, no
+    /// name, no focus - so assistive tech saw an unlabeled group and the
+    /// keyboard could not flip it. Every toggle now goes through
+    /// [`toggle_switch`], which is the one place the switch semantics live.
+    /// This scan fails with the offending `file:line` if a settings tab wraps
+    /// `toggle_pill` directly again, or if `toggle_switch` loses its role,
+    /// toggled state, or focusability.
+    #[test]
+    fn settings_toggles_are_accessible_switches() {
+        use std::path::{Path, PathBuf};
+
+        let this_file = include_str!("components.rs");
+        let switch_body = this_file
+            .split("pub fn toggle_switch(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("components.rs defines toggle_switch");
+        for needle in [
+            ".role(Role::Switch)",
+            ".aria_toggled(switch_toggled(on))",
+            ".aria_label(label)",
+            ".tab_index(0)",
+            ".child(toggle_pill(on, ui))",
+        ] {
+            assert!(
+                switch_body.contains(needle),
+                "toggle_switch lost `{needle}`; the switch semantics live there"
+            );
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings");
+        let mut violations = Vec::new();
+        let mut stack: Vec<PathBuf> = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if rel == "components.rs" {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (idx, line) in text.lines().enumerate() {
+                    if line.contains("toggle_pill(") {
+                        violations.push(format!("{rel}:{}: {}", idx + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "settings tabs must build toggles with `toggle_switch`, not wrap `toggle_pill` \
+             themselves (the wrapper has no switch role):\n{}",
+            violations.join("\n")
+        );
+    }
 }

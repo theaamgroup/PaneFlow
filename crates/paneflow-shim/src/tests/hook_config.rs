@@ -122,6 +122,44 @@ fn install_at_refuses_symlinked_config_dir() {
 }
 
 #[test]
+fn install_at_refuses_symlinked_config_file() {
+    use std::os::unix::fs::symlink;
+
+    // #234: the `.claude` directory is real, but `settings.local.json`
+    // inside it is a FILE symlink a cloned repo can point at any
+    // user-owned JSON file outside the project. `write_json_atomic`
+    // deliberately follows a symlinked HOME config (stow/chezmoi/yadm);
+    // a project-local link is under the checkout's control, not the
+    // user's, so install must refuse it and leave the target untouched.
+    let td = tempfile::TempDir::new().unwrap();
+    let outside = td.path().join("outside.json");
+    let original = "{\"untouched\": true}\n";
+    std::fs::write(&outside, original).unwrap();
+    let claude_dir = td.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let link = claude_dir.join("settings.local.json");
+    symlink(&outside, &link).unwrap();
+
+    let guard = HookConfigGuard::install_at(&claude_dir);
+    assert!(
+        guard.is_err(),
+        "install_at must refuse a symlinked config file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        original,
+        "the outside file must not be rewritten through the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link itself must be left in place"
+    );
+}
+
+#[test]
 fn install_at_preserves_existing_user_hooks_and_permissions() {
     let td = tempfile::TempDir::new().unwrap();
     let claude_dir = td.path().join(".claude");

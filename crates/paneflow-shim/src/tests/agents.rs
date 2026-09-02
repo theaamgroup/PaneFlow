@@ -409,6 +409,25 @@ fn strip_hermes_block_handles_absent_and_partial_markers() {
 // ---------- US-006: CodexHookConfigGuard (Unix) ----------
 
 #[test]
+fn codex_install_at_refuses_symlinked_hooks_file() {
+    // #234: same guard as Claude's settings.local.json - a project-local
+    // `.codex/hooks.json` FILE symlink must not be followed out of the repo.
+    let td = tempfile::TempDir::new().unwrap();
+    let outside = td.path().join("outside.json");
+    let original = "{\"untouched\": true}\n";
+    std::fs::write(&outside, original).unwrap();
+    let codex_dir = td.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::os::unix::fs::symlink(&outside, codex_dir.join("hooks.json")).unwrap();
+
+    assert!(
+        CodexHookConfigGuard::install_at(&codex_dir, None).is_err(),
+        "install_at must refuse a symlinked hooks.json"
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), original);
+}
+
+#[test]
 fn codex_install_at_creates_hooks_json_with_all_six_events() {
     let td = tempfile::TempDir::new().unwrap();
     let codex_dir = td.path().join(".codex");
