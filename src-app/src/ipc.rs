@@ -97,7 +97,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -213,6 +213,36 @@ const MAX_CONCURRENT_CONNECTIONS: usize = MAX_REQUEST_CONNECTIONS + MAX_SUBSCRIP
 /// thread. Once 256 requests are pending, new GPUI-bound requests fail fast
 /// with an overload error instead of growing memory without a cap.
 pub(crate) const IPC_REQUEST_QUEUE_CAPACITY: usize = 256;
+
+/// Issue #283: process-wide mirror of the `ai_unrestricted` config switch.
+/// `system.capabilities` is answered on the socket thread, which has no
+/// `cached_config`, while the live `surface.send_text` gate on the GPUI tick
+/// is `env OR ai_unrestricted`. The GPUI thread writes this flag at startup,
+/// on every config reload, and from the Settings toggle so the advertised
+/// `scripting` capability agrees with the gate that actually accepts writes.
+static AI_UNRESTRICTED: AtomicBool = AtomicBool::new(false);
+
+/// Publish the current `ai_unrestricted` value to the socket thread.
+pub(crate) fn set_ai_unrestricted(enabled: bool) {
+    AI_UNRESTRICTED.store(enabled, Ordering::Relaxed);
+}
+
+/// Read the mirrored `ai_unrestricted` value (socket thread).
+fn ai_unrestricted() -> bool {
+    AI_UNRESTRICTED.load(Ordering::Relaxed)
+}
+
+/// The `scripting` capability `system.capabilities` advertises. Must equal
+/// the effective `surface.send_text` / `surface.send_keystroke` write gate
+/// (`ipc_handler::send_text_gate_open`): open when `PANEFLOW_IPC_SCRIPTING=1`
+/// OR `ai_unrestricted` is on. Pure truth table, so it is unit-tested without
+/// mutating the process environment.
+pub(crate) fn scripting_capability_from(
+    scripting_env: Option<&str>,
+    ai_unrestricted: bool,
+) -> bool {
+    matches!(scripting_env, Some("1")) || ai_unrestricted
+}
 
 /// EP-004 US-011: maximum live IPC handlers the GPUI thread runs in one tick.
 /// Remaining queued requests stay pending for the next scheduled tick.
@@ -1048,8 +1078,10 @@ fn handle_connection(
                                 ];
                                 methods.extend_from_slice(paneflow_ipc_client::ai_hook::METHODS);
                                 json!({"jsonrpc": "2.0", "result": {
-                                    "scripting": std::env::var("PANEFLOW_IPC_SCRIPTING")
-                                        .is_ok_and(|v| v == "1"),
+                                    "scripting": scripting_capability_from(
+                                        std::env::var("PANEFLOW_IPC_SCRIPTING").ok().as_deref(),
+                                        ai_unrestricted(),
+                                    ),
                                     "orchestration": std::env::var("PANEFLOW_IPC_ORCHESTRATION")
                                         .is_ok_and(|v| v == "1")
                                         || std::env::var("PANEFLOW_IPC_SCRIPTING")
@@ -1896,5 +1928,42 @@ mod allow_multiple_tests {
             super::allow_multiple_from(Some("1")),
             "the documented opt-in value must skip the singleton"
         );
+    }
+}
+
+#[cfg(test)]
+mod capabilities_tests {
+    /// Issue #283: `system.capabilities.scripting` must report the effective
+    /// write gate, not just the env var. With `ai_unrestricted` on and the env
+    /// unset the server accepts `surface.send_text`, so a client probing the
+    /// capability (`paneflow flow run` with `submit = true`) must not be
+    /// refused on `scripting: false`.
+    #[test]
+    fn scripting_capability_reports_the_effective_write_gate() {
+        assert!(
+            !super::scripting_capability_from(None, false),
+            "both off must read as disabled (unchanged legacy behavior)"
+        );
+        assert!(
+            !super::scripting_capability_from(Some("0"), false),
+            "explicit 0 without free-access must read as disabled"
+        );
+        assert!(
+            super::scripting_capability_from(Some("1"), false),
+            "the env gate alone still advertises scripting"
+        );
+        assert!(
+            super::scripting_capability_from(None, true),
+            "ai_unrestricted must advertise scripting without the env gate"
+        );
+        assert!(super::scripting_capability_from(Some("1"), true));
+
+        // The mirror the socket thread reads round-trips what the GPUI
+        // thread publishes. Kept in this one test so no parallel test
+        // observes a half-written global.
+        super::set_ai_unrestricted(true);
+        assert!(super::ai_unrestricted());
+        super::set_ai_unrestricted(false);
+        assert!(!super::ai_unrestricted());
     }
 }

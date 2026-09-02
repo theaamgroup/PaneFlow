@@ -1737,6 +1737,9 @@ impl PaneFlowApp {
             // Hot-reload the motion switch (GPUI refreshes the windows itself
             // when the value actually changes).
             crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
+            // Issue #283: keep the socket thread's `system.capabilities`
+            // answer in step with the write gate this reload just changed.
+            crate::ipc::set_ai_unrestricted(self.cached_config.ai_unrestricted_enabled());
             // A hand edit that switches Review off while it is the live
             // mode has to demote here: the footer tab that would let the
             // user out stops rendering on the very next frame.
@@ -3190,9 +3193,7 @@ impl PaneFlowApp {
                 if !send_text_gate_open(ipc_scripting_enabled(), unrestricted) {
                     return JsonRpcError {
                         code: -32601,
-                        message:
-                            "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 to enable"
-                                .to_string(),
+                        message: "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 or enable ai_unrestricted to use".to_string(),
                     }
                     .into_value();
                 }
@@ -4978,8 +4979,7 @@ mod tests {
         // (b) JSON-RPC envelope shape returned by the handler.
         let err = JsonRpcError {
             code: -32601,
-            message: "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 to enable"
-                .to_string(),
+            message: "surface.send_text disabled; set PANEFLOW_IPC_SCRIPTING=1 or enable ai_unrestricted to use".to_string(),
         };
         let envelope = promote_response(err.into_value(), serde_json::json!(42));
         assert_eq!(envelope["error"]["code"], -32601);
@@ -5005,6 +5005,23 @@ mod tests {
             "free-access mode opens it without the env gate"
         );
         assert!(super::send_text_gate_open(true, true));
+    }
+
+    /// Issue #283: the `scripting` capability the socket thread advertises
+    /// must be the same truth table as the write gate the GPUI tick applies,
+    /// or a client that probes `system.capabilities` refuses a write the
+    /// server would accept.
+    #[test]
+    fn advertised_scripting_capability_matches_the_write_gate() {
+        for env in [None, Some(""), Some("0"), Some("true"), Some("1")] {
+            for unrestricted in [false, true] {
+                assert_eq!(
+                    crate::ipc::scripting_capability_from(env, unrestricted),
+                    super::send_text_gate_open(super::scripting_enabled_from(env), unrestricted),
+                    "env={env:?} unrestricted={unrestricted}"
+                );
+            }
+        }
     }
 
     #[test]

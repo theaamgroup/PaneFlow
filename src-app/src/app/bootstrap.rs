@@ -715,6 +715,9 @@ impl PaneFlowApp {
             .detach();
 
         let cached_config = paneflow_config::loader::load_config();
+        // Issue #283: the socket thread answers `system.capabilities` from
+        // this mirror; seed it before any client can probe the gate.
+        crate::ipc::set_ai_unrestricted(cached_config.ai_unrestricted_enabled());
         let effective_shortcuts = keybindings::effective_shortcuts(&cached_config.shortcuts);
         let theme_mode = crate::ThemeMode::from_config(
             cached_config.theme_mode.as_deref(),
