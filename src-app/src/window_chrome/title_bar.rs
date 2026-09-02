@@ -1,7 +1,7 @@
 use crate::ui_primitives::TooltipDelayExt;
 
 use gpui::{
-    Context, Decorations, EventEmitter, IntoElement, MouseButton, Render, Styled, Window,
+    Context, Decorations, EventEmitter, IntoElement, MouseButton, Render, Role, Styled, Window,
     WindowControlArea, div, prelude::*, px, svg,
 };
 
@@ -184,6 +184,8 @@ impl Render for TitleBar {
             .child(
                 div()
                     .id("toggle-primary-sidebar")
+                    .role(Role::Button)
+                    .aria_label(sidebar_tooltip.clone())
                     .flex_none()
                     .size(TITLE_BAR_CONTROL_SIZE)
                     .flex()
@@ -202,7 +204,11 @@ impl Render for TitleBar {
                         cx.new(|_| crate::app::sidebar::SidebarTooltip { label })
                             .into()
                     })
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    // Swallow the press so the bar's drag-to-move state machine
+                    // never arms; the toggle itself fires on click so AccessKit
+                    // exposes `Action::Click` on the button.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         if let Some(entity) = toggle_sidebar_handle.upgrade() {
                             entity.update(cx, |_this, cx| {
@@ -375,6 +381,43 @@ impl Render for TitleBar {
 
 #[cfg(test)]
 mod tests {
+    /// Issue #321: the sidebar toggle had a visual tooltip but no button
+    /// role, no accessible name, and fired on `mouse_down`, so AccessKit never
+    /// exposed it as a named, clickable control. This scan pins the toggle's
+    /// builder chain to the repo recipe (`Role::Button` + `aria_label` bound
+    /// to the state-tracking tooltip text + `on_click`).
+    #[test]
+    fn sidebar_toggle_is_an_accessible_named_button() {
+        let source = include_str!("title_bar.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production title bar source");
+        let chain = source
+            .split(".id(\"toggle-primary-sidebar\")")
+            .nth(1)
+            .and_then(|rest| rest.split("svg()").next())
+            .expect("title_bar.rs builds the toggle-primary-sidebar control");
+        for needle in [
+            ".role(Role::Button)",
+            ".aria_label(sidebar_tooltip.clone())",
+            ".on_click(",
+        ] {
+            assert!(
+                chain.contains(needle),
+                "sidebar toggle lost `{needle}`; AccessKit needs it to expose a named button"
+            );
+        }
+        let click_at = chain.find(".on_click(").unwrap();
+        let emit_at = chain
+            .find("cx.emit(TitleBarEvent::ToggleSidebar)")
+            .expect("sidebar toggle emits TitleBarEvent::ToggleSidebar");
+        assert!(
+            emit_at > click_at && !chain[click_at..emit_at].contains(".on_mouse_down("),
+            "TitleBarEvent::ToggleSidebar must be emitted from the on_click handler, \
+             not from on_mouse_down, so accesskit::Action::Click reaches it"
+        );
+    }
+
     #[test]
     fn title_bar_files_and_help_popovers_are_removed_end_to_end() {
         let title_bar = include_str!("title_bar.rs")
