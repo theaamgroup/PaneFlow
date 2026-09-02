@@ -1005,7 +1005,7 @@ fn handle_connection(
                                 );
                                 return;
                             };
-                            serve_subscription(&mut writer, &params, &event_bus);
+                            serve_subscription(&mut writer, &params, &event_bus, &response_id);
                             return;
                         }
 
@@ -1103,7 +1103,12 @@ fn handle_connection(
 /// Every push goes through [`push_frame`] / [`push_line`]. A write to a
 /// closed Unix socket returns `BrokenPipe`, so the `watch` client's
 /// disconnect is a clean RAII eviction of the `Subscription`.
-fn serve_subscription(writer: &mut Stream, params: &Value, bus: &Arc<crate::ipc_events::EventBus>) {
+fn serve_subscription(
+    writer: &mut Stream,
+    params: &Value,
+    bus: &Arc<crate::ipc_events::EventBus>,
+    request_id: &Value,
+) {
     use std::sync::mpsc::RecvTimeoutError;
 
     const HEARTBEAT: Duration = Duration::from_secs(30);
@@ -1114,7 +1119,7 @@ fn serve_subscription(writer: &mut Stream, params: &Value, bus: &Arc<crate::ipc_
             let err = json!({
                 "jsonrpc": "2.0",
                 "error": {"code": -32602, "message": msg},
-                "id": Value::Null,
+                "id": request_id,
             });
             // Guarded like every other push: the subscribe request's
             // socket may already be closed by the time we reply.
@@ -1895,6 +1900,46 @@ mod allow_multiple_tests {
         assert!(
             super::allow_multiple_from(Some("1")),
             "the documented opt-in value must skip the singleton"
+        );
+    }
+}
+
+#[cfg(test)]
+mod subscription_error_id_tests {
+    use super::{GenericFilePath, ListenerOptions, Stream, serve_subscription};
+    use interprocess::local_socket::prelude::*;
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader};
+
+    /// Issue #284: an invalid `events.subscribe` request must be answered with
+    /// a JSON-RPC error carrying the request's own `id`, not `null`, so a
+    /// client that correlates replies by id can see the `-32602`.
+    #[test]
+    fn invalid_subscribe_error_echoes_request_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sub-err.sock");
+        let name = path.to_fs_name::<GenericFilePath>().expect("fs name");
+        let listener = ListenerOptions::new()
+            .name(name.clone())
+            .create_sync()
+            .expect("listener");
+        let client = Stream::connect(name).expect("connect");
+        let mut server = listener.accept().expect("accept");
+
+        let bus = crate::ipc_events::EventBus::new();
+        serve_subscription(&mut server, &json!({"types": ["bogus"]}), &bus, &json!(7));
+        drop(server);
+
+        let mut line = String::new();
+        BufReader::new(client)
+            .read_line(&mut line)
+            .expect("read error frame");
+        let reply: Value = serde_json::from_str(line.trim()).expect("json frame");
+        assert_eq!(reply["jsonrpc"], "2.0");
+        assert_eq!(reply["error"]["code"], -32602);
+        assert_eq!(
+            reply["id"], 7,
+            "error envelope must echo the request id; got {reply}"
         );
     }
 }
