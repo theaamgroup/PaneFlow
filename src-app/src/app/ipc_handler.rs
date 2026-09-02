@@ -96,24 +96,52 @@ pub(crate) struct PlannedPane {
     pub(crate) context: Option<String>,
 }
 
-/// Parse a JSON `{ "K": "V", … }` object into an env map, dropping non-string
-/// values. Returns `None` for absent/empty so the global `terminal.env` default
-/// still applies underneath (parity with `SurfaceDefinition::env`).
-fn parse_env_object(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
-    let obj = value?.as_object()?;
-    let map: HashMap<String, String> = obj
-        .iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-        .collect();
-    (!map.is_empty()).then_some(map)
+/// Parse a JSON `{ "K": "V", … }` object into an env map. Every value must be
+/// a string (a shell env value can only be a string); anything else is a
+/// `-32602` rather than a silently dropped entry, so a client never gets a
+/// pane missing the env it asked for. Returns `Ok(None)` for absent/`null`/
+/// empty so the global `terminal.env` default still applies underneath
+/// (parity with `SurfaceDefinition::env`).
+fn parse_env_object(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<HashMap<String, String>>, JsonRpcError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let Some(obj) = value.as_object() else {
+        return Err(JsonRpcError::invalid_params(
+            "env must be an object of string values",
+        ));
+    };
+    let mut map = HashMap::with_capacity(obj.len());
+    for (k, v) in obj {
+        let Some(s) = v.as_str() else {
+            return Err(JsonRpcError::invalid_params(format!(
+                "env value for {k:?} must be a string"
+            )));
+        };
+        map.insert(k.clone(), s.to_string());
+    }
+    Ok((!map.is_empty()).then_some(map))
 }
 
-fn parse_terminal_profile(value: Option<&serde_json::Value>) -> TerminalSurfaceProfile {
-    match value.and_then(|v| v.as_str()) {
-        Some("agent") => TerminalSurfaceProfile::Agent,
-        Some("review") => TerminalSurfaceProfile::Review,
-        Some("cached") => TerminalSurfaceProfile::Cached,
-        _ => TerminalSurfaceProfile::Normal,
+/// Parse an optional `profile` string. Absent/`null` is `Normal`; an unknown
+/// name or a non-string is a `-32602` instead of silently falling back.
+fn parse_terminal_profile(
+    value: Option<&serde_json::Value>,
+) -> Result<TerminalSurfaceProfile, JsonRpcError> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(TerminalSurfaceProfile::Normal),
+        Some(serde_json::Value::String(name)) => match name.as_str() {
+            "normal" => Ok(TerminalSurfaceProfile::Normal),
+            "agent" => Ok(TerminalSurfaceProfile::Agent),
+            "review" => Ok(TerminalSurfaceProfile::Review),
+            "cached" => Ok(TerminalSurfaceProfile::Cached),
+            other => Err(JsonRpcError::invalid_params(format!(
+                "unknown profile {other:?}; expected one of normal, agent, review, cached"
+            ))),
+        },
+        Some(_) => Err(JsonRpcError::invalid_params("profile must be a string")),
     }
 }
 
@@ -145,8 +173,8 @@ pub(crate) fn parse_workspace_pane_plan(
             .get("prompt")
             .and_then(|c| c.as_str())
             .map(str::to_string),
-        env: parse_env_object(spec.get("env")),
-        profile: parse_terminal_profile(spec.get("profile")),
+        env: parse_env_object(spec.get("env"))?,
+        profile: parse_terminal_profile(spec.get("profile"))?,
         focus: spec.get("focus").and_then(|f| f.as_bool()).unwrap_or(false),
         label: spec
             .get("label")
@@ -644,10 +672,10 @@ fn normalized_shell_value(shell: Option<&str>) -> &str {
     shell.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("")
 }
 
-fn env_param_has_strings(value: Option<&serde_json::Value>) -> bool {
+fn env_param_is_nonempty_object(value: Option<&serde_json::Value>) -> bool {
     value
         .and_then(|v| v.as_object())
-        .is_some_and(|obj| obj.values().any(serde_json::Value::is_string))
+        .is_some_and(|obj| !obj.is_empty())
 }
 
 fn string_param_is_nonempty(value: Option<&serde_json::Value>) -> bool {
@@ -660,7 +688,7 @@ fn pane_spec_requires_orchestration(spec: &serde_json::Value) -> bool {
     string_param_is_nonempty(spec.get("command"))
         || string_param_is_nonempty(spec.get("prompt"))
         || string_param_is_nonempty(spec.get("context"))
-        || env_param_has_strings(spec.get("env"))
+        || env_param_is_nonempty_object(spec.get("env"))
         || spec
             .get("managed_worktree")
             .is_some_and(|value| !value.is_null())
@@ -3470,7 +3498,14 @@ impl PaneFlowApp {
                     .and_then(|p| p.as_str())
                     .filter(|p| !p.is_empty())
                     .map(str::to_string);
-                let spawn_profile = parse_terminal_profile(params.get("profile"));
+                let spawn_profile = match parse_terminal_profile(params.get("profile")) {
+                    Ok(profile) => profile,
+                    Err(err) => return err.into_value(),
+                };
+                let spawn_env_overrides = match parse_env_object(params.get("env")) {
+                    Ok(env) => env,
+                    Err(err) => return err.into_value(),
+                };
 
                 // US-002 (orchestration-v2): an optional `surface_id` targets
                 // the leaf hosting that surface - in whatever workspace it
@@ -3526,7 +3561,7 @@ impl PaneFlowApp {
                 // before spawn; a failure is a JSON-RPC error, not success.
                 let spawn_env = match stage_context_file(
                     params.get("context").and_then(|c| c.as_str()),
-                    parse_env_object(params.get("env")),
+                    spawn_env_overrides,
                     cx,
                 ) {
                     Ok(env) => env,
@@ -4852,32 +4887,128 @@ mod tests {
         );
     }
 
-    // US-008: `workspace.up` env parsing. Non-string values are dropped (a
-    // shell env value can only be a string) and an absent/empty object yields
-    // `None` so the global `terminal.env` default still applies underneath.
+    // US-008: `workspace.up` env parsing. A shell env value can only be a
+    // string, so a non-string value is a `-32602` (never silently dropped),
+    // and an absent/empty object yields `None` so the global `terminal.env`
+    // default still applies underneath.
     #[test]
-    fn parse_env_object_keeps_strings_and_drops_the_rest() {
+    fn parse_env_object_keeps_strings_and_rejects_the_rest() {
         let env = parse_env_object(Some(&serde_json::json!({
             "RUST_LOG": "info",
-            "PORT": 8080,
-            "FLAG": true
+            "PORT": "8080"
         })))
+        .expect("all-string values parse")
         .expect("non-empty string map");
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
-        assert!(
-            !env.contains_key("PORT"),
-            "non-string value must be dropped"
-        );
-        assert!(!env.contains_key("FLAG"));
-        assert_eq!(env.len(), 1);
+        assert_eq!(env.get("PORT").map(String::as_str), Some("8080"));
+        assert_eq!(env.len(), 2);
+
+        for spec in [
+            serde_json::json!({ "RUST_LOG": "info", "PORT": 8080 }),
+            serde_json::json!({ "FLAG": true }),
+            serde_json::json!({ "NESTED": { "A": "b" } }),
+            serde_json::json!({ "NULL": null }),
+            serde_json::json!("PORT=8080"),
+            serde_json::json!(["PORT=8080"]),
+        ] {
+            let err = parse_env_object(Some(&spec))
+                .err()
+                .unwrap_or_else(|| panic!("must be rejected: {spec}"));
+            assert_eq!(err.code, JsonRpcError::INVALID_PARAMS, "{spec}");
+        }
     }
 
     #[test]
     fn parse_env_object_absent_or_empty_is_none() {
-        assert!(parse_env_object(None).is_none());
-        assert!(parse_env_object(Some(&serde_json::json!({}))).is_none());
-        // An object with only non-string values collapses to an empty map -> None.
-        assert!(parse_env_object(Some(&serde_json::json!({ "N": 1 }))).is_none());
+        assert!(parse_env_object(None).expect("absent is fine").is_none());
+        assert!(
+            parse_env_object(Some(&serde_json::Value::Null))
+                .expect("null is absent")
+                .is_none()
+        );
+        assert!(
+            parse_env_object(Some(&serde_json::json!({})))
+                .expect("empty object is fine")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_terminal_profile_accepts_known_names_and_rejects_the_rest() {
+        assert_eq!(
+            parse_terminal_profile(None).expect("absent"),
+            TerminalSurfaceProfile::Normal
+        );
+        assert_eq!(
+            parse_terminal_profile(Some(&serde_json::Value::Null)).expect("null"),
+            TerminalSurfaceProfile::Normal
+        );
+        for (name, expected) in [
+            ("normal", TerminalSurfaceProfile::Normal),
+            ("agent", TerminalSurfaceProfile::Agent),
+            ("review", TerminalSurfaceProfile::Review),
+            ("cached", TerminalSurfaceProfile::Cached),
+        ] {
+            assert_eq!(
+                parse_terminal_profile(Some(&serde_json::json!(name))).expect(name),
+                expected
+            );
+        }
+        for spec in [
+            serde_json::json!("bogus"),
+            serde_json::json!("Agent"),
+            serde_json::json!(""),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!({ "name": "agent" }),
+        ] {
+            let err = parse_terminal_profile(Some(&spec))
+                .err()
+                .unwrap_or_else(|| panic!("must be rejected: {spec}"));
+            assert_eq!(err.code, JsonRpcError::INVALID_PARAMS, "{spec}");
+        }
+    }
+
+    // A pane spec with a non-string env value or an unknown profile is a
+    // `-32602`, never a pane that silently lacks what the client asked for.
+    #[test]
+    fn parse_workspace_pane_plan_rejects_non_string_env_and_unknown_profile() {
+        let reject = |spec: serde_json::Value, what: &str| -> JsonRpcError {
+            match parse_workspace_pane_plan(&spec) {
+                Ok(_) => panic!("{what} must be rejected: {spec}"),
+                Err(err) => err,
+            }
+        };
+
+        let err = reject(
+            serde_json::json!({ "env": { "PORT": 3000 } }),
+            "non-string env value",
+        );
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("PORT"), "{}", err.message);
+
+        let err = reject(serde_json::json!({ "env": "PORT=3000" }), "non-object env");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+
+        let err = reject(serde_json::json!({ "profile": "bogus" }), "unknown profile");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("bogus"), "{}", err.message);
+
+        let plan = parse_workspace_pane_plan(&serde_json::json!({
+            "env": { "PORT": "3000" },
+            "profile": "normal"
+        }))
+        .unwrap_or_else(|err| {
+            panic!(
+                "all-string env and a known profile are accepted: {}",
+                err.message
+            )
+        });
+        assert_eq!(
+            plan.env.and_then(|e| e.get("PORT").cloned()).as_deref(),
+            Some("3000")
+        );
+        assert_eq!(plan.profile, TerminalSurfaceProfile::Normal);
     }
 
     // -----------------------------------------------------------------
@@ -5091,8 +5222,14 @@ mod tests {
         assert!(super::pane_spec_requires_orchestration(
             &serde_json::json!({"env": {"PROMPT_COMMAND": "date"}})
         ));
+        // A non-string env value is still an env request (it is rejected
+        // with -32602 at parse time rather than silently dropped), so it
+        // must not slip past the gate.
+        assert!(super::pane_spec_requires_orchestration(
+            &serde_json::json!({"env": {"NOT_A_STRING": 7}})
+        ));
         assert!(!super::pane_spec_requires_orchestration(
-            &serde_json::json!({"env": {"IGNORED": 7}})
+            &serde_json::json!({"env": {}})
         ));
         assert!(super::pane_spec_requires_orchestration(
             &serde_json::json!({"managed_worktree": {
