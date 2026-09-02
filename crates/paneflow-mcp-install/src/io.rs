@@ -67,6 +67,19 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(&parent)
         .with_context(|| format!("tempfile in {} failed", parent.display()))?;
     std::io::Write::write_all(&mut tmp, contents).context("write_all to tempfile failed")?;
+    // Preserve the existing file's mode: persist replaces the inode, which
+    // would otherwise silently reset the user's permissions to the temp
+    // file's 0600. A missing target keeps the temp file's 0600 default.
+    match std::fs::metadata(path) {
+        Ok(metadata) => tmp
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .context("preserve existing file mode failed")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).context(format!("stat {} failed", path.display()));
+        }
+    }
     tmp.as_file_mut()
         .sync_all()
         .context("sync_all on tempfile failed")?;
@@ -157,6 +170,33 @@ mod tests {
             "the write must update the managed target, not replace the symlink"
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"updated");
+    }
+
+    #[test]
+    fn write_atomic_preserves_the_existing_mode_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("managed.json");
+        let link = dir.path().join("config.json");
+        std::fs::write(&target, b"{}\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomic(&link, b"updated").unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"updated");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the write must update the managed target, not replace the symlink"
+        );
     }
 
     #[test]
