@@ -30,7 +30,8 @@
 //!   still sources `/etc/profile` + `/etc/profile.d` + `~/.profile`, i.e. the
 //!   system PATH;
 //! - **bounded** by a 5 s timeout so a pathological rc script can't wedge
-//!   startup;
+//!   startup, and by a 256 KiB read cap so one that writes continuously can't
+//!   balloon the capture buffer meanwhile;
 //! - **best-effort** - any failure logs and leaves the inherited PATH untouched.
 //!
 //! Safety: like [`crate::runtime_paths::augment_path_for_gui_launch`], this
@@ -42,7 +43,6 @@
 
 #[cfg(unix)]
 pub fn load_login_shell_env() {
-    use std::io::Read;
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
@@ -130,13 +130,24 @@ pub fn load_login_shell_env() {
     // thread is touching the environment when we mutate it.
     let (tx, rx) = mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
+        let buf = read_login_shell_capture(&mut stdout);
+        // Close our end of the pipe before handing the bytes over, so a child
+        // still writing past the cap gets EPIPE instead of wedging on a full
+        // pipe while the main thread is in `child.wait()`.
+        drop(stdout);
         let _ = tx.send(buf);
     });
 
     let buf = match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(buf) => {
+            if buf.len() as u64 >= LOGIN_ENV_CAPTURE_CAP {
+                // The child out-wrote the cap; it may still be running (and
+                // may ignore SIGPIPE), so stop it before waiting on it.
+                log::warn!(
+                    "login-shell env: {capture_shell:?} wrote more than {LOGIN_ENV_CAPTURE_CAP} bytes; capture truncated"
+                );
+                terminate_login_shell_capture(&mut child);
+            }
             let _ = child.wait();
             let _ = reader.join();
             buf
@@ -180,6 +191,24 @@ pub fn load_login_shell_env() {
             );
         }
     }
+}
+
+/// Upper bound on the bytes read from the capture shell's stdout. The `PATH=`
+/// line follows the marker almost immediately, so 256 KiB is plenty; the cap
+/// keeps a login rc that writes continuously from growing the capture buffer
+/// (and the GUI process's RSS) until the 5 s deadline fires.
+#[cfg(unix)]
+const LOGIN_ENV_CAPTURE_CAP: u64 = 256 * 1024;
+
+/// Read the capture shell's stdout into a buffer, stopping after
+/// [`LOGIN_ENV_CAPTURE_CAP`] bytes. The buffer can never grow past the cap, no
+/// matter how much the child writes before the deadline.
+#[cfg(unix)]
+fn read_login_shell_capture<R: std::io::Read>(stdout: &mut R) -> Vec<u8> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    let _ = stdout.take(LOGIN_ENV_CAPTURE_CAP).read_to_end(&mut buf);
+    buf
 }
 
 /// Shells whose `-l -i -c '<posix script>'` invocation runs our capture script.
@@ -263,9 +292,28 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        captured_path_has_system_bin, extract_path, find_subslice, is_launchd_default_path,
-        is_posix_capture_shell,
+        LOGIN_ENV_CAPTURE_CAP, captured_path_has_system_bin, extract_path, find_subslice,
+        is_launchd_default_path, is_posix_capture_shell, read_login_shell_capture,
     };
+
+    #[test]
+    fn capture_read_is_capped_for_a_child_that_never_stops_writing() {
+        // A login rc that writes continuously: emulate 4x the cap worth of
+        // output. The capture buffer must not grow past the cap.
+        let mut endless = std::io::Read::take(std::io::repeat(b'x'), 4 * LOGIN_ENV_CAPTURE_CAP);
+        let buf = read_login_shell_capture(&mut endless);
+        assert_eq!(
+            buf.len() as u64,
+            LOGIN_ENV_CAPTURE_CAP,
+            "capture buffer grew past the byte cap"
+        );
+        // A short, well-behaved dump is still read in full.
+        let mut small = &b"__M__\nPATH=/usr/bin\n"[..];
+        assert_eq!(
+            read_login_shell_capture(&mut small),
+            b"__M__\nPATH=/usr/bin\n"
+        );
+    }
 
     #[test]
     fn find_subslice_locates_marker() {
