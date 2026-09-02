@@ -11,9 +11,17 @@
 #                                  rationale + re-evaluation triggers
 #   * unused-ignored-advisory    → warn (surface stale ignores when
 #                                  the dep graph evolves)
-#   * licenses.allow             → permissive set + GPL-3 family
-#                                  (33+ transitive deps from GPUI)
+#   * licenses.allow             → permissive set + GPL-3.0-or-later
+#                                  (the Zed crates behind GPUI)
 #   * sources                    → unknown-registry / unknown-git deny
+#
+# Every entry in this file is meant to match something in Cargo.lock.
+# cargo-deny only *warns* about an entry that matches nothing
+# (`advisory-not-detected`, `license-not-encountered`,
+# `license-exception-not-encountered`, `unmatched-source`), so the gate
+# stays green while the policy drifts; the workspace test
+# `src-app/tests/dependency_policy_drift.rs` turns the entries that were
+# found dead on 2026-09-01 (issue #213) into a failing test instead.
 #
 # Reference: https://embarkstudios.github.io/cargo-deny/
 
@@ -23,10 +31,13 @@
 # own dependencies are flagged, not 10-hop transitive deps that we
 # cannot influence without bumping the root dep.
 unmaintained = "workspace"
-# Yanked crates: warn-only for now. A yanked transitive dep often
-# lingers in lockfiles until the parent publishes a bump; blocking
-# on yanked would create bandwidth-vs-noise pressure that isn't
-# warranted for a release-engineering PRD.
+# Yanked crates: warn-only. A yanked transitive dep often lingers in the
+# lockfile until the parent publishes a bump; blocking on yanked would
+# create bandwidth-vs-noise pressure that isn't warranted. When the
+# yanked release has an in-place patched successor (the `spin 0.9.8` /
+# `0.10.0` case, issue #213), fix it with a targeted
+# `cargo update -p <crate>@<yanked> --precise <patched>` rather than a
+# broad `cargo update`.
 yanked = "warn"
 # Fail if the local copy of the RustSec advisory DB is older than 30
 # days - guards against a stale CI runner silently missing recent
@@ -42,97 +53,74 @@ unused-ignored-advisory = "warn"
 # Explicit advisory ignores. Each entry below MUST document:
 #   1. why the advisory does not apply to PaneFlow's threat model
 #   2. what triggers re-evaluation (upstream patch, code-path change)
-# Reviewed 2026-07-03.
+# Reviewed 2026-09-01 against the live graph (`cargo tree -i <crate>@<ver>
+# --target all`); an ignore whose crate leaves the lockfile is removed,
+# not kept for history (RUSTSEC-2023-0071 / `rsa` went that way when the
+# zed-industries/zed pin stopped pulling zed/rpc).
 ignore = [
-    # RUSTSEC-2023-0071 - Marvin Attack on the `rsa` crate
-    # (timing side-channel during RSA private-key decryption).
-    #
-    # Why ignored:
-    #   * `rsa v0.9.x` is a transitive dep via
-    #     zed/markdown → zed/language → zed/rpc → rsa.
-    #     PaneFlow uses Zed's `markdown` crate purely for AST +
-    #     rendering - we never instantiate the `language` server
-    #     wiring, never connect to rpc.zed.dev, and the linker
-    #     keeps the RSA code only because cargo cannot prove it's
-    #     dead at link-time. `grep -rn 'rsa::' src-app/ crates/`
-    #     returns zero hits.
-    #   * The attack requires the victim to decrypt
-    #     attacker-controlled ciphertext and leak timing
-    #     differences. PaneFlow's binary never decrypts anything
-    #     from a network surface - there is no exploitable code
-    #     path.
-    #   * Upstream RustCrypto position (per the advisory itself):
-    #     "No safe upgrade is available!" - no fixed rsa version
-    #     exists as of 2026-05. The recommended migration is to a
-    #     different crate, which has to happen on the Zed side
-    #     (zed/rpc/Cargo.toml), not ours.
-    #
-    # Re-evaluation triggers:
-    #   * rsa publishes a 0.10+ with timing-safe RSA decryption,
-    #   * OR Zed migrates rpc off rsa (drops it from the dep tree),
-    #   * OR PaneFlow starts using zed/rpc directly (any
-    #     `use rpc::` in src-app/** would invalidate this ignore).
-    "RUSTSEC-2023-0071",
-
     # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 - quick-xml CPU and memory
     # denial-of-service issues in duplicate-attribute and namespace handling.
+    # Both advisories are patched only in quick-xml >= 0.41.0.
     #
     # Why ignored:
-    #   * The only remaining vulnerable quick-xml instances after the
-    #     notify-rust refresh are transitive:
-    #       - quick-xml 0.38.4 via arthjean/zed mermaid_render,
-    #       - quick-xml 0.39.2 via syntect/plist and Linux Wayland/zbus tooling.
-    #   * Paneflow has no direct quick_xml usage (`rg 'quick_xml|quick-xml'
+    #   * Two quick-xml releases are locked, and neither is reachable on the
+    #     one target this fork builds (`cargo tree -i quick-xml@<ver>` prints
+    #     nothing for aarch64-apple-darwin; both only appear under
+    #     `--target all`):
+    #       - quick-xml 0.30.0 via xcb 1.7 (X11 bindings behind GPUI's
+    #         Linux platform layer),
+    #       - quick-xml 0.39.2 via zbus_xml 5 <- zbus-lockstep /
+    #         zbus-lockstep-macros <- atspi-common (Linux accessibility
+    #         D-Bus tooling behind GPUI).
+    #     cargo-deny evaluates every target, so the lockfile entries still
+    #     match the advisories even though no macOS binary links them.
+    #   * PaneFlow has no direct quick_xml usage (`rg 'quick_xml|quick-xml'
     #     src-app crates -g '*.rs'` returns no Rust call sites), so the app
     #     cannot apply the upstream workaround (`attributes().with_checks(false)`)
     #     locally.
-    #   * Cargo cannot move these to quick-xml >= 0.41.0 without parent crate
-    #     releases: mermaid_render requires ^0.38, plist/wayland/zbus paths
-    #     require ^0.39.2. A forced lockfile update fails dependency selection.
+    #   * Cargo cannot move either instance to quick-xml >= 0.41.0 without
+    #     parent crate releases: xcb 1.7 requires ^0.30 and zbus_xml 5.1
+    #     requires ^0.39.2. A forced lockfile update fails dependency selection.
     #
     # Re-evaluation triggers:
-    #   * Zed's mermaid_render moves to quick-xml >= 0.41.0 or the fork drops
-    #     mermaid rendering from Paneflow's markdown path,
-    #   * OR syntect/plist, wayland-scanner, and zbus_xml publish compatible
-    #     releases using quick-xml >= 0.41.0,
-    #   * OR Paneflow adds direct XML parsing, untrusted Mermaid XML ingestion,
-    #     or any `use quick_xml::` call site.
+    #   * xcb and zbus_xml publish releases on quick-xml >= 0.41.0 and the
+    #     GPUI pin picks them up,
+    #   * OR a GPUI pin bump drops the Linux X11 / atspi layers from the
+    #     lockfile entirely (then remove these ignores; cargo-deny will flag
+    #     them as `advisory-not-detected`),
+    #   * OR PaneFlow adds direct XML parsing or any `use quick_xml::` call
+    #     site.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 
-    # NOTE (2026-05-28, prd-cli-hardening-followup-2026-Q3 US-027):
-    # a preemptive ignore for RUSTSEC-2025-0052 (async-std
-    # discontinued) was removed -- `async-std` is NOT in the current
-    # Cargo.lock (the arthjean/zed fork pin does not pull
-    # zed/http_client → async-tar → async-std). cargo-deny rejects
-    # an `ignore` entry that matches no crate (`unmatched-skip`), so
-    # the dead entry was failing the `security_audit` PR gate AND the
-    # release build. Re-add it ONLY if a future GPUI-pin bump
-    # reintroduces async-std into the tree.
+    # NOTE: a preemptive ignore for RUSTSEC-2025-0052 (async-std
+    # discontinued) was removed in 2026-05 -- `async-std` is NOT in
+    # Cargo.lock (the zed-industries/zed pin does not pull
+    # zed/http_client → async-tar → async-std). Re-add it ONLY if a future
+    # GPUI-pin bump reintroduces async-std into the tree.
 ]
 
 [licenses]
 # Permissive-license allow list. An unlisted license raises a warning
-# per the sources deny posture below. Covers the full Rust ecosystem
-# mainstream + the specific ones present in our current Cargo.lock
+# per the sources deny posture below. Covers the Rust ecosystem
+# mainstream plus the specific ones present in the current Cargo.lock
 # (Unicode-3.0 for the Unicode crates, Zlib for miniz_oxide, BSD
 # variants for misc parsers, plus extras pulled in by GPUI's image /
-# font-kit dep tree: 0BSD, MPL-2.0, CC0-1.0, CDLA-Permissive-2.0,
-# bzip2-1.0.6, NCSA - all OSI-approved or public-domain-equivalent).
+# font-kit dep tree: 0BSD, MPL-2.0, CC0-1.0, bzip2-1.0.6 - all
+# OSI-approved or public-domain-equivalent). An allowance that no locked
+# crate uses is removed, not kept "just in case": cargo-deny reports it as
+# `license-not-encountered` and the drift test above pins the removals.
 #
-# GPL-3.0 / GPL-3.0-or-later - accepted globally (2026-05-27).
-# The Zed monorepo we pin GPUI from contains 33+ crates licensed
-# `GPL-3.0` that land in our dep tree as transitive deps of `gpui` /
-# `gpui_platform` / `collections` (askpass, clock, component, fs,
-# fuzzy, git, icons, language, lsp, markdown, menu, migrator, net,
-# paths, proto, release_channel, rope, rpc, settings*, syntax_theme,
-# task, telemetry*, text, theme*, ui*, zed_actions, ...). The
-# previous per-crate `[[licenses.exceptions]]` for zlog / ztracing
-# was unsustainable - every GPUI pin bump shifted the list and the
-# CI gate fell out of sync. PaneFlow already statically links these,
-# so cargo-deny's noise-vs-block dilemma was the wrong frame: the
-# right question is whether PaneFlow's binary distribution license
-# is GPL-3-compatible. It is (same posture Zed itself ships under).
+# GPL-3.0-or-later - accepted globally (2026-05-27). The Zed monorepo we
+# pin GPUI from contains dozens of crates licensed `GPL-3.0-or-later`
+# that land in our dep tree as transitive deps of `gpui` /
+# `gpui_platform`, and the PaneFlow workspace itself is
+# `GPL-3.0-or-later`. The previous per-crate `[[licenses.exceptions]]`
+# was unsustainable - every GPUI pin bump shifted the list and the CI
+# gate fell out of sync. PaneFlow already statically links these, so
+# cargo-deny's noise-vs-block dilemma was the wrong frame: the right
+# question is whether PaneFlow's binary distribution license is
+# GPL-3-compatible. It is (same posture Zed itself ships under).
 allow = [
     "MIT",
     "Apache-2.0",
@@ -145,20 +133,14 @@ allow = [
     "0BSD",
     "MPL-2.0",
     "CC0-1.0",
-    "CDLA-Permissive-2.0",
     "bzip2-1.0.6",
-    "NCSA",
-    "GPL-3.0",
     "GPL-3.0-or-later",
 ]
 
-# Boost Software License 1.0 is required only by xxhash-rust, pulled through
-# Zed's fs -> notify 9 path. Scoped to the crate and its 0.8 line so a new
-# BSL-1.0 dependency is still rejected, but a patch bump inside 0.8 does not
-# turn the license check red on its own.
-exceptions = [
-    { crate = "xxhash-rust@0.8", allow = ["BSL-1.0"] },
-]
+# No per-crate license exceptions. The last one (BSL-1.0 for
+# xxhash-rust@0.8, reached through Zed's fs -> notify path) was removed
+# when that crate left the lockfile; a new BSL-1.0 dependency is therefore
+# still rejected until someone scopes an exception to it here.
 
 [sources]
 # Block unknown crate registries or git sources. Require tags or immutable
@@ -170,14 +152,16 @@ required-git-spec = "rev"
 # Pin the crates.io registry explicitly; anything else is "unknown".
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
 # Keep repository authorization exact. Organization-wide grants would let a
-# transitive update introduce an unrelated repository without review.
+# transitive update introduce an unrelated repository without review. Every
+# repository listed here has a `source = "git+..."` entry in Cargo.lock; one
+# that stops matching (zed-industries/scap, dropped by the current GPUI pin)
+# is removed rather than left as a standing grant.
 allow-git = [
     "https://github.com/proptest-rs/proptest",
     "https://github.com/smol-rs/async-task.git",
     "https://github.com/zed-industries/async-process.git",
     "https://github.com/zed-industries/calloop",
     "https://github.com/zed-industries/font-kit",
-    "https://github.com/zed-industries/scap",
     "https://github.com/zed-industries/wasm_thread",
     "https://github.com/zed-industries/zed",
 ]
