@@ -220,7 +220,13 @@ pub fn handle_message<T: IpcTransport + ?Sized>(
             id?,
             json!({ "tools": tools::tool_specs() }),
         )),
-        "tools/call" => Some(result_response(id?, tools::dispatch_call(&params, bridge))),
+        "tools/call" => {
+            let id = id?;
+            match tools::dispatch_call(&params, bridge) {
+                Ok(result) => Some(result_response(id, result)),
+                Err(message) => Some(error_response(id, -32602, &message)),
+            }
+        }
         "resources/list" => {
             let id = id?;
             match resources::list(bridge) {
@@ -331,6 +337,21 @@ mod tests {
         let message = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_pane","arguments":{"target":1,"extra":true}}}"#;
         let response = handle_message(message, &bridge(&transport)).unwrap();
         assert_eq!(response["result"]["isError"], true);
+        assert!(transport.calls().is_empty());
+    }
+
+    #[test]
+    fn unknown_or_missing_tool_name_is_a_json_rpc_error_not_a_tool_result() {
+        let transport = FakeTransport::new();
+        for message in [
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"not_a_tool","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_pane","arguments":{},"bogus":1}}"#,
+        ] {
+            let response = handle_message(message, &bridge(&transport)).unwrap();
+            assert_eq!(response["error"]["code"], -32602, "message: {message}");
+            assert!(response.get("result").is_none(), "message: {message}");
+        }
         assert!(transport.calls().is_empty());
     }
 
