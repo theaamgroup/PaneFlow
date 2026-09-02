@@ -6,13 +6,16 @@
 //! and they all compose over the primary cell grid rather than participating
 //! in cell-level layout.
 
-use gpui::{App, Bounds, Font, Pixels, Point, SharedString, TextAlign, TextRun, Window, fill, px};
+use gpui::{
+    App, Bounds, Font, Hsla, Pixels, Point, SharedString, TextAlign, TextRun, Window, fill, px,
+};
 #[cfg(debug_assertions)]
 use gpui::{BorderStyle, hsla, outline};
 
 use super::super::LayoutState;
 use super::super::TerminalElement;
 use super::super::geometry::CellGeometry;
+use super::super::{MIN_APCA_CONTRAST, ensure_minimum_contrast};
 
 /// Search match highlight rects (`.floor()` / `.ceil()` matches background).
 pub fn paint_search_highlights(layout: &LayoutState, geom: &CellGeometry, window: &mut Window) {
@@ -56,6 +59,31 @@ pub fn paint_hyperlink_underline(
         },
     );
     window.paint_quad(fill(underline_bounds, layout.link_text_color));
+}
+
+/// Colour pair for the in-line IME preedit: `(glyph colour, erase-fill colour)`.
+///
+/// Glyphs in the theme foreground on an opaque erase quad in the theme
+/// background (the conventional preedit look; the underline inherits the
+/// glyph colour). The layout's own `background_color` is transparent (the
+/// host pane card paints the ground), so it is never used here: the fill is
+/// forced opaque and the glyph colour is pushed through
+/// `ensure_minimum_contrast` so the pair clears `MIN_APCA_CONTRAST` on any
+/// theme. Issue #324 was both slots reading the transparent layout colour.
+pub(crate) fn ime_preedit_colors(theme_foreground: Hsla, theme_background: Hsla) -> (Hsla, Hsla) {
+    let erase = Hsla {
+        a: 1.0,
+        ..theme_background
+    };
+    let glyph = ensure_minimum_contrast(
+        Hsla {
+            a: 1.0,
+            ..theme_foreground
+        },
+        erase,
+        MIN_APCA_CONTRAST,
+    );
+    (glyph, erase)
 }
 
 /// Register the IME `InputHandler` for this element and paint the preedit
@@ -106,7 +134,7 @@ pub fn paint_ime_preedit<H, F>(
         let ime_run = TextRun {
             len: element.ime_marked_text.len(),
             font: base_font.clone(),
-            color: layout.background_color,
+            color: layout.ime_preedit_foreground,
             background_color: None,
             underline: Some(gpui::UnderlineStyle {
                 color: None,
@@ -130,7 +158,7 @@ pub fn paint_ime_preedit<H, F>(
                 height: line_height,
             },
         );
-        window.paint_quad(fill(preedit_bg, layout.background_color));
+        window.paint_quad(fill(preedit_bg, layout.ime_preedit_background));
         // Paint preedit text
         let _ = shaped.paint(cb.origin, line_height, TextAlign::Left, None, window, cx);
     }
@@ -228,6 +256,34 @@ pub fn paint_pixel_probe_overlay(layout: &LayoutState, geom: &CellGeometry, wind
             let bounds = geom.cell_span_bounds(row as i32, col, 1);
             window.paint_quad(
                 outline(bounds, border_color, BorderStyle::Solid).border_widths(border_width),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::element::apca_contrast;
+
+    /// Issue #324: the preedit used `layout.background_color` for both the
+    /// glyphs and the erase quad, and that slot is `transparent_black`, so a
+    /// CJK / dead-key composition painted nothing. The pair must be readable
+    /// on every bundled theme, light and dark.
+    #[test]
+    fn ime_preedit_colors_are_opaque_and_readable() {
+        for theme in [
+            crate::theme::paneflow_dark(),
+            crate::theme::paneflow_light(),
+        ] {
+            let (glyph, erase) = ime_preedit_colors(theme.foreground, theme.background);
+            assert_eq!(erase.a, 1.0, "erase fill must be opaque");
+            assert_eq!(glyph.a, 1.0, "glyphs must be opaque");
+            assert_ne!(glyph, erase, "glyphs must not match the erase fill");
+            assert!(
+                apca_contrast(glyph, erase).abs() >= MIN_APCA_CONTRAST,
+                "preedit contrast below Lc {MIN_APCA_CONTRAST} for theme bg {:?}",
+                theme.background
             );
         }
     }
