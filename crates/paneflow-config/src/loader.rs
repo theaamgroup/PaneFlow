@@ -166,6 +166,28 @@ pub fn load_config() -> PaneFlowConfig {
 /// path. `Ok(None)` means the file is absent; every other failure remains typed
 /// so cold start and hot reload can apply different policies deliberately.
 pub fn read_config_string(path: &Path) -> Result<Option<String>, ConfigError> {
+    // Issue #241: `open(O_RDONLY)` on a FIFO with no writer blocks forever, so
+    // the post-open type check below can never be reached for that case. Stat
+    // the path first (following symlinks, so a dotfile-manager link to a
+    // regular file still loads) and refuse anything that is not a regular file
+    // before the blocking open. The check on the opened descriptor stays: it
+    // is what closes the stat-to-open swap window.
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(ConfigError::NotRegularFile {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ConfigError::IoError {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

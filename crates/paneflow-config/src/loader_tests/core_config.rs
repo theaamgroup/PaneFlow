@@ -368,3 +368,49 @@ fn test_command_with_shell_command() {
     assert_eq!(config.commands[0].command.as_deref(), Some("htop"));
     assert!(config.commands[0].workspace.is_none());
 }
+
+/// Issue #241: `open(O_RDONLY)` on a FIFO with no writer blocks forever, so the
+/// regular-file guard has to run before the blocking open, not only on the
+/// opened descriptor. The read runs on a helper thread with a bounded wait so a
+/// regression fails the test instead of hanging the suite.
+#[test]
+fn read_config_string_refuses_a_fifo_without_blocking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fifo = tmp.path().join("paneflow.json");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must be runnable");
+    assert!(status.success(), "mkfifo failed: {status}");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_path = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_config_string(&worker_path));
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Err(ConfigError::NotRegularFile { path })) => assert_eq!(path, fifo),
+        Ok(other) => panic!("expected NotRegularFile for a FIFO, got {other:?}"),
+        Err(_) => {
+            // Release the reader blocked inside `open` so the thread does not
+            // linger, then fail loudly.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+            panic!("read_config_string blocked on a FIFO at the config path");
+        }
+    }
+}
+
+/// A dotfile-manager symlink to a regular file must keep loading: the pre-open
+/// type check follows symlinks so only the target's type is judged.
+#[test]
+fn read_config_string_follows_a_symlink_to_a_regular_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("real.json");
+    std::fs::write(&target, "{\"font_size\": 14.0}").unwrap();
+    let link = tmp.path().join("paneflow.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let contents = read_config_string(&link).unwrap();
+    assert_eq!(contents.as_deref(), Some("{\"font_size\": 14.0}"));
+}
