@@ -1766,9 +1766,7 @@ pub(crate) mod tests {
     fn worktree_file_stats_count_tracked_and_untracked() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
+        assert!(test_git(root, &["init"]), "git init is required");
         assert!(test_git(root, &["config", "core.autocrlf", "false"]));
         std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
         assert!(test_git(root, &["add", "tracked.txt"]));
@@ -1807,12 +1805,10 @@ pub(crate) mod tests {
 
     #[test]
     fn list_untracked_limited_timed_propagates_deadline() {
+        // No `git init`: a zero deadline must fail closed before any git
+        // subprocess is spawned, so a bare temp dir is enough.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
-        std::fs::write(root.join("ghost.txt"), "x\n").unwrap();
         let err = list_untracked_limited_timed(root, 8, Duration::from_secs(0))
             .expect_err("zero deadline must fail closed");
         assert!(
@@ -1900,9 +1896,7 @@ pub(crate) mod tests {
     fn list_untracked_limited_reports_truncation() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
+        assert!(test_git(root, &["init"]), "git init is required");
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         std::fs::write(root.join("c.txt"), "c\n").unwrap();
@@ -1917,9 +1911,7 @@ pub(crate) mod tests {
     fn compute_diff_against_fails_closed_on_exhausted_budget() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
+        assert!(test_git(root, &["init"]), "git init is required");
         assert!(test_git(
             root,
             &[
@@ -1955,9 +1947,7 @@ pub(crate) mod tests {
     fn file_stats_fail_closed_on_exhausted_budget() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
+        assert!(test_git(root, &["init"]), "git init is required");
         assert!(test_git(
             root,
             &[
@@ -1995,9 +1985,7 @@ pub(crate) mod tests {
     fn untracked_hash_fails_closed_when_scan_times_out() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
+        assert!(test_git(root, &["init"]), "git init is required");
         assert!(test_git(
             root,
             &[
@@ -2029,9 +2017,7 @@ pub(crate) mod tests {
     fn column_fingerprint_changes_when_modified_file_content_changes() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
+        assert!(test_git(root, &["init"]), "git init is required");
         assert!(test_git(root, &["config", "core.autocrlf", "false"]));
         std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
         assert!(test_git(root, &["add", "tracked.txt"]));
@@ -2100,9 +2086,7 @@ pub(crate) mod tests {
     fn compute_diff_against_batches_git_show() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        if !test_git(root, &["init"]) {
-            return;
-        }
+        assert!(test_git(root, &["init"]), "git init is required");
         assert!(test_git(root, &["config", "core.autocrlf", "false"]));
         assert!(test_git(
             root,
