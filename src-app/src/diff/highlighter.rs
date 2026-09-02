@@ -240,7 +240,7 @@ fn apply_grammar(
     let mut caps = cursor.captures(&grammar.query, tree.root_node(), text.as_bytes());
     // `QueryCursor::captures` is a StreamingIterator in tree-sitter >= 0.25.
     while let Some((mat, idx)) = caps.next() {
-        let cap = mat.captures[*idx];
+        let cap = mat.captures()[*idx];
         let name = names[cap.index as usize];
         let Some(color) = syntax.color_for_capture(name) else {
             continue;

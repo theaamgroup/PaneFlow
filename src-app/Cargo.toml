@@ -92,7 +92,7 @@ parking_lot = "0.12"
 # composer to mirror the model + reasoning-effort fields into the live pill
 # selectors (same bridge pattern as the JSON one for Claude Code's
 # `~/.claude/settings.json`).
-toml = "0.8"
+toml = "1"
 
 # Standard deps
 anyhow.workspace = true
@@ -121,7 +121,7 @@ open = "5"
 # Markdown viewer pane (US-020 - prd-cmux-port-2026-q2.md). CommonMark + tables
 # + strikethrough + footnotes via the event API (we walk events directly into
 # a GPUI element tree rather than rendering HTML).
-pulldown-cmark = { version = "0.10", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false }
 # Multi-worktree diff engine (prd-multi-worktree-diff-2026-Q3.md, EP-002).
 # Histogram line-diff lifted from Zed's `buffer_diff::compute_hunks`; pinned to
 # the same 0.1.8 Zed uses so the ported algorithm matches the reference API.
@@ -135,7 +135,7 @@ imara-diff = "0.1.8"
 # accepted by the 0.26 runtime), which arrives transitively through each
 # grammar and is not a direct dependency (issue #212). Each grammar compiles
 # bundled C via `cc`.
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-rust = "0.24"
 tree-sitter-json = "0.24"
 tree-sitter-bash = "0.25"

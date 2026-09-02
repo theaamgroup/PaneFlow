@@ -18,7 +18,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 # `~/.codex/config.toml`. Kept OUT of the embedded `paneflow-mcp` bridge
 # binary (PRD D3): this crate links only into `paneflow-app`, never into
 # the size-budgeted bridge.
-toml_edit = "0.22"
+toml_edit = "0.25"
 # Match the versions already compiled in the src-app dep graph so this
 # crate adds no new transitive build (src-app pins which 8; dirs 6 matches
 # paneflow-acp). PRD: `which` is "déjà utilisé dans le workspace".
