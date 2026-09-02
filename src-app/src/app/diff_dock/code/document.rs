@@ -204,6 +204,12 @@ impl CodeDocument {
         self.read_only = reason;
     }
 
+    /// Adopt a new terminator, for a reload that took the disk's bytes as the
+    /// new saved state: the rope stays LF, but the next save re-applies this.
+    pub(crate) fn set_line_ending(&mut self, line_ending: LineEnding) {
+        self.line_ending = line_ending;
+    }
+
     /// Widest line measured so far, in characters. Grow-only between loads -
     /// see the module header for why that direction is the safe one.
     pub(crate) fn longest_line_chars(&self) -> usize {
