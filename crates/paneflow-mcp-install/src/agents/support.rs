@@ -331,6 +331,36 @@ fn ensure_codex_env_vars(doc: &mut toml_edit::DocumentMut) -> Result<()> {
     Ok(())
 }
 
+/// The managed Codex contract requires the entry to be active (issue #214):
+/// leaving `enabled = false` in place would make `mcp install` report a
+/// successful repair while status keeps saying NeedsRepair ("must not be
+/// disabled") and the bridge stays dead. Repair enables the managed entry
+/// by flipping an explicit `enabled = false` to `true`. An absent `enabled`
+/// key (Codex's default is enabled) is not added, and a non-boolean value
+/// is left alone, matching what [`toml_status`] accepts. Generic unknown-key
+/// preservation in [`crate::merge`] is deliberately unchanged; this override
+/// lives only in the Codex adapter's managed contract.
+fn ensure_codex_entry_enabled(doc: &mut toml_edit::DocumentMut) -> Result<()> {
+    use toml_edit::{value, Item};
+
+    let entry = doc
+        .get_mut(CODEX_TABLE)
+        .and_then(Item::as_table_mut)
+        .and_then(|parent| parent.get_mut(ENTRY))
+        .and_then(Item::as_table_like_mut)
+        .context("managed Codex MCP entry is not a TOML table")?;
+
+    if let Some(enabled) = entry.get_mut("enabled") {
+        if enabled.as_bool() == Some(false) {
+            log::info!(
+                "paneflow mcp: enabling the managed Codex MCP entry (`enabled = false` -> `true`)"
+            );
+            *enabled = value(true);
+        }
+    }
+    Ok(())
+}
+
 fn codex_env_vars_ok(entry: &toml_edit::Item) -> bool {
     entry
         .get("env_vars")
@@ -349,6 +379,7 @@ pub(crate) fn toml_install(path: &Path, command: &str) -> Result<InstallOutcome>
         let before = doc.to_string();
         merge::upsert_toml_entry(&mut doc, CODEX_TABLE, ENTRY, command, &[])?;
         ensure_codex_env_vars(&mut doc)?;
+        ensure_codex_entry_enabled(&mut doc)?;
         if doc.to_string() == before {
             return Ok(InstallOutcome::AlreadyCurrent);
         }
@@ -819,6 +850,98 @@ mod tests {
             toml_uninstall(&p).unwrap(),
             UninstallOutcome::NothingToRemove
         );
+    }
+
+    #[test]
+    fn toml_install_enables_disabled_entry_table_form() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        // Correct command/args/env_vars but `enabled = false`: status says
+        // NeedsRepair, and the install (the advertised repair) used to
+        // return AlreadyCurrent without touching the file, leaving the
+        // entry disabled indefinitely (issue #214).
+        std::fs::write(
+            &p,
+            "[mcp_servers.paneflow]\n\
+             command = \"/cur\"\n\
+             args = []\n\
+             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"]\n\
+             enabled = false\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
+            StatusOutcome::NeedsRepair { .. }
+        ));
+        assert_eq!(toml_install(&p, "/cur").unwrap(), InstallOutcome::Updated);
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert!(txt.contains("enabled = true"), "repair must enable: {txt}");
+        assert_eq!(
+            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
+            StatusOutcome::Installed {
+                path: "/cur".into()
+            }
+        );
+        // Only now is the entry truly current.
+        assert_eq!(
+            toml_install(&p, "/cur").unwrap(),
+            InstallOutcome::AlreadyCurrent
+        );
+    }
+
+    #[test]
+    fn toml_install_enables_disabled_entry_inline_table_form() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "[mcp_servers]\npaneflow = { command = \"/cur\", args = [], env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"], enabled = false }\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
+            StatusOutcome::NeedsRepair { .. }
+        ));
+        assert_eq!(toml_install(&p, "/cur").unwrap(), InstallOutcome::Updated);
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert!(txt.contains("enabled = true"), "repair must enable: {txt}");
+        assert_eq!(
+            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
+            StatusOutcome::Installed {
+                path: "/cur".into()
+            }
+        );
+    }
+
+    #[test]
+    fn toml_install_leaves_absent_and_true_enabled_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+
+        // Fresh install must not add an `enabled` key (absent = enabled).
+        assert_eq!(toml_install(&p, "/cur").unwrap(), InstallOutcome::Installed);
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert!(!txt.contains("enabled"), "no enabled key added: {txt}");
+
+        // An explicit `enabled = true` stays as the user wrote it.
+        std::fs::write(
+            &p,
+            "[mcp_servers.paneflow]\n\
+             command = \"/cur\"\n\
+             args = []\n\
+             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"]\n\
+             enabled = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            toml_install(&p, "/cur").unwrap(),
+            InstallOutcome::AlreadyCurrent
+        );
+        assert!(std::fs::read_to_string(&p)
+            .unwrap()
+            .contains("enabled = true"));
     }
 
     #[test]

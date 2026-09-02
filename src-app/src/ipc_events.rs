@@ -14,9 +14,11 @@
 //! blocked.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+
+use parking_lot::Mutex;
 
 use paneflow_ipc_client::ai_hook::{
     METHOD_EXIT, METHOD_NOTIFICATION, METHOD_PROMPT_SUBMIT, METHOD_SESSION_END,
@@ -127,6 +129,11 @@ struct Subscriber {
 
 /// Shared registry of subscribers. Held by the IPC server (to register on
 /// `events.subscribe`) and by the GPUI app (to broadcast).
+///
+/// The registry is a `parking_lot::Mutex` (issue #222): it cannot poison, so
+/// a panic on one thread can never leave `subscribe` handing out unregistered
+/// handles, `unsubscribe` no-oping, or `broadcast` silently dropping every
+/// event for the rest of the process.
 pub struct EventBus {
     subscribers: Mutex<Vec<Subscriber>>,
     next_id: AtomicU64,
@@ -169,14 +176,12 @@ impl EventBus {
         let (tx, rx) = sync_channel::<String>(SUBSCRIBER_QUEUE_CAP);
         let dropped = Arc::new(AtomicU64::new(0));
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut subs) = self.subscribers.lock() {
-            subs.push(Subscriber {
-                id,
-                filter,
-                tx,
-                dropped: Arc::clone(&dropped),
-            });
-        }
+        self.subscribers.lock().push(Subscriber {
+            id,
+            filter,
+            tx,
+            dropped: Arc::clone(&dropped),
+        });
         Subscription {
             id,
             rx,
@@ -186,27 +191,20 @@ impl EventBus {
     }
 
     fn unsubscribe(&self, id: u64) {
-        if let Ok(mut subs) = self.subscribers.lock() {
-            subs.retain(|s| s.id != id);
-        }
+        self.subscribers.lock().retain(|s| s.id != id);
     }
 
     /// True if at least one subscriber is registered. Lets the GPUI hot paths
     /// skip building events when nobody is watching.
     pub fn has_subscribers(&self) -> bool {
-        self.subscribers
-            .lock()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
+        !self.subscribers.lock().is_empty()
     }
 
     /// Broadcast one event to every matching subscriber. NON-BLOCKING: a full
     /// subscriber queue drops the event and bumps its `dropped` counter. Safe to
     /// call from the GPUI render thread (brief lock + `try_send`, no I/O).
     pub fn broadcast(&self, type_: &str, surface_id: Option<u64>, event: &Value) {
-        let Ok(subs) = self.subscribers.lock() else {
-            return;
-        };
+        let subs = self.subscribers.lock();
         if subs.is_empty() {
             return;
         }
@@ -242,6 +240,29 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Issue #222: the subscriber registry must not be a poisoning lock. With
+    /// the poisoning std mutex, `subscribe` returned an unregistered handle,
+    /// `unsubscribe` no-oped and `broadcast` dropped every event once a
+    /// panic had poisoned the lock. `parking_lot::Mutex` cannot poison, so
+    /// none of those silent branches can exist.
+    #[test]
+    fn subscriber_registry_uses_a_non_poisoning_mutex() {
+        let src = include_str!("ipc_events.rs");
+        let std_mutex_import = ["use std::sync::{Arc, ", "Mutex};"].concat();
+        let std_mutex_path = ["std::sync::", "Mutex"].concat();
+        assert!(!src.contains(&std_mutex_import), "std Mutex import present");
+        assert!(!src.contains(&std_mutex_path), "std Mutex path present");
+        assert!(
+            src.contains("parking_lot::Mutex"),
+            "subscriber registry should be a parking_lot::Mutex"
+        );
+        let poison_branch = ["if let Ok(mut subs) = self.subscribers.", "lock()"].concat();
+        assert!(
+            !src.contains(&poison_branch),
+            "poison-tolerant branch present"
+        );
+    }
 
     #[test]
     fn from_params_rejects_unknown_type() {

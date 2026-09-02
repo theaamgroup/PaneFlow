@@ -1850,13 +1850,12 @@ impl TerminalState {
 
     /// Capture the screen and its recent history as VT sequences.
     ///
-    /// Unlike [`Self::extract_scrollback`] this keeps the styling, the modes,
-    /// and the cursor, so a restored pane looks like the one that was closed
-    /// rather than like a transcript of it. The bytes are produced by
-    /// libghostty's own formatter over this process's terminal.
-    // `capture_replay` / `restore_replay` are wired by the styled undo replay
-    // (#195); until then they are engine plumbing with no caller.
-    #[allow(dead_code)]
+    /// Unlike [`Self::extract_scrollback`] this keeps the styling and the
+    /// cursor, so a restored pane looks like the one that was closed rather
+    /// than like a transcript of it. The bytes are produced by libghostty's
+    /// own formatter over this process's terminal under
+    /// `TerminalExtra::replay`, which is what keeps a closed pane's OSC 52,
+    /// OSC 7, title, and mode state out of the pane undo brings back (#195).
     pub fn capture_replay(&self) -> Option<Vec<u8>> {
         self.ghostty.capture_replay()
     }
@@ -1927,8 +1926,6 @@ impl TerminalState {
     /// point for anything read from disk or from a config file, where
     /// [`Self::restore_scrollback`] and its ANSI stripping is the only safe
     /// path. Only pass bytes this process captured from its own terminal.
-    // Wired by the styled undo replay (#195).
-    #[allow(dead_code)]
     pub fn restore_replay(&self, bytes: &[u8]) {
         self.ghostty.write_output(bytes);
     }
@@ -3388,6 +3385,80 @@ mod tests {
             !restored.contains('\x1b') && !restored.contains('\x07'),
             "no VT introducer may reach the grid; got {restored:?}"
         );
+    }
+
+    /// The undo replay (#195) feeds a capture of the closed pane into the new
+    /// PTY verbatim, escapes included, so the capture is where the policy
+    /// lives (`TerminalExtra::replay`): a program that set the clipboard
+    /// (OSC 52), the working directory (OSC 7), or the title (OSC 0/2) in the
+    /// closed pane must not replay any of them into the new one, while the
+    /// styling that `restore_scrollback` strips has to survive the trip.
+    #[test]
+    fn restore_replay_keeps_styling_but_carries_no_clipboard_pwd_or_title() {
+        use crate::terminal::types::{CellFlags, Color, NamedColor};
+
+        let source = TerminalState::new_display_only(6, 80);
+        source.write_output(
+            b"\x1b]52;c;UFdORUQ=\x07\x1b]7;file://evil.example/pwned\x07\
+              \x1b]0;PWNED\x07\x1b]2;PWNED\x07above-the-fold\n\
+              \x1b[1;31mred\x1b[0m plain",
+        );
+        let replay = source.capture_replay().expect("a styled capture");
+        let bytes = String::from_utf8_lossy(&replay);
+        assert!(bytes.contains("\x1b["), "SGR must survive; got {bytes:?}");
+        for forbidden in [
+            "\x1b]52",
+            "\x1b]7;",
+            "\x1b]0;",
+            "\x1b]2;",
+            "PWNED",
+            "evil.example",
+        ] {
+            assert!(
+                !bytes.contains(forbidden),
+                "{forbidden:?} must not be captured; got {bytes:?}"
+            );
+        }
+
+        let mut target = TerminalState::new_display_only(6, 80);
+        target.restore_replay(&replay);
+        target.sync();
+        assert_eq!(target.title, "Terminal", "no title may replay");
+        assert_eq!(target.current_cwd, None, "no OSC 7 may replay");
+        assert!(
+            target.pending_clipboard_ops.is_empty(),
+            "no OSC 52 may replay"
+        );
+
+        let backend = target.session_backend();
+        let restored = (0..6)
+            .filter_map(|row| backend.line_text_at(Point::new(row, 0)))
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for marker in ["above-the-fold", "red", "plain"] {
+            assert!(
+                restored.contains(marker),
+                "glyphs must survive; {marker:?} missing from {restored:?}"
+            );
+        }
+        assert!(
+            !restored.contains('\x1b') && !restored.contains('\x07'),
+            "no VT introducer may land in the grid as text; got {restored:?}"
+        );
+        let (content, _) =
+            backend.render_content(TerminalWindowSize::new(80, 6, 8, 16), 0, 5, false);
+        let red = content
+            .cells
+            .iter()
+            .find(|cell| cell.c == 'r')
+            .expect("the styled glyph must be on screen; no other row carries an r");
+        assert_eq!(
+            red.fg,
+            Color::Named(NamedColor::Red),
+            "foreground must survive"
+        );
+        assert!(red.flags.contains(CellFlags::BOLD), "bold must survive");
     }
 
     /// Extraction drains terminal history while excluding the active viewport

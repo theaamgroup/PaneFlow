@@ -118,17 +118,10 @@ libc = "0.2"
 regex = "1"
 ctrlc.workspace = true
 open = "5"
-# Native file picker (markdown "open file" button in the pane tab strip).
-# On macOS this is NSOpenPanel, driven via `AsyncFileDialog` from `cx.spawn`.
-rfd = "0.17"
 # Markdown viewer pane (US-020 - prd-cmux-port-2026-q2.md). CommonMark + tables
 # + strikethrough + footnotes via the event API (we walk events directly into
 # a GPUI element tree rather than rendering HTML).
 pulldown-cmark = { version = "0.10", default-features = false }
-# Syntax highlighting for fenced code blocks in rendered markdown.
-# `default-fancy` ships the bundled syntax + theme sets plus the
-# FancyRegex engine (~3 MB binary cost).
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 # Multi-worktree diff engine (prd-multi-worktree-diff-2026-Q3.md, EP-002).
 # Histogram line-diff lifted from Zed's `buffer_diff::compute_hunks`; pinned to
 # the same 0.1.8 Zed uses so the ported algorithm matches the reference API.
@@ -139,9 +132,10 @@ imara-diff = "0.1.8"
 # build time off-thread, no lazy-viewport machinery needed. Core `tree-sitter`
 # 0.26 is already a transitive workspace dep (via the Zed fork); grammars below
 # all bridge through `tree-sitter-language` 0.1 (LANGUAGE: LanguageFn, ABI 15,
-# accepted by the 0.26 runtime). Each grammar compiles bundled C via `cc`.
+# accepted by the 0.26 runtime), which arrives transitively through each
+# grammar and is not a direct dependency (issue #212). Each grammar compiles
+# bundled C via `cc`.
 tree-sitter = "0.26"
-tree-sitter-language = "0.1"
 tree-sitter-rust = "0.24"
 tree-sitter-json = "0.24"
 tree-sitter-bash = "0.25"

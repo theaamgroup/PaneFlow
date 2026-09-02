@@ -167,7 +167,8 @@ impl PaneFlowApp {
 
     /// Close the Composer, clear the pushed slot and hand focus back to the
     /// target pane's terminal (via the existing one-shot
-    /// `pending_pane_focus`, consumed by `render` which owns a `Window`).
+    /// `pending_pane_focus`, consumed by `drain_pending_window_actions`,
+    /// which owns a `Window`).
     pub(crate) fn close_composer(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.composer.take() else {
             return;

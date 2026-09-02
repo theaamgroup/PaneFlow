@@ -72,11 +72,13 @@ the session-host PR on top). What is now true, and where the evidence is:
   at 13.0), a property of the archive, left to the rebuild follow-up.
 
 **2026-08-28 deep review.** Five parallel agents (correctness, security,
-architecture, performance, reality-check) swept the whole repo. Findings and
-the 48 that remain open are in
-`docs/fork/2026-08-28-deep-review-findings.md`; read it before planning a
-pass. Twelve landed here, all gates green, test list name-diffed
-2075 -> 2079 with zero removed:
+architecture, performance, reality-check) swept the whole repo. The findings
+are archived as a historical record in
+`docs/fork/2026-08-28-deep-review-findings.md` (as of `29ac597a`); it is not
+a backlog and quotes no live open count. Open work is `gh issue list`, and
+`src-app/tests/fork_docs_backlog_policy.rs` fails if either document regains
+the work-queue role (issue #224). Twelve landed in that pass, all gates
+green, test list name-diffed 2075 -> 2079 with zero removed:
 
 - `Tab::pane_count` ignored `saved_layout`, so a pane added while zoomed was
   destroyed by `exit_zoom` along with its PTY and agent.

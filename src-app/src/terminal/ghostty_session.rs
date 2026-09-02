@@ -373,9 +373,7 @@ enum RuntimeMessage {
     },
     ExtractScrollback(SyncSender<Result<Option<String>, String>>),
     /// Capture the screen and its recent history as VT sequences, which keep
-    /// the styling, modes, and cursor that plain text drops.
-    // Constructed once the styled undo replay wires `capture_replay` (#195).
-    #[allow(dead_code)]
+    /// the styling and cursor that plain text drops (#195).
     CaptureReplay(SyncSender<Result<Vec<u8>, String>>),
     /// One page of the retained history followed by the screen being
     /// painted (#184 Phase 3.6), read under a single message so live output
@@ -1860,8 +1858,8 @@ impl GhosttySession {
         let _ = self.inner.mailbox.try_send_control(RuntimeMessage::Reset);
     }
 
-    // Wired by the styled undo replay (#195).
-    #[allow(dead_code)]
+    /// Styled capture of the screen and its recent history for the undo
+    /// replay (#195); `None` when blank or unanswered.
     pub(super) fn capture_replay(&self) -> Option<Vec<u8>> {
         self.request(RuntimeMessage::CaptureReplay)
             .and_then(Result::ok)

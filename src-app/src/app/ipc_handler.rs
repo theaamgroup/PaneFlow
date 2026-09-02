@@ -7,9 +7,12 @@
 //! - `process_config_changes` - picks up a hot-reloaded config deposited by
 //!   the `ConfigWatcher` background thread and reapplies keybindings + theme.
 //!
-//! Extracted from `main.rs` per US-024 of the src-app refactor PRD. `handle_ipc`
-//! remains a single function here; if future additions push it over the
-//! module's LOC budget, split by namespace per the PRD's fallback spec.
+//! Extracted from `main.rs` per US-024 of the src-app refactor PRD. The PRD's
+//! fallback spec — split by namespace — has been applied (issue #210):
+//! `handle_ipc` is a thin per-namespace router over `handle_workspace_method`,
+//! `handle_surface_method`, `handle_fleet_method`, and
+//! `handle_ai_lifecycle_method`, each holding its family's match arms
+//! verbatim, with an identical method-not-found catch-all in every handler.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -2691,6 +2694,31 @@ impl PaneFlowApp {
         caller_pid: Option<i64>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
+        // Issue #210: thin per-namespace router. Every family's match arms
+        // moved verbatim into the handlers below; an unknown method inside a
+        // known namespace falls into that handler's `_` arm, which produces
+        // the same method-not-found envelope as the catch-all here.
+        if method.starts_with("workspace.") {
+            self.handle_workspace_method(method, params, cx)
+        } else if method.starts_with("surface.") {
+            self.handle_surface_method(method, params, caller_pid, cx)
+        } else if method.starts_with("fleet.") {
+            self.handle_fleet_method(method, params, cx)
+        } else if method.starts_with("ai.") {
+            self.handle_ai_lifecycle_method(method, params, cx)
+        } else {
+            JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value()
+        }
+    }
+
+    /// `workspace.*` dispatch: arms moved verbatim from `handle_ipc`
+    /// (issue #210); relative arm order is unchanged.
+    fn handle_workspace_method(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> serde_json::Value {
         match method {
             "workspace.list" => {
                 let list: Vec<_> = self
@@ -2874,6 +2902,43 @@ impl PaneFlowApp {
                     }
                 }
             }
+            "workspace.restore_layout" => {
+                if self.session_restore.is_some() {
+                    return serde_json::json!({"error": "Session restore in progress"});
+                }
+                let Some(layout_value) = params.get("layout") else {
+                    return serde_json::json!({"error": "Missing 'layout' parameter"});
+                };
+                let mut layout: LayoutNode = match serde_json::from_value(layout_value.clone()) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        return serde_json::json!({"error": format!("Invalid layout JSON: {e}")});
+                    }
+                };
+                match self.apply_layout_from_json(&mut layout, cx) {
+                    Ok(()) => {
+                        let panes = self.active_workspace().map_or(0, |ws| ws.pane_count());
+                        serde_json::json!({"restored": true, "panes": panes})
+                    }
+                    Err(e) => serde_json::json!({"error": e}),
+                }
+            }
+            _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
+        }
+    }
+
+    /// `surface.*` dispatch: arms moved verbatim from `handle_ipc`
+    /// (issue #210); relative arm order is unchanged.
+    fn handle_surface_method(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+        // EP-003 US-010 (agent-control-plane): socket peer PID for the
+        // free-access write trace; None on macOS/Windows. Advisory only.
+        caller_pid: Option<i64>,
+        cx: &mut Context<Self>,
+    ) -> serde_json::Value {
+        match method {
             "surface.list" => {
                 // US-002: additive enrichment - keep the legacy root fields
                 // (`pane_count`, `workspace`) for back-compat and add a
@@ -2979,27 +3044,6 @@ impl PaneFlowApp {
                     text
                 };
                 surface_read_value(text, returned, total, eof, output_generation, truncated)
-            }
-            "fleet.list" => {
-                // EP-001 US-001 (agent-control-plane): snapshot every running
-                // agent across all workspaces. Read-only, no scripting gate.
-                let name_by_sid: HashMap<u64, String> = self
-                    .collect_surface_meta(cx)
-                    .into_iter()
-                    .map(|m| (m.surface_id, m.name))
-                    .collect();
-                let fleets: Vec<WsFleet> = self
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, ws)| WsFleet {
-                        idx,
-                        sessions: &ws.agent_sessions,
-                        detected: &ws.detected_agents,
-                    })
-                    .collect();
-                let agents = build_fleet_rows(&fleets, &name_by_sid, std::time::Instant::now());
-                serde_json::json!({ "agents": agents })
             }
             "surface.status" => {
                 // EP-001 US-002 (agent-control-plane): one pane's agent state.
@@ -3510,27 +3554,55 @@ impl PaneFlowApp {
                     "surface_id": surface_id
                 })
             }
-            "workspace.restore_layout" => {
-                if self.session_restore.is_some() {
-                    return serde_json::json!({"error": "Session restore in progress"});
-                }
-                let Some(layout_value) = params.get("layout") else {
-                    return serde_json::json!({"error": "Missing 'layout' parameter"});
-                };
-                let mut layout: LayoutNode = match serde_json::from_value(layout_value.clone()) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        return serde_json::json!({"error": format!("Invalid layout JSON: {e}")});
-                    }
-                };
-                match self.apply_layout_from_json(&mut layout, cx) {
-                    Ok(()) => {
-                        let panes = self.active_workspace().map_or(0, |ws| ws.pane_count());
-                        serde_json::json!({"restored": true, "panes": panes})
-                    }
-                    Err(e) => serde_json::json!({"error": e}),
-                }
+            _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
+        }
+    }
+
+    /// `fleet.*` dispatch: arms moved verbatim from `handle_ipc`
+    /// (issue #210). `fleet.list` takes no parameters, hence the
+    /// underscore; the router still hands them through for signature
+    /// symmetry with the other family handlers.
+    fn handle_fleet_method(
+        &mut self,
+        method: &str,
+        _params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> serde_json::Value {
+        match method {
+            "fleet.list" => {
+                // EP-001 US-001 (agent-control-plane): snapshot every running
+                // agent across all workspaces. Read-only, no scripting gate.
+                let name_by_sid: HashMap<u64, String> = self
+                    .collect_surface_meta(cx)
+                    .into_iter()
+                    .map(|m| (m.surface_id, m.name))
+                    .collect();
+                let fleets: Vec<WsFleet> = self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ws)| WsFleet {
+                        idx,
+                        sessions: &ws.agent_sessions,
+                        detected: &ws.detected_agents,
+                    })
+                    .collect();
+                let agents = build_fleet_rows(&fleets, &name_by_sid, std::time::Instant::now());
+                serde_json::json!({ "agents": agents })
             }
+            _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
+        }
+    }
+
+    /// `ai.*` lifecycle dispatch: arms moved verbatim from `handle_ipc`
+    /// (issue #210); relative arm order is unchanged.
+    fn handle_ai_lifecycle_method(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> serde_json::Value {
+        match method {
             // -----------------------------------------------------------------
             // AI hook lifecycle methods (from paneflow-hook via IPC socket)
             // -----------------------------------------------------------------
@@ -4510,7 +4582,7 @@ mod tests {
         let close_arm = src
             .split("\"workspace.close\"")
             .nth(1)
-            .and_then(|rest| rest.split("\"surface.list\"").next())
+            .and_then(|rest| rest.split("\"workspace.restore_layout\"").next())
             .expect("workspace.close arm");
         assert!(
             close_arm.contains("request_close_workspace_without_window")
@@ -4534,6 +4606,36 @@ mod tests {
             close_arm.contains("confirmation_required"),
             "a live-agent workspace must report that the in-app modal now owns the decision"
         );
+    }
+
+    /// Issue #210: `handle_ipc` was a ~1,295-line, 24-arm method. It is now a
+    /// thin per-namespace router; the four family handlers hold the arms
+    /// (moved verbatim). This pins the split so the router does not regrow
+    /// inline arms.
+    #[test]
+    fn handle_ipc_is_a_thin_namespace_router() {
+        let src = include_str!("ipc_handler.rs");
+        let body = src
+            .split("fn handle_ipc(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("handle_ipc body");
+        let lines = body.lines().count();
+        assert!(
+            lines < 60,
+            "handle_ipc must stay a thin per-namespace router (issue #210); got {lines} lines"
+        );
+        for handler in [
+            "fn handle_workspace_method(",
+            "fn handle_surface_method(",
+            "fn handle_fleet_method(",
+            "fn handle_ai_lifecycle_method(",
+        ] {
+            assert!(
+                src.contains(handler),
+                "missing per-namespace handler: {handler}"
+            );
+        }
     }
 
     #[test]
@@ -5272,7 +5374,7 @@ mod tests {
         let arm = src
             .split("\"surface.read\"")
             .nth(1)
-            .and_then(|rest| rest.split("\"fleet.list\"").next())
+            .and_then(|rest| rest.split("\"surface.status\"").next())
             .expect("surface.read arm");
         assert!(
             arm.contains("extract_scrollback_window"),

@@ -19,6 +19,15 @@
 //! instances and panes launched from a running instance agree on the exact
 //! IPC endpoint. Without this, clients can point at one socket while the
 //! server keeps binding the default one.
+//!
+//! LOCKSTEP: `crates/paneflow-ipc-client/src/lib.rs` (`resolve_socket_path`)
+//! re-implements this exact chain without the `dirs` dependency (that crate
+//! deliberately keeps its tree minimal), and the two must be kept in lockstep
+//! (#217). Any change here to the `PANEFLOW_SOCKET_PATH` handling (read as
+//! `OsString`, absolute-only), the `$TMPDIR` acceptance (non-UTF-8 or empty
+//! reads as unset), the fallback chain, or the `sun_path` ceiling must be
+//! mirrored there, or the CLI/MCP client dials an endpoint the server never
+//! bound.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

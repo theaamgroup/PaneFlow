@@ -1360,6 +1360,7 @@ pub(crate) fn warn_if_rosetta_translated() {
 #[cfg(test)]
 mod tests {
     use super::{git_head_index_should_fire, restored_primary_sidebar};
+    use crate::source_probe::source_slice;
     use std::time::{Duration, Instant};
 
     fn session_with_sidebar_collapsed(collapsed: bool) -> paneflow_config::schema::SessionState {
@@ -1416,16 +1417,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the module");
-        let menus = production
-            .split("cx.set_menus(vec![")
-            .nth(1)
-            .expect("the menu-bar tree");
+        // The tree closes at the first `]);` (nested menus close with `]),`);
+        // issue #219: unbounded, `menus` ran to the end of production code.
+        let menus = source_slice(production, "cx.set_menus(vec![", "]);");
 
-        let paneflow_menu = menus
-            .split("Menu::new(\"PaneFlow\")")
-            .nth(1)
-            .and_then(|rest| rest.split("Menu::new(\"Edit\")").next())
-            .expect("the PaneFlow menu");
+        let paneflow_menu = source_slice(menus, "Menu::new(\"PaneFlow\")", "Menu::new(\"Edit\")");
         let settings_at = paneflow_menu
             .find("MenuItem::action(\"Settings…\", OpenSettings)")
             .expect("PaneFlow > Settings... must exist and dispatch OpenSettings");
@@ -1468,11 +1464,7 @@ mod tests {
             "Edit sits directly before Window; no menu in between"
         );
 
-        let window_menu = menus
-            .split("Menu::new(\"Window\")")
-            .nth(1)
-            .and_then(|rest| rest.split("Menu::new(\"Help\")").next())
-            .expect("the Window menu");
+        let window_menu = source_slice(menus, "Menu::new(\"Window\")", "Menu::new(\"Help\")");
         let minimize_at = window_menu
             .find("MenuItem::action(\"Minimize\", MinimizeWindow)")
             .expect("Window > Minimize must exist and dispatch MinimizeWindow");
@@ -1527,14 +1519,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of the module");
-        let install = production
-            .split("pub(crate) fn install_macos_menu_bar")
-            .nth(1)
-            .and_then(|rest| {
-                rest.split("pub(crate) fn install_macos_menu_action_fallbacks")
-                    .next()
-            })
-            .expect("install_macos_menu_bar");
+        let install = source_slice(
+            production,
+            "pub(crate) fn install_macos_menu_bar",
+            "pub(crate) fn install_macos_menu_action_fallbacks",
+        );
 
         let set_menus_at = install
             .find("cx.set_menus(vec![")
@@ -1546,11 +1535,7 @@ mod tests {
             set_menus_at < apply_at,
             "menu icons must be applied after GPUI installs the menu"
         );
-        let after_icon_pass = install
-            .split("apply_macos_app_menu_icons();")
-            .nth(1)
-            .and_then(|rest| rest.split('}').next())
-            .expect("the rest of install_macos_menu_bar after the icon pass");
+        let after_icon_pass = source_slice(install, "apply_macos_app_menu_icons();", "}");
         assert!(
             !after_icon_pass.contains("set_menus"),
             "cx.set_menus after the icon pass would drop the images"
