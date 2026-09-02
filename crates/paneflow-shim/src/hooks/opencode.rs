@@ -201,11 +201,8 @@ fn merge_opencode_plugin_entry(
     root: &mut serde_json::Value,
     plugin_path: &str,
 ) -> std::io::Result<()> {
-    if !root.is_object() {
-        *root = serde_json::json!({});
-    }
     let Some(root) = root.as_object_mut() else {
-        return Ok(());
+        return Err(non_object_root_error(root));
     };
     let plugins = root
         .entry("plugin")
@@ -243,19 +240,35 @@ fn remove_opencode_plugin_entry(root: &mut serde_json::Value) -> std::io::Result
     Ok(())
 }
 
+fn non_object_root_error(value: &serde_json::Value) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "OpenCode config root must be an object, found {}",
+            json_kind(value)
+        ),
+    )
+}
+
 fn non_array_plugin_error(value: &serde_json::Value) -> std::io::Error {
-    let kind = match value {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "OpenCode config key `plugin` must be an array, found {}",
+            json_kind(value)
+        ),
+    )
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "boolean",
         serde_json::Value::Number(_) => "number",
         serde_json::Value::String(_) => "string",
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
-    };
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("OpenCode config key `plugin` must be an array, found {kind}"),
-    )
+    }
 }
 
 fn is_paneflow_plugin_entry(value: &serde_json::Value) -> bool {
@@ -352,6 +365,38 @@ mod tests {
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
         assert_eq!(root, serde_json::json!({}));
+    }
+
+    #[test]
+    fn merge_opencode_plugin_entry_rejects_non_object_root() {
+        let mut root = serde_json::json!(["other"]);
+        let error = merge_opencode_plugin_entry(&mut root, "/tmp/plugin.js").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("array"),
+            "error must name the existing type, got {error}"
+        );
+        assert_eq!(root, serde_json::json!(["other"]));
+    }
+
+    #[test]
+    fn install_refuses_non_object_config_without_writing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("opencode");
+        std::fs::create_dir_all(&directory).unwrap();
+        let config = directory.join("opencode.json");
+        std::fs::write(&config, "[1, 2]").unwrap();
+
+        let error = match OpenCodePluginGuard::install_at(&directory) {
+            Ok(_) => panic!("install must fail on a non-object config root"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "[1, 2]");
+        assert!(!directory
+            .join("plugins")
+            .join(PANEFLOW_TS_BASENAME)
+            .exists());
     }
 
     #[test]
