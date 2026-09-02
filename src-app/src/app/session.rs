@@ -1216,8 +1216,16 @@ fn write_session_json_if_current(
 }
 
 fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::SessionState) -> bool {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
     if let Some(parent) = path.parent() {
-        match std::fs::create_dir_all(parent) {
+        // Owner-only: session.json stores absolute workspace cwds, tab titles,
+        // and custom-button commands. `mode` only applies to directories this
+        // call creates; a pre-existing parent keeps its mode.
+        match std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+        {
             Ok(()) => {}
             Err(e) => {
                 log::warn!(
@@ -1231,10 +1239,19 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
     match serde_json::to_string_pretty(state) {
         Ok(json) => {
             let tmp_path = session_tmp_path(path);
-            let write_result = std::fs::File::create(&tmp_path).and_then(|mut temporary| {
-                std::io::Write::write_all(&mut temporary, json.as_bytes())?;
-                temporary.sync_all()
-            });
+            let write_result = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .and_then(|mut temporary| {
+                    // `mode` is ignored for a path that already exists, so pin
+                    // the temp file 0600 before it is renamed into place.
+                    temporary.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                    std::io::Write::write_all(&mut temporary, json.as_bytes())?;
+                    temporary.sync_all()
+                });
             match write_result {
                 Ok(()) => {
                     if let Err(e) = std::fs::rename(&tmp_path, path) {
@@ -2180,6 +2197,50 @@ mod tests {
             paneflow_config::schema::SESSION_SCHEMA_VERSION
         );
         assert!(loaded.workspaces.is_empty());
+    }
+
+    /// session.json carries absolute workspace cwds, tab titles, and
+    /// custom-button commands, so it must be owner-only on disk: 0600 for
+    /// the file (also when it replaces a looser pre-existing one) and 0700
+    /// for a parent directory this writer had to create.
+    #[test]
+    fn write_session_json_creates_owner_only_file_and_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent = tmp.path().join("paneflow");
+        let path = parent.join("session.json");
+        assert!(write_session_json(&path, &empty_session_state()));
+        let file_mode = std::fs::metadata(&path)
+            .expect("session written")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "session.json must be 0600, got {file_mode:o}"
+        );
+        let dir_mode = std::fs::metadata(&parent)
+            .expect("parent created")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "session parent must be 0700, got {dir_mode:o}"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen the existing session file");
+        assert!(write_session_json(&path, &empty_session_state()));
+        let rewritten_mode = std::fs::metadata(&path)
+            .expect("session rewritten")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            rewritten_mode, 0o600,
+            "rewriting session.json must leave it 0600, got {rewritten_mode:o}"
+        );
     }
 
     #[test]
