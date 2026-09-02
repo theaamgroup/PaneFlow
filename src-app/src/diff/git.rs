@@ -266,6 +266,57 @@ fn deadline_exhausted(budget: &GitBudget, err: &str) -> bool {
     budget.remaining().is_err() || err.contains("exceeded its deadline")
 }
 
+/// Run a blocking working-tree filesystem call under `budget`. `std::fs` has
+/// no deadline of its own, so the call runs on a helper thread and the caller
+/// waits only for the budget's remaining time: an open or stat that never
+/// returns (a dead NFS mount, a FIFO with no writer) surfaces the column's
+/// deadline error instead of wedging the blocking-pool task. On timeout the
+/// helper is abandoned; it exits on its own once the kernel releases it.
+fn fs_within<T: Send + 'static>(
+    budget: &GitBudget,
+    what: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let deadline = budget.remaining()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("paneflow-diff-fs".to_string())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(|e| format!("{what} failed: {e}"))?;
+    rx.recv_timeout(deadline).map_err(|e| match e {
+        std::sync::mpsc::RecvTimeoutError::Timeout => "git diff exceeded its deadline".to_string(),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => format!("{what} failed"),
+    })
+}
+
+/// [`is_too_large`] charged against `budget` instead of blocking unbounded.
+fn is_too_large_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    rel_path: &str,
+) -> Result<bool, String> {
+    let dir = worktree_dir.to_path_buf();
+    let rel = rel_path.to_string();
+    fs_within(budget, "working-tree stat", move || {
+        is_too_large(&dir, &rel)
+    })
+}
+
+/// [`load_working_text`] charged against `budget` instead of blocking unbounded.
+fn load_working_text_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    rel_path: &str,
+) -> Result<(String, bool), String> {
+    let dir = worktree_dir.to_path_buf();
+    let rel = rel_path.to_string();
+    fs_within(budget, "working-tree read", move || {
+        load_working_text(&dir, &rel)
+    })
+}
+
 /// List all worktrees of the repository containing `repo_dir`. Live path:
 /// [`list_repo_worktrees`] calls this for the US-013 Worktree-scope "include
 /// worktrees not open as workspaces" enumeration.
@@ -1194,8 +1245,18 @@ fn compute_diff_against_within(
 
     let mut lookups = Vec::new();
     for (change, path, old_path) in &changes {
-        if is_skipped_name(path) || is_too_large(worktree_dir, path) {
+        if is_skipped_name(path) {
             continue;
+        }
+        match is_too_large_within(budget, worktree_dir, path) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => {
+                return WorktreeDiff {
+                    files: Vec::new(),
+                    error: Some(e),
+                };
+            }
         }
         if *change == FileChange::Added {
             continue;
@@ -1233,7 +1294,20 @@ fn compute_diff_against_within(
         }
         // Skip lockfiles and oversized files: emit a stub, never load/diff/
         // highlight them. This is the primary OOM guard.
-        if is_skipped_name(&path) || is_too_large(worktree_dir, &path) {
+        let too_large = if is_skipped_name(&path) {
+            true
+        } else {
+            match is_too_large_within(budget, worktree_dir, &path) {
+                Ok(too_large) => too_large,
+                Err(e) => {
+                    return WorktreeDiff {
+                        files: Vec::new(),
+                        error: Some(e),
+                    };
+                }
+            }
+        };
+        if too_large {
             log::debug!("git: skip (lockfile/large) {path}");
             files.push(stub_file(path, change));
             continue;
@@ -1258,7 +1332,15 @@ fn compute_diff_against_within(
         };
         let (new_text, new_bin) = match change {
             FileChange::Deleted => (String::new(), false),
-            _ => load_working_text(worktree_dir, &path),
+            _ => match load_working_text_within(budget, worktree_dir, &path) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    return WorktreeDiff {
+                        files: Vec::new(),
+                        error: Some(e),
+                    };
+                }
+            },
         };
         // Post-load size guard. `is_too_large` only sees the working-tree side
         // via metadata, so a file that is huge at the merge-base but small or
@@ -1584,6 +1666,52 @@ pub(crate) mod tests {
             text.is_empty() && is_binary,
             "oversized working-tree content should stub as binary without keeping the buffer"
         );
+    }
+
+    #[test]
+    fn load_working_text_within_fails_instead_of_hanging_on_blocking_path() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // A FIFO with no writer blocks `File::open` forever - the shape of a
+        // working-tree file on a dead NFS mount. The column budget, not the
+        // kernel, has to bound the read.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let fifo = std::ffi::CString::new(root.join("stuck").as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path for the call's duration.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let budget = GitBudget {
+            deadline_at: Instant::now() + Duration::from_millis(200),
+        };
+        // Watchdog: a regression here hangs forever, so wait on a channel
+        // instead of joining the worker.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_working_text_within(&budget, &root, "stuck"));
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("load_working_text_within hung on a blocking working-tree path");
+        assert_eq!(result, Err("git diff exceeded its deadline".to_string()));
+    }
+
+    #[test]
+    fn working_tree_reads_fail_closed_once_budget_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("small.txt"), b"hello\n").unwrap();
+        let live = GitBudget::for_column();
+        assert_eq!(is_too_large_within(&live, root, "small.txt"), Ok(false));
+        assert_eq!(
+            load_working_text_within(&live, root, "small.txt"),
+            Ok(("hello\n".to_string(), false))
+        );
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        assert!(is_too_large_within(&spent, root, "small.txt").is_err());
+        assert!(load_working_text_within(&spent, root, "small.txt").is_err());
     }
 
     #[test]
