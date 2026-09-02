@@ -588,10 +588,21 @@ impl Workspace {
             .iter()
             .map(|tab| TabSession {
                 title: tab.title.clone(),
-                layout: tab.serialize_without_scrollback(cx),
+                layout: persisted_tab_layout(tab.serialize_without_scrollback(cx)),
             })
             .collect()
     }
+}
+
+/// The layout `session.json` stores for one tab.
+///
+/// A Diff pane serializes to `LayoutNode::Pane { surfaces: [] }` (the diff
+/// surface is filtered out, the leaf survives), and restore turns that
+/// surfaceless leaf into a default terminal the user never had (issue #239).
+/// Prune it the same way undo does, so a Diff-only tab persists as `None`
+/// and a mixed split drops the empty child.
+fn persisted_tab_layout(layout: Option<LayoutNode>) -> Option<LayoutNode> {
+    layout.and_then(crate::app::workspace_ops::prune_unrestorable)
 }
 
 impl Workspace {
@@ -636,9 +647,11 @@ mod tests {
 
     use super::{
         AgentCompletionNotification, MAX_TABS_PER_WORKSPACE, Tab, Workspace, commands_are_idle,
+        persisted_tab_layout,
     };
     use crate::layout::LayoutTree;
     use crate::terminal::TerminalView;
+    use paneflow_config::schema::{LayoutNode, SurfaceDefinition};
 
     fn test_workspace(cx: &mut impl AppContext) -> Workspace {
         let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
@@ -1088,5 +1101,59 @@ mod tests {
                 "the trailing shell must not talk the workspace back into idle"
             );
         });
+    }
+
+    /// Issue #239: a Diff pane serializes to a leaf with an EMPTY surface
+    /// list (`serialize_with` filters the diff surface out but still emits
+    /// the leaf). Written into `session.json` as-is, restore's
+    /// `validate_layout` synthesizes a default terminal for it, so a
+    /// Diff-only tab comes back as a bare shell the user never had. The
+    /// session writer has to run the same prune undo already does. A real
+    /// `DiffView` cannot be built here (its filesystem watcher aborts the
+    /// GPUI test scheduler), so this pins the prune on the shapes a diff
+    /// produces and that the writer routes through it.
+    #[test]
+    fn session_tabs_prune_the_leaf_a_diff_pane_serializes_to() {
+        let diff_only = LayoutNode::Pane { surfaces: vec![] };
+        assert_eq!(
+            persisted_tab_layout(Some(diff_only)),
+            None,
+            "a Diff-only tab persists as `layout: None`, not an empty-surface pane"
+        );
+
+        let terminal = LayoutNode::Pane {
+            surfaces: vec![SurfaceDefinition {
+                surface_type: Some("terminal".to_string()),
+                ..Default::default()
+            }],
+        };
+        let terminal_beside_diff = LayoutNode::Split {
+            direction: "vertical".to_string(),
+            ratio: None,
+            ratios: Some(vec![0.5, 0.5]),
+            children: vec![terminal.clone(), LayoutNode::Pane { surfaces: vec![] }],
+        };
+        assert_eq!(
+            persisted_tab_layout(Some(terminal_beside_diff)),
+            Some(terminal.clone()),
+            "a terminal+Diff split persists only the terminal leaf"
+        );
+        assert_eq!(
+            persisted_tab_layout(Some(terminal.clone())),
+            Some(terminal),
+            "a healthy tab is stored unchanged"
+        );
+        assert_eq!(persisted_tab_layout(None), None, "an empty tab stays empty");
+
+        let src = include_str!("mod.rs");
+        let writer = crate::source_probe::source_slice(
+            src,
+            "fn serialize_tabs_without_scrollback(",
+            "\n    }",
+        );
+        assert!(
+            writer.contains("persisted_tab_layout("),
+            "the session writer must prune unrestorable leaves before storing a tab"
+        );
     }
 }

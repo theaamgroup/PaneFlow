@@ -1463,8 +1463,8 @@ mod tests {
         "env_remove(\"GIT_SSH_COMMAND\")",
     ];
 
-    fn run_git_fn_source(source: &str) -> &str {
-        let after = source.split_once("fn run_git(").expect("run_git helper").1;
+    fn git_fn_source<'a>(source: &'a str, marker: &str) -> &'a str {
+        let after = source.split_once(marker).expect("git spawn helper").1;
         after.get(..after.len().min(2000)).unwrap_or(after)
     }
 
@@ -1474,14 +1474,14 @@ mod tests {
             .all(|needle| source.contains(needle))
     }
 
-    fn assert_production_git_command_isolated(source: &str) {
-        let run_git_src = run_git_fn_source(source);
+    fn assert_production_git_command_isolated(source: &str, marker: &str) {
+        let run_git_src = git_fn_source(source, marker);
         if source_has_git_isolation_prelude(run_git_src) {
             return;
         }
         assert!(
             run_git_src.contains("git_command()"),
-            "production git Command must carry the isolation prelude or call git_command()"
+            "production git Command in `{marker}` must carry the isolation prelude or call git_command()"
         );
         assert!(
             source_has_git_isolation_prelude(source)
@@ -1493,8 +1493,21 @@ mod tests {
 
     #[test]
     fn git_run_disables_repo_hooks() {
-        assert_production_git_command_isolated(include_str!("worktree.rs"));
-        assert_production_git_command_isolated(include_str!("../diff/git.rs"));
+        assert_production_git_command_isolated(include_str!("worktree.rs"), "fn run_git(");
+        assert_production_git_command_isolated(include_str!("../diff/git.rs"), "fn run_git_timed(");
+        assert_production_git_command_isolated(
+            include_str!("../diff/git.rs"),
+            "fn run_git_stdin_timed(",
+        );
+        assert_production_git_command_isolated(include_str!("git.rs"), "fn git_stdout(");
+        assert_production_git_command_isolated(
+            include_str!("../app/diff_dock/branch.rs"),
+            "fn list_branches(",
+        );
+        assert_production_git_command_isolated(
+            include_str!("../app/diff_dock/branch.rs"),
+            "fn switch_branch(",
+        );
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");

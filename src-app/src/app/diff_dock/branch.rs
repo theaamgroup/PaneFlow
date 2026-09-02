@@ -484,7 +484,7 @@ fn render_diff_branch_menu_status(
 }
 
 fn list_branches(cwd: &str) -> Result<Vec<String>, String> {
-    let mut command = std::process::Command::new("git");
+    let mut command = crate::workspace::worktree::git_command();
     command
         .args(["branch", "--format=%(refname:short)"])
         .current_dir(cwd)
@@ -512,7 +512,7 @@ fn switch_branch(
     cwd: &str,
     branch: &str,
 ) -> Result<(String, bool, crate::workspace::GitDiffStats), String> {
-    let mut command = std::process::Command::new("git");
+    let mut command = crate::workspace::worktree::git_command();
     command
         .args(["switch", "--", branch])
         .current_dir(cwd)

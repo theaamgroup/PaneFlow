@@ -20,7 +20,7 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Point, SharedString, Styled,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Point, Role, SharedString, Styled,
     Window, div, prelude::*, px, svg,
 };
 
@@ -234,6 +234,8 @@ impl PaneFlowApp {
                 let row = squircle_skin(
                     div()
                         .id(SharedString::from(format!("settings-nav-{}", it.label)))
+                        .role(Role::Button)
+                        .aria_label(it.label)
                         .mx(px(8.))
                         .px(px(8.))
                         .py(px(6.))

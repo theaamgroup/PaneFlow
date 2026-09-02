@@ -45,6 +45,14 @@ impl PaneFlowApp {
         // framework and return immediately.
         crate::sparkle::start_if_bundled();
 
+        // Issue #283: `system.capabilities` is answered on the socket thread
+        // from this process-wide mirror. Publish it before the listener
+        // exists so a client that treats socket appearance as readiness
+        // cannot see a closed write gate the GPUI tick would open. One
+        // snapshot seeds the mirror, the boot warn, and `cached_config`.
+        let boot_config = paneflow_config::loader::load_config();
+        crate::ipc::set_ai_unrestricted(boot_config.ai_unrestricted_enabled());
+
         let title_bar = cx.new(title_bar::TitleBar::new);
         cx.subscribe(&title_bar, Self::handle_title_bar_event)
             .detach();
@@ -626,8 +634,7 @@ impl PaneFlowApp {
         // free-access mode is enabled, mirroring the PANEFLOW_IPC_SCRIPTING
         // boot warn in `ipc::start_server()`. The fence is independent and
         // defaults ON, so it does not warn.
-        let config_snapshot = paneflow_config::loader::load_config();
-        if config_snapshot.ai_unrestricted_enabled() {
+        if boot_config.ai_unrestricted_enabled() {
             tracing::warn!(
                 "ai.unrestricted is ON; same-UID callers may auto-submit prompts to agent panes without PANEFLOW_IPC_SCRIPTING (toggle in Settings -> AI Agent)"
             );
@@ -714,7 +721,7 @@ impl PaneFlowApp {
         cx.observe(&workspace_pane_prompt_input, |_, _, cx| cx.notify())
             .detach();
 
-        let cached_config = paneflow_config::loader::load_config();
+        let cached_config = boot_config;
         let effective_shortcuts = keybindings::effective_shortcuts(&cached_config.shortcuts);
         let theme_mode = crate::ThemeMode::from_config(
             cached_config.theme_mode.as_deref(),

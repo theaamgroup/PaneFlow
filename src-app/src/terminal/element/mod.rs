@@ -587,6 +587,10 @@ pub struct LayoutState {
     link_text_color: Hsla,
     /// Cursor position bounds for IME popup positioning (pixel coordinates).
     ime_cursor_bounds: Option<Bounds<Pixels>>,
+    /// Glyph colour for the in-line IME preedit (issue #324).
+    ime_preedit_foreground: Hsla,
+    /// Opaque erase fill painted behind the IME preedit (issue #324).
+    ime_preedit_background: Hsla,
     /// Whether emoji glyphs should use GPUI's platform color-emoji path.
     color_emoji_enabled: bool,
 }
@@ -891,6 +895,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
     // background and the rounded corners; a base fill here would repaint the
     // arcs square (GPUI does not clip children to a parent radius).
     let background_color = gpui::transparent_black();
+    let (ime_preedit_foreground, ime_preedit_background) =
+        paint::overlay::ime_preedit_colors(theme.foreground, theme.background);
     let selection_color = theme.selection;
 
     let cursor_snapshot = cursor_snapshot.and_then(|mut cursor| {
@@ -1351,6 +1357,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
         desired_rows,
         link_text_color: theme.link_text,
         ime_cursor_bounds,
+        ime_preedit_foreground,
+        ime_preedit_background,
         color_emoji_enabled,
     }
 }
@@ -2962,6 +2970,46 @@ mod golden_frame_tests {
             state.rects.iter().any(|rect| rect.color.a > 0.0),
             "explicit ANSI backgrounds must remain painted"
         );
+    }
+
+    /// Issue #324: the IME preedit must not paint in the (transparent) layout
+    /// background. The layout carries an opaque, contrast-checked pair drawn
+    /// from the theme instead.
+    #[test]
+    fn ime_preedit_pair_is_opaque_and_readable_on_light_and_dark_themes() {
+        for theme in [
+            crate::theme::paneflow_dark(),
+            crate::theme::paneflow_light(),
+        ] {
+            let state = layout_from_snapshot(LayoutInputs {
+                cells: Vec::new().into(),
+                cursor: None,
+                selection_range: None,
+                copy_mode_cursor: None,
+                search_highlights: &[],
+                display_offset: 0,
+                history_size: 0,
+                desired_cols: COLS,
+                desired_rows: ROWS,
+                first_visible_row: 0,
+                last_visible_row: ROWS as i32,
+                dims: test_dims(),
+                base_font: test_font(),
+                theme: &theme,
+                exited: None,
+                exit_signal: None,
+                integrated_glyphs_enabled: true,
+                color_emoji_enabled: true,
+            });
+
+            assert_eq!(state.ime_preedit_background.a, 1.0);
+            assert_ne!(state.ime_preedit_foreground, state.background_color);
+            assert_ne!(state.ime_preedit_background, state.background_color);
+            assert!(
+                apca_contrast(state.ime_preedit_foreground, state.ime_preedit_background).abs()
+                    >= MIN_APCA_CONTRAST
+            );
+        }
     }
 
     #[test]

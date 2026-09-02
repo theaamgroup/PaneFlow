@@ -97,7 +97,10 @@ fn opencode_configs_from(
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
     {
-        push_opencode_names(&mut out, dir);
+        // `OPENCODE_CONFIG_DIR` *is* the config directory (the one holding
+        // `opencode.json`), not its parent - the same reading the shim's
+        // `opencode_config_dir_from` uses (issue #233).
+        push_opencode_names_in(&mut out, dir);
         return out;
     }
 
@@ -115,7 +118,10 @@ fn opencode_configs_from(
 }
 
 fn push_opencode_names(out: &mut Vec<PathBuf>, config_base: PathBuf) {
-    let dir = config_base.join("opencode");
+    push_opencode_names_in(out, config_base.join("opencode"));
+}
+
+fn push_opencode_names_in(out: &mut Vec<PathBuf>, dir: PathBuf) {
     out.push(dir.join("opencode.jsonc"));
     out.push(dir.join("opencode.json"));
 }
@@ -634,14 +640,58 @@ mod tests {
                 Some(OsString::from("/tmp/opencode-config")),
             ),
             vec![
-                PathBuf::from("/tmp/opencode-config")
-                    .join("opencode")
-                    .join("opencode.jsonc"),
-                PathBuf::from("/tmp/opencode-config")
-                    .join("opencode")
-                    .join("opencode.json"),
+                PathBuf::from("/tmp/opencode-config").join("opencode.jsonc"),
+                PathBuf::from("/tmp/opencode-config").join("opencode.json"),
             ]
         );
+    }
+
+    /// Issue #233: the shim's `opencode_config_dir_from`
+    /// (`crates/paneflow-shim/src/hooks/opencode.rs`) treats
+    /// `OPENCODE_CONFIG_DIR` as the config directory itself and writes
+    /// `$DIR/opencode.json`; the candidates this crate edits must resolve to
+    /// the same file for the same env, or `paneflow mcp install` registers the
+    /// bridge where OpenCode never loads it.
+    #[test]
+    fn opencode_config_candidates_agree_with_shim_config_dir() {
+        let home = Some(PathBuf::from("/Users/alice"));
+        let cases = [
+            (
+                Some("/Users/alice/.config"),
+                None,
+                None,
+                "/Users/alice/.config/opencode",
+            ),
+            (
+                None,
+                Some("/tmp/custom/opencode.json"),
+                Some("/tmp/ignored"),
+                "/tmp/custom",
+            ),
+            (None, None, Some("/tmp/opencode"), "/tmp/opencode"),
+            (None, None, None, "/Users/alice/.config/opencode"),
+        ];
+        for (xdg, config, config_dir, shim_dir) in cases {
+            let candidates = opencode_configs_from(
+                home.clone(),
+                None,
+                xdg.map(OsString::from),
+                config.map(OsString::from),
+                config_dir.map(OsString::from),
+            );
+            let json = PathBuf::from(shim_dir).join("opencode.json");
+            assert!(
+                candidates.contains(&json),
+                "env xdg={xdg:?} config={config:?} dir={config_dir:?}: {candidates:?} lacks {json:?}"
+            );
+            for candidate in &candidates {
+                assert_eq!(
+                    candidate.parent(),
+                    Some(Path::new(shim_dir)),
+                    "candidate {candidate:?} not in the shim's directory"
+                );
+            }
+        }
     }
 
     #[test]

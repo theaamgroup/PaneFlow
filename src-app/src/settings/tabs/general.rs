@@ -34,6 +34,7 @@ use crate::PaneFlowApp;
 use crate::settings::components::{
     Logo, deferred_select_menu, hairline, render_logo, section_header, select_chevron, select_item,
     select_menu, select_trigger, setting_card, setting_text, toggle_row, toggle_row_with,
+    toggle_switch,
 };
 
 /// One select option: display label, optional leading logo, the JSON value
@@ -172,10 +173,14 @@ impl PaneFlowApp {
                  the terminal view is then the only one.",
                     None,
                     ui,
-                    div()
-                        .id("row-review-enabled")
-                        .flex_shrink_0()
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    toggle_switch(
+                        "row-review-enabled",
+                        "Review view",
+                        self.cached_config.review_view_enabled(),
+                        ui,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, window, cx| {
                             let target = !this.cached_config.review_view_enabled();
                             this.persist_setting(false, "review_enabled", Value::Bool(target), cx);
                             // Settings is an overlay, not a mode: switching Review
@@ -185,11 +190,8 @@ impl PaneFlowApp {
                             if !target {
                                 this.enter_cli_mode(window, cx);
                             }
-                        }))
-                        .child(crate::settings::components::toggle_pill(
-                            self.cached_config.review_view_enabled(),
-                            ui,
-                        )),
+                        },
+                    )),
                 )),
             )
             .into_any_element()
@@ -225,17 +227,19 @@ impl PaneFlowApp {
                 "Alert you when an agent needs attention or finishes while PaneFlow is unfocused.",
                 None,
                 ui,
-                div()
-                    .id("row-native-notifications")
-                    .flex_shrink_0()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.persist_agent_panel_setting(
-                            "notify_when_agent_waiting",
-                            target.clone(),
-                            cx,
-                        );
-                    }))
-                    .child(crate::settings::components::toggle_pill(enabled, ui)),
+                toggle_switch(
+                    "row-native-notifications",
+                    "Native OS notifications",
+                    enabled,
+                    ui,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.persist_agent_panel_setting(
+                        "notify_when_agent_waiting",
+                        target.clone(),
+                        cx,
+                    );
+                })),
             )))
             .into_any_element()
     }

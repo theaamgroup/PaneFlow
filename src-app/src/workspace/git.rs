@@ -108,9 +108,11 @@ impl GitDiffStats {
 }
 
 fn git_stdout(cwd: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(args)
-        .current_dir(cwd)
+    // Isolated spawn: the repo's core.fsmonitor / core.hooksPath / diff.external
+    // and an inherited GIT_DIR must not steer the sidebar's periodic stats.
+    let mut cmd = super::worktree::git_command();
+    super::worktree::git_subcommand(&mut cmd, args);
+    cmd.current_dir(cwd)
         // U-035: a hung credential/helper prompt would otherwise pin the
         // blocking-pool task. With no terminal git fails fast instead.
         .env("GIT_TERMINAL_PROMPT", "0");
@@ -768,6 +770,60 @@ mod tests {
         assert_eq!(stats.files_changed, 2);
         assert_eq!(stats.insertions, 3);
         assert_eq!(stats.deletions, 0);
+    }
+
+    #[test]
+    fn from_cwd_does_not_run_repo_fsmonitor_or_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        if !test_git(&root, &["init"]) {
+            return;
+        }
+        assert!(test_git(
+            &root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+
+        // A repo-local fsmonitor / hooks script that records every invocation.
+        let marker = dir.path().join("MARKER_RAN");
+        let script = dir.path().join("marker.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'ran\\n' >> '{}'\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let hooks_dir = dir.path().join("hostile-hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::copy(&script, hooks_dir.join("post-index-change")).unwrap();
+
+        let script_s = script.to_string_lossy();
+        let hooks_dir_s = hooks_dir.to_string_lossy();
+        assert!(test_git(&root, &["config", "core.fsmonitor", &script_s]));
+        assert!(test_git(&root, &["config", "core.hooksPath", &hooks_dir_s]));
+        std::fs::write(root.join("untracked.txt"), "alpha\n").unwrap();
+
+        let stats = GitDiffStats::from_cwd(root.to_str().unwrap());
+        assert_eq!(stats.files_changed, 1);
+        assert!(
+            !marker.exists(),
+            "sidebar git stats must not execute the repo's core.fsmonitor / core.hooksPath script"
+        );
     }
 
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {

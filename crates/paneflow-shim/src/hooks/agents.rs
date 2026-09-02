@@ -1,9 +1,10 @@
 use super::{
     cleanup_hook_config_file, home_unavailable, hook_config_error, install_hook_config_file,
     is_paneflow_hook_command, merge_strict_matcher_hooks_for_events, paneflow_ipc_reachable,
-    reconcile_matcher_hooks_replacing_invalid_container, remove_matcher_hooks_for_events,
-    remove_matcher_hooks_lenient, resolve_plain_hook_command, sweep_orphan_hook_config,
-    HookInstall, HookInstallResult, HookInstallSkip, HookLease, InvalidJsonPolicy,
+    reconcile_matcher_hooks_replacing_invalid_container, refuse_symlinked_project_hook_file,
+    remove_matcher_hooks_for_events, remove_matcher_hooks_lenient, resolve_plain_hook_command,
+    sweep_orphan_hook_config, HookInstall, HookInstallResult, HookInstallSkip, HookLease,
+    InvalidJsonPolicy,
 };
 use paneflow_agent_config::home_dir;
 use std::env;
@@ -183,8 +184,13 @@ impl ManagedHookSpec {
 
 impl ManagedHookConfigGuard {
     pub(crate) fn install_in_cwd(spec: ManagedHookSpec) -> HookInstallResult<Self> {
+        let config_dir = env::current_dir()?.join(spec.directory_name);
+        refuse_symlinked_project_hook_file(
+            &config_dir.join(spec.config_filename),
+            spec.tool_label,
+        )?;
         Self::install_anchored(
-            &env::current_dir()?.join(spec.directory_name),
+            &config_dir,
             spec,
             // #202: project-local configs get the same protection as the
             // home-scope ones - refuse a parse failure, never clobber.
