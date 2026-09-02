@@ -21,10 +21,9 @@ use futures::channel::mpsc;
 use futures::future::Either;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle,
-    FontWeight, Hsla, InteractiveElement, IntoElement, KeyContext, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Point, Render, ScrollHandle, SharedString,
-    StrikethroughStyle, Styled, StyledText, TextRun, UnderlineStyle, Window, div, point,
-    prelude::*, px,
+    FontWeight, Hsla, InteractiveElement, IntoElement, KeyContext, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement, Point, Render, ScrollHandle, SharedString, StrikethroughStyle,
+    Styled, StyledText, TextRun, UnderlineStyle, Window, div, point, prelude::*, px,
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use pulldown_cmark::{Alignment, HeadingLevel};
@@ -95,6 +94,11 @@ pub struct MarkdownView {
     /// US-022 - search overlay state. `search_active` gates the bar visibility
     /// and the `MarkdownSearch` key context that captures Enter/Esc/typing.
     search_active: bool,
+    /// Real single-line input backing the find bar - the same `TextInput`
+    /// the terminal find bar and sidebar filter use (caret, selection, IME,
+    /// clipboard). Focused on open; `search_query` mirrors its value via
+    /// `on_search_input_changed`.
+    search_input: gpui::Entity<crate::widgets::text_input::TextInput>,
     search_query: String,
     /// Plain-text snapshot of the rendered AST, lazily rebuilt when the AST
     /// changes. Searching this string is O(n) per query - fine for files up
@@ -122,12 +126,29 @@ impl MarkdownView {
     /// US-021: on a successful first read, registers a `notify` watcher on
     /// the file's parent directory and spawns the debounce/reload loop.
     pub fn open(path: PathBuf, cx: &mut Context<Self>) -> Self {
+        let view = Self::build(path, cx);
+        view.start_initial_load(cx);
+        view.start_scroll_persistence(cx);
+        view
+    }
+
+    /// Construct the entity and wire its find-bar input without spawning
+    /// the disk load or scroll-persistence tasks. Split out of `open` so a
+    /// deterministic GPUI test can host the view without background timers.
+    fn build(path: PathBuf, cx: &mut Context<Self>) -> Self {
         let element_id = make_element_id(&path);
         // US-022 - restore last-known scroll offset for this file (if any).
         // Goes through the shared state mutex so concurrent panes never
         // observe a half-written cache.
         let pending_restore_y = state::lookup_offset_for(&path);
-        let view = Self {
+        // Find bar input - observe it so every edit re-runs the search.
+        let search_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Type to search…", cx));
+        cx.observe(&search_input, |this, _input, cx| {
+            this.on_search_input_changed(cx);
+        })
+        .detach();
+        Self {
             path,
             ast: None,
             error: Some("Loading...".into()),
@@ -137,6 +158,7 @@ impl MarkdownView {
             scroll_handle: ScrollHandle::new(),
             pending_restore_y,
             search_active: false,
+            search_input,
             search_query: String::new(),
             search_corpus: String::new(),
             search_corpus_lower: String::new(),
@@ -144,10 +166,7 @@ impl MarkdownView {
             search_matches: Vec::new(),
             search_current: 0,
             scroll_drag: None,
-        };
-        view.start_initial_load(cx);
-        view.start_scroll_persistence(cx);
-        view
+        }
     }
 
     fn start_initial_load(&self, cx: &mut Context<Self>) {
@@ -343,10 +362,14 @@ impl MarkdownView {
     fn handle_find_open(
         &mut self,
         _: &crate::MarkdownFindOpen,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.search_active = true;
+        // Move keyboard focus to the real input so keystrokes land in the
+        // find bar and the widget owns caret, selection, IME and clipboard.
+        let handle = self.search_input.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
         // Build the corpus on demand the first time the bar opens (M-1).
         if let Some(ast) = self.ast.as_deref() {
             self.search_corpus = harvest_text(ast);
@@ -365,11 +388,13 @@ impl MarkdownView {
     fn handle_find_dismiss(
         &mut self,
         _: &crate::MarkdownFindDismiss,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.search_active = false;
         self.search_query.clear();
+        self.search_input.update(cx, |input, cx| input.clear(cx));
+        self.focus_handle.focus(window, cx);
         self.search_corpus.clear();
         self.search_corpus_lower.clear();
         self.search_lower_to_source.clear();
@@ -447,39 +472,19 @@ impl MarkdownView {
         self.search_corpus[start..end].to_string()
     }
 
-    /// US-022 - handle keystrokes routed via the `MarkdownSearch` key context
-    /// when the find bar is open. Printable ASCII chars append to the query;
-    /// Backspace removes the last char. Arrow keys / Enter / Esc are handled
-    /// by their respective bound actions.
-    fn handle_search_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Re-run the search whenever the bound [`TextInput`] entity changes
+    /// (wired via `cx.observe` in `open`). Keeps `search_query` - the source
+    /// of truth for match scanning and the counter - in sync with the field.
+    fn on_search_input_changed(&mut self, cx: &mut Context<Self>) {
         if !self.search_active {
             return;
         }
-        let key = &event.keystroke.key;
-        match key.as_str() {
-            "backspace" => {
-                if self.search_query.pop().is_some() {
-                    self.recompute_matches();
-                    self.scroll_to_current_match();
-                    cx.notify();
-                }
-            }
-            _ => {
-                if let Some(ime_key) = event.keystroke.key_char.as_deref()
-                    && !ime_key.is_empty()
-                    && ime_key.chars().all(|c| !c.is_control())
-                {
-                    self.search_query.push_str(ime_key);
-                    self.recompute_matches();
-                    self.scroll_to_current_match();
-                    cx.notify();
-                }
-            }
+        let q = self.search_input.read(cx).value();
+        if q != self.search_query {
+            self.search_query = q;
+            self.recompute_matches();
+            self.scroll_to_current_match();
+            cx.notify();
         }
     }
 
@@ -723,9 +728,6 @@ impl Render for MarkdownView {
                     }
                 }),
             );
-        if self.search_active {
-            root = root.on_key_down(cx.listener(Self::handle_search_key));
-        }
         root = root.child(scroll_root);
         if let Some(bar) = bar {
             root = root.child(bar);
@@ -746,11 +748,6 @@ impl MarkdownView {
         } else {
             format!("{} of {}", self.search_current + 1, total)
         };
-        let label: SharedString = if self.search_query.is_empty() {
-            "Type to search…".into()
-        } else {
-            SharedString::from(self.search_query.clone())
-        };
         let position: SharedString = position.into();
         div()
             .absolute()
@@ -769,11 +766,17 @@ impl MarkdownView {
             .text_color(palette.body)
             .text_size(px(12.0))
             .child(div().child("Find:"))
+            // Real input entity (caret, selection, IME, clipboard). The
+            // placeholder is painted by the widget; we only own the box.
             .child(
                 div()
+                    .id("markdown-search-field")
+                    .flex()
+                    .items_center()
                     .min_w(px(120.0))
+                    .max_w(px(320.0))
                     .text_color(palette.heading)
-                    .child(label),
+                    .child(self.search_input.clone()),
             )
             .child(div().text_color(palette.blockquote_text).child(position))
     }
@@ -1611,5 +1614,60 @@ mod tests {
             s.push('a');
         }
         let _ = truncate_for_clipboard(&s);
+    }
+
+    /// #278: the find bar hosts the same `TextInput` entity the terminal
+    /// find bar uses. Opening focuses the widget, edits made through it (the
+    /// path IME, paste and mid-string editing all take) drive the query and
+    /// match set, and dismissing clears the field and hands focus back to
+    /// the document.
+    #[gpui::test]
+    fn find_bar_text_input_drives_query_and_focus(cx: &mut gpui::TestAppContext) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("find.md");
+        write(&path, b"alpha beta\n\nbeta gamma\n");
+        let (view, cx) = cx.add_window_view({
+            let path = path.clone();
+            move |_, cx| MarkdownView::build(path, cx)
+        });
+        // Load synchronously so the test does not race the background read.
+        view.update(cx, |view, _| {
+            let (ast, error) = load_from_disk(&path);
+            view.apply_loaded(ast, error);
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            view.handle_find_open(&crate::MarkdownFindOpen, window, cx);
+            assert!(view.search_active);
+            assert!(
+                view.search_input.read(cx).focus_handle.is_focused(window),
+                "opening the find bar must focus the input widget"
+            );
+        });
+
+        // Edit through the widget, not a synthesized key: this is the path
+        // paste, IME commits and caret-positioned edits all share.
+        view.update(cx, |view, cx| {
+            view.search_input
+                .update(cx, |input, cx| input.set_value("beta", cx));
+        });
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.search_query, "beta");
+            assert_eq!(view.search_matches.len(), 2);
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            view.handle_find_dismiss(&crate::MarkdownFindDismiss, window, cx);
+            assert!(!view.search_active);
+            assert!(view.search_query.is_empty());
+            assert!(
+                view.search_input.read(cx).value().is_empty(),
+                "dismiss must clear the field"
+            );
+            assert!(
+                view.focus_handle.is_focused(window),
+                "dismiss must hand focus back to the document"
+            );
+        });
     }
 }
