@@ -8,14 +8,57 @@ use gpui::{
 
 use crate::{
     PaneFlowApp,
+    theme::UiColors,
     ui_primitives::{AnimatedHoverExt, lerp_color},
 };
+
+/// Chrome colours for the About dialog: the surfaces, hairlines and button
+/// faces that the themed labels (`ui.text` / `ui.muted`) sit on. The retro
+/// CRT credit plate is deliberately not part of this - it keeps its own fixed
+/// phosphor palette whatever the theme.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AboutChromeColors {
+    /// Dialog body surface and the outer card fill.
+    pub surface: gpui::Hsla,
+    /// Header and footer bands.
+    pub band: gpui::Hsla,
+    /// Outer frame and the header / footer hairlines.
+    pub frame: gpui::Hsla,
+    /// OK and View on GitHub face.
+    pub button_bg: gpui::Hsla,
+    /// OK and View on GitHub outline.
+    pub button_border: gpui::Hsla,
+    /// Hover target for the buttons and the close glyph.
+    pub button_hover_bg: gpui::Hsla,
+}
+
+/// Derive the About chrome from the active theme's `UiColors` (issue #273).
+/// The dialog used to be hardcoded dark (0x202020 body) while its labels were
+/// themed, so under every light theme `ui.text` (0x262626) sat on a
+/// near-identical surface and the title and button labels disappeared. Every
+/// slot now comes from the same palette the labels do, the way
+/// `render_system_info_dialog` paints, so text and surface move together.
+pub(crate) fn about_chrome_colors(ui: &UiColors) -> AboutChromeColors {
+    AboutChromeColors {
+        surface: ui.overlay,
+        band: ui.surface,
+        frame: ui.border,
+        button_bg: ui.subtle,
+        // Half-strength secondary-text grey: an outline that reads on both
+        // arms without competing with the label.
+        button_border: ui.muted.opacity(0.5),
+        // A step from the face toward the secondary-text grey, kept opaque so
+        // the label's contrast on hover is a property of the palette alone.
+        button_hover_bg: lerp_color(ui.subtle, ui.muted, 0.2),
+    }
+}
 
 impl PaneFlowApp {
     pub(crate) fn render_about_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = crate::theme::ui_colors();
+        let chrome = about_chrome_colors(&ui);
         let version = env!("CARGO_PKG_VERSION");
-        let button_hover_bg = gpui::Hsla::from(rgb(0x3a3a3a));
+        let button_hover_bg = chrome.button_hover_bg;
 
         // The credit plate's block caret rides the app-wide 530 ms blink phase
         // (`terminal/blink.rs`) instead of owning a timer: a decorative caret
@@ -70,9 +113,9 @@ impl PaneFlowApp {
             .justify_between()
             .pl(px(10.))
             .pr(px(2.))
-            .bg(rgb(0x232323))
+            .bg(chrome.band)
             .border_b_1()
-            .border_color(rgb(0x343434))
+            .border_color(chrome.frame)
             .child(
                 div()
                     .flex()
@@ -213,17 +256,13 @@ impl PaneFlowApp {
             .justify_center()
             .rounded(px(3.))
             .border_1()
-            .border_color(rgb(0x666666))
-            .bg(rgb(0x2d2d2d))
+            .border_color(chrome.button_border)
+            .bg(chrome.button_bg)
             .text_size(px(12.))
             .text_color(ui.text)
             .cursor_pointer()
             .animated_hover(move |style, delta| {
-                style.bg(lerp_color(
-                    gpui::Hsla::from(rgb(0x2d2d2d)),
-                    button_hover_bg,
-                    delta,
-                ));
+                style.bg(lerp_color(chrome.button_bg, button_hover_bg, delta));
             })
             .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
                 if let Err(e) =
@@ -279,7 +318,7 @@ impl PaneFlowApp {
             .flex_col()
             .items_center()
             .justify_center()
-            .bg(rgb(0x202020))
+            .bg(chrome.surface)
             .child(
                 img("icons/paneflow.png")
                     .w(px(64.))
@@ -321,16 +360,12 @@ impl PaneFlowApp {
             .justify_center()
             .rounded(px(3.))
             .border_1()
-            .border_color(rgb(0x666666))
-            .bg(rgb(0x2d2d2d))
+            .border_color(chrome.button_border)
+            .bg(chrome.button_bg)
             .text_size(px(12.))
             .text_color(ui.text)
             .animated_hover(move |style, delta| {
-                style.bg(lerp_color(
-                    gpui::Hsla::from(rgb(0x2d2d2d)),
-                    button_hover_bg,
-                    delta,
-                ));
+                style.bg(lerp_color(chrome.button_bg, button_hover_bg, delta));
             })
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.show_about_dialog = false;
@@ -347,9 +382,9 @@ impl PaneFlowApp {
             .items_center()
             .justify_end()
             .px(px(14.))
-            .bg(rgb(0x252525))
+            .bg(chrome.band)
             .border_t_1()
-            .border_color(rgb(0x343434))
+            .border_color(chrome.frame)
             .child(ok_button);
 
         let dialog = div()
@@ -359,9 +394,9 @@ impl PaneFlowApp {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(rgb(0x202020))
+            .bg(chrome.surface)
             .border_1()
-            .border_color(rgb(0x3a3a3a))
+            .border_color(chrome.frame)
             .rounded(px(10.))
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -402,6 +437,59 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production half of about_dialog.rs")
+    }
+
+    /// Issue #273: the About chrome follows the active theme's `UiColors`.
+    /// PaneFlow Light declares `ui: None`, so it takes the light derivation
+    /// arm (text 0x262626, muted 0x6a6a6a); on the old hardcoded 0x202020
+    /// surface the title and button labels vanished. Every label must clear
+    /// body-text contrast against the surface it sits on, in both arms.
+    #[test]
+    fn about_chrome_is_readable_under_light_and_dark_ui_colors() {
+        use crate::terminal::element::apca_contrast;
+        use crate::theme::{paneflow_dark, paneflow_light, ui_colors_with};
+
+        for (name, theme) in [
+            ("PaneFlow Light", paneflow_light()),
+            ("PaneFlow Dark", paneflow_dark()),
+        ] {
+            let ui = ui_colors_with(&theme);
+            let chrome = super::about_chrome_colors(&ui);
+            // (label, text, background, minimum |Lc|): 60 is APCA's body-text
+            // floor, 45 the large/secondary-text floor the theme loader
+            // already asserts for selections.
+            let checks = [
+                ("title on body", ui.text, chrome.surface, 60.0),
+                ("header title on band", ui.text, chrome.band, 60.0),
+                ("button label on face", ui.text, chrome.button_bg, 60.0),
+                (
+                    "button label on hover",
+                    ui.text,
+                    chrome.button_hover_bg,
+                    60.0,
+                ),
+                (
+                    "version / copyright on body",
+                    ui.muted,
+                    chrome.surface,
+                    45.0,
+                ),
+            ];
+            for (label, text, bg, floor) in checks {
+                let lc = apca_contrast(text, bg).abs();
+                assert!(
+                    lc >= floor,
+                    "{name}: {label} reads Lc {lc:.1}, below {floor} (text {text:?} on {bg:?})"
+                );
+            }
+            // The card outline and hairlines must be visible against the body
+            // they frame, but must not be the body itself.
+            assert_ne!(chrome.frame, chrome.surface, "{name}: frame equals surface");
+            assert_ne!(
+                chrome.button_bg, chrome.surface,
+                "{name}: button face equals surface"
+            );
+        }
     }
 
     /// Issue #226: About exposes a View on GitHub control that opens this
