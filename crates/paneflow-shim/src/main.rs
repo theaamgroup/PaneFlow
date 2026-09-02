@@ -361,6 +361,9 @@ mod agent_tests;
 #[path = "tests/detect.rs"]
 mod detect_tests;
 #[cfg(test)]
+#[path = "tests/exec.rs"]
+mod exec_tests;
+#[cfg(test)]
 #[path = "tests/hook_config.rs"]
 mod hook_config_tests;
 #[cfg(test)]
