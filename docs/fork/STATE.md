@@ -69,7 +69,10 @@ the session-host PR on top). What is now true, and where the evidence is:
 - **The vendored archive links with `ld: duplicate symbol '_memset'`**
   (`compiler_rt.o` vs `libghostty-vt-static_zcu.o`) and carries
   `minos 13.0`. Benign (ld64 keeps the first; `Info.plist` already floors
-  at 13.0), a property of the archive, left to the rebuild follow-up.
+  at 13.0), a property of the archive. Not locally fixable: the rebuild
+  needs a Linux host, Zig 0.16.0 and upstream's
+  `scripts/build-libghostty-macos.sh`, which this fork does not vendor, so
+  it rides the next `source_sha` bump. Issue #194 closed 2026-09-02.
 
 **2026-08-28 deep review.** Five parallel agents (correctness, security,
 architecture, performance, reality-check) swept the whole repo. The findings
