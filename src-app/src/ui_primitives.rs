@@ -801,7 +801,7 @@ pub(crate) fn panel_empty_state(
             .flex_none()
             .path(path)
             .text_color(with_alpha(ui.muted, 0.8));
-        col = col.child(if animate {
+        col = col.child(if animate && !reduce_motion() {
             glyph
                 .with_animation(
                     "panel-empty-spin",
