@@ -11,13 +11,77 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
     dirs::config_dir()
 }
 
+/// Hard cap on the size of any agent configuration file this crate reads
+/// into memory. Real settings files are kilobytes; the cap matches the app
+/// config loader's `MAX_CONFIG_SIZE_BYTES` (1 MiB) so a runaway or hostile
+/// file cannot OOM the shim on every wrapped-agent launch.
+const MAX_OPTIONAL_TEXT_BYTES: u64 = 1 << 20;
+
 /// Read a UTF-8 configuration file without conflating absence with failure.
+///
+/// Mirrors `read_config_string` in `crates/paneflow-config/src/loader.rs`:
+/// the file type and size are checked on the already-open descriptor (so a
+/// path swap between stat and read cannot bypass the guard), anything that is
+/// not a regular file is refused, and the read itself is bounded by
+/// `MAX_OPTIONAL_TEXT_BYTES`. Both refusals surface as `InvalidData` so every
+/// caller fails closed through its existing `?` instead of hanging on a FIFO
+/// or allocating an unbounded blob.
 pub fn read_optional_text(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => Ok(Some(content)),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // `O_NONBLOCK` makes `open(2)` on a writer-less FIFO return at once
+    // instead of blocking until a writer appears; it has no effect on the
+    // regular files this helper is meant to read.
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nonblock())
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("{} is not a regular file", path.display()),
+        ));
     }
+    if metadata.len() > MAX_OPTIONAL_TEXT_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "{} is too large ({} bytes; maximum {MAX_OPTIONAL_TEXT_BYTES})",
+                path.display(),
+                metadata.len()
+            ),
+        ));
+    }
+
+    let mut content = String::new();
+    file.take(MAX_OPTIONAL_TEXT_BYTES + 1)
+        .read_to_string(&mut content)?;
+    if content.len() as u64 > MAX_OPTIONAL_TEXT_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "{} is too large ({} bytes; maximum {MAX_OPTIONAL_TEXT_BYTES})",
+                path.display(),
+                content.len()
+            ),
+        ));
+    }
+    Ok(Some(content))
+}
+
+/// `O_NONBLOCK` as macOS `open(2)` expects it (`<sys/fcntl.h>`). Spelled out
+/// here because this crate deliberately carries no `libc` dependency, and the
+/// fork builds for `aarch64-apple-darwin` only.
+const fn libc_o_nonblock() -> i32 {
+    0x4
 }
 
 pub fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
@@ -187,5 +251,52 @@ mod tests {
             ErrorKind::InvalidData
         );
         assert_eq!(std::fs::read(&invalid).unwrap(), [0xff]);
+    }
+
+    #[test]
+    fn optional_read_refuses_an_oversize_file() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("huge.json");
+        let oversize = usize::try_from(MAX_OPTIONAL_TEXT_BYTES).unwrap() + 1;
+        std::fs::write(&path, vec![b' '; oversize]).unwrap();
+
+        let error = read_optional_text(&path).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("too large"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn optional_read_still_accepts_a_file_at_the_cap() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("exact.json");
+        let exact = usize::try_from(MAX_OPTIONAL_TEXT_BYTES).unwrap();
+        std::fs::write(&path, vec![b' '; exact]).unwrap();
+
+        assert_eq!(read_optional_text(&path).unwrap().unwrap().len(), exact);
+    }
+
+    #[test]
+    fn optional_read_refuses_a_fifo_without_blocking() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("settings.json");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo must be runnable");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        // No writer ever opens the pipe: an unguarded read would block here
+        // forever instead of returning.
+        let error = read_optional_text(&path).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("not a regular file"),
+            "unexpected error: {error}"
+        );
     }
 }
