@@ -330,12 +330,18 @@ pub fn ref_exists(worktree_dir: &Path, ref_name: &str) -> bool {
 
 /// Pick a sensible default base ref for `worktree_dir`: local `develop`, then
 /// the remote default branch, then common local and remote defaults. Returns
-/// `None` when none resolve.
+/// `None` when none resolve. Every probe draws on one shared [`GitBudget`]
+/// (issue #270), so the whole discovery cannot outlive a single
+/// [`GIT_DEADLINE`] even if every `rev-parse` hangs.
 pub fn default_base_ref(worktree_dir: &Path) -> Option<String> {
-    if ref_exists(worktree_dir, "develop") {
+    default_base_ref_within(&GitBudget::for_column(), worktree_dir)
+}
+
+fn default_base_ref_within(budget: &GitBudget, worktree_dir: &Path) -> Option<String> {
+    if ref_exists_within(budget, worktree_dir, "develop") {
         return Some("develop".to_string());
     }
-    if let Some(remote_head) = default_origin_head(worktree_dir) {
+    if let Some(remote_head) = default_origin_head(budget, worktree_dir) {
         return Some(remote_head);
     }
     for candidate in [
@@ -345,22 +351,35 @@ pub fn default_base_ref(worktree_dir: &Path) -> Option<String> {
         "origin/main",
         "origin/master",
     ] {
-        if ref_exists(worktree_dir, candidate) {
+        if ref_exists_within(budget, worktree_dir, candidate) {
             return Some(candidate.to_string());
         }
     }
     None
 }
 
-fn default_origin_head(worktree_dir: &Path) -> Option<String> {
-    let out = run_git(
-        worktree_dir,
-        &["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"],
-    )
-    .ok()?;
+/// [`ref_exists`] charged against `budget` instead of a fresh deadline.
+fn ref_exists_within(budget: &GitBudget, worktree_dir: &Path, ref_name: &str) -> bool {
+    budget
+        .run(
+            worktree_dir,
+            &["rev-parse", "--verify", "--quiet", ref_name],
+        )
+        .is_ok()
+}
+
+fn default_origin_head(budget: &GitBudget, worktree_dir: &Path) -> Option<String> {
+    let out = budget
+        .run(
+            worktree_dir,
+            &["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"],
+        )
+        .ok()?;
     let branch = String::from_utf8_lossy(&out).trim().to_string();
-    (!branch.is_empty() && branch != "origin/HEAD" && ref_exists(worktree_dir, &branch))
-        .then_some(branch)
+    (!branch.is_empty()
+        && branch != "origin/HEAD"
+        && ref_exists_within(budget, worktree_dir, &branch))
+    .then_some(branch)
 }
 
 /// Cheap content fingerprint of a worktree's diff inputs, used on diff-mode
@@ -1639,6 +1658,65 @@ pub(crate) mod tests {
         assert!(
             err.contains("deadline") || err.contains("timed") || err.contains("timeout"),
             "untracked listing must surface the timeout, got {err}"
+        );
+    }
+
+    #[test]
+    fn default_base_ref_probes_share_one_deadline() {
+        // Issue #270: every probe in default-base discovery must draw on one
+        // GitBudget, not a fresh GIT_DEADLINE each, so a wedged git cannot
+        // stack eight 30 s timeouts before the column fails.
+        let src = include_str!("git.rs");
+        let body = src
+            .split("pub fn default_base_ref(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Cheap content fingerprint").next())
+            .expect("default_base_ref + default_origin_head bodies");
+        assert!(
+            !body.contains("ref_exists(") && !body.contains("run_git("),
+            "default_base_ref must not probe refs with a fresh per-call deadline: {body}"
+        );
+        assert!(
+            body.contains("GitBudget::for_column()"),
+            "default_base_ref must take exactly one GitBudget: {body}"
+        );
+    }
+
+    #[test]
+    fn default_base_ref_stops_probing_once_budget_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init", "-b", "develop"]) {
+            return;
+        }
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        // A live budget resolves `develop` as before.
+        assert_eq!(
+            default_base_ref_within(&GitBudget::for_column(), root).as_deref(),
+            Some("develop")
+        );
+        // An exhausted budget fails closed: no probe may spawn git at all,
+        // let alone one per candidate with its own 30 s deadline.
+        let spent = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let _ = take_git_commands();
+        assert_eq!(default_base_ref_within(&spent, root), None);
+        assert!(
+            take_git_commands().is_empty(),
+            "no git probe may run after the shared deadline has passed"
         );
     }
 
