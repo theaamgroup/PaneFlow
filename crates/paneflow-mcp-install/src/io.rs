@@ -49,7 +49,14 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>> {
 
 /// Atomically write `contents` to `path`: temp file in the same directory,
 /// flush + fsync, then `rename`. The rename is atomic on POSIX.
+///
+/// A symlinked `path` (stow, chezmoi, yadm) is resolved to its target first so
+/// the rename updates the managed file instead of replacing the link with a
+/// regular file; a dangling link is refused.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let target = paneflow_agent_config::io::write_target(path)
+        .with_context(|| format!("resolve write target for {} failed", path.display()))?;
+    let path = target.as_path();
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -130,6 +137,45 @@ mod tests {
         let p = dir.path().join("nested").join("deep").join("config.json");
         write_atomic(&p, b"hello").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn write_atomic_updates_a_symlinked_config_through_the_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("managed.json");
+        let link = dir.path().join("config.json");
+        std::fs::write(&target, b"{}\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomic(&link, b"updated").unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the write must update the managed target, not replace the symlink"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"updated");
+    }
+
+    #[test]
+    fn write_atomic_refuses_a_dangling_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("missing.json");
+        let link = dir.path().join("config.json");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+
+        write_atomic(&link, b"content").unwrap_err();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a dangling link must be refused, not replaced with a regular file"
+        );
+        assert!(!missing.exists(), "the missing target must not be created");
     }
 
     #[test]
