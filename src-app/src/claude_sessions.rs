@@ -124,7 +124,10 @@ pub fn project_dir_for_cwd(cwd: &str) -> Option<PathBuf> {
     )
 }
 
-/// `$CLAUDE_CONFIG_DIR` if set and non-empty, else `~/.claude`.
+/// `$CLAUDE_CONFIG_DIR` if set, non-empty and absolute, else `~/.claude`.
+///
+/// A relative value is ignored (with one warning): the CLI resolves it
+/// against the pane's cwd, which this process does not share.
 fn claude_config_dir_from(
     home: Option<PathBuf>,
     claude_config_dir: Option<OsString>,
@@ -132,6 +135,16 @@ fn claude_config_dir_from(
     claude_config_dir
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| {
+            if p.is_absolute() {
+                return true;
+            }
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log::warn!("ignoring relative CLAUDE_CONFIG_DIR {p:?}; using ~/.claude");
+            });
+            false
+        })
         .or_else(|| home.map(|h| h.join(".claude")))
 }
 
@@ -1128,6 +1141,23 @@ mod tests {
                 None,
             ),
             Some(PathBuf::from("/tmp/claude-cfg/projects/-home-alice-myapp")),
+        );
+    }
+
+    #[test]
+    fn project_dir_ignores_a_relative_claude_config_dir() {
+        // A relative override resolves against a cwd the GUI does not share
+        // with the CLI, so it is refused rather than joined onto `/`.
+        assert_eq!(
+            project_dir_for_cwd_from(
+                "/home/alice/myapp",
+                Some(PathBuf::from("/home/alice")),
+                Some(OsString::from("cfg/claude")),
+                None,
+            ),
+            Some(PathBuf::from(
+                "/home/alice/.claude/projects/-home-alice-myapp"
+            )),
         );
     }
 
