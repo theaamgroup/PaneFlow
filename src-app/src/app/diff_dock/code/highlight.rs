@@ -415,7 +415,7 @@ impl CodeHighlighter {
             let mut caps =
                 cursor.captures(&pass.grammar.query, tree.root_node(), RopeText(doc.text()));
             while let Some((mat, idx)) = caps.next() {
-                let cap = mat.captures[*idx];
+                let cap = mat.captures()[*idx];
                 let name = names[cap.index as usize];
                 let Some(color) = self.syntax.color_for_capture(name) else {
                     continue;

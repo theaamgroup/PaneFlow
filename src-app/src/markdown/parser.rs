@@ -271,6 +271,14 @@ impl Walker {
                 let glyph = if checked { "[x] " } else { "[ ] " };
                 self.push_text(glyph.to_string());
             }
+            // `Options::ENABLE_MATH` is not set, so pulldown-cmark never emits
+            // these: `$x$` arrives as ordinary `Event::Text`. They are handled
+            // rather than wildcarded so this match stays exhaustive, and so
+            // enabling math later degrades to the literal source instead of
+            // dropping the expression.
+            Event::InlineMath(text) | Event::DisplayMath(text) => {
+                self.push_text(text.into_string());
+            }
         }
     }
 
@@ -278,7 +286,7 @@ impl Walker {
         match tag {
             Tag::Paragraph => self.stack.push(Frame::Paragraph(Vec::new())),
             Tag::Heading { level, .. } => self.stack.push(Frame::Heading(level, Vec::new())),
-            Tag::BlockQuote => self.stack.push(Frame::Quote(Vec::new())),
+            Tag::BlockQuote(_) => self.stack.push(Frame::Quote(Vec::new())),
             Tag::CodeBlock(kind) => {
                 let lang = match kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.into_string()),
@@ -353,6 +361,19 @@ impl Walker {
                 // accumulate as plain text rather than panic.
                 self.stack.push(Frame::Paragraph(Vec::new()));
             }
+            // Added by pulldown-cmark 0.12/0.13 and gated behind extensions
+            // this parser does not enable (`ENABLE_DEFINITION_LIST`), so they
+            // are unreachable today. Handled rather than wildcarded to keep
+            // this match exhaustive - a future extension flag must come here
+            // and make a deliberate choice. Definition lists are block-level,
+            // so they push a frame and `on_end` installs it: the start/end
+            // pair has to stay balanced or the stack desynchronises.
+            Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {
+                self.stack.push(Frame::Paragraph(Vec::new()));
+            }
+            // Superscript/subscript are inline: no frame, matching the
+            // `TableRow | TableCell` precedent above.
+            Tag::Superscript | Tag::Subscript => {}
         }
     }
 
@@ -416,16 +437,21 @@ impl Walker {
                 // Discard frontmatter - pop without installing.
                 self.stack.pop();
             }
+            // Inline, and `on_start` pushed no frame for them.
+            TagEnd::Superscript | TagEnd::Subscript => {}
             // Closing block tags: install into parent.
             TagEnd::Paragraph
             | TagEnd::Heading(_)
-            | TagEnd::BlockQuote
+            | TagEnd::BlockQuote(_)
             | TagEnd::CodeBlock
             | TagEnd::HtmlBlock
             | TagEnd::List(_)
             | TagEnd::Item
             | TagEnd::Table
-            | TagEnd::FootnoteDefinition => {
+            | TagEnd::FootnoteDefinition
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition => {
                 // Stack underflow on a malformed event stream is not a panic
                 // condition - the workspace lints `panic = "deny"` and the
                 // input is untrusted (any 10 MB of bytes parses). Tolerate by
