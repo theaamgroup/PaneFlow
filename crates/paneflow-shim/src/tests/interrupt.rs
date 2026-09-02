@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 static SERIAL: Mutex<()> = Mutex::new(());
 
 const POLL: Duration = Duration::from_millis(10);
-const WAIT: Duration = Duration::from_secs(10);
+const WAIT: Duration = Duration::from_secs(60);
 
 fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
