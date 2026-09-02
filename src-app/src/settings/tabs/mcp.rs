@@ -22,7 +22,21 @@ use crate::settings::components::{
     SETTINGS_CONTROL_CORNER_RADIUS, hairline, section_header, setting_card, setting_text,
     with_alpha,
 };
+use crate::terminal::element::{MIN_APCA_CONTRAST, ensure_minimum_contrast};
 use crate::ui_primitives::AnimatedHoverExt;
+
+/// Label color for the install button: on-accent when live, muted when not.
+///
+/// `accent` and `text` are independent theme tokens (Vercel Dark's accent is
+/// #ffffff), so a fixed white label can vanish on the fill. Lift the label
+/// off the fill with the same APCA pass the Shortcuts page uses.
+fn mcp_button_text_color(ui: crate::theme::UiColors, enabled: bool) -> gpui::Hsla {
+    if enabled {
+        ensure_minimum_contrast(ui.text, ui.accent, MIN_APCA_CONTRAST)
+    } else {
+        ui.muted
+    }
+}
 
 impl PaneFlowApp {
     pub(crate) fn render_mcp_servers_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -64,7 +78,7 @@ impl PaneFlowApp {
             .text_size(px(12.))
             .font_weight(FontWeight::MEDIUM)
             .bg(button_bg)
-            .text_color(if enabled { gpui::white() } else { ui.muted })
+            .text_color(mcp_button_text_color(ui, enabled))
             .animated_hover_bg(button_bg, button_hover_bg)
             .child(label)
             .when(enabled, |button| {
@@ -250,4 +264,28 @@ impl PaneFlowApp {
 /// readable on every bundled theme.
 fn danger_color() -> gpui::Hsla {
     gpui::rgb(0xE0_6C_75).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::element::apca_contrast;
+
+    #[test]
+    fn enabled_mcp_button_label_is_readable_on_every_bundled_theme() {
+        // The enabled button paints its label on `ui.accent`. Vercel Dark's
+        // accent is #ffffff and PaneFlow Dark's is a light teal, so a fixed
+        // white label vanishes or falls under the APCA floor. The label must
+        // clear the same Lc threshold the terminal uses for selected text.
+        for (name, _) in crate::theme::THEMES {
+            let theme = crate::theme::theme_by_name(name).expect("bundled theme not found");
+            let ui = crate::theme::ui_colors_with(&theme);
+            let label = mcp_button_text_color(ui, true);
+            let lc = apca_contrast(label, ui.accent).abs();
+            assert!(
+                lc >= MIN_APCA_CONTRAST,
+                "{name}: APCA Lc({lc}) < {MIN_APCA_CONTRAST} for the enabled MCP button label vs accent"
+            );
+        }
+    }
 }
