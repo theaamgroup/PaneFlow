@@ -167,8 +167,27 @@ mod tests {
         abandoned.mark_created().unwrap();
         drop(abandoned);
 
-        let mut survivor = ConfigLease::acquire(&resource).unwrap();
-        let mut last = survivor.try_take_last().unwrap().unwrap();
+        // File drop releases the shared flock synchronously, but a loaded
+        // runner can still observe WouldBlock on the immediate exclusive
+        // upgrade. Retry acquire + try_take_last; a real strand stays None.
+        let mut last = None;
+        for attempt in 0..10 {
+            let mut survivor = ConfigLease::acquire(&resource).unwrap();
+            match survivor.try_take_last().unwrap() {
+                Some(taken) => {
+                    last = Some(taken);
+                    break;
+                }
+                None => {
+                    if attempt + 1 < 10 {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        let mut last = last.expect(
+            "dropped lease stranded the resource: try_take_last stayed WouldBlock after Drop",
+        );
         assert!(last.take_created().unwrap());
     }
 
@@ -195,8 +214,14 @@ mod tests {
     }
 
     fn unique_resource(label: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         std::env::temp_dir().join(format!(
-            "paneflow-agent-config-lease-{label}-{}-{:?}",
+            "paneflow-agent-config-lease-{label}-{}-{:?}-{seq}-{nanos}",
             std::process::id(),
             std::thread::current().id()
         ))
