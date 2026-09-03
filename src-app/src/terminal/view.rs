@@ -812,7 +812,13 @@ impl TerminalView {
                     );
                     if new_visible != view.cursor_visible {
                         view.cursor_visible = new_visible;
-                        cx.notify();
+                        // Only the focused pane draws a cursor, so only it has
+                        // a frame to repaint. The phase is tracked either way,
+                        // so a pane that gains focus shows the current phase
+                        // rather than the one it last painted.
+                        if view.was_focused {
+                            cx.notify();
+                        }
                     }
                 },
             )
@@ -2255,5 +2261,64 @@ mod tests {
         assert!(resolve_cursor_visible(M::TerminalControlled, true, true));
         // TerminalControlled + DECSCUSR not blinking → always solid.
         assert!(resolve_cursor_visible(M::TerminalControlled, false, false));
+    }
+
+    /// Issue #344: a blink tick repaints only the focused pane. Every view
+    /// still tracks the phase, so a pane gaining focus shows the current one.
+    #[gpui::test]
+    fn blink_tick_notifies_only_the_focused_view(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let phase = cx.update(|cx| {
+            let phase = cx.new(|_| crate::terminal::blink::BlinkPhase::default());
+            cx.set_global(crate::terminal::blink::BlinkPhaseGlobal(phase.clone()));
+            phase
+        });
+
+        let make_view = |cx: &mut gpui::TestAppContext, focused: bool| {
+            let view = cx.update(|cx| cx.new(|cx| TerminalView::display_only_for_test(1, cx)));
+            view.update(cx, |view, _| {
+                // A display-only surface never spawned a child, so nothing
+                // asked for a blinking cursor; the tick must still be observed.
+                view.terminal.cursor_blinking = true;
+                view.apply_terminal_focus(focused);
+            });
+            let notifications = Rc::new(Cell::new(0usize));
+            let counter = notifications.clone();
+            cx.update(|cx| {
+                cx.observe(&view, move |_, _| counter.set(counter.get() + 1))
+                    .detach();
+            });
+            (view, notifications)
+        };
+        let (focused, focused_notified) = make_view(cx, true);
+        let (unfocused, unfocused_notified) = make_view(cx, false);
+
+        for expected_visible in [false, true, false] {
+            phase.update(cx, |phase, cx| {
+                phase.visible = expected_visible;
+                cx.notify();
+            });
+            for view in [&focused, &unfocused] {
+                assert_eq!(
+                    view.read_with(cx, |view, _| view.cursor_visible),
+                    expected_visible,
+                    "every view tracks the phase so focus can land on the current one"
+                );
+            }
+        }
+
+        assert_eq!(
+            focused_notified.get(),
+            3,
+            "the focused pane repaints once per blink tick"
+        );
+        assert_eq!(
+            unfocused_notified.get(),
+            0,
+            "an unfocused pane has no cursor to repaint and must stay quiet"
+        );
     }
 }
