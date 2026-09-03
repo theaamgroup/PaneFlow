@@ -671,6 +671,16 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Launch Pad",
         group: ShortcutGroup::Agents,
     },
+    // Issue #339: Pane Overview. `ShortcutGroup::Agents` alongside the other
+    // cockpit overlays, so Settings > Keyboard Shortcuts files it with them.
+    // No `display.rs` edit is needed - that page is generated from this table.
+    ActionMeta {
+        name: "open_pane_overview",
+        factory: || Box::new(crate::OpenPaneOverview),
+        context: "",
+        description: "Pane overview",
+        group: ShortcutGroup::Agents,
+    },
 ];
 
 fn find(name: &str) -> Option<&'static ActionMeta> {

@@ -25,6 +25,7 @@ mod hyperlink;
 mod paint;
 #[cfg(debug_assertions)]
 pub(super) mod pixel_probe;
+mod thumbnail;
 
 use color::convert_color;
 /// The benchmark resolves the base font the way the renderer does per frame.
@@ -56,6 +57,9 @@ pub(crate) use color::ensure_minimum_contrast;
 // (`crate::terminal::input`) can hit-test against the painted strip. `paint`
 // is a private module, so the type must surface through `element`.
 pub(crate) use paint::scrollbar::ScrollbarMetrics;
+// Issue #339: the Pane Overview's read-only cropped pane preview. It never
+// routes through `TerminalElement`, whose `build_layout` resizes the PTY.
+pub(crate) use thumbnail::{THUMBNAIL_BAND_H, THUMBNAIL_BAND_W, TerminalThumbnail};
 
 /// APCA minimum Lc (lightness contrast) threshold.
 /// Lc 45 is "minimum for large fluent text" per ARC Bronze Simple Mode - matches Zed's default.

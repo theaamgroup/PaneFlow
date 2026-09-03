@@ -501,6 +501,32 @@ impl PaneFlowApp {
         )
         .detach();
 
+        // Issue #339: repaint the Pane Overview while it is open, at ~4 fps.
+        //
+        // The overlay deliberately does NOT subscribe to terminal wakeups: a
+        // chatty pane fires at the 4 ms coalescing floor, ~250 times a second,
+        // and a grid of them driving repaints would blow the frame budget the
+        // eight-pane gate in `layout/render.rs` already spends. This loop does
+        // nothing at all while the overlay is closed.
+        cx.spawn(
+            async |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                loop {
+                    smol::Timer::after(std::time::Duration::from_millis(250)).await;
+                    let alive = cx.update(|cx| {
+                        this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                            if app.pane_overview.is_some() {
+                                cx.notify();
+                            }
+                        })
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            },
+        )
+        .detach();
+
         // Claude Code session-registry sweep (#184 Phase 3.8). The registry
         // is the only channel that reports an agent's turn state when a
         // managed-settings policy has disabled hooks, so this loop is what
@@ -891,6 +917,9 @@ impl PaneFlowApp {
             fleet_search_pending_focus: false,
             launch_pad: None,
             launch_pad_focus: cx.focus_handle(),
+            // Issue #339: Pane Overview closed.
+            pane_overview: None,
+            pane_overview_focus: cx.focus_handle(),
             pane_palette: None,
             pane_palette_focus: cx.focus_handle(),
             pending_palette_focus: false,
@@ -1020,7 +1049,7 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
 
     use crate::{
         About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
-        OpenSettings, Paste, Quit, ReportIssue, SelectAll, ZoomWindow,
+        OpenPaneOverview, OpenSettings, Paste, Quit, ReportIssue, SelectAll, ZoomWindow,
     };
 
     cx.set_menus(vec![
@@ -1047,6 +1076,10 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
         Menu::new("Window").items(vec![
             MenuItem::action("Minimize", MinimizeWindow),
             MenuItem::action("Zoom", ZoomWindow),
+            MenuItem::separator(),
+            // Issue #339: above the workspace group, fenced by its own
+            // separator so the chrome / overview / workspaces split reads.
+            MenuItem::action("Show All Panes", OpenPaneOverview),
             MenuItem::separator(),
             MenuItem::action("Next Workspace", NextWorkspace),
             MenuItem::action("Close Workspace", CloseWorkspace),
@@ -1246,8 +1279,8 @@ unsafe fn set_menu_item_image_by_title(menu: cocoa::base::id, title: &str, image
 pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     use crate::{
         About, CloseWorkspace, Copy, MinimizeWindow, NewWorkspace, NextWorkspace, OpenHelp,
-        OpenSettings, PaneFlowApp, Paste, Quit, ReportIssue, SelectAll, TerminalCopy,
-        TerminalPaste, TerminalSelectAll, ZoomWindow,
+        OpenPaneOverview, OpenSettings, PaneFlowApp, Paste, Quit, ReportIssue, SelectAll,
+        TerminalCopy, TerminalPaste, TerminalSelectAll, ZoomWindow,
     };
 
     fn with_active_paneflow_window(
@@ -1307,6 +1340,14 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     cx.on_action(|_: &NextWorkspace, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
             app.handle_next_workspace(&NextWorkspace, window, cx);
+        });
+    });
+
+    // Issue #339: without this the menu item paints permanently greyed while
+    // focus sits in a terminal, which is nearly always.
+    cx.on_action(|_: &OpenPaneOverview, cx| {
+        with_active_paneflow_window(cx, |app, window, cx| {
+            app.handle_open_pane_overview(&OpenPaneOverview, window, cx);
         });
     });
 
@@ -1508,6 +1549,11 @@ mod tests {
         let window_separator_at = window_menu
             .find("MenuItem::separator()")
             .expect("the Window menu keeps the separator above the workspace group");
+        // Issue #339: the overview sits between the chrome group and the
+        // workspace group, fenced by its own separator.
+        let overview_at = window_menu
+            .find("MenuItem::action(\"Show All Panes\", OpenPaneOverview)")
+            .expect("Window > Show All Panes must exist and dispatch OpenPaneOverview");
         let next_at = window_menu
             .find("MenuItem::action(\"Next Workspace\", NextWorkspace)")
             .expect("Window > Next Workspace");
@@ -1520,10 +1566,15 @@ mod tests {
         assert!(
             minimize_at < zoom_at
                 && zoom_at < window_separator_at
-                && window_separator_at < next_at
+                && window_separator_at < overview_at
+                && overview_at < next_at
                 && next_at < close_at
                 && close_at < new_at,
-            "Window is Minimize, Zoom, separator, Next, Close, New Workspace"
+            "Window is Minimize, Zoom, separator, Show All Panes, separator, Next, Close, New Workspace"
+        );
+        assert!(
+            window_menu[overview_at..next_at].contains("MenuItem::separator()"),
+            "a second separator isolates the workspace group below Show All Panes"
         );
 
         // AppKit validates a menu item through `is_action_available`, which
@@ -1534,6 +1585,7 @@ mod tests {
             "cx.on_action(|_: &OpenSettings, cx|",
             "cx.on_action(|_: &MinimizeWindow, cx|",
             "cx.on_action(|_: &ZoomWindow, cx|",
+            "cx.on_action(|_: &OpenPaneOverview, cx|",
         ] {
             assert!(
                 production.contains(fallback),

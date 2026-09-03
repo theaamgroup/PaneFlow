@@ -1549,6 +1549,11 @@ struct PaneFlowApp {
     /// EP-002 US-005 (cli-cockpit): Launch Pad modal state, `None` = closed.
     launch_pad: Option<app::launch_pad::LaunchPadState>,
     launch_pad_focus: FocusHandle,
+    /// Issue #339: Pane Overview overlay, `None` = closed. Cards are derived
+    /// from the live workspace tree on every render, never stored - a pane
+    /// that closes while the overlay is open disappears at the next repaint.
+    pane_overview: Option<app::pane_overview::PaneOverviewState>,
+    pane_overview_focus: FocusHandle,
     /// EP-005 US-014 (cli-tab-hierarchy): « New pane » preset palette,
     /// `None` = closed. Opened by `New tab` and by the sidebar folder row's
     /// hover `+`.
@@ -2244,6 +2249,7 @@ impl Render for PaneFlowApp {
             // EP-002 (cli-cockpit): Attention Queue + Launch Pad.
             .on_action(cx.listener(Self::handle_open_attention_queue))
             .on_action(cx.listener(Self::handle_open_launch_pad))
+            .on_action(cx.listener(Self::handle_open_pane_overview))
             .on_action(cx.listener(Self::handle_diff_new_file_tab))
             .on_action(cx.listener(Self::handle_diff_new_terminal_tab))
             // EP-001 US-003: Escape cancels an in-flight tab drag. Capture
@@ -2558,6 +2564,10 @@ impl Render for PaneFlowApp {
                 self.fleet_search_focus.focus(window, cx);
             }
             app_content = app_content.child(self.render_fleet_search(cx));
+        }
+        // Issue #339: Pane Overview (same mode gate).
+        if self.pane_overview.is_some() && in_cli_mode {
+            app_content = app_content.child(self.render_pane_overview(cx));
         }
 
         if self.custom_buttons_modal.is_some() {

@@ -1040,6 +1040,26 @@ impl PaneFlowApp {
                         .text_size(px(13.))
                         .text_color(ui.muted)
                         .child("Workspaces"),
+                )
+                // Issue #339: Pane Overview. Issue #105 stripped this header's
+                // `+` as a redundant fifth route to New Workspace; the overview
+                // is the opposite case - it has three entry points and no other
+                // discoverable one. Dispatches the action rather than calling
+                // the handler so the button and Cmd+Shift+P cannot drift.
+                .child(
+                    sidebar_action_button(
+                        SharedString::from("sidebar-pane-overview"),
+                        SharedString::from("Show all panes \u{b7} \u{21e7}\u{2318}P"),
+                        "icons/layout-grid.svg",
+                        12.,
+                        ui,
+                    )
+                    .on_click(cx.listener(
+                        |_this, _: &ClickEvent, window, cx| {
+                            window.dispatch_action(Box::new(crate::OpenPaneOverview), cx);
+                            cx.stop_propagation();
+                        },
+                    )),
                 ),
         );
 

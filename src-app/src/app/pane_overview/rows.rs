@@ -1,0 +1,313 @@
+//! Pure row model for the Pane Overview (issue #339).
+//!
+//! No GPUI: the overlay's grouping, filtering, ordering, and selection rules
+//! are plain data transforms so they can be unit-tested without building a
+//! window. `PaneFlowApp` walks the workspace tree, produces `CardMeta` values,
+//! and hands them here.
+
+use std::collections::HashSet;
+
+use crate::agent_launcher::TerminalAgent;
+use crate::ai_types::AgentState;
+
+/// Cards past this many, in visible order, render a static shell instead of a
+/// live thumbnail.
+///
+/// The eight-pane perf gate (`layout/render.rs`) already spends a whole 60 Hz
+/// frame on eight painted terminals, and the theoretical worst case here is
+/// 20 workspaces x 32 tabs x 32 panes = 20,480 panes. Off-screen cards cull
+/// themselves in prepaint; this cap bounds what is left when a very large
+/// grid IS on screen.
+pub(crate) const MAX_LIVE_THUMBNAILS: usize = 24;
+
+/// One terminal pane, flattened. Carries only plain data - no entities - so
+/// the transforms below stay testable.
+#[derive(Clone, Debug)]
+pub(crate) struct CardMeta {
+    pub surface_id: u64,
+    pub ws_idx: usize,
+    pub ws_title: String,
+    pub tab_idx: usize,
+    pub tab_title: String,
+    /// Display name, already clamped through `limits::clamp_untrusted_label`.
+    pub name: String,
+    pub cwd_label: Option<String>,
+    pub agent: Option<TerminalAgent>,
+    /// `None` == idle: a session absent from `agent_sessions` has no state.
+    pub state: Option<AgentState>,
+    pub cols: usize,
+    pub rows: usize,
+    pub exited: bool,
+    pub is_active: bool,
+}
+
+impl CardMeta {
+    /// Everything the filter matches on, lowercased once per card per render.
+    fn search_key(&self) -> String {
+        let mut key = String::with_capacity(64);
+        key.push_str(&self.name.to_lowercase());
+        key.push(' ');
+        key.push_str(&self.ws_title.to_lowercase());
+        key.push(' ');
+        key.push_str(&self.tab_title.to_lowercase());
+        if let Some(agent) = self.agent {
+            key.push(' ');
+            key.push_str(&agent.display_name().to_lowercase());
+        }
+        if let Some(cwd) = &self.cwd_label {
+            key.push(' ');
+            key.push_str(&cwd.to_lowercase());
+        }
+        key
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TabGroup {
+    pub tab_idx: usize,
+    pub title: String,
+    pub cards: Vec<CardMeta>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WorkspaceGroup {
+    pub ws_idx: usize,
+    pub title: String,
+    pub tabs: Vec<TabGroup>,
+}
+
+/// Group a flat card list into workspace sections and tab rows.
+///
+/// Input order is the caller's traversal order (workspace index, then tab
+/// index, then layout traversal); grouping is stable and never re-sorts, so
+/// the on-screen order matches `flat_order`.
+pub(crate) fn group_cards(cards: Vec<CardMeta>) -> Vec<WorkspaceGroup> {
+    let mut groups: Vec<WorkspaceGroup> = Vec::new();
+    for card in cards {
+        let ws_slot = match groups.iter().position(|g| g.ws_idx == card.ws_idx) {
+            Some(at) => at,
+            None => {
+                groups.push(WorkspaceGroup {
+                    ws_idx: card.ws_idx,
+                    title: card.ws_title.clone(),
+                    tabs: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        let tabs = &mut groups[ws_slot].tabs;
+        let tab_slot = match tabs.iter().position(|t| t.tab_idx == card.tab_idx) {
+            Some(at) => at,
+            None => {
+                tabs.push(TabGroup {
+                    tab_idx: card.tab_idx,
+                    title: card.tab_title.clone(),
+                    cards: Vec::new(),
+                });
+                tabs.len() - 1
+            }
+        };
+        tabs[tab_slot].cards.push(card);
+    }
+    groups
+}
+
+/// Metadata-only filter: name, workspace, tab, agent, cwd basename.
+///
+/// Deliberately NOT a content search. Fleet Search already owns that, and
+/// re-running it across every pane on each keystroke is the
+/// extract-scrollback-on-the-tick anti-pattern guarded in `ipc_handler.rs`
+/// (issue #29).
+pub(crate) fn filter_cards(cards: &[CardMeta], query: &str) -> Vec<CardMeta> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return cards.to_vec();
+    }
+    cards
+        .iter()
+        .filter(|card| card.search_key().contains(&needle))
+        .cloned()
+        .collect()
+}
+
+/// Surface ids in visible order. This is the same stable order
+/// `jump_next_session_where` uses, so the overview and Cmd+Shift+J agree
+/// about what "next" means.
+pub(crate) fn flat_order(groups: &[WorkspaceGroup]) -> Vec<u64> {
+    groups
+        .iter()
+        .flat_map(|ws| ws.tabs.iter())
+        .flat_map(|tab| tab.cards.iter())
+        .map(|card| card.surface_id)
+        .collect()
+}
+
+/// Move the selection cursor by `delta`, clamped. Never wraps: wrapping from
+/// the last card of the last workspace to the first is disorienting in a
+/// grouped grid where the two are visually far apart.
+pub(crate) fn move_selection(selected: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let last = len as isize - 1;
+    (selected as isize + delta).clamp(0, last) as usize
+}
+
+/// The prefix of `order` allowed to paint a live thumbnail.
+pub(crate) fn live_thumbnail_ids(order: &[u64], cap: usize) -> HashSet<u64> {
+    order.iter().take(cap).copied().collect()
+}
+
+/// How many cards fit on one wrapped row of a grid `width` px wide, given the
+/// card width and the gap between cards. Never below one: a grid narrower
+/// than a card still shows one card per row.
+pub(crate) fn cards_per_row(width: f32, card_w: f32, gap: f32) -> usize {
+    if width <= 0.0 || card_w <= 0.0 {
+        return 1;
+    }
+    (((width + gap) / (card_w + gap)).floor() as usize).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(sid: u64, ws: usize, tab: usize, name: &str) -> CardMeta {
+        CardMeta {
+            surface_id: sid,
+            ws_idx: ws,
+            ws_title: format!("ws{ws}"),
+            tab_idx: tab,
+            tab_title: format!("tab{tab}"),
+            name: name.to_string(),
+            cwd_label: None,
+            agent: None,
+            state: None,
+            cols: 80,
+            rows: 24,
+            exited: false,
+            is_active: false,
+        }
+    }
+
+    #[test]
+    fn grouping_preserves_workspace_then_tab_order() {
+        let cards = vec![card(1, 0, 0, "a"), card(2, 0, 1, "b"), card(3, 1, 0, "c")];
+        let groups = group_cards(cards);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].ws_idx, 0);
+        assert_eq!(groups[0].tabs.len(), 2);
+        assert_eq!(groups[0].tabs[0].tab_idx, 0);
+        assert_eq!(groups[0].tabs[1].tab_idx, 1);
+        assert_eq!(groups[1].ws_idx, 1);
+        assert_eq!(groups[1].tabs.len(), 1);
+    }
+
+    #[test]
+    fn grouping_keeps_two_panes_of_one_tab_together() {
+        let groups = group_cards(vec![card(1, 0, 0, "a"), card(2, 0, 0, "b")]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].tabs.len(), 1);
+        assert_eq!(groups[0].tabs[0].cards.len(), 2);
+    }
+
+    #[test]
+    fn filter_matches_name_workspace_and_tab_case_insensitively() {
+        let cards = vec![card(1, 0, 0, "Claude"), card(2, 1, 0, "vite")];
+        assert_eq!(filter_cards(&cards, "cla").len(), 1);
+        assert_eq!(filter_cards(&cards, "CLA").len(), 1);
+        assert_eq!(filter_cards(&cards, "ws1").len(), 1);
+        assert_eq!(filter_cards(&cards, "tab0").len(), 2);
+        assert_eq!(filter_cards(&cards, "nothing").len(), 0);
+    }
+
+    #[test]
+    fn an_empty_filter_keeps_every_card() {
+        let cards = vec![card(1, 0, 0, "a"), card(2, 1, 0, "b")];
+        assert_eq!(filter_cards(&cards, "").len(), 2);
+        assert_eq!(filter_cards(&cards, "   ").len(), 2);
+    }
+
+    #[test]
+    fn filter_matches_the_agent_display_name() {
+        let mut c = card(1, 0, 0, "shell");
+        c.agent = Some(crate::agent_launcher::TerminalAgent::ClaudeCode);
+        let needle = crate::agent_launcher::TerminalAgent::ClaudeCode
+            .display_name()
+            .to_lowercase();
+        assert_eq!(filter_cards(&[c], &needle).len(), 1);
+    }
+
+    #[test]
+    fn filter_matches_the_cwd_basename() {
+        let mut c = card(1, 0, 0, "shell");
+        c.cwd_label = Some("paneflow".to_string());
+        assert_eq!(filter_cards(&[c], "PANEflow").len(), 1);
+    }
+
+    #[test]
+    fn flat_order_is_workspace_then_tab_then_traversal() {
+        let groups = group_cards(vec![
+            card(3, 1, 0, "c"),
+            card(1, 0, 0, "a"),
+            card(2, 0, 1, "b"),
+        ]);
+        assert_eq!(flat_order(&groups), vec![3, 1, 2]);
+        // The caller supplies traversal order; grouping never re-sorts.
+        let groups = group_cards(vec![
+            card(1, 0, 0, "a"),
+            card(2, 0, 1, "b"),
+            card(3, 1, 0, "c"),
+        ]);
+        assert_eq!(flat_order(&groups), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn move_selection_clamps_at_both_ends() {
+        assert_eq!(move_selection(0, 5, -1), 0);
+        assert_eq!(move_selection(4, 5, 1), 4);
+        assert_eq!(move_selection(2, 5, 1), 3);
+        assert_eq!(move_selection(2, 5, -1), 1);
+    }
+
+    #[test]
+    fn move_selection_by_a_row_clamps_rather_than_wrapping() {
+        // Down from the last partial row lands on the last card, not past it.
+        assert_eq!(move_selection(3, 5, 4), 4);
+        // Up from the first row stays put.
+        assert_eq!(move_selection(1, 5, -4), 0);
+    }
+
+    #[test]
+    fn move_selection_on_an_empty_list_is_zero() {
+        assert_eq!(move_selection(0, 0, 1), 0);
+        assert_eq!(move_selection(3, 0, -1), 0);
+    }
+
+    #[test]
+    fn only_the_first_cards_render_live_thumbnails() {
+        let order: Vec<u64> = (0..30).collect();
+        let live = live_thumbnail_ids(&order, 24);
+        assert_eq!(live.len(), 24);
+        assert!(live.contains(&0));
+        assert!(live.contains(&23));
+        assert!(!live.contains(&24));
+    }
+
+    #[test]
+    fn a_short_list_renders_every_thumbnail_live() {
+        let order: Vec<u64> = (0..3).collect();
+        assert_eq!(live_thumbnail_ids(&order, 24).len(), 3);
+    }
+
+    #[test]
+    fn cards_per_row_follows_the_measured_width() {
+        // Three 328px cards with 12px gaps need 1008px; a fourth needs 1348.
+        assert_eq!(cards_per_row(1008.0, 328.0, 12.0), 3);
+        assert_eq!(cards_per_row(1347.0, 328.0, 12.0), 3);
+        assert_eq!(cards_per_row(1348.0, 328.0, 12.0), 4);
+        // Narrower than one card still yields one card per row.
+        assert_eq!(cards_per_row(100.0, 328.0, 12.0), 1);
+        assert_eq!(cards_per_row(0.0, 328.0, 12.0), 1);
+    }
+}

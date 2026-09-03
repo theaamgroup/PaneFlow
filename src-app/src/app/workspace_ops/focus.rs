@@ -155,6 +155,41 @@ impl PaneFlowApp {
         self.activate_workspace_at(ws_idx, WorkspaceFocusTarget::Pane { pane }, window, cx);
         self.jump_cursor = Some(sid);
     }
+
+    /// Focus the pane hosting `surface_id`, wherever it lives (issue #339).
+    ///
+    /// Returns `false` when the surface is gone (a pane closed between render
+    /// and activation), which every caller treats as a clean no-op.
+    ///
+    /// The ORDER is load-bearing and is why this is one function rather than
+    /// another copy of the Attention Queue / Fleet Search teleport: focus can
+    /// only land on a *rendered* pane, so the owning tab has to become
+    /// visible before `activate_workspace_at` runs. Indices are re-resolved
+    /// from `surface_id` here rather than captured by the caller, so a
+    /// workspace or tab reorder between render and click cannot teleport the
+    /// user to the wrong pane.
+    pub(crate) fn teleport_to_surface(
+        &mut self,
+        surface_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(loc) =
+            crate::app::ipc_handler::find_pane_by_surface_id(&self.workspaces, surface_id, cx)
+        else {
+            cx.notify();
+            return false;
+        };
+        let (ws_idx, pane) = (loc.workspace_idx, loc.pane);
+        if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+            ws.set_active_tab(loc.tab_idx);
+        }
+        self.activate_workspace_at(ws_idx, WorkspaceFocusTarget::Pane { pane }, window, cx);
+        // Keep the jump cycle coherent: a teleport counts as visiting that
+        // surface, so the next Cmd+Shift+J continues from here.
+        self.jump_cursor = Some(surface_id);
+        true
+    }
 }
 
 /// Pure cycle rule (unit-tested): first waiting surface when the cursor is
