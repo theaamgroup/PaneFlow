@@ -226,17 +226,43 @@ fn read_sessions_for_cwd_inner(
 /// instead of overflowing the stack (U-003).
 const MAX_WALK_DEPTH: u32 = 8;
 
+/// Cap on directory entries examined by one walk of the session store (files
+/// and subdirectories alike), so a large or hostile `~/.codex/sessions`
+/// cannot turn a sidebar refresh into an unbounded disk walk. Mirrors
+/// `MAX_WALK_ENTRIES` in `pi_sessions.rs`; the sidebar retains at most
+/// `SIDEBAR_SESSION_RETAINED_PER_SOURCE` of the results anyway.
+const MAX_WALK_ENTRIES: usize = 4_096;
+
 /// Walk Codex's `YYYY/MM/DD/*.jsonl` layout depth-first and invoke
 /// `visit` on every `.jsonl` leaf.
 fn walk_jsonl_files(dir: &Path, visit: &mut impl FnMut(&Path)) {
-    walk_jsonl_files_bounded(dir, MAX_WALK_DEPTH, visit);
+    let mut examined = 0usize;
+    if walk_jsonl_files_bounded(dir, MAX_WALK_DEPTH, &mut examined, visit) {
+        log::debug!(
+            target: "paneflow_app::codex_sessions",
+            "stopped the session walk under {} after {} entries",
+            dir.display(),
+            MAX_WALK_ENTRIES,
+        );
+    }
 }
 
-fn walk_jsonl_files_bounded(dir: &Path, depth_left: u32, visit: &mut impl FnMut(&Path)) {
+/// Returns `true` when the shared entry budget is exhausted so every caller in
+/// the recursive stack stops walking immediately.
+fn walk_jsonl_files_bounded(
+    dir: &Path,
+    depth_left: u32,
+    examined: &mut usize,
+    visit: &mut impl FnMut(&Path),
+) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
-        return;
+        return false;
     };
     for entry in entries.flatten() {
+        if *examined >= MAX_WALK_ENTRIES {
+            return true;
+        }
+        *examined += 1;
         // U-003: `DirEntry::file_type()` reports the entry's *own* type (from
         // the readdir record, or an lstat) and does NOT follow symlinks -
         // unlike `Path::is_dir()`, which dereferences. A symlinked directory
@@ -248,13 +274,14 @@ fn walk_jsonl_files_bounded(dir: &Path, depth_left: u32, visit: &mut impl FnMut(
         };
         let path = entry.path();
         if file_type.is_dir() {
-            if depth_left > 0 {
-                walk_jsonl_files_bounded(&path, depth_left - 1, visit);
+            if depth_left > 0 && walk_jsonl_files_bounded(&path, depth_left - 1, examined, visit) {
+                return true;
             }
         } else if file_type.is_file() && is_jsonl_file(&path) {
             visit(&path);
         }
     }
+    false
 }
 
 fn jsonl_tree_mtime(root: &Path) -> Option<SystemTime> {
@@ -974,6 +1001,18 @@ mod tests {
         let mut found = Vec::new();
         walk_jsonl_files(dir.path(), &mut |p| found.push(p.to_path_buf()));
         assert_eq!(found, vec![jsonl], "the one real .jsonl must be discovered");
+    }
+
+    #[test]
+    fn walk_stops_after_max_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..(MAX_WALK_ENTRIES + 16) {
+            std::fs::write(dir.path().join(format!("{i:05}.jsonl")), b"").expect("write");
+        }
+
+        let mut found = Vec::new();
+        walk_jsonl_files(dir.path(), &mut |path| found.push(path.to_path_buf()));
+        assert_eq!(found.len(), MAX_WALK_ENTRIES);
     }
 
     /// U-003: the depth bound stops recursion past `MAX_WALK_DEPTH`, so an
