@@ -304,6 +304,11 @@ pub struct TerminalView {
     pub(super) color_emoji_enabled: bool,
     /// Whether copy mode (keyboard-driven selection) is active
     pub(super) copy_mode_active: bool,
+    /// Issue #299: this view is the source of an armed pane swap, so Escape
+    /// cancels swap mode instead of reaching the PTY. Set by
+    /// `PaneFlowApp::set_swap_source` on the source pane's terminal only, so
+    /// swap state has one owner and no process-global mirror.
+    pub(super) swap_mode_armed: bool,
     /// Copy mode cursor position in grid coordinates
     pub(super) copy_cursor: Point,
     /// Display offset frozen at copy mode entry to prevent auto-scroll
@@ -415,6 +420,19 @@ impl TerminalView {
             self.color_emoji_enabled = enabled;
             cx.notify();
         }
+    }
+
+    /// Issue #299: arm or disarm swap-mode Escape interception on this view.
+    pub(crate) fn set_swap_mode_armed(&mut self, armed: bool, cx: &mut Context<Self>) {
+        if self.swap_mode_armed != armed {
+            self.swap_mode_armed = armed;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn swap_mode_armed(&self) -> bool {
+        self.swap_mode_armed
     }
 
     pub(crate) fn set_cursor_color_override(
@@ -838,6 +856,7 @@ impl TerminalView {
             integrated_glyphs_enabled,
             color_emoji_enabled,
             copy_mode_active: false,
+            swap_mode_armed: false,
             copy_cursor: Point::new(0, 0),
             copy_mode_frozen_offset: 0,
             was_focused: false,

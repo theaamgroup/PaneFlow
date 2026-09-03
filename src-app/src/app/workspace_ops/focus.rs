@@ -8,7 +8,7 @@ use gpui::{Context, Focusable, Window};
 use super::WorkspaceFocusTarget;
 use crate::PaneFlowApp;
 use crate::layout::{FocusDirection, FocusNav};
-use crate::{FocusDown, FocusLeft, FocusRight, FocusUp, JumpNextWaiting, SWAP_MODE};
+use crate::{FocusDown, FocusLeft, FocusRight, FocusUp, JumpNextWaiting};
 
 impl PaneFlowApp {
     pub(crate) fn handle_focus(
@@ -18,8 +18,8 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         // When swap mode is active, perform the swap instead of just moving focus
-        if let Some(source) = self.swap_source.take() {
-            SWAP_MODE.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(source) = self.swap_source.clone() {
+            self.set_swap_source(None, cx);
 
             if let Some(ws) = self.active_workspace()
                 && let Some(root) = &ws.active_tab().root
