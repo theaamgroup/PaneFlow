@@ -243,6 +243,10 @@ pub struct TerminalView {
     /// Element origin in window coordinates - set by TerminalElement::paint(),
     /// read by mouse handlers for pixel→grid conversion.
     pub(super) element_origin: Arc<Mutex<gpui::Point<gpui::Pixels>>>,
+    /// Memoized terminal layout, kept across frames so a pane whose grid did
+    /// not change is not re-laid-out when a sibling pane's output dirties the
+    /// window. See `TerminalElement::build_layout`.
+    layout_cache: super::element::SharedLayoutCache,
     /// US-015: painted scrollbar geometry - set by TerminalElement::paint(),
     /// read by the mouse handlers to hit-test click-to-jump / drag.
     pub(super) scrollbar_metrics: Arc<Mutex<Option<super::element::ScrollbarMetrics>>>,
@@ -331,6 +335,10 @@ pub struct TerminalView {
     pub(super) hovered_cell: Option<Point>,
     /// Active hyperlink under Ctrl+hover - drives underline rendering and Ctrl+click.
     pub(super) ctrl_hovered_link: Option<HyperlinkZone>,
+    /// Whether the open-link modifier was held at the last pointer or
+    /// modifier event, so an OSC 8 answer that arrives after a release is
+    /// dropped instead of underlining a link nobody is pointing at.
+    pub(super) link_modifier_held: bool,
     /// Last full-line link detection result. Avoids repeating canonicalize on
     /// every mouse move while the pointer stays on the same terminal line.
     pub(super) hover_link_cache: Option<HoverLinkCache>,
@@ -618,7 +626,7 @@ impl TerminalView {
         // Backend event coalescing:
         // Phase 1: Block until first event (zero CPU when idle)
         // Phase 2: Hold the leading wakeup and batch for 4 ms (max 100 events,
-        // dedup Wakeup) so a multi-write frame is painted once
+        // dedup Wakeup) so one entity update absorbs a burst of events
         // Phase 3: Process batch, yield to other GPUI tasks
         let events_rx = terminal.take_backend_events();
         cx.spawn(
@@ -629,8 +637,13 @@ impl TerminalView {
                 while let Some(first_event) = events_rx.next().await {
                     // Phase 2: the leading wakeup is held until the batch closes -
                     // the coalesced path that was measured on macOS (see
-                    // `process_backend_wakeup`) - so a synchronized-output frame
-                    // is never painted half-written.
+                    // `process_backend_wakeup`) - so a burst of title, progress
+                    // and wakeup events costs one entity update. This is a timer,
+                    // not a frame gate: a half-drawn synchronized-output frame is
+                    // never published in the first place, because `PublishGate`
+                    // in `terminal/ghostty_session.rs` holds the snapshot while
+                    // DEC 2026 is set and queues a wakeup only for a frame it
+                    // actually published.
                     let mut batch = Vec::with_capacity(32);
                     let mut dequeued = 1usize;
                     let mut had_wakeup = first_event.is_wakeup();
@@ -679,6 +692,9 @@ impl TerminalView {
                             }
                             for event in batch {
                                 view.terminal.process_backend_event(event);
+                            }
+                            if let Some((point, link)) = view.terminal.take_resolved_hover_link() {
+                                view.apply_resolved_hover_link(point, link, cx);
                             }
 
                             // Execute deferred clipboard operations (OSC 52)
@@ -834,6 +850,7 @@ impl TerminalView {
             cell_width: gpui::px(8.0),
             line_height: gpui::px(16.0),
             element_origin: Arc::new(Mutex::new(gpui::Point::default())),
+            layout_cache: Arc::new(Mutex::new(None)),
             scrollbar_metrics: Arc::new(Mutex::new(None)),
             scrollbar_drag: None,
             scroll_remainder: 0.0,
@@ -867,6 +884,7 @@ impl TerminalView {
             ghostty_pending_text_key: None,
             hovered_cell: None,
             ctrl_hovered_link: None,
+            link_modifier_held: false,
             hover_link_cache: None,
             mouse_down_link: None,
             ime_marked_text: String::new(),
@@ -1637,6 +1655,7 @@ impl Render for TerminalView {
             self.color_emoji_enabled,
             frame_metrics,
             alt_screen,
+            self.layout_cache.clone(),
             #[cfg(debug_assertions)]
             keystroke_at,
         );

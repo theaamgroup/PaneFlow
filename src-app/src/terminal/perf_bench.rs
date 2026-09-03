@@ -14,15 +14,14 @@
 //! (`test_allocator`), which wraps the system allocator.
 //!
 //! The metric names and units are upstream's, so a result document from this
-//! fork compares against one of theirs with the same table code. What each
-//! metric measures on this tree, before the publish gate (#343) and the
-//! layout memo (#344) land, is noted where it differs from upstream's
-//! implementation: `publish_*` and `pipeline_corpus_mib_s` pay for a full
-//! snapshot-to-`Content` conversion per frame today, `gate_trickle_publishes`
-//! reads the chunk count because nothing gates the publish, and the two idle
-//! probes count a fixed 10 ms tick. Those are the metrics the gate and the
-//! runtime idle work are expected to move; `layout_220x60` is the one the
-//! layout memo targets.
+//! fork compares against one of theirs with the same table code. `publish_*`
+//! and `pipeline_corpus_mib_s` go through the runtime's `CellMirror` (#343),
+//! so a frame converts only the rows the engine flagged and writes into the
+//! buffer it published two frames earlier; `gate_trickle_publishes` drives
+//! the real `PublishGate` decision against a synthetic clock; the two idle
+//! probes count the runtime loop's real ticks (10 ms while output flows,
+//! 100 ms once a pane has been quiet for a second, 1 s for a display-only
+//! session). `layout_220x60` is the one the layout memo (#344) targets.
 
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -35,7 +34,7 @@ use super::bench_corpus::{
 };
 use super::element::{CellDimensions, LayoutInputs, base_font, layout_from_snapshot};
 use super::ghostty_session::{
-    RUNTIME_LOOP_ITERATIONS, RUNTIME_LOOP_MESSAGES, content_from_ghostty, simulate_gate_trickle,
+    CellMirror, RUNTIME_LOOP_ITERATIONS, RUNTIME_LOOP_MESSAGES, simulate_gate_trickle,
 };
 use super::pty_session::TerminalState;
 use super::test_allocator::allocation_counters;
@@ -183,26 +182,30 @@ fn scroll_chunk(index: usize) -> Vec<u8> {
 }
 
 /// One keystroke echo on the bottom row: the cursor moves and a handful of
-/// cells change, no scroll. A dirty-row tracker would have one row to report;
-/// today the conversion walks the whole grid either way.
+/// cells change, no scroll. The engine flags one dirty row, so the mirror
+/// converts one row.
 fn echo_chunk(index: usize, rows: usize) -> Vec<u8> {
     format!("\x1b[{rows};1Hprompt> {index:06}").into_bytes()
 }
 
-/// What the runtime does per frame today (`update_shared_state`): snapshot
-/// the grid and convert every cell into a fresh `Content`, then install it
-/// where the previous frame was. The gate port (#343) turns the conversion
-/// into an in-place mirror update that recycles the previous frame's buffer,
-/// which is what the `publish_*` allocation columns are meant to show.
+/// What the runtime does per frame (`update_shared_state`): snapshot the grid,
+/// convert the rows the engine flagged through the `CellMirror` into the
+/// buffer published two frames earlier, install the frame where the previous
+/// one was, and hand the previous one back to the mirror. The `publish_*`
+/// allocation columns show what that dirty-row path still allocates.
 #[derive(Default)]
 struct Publisher {
     front: Option<Content>,
+    mirror: CellMirror,
 }
 
 impl Publisher {
     fn publish(&mut self, terminal: &mut ghostty::DisplayTerminal) -> &Content {
         let snapshot = terminal.snapshot().expect("snapshot must succeed");
-        self.front = Some(content_from_ghostty(snapshot));
+        let published = self.mirror.publish(snapshot);
+        if let Some(previous) = self.front.replace(published) {
+            self.mirror.recycle(previous);
+        }
         self.front.as_ref().expect("a frame was just published")
     }
 }
@@ -272,7 +275,7 @@ fn publish_scenarios(metrics: &mut Vec<Metric>) -> Content {
         };
         metrics.push(measure(
             name,
-            "one scrolled line fed, then snapshot plus conversion to the neutral Content (every row dirty)",
+            "one scrolled line fed, then snapshot plus dirty-row conversion into the mirrored Content (every row dirty)",
             20,
             300,
             || {
@@ -285,7 +288,7 @@ fn publish_scenarios(metrics: &mut Vec<Metric>) -> Content {
             let mut index = 0usize;
             metrics.push(measure(
                 "publish_echo_220x60",
-                "one keystroke echo on the bottom row, then snapshot plus conversion (one row dirty)",
+                "one keystroke echo on the bottom row, then snapshot plus dirty-row conversion (one row dirty)",
                 20,
                 300,
                 || {
@@ -452,7 +455,7 @@ fn pipeline_scenario(metrics: &mut Vec<Metric>) {
         alloc_bytes_per_iter: Some((bytes_after - bytes_before) as f64 / publishes as f64),
         allocs_per_iter: Some((calls_after - calls_before) as f64 / publishes as f64),
         iters: publishes,
-        note: "corpus streams fed one per batch with a publish after each: parse plus snapshot plus conversion throughput",
+        note: "corpus streams fed one per batch with a publish after each: parse plus snapshot plus dirty-row conversion throughput",
     });
 }
 

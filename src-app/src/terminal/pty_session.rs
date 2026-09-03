@@ -320,8 +320,10 @@ impl TerminalSessionBackend {
         self.ghostty.select_all();
     }
 
-    pub(crate) fn osc8_hyperlink_at(&self, point: Point) -> Option<HyperlinkZone> {
-        self.ghostty.hyperlink_at(point)
+    /// Start resolving the OSC 8 hyperlink under `point`; the answer lands in
+    /// [`TerminalState::take_resolved_hover_link`] on a later event batch.
+    pub(crate) fn request_osc8_hyperlink_at(&self, point: Point) -> bool {
+        self.ghostty.request_hyperlink_at(point)
     }
 
     pub(crate) fn line_text_at(&self, point: Point) -> Option<GridLineText> {
@@ -660,6 +662,8 @@ pub struct TerminalState {
     /// [`Self::take_shell_prompt_ready`].
     last_prompt_seq: u64,
     pub exited: Option<i32>,
+    /// Latest answer to a hover hyperlink lookup, until the view takes it.
+    resolved_hover_link: Option<(Point, Option<HyperlinkZone>)>,
     /// US-002: set true once any user input (keystroke, paste, mouse report,
     /// IME commit, user scroll) has been written via `write_to_pty`.
     /// Distinguishes a user-initiated exit (always close the pane) from a
@@ -1180,7 +1184,18 @@ impl TerminalState {
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            resolve_default_shell(configured)
+            let resolved = resolve_default_shell(configured);
+            // The configured value and what actually got launched are the two
+            // facts needed to tell "my shell setting is ignored" apart from "my
+            // shell is just slow to start". `resolve_default_shell` only warns
+            // on the rejection path, which says nothing when resolution
+            // succeeded but picked something else than expected.
+            log::info!(
+                target: "paneflow::terminal::backend",
+                "{}",
+                shell_resolution_log_line(&resolved, configured)
+            );
+            resolved
         };
         let shell_quoting = ShellQuoting::for_shell(&shell);
         // US-014: layer the per-surface `user_env` on top of the global
@@ -1310,6 +1325,7 @@ impl TerminalState {
             marks,
             last_prompt_seq: 0,
             exited: None,
+            resolved_hover_link: None,
             keyboard_input_sent: std::sync::atomic::AtomicBool::new(false),
             exit_signal: None,
             child_pid: 0,
@@ -1412,6 +1428,12 @@ impl TerminalState {
     /// more, which is how the app reaps a finished agent's session without
     /// waiting for the periodic PID sweep. The first prompt of a fresh shell
     /// fires it too; the consumer is a no-op when the surface owns no session.
+    /// The latest answer to [`TerminalSessionBackend::request_osc8_hyperlink_at`],
+    /// once.
+    pub(crate) fn take_resolved_hover_link(&mut self) -> Option<(Point, Option<HyperlinkZone>)> {
+        self.resolved_hover_link.take()
+    }
+
     pub(crate) fn take_shell_prompt_ready(&mut self) -> bool {
         let seq = self
             .marks
@@ -1482,6 +1504,11 @@ impl TerminalState {
                 {
                     self.pty_guard = None;
                 }
+            }
+            GhosttyUiEvent::HyperlinkResolved { point, link } => {
+                // Only the latest answer matters: the pointer has moved on
+                // from any older one.
+                self.resolved_hover_link = Some((point, link));
             }
             GhosttyUiEvent::InputRejected(error) => {
                 log::warn!(target: "paneflow::terminal::ghostty", "{error}");
@@ -2133,6 +2160,14 @@ pub(super) fn is_inherited_host_terminal_env_key(key: &str) -> bool {
 ///
 /// Non-UTF-8 names are left alone: none of the targets can be spelled that way,
 /// and guessing at a lossy comparison would risk unsetting an unrelated var.
+/// The one line that says which shell a pane launched, next to the one the
+/// config asked for. Logged at info level by `spawn_params` under the
+/// `paneflow::terminal::backend` target, so `RUST_LOG=info` tells an ignored
+/// `default_shell` apart from a shell that is merely slow to start.
+fn shell_resolution_log_line(resolved: &str, configured: Option<&str>) -> String {
+    format!("Terminal shell resolved: {resolved:?} (default_shell={configured:?})")
+}
+
 pub(super) fn inherited_env_keys_to_strip() -> Vec<std::ffi::OsString> {
     std::env::vars_os()
         .map(|(key, _)| key)
@@ -2548,6 +2583,26 @@ impl Drop for TerminalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `RUST_LOG=info` must show the resolved shell next to the configured
+    /// one: both values, in one line, whether or not a shell was configured.
+    #[test]
+    fn shell_resolution_log_line_names_the_resolved_and_the_configured_shell() {
+        assert_eq!(
+            shell_resolution_log_line("/bin/zsh", Some("/opt/homebrew/bin/fish")),
+            "Terminal shell resolved: \"/bin/zsh\" (default_shell=Some(\"/opt/homebrew/bin/fish\"))"
+        );
+        assert_eq!(
+            shell_resolution_log_line("/bin/zsh", None),
+            "Terminal shell resolved: \"/bin/zsh\" (default_shell=None)"
+        );
+        // The real call site feeds the config's `default_shell` through the
+        // same trim-and-drop-empty filter and the same resolver.
+        let resolved = resolve_default_shell(Some("/bin/sh"));
+        let line = shell_resolution_log_line(&resolved, Some("/bin/sh"));
+        assert!(line.contains("\"/bin/sh\""), "{line}");
+        assert!(line.contains("default_shell=Some(\"/bin/sh\")"), "{line}");
+    }
     use std::collections::HashMap;
     use std::io::Read;
     use std::path::{Path, PathBuf};
