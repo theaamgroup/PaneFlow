@@ -64,7 +64,30 @@ impl MarkdownState {
             return;
         }
         let key = key_for_path(path);
-        self.offsets.insert(key, offset_y);
+        self.offsets.insert(key.clone(), offset_y);
+        self.evict_to_fit(&key);
+    }
+
+    /// Write-side counterpart of the `MAX_MARKDOWN_STATE_SIZE_BYTES` read cap
+    /// (#314). `load_from_path` discards any file over the cap, so a map
+    /// allowed to grow past it would be wiped on the next start and the wipe
+    /// persisted by the next save. No recency is stored, so eviction picks
+    /// arbitrary entries; the key just written is always kept.
+    fn evict_to_fit(&mut self, keep: &str) {
+        let cap = MAX_MARKDOWN_STATE_SIZE_BYTES as usize;
+        while self.serialized_len() > cap {
+            let Some(victim) = self.offsets.keys().find(|k| k.as_str() != keep).cloned() else {
+                break;
+            };
+            self.offsets.remove(&victim);
+        }
+    }
+
+    /// Byte length of the on-disk form produced by [`save`].
+    fn serialized_len(&self) -> usize {
+        serde_json::to_string_pretty(self)
+            .map(|json| json.len())
+            .unwrap_or(0)
     }
 }
 
@@ -318,6 +341,43 @@ mod tests {
         let state = load_from_path(&path);
         assert!(state.offsets.is_empty());
         assert_eq!(state.version, 1);
+    }
+
+    #[test]
+    fn record_keeps_serialized_state_under_read_cap() {
+        // Regression for #314: without a write-side bound the map grows past
+        // the 1 MiB read cap, and the next start throws every offset away.
+        let cap = crate::limits::MAX_MARKDOWN_STATE_SIZE_BYTES as usize;
+        let mut s = MarkdownState::default();
+        // Long keys keep the entry count (and so the number of size checks
+        // the test performs) small.
+        let filler = "x".repeat(16 * 1024);
+        let mut i = 0usize;
+        let mut last = PathBuf::new();
+        // Keep writing until an unbounded map would have crossed the cap by
+        // a comfortable margin (each entry is > filler.len() bytes serialized).
+        while i * filler.len() < cap * 2 {
+            last = PathBuf::from(format!("/docs/{filler}/{i}.md"));
+            s.record_offset(&last, i as f32);
+            i += 1;
+        }
+
+        let json = serde_json::to_string_pretty(&s).expect("ser");
+        assert!(
+            json.len() <= cap,
+            "serialized state is {} bytes, over the {} byte read cap",
+            json.len(),
+            cap
+        );
+        assert!(!s.offsets.is_empty());
+        assert_eq!(s.lookup_offset(&last), Some((i - 1) as f32));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("markdown_state.json");
+        std::fs::write(&path, &json).expect("write cache");
+        let restored = load_from_path(&path);
+        assert_eq!(restored.lookup_offset(&last), Some((i - 1) as f32));
+        assert_eq!(restored.offsets.len(), s.offsets.len());
     }
 
     #[test]
