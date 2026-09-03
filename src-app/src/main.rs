@@ -1027,6 +1027,10 @@ struct AgentSessionsState {
     /// open / retarget; observed in `bootstrap.rs` so each keystroke
     /// re-renders the sidebar.
     sessions_filter_input: gpui::Entity<crate::widgets::text_input::TextInput>,
+    /// Issue #334: the open row menu (Resume / Copy summary / Continue in),
+    /// or `None`. Cleared by every action, click-away, and
+    /// `dismiss_transient_surfaces`.
+    sessions_menu_open: Option<crate::app::sessions_context_menu::SessionContextMenu>,
 }
 
 /// US-053: Git Diff mode state (mounted single/multi-repo views + their
@@ -2643,6 +2647,16 @@ impl Render for PaneFlowApp {
         // files-tree EP-003 US-009: per-file copy-path context menu.
         if let Some(menu) = self.files_menu_open.clone() {
             app_content = app_content.child(self.render_files_context_menu(menu, ui, window, cx));
+        }
+
+        // Issue #334: sessions-sidebar row menu (Resume / Copy summary /
+        // Continue in). Only while the sidebar is up, so a stale entry cannot
+        // paint over a closed rail.
+        if self.agent_sessions.sessions_sidebar_open
+            && let Some(menu) = self.agent_sessions.sessions_menu_open.clone()
+        {
+            app_content =
+                app_content.child(self.render_sessions_context_menu(menu, ui, window, cx));
         }
 
         crate::window_chrome::csd::client_side_window_shell(

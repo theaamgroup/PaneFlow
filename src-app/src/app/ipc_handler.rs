@@ -2459,7 +2459,12 @@ impl PaneFlowApp {
                              {UP_PREFILL_MAX:?}; prompt prefilled best-effort"
                         );
                     }
-                    t.read(cx).send_text(&prompt);
+                    // Issue #334: `inject_text`, not the raw `send_text`. A
+                    // surface that has enabled `ESC[?2004h` gets the block
+                    // inside bracketed-paste markers so its embedded newlines
+                    // stay literal; one that has not gets it verbatim, never
+                    // rewritten to `\r`. Either way nothing submits.
+                    t.read(cx).inject_text(&prompt);
                 }
             });
         })
@@ -7076,6 +7081,29 @@ mod tests {
         assert!(
             arm.contains("find_pane_by_surface_id"),
             "the tab write needs the pane that owns this surface: {arm}"
+        );
+    }
+
+    #[test]
+    fn prompt_prefill_writes_through_inject_text_and_never_submits() {
+        // Issue #334: the shared prefill (workspace.up, surface.split, Launch
+        // Pad, and "Continue in") writes through `inject_text`, which wraps
+        // the block in bracketed-paste markers when the surface has enabled
+        // `ESC[?2004h` and otherwise writes it verbatim, never rewriting a
+        // newline to a carriage return. Nothing follows the block.
+        let src = include_str!("ipc_handler.rs");
+        let body = src
+            .split("pub(crate) fn schedule_prompt_prefill(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn schedule_launch_command(").next())
+            .expect("schedule_prompt_prefill body");
+        assert!(
+            body.contains("t.read(cx).inject_text(&prompt);"),
+            "prefill must go through inject_text: {body}"
+        );
+        assert!(
+            !body.contains("send_text(&prompt)") && !body.contains("send_command("),
+            "prefill must not write raw bytes or a command: {body}"
         );
     }
 

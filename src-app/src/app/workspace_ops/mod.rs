@@ -1084,6 +1084,7 @@ impl PaneFlowApp {
         self.pane_menu_open = None;
         self.profile_menu_open = None;
         self.files_menu_open = None;
+        self.agent_sessions.sessions_menu_open = None;
     }
 
     /// End a live inline rename WITHOUT keeping the typed name, and hand focus

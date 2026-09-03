@@ -31,6 +31,8 @@ pub mod pane_palette;
 pub mod profile_menu;
 pub mod pull_request;
 pub mod session;
+pub mod sessions_context_menu;
+pub mod sessions_handoff;
 pub mod sessions_sidebar;
 pub mod settings;
 pub mod sidebar;
