@@ -21,7 +21,7 @@
   cargo test --workspace                     # diff test NAMES, never trust the integer
   cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
   cargo fmt --check                          # exit 0
-  ./target/debug/paneflow --version          # paneflow 0.2.0
+  ./target/debug/paneflow --version          # paneflow 0.2.1
   cargo deny check advisories licenses sources   # exit 0
   ```
 - **Never pipe a command whose exit status matters.** `cargo test | tail` reports `tail`'s status. Redirect as `cmd > file 2>&1`, never `cmd 2>&1 > file`.
@@ -2099,7 +2099,7 @@ cargo deny check advisories licenses sources 2>&1 | tail -5
 ```
 
 Expected: build exit 0; test names a strict superset of the baseline; clippy WARNING COUNT 1
-(`block v0.1.6`); fmt exit 0; version `paneflow 0.2.0`; deny exit 0; census prints no `FAIL:` line.
+(`block v0.1.6`); fmt exit 0; version `paneflow 0.2.1`; deny exit 0; census prints no `FAIL:` line.
 
 - [ ] **Step 7: Commit**
 
