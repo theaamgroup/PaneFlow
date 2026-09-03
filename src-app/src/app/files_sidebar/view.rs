@@ -6,14 +6,18 @@ use std::cell::Cell;
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, SharedString, Styled, div, prelude::*, px,
+    ParentElement, Role, SharedString, Styled, div, prelude::*, px,
 };
 
 use super::filter;
 use super::row::FilesRowLabel;
 use crate::PaneFlowApp;
 use crate::app::files_tree::VisibleRowRef;
-use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
+use crate::ui_primitives::{AnimatedHoverExt, TooltipDelayExt, lerp_color, text_tooltip};
+
+/// Accessible name and tooltip of the rail's close `×` (issue #340: one string
+/// feeds both).
+const CLOSE_FILES_LABEL: &str = "Close files sidebar";
 
 struct FilesSidebarRenderTimeCanary {
     start: std::time::Instant,
@@ -88,6 +92,8 @@ impl PaneFlowApp {
             .child(
                 div()
                     .id("files-sidebar-close")
+                    .role(Role::Button)
+                    .aria_label(CLOSE_FILES_LABEL)
                     .flex()
                     .flex_none()
                     .items_center()
@@ -105,6 +111,7 @@ impl PaneFlowApp {
                             ))
                             .text_color(lerp_color(ui.muted, ui.text, delta));
                     })
+                    .delayed_tooltip(text_tooltip(CLOSE_FILES_LABEL))
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.close_files_sidebar(cx);
                         cx.stop_propagation();

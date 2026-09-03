@@ -5,7 +5,7 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, FontWeight, Hsla, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, SharedString,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Role, SharedString,
     StatefulInteractiveElement, Styled, Window, div, img, prelude::FluentBuilder, px, svg,
 };
 
@@ -14,7 +14,13 @@ use super::new_tab_menu::render_diff_new_tab_menu;
 use super::options_menu::render_diff_options_button;
 use crate::PaneFlowApp;
 use crate::settings::components::with_alpha;
-use crate::ui_primitives::{AnimatedHoverExt, ROW_RADIUS, squircle_skin};
+use crate::ui_primitives::{
+    AnimatedHoverExt, ROW_RADIUS, TooltipDelayExt, squircle_skin, text_tooltip,
+};
+
+/// Accessible name and tooltip of the tab strip's `+` (issue #340: one string
+/// feeds both).
+const NEW_TAB_LABEL: &str = "New tab";
 
 /// The thin, column-resize hit target straddling the panel's left border.
 /// Captures the drag anchor `(cursor_x, width_at_grab)`; the resize math runs
@@ -97,6 +103,8 @@ pub(super) fn render_diff_tab_strip(
             squircle_skin(
                 div()
                     .id("diff-dock-tab-new")
+                    .role(Role::Button)
+                    .aria_label(NEW_TAB_LABEL)
                     .flex_none()
                     .size(px(28.))
                     .flex()
@@ -108,6 +116,7 @@ pub(super) fn render_diff_tab_strip(
                 open.then_some(rail_hover),
                 Some(rail_hover),
             )
+            .delayed_tooltip(text_tooltip(NEW_TAB_LABEL))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                 this.toggle_diff_new_tab_menu(!open, cx);
@@ -127,6 +136,7 @@ pub(super) fn render_diff_tab_strip(
         .child(render_diff_header_icon_button(
             "diff-dock-close",
             "icons/close.svg",
+            "Close dock",
             cx.listener(|this, _: &ClickEvent, _w, cx| {
                 this.close_diff_dock_panel(cx);
             }),
@@ -168,6 +178,7 @@ fn render_diff_tab(
         (DiffDockTab::Changes, _) => ("icons/plus-minus.svg", "Changes".to_string()),
         (DiffDockTab::Terminal(_), _) => ("icons/terminal.svg", "Terminal".to_string()),
         (DiffDockTab::PendingFile, _) => ("icons/file-text.svg", "Open a file".to_string()),
+        (DiffDockTab::Setup(_), _) => ("icons/list.svg", "Agent setup".to_string()),
         (_, Some((icon, label, _))) => (*icon, label.clone()),
         // Unreachable: `File` is the only remaining variant and it always
         // resolves `file` above. Kept total rather than panicking in a paint.
@@ -224,7 +235,10 @@ fn render_diff_tab(
 
     if matches!(
         tab,
-        DiffDockTab::Terminal(_) | DiffDockTab::File(_) | DiffDockTab::PendingFile
+        DiffDockTab::Terminal(_)
+            | DiffDockTab::File(_)
+            | DiffDockTab::PendingFile
+            | DiffDockTab::Setup(_)
     ) {
         // Cursor's grammar: a modified document trades the close glyph for a
         // dot at rest, the dot yields the slot back to the glyph while the
@@ -232,6 +246,15 @@ fn render_diff_tab(
         // both. Arming the close (the confirmation US-017 asks for) pins the
         // glyph in the deletion color, so the second press reads as
         // destructive.
+        //
+        // Issue #340: the control's name follows the same arming, so a screen
+        // reader hears what the next click does, as the pane header's `x`
+        // (issue #83) already says in its tooltip.
+        let close_label = if close_armed {
+            "Click again to close"
+        } else {
+            "Close tab"
+        };
         let mark: AnyElement = if dirty && !close_armed {
             // The two states share the slot and swap by visibility, the way
             // `squircle_skin` swaps its own fills: both are laid out every
@@ -274,6 +297,8 @@ fn render_diff_tab(
         chip = chip.child(
             div()
                 .id(SharedString::from(format!("diff-dock-tab-close-{index}")))
+                .role(Role::Button)
+                .aria_label(close_label)
                 .flex_none()
                 .size(px(16.))
                 .flex()
@@ -288,6 +313,7 @@ fn render_diff_tab(
                     gpui::transparent_black(),
                     crate::app::constants::sidebar_tab_active_background(),
                 )
+                .delayed_tooltip(text_tooltip(close_label))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                     this.request_close_diff_tab(index, cx);
@@ -427,15 +453,20 @@ pub(super) fn render_diff_file_header(
 /// `squircle`, not a circular `rounded()`), and the same hover tint. The dock
 /// chrome and the workspace rail are the same control family, so they share one
 /// silhouette instead of drifting into two.
+///
+/// `label` is the button's accessible name and its tooltip (issue #340).
 pub(super) fn render_diff_header_icon_button(
     id: &'static str,
     icon: &'static str,
+    label: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
     color: Hsla,
 ) -> AnyElement {
     squircle_skin(
         div()
             .id(id)
+            .role(Role::Button)
+            .aria_label(label)
             .flex_none()
             .size(px(28.))
             .flex()
@@ -446,6 +477,7 @@ pub(super) fn render_diff_header_icon_button(
         None,
         Some(crate::app::constants::sidebar_tab_hover_background()),
     )
+    .delayed_tooltip(text_tooltip(label))
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     .on_click(on_click)
     .child(svg().size(px(14.)).flex_none().path(icon).text_color(color))
@@ -552,7 +584,63 @@ pub(super) fn diff_panel_centered(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_probe::source_slice;
     use std::path::Path;
+
+    /// Issue #340: the dock's icon-only controls (the strip's `+`, a tab's
+    /// close, the header close) had no button role, no accessible name and no
+    /// tooltip. Each chain now carries all three from one label and activates
+    /// on `on_click`, the only activation AccessKit exposes.
+    #[test]
+    fn dock_icon_buttons_are_accessible_named_buttons() {
+        let source = include_str!("render.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production dock render source");
+        let header = source_slice(
+            source,
+            "pub(super) fn render_diff_header_icon_button(",
+            "\n}\n",
+        );
+        for needle in [
+            "label: &'static str,",
+            ".role(Role::Button)",
+            ".aria_label(label)",
+            ".delayed_tooltip(text_tooltip(label))",
+            ".on_click(on_click)",
+        ] {
+            assert!(
+                header.contains(needle),
+                "render_diff_header_icon_button lost `{needle}`"
+            );
+        }
+        let new_tab = source_slice(
+            source,
+            ".id(\"diff-dock-tab-new\")",
+            "this.toggle_diff_new_tab_menu(",
+        );
+        for needle in [
+            ".role(Role::Button)",
+            ".aria_label(NEW_TAB_LABEL)",
+            ".delayed_tooltip(text_tooltip(NEW_TAB_LABEL))",
+            ".on_click(",
+        ] {
+            assert!(new_tab.contains(needle), "the strip's `+` lost `{needle}`");
+        }
+        let close = source_slice(
+            source,
+            "format!(\"diff-dock-tab-close-{index}\")",
+            "this.request_close_diff_tab(",
+        );
+        for needle in [
+            ".role(Role::Button)",
+            ".aria_label(close_label)",
+            ".delayed_tooltip(text_tooltip(close_label))",
+            ".on_click(",
+        ] {
+            assert!(close.contains(needle), "the tab close lost `{needle}`");
+        }
+    }
 
     /// US-017: the chip's icon is derived from the extension, with
     /// `icons/file-text.svg` as the declared fallback.

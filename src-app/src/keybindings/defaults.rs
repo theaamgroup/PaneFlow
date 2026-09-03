@@ -475,6 +475,16 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_launch_pad",
         context: None,
     },
+    // Issue #339: Pane Overview. `p` for panes; `secondary-shift-p` is free on
+    // this table today and stays clear of `secondary-shift-a` (attention
+    // queue) and `secondary-shift-l` (launch pad), the two chords a user
+    // reaches for in the same breath. Global for the same reason those are:
+    // a terminal holds focus nearly always.
+    DefaultBinding {
+        key: "secondary-shift-p",
+        action_name: "open_pane_overview",
+        context: None,
+    },
 ];
 
 /// Platform-specific default bindings layered on top of [`DEFAULTS`].

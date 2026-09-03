@@ -201,7 +201,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 92 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 93 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -222,6 +222,9 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
+│   ├── pane_overview/                 ← Cmd+Shift+P expose: every terminal pane across every
+│                                         workspace/tab, grouped, each bottom-cropped to its last
+│                                         12 rows (rows.rs is the pure, GPUI-free row model)
 │   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
 │   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
@@ -260,6 +263,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │       ├── font.rs / geometry.rs      ← font resolution + cell geometry
 │       ├── hyperlink.rs               ← OSC 8 + URL scanning
 │       ├── paint/                     ← background, text, cursor, selection, scrollbar, box-drawing
+│       ├── thumbnail.rs               ← read-only cropped pane preview; NEVER routes through
+│                                          TerminalElement (its build_layout resizes the PTY)
 │       └── golden/ pixel_probe.rs     ← golden-image + pixel assertions
 ├── theme/                             ← theme model + hot-reload (8 bundled variants)
 │   ├── model.rs                       ← TerminalTheme (36 Hsla slots + ui + syntax), UiColors
@@ -339,6 +344,7 @@ KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
 | `paneflow-mcp` | `crates/paneflow-mcp/` | Binary | Read-only stdio MCP server (see below) |
 | `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | GPU-free per-agent MCP config merge engine |
+| `paneflow-agent-setup` | `crates/paneflow-agent-setup/` | Library | GPU-free rulebook inventory (instruction files, skills, rules, hooks, MCP) behind the dock's Agent setup tab (#331) |
 | `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 16 agent CLIs |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
@@ -399,11 +405,11 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 92 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 93 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
-**The macOS menu bar** (`app/bootstrap.rs::install_macos_menu_bar`, `#[cfg(target_os = "macos")]`) is PaneFlow (`About PaneFlow`, `Settings…`, separator, `Report an Issue`, separator, `Quit PaneFlow`) / Edit / Window / Help (`PaneFlow Help`, separator, `System Info…`). `Settings…` dispatches `OpenSettings` into `open_settings_window`. `Report an Issue` dispatches `ReportIssue` and opens `https://github.com/theaamgroup/paneflow/issues/new` in the default browser. `System Info…` dispatches `ShowSystemInfo` into `open_system_info_dialog` (`app/system_info_dialog.rs`): a copyable environment block - version, install format, OS, CPU, GPU, renderer, libghostty version - with no project path and no environment dump, collected off the render thread by `system_info.rs` (`sysctl`, `MTLCopyAllDevices`, and `sparkle::bundled_framework_binary` for the install format). Like `About` / `OpenHelp` / `OpenSettings` / `ReportIssue` it has no default chord and is absent from `keybindings/registry.rs::ACTIONS`. Theme selection lives in Settings → Appearance (and the title-bar profile menu's `Themes…` row, which calls `open_theme_picker` directly); there is no View menu. Every menu action needs BOTH a render-root `.on_action` in `main.rs` and an app-global fallback in `install_macos_menu_action_fallbacks`, or AppKit's `is_action_available` check paints the item permanently greyed while focus sits in a terminal. `OpenSettings` is deliberately absent from `keybindings/registry.rs::ACTIONS` (the `About` / `OpenHelp` precedent) so Settings → Keyboard Shortcuts does not grow permanently `Unassigned` rows, and **`Cmd+,` is deliberately unbound** (issue #105) - `no_default_binds_the_macos_preferences_chord` in `keybindings/apply.rs` fails if any default claims it. The sidebar's "Workspaces" header carries no `+`; New Workspace is `Cmd+Shift+N`, Window ▸ New Workspace, the profile menu, and the empty-state "Open folder" button. The sidebar footer carries **no Settings affordance at all** - the gear that survived issue #105 is gone, so `Settings…` on the menu bar and the title-bar profile menu are the only two entry points.
+**The macOS menu bar** (`app/bootstrap.rs::install_macos_menu_bar`, `#[cfg(target_os = "macos")]`) is PaneFlow (`About PaneFlow`, `Settings…`, separator, `Report an Issue`, separator, `Quit PaneFlow`) / Edit / Window (`Minimize`, `Zoom`, separator, `Show All Panes`, separator, `Next Workspace`, `Close Workspace`, `New Workspace`) / Help (`PaneFlow Help`, separator, `System Info…`). `Settings…` dispatches `OpenSettings` into `open_settings_window`. `Report an Issue` dispatches `ReportIssue` and opens `https://github.com/theaamgroup/paneflow/issues/new` in the default browser. `System Info…` dispatches `ShowSystemInfo` into `open_system_info_dialog` (`app/system_info_dialog.rs`): a copyable environment block - version, install format, OS, CPU, GPU, renderer, libghostty version - with no project path and no environment dump, collected off the render thread by `system_info.rs` (`sysctl`, `MTLCopyAllDevices`, and `sparkle::bundled_framework_binary` for the install format). Like `About` / `OpenHelp` / `OpenSettings` / `ReportIssue` it has no default chord and is absent from `keybindings/registry.rs::ACTIONS`. Theme selection lives in Settings → Appearance (and the title-bar profile menu's `Themes…` row, which calls `open_theme_picker` directly); there is no View menu. Every menu action needs BOTH a render-root `.on_action` in `main.rs` and an app-global fallback in `install_macos_menu_action_fallbacks`, or AppKit's `is_action_available` check paints the item permanently greyed while focus sits in a terminal. `OpenSettings` is deliberately absent from `keybindings/registry.rs::ACTIONS` (the `About` / `OpenHelp` precedent) so Settings → Keyboard Shortcuts does not grow permanently `Unassigned` rows, and **`Cmd+,` is deliberately unbound** (issue #105) - `no_default_binds_the_macos_preferences_chord` in `keybindings/apply.rs` fails if any default claims it. The sidebar's "Workspaces" header carries no `+` (issue #105); it does carry the Pane Overview button (issue #339, id `sidebar-pane-overview`), which the #105 guard test permits because it forbids only the `sidebar-new-workspace` id. New Workspace is `Cmd+Shift+N`, Window ▸ New Workspace, the profile menu, and the empty-state "Open folder" button. The sidebar footer carries **no Settings affordance at all** - the gear that survived issue #105 is gone, so `Settings…` on the menu bar and the title-bar profile menu are the only two entry points.
 
 | Key | Action | Context |
 |-----|--------|---------|
@@ -419,6 +425,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 92 ac
 | `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
 | `Cmd+Shift+Z` | Toggle zoom | Global |
 | `Cmd+Shift+J` / `Cmd+Shift+A` | Jump to next waiting agent / open attention queue | Global |
+| `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
 | `Cmd+Shift+G` | Diff view | Global |
 | `Cmd+G` / `Cmd+J` | New file tab / new terminal tab (diff dock; `secondary-g` / `secondary-j`) | Global, not Terminal/TextInput/CodeEditor |
 | `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |

@@ -578,6 +578,10 @@ pub(crate) fn text_tooltip(
 
 // ── Icon buttons ────────────────────────────────────────────────────────────
 
+/// Issue #340: one `label` feeds the button role's accessible name AND the
+/// tooltip, so an icon-only control cannot be built with one and not the
+/// other. The caller chains `.on_click` (never `on_mouse_down`: AccessKit
+/// exposes only the click as the button's activation).
 fn icon_button(
     id: impl Into<ElementId>,
     outer: Pixels,
@@ -587,16 +591,18 @@ fn icon_button(
     icon_color: Hsla,
     hover_bg: Hsla,
 ) -> AnimatedHover {
+    let label: SharedString = label.into();
     div()
         .id(id.into())
         .role(Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
         .size(outer)
         .rounded(px(4.))
+        .delayed_tooltip(text_tooltip(label))
         .animated_hover_bg(hover_bg.opacity(0.0), hover_bg)
         .child(
             svg()
@@ -608,8 +614,8 @@ fn icon_button(
 }
 
 /// 20×20 icon button (12px glyph). `label` is the accessible name announced by
-/// assistive technology (usually the tooltip text). The caller chains
-/// `.on_click` / `.tooltip` and any resting-state `.bg(..)`.
+/// assistive technology and the tooltip text. The caller chains `.on_click`
+/// and any resting-state `.bg(..)`.
 pub(crate) fn icon_button_sm(
     id: impl Into<ElementId>,
     icon: &'static str,
@@ -621,8 +627,8 @@ pub(crate) fn icon_button_sm(
 }
 
 /// 24×24 icon button (13px glyph). `label` is the accessible name announced by
-/// assistive technology (usually the tooltip text). The caller chains
-/// `.on_click` / `.tooltip` and any resting-state `.bg(..)`.
+/// assistive technology and the tooltip text. The caller chains `.on_click`
+/// and any resting-state `.bg(..)`.
 pub(crate) fn icon_button_md(
     id: impl Into<ElementId>,
     icon: &'static str,
@@ -638,7 +644,17 @@ pub(crate) fn icon_button_md(
 /// An icon+label toolbar control (24px tall, subtle-gray resting/hover fill).
 /// `active` paints the resting highlight (open popover / toggle on). The caller
 /// chains `.on_click` and the icon/label children.
-pub(crate) fn toolbar_pill(id: impl Into<ElementId>, ui: UiColors, active: bool) -> AnimatedHover {
+///
+/// Issue #340: the pill is always a `Role::Button`. `label` is its accessible
+/// name and its tooltip, from one string; `None` is the explicit opt-out for a
+/// pill whose visible text child already reads as its name (the base-branch
+/// chip, "Collapse all"). An icon-only pill must pass `Some`.
+pub(crate) fn toolbar_pill(
+    id: impl Into<ElementId>,
+    ui: UiColors,
+    active: bool,
+    label: Option<SharedString>,
+) -> AnimatedHover {
     let resting_bg = if active {
         ui.subtle
     } else {
@@ -647,6 +663,11 @@ pub(crate) fn toolbar_pill(id: impl Into<ElementId>, ui: UiColors, active: bool)
 
     div()
         .id(id.into())
+        .role(Role::Button)
+        .when_some(label, |pill, label| {
+            pill.aria_label(label.clone())
+                .delayed_tooltip(text_tooltip(label))
+        })
         .flex_none()
         .flex()
         .flex_row()
@@ -964,6 +985,62 @@ mod tests {
             gpui::white(),
         );
         assert_button_a11y(&md, "Open terminal");
+    }
+
+    /// Issue #340: the primitives own the whole accessible-button recipe, so
+    /// an icon-only control built through them cannot ship without a name or
+    /// a tooltip. `toolbar_pill` names itself from the same string when one is
+    /// given, and stays a button when the caller opts out for visible text.
+    #[test]
+    fn toolbar_pill_is_a_button_named_by_its_label() {
+        let ui = crate::theme::ui_colors();
+        let named = toolbar_pill(
+            "a11y-pill",
+            ui,
+            false,
+            Some("Columns scroll together".into()),
+        );
+        assert_button_a11y(&named, "Columns scroll together");
+
+        let visible_text = toolbar_pill("a11y-pill-text", ui, false, None);
+        assert_eq!(
+            Element::a11y_role(&visible_text),
+            Some(gpui::accesskit::Role::Button),
+            "an opted-out pill must still expose Role::Button"
+        );
+    }
+
+    /// Issue #340: the tooltip is applied by the primitive, from the same
+    /// `label` that names the button, so callers cannot drift the two apart.
+    #[test]
+    fn icon_button_primitives_apply_the_tooltip_from_the_label() {
+        let this_file = include_str!("ui_primitives.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production ui_primitives source");
+        let icon_body = crate::source_probe::source_slice(this_file, "fn icon_button(", "\n}\n");
+        for needle in [
+            ".role(Role::Button)",
+            ".aria_label(label.clone())",
+            ".delayed_tooltip(text_tooltip(label))",
+        ] {
+            assert!(
+                icon_body.contains(needle),
+                "icon_button lost `{needle}`; icon_button_sm/md callers rely on it"
+            );
+        }
+        let pill_body =
+            crate::source_probe::source_slice(this_file, "pub(crate) fn toolbar_pill(", "\n}\n");
+        for needle in [
+            ".role(Role::Button)",
+            "pill.aria_label(label.clone())",
+            ".delayed_tooltip(text_tooltip(label))",
+        ] {
+            assert!(
+                pill_body.contains(needle),
+                "toolbar_pill lost `{needle}`; its label must feed both name and tooltip"
+            );
+        }
     }
 
     struct FilterPillHarness {

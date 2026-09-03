@@ -171,7 +171,12 @@ actions!(
         // Issue #106: collapse/expand the primary left rail from the keyboard.
         // Until this existed the rail was mouse-only - the title-bar button
         // was the single way to reach it.
-        TogglePrimarySidebar
+        TogglePrimarySidebar,
+        // Issue #339: Pane Overview - every open terminal pane across every
+        // workspace and tab, grouped, with a cropped live preview each.
+        // Global context: a terminal holds focus nearly all the time, so a
+        // scoped binding would be dead exactly when it is wanted.
+        OpenPaneOverview
     ]
 );
 

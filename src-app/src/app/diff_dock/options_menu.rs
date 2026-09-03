@@ -8,14 +8,18 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton, MouseUpEvent,
-    ParentElement, StatefulInteractiveElement, Styled, deferred, div, prelude::FluentBuilder, px,
-    svg,
+    ParentElement, Role, StatefulInteractiveElement, Styled, deferred, div, prelude::FluentBuilder,
+    px, svg,
 };
 
 use super::model::DiffChrome;
 use crate::PaneFlowApp;
 use crate::settings::components::{menu_divider_color, menu_surface, select_item};
-use crate::ui_primitives::{ROW_RADIUS, squircle_skin};
+use crate::ui_primitives::{ROW_RADIUS, TooltipDelayExt, squircle_skin, text_tooltip};
+
+/// Accessible name and tooltip of the dock's `…` trigger (issue #340: one
+/// string feeds both).
+const DOCK_OPTIONS_LABEL: &str = "Dock options";
 
 /// Width of the overflow popover. Sized so "Refresh Changes" and the "Layout /
 /// Split" pair breathe without the menu overhanging a narrow dock.
@@ -56,6 +60,8 @@ pub(super) fn render_diff_options_button(
     squircle_skin(
         div()
             .id("diff-dock-options")
+            .role(Role::Button)
+            .aria_label(DOCK_OPTIONS_LABEL)
             .flex_none()
             .size(px(28.))
             .flex()
@@ -66,6 +72,7 @@ pub(super) fn render_diff_options_button(
         open.then_some(hover),
         Some(hover),
     )
+    .delayed_tooltip(text_tooltip(DOCK_OPTIONS_LABEL))
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     // Toggle off the render-time `open` snapshot, not the live state: while
     // the menu is up, its `on_mouse_up_out` fires on this same release and has

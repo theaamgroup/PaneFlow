@@ -7,6 +7,12 @@ use crate::ui_primitives::{
 };
 use crate::widgets::callout::{Callout, CalloutIcon, CalloutSeverity};
 
+/// Accessible name and tooltip of the per-branch "Review" pill (issue #340:
+/// one string feeds both).
+const REVIEW_BRANCH_LABEL: &str = "Review this branch with an AI agent";
+/// Accessible name and tooltip of the per-branch terminal button.
+const OPEN_SHELL_LABEL: &str = "Open a shell here to run git commands in this worktree";
+
 impl DiffView {
     fn render_arrange(&self, node: &Arrange, mode: ViewMode, cx: &mut Context<Self>) -> AnyElement {
         match node {
@@ -365,6 +371,13 @@ impl DiffView {
         // payload's ghost label. Click still selects (GPUI distinguishes click
         // from drag by a move threshold).
         let branch_drag = SharedString::from(col.branch.clone());
+        // The `×` names what its click does below: a worktree-scoped column is
+        // removed from the scope, any other one is hidden in place.
+        let hide_label = if self.close_removes {
+            "Close column"
+        } else {
+            "Hide column"
+        };
         let header = div()
             .id(SharedString::from(format!("diff-col-head-{idx}")))
             // Positioned ancestor for the Review CLI-picker popover below.
@@ -442,10 +455,8 @@ impl DiffView {
                         SharedString::from(format!("diff-col-review-{idx}")),
                         ui,
                         review_open,
+                        Some(REVIEW_BRANCH_LABEL.into()),
                     )
-                    .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                        "Review this branch with an AI agent",
-                    ))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.toggle_review_menu(idx, cx);
                     }))
@@ -464,6 +475,8 @@ impl DiffView {
             .child(
                 div()
                     .id(SharedString::from(format!("diff-col-term-{idx}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(OPEN_SHELL_LABEL)
                     .flex_none()
                     .flex()
                     .items_center()
@@ -471,9 +484,7 @@ impl DiffView {
                     .size(px(18.))
                     .rounded(px(4.))
                     .animated_hover_bg(ui.text.opacity(0.0), ui.text.opacity(0.12))
-                    .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                        "Open a shell here to run git commands in this worktree",
-                    ))
+                    .delayed_tooltip(crate::ui_primitives::text_tooltip(OPEN_SHELL_LABEL))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.open_terminal_for_column(idx, window, cx);
                     }))
@@ -488,6 +499,8 @@ impl DiffView {
             .child(
                 div()
                     .id(SharedString::from(format!("diff-col-hide-{idx}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(hide_label)
                     .flex_none()
                     .px(px(4.))
                     .text_size(BODY)
@@ -495,6 +508,7 @@ impl DiffView {
                     .animated_hover(move |style, delta| {
                         style.text_color(lerp_color(ui.muted, ui.text, delta));
                     })
+                    .delayed_tooltip(crate::ui_primitives::text_tooltip(hide_label))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         // Worktree scope: deselect the branch from the scope (the
                         // host drops it + rebuilds) so it's strictly shown-or-not.
@@ -703,9 +717,12 @@ impl DiffView {
             .filter(|(total, _)| *total > 0);
 
         // Pill control (icon + label). `active` paints the resting highlight
-        // (open popover / toggle on).
-        let control =
-            |id: &'static str, active: bool| crate::ui_primitives::toolbar_pill(id, ui, active);
+        // (open popover / toggle on). `label` names an icon-only pill for
+        // assistive technology and the tooltip; a pill with visible text
+        // passes `None` (issue #340).
+        let control = |id: &'static str, active: bool, label: Option<&'static str>| {
+            crate::ui_primitives::toolbar_pill(id, ui, active, label.map(SharedString::from))
+        };
         let icon = |path: &'static str| {
             gpui::svg()
                 .size(px(13.))
@@ -774,7 +791,7 @@ impl DiffView {
                 )
             })
             .child(
-                control("diff-base-chip", self.base_picker_open)
+                control("diff-base-chip", self.base_picker_open, None)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_base_picker(window, cx);
                     }))
@@ -819,9 +836,6 @@ impl DiffView {
                                 "icons/chevron_up.svg",
                                 "Previous hunk ([)",
                             )
-                            .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                                "Previous hunk ([)",
-                            ))
                             .on_click(cx.listener(
                                 |this, _: &ClickEvent, window, cx| {
                                     this.goto_hunk(false, window, cx);
@@ -838,9 +852,6 @@ impl DiffView {
                         )
                         .child(
                             nav_btn("diff-hunk-next", "icons/chevron-down.svg", "Next hunk (])")
-                                .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                                    "Next hunk (])",
-                                ))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.goto_hunk(true, window, cx);
                                 })),
@@ -894,10 +905,8 @@ impl DiffView {
                                     "diff-toolbar-review",
                                     ui,
                                     review_open,
+                                    Some(REVIEW_BRANCH_LABEL.into()),
                                 )
-                                .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                                    "Review this branch with an AI agent",
-                                ))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                                     this.toggle_review_menu(idx, cx);
                                 }))
@@ -919,13 +928,10 @@ impl DiffView {
                     crate::ui_primitives::icon_button_md(
                         "diff-toolbar-terminal",
                         "icons/terminal.svg",
-                        "Open a shell here to run git commands in this worktree",
+                        OPEN_SHELL_LABEL,
                         ui.muted,
                         ui.text.opacity(0.12),
                     )
-                    .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                        "Open a shell here to run git commands in this worktree",
-                    ))
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| {
                             this.open_terminal_for_column(idx, window, cx);
@@ -935,7 +941,7 @@ impl DiffView {
             })
             // --- right: list actions ---
             .child(
-                control("diff-collapse-all", false)
+                control("diff-collapse-all", false, None)
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                         this.toggle_collapse_all(cx);
                     }))
@@ -953,7 +959,7 @@ impl DiffView {
             )
             .when(hidden > 0, |d| {
                 d.child(
-                    control("diff-show-hidden", false)
+                    control("diff-show-hidden", false, None)
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                             this.show_all_columns(cx);
                         }))
@@ -963,14 +969,17 @@ impl DiffView {
             })
             .when(self.visible_count() > 1, |d| {
                 d.child(
-                    control("diff-sync-toggle", self.sync_scroll)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.toggle_sync(cx)))
-                        .delayed_tooltip(crate::ui_primitives::text_tooltip(if self.sync_scroll {
+                    control(
+                        "diff-sync-toggle",
+                        self.sync_scroll,
+                        Some(if self.sync_scroll {
                             "Columns scroll together (s)"
                         } else {
                             "Columns scroll independently (s)"
-                        }))
-                        .child(icon("icons/link.svg")),
+                        }),
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.toggle_sync(cx)))
+                    .child(icon("icons/link.svg")),
                 )
             })
             // --- right: view-mode segmented control ---
