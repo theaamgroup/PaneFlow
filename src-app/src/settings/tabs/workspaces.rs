@@ -8,8 +8,8 @@
 use crate::ui_primitives::TooltipDelayExt;
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, ElementId, FontWeight, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, PathPromptOptions, SharedString, Styled, div, img,
-    prelude::*, px, rgb, svg,
+    IntoElement, MouseButton, ParentElement, PathPromptOptions, Role, SharedString, Styled, div,
+    img, prelude::*, px, rgb, svg,
 };
 use paneflow_config::schema::{
     CommandDefinition, LayoutNode, SurfaceDefinition, WorkspaceDefinition,
@@ -1919,6 +1919,10 @@ fn icon_button(
         .child(label.into())
 }
 
+/// Accessible name and tooltip of a template pane's trash button (issue #340:
+/// one string feeds both).
+const PANE_DELETE_LABEL: &str = "Delete pane";
+
 fn pane_delete_button(id: impl Into<ElementId>, ui: crate::theme::UiColors) -> AnimatedHover {
     let icon_color = ui.muted;
     let resting_background = with_alpha(ui.text, 0.0);
@@ -1926,6 +1930,8 @@ fn pane_delete_button(id: impl Into<ElementId>, ui: crate::theme::UiColors) -> A
 
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(PANE_DELETE_LABEL)
         .flex_none()
         .w(px(26.))
         .h(px(26.))
@@ -1935,7 +1941,7 @@ fn pane_delete_button(id: impl Into<ElementId>, ui: crate::theme::UiColors) -> A
         .rounded(px(7.))
         .text_color(icon_color)
         .animated_hover_bg(resting_background, hover_bg)
-        .delayed_tooltip(crate::ui_primitives::text_tooltip("Delete pane"))
+        .delayed_tooltip(crate::ui_primitives::text_tooltip(PANE_DELETE_LABEL))
         .child(
             svg()
                 .size(px(13.))

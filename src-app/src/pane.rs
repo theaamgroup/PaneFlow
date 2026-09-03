@@ -16,6 +16,7 @@
 //! owns the fill (commit `30e26c5`).
 
 use crate::ui_primitives::TooltipDelayExt;
+use gpui::Role;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -1031,18 +1032,37 @@ impl Pane {
             .or_else(|| Some(trimmed.to_string()))
     }
 
-    /// Render a small icon button for the pane header end section.
+    /// The chord a header label quotes for `action`: the user's own remap in
+    /// Settings when there is one, else `default`, rendered with
+    /// `format_keystroke`'s Apple glyphs.
+    fn binding_label(&self, action: &str, default: &str) -> String {
+        crate::keybindings::format_keystroke(
+            self.cached_config
+                .shortcuts
+                .iter()
+                .find(|(_, bound)| bound.as_str() == action)
+                .map(|(key, _)| key.as_str())
+                .unwrap_or(default),
+        )
+    }
+
+    /// Render a small icon button for the far-right header action cluster.
+    /// `label` is its accessible name and tooltip (issue #340).
     fn action_button(
         &self,
         id: &'static str,
+        label: impl Into<SharedString>,
         icon_path: &'static str,
         handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ui = pane_colors();
-        self.action_button_shell(
+        self.header_button_shell(
             SharedString::from(id),
+            label.into(),
             Self::command_icon(SharedString::from(icon_path), ui.muted, false),
+            ACTION_BUTTON_SIZE,
+            4.0,
             ui.muted,
             Some(ui.text),
             handler,
@@ -1104,10 +1124,15 @@ impl Pane {
     /// Shared shell for header icon buttons. The live progress cell lets a
     /// rapid enter/exit reverse from the currently painted value instead of
     /// snapping to an endpoint.
+    ///
+    /// Issue #340: `label` is the shell's accessible name and its tooltip, and
+    /// the shell is a `Role::Button` that activates on `on_click`, so every
+    /// header icon is a named control for assistive technology.
     #[allow(clippy::too_many_arguments)]
     fn header_button_shell(
         &self,
         id: SharedString,
+        label: SharedString,
         icon: AnyElement,
         size: f32,
         radius: f32,
@@ -1128,6 +1153,8 @@ impl Pane {
         let active_background = crate::app::constants::sidebar_tab_active_background();
         let button = div()
             .id(id.clone())
+            .role(Role::Button)
+            .aria_label(label.clone())
             .flex()
             .flex_none()
             .items_center()
@@ -1135,6 +1162,7 @@ impl Pane {
             .w(px(size))
             .h(px(size))
             .rounded(px(radius))
+            .delayed_tooltip(crate::ui_primitives::text_tooltip(label))
             .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                 let target = if *hovered { 1.0 } else { 0.0 };
                 if this.set_header_hover_target(&hover_id, &hover_live_progress, target) {
@@ -1209,28 +1237,6 @@ impl Pane {
         button.child(visual).into_any_element()
     }
 
-    /// Fixed-size wrapper for the far-right header action cluster.
-    fn action_button_shell(
-        &self,
-        id: SharedString,
-        icon: AnyElement,
-        base_tint: Hsla,
-        hover_tint: Option<Hsla>,
-        handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.header_button_shell(
-            id,
-            icon,
-            ACTION_BUTTON_SIZE,
-            4.0,
-            base_tint,
-            hover_tint,
-            handler,
-            cx,
-        )
-    }
-
     /// Paint one frame of the close chip at `progress` (0 = resting, 1 =
     /// hovered). Fill and glyph move together: the circle washes from a faint
     /// tint of the theme text color up to a near-solid one while the cross
@@ -1282,7 +1288,10 @@ impl Pane {
     /// glyph cross-fade on hover over `HEADER_HOVER_MS`. It rides the same
     /// hover-motion map as the trailing action buttons, so an interrupted
     /// hover resumes from where it was instead of snapping.
-    fn render_close_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    ///
+    /// `label` is the chip's accessible name and its tooltip (issue #340); the
+    /// header computes it because it tracks the arming state (issue #83).
+    fn render_close_button(&self, label: SharedString, cx: &mut Context<Self>) -> AnyElement {
         let ui = pane_colors();
         let armed = self.close_armed();
         let id = SharedString::from("pane-btn-close");
@@ -1326,12 +1335,15 @@ impl Pane {
 
         div()
             .id(id)
+            .role(Role::Button)
+            .aria_label(label.clone())
             .flex_none()
             .size(px(CLOSE_BUTTON_SIZE))
             .flex()
             .items_center()
             .justify_center()
             .rounded_full()
+            .delayed_tooltip(crate::ui_primitives::text_tooltip(label))
             .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                 let target = if *hovered { 1.0 } else { 0.0 };
                 if this.set_header_hover_target(&hover_id, &hover_progress, target) {
@@ -1734,14 +1746,7 @@ impl Pane {
         } else {
             format!(
                 "Close pane ({})",
-                crate::keybindings::format_keystroke(
-                    self.cached_config
-                        .shortcuts
-                        .iter()
-                        .find(|(_, action)| action.as_str() == "close_pane")
-                        .map(|(key, _)| key.as_str())
-                        .unwrap_or("secondary-shift-w"),
-                )
+                self.binding_label("close_pane", "secondary-shift-w")
             )
         };
         let close_button = div()
@@ -1751,8 +1756,7 @@ impl Pane {
                 slot.invisible()
                     .group_hover(HEADER_GROUP, |style| style.visible())
             })
-            .delayed_tooltip(crate::ui_primitives::text_tooltip(close_tooltip))
-            .child(self.render_close_button(cx));
+            .child(self.render_close_button(close_tooltip.into(), cx));
 
         // Header melts into the terminal body below it - one clean surface
         // (Arthur). It paints nothing of its own: the pane card behind it owns
@@ -1890,6 +1894,10 @@ impl Pane {
             // Split vertical (panes side by side)
             .child(self.action_button(
                 "pane-btn-split-v",
+                format!(
+                    "Split vertical ({})",
+                    self.binding_label("split_vertically", "secondary-shift-e")
+                ),
                 "icons/split_vertical.svg",
                 cx.listener(|_this, _, _window, cx| {
                     cx.emit(PaneEvent::Split(crate::layout::SplitDirection::Vertical));
@@ -1899,6 +1907,10 @@ impl Pane {
             // Split horizontal (panes top/bottom)
             .child(self.action_button(
                 "pane-btn-split-h",
+                format!(
+                    "Split horizontal ({})",
+                    self.binding_label("split_horizontally", "secondary-shift-d")
+                ),
                 "icons/split_horizontal.svg",
                 cx.listener(|_this, _, _window, cx| {
                     cx.emit(PaneEvent::Split(crate::layout::SplitDirection::Horizontal));
@@ -1916,6 +1928,7 @@ impl Pane {
             .when(show_sessions_button, |s| {
                 s.child(self.action_button(
                     "pane-btn-claude-sessions",
+                    "Agent sessions",
                     "icons/sessions.svg",
                     cx.listener(|_this, _e: &ClickEvent, _window, cx| {
                         cx.emit(PaneEvent::ToggleAgentSessions);
@@ -1929,6 +1942,7 @@ impl Pane {
             // the cluster so the two splits keep their leading slots.
             .child(self.action_button(
                 "pane-btn-diff-dock",
+                "Toggle dock",
                 "icons/layout-sidebar-right.svg",
                 cx.listener(|_this, _e: &ClickEvent, _window, cx| {
                     cx.emit(PaneEvent::ToggleDiffDock);

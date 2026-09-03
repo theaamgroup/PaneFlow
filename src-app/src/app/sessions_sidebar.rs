@@ -15,10 +15,14 @@
 //! in EP-002 - this slice swaps the surface and renders flat groups.
 
 use crate::ui_primitives::TooltipDelayExt;
+
+/// Accessible name and tooltip of the sidebar's close `×` (issue #340: one
+/// string feeds both).
+const CLOSE_SESSIONS_LABEL: &str = "Close agent sessions";
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Pixels, SharedString, Styled, Window, div, img, prelude::*, px,
-    rgb, svg,
+    KeyDownEvent, ParentElement, Pixels, Role, SharedString, Styled, Window, div, img, prelude::*,
+    px, rgb, svg,
 };
 
 use crate::PaneFlowApp;
@@ -272,6 +276,8 @@ impl PaneFlowApp {
             .child(
                 div()
                     .id("sessions-sidebar-close")
+                    .role(Role::Button)
+                    .aria_label(CLOSE_SESSIONS_LABEL)
                     .flex()
                     .flex_none()
                     .items_center()
@@ -289,6 +295,7 @@ impl PaneFlowApp {
                             ))
                             .text_color(lerp_color(ui.muted, ui.text, delta));
                     })
+                    .delayed_tooltip(crate::ui_primitives::text_tooltip(CLOSE_SESSIONS_LABEL))
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.close_sessions_sidebar(cx);
                         cx.stop_propagation();

@@ -12,8 +12,8 @@ pub(crate) mod context_menu;
 use crate::ui_primitives::TooltipDelayExt;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, FontWeight,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled,
-    Window, div, prelude::*, px, rgb, svg,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString,
+    Styled, Window, div, prelude::*, px, rgb, svg,
 };
 
 use crate::{
@@ -367,14 +367,17 @@ fn sidebar_hover_actions(group: SharedString) -> gpui::Div {
         .group_hover(group, |style| style.visible())
 }
 
-/// One button of a [`sidebar_hover_actions`] cluster. The caller chains its own
-/// tooltip and click handler.
+/// One button of a [`sidebar_hover_actions`] cluster. `label` is the button's
+/// accessible name and its tooltip (issue #340: one string feeds both, so an
+/// action cannot be built without a name). The caller chains its own click
+/// handler.
 ///
 /// `svg()` is a mask: it paints nothing without its own `text_color`, and the
 /// parent's does NOT cascade - the same trap the sidebar header's `+`
 /// documents.
 fn sidebar_action_button(
     id: SharedString,
+    label: SharedString,
     icon: &'static str,
     icon_size: f32,
     ui: crate::theme::UiColors,
@@ -386,6 +389,8 @@ fn sidebar_action_button(
     let active_bg = crate::app::constants::sidebar_tab_active_background();
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
         .flex_none()
         .size(px(SIDEBAR_ACTION_BUTTON_SIZE))
         .flex()
@@ -394,6 +399,12 @@ fn sidebar_action_button(
         .rounded(px(6.))
         .text_color(tint)
         .hover(move |style| style.bg(active_bg))
+        .delayed_tooltip(move |_w, cx| {
+            cx.new(|_| SidebarTooltip {
+                label: label.clone(),
+            })
+            .into()
+        })
         .child(
             svg()
                 .size(px(icon_size))
@@ -1555,19 +1566,11 @@ impl PaneFlowApp {
                 .child(
                     sidebar_action_button(
                         SharedString::from(format!("ws-new-tab-{ws_id}")),
+                        SharedString::from(format!("New pane in {ws_title}")),
                         "icons/plus.svg",
                         12.,
                         ui,
                     )
-                    .delayed_tooltip({
-                        let label = SharedString::from(format!("New pane in {ws_title}"));
-                        move |_w, cx| {
-                            cx.new(|_| SidebarTooltip {
-                                label: label.clone(),
-                            })
-                            .into()
-                        }
-                    })
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| {
                             this.open_pane_palette(idx, window, cx);
@@ -1578,19 +1581,11 @@ impl PaneFlowApp {
                 .child(
                     sidebar_action_button(
                         SharedString::from(format!("ws-close-{ws_id}")),
+                        SharedString::from(format!("Close {ws_title}")),
                         "icons/close.svg",
                         12.,
                         ui,
                     )
-                    .delayed_tooltip({
-                        let label = SharedString::from(format!("Close {ws_title}"));
-                        move |_w, cx| {
-                            cx.new(|_| SidebarTooltip {
-                                label: label.clone(),
-                            })
-                            .into()
-                        }
-                    })
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| {
                             // Re-resolve by id, never by the captured index: rows
@@ -1842,19 +1837,11 @@ impl PaneFlowApp {
             close_actions.child(
                 sidebar_action_button(
                     SharedString::from(format!("tab-close-{tab_id}")),
+                    SharedString::from("Close tab"),
                     "icons/close.svg",
                     12.,
                     ui,
                 )
-                .delayed_tooltip({
-                    let label = SharedString::from("Close tab");
-                    move |_w, cx| {
-                        cx.new(|_| SidebarTooltip {
-                            label: label.clone(),
-                        })
-                        .into()
-                    }
-                })
                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                     // A double-click delivers BOTH clicks to this listener
                     // (the row's own double-click-to-rename below works only
@@ -4023,5 +4010,53 @@ mod tests {
             auto.iter().map(|slot| slot.tab).collect::<Vec<_>>(),
             manual.iter().map(|slot| slot.tab).collect::<Vec<_>>(),
         );
+    }
+
+    /// Issue #340: the rail's hover actions (new pane, close workspace, close
+    /// tab) had tooltips but no button role and no accessible name, so a
+    /// screen reader could not find them at all. The primitive now owns the
+    /// whole recipe - one `label` feeds `Role::Button`, `aria_label` and the
+    /// tooltip - and every caller activates on `on_click`, the only activation
+    /// AccessKit exposes.
+    #[test]
+    fn sidebar_action_buttons_are_accessible_named_buttons() {
+        let source = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production sidebar source");
+        let body = source_slice(source, "fn sidebar_action_button(", "\n}\n");
+        for needle in [
+            "label: SharedString,",
+            ".role(Role::Button)",
+            ".aria_label(label.clone())",
+            ".delayed_tooltip(",
+            "SidebarTooltip {",
+        ] {
+            assert!(
+                body.contains(needle),
+                "sidebar_action_button lost `{needle}`; its label must feed the role, \
+                 the accessible name and the tooltip"
+            );
+        }
+        for id in ["ws-new-tab-", "ws-close-", "tab-close-"] {
+            let id_anchor = format!("format!(\"{id}{{");
+            let at = source
+                .find(&id_anchor)
+                .unwrap_or_else(|| panic!("the sidebar builds the `{id}` action"));
+            let lead = source[..at]
+                .rsplit("sidebar_action_button(")
+                .next()
+                .expect("rsplit always yields");
+            assert_eq!(
+                lead.trim(),
+                "SharedString::from(",
+                "the `{id}` action must be built through sidebar_action_button, which names it"
+            );
+            let chain = source_slice(&source[at..], &id_anchor, ".on_click(");
+            assert!(
+                !chain.contains(".on_mouse_down("),
+                "the `{id}` action must activate on on_click, not on_mouse_down"
+            );
+        }
     }
 }
