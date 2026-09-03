@@ -2571,7 +2571,7 @@ impl Render for PaneFlowApp {
         }
         // Issue #339: Pane Overview (same mode gate).
         if self.pane_overview.is_some() && in_cli_mode {
-            app_content = app_content.child(self.render_pane_overview(cx));
+            app_content = app_content.child(self.render_pane_overview(window, cx));
         }
 
         if self.custom_buttons_modal.is_some() {

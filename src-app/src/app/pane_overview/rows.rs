@@ -38,7 +38,17 @@ pub(crate) struct CardMeta {
     pub cols: usize,
     pub rows: usize,
     pub exited: bool,
+    /// The focused pane of the active tab of the active workspace - the one
+    /// card the overlay opens on and marks "current". True for at most one
+    /// card. NOT "any pane of the active tab".
     pub is_active: bool,
+    /// The card's workspace is the active workspace. Lifted onto
+    /// `WorkspaceGroup::is_active` by `group_cards`; kept separate from
+    /// `is_active` so the header still marks the active workspace when its
+    /// focused pane is a markdown or diff pane.
+    pub ws_is_active: bool,
+    /// `Workspace::git_branch`, empty when the workspace is not a checkout.
+    pub ws_branch: String,
 }
 
 impl CardMeta {
@@ -73,6 +83,10 @@ pub(crate) struct TabGroup {
 pub(crate) struct WorkspaceGroup {
     pub ws_idx: usize,
     pub title: String,
+    /// Shown in the section header beside the title; empty when none.
+    pub branch: String,
+    /// The header's active marker.
+    pub is_active: bool,
     pub tabs: Vec<TabGroup>,
 }
 
@@ -81,6 +95,12 @@ pub(crate) struct WorkspaceGroup {
 /// Input order is the caller's traversal order (workspace index, then tab
 /// index, then layout traversal); grouping is stable and never re-sorts, so
 /// the on-screen order matches `flat_order`.
+///
+/// A workspace with no card - empty, or holding only markdown / diff panes -
+/// never gets a group: a group is created by the first card that lands in it.
+/// That is the product decision pinned by
+/// `group_cards_omits_workspaces_with_no_terminal_cards`, not an accident of
+/// this loop, so do not "fix" it by pre-seeding one group per workspace.
 pub(crate) fn group_cards(cards: Vec<CardMeta>) -> Vec<WorkspaceGroup> {
     let mut groups: Vec<WorkspaceGroup> = Vec::new();
     for card in cards {
@@ -90,6 +110,8 @@ pub(crate) fn group_cards(cards: Vec<CardMeta>) -> Vec<WorkspaceGroup> {
                 groups.push(WorkspaceGroup {
                     ws_idx: card.ws_idx,
                     title: card.ws_title.clone(),
+                    branch: card.ws_branch.clone(),
+                    is_active: card.ws_is_active,
                     tabs: Vec::new(),
                 });
                 groups.len() - 1
@@ -142,6 +164,17 @@ pub(crate) fn flat_order(groups: &[WorkspaceGroup]) -> Vec<u64> {
         .collect()
 }
 
+/// Where the selection cursor starts when the overlay opens: on the current
+/// pane's card (the focused pane of the active tab of the active workspace),
+/// so Esc then Enter is a no-op round trip. Falls back to the first card when
+/// `current` is `None` or not in `order` - no focused terminal, or the focused
+/// pane is a markdown / diff pane the overlay does not list.
+pub(crate) fn initial_selection(order: &[u64], current: Option<u64>) -> usize {
+    current
+        .and_then(|sid| order.iter().position(|id| *id == sid))
+        .unwrap_or(0)
+}
+
 /// Move the selection cursor by `delta`, clamped. Never wraps: wrapping from
 /// the last card of the last workspace to the first is disorienting in a
 /// grouped grid where the two are visually far apart.
@@ -187,6 +220,8 @@ mod tests {
             rows: 24,
             exited: false,
             is_active: false,
+            ws_is_active: false,
+            ws_branch: String::new(),
         }
     }
 
@@ -209,6 +244,40 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].tabs.len(), 1);
         assert_eq!(groups[0].tabs[0].cards.len(), 2);
+    }
+
+    /// Product decision (2026-09-03, spec §7.5): a workspace with no card -
+    /// empty, or holding only markdown / diff panes - gets no section and no
+    /// header. Grouping does this as a side effect (a group only exists once
+    /// a card lands in it); this test makes it a decision, not an accident.
+    #[test]
+    fn group_cards_omits_workspaces_with_no_terminal_cards() {
+        // Workspace 1 has no cards at all: nothing was enumerated for it.
+        let groups = group_cards(vec![card(1, 0, 0, "a"), card(3, 2, 0, "c")]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].ws_idx, 0);
+        assert_eq!(groups[1].ws_idx, 2);
+        assert!(groups.iter().all(|g| !g.tabs.is_empty()));
+        assert!(
+            groups
+                .iter()
+                .all(|g| g.tabs.iter().all(|t| !t.cards.is_empty()))
+        );
+    }
+
+    /// The section header marks the active workspace and shows its branch,
+    /// lifted from the cards rather than looked up again.
+    #[test]
+    fn grouping_lifts_the_active_workspace_and_branch_onto_the_header() {
+        let mut a = card(1, 0, 0, "a");
+        a.ws_is_active = true;
+        a.ws_branch = "main".to_string();
+        let b = card(2, 1, 0, "b");
+        let groups = group_cards(vec![a, b]);
+        assert!(groups[0].is_active);
+        assert_eq!(groups[0].branch, "main");
+        assert!(!groups[1].is_active);
+        assert_eq!(groups[1].branch, "");
     }
 
     #[test]
@@ -260,6 +329,25 @@ mod tests {
             card(3, 1, 0, "c"),
         ]);
         assert_eq!(flat_order(&groups), vec![1, 2, 3]);
+    }
+
+    /// Product decision (2026-09-03): the overlay opens on the current pane's
+    /// card, so Esc then Enter is a no-op round trip.
+    #[test]
+    fn initial_selection_starts_on_the_current_card() {
+        let order = vec![10, 20, 30];
+        assert_eq!(initial_selection(&order, Some(30)), 2);
+        assert_eq!(initial_selection(&order, Some(10)), 0);
+    }
+
+    /// No focused terminal (or the focused pane is a markdown / diff pane):
+    /// fall back to the first card rather than guessing.
+    #[test]
+    fn initial_selection_falls_back_to_the_first_card() {
+        let order = vec![10, 20, 30];
+        assert_eq!(initial_selection(&order, Some(99)), 0);
+        assert_eq!(initial_selection(&order, None), 0);
+        assert_eq!(initial_selection(&[], Some(10)), 0);
     }
 
     #[test]

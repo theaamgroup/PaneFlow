@@ -30,7 +30,7 @@ use crate::limits::clamp_untrusted_label;
 use crate::workspace::Workspace;
 use rows::{
     CardMeta, MAX_LIVE_THUMBNAILS, cards_per_row, filter_cards, flat_order, group_cards,
-    live_thumbnail_ids,
+    initial_selection, live_thumbnail_ids,
 };
 
 /// Card box. The thumbnail band is 320x132 (`terminal/element/thumbnail.rs`);
@@ -42,11 +42,27 @@ const CARD_GAP: f32 = 12.0;
 const CARD_RADIUS: f32 = 10.0;
 const GRID_PADDING: f32 = 16.0;
 
+/// Per-card render flags, decided by `render_pane_overview` once per frame.
+#[derive(Clone, Copy)]
+struct CardFlags {
+    /// Inside the `MAX_LIVE_THUMBNAILS` prefix: paint a live thumbnail.
+    live: bool,
+    /// Under the moving selection cursor.
+    selected: bool,
+    /// The pane that held focus when the overlay opened (spec §7.1).
+    current: bool,
+}
+
 /// Open-overlay state. Cards are never cached here - only the query and the
 /// cursor - so live agent state and live terminal content cannot go stale.
 pub(crate) struct PaneOverviewState {
     pub query: String,
     pub selected: usize,
+    /// The pane that held focus when the overlay opened - the card that
+    /// carries the "current" marker. Captured once at open: while the overlay
+    /// is up its own focus handle holds focus, so it cannot be re-derived on
+    /// render. `None` when no terminal pane was focused.
+    pub current: Option<u64>,
     /// Cards per wrapped row, captured from the last render's real pixel
     /// width by a `canvas()` prepaint. Up/Down move by this. Captured rather
     /// than estimated for the same reason `Container::container_size` is:
@@ -60,6 +76,7 @@ impl Default for PaneOverviewState {
         Self {
             query: String::new(),
             selected: 0,
+            current: None,
             cards_per_row: Rc::new(Cell::new(1)),
         }
     }
@@ -76,14 +93,34 @@ impl Default for PaneOverviewState {
 ///
 /// A free function over the workspace list (not a `PaneFlowApp` method) so a
 /// unit test can drive it without building the app.
+///
+/// Takes a `&Window` because `is_active` is the FOCUSED pane, and focus is a
+/// window property: `LayoutTree::focused_pane(window, cx)`
+/// (`layout/queries.rs`) is the accessor, and it walks the tree testing each
+/// leaf's `focus_handle(cx).is_focused(window)`. There is no
+/// `Workspace::focused_pane`; go through `ws.active_tab().root`.
 pub(crate) fn collect_cards(
     workspaces: &[Workspace],
     active_idx: usize,
+    window: &Window,
     cx: &App,
 ) -> Vec<CardMeta> {
     let mut cards = Vec::new();
     for (ws_idx, ws) in workspaces.iter().enumerate() {
+        let ws_is_active = ws_idx == active_idx;
         let active_tab_idx = ws.active_tab_idx();
+        // The one pane that is "current": only the active workspace's active
+        // tab can hold focus, so resolve it once per workspace and only
+        // there. `None` when focus sits in chrome, in a markdown or diff
+        // pane, or on the empty-workspace placeholder.
+        let focused_pane = if ws_is_active {
+            ws.active_tab()
+                .root
+                .as_ref()
+                .and_then(|root| root.focused_pane(window, cx))
+        } else {
+            None
+        };
         for (tab_idx, tab) in ws.tabs().iter().enumerate() {
             let tab_title = crate::app::sidebar::tab_row_title(tab, tab_idx, cx);
             for pane in tab.collect_panes() {
@@ -122,7 +159,12 @@ pub(crate) fn collect_cards(
                     cols: metrics.columns,
                     rows: metrics.screen_lines,
                     exited: view.terminal.exited.is_some(),
-                    is_active: ws_idx == active_idx && tab_idx == active_tab_idx,
+                    // The focused pane, not merely a pane of the active tab:
+                    // `Entity<Pane>` compares by entity id, so this is true
+                    // for exactly one card at most.
+                    is_active: tab_idx == active_tab_idx && focused_pane.as_ref() == Some(&pane),
+                    ws_is_active,
+                    ws_branch: ws.git_branch.clone(),
                 });
             }
         }
@@ -146,7 +188,18 @@ impl PaneFlowApp {
             self.close_pane_overview_and_restore_focus(window, cx);
             return;
         }
-        self.pane_overview = Some(PaneOverviewState::default());
+        // Product decision (2026-09-03): open on the current pane's card, so
+        // Esc then Enter is a no-op round trip. `is_active` is the focused
+        // pane, resolved while the terminal still holds focus - i.e. BEFORE
+        // the overlay takes it below.
+        let cards = self.collect_pane_overview_cards(window, cx);
+        let current = cards.iter().find(|c| c.is_active).map(|c| c.surface_id);
+        let order = flat_order(&group_cards(cards));
+        self.pane_overview = Some(PaneOverviewState {
+            selected: initial_selection(&order, current),
+            current,
+            ..PaneOverviewState::default()
+        });
         self.pane_overview_focus.focus(window, cx);
         cx.notify();
     }
@@ -186,8 +239,8 @@ impl PaneFlowApp {
         }
     }
 
-    pub(crate) fn collect_pane_overview_cards(&self, cx: &App) -> Vec<CardMeta> {
-        collect_cards(&self.workspaces, self.active_idx, cx)
+    pub(crate) fn collect_pane_overview_cards(&self, window: &Window, cx: &App) -> Vec<CardMeta> {
+        collect_cards(&self.workspaces, self.active_idx, window, cx)
     }
 
     pub(crate) fn handle_pane_overview_key_down(
@@ -201,7 +254,7 @@ impl PaneFlowApp {
             return;
         };
         let per_row = state.cards_per_row.get().max(1) as isize;
-        let cards = filter_cards(&self.collect_pane_overview_cards(cx), &state.query);
+        let cards = filter_cards(&self.collect_pane_overview_cards(window, cx), &state.query);
         let order = flat_order(&group_cards(cards));
         let len = order.len();
         let selected = state.selected.min(len.saturating_sub(1));
@@ -253,14 +306,21 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    pub(crate) fn render_pane_overview(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_pane_overview(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ui = crate::theme::ui_colors();
         let theme = Arc::new(crate::theme::active_theme());
         let (query, per_row_capture) = match self.pane_overview.as_ref() {
             Some(state) => (state.query.clone(), state.cards_per_row.clone()),
             None => (String::new(), Rc::new(Cell::new(1))),
         };
-        let all = self.collect_pane_overview_cards(cx);
+        // Note: while the overlay is open its own focus handle holds focus,
+        // so `is_active` is false for every card on re-render. That is fine -
+        // the "current" marker is decided once, at open, and carried below.
+        let all = self.collect_pane_overview_cards(window, cx);
         let groups = group_cards(filter_cards(&all, &query));
         let order = flat_order(&groups);
         let live = live_thumbnail_ids(&order, MAX_LIVE_THUMBNAILS);
@@ -269,6 +329,7 @@ impl PaneFlowApp {
                 .get(s.selected.min(order.len().saturating_sub(1)))
                 .copied()
         });
+        let current_id = self.pane_overview.as_ref().and_then(|s| s.current);
 
         let mut body = div()
             .relative()
@@ -309,13 +370,35 @@ impl PaneFlowApp {
             );
         } else {
             for group in &groups {
-                let mut section = div().flex().flex_col().gap(px(10.)).child(
+                // Section header: title, branch, active marker (spec §7.1).
+                let mut header = div().flex().flex_row().items_center().gap(px(8.)).child(
                     div()
                         .text_size(px(13.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(ui.text)
                         .child(SharedString::from(group.title.clone())),
                 );
+                if !group.branch.is_empty() {
+                    header = header.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(ui.muted)
+                            .child(SharedString::from(group.branch.clone())),
+                    );
+                }
+                if group.is_active {
+                    header = header.child(
+                        div()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(ui.subtle)
+                            .text_size(px(10.))
+                            .text_color(ui.text)
+                            .child("active"),
+                    );
+                }
+                let mut section = div().flex().flex_col().gap(px(10.)).child(header);
                 for tab in &group.tabs {
                     let mut row = div().flex().flex_col().gap(px(6.)).child(
                         div()
@@ -327,8 +410,11 @@ impl PaneFlowApp {
                     for card in &tab.cards {
                         grid = grid.child(self.render_pane_overview_card(
                             card,
-                            live.contains(&card.surface_id),
-                            selected_id == Some(card.surface_id),
+                            CardFlags {
+                                live: live.contains(&card.surface_id),
+                                selected: selected_id == Some(card.surface_id),
+                                current: current_id == Some(card.surface_id),
+                            },
                             ui,
                             &theme,
                             cx,
@@ -447,14 +533,31 @@ impl PaneFlowApp {
     fn render_pane_overview_card(
         &self,
         card: &CardMeta,
-        live: bool,
-        selected: bool,
+        flags: CardFlags,
         ui: crate::theme::UiColors,
         theme: &Arc<crate::theme::TerminalTheme>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let CardFlags {
+            live,
+            selected,
+            current,
+        } = flags;
         let sid = card.surface_id;
         let (dot, dot_color, status) = pane_overview_status_visual(card.state.as_ref(), ui);
+        // The "current" marker (spec §7.1): the pane that held focus when the
+        // overlay opened. It does not move with the selection.
+        let current_chip = current.then(|| {
+            div()
+                .flex_none()
+                .px(px(5.))
+                .py(px(1.))
+                .rounded(px(4.))
+                .bg(ui.subtle)
+                .text_size(px(9.))
+                .text_color(ui.text)
+                .child("current")
+        });
         let status: SharedString = if card.exited {
             SharedString::from("exited")
         } else {
@@ -498,6 +601,7 @@ impl PaneFlowApp {
                             .text_color(ui.text)
                             .child(SharedString::from(card.name.clone())),
                     )
+                    .children(current_chip)
                     .child(
                         div()
                             .flex_none()
@@ -536,11 +640,7 @@ impl PaneFlowApp {
         };
         shell = shell.child(if card.exited { band.opacity(0.5) } else { band });
 
-        let breadcrumb = if card.is_active {
-            format!("\u{25cf} {} \u{203a} {}", card.ws_title, card.tab_title)
-        } else {
-            format!("{} \u{203a} {}", card.ws_title, card.tab_title)
-        };
+        let breadcrumb = format!("{} \u{203a} {}", card.ws_title, card.tab_title);
         shell
             .child(
                 div()
@@ -657,7 +757,12 @@ mod tests {
         );
         let workspaces = vec![ws, other];
 
-        let cards = cx.update(|_, cx| collect_cards(&workspaces, 0, cx));
+        // Focus the visible pane: `is_active` is the FOCUSED pane, not "any
+        // pane of the active tab".
+        cx.update(|window, cx| {
+            assert!(workspaces[0].focus_first(window, cx));
+        });
+        let cards = cx.update(|window, cx| collect_cards(&workspaces, 0, window, cx));
         let ids: Vec<u64> = cards.iter().map(|c| c.surface_id).collect();
         assert_eq!(
             ids,
@@ -673,22 +778,36 @@ mod tests {
         assert_eq!(hidden.ws_title, "alpha");
         assert_eq!(hidden.tab_title, "background");
         assert!(!hidden.is_active, "a background tab is not the active one");
+        assert!(hidden.ws_is_active, "but its workspace is the active one");
         assert!(hidden.state.is_none(), "no session means idle");
 
         let visible = cards
             .iter()
             .find(|c| c.surface_id == visible_sid)
             .expect("the visible pane is listed");
-        assert!(visible.is_active);
+        assert!(visible.is_active, "the focused pane is the current card");
         assert_eq!(
             (visible.cols, visible.rows),
             (80, 24),
             "grid from the pane itself"
         );
+        let other = cards
+            .iter()
+            .find(|c| c.surface_id == other_sid)
+            .expect("the other workspace's pane is listed");
+        assert!(!other.is_active);
+        assert!(!other.ws_is_active, "workspace 1 is not the active one");
+        assert_eq!(
+            cards.iter().filter(|c| c.is_active).count(),
+            1,
+            "exactly one card is current"
+        );
 
         let groups = group_cards(cards);
         assert_eq!(groups.len(), 2, "one section per workspace");
         assert_eq!(groups[0].tabs.len(), 2, "one row per tab, hidden included");
+        assert!(groups[0].is_active, "the header marks the active workspace");
         assert_eq!(groups[1].title, "beta");
+        assert!(!groups[1].is_active);
     }
 }

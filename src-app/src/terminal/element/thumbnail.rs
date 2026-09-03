@@ -25,9 +25,11 @@ use gpui::{
 };
 
 use super::geometry::CellGeometry;
-use super::{CellDimensions, LayoutInputs, LayoutState, layout_from_snapshot, paint};
+use super::{
+    CellDimensions, LayoutInputs, LayoutState, cursor_from_content, layout_from_snapshot, paint,
+};
 use crate::terminal::TerminalSessionBackend;
-use crate::terminal::types::{Content, TerminalWindowSize, terminal_metric_to_u16};
+use crate::terminal::types::{Content, CursorShape, TerminalWindowSize, terminal_metric_to_u16};
 use crate::theme::TerminalTheme;
 
 /// Rows of the pane's viewport a card shows, counted from the bottom.
@@ -40,22 +42,34 @@ pub(crate) const THUMBNAIL_ROWS: usize = 12;
 
 /// Font size for a thumbnail, in pixels.
 ///
-/// Cell geometry is a pure function of this scalar - `font.rs` computes
-/// `cell_width = round(size * 0.6)` and `line_height = round(size * 1.2)`,
-/// with no glyph measurement - so 9 px yields exactly 5x11 px cells.
+/// Cell geometry is a pure function of this scalar and the two configured
+/// multipliers - `font::cell_dimensions` computes
+/// `cell_width = round(size * settings.cell_width)` and
+/// `line_height = round(size * settings.line_height)`, with no glyph
+/// measurement. At the 0.6 / 1.2 defaults 9 px yields exactly 5x11 px cells.
 pub(crate) const THUMBNAIL_FONT_PX: f32 = 9.0;
 
-/// Thumbnail band size. Both divide evenly by the cell metrics above, which
-/// `the_thumbnail_band_is_a_whole_number_of_cells` pins.
+/// Thumbnail band size, in pixels. These are the DEFAULT-derived figure:
+/// 64 columns x 12 rows at 5x11 px cells. They stay hardcoded on purpose -
+/// the card box is sized to them - and a user with non-default
+/// `cell_width` / `line_height` gets a different number of cells in the same
+/// band, not a different band. `the_thumbnail_band_is_a_whole_number_of_cells`
+/// pins them against the defaults.
 pub(crate) const THUMBNAIL_BAND_W: f32 = 320.0;
 pub(crate) const THUMBNAIL_BAND_H: f32 = 132.0;
 
-/// Cell metrics for a thumbnail, mirroring `font.rs`'s multipliers.
+/// Cell metrics for a thumbnail under `settings`: the same two multipliers
+/// the pane uses, applied to the thumbnail font size through the same
+/// rounding as the pane (`font::cell_dimensions`).
+pub(super) fn thumbnail_cell_dimensions_for(
+    settings: &super::font::FontSettings,
+) -> CellDimensions {
+    super::font::cell_dimensions(settings, px(THUMBNAIL_FONT_PX))
+}
+
+/// Cell metrics for a thumbnail under the live config.
 pub(super) fn thumbnail_cell_dimensions() -> CellDimensions {
-    CellDimensions {
-        cell_width: px((THUMBNAIL_FONT_PX * 0.6).round()),
-        line_height: px((THUMBNAIL_FONT_PX * 1.2).round()),
-    }
+    thumbnail_cell_dimensions_for(&super::font::cached_font_config())
 }
 
 /// A grid snapshot plus the row window a thumbnail paints.
@@ -179,11 +193,31 @@ impl Element for TerminalThumbnail {
 
         let dims = thumbnail_cell_dimensions();
         let (base_font, _size) = thumbnail_font();
+        // A dim, non-blinking block cursor (spec §4.3): a useful "parked at a
+        // prompt" signal for one quad. `cursor_from_content` is the private
+        // helper `build_layout` uses; `focused: true` because the helper
+        // returns `None` for an unfocused pane and a thumbnail is never
+        // "unfocused". It filters `CursorShape::Hidden` itself. The shape is
+        // then forced to `Block` regardless of the pane's own beam/underline/
+        // vintage mode - a 5 px beam is invisible - and `text` is cleared so
+        // the block does not try to re-shape the glyph under it. Blink is not
+        // a layout input: it only gates whether `paint` draws the cursor, and
+        // this element always draws it.
+        let cursor = cursor_from_content(
+            snap.content.cursor,
+            true,
+            self.theme.cursor.opacity(0.5),
+            CursorShape::Block,
+            &self.theme,
+        )
+        .map(|mut c| {
+            c.shape = CursorShape::Block;
+            c.text = None;
+            c
+        });
         Some(layout_from_snapshot(LayoutInputs {
             cells: snap.content.cells.clone(),
-            // No cursor: a thumbnail is not focused, and a blinking or hollow
-            // cursor in a 5px cell reads as noise rather than as a signal.
-            cursor: None,
+            cursor,
             // Selection, copy mode, and search belong to the live pane.
             selection_range: None,
             copy_mode_cursor: None,
@@ -257,6 +291,9 @@ impl Element for TerminalThumbnail {
                 window,
             );
             paint::text::paint_text_runs(&layout, &geom, &base_font, font_size, window, cx);
+            // The dim block cursor built in prepaint. Unconditional: there is
+            // no blink phase here.
+            paint::cursor::paint_cursor(&layout, &geom, &base_font, font_size, window, cx);
         });
         // Deliberately not painted: selection, search highlights, hyperlink
         // underlines, IME preedit, the scrollbar and its match rail, and Kitty
@@ -330,13 +367,27 @@ mod tests {
         assert_eq!(snap.last_visible_row, snap.content.rows as i32);
     }
 
-    /// 9 px is above the quantization floor: `round(9 * 0.6) = 5` and
-    /// `round(9 * 1.2) = 11`, so a 320x132 band is exactly 64 columns by 12
-    /// rows. Below ~4 px cell width the rounding dominates and columns drift,
-    /// which is why the design crops rather than scaling the whole grid.
+    /// 9 px is above the quantization floor at the DEFAULT multipliers:
+    /// `round(9 * 0.6) = 5` and `round(9 * 1.2) = 11`, so a 320x132 band is
+    /// exactly 64 columns by 12 rows. Below ~4 px cell width the rounding
+    /// dominates and columns drift, which is why the design crops rather than
+    /// scaling the whole grid.
+    ///
+    /// The multipliers are config-driven (`settings.cell_width` /
+    /// `settings.line_height`), so this test pins the band against the
+    /// defaults explicitly rather than reading the developer's own config
+    /// through `cached_font_config()`.
     #[test]
     fn the_thumbnail_band_is_a_whole_number_of_cells() {
-        let dims = thumbnail_cell_dimensions();
+        use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
+
+        let defaults = FontSettings {
+            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            size: 13.0,
+            line_height: DEFAULT_LINE_HEIGHT,
+            cell_width: DEFAULT_CELL_WIDTH,
+        };
+        let dims = thumbnail_cell_dimensions_for(&defaults);
         assert_eq!(f32::from(dims.cell_width), 5.0);
         assert_eq!(f32::from(dims.line_height), 11.0);
         assert_eq!(THUMBNAIL_BAND_W / f32::from(dims.cell_width), 64.0);
