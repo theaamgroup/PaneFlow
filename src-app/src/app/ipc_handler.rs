@@ -145,6 +145,44 @@ fn parse_terminal_profile(
     }
 }
 
+/// The directory a `surface.split` pane starts in, given the tab it lands in
+/// (issue #347).
+///
+/// An unbound tab takes the explicit `cwd`, or `default` without one. A tab
+/// bound to a worktree starts a pane with no `cwd` in that worktree, and an
+/// explicit `cwd` where it points - provided that is inside the worktree. A
+/// `cwd` outside it is refused with `-32602`: the alternative, moving the
+/// pane into the worktree without saying so, spawned a pane in one checkout
+/// while the `managed_worktree` record it carried registered another. The
+/// worktree side is also compared canonicalized, as ownership checks are, so
+/// a `/var` vs `/private/var` spelling cannot refuse a directory that is in
+/// fact inside.
+fn split_spawn_cwd(
+    tab: &crate::workspace::Tab,
+    explicit: Option<PathBuf>,
+    default: PathBuf,
+) -> Result<PathBuf, JsonRpcError> {
+    let Some(worktree) = tab.worktree.as_deref() else {
+        return Ok(explicit.unwrap_or(default));
+    };
+    let Some(cwd) = explicit else {
+        return Ok(worktree.to_path_buf());
+    };
+    let inside = cwd.starts_with(worktree)
+        || worktree
+            .canonicalize()
+            .is_ok_and(|resolved| cwd.starts_with(resolved));
+    if inside {
+        Ok(cwd)
+    } else {
+        Err(JsonRpcError::invalid_params(format!(
+            "cwd {} is outside the target tab's worktree {}",
+            cwd.display(),
+            worktree.display()
+        )))
+    }
+}
+
 fn surface_split_root(tab: &crate::workspace::Tab) -> Result<&LayoutTree, JsonRpcError> {
     if tab.is_zoomed() {
         return Err(JsonRpcError::invalid_params(
@@ -3614,18 +3652,20 @@ impl PaneFlowApp {
                 if pane_spec_requires_orchestration(params) && !ipc_orchestration_enabled() {
                     return orchestration_disabled_error("surface.split").into_value();
                 }
-                let spawn_cwd = match params.get("cwd").and_then(|c| c.as_str()) {
+                // Kept apart from the default it falls back to: whether the
+                // caller NAMED a directory decides below whether the target
+                // tab's worktree binding applies (issue #347).
+                let explicit_cwd = match params.get("cwd").and_then(|c| c.as_str()) {
                     Some(raw) => match canonicalize_workspace_cwd(raw) {
                         Ok(canonical) => Some(canonical),
                         Err(err) => return err.into_value(),
                     },
                     None => None,
                 };
-                let spawn_cwd =
-                    Some(spawn_cwd.unwrap_or_else(crate::launch_cwd::implicit_launch_cwd));
-                if self.pending_worktree_teardown_conflicts(
-                    spawn_cwd.as_deref().expect("effective split cwd"),
-                ) {
+                let default_cwd = explicit_cwd
+                    .clone()
+                    .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+                if self.pending_worktree_teardown_conflicts(&default_cwd) {
                     return JsonRpcError::invalid_params("cwd is inside a worktree being retired")
                         .into_value();
                 }
@@ -3645,7 +3685,7 @@ impl PaneFlowApp {
                     None => None,
                 };
                 if let Some(worktree) = &spawn_managed_worktree
-                    && spawn_cwd.as_deref() != Some(worktree.path.as_path())
+                    && default_cwd != worktree.path
                 {
                     return JsonRpcError::invalid_params("managed_worktree path must match cwd")
                         .into_value();
@@ -3731,11 +3771,16 @@ impl PaneFlowApp {
                     return JsonRpcError::invalid_params("Surface not found").into_value();
                 }
                 // Issue #347: a split into a tab bound to a worktree starts in
-                // that worktree. An explicit `cwd` still wins - a conductor
-                // that names a directory means it - but it is confined the
-                // same way, so a bound tab cannot be split into a sibling
-                // checkout by omission.
-                let spawn_cwd = tab.confine_cwd(spawn_cwd);
+                // that worktree when no `cwd` was given. An explicit `cwd` is
+                // honoured as written - a conductor that names a directory
+                // means it - but only inside the bound worktree: one outside
+                // it (and the `managed_worktree` that has to match it) is
+                // refused rather than silently moved, so the pane and the
+                // ownership record it registers can never disagree.
+                let spawn_cwd = match split_spawn_cwd(tab, explicit_cwd, default_cwd) {
+                    Ok(cwd) => Some(cwd),
+                    Err(err) => return err.into_value(),
+                };
                 // EP-004 US-015: stage a (possibly large) `context` blob to a
                 // temp file and pass its path via PANEFLOW_CONTEXT_FILE. Write
                 // before spawn; a failure is a JSON-RPC error, not success.
@@ -4911,6 +4956,78 @@ mod tests {
                 (wt("/r.worktrees/a"), vec![2]),
             ],
             "tab order follows first appearance, not path order"
+        );
+    }
+
+    #[test]
+    fn a_split_into_a_bound_tab_keeps_an_explicit_cwd_inside_it_and_refuses_one_outside() {
+        // Issue #347 review, finding 2: `surface.split` confined every cwd
+        // to the bound tab's worktree, so a conductor splitting a feat-a pane
+        // with `cwd` = feat-b (and a matching `managed_worktree`) got a pane in
+        // feat-a while the workspace recorded ownership of feat-b.
+        let sandbox = tempfile::tempdir().expect("tempdir");
+        let feat_a = sandbox.path().join("repo.worktrees").join("feat-a");
+        let feat_b = sandbox.path().join("repo.worktrees").join("feat-b");
+        std::fs::create_dir_all(feat_a.join("src")).expect("feat-a");
+        std::fs::create_dir_all(&feat_b).expect("feat-b");
+        let default = sandbox.path().join("elsewhere");
+        let bound = crate::workspace::Tab::restored("a", None, Some(feat_a.clone()));
+
+        // No cwd: the bound worktree, never the process default.
+        assert_eq!(
+            split_spawn_cwd(&bound, None, default.clone()).expect("bound default"),
+            feat_a
+        );
+        // A cwd inside the worktree is honoured as written.
+        assert_eq!(
+            split_spawn_cwd(&bound, Some(feat_a.join("src")), default.clone())
+                .expect("inside the worktree"),
+            feat_a.join("src")
+        );
+        // A cwd outside it is refused, not silently moved.
+        let refused = split_spawn_cwd(&bound, Some(feat_b.clone()), default.clone())
+            .expect_err("a sibling worktree is outside");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert!(
+            refused
+                .message
+                .contains("outside the target tab's worktree"),
+            "{}",
+            refused.message
+        );
+        // A canonical spelling of a directory inside the worktree is inside.
+        let canonical_inside = feat_a.canonicalize().expect("canonical feat-a").join("src");
+        assert_eq!(
+            split_spawn_cwd(&bound, Some(canonical_inside.clone()), default.clone())
+                .expect("canonical spelling"),
+            canonical_inside
+        );
+
+        // An unbound tab keeps the pre-#347 contract: the explicit cwd, or
+        // the default without one.
+        let free = crate::workspace::Tab::new("free", None);
+        assert_eq!(
+            split_spawn_cwd(&free, Some(feat_b.clone()), default.clone()).expect("explicit"),
+            feat_b
+        );
+        assert_eq!(
+            split_spawn_cwd(&free, None, default.clone()).expect("default"),
+            default
+        );
+    }
+
+    #[test]
+    fn surface_split_routes_its_cwd_through_the_bound_tab_rule() {
+        let src = include_str!("ipc_handler.rs");
+        let split =
+            crate::source_probe::source_slice(src, "\"surface.split\" => {", "\"fleet.list\" => {");
+        assert!(
+            split.contains("split_spawn_cwd(tab, explicit_cwd, default_cwd)"),
+            "the split must tell the rule whether a cwd was named: {split}"
+        );
+        assert!(
+            !split.contains("confine_cwd("),
+            "the unconditional confinement rewrote an explicit cwd: {split}"
         );
     }
 

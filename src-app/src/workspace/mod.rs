@@ -47,8 +47,8 @@ pub use git::{
 #[cfg(test)]
 pub(crate) use ports::PortEntry;
 pub use ports::{PaneScan, scan_panes};
-pub use tab::Tab;
 pub(crate) use tab::apply_pane_rename_to_tab;
+pub use tab::{Tab, existing_worktree_dir, tab_spawn_root};
 
 /// Hard cap on open workspaces (US-054: single source for the bound previously
 /// re-declared as a local `const` at every create/IPC site).
@@ -362,6 +362,13 @@ impl Workspace {
     /// Every tab of this workspace, in display order. Never empty.
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
+    }
+
+    /// Every tab, mutably, for a sweep over their bindings (issue #347).
+    /// The tab list itself stays private, so the "at least one tab"
+    /// invariant cannot be observed broken through this either.
+    pub fn tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.tabs.iter_mut()
     }
 
     /// Number of tabs. Always >= 1.

@@ -247,6 +247,34 @@ pub(crate) fn apply_pane_rename_to_tab(tab: &mut Tab, new_name: Option<&str>) {
     tab.title = new_name.unwrap_or("").trim().to_string();
 }
 
+/// A tab binding that can still be honoured: the path, when it is a directory
+/// now, and `None` otherwise (issue #347).
+///
+/// Every path that rebuilds a bound tab - session restore, undo-close-tab,
+/// undo-close-workspace, a pick from a cached worktree listing - runs its
+/// binding through here, so a checkout removed in the meantime (by
+/// `git worktree remove`, by another PaneFlow session's teardown, by hand)
+/// restores the tab unbound instead of pinning every pane it opens to a
+/// missing directory. A plain `is_dir`, no canonicalization: a stat is
+/// bounded where resolving symlinks across a dead mount is not.
+pub fn existing_worktree_dir(worktree: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    worktree.filter(|path| path.is_dir())
+}
+
+/// Where the panes of a tab rebuilt with binding `worktree` spawn: the bound
+/// checkout, or the workspace root for an unbound tab (issue #347).
+///
+/// Persisted surfaces carry no cwd of their own, so this fallback IS the
+/// spawn directory. Handing the workspace root to a bound tab restored a row
+/// that named `feat/x` above a shell sitting in the repository on `main`,
+/// with `confine_cwd` then pinning only the panes opened after it.
+pub fn tab_spawn_root(
+    worktree: Option<&std::path::Path>,
+    workspace_cwd: &std::path::Path,
+) -> std::path::PathBuf {
+    worktree.map_or_else(|| workspace_cwd.to_path_buf(), std::path::Path::to_path_buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +306,35 @@ mod tests {
     fn a_new_tab_starts_with_the_files_sidebar_closed() {
         assert!(!Tab::new("Claude", None).files_sidebar_open);
         assert!(!Tab::empty().files_sidebar_open);
+    }
+
+    #[test]
+    fn a_rebuilt_tab_spawns_its_panes_in_its_worktree() {
+        // Issue #347 review, finding 1: session restore and both undo paths
+        // rebuild a bound tab's panes from the tab's own checkout, not the
+        // workspace root - the row said `feat/x` while the shell sat on main.
+        let root = std::path::Path::new("/repo");
+        let worktree = std::path::Path::new("/repo.worktrees/feat-x");
+        assert_eq!(tab_spawn_root(Some(worktree), root), worktree);
+        assert_eq!(tab_spawn_root(None, root), root);
+    }
+
+    #[test]
+    fn a_binding_to_a_missing_checkout_is_dropped_before_it_is_honoured() {
+        // Issue #347 review, finding 4: the fast bind path and
+        // undo-close-workspace skipped the "path still exists" rule the
+        // session restore and undo-close-tab paths apply.
+        let live = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            existing_worktree_dir(Some(live.path().to_path_buf())),
+            Some(live.path().to_path_buf())
+        );
+        let gone = live.path().join("removed-checkout");
+        assert_eq!(existing_worktree_dir(Some(gone)), None);
+        let file = live.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("write");
+        assert_eq!(existing_worktree_dir(Some(file)), None);
+        assert_eq!(existing_worktree_dir(None), None);
     }
 
     #[test]

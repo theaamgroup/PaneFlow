@@ -65,6 +65,15 @@ impl PaneFlowApp {
             .then(|| ws.active_tab().worktree.clone())
             .flatten()
             .or_else(|| (!ws.cwd.is_empty()).then(|| std::path::PathBuf::from(&ws.cwd)));
+        // The same gate every other pane-creation path holds
+        // (`split_pane`, `surface.split`, `workspace.up`): a checkout being
+        // torn down is not a place to start a shell.
+        if let Some(cwd) = cwd.as_deref()
+            && self.pending_worktree_teardown_conflicts(cwd)
+        {
+            self.show_toast("Worktree is still being retired", cx);
+            return false;
+        }
         // A preset label reaches the sidebar verbatim, and a custom command's
         // name is user input: strip CLI decoration (spinners, zero-width
         // glyphs) the way every other title path does.

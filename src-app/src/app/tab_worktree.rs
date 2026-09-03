@@ -51,6 +51,23 @@ impl WorktreeStates {
         }
     }
 
+    /// [`Self::set_checkout`] for a probe taken at `probed`: stored only when
+    /// that is the directory `cwd` names. The workspace fields follow a pane's
+    /// shell wherever it goes, but this cache answers for a *checkout*, and a
+    /// branch read in a foreign directory filed under the workspace-root key
+    /// is what a tab bound there would show.
+    pub(crate) fn set_checkout_probed_at(
+        &mut self,
+        cwd: &str,
+        probed: &str,
+        state: CheckoutGit,
+    ) -> bool {
+        if probed != cwd {
+            return false;
+        }
+        self.set_checkout(cwd, state)
+    }
+
     pub(crate) fn checkout(&self, cwd: &str) -> Option<&CheckoutGit> {
         self.checkouts.get(cwd)
     }
@@ -93,7 +110,111 @@ impl WorktreeStates {
     }
 }
 
+/// Why a tab of workspace `ws_idx` cannot be bound to `path`, or `None` when
+/// it can.
+///
+/// A checkout that another workspace owns as a `ManagedWorktree` - live, or
+/// held by an undo record - is removed when that ownership ends, and a tab
+/// bound to it would then spawn every pane into a missing directory. One the
+/// retirement journal already names is going now. A workspace's own managed
+/// checkouts are fine: that is exactly what `workspace.up` binds its tabs to.
+/// Prefix matches both ways, like the ownership check `surface.split` runs,
+/// so a binding cannot sit under or over an owned path either.
+fn binding_refusal(
+    path: &std::path::Path,
+    ws_idx: usize,
+    owned: &[(usize, std::path::PathBuf)],
+    closed: &[std::path::PathBuf],
+    pending: &[std::path::PathBuf],
+) -> Option<&'static str> {
+    let overlaps = |owned: &std::path::Path| owned.starts_with(path) || path.starts_with(owned);
+    if pending.iter().any(|p| overlaps(p)) {
+        return Some("That worktree is being retired");
+    }
+    if owned
+        .iter()
+        .any(|(owner, p)| *owner != ws_idx && overlaps(p))
+    {
+        return Some("That worktree belongs to another workspace");
+    }
+    if closed.iter().any(|p| overlaps(p)) {
+        return Some("That worktree belongs to a closed workspace");
+    }
+    None
+}
+
 impl PaneFlowApp {
+    /// Why the tab cannot be bound to `path` right now, as the toast to show,
+    /// or `None` when it can: see [`binding_refusal`].
+    pub(crate) fn tab_binding_refusal(
+        &self,
+        path: &std::path::Path,
+        ws_idx: usize,
+    ) -> Option<&'static str> {
+        let owned: Vec<(usize, std::path::PathBuf)> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(index, ws)| {
+                ws.managed_worktrees
+                    .iter()
+                    .map(move |worktree| (index, worktree.path.clone()))
+            })
+            .collect();
+        let closed: Vec<std::path::PathBuf> = self
+            .closed_items
+            .iter()
+            .flat_map(|record| match record {
+                crate::ClosedRecord::Workspace(ws) => ws
+                    .managed_worktrees
+                    .iter()
+                    .map(|worktree| worktree.path.clone())
+                    .collect::<Vec<_>>(),
+                crate::ClosedRecord::Pane(_) | crate::ClosedRecord::Tab(_) => Vec::new(),
+            })
+            .collect();
+        let pending: Vec<std::path::PathBuf> = self
+            .pending_worktree_teardowns
+            .iter()
+            .map(|worktree| worktree.path.clone())
+            .collect();
+        binding_refusal(path, ws_idx, &owned, &closed, &pending)
+    }
+
+    /// Whether a picker may offer `path` to a tab of workspace `ws_idx`:
+    /// the row is left out when binding to it would be refused.
+    pub(crate) fn checkout_is_bindable(&self, path: &std::path::Path, ws_idx: usize) -> bool {
+        self.tab_binding_refusal(path, ws_idx).is_none()
+    }
+
+    /// Bind a tab to a checkout the user picked, or say why not.
+    ///
+    /// The one door for a path chosen from a list: the picker's rows come
+    /// from a listing read when it opened, and between then and the click the
+    /// directory can have been removed or claimed. A refusal reaches the user
+    /// as a toast and leaves the tab as it was. Returns whether it bound.
+    pub(crate) fn bind_tab_to_checkout(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(reason) = self.tab_binding_refusal(&path, ws_idx) {
+            self.show_toast(reason, cx);
+            return false;
+        }
+        let Some(path) = crate::workspace::existing_worktree_dir(Some(path)) else {
+            self.show_toast(
+                "That checkout no longer exists; run `git worktree prune`",
+                cx,
+            );
+            return false;
+        };
+        self.set_tab_worktree(ws_idx, tab_idx, Some(path), cx);
+        true
+    }
+
     /// Every checkout worth probing: each workspace root, plus the worktree of
     /// every bound tab. Deduplicated, so two tabs on one worktree cost one
     /// subprocess per tick rather than two.
@@ -186,22 +307,42 @@ impl PaneFlowApp {
         worktree: Option<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        let active_idx = self.active_idx;
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             return;
         };
+        let is_active_tab = ws_idx == active_idx && ws.active_tab_idx() == tab_idx;
         let ws_id = ws.id;
+        let ws_cwd = ws.cwd.clone();
         let Some(tab) = ws.tab_mut(tab_idx) else {
             return;
         };
         if tab.worktree == worktree {
             return;
         }
+        let tab_id = tab.id;
+        let checkout = |bound: Option<&std::path::PathBuf>| {
+            bound.map_or_else(
+                || ws_cwd.clone(),
+                |path| path.to_string_lossy().into_owned(),
+            )
+        };
+        let from = checkout(tab.worktree.as_ref());
+        let to = checkout(worktree.as_ref());
         tab.worktree = worktree.clone();
         // Probe the new checkout now rather than waiting up to 30 s for the
         // poll: a row that names a branch only after half a minute reads as
         // broken.
         if let Some(path) = worktree {
             Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
+        }
+        // The git surfaces follow the tab's checkout: the diff dock this tab
+        // owns moves with it, and Diff mode is rebuilt when the tab is the one
+        // on screen - switching tab already does both, and binding changes
+        // the same fact without a switch.
+        self.retarget_diff_dock_for_tab(tab_id, &from, &to, cx);
+        if is_active_tab {
+            self.reconcile_diff_after_workspace_change(cx);
         }
         self.save_session(cx);
         cx.notify();
@@ -290,19 +431,30 @@ impl PaneFlowApp {
         };
         let ws_id = ws.id;
         // A branch the listing already places needs no subprocess: bind now,
-        // so the common case stays a single frame.
-        if let Some(entry) = self
+        // so the common case stays a single frame. The listing is as old as
+        // the picker, so the path is checked the way every other binding is
+        // (`bind_tab_to_checkout`): a checkout removed since the listing was
+        // read falls through to git, which re-lists and re-creates it.
+        let placed = self
             .workspace_worktree_listing(ws_idx)
             .iter()
             .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
-        {
-            let path = (entry.path != repo_root).then(|| entry.path.clone());
-            self.set_tab_worktree(ws_idx, tab_idx, path, cx);
-            return;
+            .map(|entry| entry.path.clone());
+        match placed {
+            Some(path) if path == repo_root => {
+                self.set_tab_worktree(ws_idx, tab_idx, None, cx);
+                return;
+            }
+            Some(path) if path.is_dir() => {
+                self.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
+                return;
+            }
+            _ => {}
         }
         // One checkout at a time: a second click while git works would race
         // the first for the same directory.
-        if self.branch_checkout_pending.is_some() {
+        if let Some(pending) = self.branch_checkout_pending.clone() {
+            self.show_toast(format!("Still checking out {pending}"), cx);
             return;
         }
 
@@ -318,6 +470,9 @@ impl PaneFlowApp {
                 .await;
                 let _ = cx.update(|cx| {
                     this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                        // Cleared first, on every outcome: a refusal below
+                        // must not leave the picker reading "Checking out"
+                        // for the rest of the session.
                         app.branch_checkout_pending = None;
                         match prepared {
                             Ok(path) => {
@@ -326,8 +481,16 @@ impl PaneFlowApp {
                                     cx.notify();
                                     return;
                                 };
-                                let path = (path != repo_root).then_some(path);
-                                app.set_tab_worktree(ws_idx, tab_idx, path, cx);
+                                if path == repo_root {
+                                    app.set_tab_worktree(ws_idx, tab_idx, None, cx);
+                                } else {
+                                    // The same refusals as the fast path: git
+                                    // resolved the branch to a checkout, but
+                                    // whether this tab may stand on it is
+                                    // PaneFlow's question, and the answer can
+                                    // have changed while git worked.
+                                    app.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
+                                }
                                 app.spawn_worktree_listing(ws_idx, cx);
                             }
                             Err(message) => app.show_toast(message, cx),
@@ -384,8 +547,161 @@ impl PaneFlowApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckoutGit, WorktreeStates};
+    use super::{CheckoutGit, WorktreeStates, binding_refusal};
     use crate::workspace::GitDiffStats;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_probe_taken_elsewhere_is_not_filed_under_the_checkout_key() {
+        // Issue #347 review, finding 12: `handle_cwd_change`'s fall-through
+        // applied a probe taken at the pane's new cwd under the workspace-root
+        // key, so a pane that walked into another repository wrote that
+        // repository's branch where a tab bound to the root would read it.
+        let mut states = WorktreeStates::default();
+        assert!(
+            !states.set_checkout_probed_at("/w/a", "/elsewhere/b", state("other", 7)),
+            "a foreign probe must neither store nor repaint"
+        );
+        assert!(states.checkout("/w/a").is_none());
+        assert!(
+            !states.set_checkout_probed_at("/w/a", "/w/a/src", state("main", 1)),
+            "a subdirectory is not the checkout key either"
+        );
+        assert!(states.set_checkout_probed_at("/w/a", "/w/a", state("main", 1)));
+        assert_eq!(
+            states.checkout("/w/a").map(|s| s.branch.as_str()),
+            Some("main")
+        );
+        assert!(
+            !states.set_checkout_probed_at("/w/a", "/elsewhere/b", state("other", 7)),
+            "a later foreign probe must not overwrite a real one"
+        );
+        assert_eq!(
+            states.checkout("/w/a").map(|s| s.branch.as_str()),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn a_tab_cannot_bind_to_a_checkout_another_workspace_owns_or_is_retiring() {
+        // Issue #347 review, finding 3: the picker bound to any listing entry
+        // holding the branch, including a checkout `workspace.up` created for
+        // another workspace - which is removed when that workspace closes.
+        let feat = PathBuf::from("/repo.worktrees/feat-x");
+        let owned = vec![(0usize, feat.clone())];
+        let none: Vec<PathBuf> = Vec::new();
+        assert_eq!(
+            binding_refusal(&feat, 1, &owned, &none, &none),
+            Some("That worktree belongs to another workspace")
+        );
+        assert_eq!(
+            binding_refusal(&feat.join("src"), 1, &owned, &none, &none),
+            Some("That worktree belongs to another workspace"),
+            "a path under an owned checkout is owned with it"
+        );
+        assert_eq!(
+            binding_refusal(&feat, 0, &owned, &none, &none),
+            None,
+            "a workspace may bind its own managed checkout - that is what `up` does"
+        );
+        assert_eq!(
+            binding_refusal(Path::new("/repo.worktrees/feat-y"), 1, &owned, &none, &none),
+            None,
+            "a sibling checkout nobody owns is free"
+        );
+        assert_eq!(
+            binding_refusal(&feat, 0, &[], std::slice::from_ref(&feat), &none),
+            Some("That worktree belongs to a closed workspace"),
+            "an undo record still owns its checkouts"
+        );
+        assert_eq!(
+            binding_refusal(&feat, 0, &owned, &none, std::slice::from_ref(&feat)),
+            Some("That worktree is being retired"),
+            "retirement outranks ownership: the directory is going now"
+        );
+    }
+
+    #[test]
+    fn every_picked_checkout_passes_through_the_binding_gate() {
+        // Findings 3 and 4 at the source level: the fast path and the async
+        // landing of `bind_tab_to_branch` bind through `bind_tab_to_checkout`
+        // (refusals + "still a directory"), never through the raw setter,
+        // and a stale listing entry whose directory is gone is not bound.
+        let src = include_str!("tab_worktree.rs");
+        let bind = crate::source_probe::source_slice(
+            src,
+            "pub(crate) fn bind_tab_to_branch(",
+            "/// Locate a tab by the ids that survive an await",
+        );
+        assert!(
+            bind.contains("Some(path) if path.is_dir() => {"),
+            "the fast path must check the listing's path still exists: {bind}"
+        );
+        assert_eq!(
+            bind.matches("bind_tab_to_checkout(ws_idx, tab_idx, path, cx)")
+                .count(),
+            2,
+            "both the fast path and the landing must bind through the gate: {bind}"
+        );
+        assert!(
+            !bind.contains("set_tab_worktree(ws_idx, tab_idx, Some("),
+            "no bind path may skip the gate: {bind}"
+        );
+        let landing = crate::source_probe::source_slice(
+            bind,
+            "this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {",
+            "match prepared {",
+        );
+        assert!(
+            landing.contains("app.branch_checkout_pending = None;"),
+            "the pending slot must clear before any outcome is judged: {landing}"
+        );
+
+        let gate = crate::source_probe::source_slice(
+            src,
+            "pub(crate) fn bind_tab_to_checkout(",
+            "/// Every checkout worth probing",
+        );
+        let refusal_at = gate
+            .find("self.tab_binding_refusal(&path, ws_idx)")
+            .expect("the gate consults the refusal rules");
+        let exists_at = gate
+            .find("crate::workspace::existing_worktree_dir(Some(path))")
+            .expect("the gate checks the directory still exists");
+        let set_at = gate
+            .find("self.set_tab_worktree(ws_idx, tab_idx, Some(path), cx)")
+            .expect("the gate is what binds");
+        assert!(refusal_at < exists_at && exists_at < set_at, "{gate}");
+        assert_eq!(
+            gate.matches("self.show_toast(").count(),
+            2,
+            "each refusal reaches the user as a toast: {gate}"
+        );
+    }
+
+    #[test]
+    fn binding_the_active_tab_retargets_the_git_surfaces() {
+        // Issue #347 review, finding 11: the bind only saved and repainted,
+        // so Diff mode and an open dock kept showing the checkout the tab
+        // had just left.
+        let src = include_str!("tab_worktree.rs");
+        let set = crate::source_probe::source_slice(
+            src,
+            "pub(crate) fn set_tab_worktree(",
+            "/// Refresh what the branch picker offers",
+        );
+        assert!(
+            set.contains("self.retarget_diff_dock_for_tab(tab_id, &from, &to, cx);"),
+            "the tab's dock must follow its checkout: {set}"
+        );
+        let active_at = set
+            .find("if is_active_tab {")
+            .expect("the rebuild is gated on the tab being the visible one");
+        assert!(
+            set[active_at..].contains("self.reconcile_diff_after_workspace_change(cx);"),
+            "Diff mode must rebuild when the visible tab rebinds: {set}"
+        );
+    }
 
     fn state(branch: &str, insertions: usize) -> CheckoutGit {
         CheckoutGit {

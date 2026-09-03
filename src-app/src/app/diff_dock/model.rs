@@ -117,7 +117,7 @@ pub(crate) struct DiffDockData {
 }
 
 impl DiffDockData {
-    pub(super) fn loading(cwd: String) -> Self {
+    pub(crate) fn loading(cwd: String) -> Self {
         Self {
             cwd,
             loading: true,

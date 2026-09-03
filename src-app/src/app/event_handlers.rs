@@ -1698,6 +1698,14 @@ impl PaneFlowApp {
         };
 
         if self.workspaces[ws_idx].cwd == new_cwd {
+            // Back at the workspace root: the pane has left whatever checkout
+            // its tab was bound to, and the tab follows it out the way it
+            // followed it in (issue #347). Without this the tab stayed bound
+            // and the next split landed in the checkout the pane had left.
+            // An unbound tab returns exactly as before: nothing to probe.
+            if self.workspaces[ws_idx].tabs()[tab_idx].worktree.is_some() {
+                self.set_tab_worktree(ws_idx, tab_idx, None, cx);
+            }
             return;
         }
 
@@ -1757,27 +1765,51 @@ impl PaneFlowApp {
                         // workspace: the other tabs still work in the
                         // repository's own checkout, and until now this branch
                         // landed on `ws.cwd`'s git state, showing every one of
-                        // them a branch none of them was on.
-                        if let Some((repo_root, checkout)) = checkout
-                            && repo_root.is_some()
-                            && repo_root == ws_repo_root
-                            && checkout != ws_worktree_root
-                        {
-                            if let Some((ws_idx, tab_idx)) = app.tab_position(ws_id, tab_id) {
-                                app.set_tab_worktree(ws_idx, tab_idx, Some(checkout.clone()), cx);
+                        // them a branch none of them was on. Walking back into
+                        // the workspace's own checkout unbinds the tab again.
+                        let tab = app.tab_position(ws_id, tab_id);
+                        let bound = tab
+                            .and_then(|(ws_idx, tab_idx)| {
+                                app.workspaces[ws_idx].tabs().get(tab_idx)
+                            })
+                            .is_some_and(|tab| tab.worktree.is_some());
+                        match tab_binding_for_cwd(
+                            checkout,
+                            ws_repo_root.as_deref(),
+                            &ws_worktree_root,
+                            bound,
+                        ) {
+                            CwdBinding::Bind(checkout) => {
+                                if let Some((ws_idx, tab_idx)) = tab {
+                                    app.set_tab_worktree(
+                                        ws_idx,
+                                        tab_idx,
+                                        Some(checkout.clone()),
+                                        cx,
+                                    );
+                                }
+                                let key = checkout.to_string_lossy().into_owned();
+                                if app.worktree_states.set_checkout(
+                                    &key,
+                                    crate::app::tab_worktree::CheckoutGit {
+                                        branch,
+                                        is_repo,
+                                        stats,
+                                    },
+                                ) {
+                                    cx.notify();
+                                }
+                                return;
                             }
-                            let key = checkout.to_string_lossy().into_owned();
-                            if app.worktree_states.set_checkout(
-                                &key,
-                                crate::app::tab_worktree::CheckoutGit {
-                                    branch,
-                                    is_repo,
-                                    stats,
-                                },
-                            ) {
-                                cx.notify();
+                            CwdBinding::Unbind => {
+                                // The probe below then lands on the workspace,
+                                // as it did before the tab was ever bound: the
+                                // pane is in the workspace's own checkout.
+                                if let Some((ws_idx, tab_idx)) = tab {
+                                    app.set_tab_worktree(ws_idx, tab_idx, None, cx);
+                                }
                             }
-                            return;
+                            CwdBinding::Keep => {}
                         }
                         // Unwatch old git dir
                         let old_git_dir = app.workspaces[ws_idx].git_dir.clone();
@@ -1804,8 +1836,16 @@ impl PaneFlowApp {
                                 log::warn!("git watcher: failed to watch {}: {e}", dir.display());
                             }
                         }
-                        let changed =
-                            app.apply_git_state_for_cwd(&tracked_cwd, branch, is_repo, stats);
+                        // Keyed by the workspace root, probed at the pane's
+                        // cwd: the workspace fields follow the shell, the
+                        // per-checkout cache does not take a foreign probe.
+                        let changed = app.apply_git_state_probed_at(
+                            &tracked_cwd,
+                            &new_cwd,
+                            branch,
+                            is_repo,
+                            stats,
+                        );
                         let refreshed_diff =
                             changed && app.refresh_diff_dock_if_open_for_cwd(&tracked_cwd, cx);
                         log::debug!("workspace CWD changed to: {new_cwd}");
@@ -1855,8 +1895,55 @@ impl PaneFlowApp {
     }
 }
 
+/// What a pane's new checkout means for its tab's binding (issue #347).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CwdBinding {
+    /// The pane is in a sibling checkout of the workspace's repository: the
+    /// tab stands there now.
+    Bind(std::path::PathBuf),
+    /// The pane is back in the workspace's own checkout and the tab was
+    /// bound elsewhere: the tab follows it home.
+    Unbind,
+    /// Nothing about the binding changes - the pane is in no repository, in
+    /// another repository, or at home in a tab that was never bound.
+    Keep,
+}
+
+/// Decide a tab's binding from where its pane's shell went.
+///
+/// `checkout` is the probe's answer: the repository root the new cwd belongs
+/// to and the checkout of it the cwd is in, or `None` outside any repository.
+/// Only the workspace's own repository can move the binding; a `cd` into an
+/// unrelated directory changes nothing, exactly as before tabs had bindings.
+/// The workspace's own checkout AND the repository root both resolve to
+/// unbound - the picker treats picking the repository's own branch the same
+/// way (`bind_tab_to_branch`), so the two paths cannot disagree about what
+/// "not bound" means.
+pub(crate) fn tab_binding_for_cwd(
+    checkout: Option<(Option<std::path::PathBuf>, std::path::PathBuf)>,
+    ws_repo_root: Option<&std::path::Path>,
+    ws_worktree_root: &std::path::Path,
+    bound: bool,
+) -> CwdBinding {
+    let Some((Some(repo_root), checkout)) = checkout else {
+        return CwdBinding::Keep;
+    };
+    if Some(repo_root.as_path()) != ws_repo_root {
+        return CwdBinding::Keep;
+    }
+    if checkout != ws_worktree_root && checkout != repo_root {
+        return CwdBinding::Bind(checkout);
+    }
+    if bound {
+        CwdBinding::Unbind
+    } else {
+        CwdBinding::Keep
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{CwdBinding, tab_binding_for_cwd};
     use super::{
         announced_port_conflicts, child_identity_is_live, declaration_survives_scan,
         keep_session_after_surface_focus, keep_session_after_surface_purge,
@@ -1869,6 +1956,120 @@ mod tests {
     use crate::terminal::ServiceInfo;
     use crate::workspace::{PaneScan, PortEntry};
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn a_pane_walking_home_unbinds_its_tab_and_an_unrelated_cd_changes_nothing() {
+        // Issue #347 review, finding 6: `cd` bound a tab but never unbound
+        // it, and the cwd path and the picker disagreed about the repository
+        // root - the picker resolves it to "unbound", the cwd path bound it.
+        use std::path::{Path, PathBuf};
+        let repo = PathBuf::from("/repo");
+        let feat = PathBuf::from("/repo.worktrees/feat-x");
+        let probe = |checkout: &Path| Some((Some(repo.clone()), checkout.to_path_buf()));
+
+        // Walking into a sibling checkout binds, bound or not.
+        assert_eq!(
+            tab_binding_for_cwd(probe(&feat), Some(&repo), &repo, false),
+            CwdBinding::Bind(feat.clone())
+        );
+        assert_eq!(
+            tab_binding_for_cwd(probe(&feat), Some(&repo), &repo, true),
+            CwdBinding::Bind(feat.clone())
+        );
+        // Walking back into the workspace's own checkout unbinds a bound
+        // tab, and is a no-op for one that was never bound.
+        assert_eq!(
+            tab_binding_for_cwd(probe(&repo), Some(&repo), &repo, true),
+            CwdBinding::Unbind
+        );
+        assert_eq!(
+            tab_binding_for_cwd(probe(&repo), Some(&repo), &repo, false),
+            CwdBinding::Keep
+        );
+        // A workspace rooted in a linked worktree: the repository root is
+        // "unbound" here as it is in the picker, never a binding of its own.
+        assert_eq!(
+            tab_binding_for_cwd(probe(&repo), Some(&repo), &feat, true),
+            CwdBinding::Unbind
+        );
+        assert_eq!(
+            tab_binding_for_cwd(probe(&repo), Some(&repo), &feat, false),
+            CwdBinding::Keep
+        );
+        // Outside any repository, or in another one: the binding is left
+        // alone - a plain `cd /tmp` is what it always was.
+        assert_eq!(
+            tab_binding_for_cwd(None, Some(&repo), &repo, true),
+            CwdBinding::Keep
+        );
+        assert_eq!(
+            tab_binding_for_cwd(
+                Some((None, PathBuf::from("/tmp"))),
+                Some(&repo),
+                &repo,
+                true
+            ),
+            CwdBinding::Keep
+        );
+        let other = PathBuf::from("/other");
+        assert_eq!(
+            tab_binding_for_cwd(
+                Some((Some(other.clone()), other.clone())),
+                Some(&repo),
+                &repo,
+                true
+            ),
+            CwdBinding::Keep
+        );
+        assert_eq!(
+            tab_binding_for_cwd(probe(&feat), None, &repo, false),
+            CwdBinding::Keep,
+            "a workspace outside any repository binds nothing"
+        );
+    }
+
+    #[test]
+    fn cwd_change_unbinds_before_the_root_early_return_and_probes_where_it_looked() {
+        // Findings 6 and 12 at the source level: the "already at the
+        // workspace root" early return unbinds a bound tab (that return used
+        // to skip the probe that would have noticed), the landing routes
+        // through `tab_binding_for_cwd`, and the fall-through files the probe
+        // under the workspace key only when it was taken there.
+        let src = include_str!("event_handlers.rs");
+        let handler = crate::source_probe::source_slice(
+            src,
+            "fn handle_cwd_change(",
+            "pub(crate) fn spawn_initial_git_stats(",
+        );
+        let early_return = crate::source_probe::source_slice(
+            handler,
+            "if self.workspaces[ws_idx].cwd == new_cwd {",
+            "let ws_id = self.workspaces[ws_idx].id;",
+        );
+        assert!(
+            early_return.contains("self.set_tab_worktree(ws_idx, tab_idx, None, cx);"),
+            "a pane back at the root must unbind its tab before returning: {early_return}"
+        );
+        assert!(handler.contains("match tab_binding_for_cwd("), "{handler}");
+        assert!(
+            handler.contains("CwdBinding::Unbind => {"),
+            "the landing must handle the walk home: {handler}"
+        );
+        let apply =
+            crate::source_probe::source_slice(handler, "app.apply_git_state_probed_at(", ");");
+        let tracked_at = apply
+            .find("&tracked_cwd")
+            .expect("keyed by the workspace root");
+        let probed_at = apply.find("&new_cwd").expect("probed at the pane's cwd");
+        assert!(
+            tracked_at < probed_at,
+            "the fall-through must say where the probe was taken: {apply}"
+        );
+        assert!(
+            !handler.contains("apply_git_state_for_cwd("),
+            "the keyed-only apply would file a foreign probe under the root: {handler}"
+        );
+    }
 
     #[test]
     fn session_drop_edge_split_refuses_when_zoomed() {

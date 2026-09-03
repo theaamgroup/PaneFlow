@@ -40,6 +40,25 @@ fn workspace_context_menu_counts(
     (menu_rows, separator_rows)
 }
 
+/// The tallest a select menu is drawn: `select_menu` caps its surface at this
+/// and scrolls the rows inside it (`settings/components.rs`).
+const SELECT_MENU_MAX_HEIGHT: f32 = 320.;
+
+/// Height of the tab context menu as it is actually drawn: the menu chrome,
+/// its two fixed rows, and - when `branch_rows` is non-zero - the Branch
+/// section (header plus one row per branch), all capped at the surface's own
+/// ceiling. The on-screen clamp has to measure what is painted: sizing a
+/// forty-branch list at its uncapped height pinned the menu at `y = 0`
+/// (issue #347).
+pub(crate) fn tab_context_menu_height(branch_rows: usize) -> Pixels {
+    let branch_rows = if branch_rows > 0 {
+        1. + branch_rows as f32
+    } else {
+        0.
+    };
+    px((8. + (2. + branch_rows) * 28.).min(SELECT_MENU_MAX_HEIGHT))
+}
+
 pub(crate) fn clamped_context_menu_position(
     position: gpui::Point<Pixels>,
     width: Pixels,
@@ -440,13 +459,7 @@ impl PaneFlowApp {
         // A single branch is where the tab already works: the section would
         // only restate it.
         let show_branches = branches.len() > 1;
-        let branch_rows = if show_branches {
-            // The section header and its divider, plus one row per branch.
-            1. + branches.len() as f32
-        } else {
-            0.
-        };
-        let menu_height = px(8. + (2. + branch_rows) * 28.);
+        let menu_height = tab_context_menu_height(if show_branches { branches.len() } else { 0 });
         let menu_pos = clamped_context_menu_position(position, px(248.), menu_height, window);
         let close_shortcut = self
             .shortcut_for_action("close_tab")
@@ -514,7 +527,7 @@ impl PaneFlowApp {
                             this.tab_menu_open = None;
                             match detached.clone() {
                                 Some(path) => {
-                                    this.set_tab_worktree(ws_idx, tab_idx, Some(path), cx)
+                                    this.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
                                 }
                                 None => {
                                     this.bind_tab_to_branch(ws_idx, tab_idx, branch.clone(), cx)
@@ -564,9 +577,21 @@ impl PaneFlowApp {
                 .and_then(|entry| entry.branch.clone()),
             None => Some(self.workspace_checkout_label(ws_idx)),
         };
+        // A branch whose checkout this tab may not stand on - one another
+        // workspace owns, or one being retired - is not offered at all: a row
+        // that can only refuse is a row that should not be there.
+        let bindable = |entry: &crate::workspace::worktree::WorktreeEntry| {
+            entry.path == root || self.checkout_is_bindable(&entry.path, ws_idx)
+        };
         let mut rows: Vec<(Option<PathBuf>, String, bool)> = self
             .workspace_branches(ws_idx)
             .iter()
+            .filter(|branch| {
+                listing
+                    .iter()
+                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
+                    .is_none_or(bindable)
+            })
             .map(|branch| {
                 let selected = on_branch.as_deref() == Some(branch.as_str());
                 (None, branch.clone(), selected)
@@ -578,6 +603,7 @@ impl PaneFlowApp {
             listing
                 .iter()
                 .filter(|entry| entry.branch.is_none() && !entry.is_bare && entry.path != root)
+                .filter(|entry| bindable(entry))
                 .map(|entry| {
                     let label =
                         crate::workspace::worktree::checkout_label(None, &entry.path, &root);
@@ -794,7 +820,23 @@ impl PaneFlowApp {
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_context_menu_counts;
+    use super::{tab_context_menu_height, workspace_context_menu_counts};
+    use gpui::px;
+
+    #[test]
+    fn tab_menu_height_never_exceeds_the_surface_cap() {
+        // Issue #347 review, finding 7: the height fed to the on-screen
+        // clamp counted every branch row, while `select_menu` caps the
+        // surface at 320 px, so a long branch list pinned the menu at y = 0.
+        assert_eq!(tab_context_menu_height(0), px(64.), "chrome + two rows");
+        assert_eq!(
+            tab_context_menu_height(2),
+            px(8. + (2. + 3.) * 28.),
+            "the section header and one row per branch, under the cap"
+        );
+        assert_eq!(tab_context_menu_height(40), px(320.));
+        assert_eq!(tab_context_menu_height(400), px(320.));
+    }
 
     #[test]
     fn workspace_menu_geometry_uses_filtered_editor_rows() {
