@@ -336,55 +336,8 @@ pub(super) fn enable(terminal: &mut ghostty::DisplayTerminal) {
 
 #[cfg(test)]
 mod tests {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
+    use super::super::test_allocator::{largest_allocation, reset_largest_allocation};
     use super::*;
-
-    thread_local! {
-        /// Largest single allocation the current thread has requested.
-        static LARGEST_ALLOCATION: Cell<usize> = const { Cell::new(0) };
-    }
-
-    /// Test-only allocator that records each thread's largest allocation,
-    /// so a test can prove a refused PNG never reached its pixel buffer.
-    struct LargestAllocationRecorder;
-
-    impl LargestAllocationRecorder {
-        fn record(size: usize) {
-            let _ = LARGEST_ALLOCATION.try_with(|largest| largest.set(largest.get().max(size)));
-        }
-    }
-
-    // SAFETY: every method forwards to `System` unchanged; the recorder only
-    // touches a thread-local `Cell`, which never allocates.
-    unsafe impl GlobalAlloc for LargestAllocationRecorder {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            Self::record(layout.size());
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            Self::record(layout.size());
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.alloc_zeroed(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            Self::record(new_size);
-            // SAFETY: the caller's obligations are forwarded unchanged.
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: LargestAllocationRecorder = LargestAllocationRecorder;
 
     /// A 16x32 solid-red RGB image transmitted inline and placed at the
     /// cursor. One pixel is exactly one base64 group at `f=24`, so a solid
@@ -630,9 +583,9 @@ mod tests {
             0x9c, 0x63, 0x60, 0x80, 0x00, 0x00, 0x00, 0x08, 0x00, 0x01, 0xb7, 0x58, 0x73, 0x95,
             0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
-        LARGEST_ALLOCATION.with(|largest| largest.set(0));
+        reset_largest_allocation();
         assert!(decode_png(&png).is_none());
-        let largest = LARGEST_ALLOCATION.with(Cell::get);
+        let largest = largest_allocation();
         assert!(
             largest < 1024 * 1024,
             "refusing the PNG allocated {largest} bytes at once; the pixel buffer would be 67 MB"

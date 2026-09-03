@@ -405,7 +405,7 @@ pub(super) fn cached_font_config() -> (String, f32, f32, f32, FontWeight, bool, 
     )
 }
 
-pub(super) fn base_font() -> Font {
+pub(crate) fn base_font() -> Font {
     let (family, _, _, _, font_weight, ligatures, fallbacks) = cached_font_config();
     // US-008: when the user opts into ligatures, hand GPUI the font's
     // native feature set untouched. Default behavior (and explicit

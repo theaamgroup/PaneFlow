@@ -895,6 +895,13 @@ pub(super) fn restore_thread_signal_mask(saved: Option<libc::sigset_t>) {
 }
 
 impl TerminalState {
+    /// PTY bytes the runtime has parsed so far. The benchmark's idle probe
+    /// uses it to wait for a shell to finish printing its prompt.
+    #[cfg(test)]
+    pub(super) fn processed_output_bytes_for_test(&self) -> usize {
+        self.ghostty.processed_output_bytes_for_test()
+    }
+
     pub(crate) fn session_backend(&self) -> TerminalSessionBackend {
         TerminalSessionBackend::new(self.ghostty.clone())
     }

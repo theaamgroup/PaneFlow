@@ -135,7 +135,19 @@ cargo test <test_name> -- --nocapture  # single test with output
 # Lint
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
+
+# Benchmark (release profile; see bench/README.md)
+scripts/bench-terminal.sh                # terminal pipeline benchmark: writes bench/results/<stamp>-<sha>.json,
+                                         # prints a Markdown comparison against bench/baseline.json when it exists
+scripts/bench-terminal.sh --set-baseline # same run, then make it the baseline
 ```
+
+Performance claims about the terminal pipeline need evidence from that
+suite: the ignored `terminal_pipeline_benchmark` in
+`src-app/src/terminal/perf_bench.rs` measures it GPU-free under the release
+profile and prints the comparison table `bench/README.md` documents. Do not
+ship a perf number you did not measure, and do not publish a run that
+printed `PANEFLOW_BENCH_WARNING` (another workload was competing).
 
 Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`):
 config, data, cache, and the default IPC socket (`paneflow-dev.sock`). A

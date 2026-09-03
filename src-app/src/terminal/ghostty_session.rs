@@ -60,6 +60,42 @@ const MAX_NOTIFICATION_EVENTS: usize = 8;
 const _: () = assert!(OUTPUT_POOL_BYTES <= NFR_005_MAX_PENDING_OUTPUT_BYTES);
 const _: () = assert!(MAX_QUEUED_INPUT_BYTES <= NFR_005_MAX_QUEUED_INPUT_BYTES);
 
+/// Longest a runtime or display loop blocks between checks. There is no
+/// publish gate yet (#343): both loops tick at this rate whether or not the
+/// pane has anything to do, and `RUNTIME_LOOP_ITERATIONS` shows it.
+const RUNTIME_IDLE_TICK: Duration = Duration::from_millis(10);
+
+/// Runtime and display loop iterations across every session in the process.
+///
+/// Read by the terminal benchmark (`perf_bench`) to count idle wakeups: a
+/// loop that ticks while nothing happens shows up here as a steady rate, a
+/// loop that blocks until it has work does not.
+#[cfg(test)]
+pub(super) static RUNTIME_LOOP_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+/// Loop iterations that received a message rather than timing out. Benchmark
+/// diagnostic for the idle probes: it says whether an idle pane was woken by
+/// traffic or by its own tick.
+#[cfg(test)]
+pub(super) static RUNTIME_LOOP_MESSAGES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn count_runtime_loop_iteration() {
+    RUNTIME_LOOP_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn count_runtime_loop_iteration() {}
+
+#[cfg(test)]
+fn count_runtime_loop_message(received_message: bool) {
+    if received_message {
+        RUNTIME_LOOP_MESSAGES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(test))]
+fn count_runtime_loop_message(_received_message: bool) {}
+
 #[derive(Debug)]
 pub(crate) enum GhosttyUiEvent {
     Wakeup(Arc<UiEventState>),
@@ -2231,19 +2267,21 @@ fn run_runtime(
     let mut last_autoscroll = Instant::now();
 
     loop {
+        count_runtime_loop_iteration();
         advance_selection_autoscroll(&inner, &mut terminal, &mut last_autoscroll);
         if inner.shutdown_sent.load(Ordering::Acquire) && exit.is_none() {
             reap_child_bounded(child.child_mut());
             child.disarm();
             break;
         }
-        let received = match mailbox.recv_timeout(Duration::from_millis(10)) {
+        let received = match mailbox.recv_timeout(RUNTIME_IDLE_TICK) {
             Ok(message) => match handle_terminal_command(&inner, &mut terminal, message) {
                 CommandOutcome::Handled => Ok(None),
                 CommandOutcome::Unhandled(message) => Ok(Some(message)),
             },
             Err(error) => Err(error),
         };
+        count_runtime_loop_message(received.is_ok());
         match received {
             Ok(Some(RuntimeMessage::Output(bytes))) => {
                 if let Err(error) = process_output_batch(
@@ -2791,11 +2829,13 @@ fn run_display_runtime(
     }
 
     loop {
-        let message = match mailbox.recv_timeout(Duration::from_millis(10)) {
+        count_runtime_loop_iteration();
+        let message = match mailbox.recv_timeout(RUNTIME_IDLE_TICK) {
             Ok(message) => message,
             Err(MailboxRecvError::Timeout) => continue,
             Err(MailboxRecvError::Disconnected) => break,
         };
+        count_runtime_loop_message(true);
         let CommandOutcome::Unhandled(message) =
             handle_terminal_command(&inner, &mut terminal, message)
         else {
@@ -3242,6 +3282,25 @@ fn update_shared_state(
         kitty,
     };
     Ok(())
+}
+
+/// Model of what the runtime publishes when grid changes arrive `interval`
+/// apart with the output queue drained after each one. Returns how many of
+/// those changes became published frames.
+///
+/// This is the shape of a program that prints faster than a display refreshes
+/// but slower than the runtime can parse: a build log, an agent transcript.
+/// Today there is no publish gate: `process_output_batch` finds the queue
+/// empty after every chunk and calls `update_shared_state` once per batch, so
+/// every chunk is a frame whatever the interval. The `gate_trickle_publishes`
+/// benchmark metric reads this figure, and it is the "before" of the gate
+/// (#343) that will bound it to the display rate. Benchmark input only: it
+/// models the loop's decision, it does not run the loop.
+#[cfg(test)]
+pub(super) fn simulate_gate_trickle(_interval: Duration, chunks: usize) -> usize {
+    // No gate: every chunk is a frame, whatever the interval between them.
+    // The gate port replaces this body with its decision model (#343).
+    chunks
 }
 
 fn update_shared_selection(inner: &SessionInner, selection: Option<SelectionRange>) {
