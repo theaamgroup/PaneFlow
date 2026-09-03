@@ -172,6 +172,123 @@ pub(crate) fn shell_out(program: &str, args: &[&str]) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// CLI-first control flow shared by the Claude Code and Codex writers (#319)
+// ---------------------------------------------------------------------------
+
+/// The agent CLI a writer prefers over editing its config file directly.
+pub(crate) struct Cli<'a> {
+    /// The config file the writer watches and the CLI is expected to edit.
+    pub path: &'a Path,
+    /// CLI program name (`claude`, `codex`), for warnings only.
+    pub name: &'a str,
+    /// Display name of `path` (`~/.claude.json`), for warnings only.
+    pub file: &'a str,
+    /// Whether the CLI may be invoked at all (on PATH and permitted).
+    pub available: bool,
+}
+
+/// Run the agent's own CLI and trust only the on-disk postcondition.
+///
+/// Backs up the watched file, invokes `argv`, then asks `verified` whether
+/// the file now holds the expected state. Returns `Some(outcome)` only when
+/// it does; `None` means the caller must run its locked direct edit: the
+/// CLI is unavailable, failed, or exited 0 without producing the expected
+/// file (issue #215).
+fn cli_then_verify<T>(
+    cli: &Cli<'_>,
+    argv: &[&str],
+    invoke: impl FnOnce(&[&str]) -> Result<()>,
+    verified: impl FnOnce() -> Result<Option<T>>,
+    mismatch: &str,
+) -> Result<Option<T>> {
+    if !cli.available {
+        return Ok(None);
+    }
+    io::backup(cli.path)?;
+    let what: Vec<&str> = argv.iter().copied().take(2).collect();
+    let what = format!("`{} {}`", cli.name, what.join(" "));
+    let file = cli.file;
+    match invoke(argv) {
+        Ok(()) => {
+            if let Some(outcome) = verified()? {
+                return Ok(Some(outcome));
+            }
+            log::warn!(
+                "paneflow mcp: {what} exited 0 but {file} {mismatch}; falling back to direct {file} edit"
+            );
+        }
+        Err(e) => {
+            log::warn!("paneflow mcp: {what} failed ({e:#}); falling back to direct {file} edit");
+        }
+    }
+    Ok(None)
+}
+
+fn install_outcome(had_prior: bool) -> InstallOutcome {
+    if had_prior {
+        InstallOutcome::Updated
+    } else {
+        InstallOutcome::Installed
+    }
+}
+
+/// Install via the agent's CLI (`argv`, never preceded by `mcp remove`: a
+/// crash between remove and add used to drop the entry while the rest of
+/// the file stayed intact), verify with `status`, and otherwise run the
+/// locked `fallback` merge. A non-idempotent CLI (entry already present)
+/// fails at `invoke` and the merge repairs it in place. The outcome label
+/// is keyed on `had_prior`, the state before the install started, so a
+/// CLI that wrote an off-schema entry does not turn a fresh install into
+/// `Updated`.
+pub(crate) fn cli_install(
+    cli: &Cli<'_>,
+    had_prior: bool,
+    argv: &[&str],
+    invoke: impl FnOnce(&[&str]) -> Result<()>,
+    status: impl FnOnce() -> Result<StatusOutcome>,
+    fallback: impl FnOnce() -> Result<InstallOutcome>,
+) -> Result<InstallOutcome> {
+    let verified = cli_then_verify(
+        cli,
+        argv,
+        invoke,
+        || Ok(matches!(status()?, StatusOutcome::Installed { .. }).then_some(())),
+        "does not match the managed entry",
+    )?;
+    if verified.is_some() {
+        return Ok(install_outcome(had_prior));
+    }
+    Ok(match fallback()? {
+        InstallOutcome::AlreadyCurrent => InstallOutcome::AlreadyCurrent,
+        InstallOutcome::Installed | InstallOutcome::Updated => install_outcome(had_prior),
+    })
+}
+
+/// Uninstall via the agent's CLI (`argv`), verify with `status`, and
+/// otherwise run the locked `fallback` removal. The CLI can exit 0 while
+/// the watched file still carries the entry (wrong scope, different config
+/// dir), so only `StatusOutcome::NotInstalled` counts as removed.
+pub(crate) fn cli_uninstall(
+    cli: &Cli<'_>,
+    argv: &[&str],
+    invoke: impl FnOnce(&[&str]) -> Result<()>,
+    status: impl FnOnce() -> Result<StatusOutcome>,
+    fallback: impl FnOnce() -> Result<UninstallOutcome>,
+) -> Result<UninstallOutcome> {
+    let verified = cli_then_verify(
+        cli,
+        argv,
+        invoke,
+        || Ok(matches!(status()?, StatusOutcome::NotInstalled).then_some(UninstallOutcome::Removed)),
+        "still carries the paneflow entry",
+    )?;
+    match verified {
+        Some(outcome) => Ok(outcome),
+        None => fallback(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // JSON install / uninstall / status (Claude Code, Gemini, opencode)
 // ---------------------------------------------------------------------------
 
