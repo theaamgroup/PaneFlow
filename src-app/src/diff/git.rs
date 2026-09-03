@@ -456,35 +456,52 @@ pub struct ColumnFingerprint {
 /// (never the hash of a real empty set), so unstable repo states fail closed by
 /// not matching a prior complete fingerprint.
 pub fn column_fingerprint(worktree_dir: &Path, base_ref: &str) -> ColumnFingerprint {
-    // Resolve the worktree's own root first, exactly as `compute_worktree_diff`
-    // does. The seed `worktree_dir` may be a SUBDIRECTORY (the workspace opened
-    // after a shell `cd`). Keying off the toplevel makes the fingerprint cover
-    // the same scope the diff does.
-    let toplevel = worktree_toplevel(worktree_dir);
-    let worktree_dir = toplevel.as_path();
+    // Resolve the worktree's own root first, exactly as `load_column` does. The
+    // seed `worktree_dir` may be a SUBDIRECTORY (the workspace opened after a
+    // shell `cd`). Keying off the toplevel makes the fingerprint cover the same
+    // scope the diff does.
+    let budget = GitBudget::for_column();
+    let toplevel = worktree_toplevel_within(&budget, worktree_dir);
+    let merge_base = merge_base_within(&budget, &toplevel, base_ref).unwrap_or_default();
+    column_fingerprint_within(&budget, &toplevel, base_ref, &merge_base)
+}
+
+/// [`column_fingerprint`] for an already-resolved `worktree_dir` toplevel and
+/// `merge_base` (empty when unresolved), charged against `budget` (issue #309:
+/// one column load draws every git call from one budget).
+fn column_fingerprint_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    base_ref: &str,
+    merge_base: &str,
+) -> ColumnFingerprint {
     let rev = |r: &str| {
-        run_git(worktree_dir, &["rev-parse", r])
+        budget
+            .run(worktree_dir, &["rev-parse", r])
             .ok()
             .map(|o| String::from_utf8_lossy(&o).trim().to_string())
             .unwrap_or_default()
     };
-    let merge_base = merge_base(worktree_dir, base_ref).unwrap_or_default();
     let diff_hash = if merge_base.is_empty() {
         0
     } else {
-        run_git(
-            worktree_dir,
-            &["diff", "--binary", "--no-color", &merge_base, "--"],
-        )
-        .ok()
-        .map(|out| hash_bytes(&out))
-        .unwrap_or(0)
+        budget
+            .run(
+                worktree_dir,
+                &["diff", "--binary", "--no-color", merge_base, "--"],
+            )
+            .ok()
+            .map(|out| hash_bytes(&out))
+            .unwrap_or(0)
     };
     ColumnFingerprint {
         head: rev("HEAD"),
         base: rev(base_ref),
         diff_hash,
-        untracked_hash: hash_untracked_inputs(worktree_dir, GIT_DEADLINE),
+        untracked_hash: budget
+            .remaining()
+            .ok()
+            .and_then(|deadline| hash_untracked_inputs(worktree_dir, deadline)),
     }
 }
 
@@ -594,7 +611,12 @@ pub fn list_base_ref_candidates(worktree_dir: &Path) -> Vec<String> {
 /// `worktree_dir.join(repo_root_relative_path)` lands on the right file.
 /// Falls back to `dir` when git can't resolve (non-repo, error).
 fn worktree_toplevel(dir: &Path) -> PathBuf {
-    match run_git(dir, &["rev-parse", "--show-toplevel"]) {
+    worktree_toplevel_within(&GitBudget::for_column(), dir)
+}
+
+/// [`worktree_toplevel`] charged against `budget` instead of a fresh deadline.
+fn worktree_toplevel_within(budget: &GitBudget, dir: &Path) -> PathBuf {
+    match budget.run(dir, &["rev-parse", "--show-toplevel"]) {
         Ok(out) => {
             let s = String::from_utf8_lossy(&out).trim().to_string();
             if s.is_empty() {
@@ -636,8 +658,12 @@ fn list_untracked_limited_timed(
 }
 
 /// Resolve the merge-base SHA between `HEAD` and `base_ref` in `worktree_dir`.
-fn merge_base(worktree_dir: &Path, base_ref: &str) -> Result<String, String> {
-    let out = run_git(worktree_dir, &["merge-base", "HEAD", base_ref])?;
+fn merge_base_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    base_ref: &str,
+) -> Result<String, String> {
+    let out = budget.run(worktree_dir, &["merge-base", "HEAD", base_ref])?;
     let sha = String::from_utf8_lossy(&out).trim().to_string();
     if sha.is_empty() {
         return Err(format!("no common ancestor with '{base_ref}'"));
@@ -1081,7 +1107,7 @@ pub fn is_skipped_name(path: &str) -> bool {
 /// Working-tree size of `rel_path` exceeds [`MAX_FILE_BYTES`]. Fast pre-load
 /// guard for the common added/modified case; a metadata miss (deleted file)
 /// reads as not-too-large. The base side - and the metadata-miss case - is
-/// caught by the post-load length check in [`compute_worktree_diff`].
+/// caught by the post-load length check in [`load_column`].
 fn is_too_large(worktree_dir: &Path, rel_path: &str) -> bool {
     std::fs::metadata(worktree_dir.join(rel_path))
         .map(|m| m.len() > MAX_FILE_BYTES)
@@ -1101,52 +1127,76 @@ fn stub_file(path: String, change: FileChange) -> FileDiff {
     }
 }
 
-/// Compute the diff of `worktree_dir` against `base_ref`:
-/// `merge-base(HEAD, base_ref)..working-tree`, including uncommitted changes.
+/// Everything one Review column build reads from git, produced by
+/// [`load_column`] under ONE [`GitBudget`].
+pub struct ColumnLoad {
+    /// US-016 warm-resume fingerprint, snapshotted BEFORE the tree is read.
+    pub fingerprint: ColumnFingerprint,
+    /// The diff of the worktree against `base_ref`:
+    /// `merge-base(HEAD, base_ref)..working-tree`, including uncommitted
+    /// changes. `error` is set (rather than panicking) when the base ref or
+    /// merge base cannot be resolved. Oversized / lockfile / over-count files
+    /// are shown as stubs rather than loaded, bounding peak RAM.
+    pub diff: WorktreeDiff,
+    /// Per-file Git-native diffstat for the same semantic as `diff`, plus
+    /// untracked files. Used for Review's sidebar/global counters so they match
+    /// `git diff --numstat` instead of drifting with renderer hunk details.
+    /// `Err` (never an empty map) when a git read fails or times out.
+    pub file_stats: Result<HashMap<String, FileDiffStat>, String>,
+}
+
+/// Load one Review column: fingerprint, diff, and file stats of `worktree_dir`
+/// against `base_ref`. Issue #309: every git call draws on ONE [`GitBudget`],
+/// and the worktree toplevel + merge-base are resolved once and shared, so a
+/// wedged git fails the column inside a single [`GIT_DEADLINE`] instead of
+/// stacking one per pipeline.
 ///
-/// Runs entirely via subprocess; safe to call off the main thread. Returns a
-/// `WorktreeDiff` whose `error` is set (rather than panicking) when the base
-/// ref or merge base cannot be resolved. Oversized / lockfile / over-count
-/// files are shown as stubs rather than loaded, bounding peak RAM.
-pub fn compute_worktree_diff(worktree_dir: &Path, base_ref: &str) -> WorktreeDiff {
+/// Runs entirely via subprocess; safe to call off the main thread.
+pub fn load_column(worktree_dir: &Path, base_ref: &str) -> ColumnLoad {
+    load_column_within(&GitBudget::for_column(), worktree_dir, base_ref)
+}
+
+/// [`load_column`] charged against `budget`.
+fn load_column_within(budget: &GitBudget, worktree_dir: &Path, base_ref: &str) -> ColumnLoad {
     // Resolve the worktree's own root once: the seed path may be a subdirectory
     // (shell `cd`), which would make `worktree_dir.join(rel_path)` miss every
     // file. Everything below - merge-base, name-status, file reads - keys off
     // this so the diff is correct regardless of the seed path's depth.
-    let toplevel = worktree_toplevel(worktree_dir);
+    let toplevel = worktree_toplevel_within(budget, worktree_dir);
     let worktree_dir = toplevel.as_path();
     log::debug!(
-        "git: compute_worktree_diff dir={} base={base_ref}",
+        "git: load_column dir={} base={base_ref}",
         worktree_dir.display()
     );
-    let merge_base = match merge_base(worktree_dir, base_ref) {
-        Ok(mb) => mb,
-        Err(e) => {
-            log::warn!("git: merge_base failed (base={base_ref}): {e}");
-            return WorktreeDiff {
-                files: Vec::new(),
-                error: Some(e),
-            };
-        }
+    let merge_base = merge_base_within(budget, worktree_dir, base_ref);
+    match &merge_base {
+        Ok(mb) => log::debug!("git: merge_base={mb}"),
+        Err(e) => log::warn!("git: merge_base failed (base={base_ref}): {e}"),
+    }
+    // US-016: snapshot the fingerprint BEFORE reading the tree, so a commit
+    // landing mid-build makes the stored fingerprint LAG the rows.
+    let fingerprint = column_fingerprint_within(
+        budget,
+        worktree_dir,
+        base_ref,
+        merge_base.as_deref().unwrap_or_default(),
+    );
+    let diff = match &merge_base {
+        Ok(mb) => compute_diff_against_within(budget, worktree_dir, mb),
+        Err(e) => WorktreeDiff {
+            files: Vec::new(),
+            error: Some(e.clone()),
+        },
     };
-    log::debug!("git: merge_base={merge_base}");
-
-    compute_diff_against(worktree_dir, &merge_base)
-}
-
-/// Per-file Git-native diffstat for the same semantic as
-/// [`compute_worktree_diff`]: `merge-base(HEAD, base_ref)..working-tree`, plus
-/// untracked files. This is used for Review's sidebar/global counters so they
-/// match `git diff --numstat` instead of drifting with renderer hunk details.
-/// Returns `Err` (never an empty map) when a git read fails or times out.
-pub fn compute_worktree_file_stats(
-    worktree_dir: &Path,
-    base_ref: &str,
-) -> Result<HashMap<String, FileDiffStat>, String> {
-    let toplevel = worktree_toplevel(worktree_dir);
-    let worktree_dir = toplevel.as_path();
-    let merge_base = merge_base(worktree_dir, base_ref)?;
-    compute_file_stats_against(worktree_dir, &merge_base)
+    let file_stats = merge_base
+        .as_deref()
+        .map_err(Clone::clone)
+        .and_then(|mb| compute_file_stats_against_within(budget, worktree_dir, mb));
+    ColumnLoad {
+        fingerprint,
+        diff,
+        file_stats,
+    }
 }
 
 /// Git's well-known empty-tree object hash. Diffing against it (used when `HEAD`
@@ -1159,7 +1209,7 @@ const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// "what did the agent just touch" semantic used by the diff dock
 /// ([`crate::app::diff_dock`]). When `HEAD` is unborn, everything is diffed
 /// against the empty tree. Reuses [`compute_diff_against`], so the lockfile /
-/// size / count / binary guards are identical to [`compute_worktree_diff`].
+/// size / count / binary guards are identical to [`load_column`].
 ///
 /// Runs entirely via subprocess; safe to call off the main thread.
 pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
@@ -1174,7 +1224,7 @@ pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
     compute_diff_against(worktree_dir, &base)
 }
 
-/// Shared core of [`compute_worktree_diff`] and [`compute_head_diff`]: diff the
+/// Shared core of [`load_column`] and [`compute_head_diff`]: diff the
 /// working tree against the already-resolved commit-ish `base`. `worktree_dir`
 /// must already be the worktree toplevel (both callers resolve it first).
 /// Oversized / lockfile / over-count files are shown as stubs rather than
@@ -1380,16 +1430,9 @@ fn compute_diff_against_within(
     WorktreeDiff { files, error: None }
 }
 
-fn compute_file_stats_against(
-    worktree_dir: &Path,
-    base: &str,
-) -> Result<HashMap<String, FileDiffStat>, String> {
-    compute_file_stats_against_within(&GitBudget::for_column(), worktree_dir, base)
-}
-
-/// [`compute_file_stats_against`] charged against `budget`. A failed or
-/// timed-out numstat or untracked scan is an `Err`, never a partial or empty
-/// map that reads as "no changes".
+/// Per-file diffstat of the working tree against `base`, charged against
+/// `budget`. A failed or timed-out numstat or untracked scan is an `Err`,
+/// never a partial or empty map that reads as "no changes".
 fn compute_file_stats_against_within(
     budget: &GitBudget,
     worktree_dir: &Path,
@@ -1786,7 +1829,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
         std::fs::write(root.join("untracked.txt"), "alpha\nbeta\n").unwrap();
 
-        let stats = compute_worktree_file_stats(root, "HEAD").expect("file stats");
+        let stats = load_column(root, "HEAD").file_stats.expect("file stats");
         assert_eq!(
             stats.get("tracked.txt"),
             Some(&FileDiffStat {
@@ -1882,7 +1925,7 @@ pub(crate) mod tests {
         let body = src
             .split("fn compute_diff_against(")
             .nth(1)
-            .and_then(|rest| rest.split("fn compute_file_stats_against(").next())
+            .and_then(|rest| rest.split("fn compute_file_stats_against_within(").next())
             .expect("compute_diff_against body");
         assert!(
             body.contains("list_untracked_limited_timed")
@@ -2068,6 +2111,114 @@ pub(crate) mod tests {
         assert_eq!(fd.line_counts(), (5, 1));
     }
 
+    #[test]
+    fn column_load_runs_under_one_git_budget() {
+        // Issue #309: one Review column load must be ONE GitBudget - the
+        // fingerprint, the diff, and the file stats share a single deadline and
+        // a single toplevel + merge-base resolution, so a wedged git fails the
+        // column once, not once per pipeline.
+        let loader = include_str!("view/loader.rs");
+        for stale in [
+            "column_fingerprint(",
+            "compute_worktree_diff(",
+            "compute_worktree_file_stats(",
+        ] {
+            assert!(
+                !loader.contains(stale),
+                "loader.rs must not run `{stale}` as its own git pipeline"
+            );
+        }
+        assert!(
+            loader.contains("load_column("),
+            "loader.rs must load a column through one budgeted `load_column`"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(test_git(root, &["init"]), "git init is required");
+        assert!(test_git(root, &["config", "core.autocrlf", "false"]));
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        assert!(test_git(root, &["add", "tracked.txt"]));
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "-m",
+                "init",
+            ],
+        ));
+        std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("ghost.txt"), "x\n").unwrap();
+
+        let _ = take_git_commands();
+        let load = load_column(root, "HEAD");
+        let cmds = take_git_commands();
+        assert_eq!(load.diff.error, None);
+        assert!(load.diff.files.iter().any(|f| f.path == "tracked.txt"));
+        let stats = load.file_stats.expect("file stats");
+        assert_eq!(
+            stats.get("ghost.txt"),
+            Some(&FileDiffStat {
+                added: 1,
+                removed: 0
+            })
+        );
+        assert_eq!(load.fingerprint, column_fingerprint(root, "HEAD"));
+        let count = |needle: &str| cmds.iter().filter(|c| c.contains(needle)).count();
+        assert_eq!(
+            count("rev-parse --show-toplevel"),
+            1,
+            "toplevel resolved once per column load, commands={cmds:?}"
+        );
+        assert_eq!(
+            count("merge-base HEAD"),
+            1,
+            "merge-base resolved once per column load, commands={cmds:?}"
+        );
+    }
+
+    #[test]
+    fn column_load_fails_within_one_deadline_when_git_never_returns() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // A FIFO with no writer in place of `.git/config` blocks every git
+        // invocation forever. The whole column load - fingerprint, diff, and
+        // file stats - has to fail inside ONE budget, not one per pipeline.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        assert!(test_git(&root, &["init"]), "git init is required");
+        let config = root.join(".git").join("config");
+        std::fs::remove_file(&config).unwrap();
+        let fifo = std::ffi::CString::new(config.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path for the call's duration.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let budget = GitBudget {
+            deadline_at: Instant::now() + Duration::from_millis(300),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_column_within(&budget, &root, "HEAD"));
+        });
+        let load = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("column load must fail inside one budget, not one per git pipeline");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "column load took {:?} for a 300 ms budget",
+            started.elapsed()
+        );
+        let err = load.diff.error.expect("hung git must fail the diff");
+        assert!(err.contains("deadline"), "got {err}");
+        assert!(load.file_stats.is_err());
+        assert_eq!(load.fingerprint.untracked_hash, None);
+    }
+
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {
         std::process::Command::new("git")
             .args(args)
@@ -2105,7 +2256,7 @@ pub(crate) mod tests {
         }
 
         let _ = take_git_commands();
-        let diff = compute_worktree_diff(root, "HEAD");
+        let diff = load_column(root, "HEAD").diff;
         let cmds = take_git_commands();
 
         assert!(
