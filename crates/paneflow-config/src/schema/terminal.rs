@@ -1,6 +1,6 @@
 use super::config::{
     lenient_opt_bool, lenient_opt_cursor_blink, lenient_opt_cursor_shape, lenient_opt_f32,
-    lenient_opt_string, lenient_opt_string_map, lenient_opt_usize,
+    lenient_opt_osc52_clipboard, lenient_opt_string, lenient_opt_string_map, lenient_opt_usize,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -65,6 +65,20 @@ pub enum CursorBlinkConfig {
     TerminalControlled,
 }
 
+/// OSC 52 clipboard policy for programs running in a terminal. `CopyOnly`
+/// (default) lets a focused pane write the system clipboard; `Disabled`
+/// refuses every OSC 52 store. Clipboard reads are never served, so there
+/// is no read-enabling variant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Osc52ClipboardConfig {
+    /// A focused pane may write the clipboard (historical default).
+    #[default]
+    CopyOnly,
+    /// Ignore every OSC 52 clipboard write.
+    Disabled,
+}
+
 // Manual `Deserialize` for the terminal enums. A derived `Deserialize` hard-
 // errors on an unrecognised variant; that error propagates up to
 // `parse_and_validate` (loader.rs), which discards the ENTIRE user config and
@@ -118,6 +132,27 @@ impl<'de> Deserialize<'de> for CursorBlinkConfig {
                     "terminal.cursor_blink value not recognized, defaulting to terminal_controlled",
                 );
                 Self::TerminalControlled
+            }
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Osc52ClipboardConfig {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(d)?;
+        Ok(match raw.as_str() {
+            "copy_only" => Self::CopyOnly,
+            "disabled" => Self::Disabled,
+            other => {
+                tracing::warn!(
+                    target: "paneflow_config::terminal",
+                    value = other,
+                    "terminal.osc52_clipboard value not recognized, defaulting to copy_only",
+                );
+                Self::CopyOnly
             }
         })
     }
@@ -217,6 +252,12 @@ pub struct TerminalConfig {
     /// constructed, so existing terminals keep their current scroll feel.
     #[serde(default, deserialize_with = "lenient_opt_f32")]
     pub scroll_multiplier: Option<f32>,
+    /// OSC 52 clipboard policy. `None` resolves to `CopyOnly`: a focused pane
+    /// may write the system clipboard. `Disabled` refuses every OSC 52 store,
+    /// so PTY-controlled text never reaches the pasteboard. Read once at PTY
+    /// spawn time; changing this value takes effect on the next new terminal.
+    #[serde(default, deserialize_with = "lenient_opt_osc52_clipboard")]
+    pub osc52_clipboard: Option<Osc52ClipboardConfig>,
 }
 
 impl TerminalConfig {
@@ -251,6 +292,11 @@ impl TerminalConfig {
 
     pub fn normalized_cursor_color(&self) -> Option<String> {
         self.cursor_color.as_deref().and_then(normalize_hex_color)
+    }
+
+    /// Resolve `osc52_clipboard` to a usable value: default `CopyOnly`.
+    pub fn resolved_osc52_clipboard(&self) -> Osc52ClipboardConfig {
+        self.osc52_clipboard.unwrap_or_default()
     }
 
     /// Resolve `scroll_multiplier` to a usable value: default `1.0`, clamped to

@@ -29,7 +29,7 @@ use super::types::{
 };
 use crate::agents::parent_guard::INHERITED_AGENT_SESSION_ENV;
 use crate::limits::MAX_OSC52_BYTES;
-use paneflow_config::schema::{TerminalConfig, TerminalSurfaceProfile};
+use paneflow_config::schema::{Osc52ClipboardConfig, TerminalConfig, TerminalSurfaceProfile};
 use paneflow_terminal_ghostty::Scroll as GhosttyScroll;
 
 const ZDOTDIR_ENV: &str = "ZDOTDIR";
@@ -416,6 +416,22 @@ pub enum Osc52Mode {
     CopyOnly,
     CopyPaste,
 }
+
+impl Osc52Mode {
+    /// Resolve the user's `terminal.osc52_clipboard` policy from a config
+    /// snapshot. `None` (block or key absent) keeps the copy-only default.
+    pub(super) fn from_config(config: &paneflow_config::schema::PaneFlowConfig) -> Self {
+        let policy = config
+            .terminal
+            .as_ref()
+            .map(TerminalConfig::resolved_osc52_clipboard)
+            .unwrap_or_default();
+        match policy {
+            Osc52ClipboardConfig::CopyOnly => Self::CopyOnly,
+            Osc52ClipboardConfig::Disabled => Self::Disabled,
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // Terminal state
 // ---------------------------------------------------------------------------
@@ -733,6 +749,10 @@ pub struct TerminalState {
     pub font_size_override: Option<f32>,
     /// OSC 52 clipboard access mode (default: copy-only for security).
     pub osc52_mode: Osc52Mode,
+    /// The configured `terminal.osc52_clipboard` policy, resolved from the
+    /// spawn's config snapshot and installed by
+    /// [`promote_ghostty`](Self::promote_ghostty) once the child exists.
+    spawn_osc52_mode: Osc52Mode,
     /// OSC 52 is accepted only while this terminal owns focus. Updated from
     /// the GPUI focus transition before any focus protocol report is queued.
     terminal_focused: bool,
@@ -930,7 +950,7 @@ impl TerminalState {
             );
         }
         self.pty_master_fd = Some(spawned.master_fd);
-        self.set_osc52_mode(Osc52Mode::CopyOnly);
+        self.set_osc52_mode(self.spawn_osc52_mode);
         self.cursor_blinking = true;
         self.dirty = true;
         self.flush_ghostty_pending_input();
@@ -1099,6 +1119,9 @@ impl TerminalState {
             params.profile,
             params.shell_quoting,
         );
+        state.set_spawn_osc52_mode(Osc52Mode::from_config(
+            &paneflow_config::loader::load_config(),
+        ));
         let spawned = state
             .ghostty_session()
             .start(pending.ghostty, params, signal_mask, max_scrollback)
@@ -1294,6 +1317,7 @@ impl TerminalState {
             announced_ports: Vec::new(),
             font_size_override: None,
             osc52_mode: Osc52Mode::Disabled,
+            spawn_osc52_mode: Osc52Mode::CopyOnly,
             terminal_focused: false,
             clipboard_gate,
             shell_quoting,
@@ -1631,6 +1655,12 @@ impl TerminalState {
         self.osc52_mode = mode;
         self.clipboard_gate
             .set_policy(mode != Osc52Mode::Disabled, mode == Osc52Mode::CopyPaste);
+    }
+
+    /// Record the configured OSC 52 policy for this spawn. Takes effect when
+    /// the child is promoted; the gate stays closed until then.
+    pub(super) fn set_spawn_osc52_mode(&mut self, mode: Osc52Mode) {
+        self.spawn_osc52_mode = mode;
     }
 
     fn dispatch_ghostty_input(
@@ -3389,6 +3419,57 @@ mod tests {
         state.set_terminal_focused(false);
         state.deliver_clipboard_text("lost-focus".into());
         assert_eq!(state.pending_clipboard_ops.len(), 1);
+    }
+
+    /// Issue #315: `terminal.osc52_clipboard: "disabled"` must survive
+    /// promotion. A focused pane whose program emits OSC 52 then writes
+    /// nothing, at both the state gate and the engine-side gate.
+    #[cfg(unix)]
+    #[test]
+    fn osc52_store_honors_the_disabled_terminal_setting() {
+        let config = paneflow_config::schema::PaneFlowConfig {
+            terminal: Some(TerminalConfig {
+                osc52_clipboard: Some(Osc52ClipboardConfig::Disabled),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(Osc52Mode::from_config(&config) == Osc52Mode::Disabled);
+        assert!(
+            Osc52Mode::from_config(&paneflow_config::schema::PaneFlowConfig::default())
+                == Osc52Mode::CopyOnly,
+            "an absent key keeps the documented copy_only default"
+        );
+
+        let (mut state, pending) = TerminalState::new_pending(80, 24);
+        state.set_spawn_osc52_mode(Osc52Mode::from_config(&config));
+        let params = SpawnParams {
+            shell: "/bin/sh".into(),
+            shell_quoting: ShellQuoting::Posix,
+            extra_args: Vec::new(),
+            env: std::collections::HashMap::from([
+                ("TERM".into(), "xterm-256color".into()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+            ]),
+            cwd: std::env::temp_dir(),
+            cols: 80,
+            rows: 24,
+            profile: TerminalSurfaceProfile::Normal,
+        };
+        let spawned = state
+            .ghostty_session()
+            .start(pending.ghostty, params, None, 1_000)
+            .expect("spawn a PTY shell");
+        state.promote_ghostty(spawned);
+
+        assert!(
+            state.osc52_mode == Osc52Mode::Disabled,
+            "promotion must install the configured policy, not a hardcoded CopyOnly"
+        );
+        state.set_terminal_focused(true);
+        assert!(!state.clipboard_gate.allows_store());
+        state.deliver_clipboard_text("secret-token".into());
+        assert!(state.pending_clipboard_ops.is_empty());
     }
 
     /// A tampered `session.json` line can carry live VT bytes: an OSC 8

@@ -520,6 +520,7 @@ impl TerminalView {
             profile,
             &config,
         );
+        let osc52_mode = crate::terminal::pty_session::Osc52Mode::from_config(&config);
         let max_scrollback = config
             .terminal
             .unwrap_or_default()
@@ -530,6 +531,7 @@ impl TerminalView {
             params.profile,
             params.shell_quoting,
         );
+        terminal.set_spawn_osc52_mode(osc52_mode);
         // Publish the resolved launch CWD before scheduling the background PTY
         // open. Worktree retirement scans placeholders too; leaving this None
         // creates a window where a pending spawn is invisible and its checkout
