@@ -1351,10 +1351,15 @@ impl TerminalView {
 
         // Regex toggle (.*): active state reads as a pressed pill with an accent
         // hairline - a full accent fill would drop below 4.5:1 on the light theme.
-        let regex_toggle = search_regex_toggle(regex_active, ui).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _window, cx| this.toggle_search_regex(cx)),
-        );
+        // The controls fire on click (not mouse-down) so AccessKit exposes
+        // `Action::Click` and VoiceOver can activate them; the mouse-down
+        // handler only stops the press from reaching the terminal underneath.
+        let regex_toggle = search_regex_toggle(regex_active, ui)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_search_regex(cx);
+            }));
 
         // EP-006 US-018: fan the query out to every pane of every workspace. The
         // clickable counterpart of the remappable `toggle_fleet_search` action.
@@ -1399,10 +1404,11 @@ impl TerminalView {
             ui.subtle,
             has_matches,
         )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _window, cx| this.search_prev(cx)),
-        );
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _window, cx| {
+            cx.stop_propagation();
+            this.search_prev(cx);
+        }));
         let next_btn = search_icon_button(
             "search-next",
             "icons/chevron_down.svg",
@@ -1411,10 +1417,11 @@ impl TerminalView {
             ui.subtle,
             has_matches,
         )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _window, cx| this.search_next(cx)),
-        );
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _window, cx| {
+            cx.stop_propagation();
+            this.search_next(cx);
+        }));
         let close_btn = search_icon_button(
             "search-close",
             "icons/close.svg",
@@ -1423,13 +1430,12 @@ impl TerminalView {
             ui.subtle,
             true,
         )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                this.dismiss_search(cx);
-                this.focus_handle.clone().focus(window, cx);
-            }),
-        );
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.dismiss_search(cx);
+            this.focus_handle.clone().focus(window, cx);
+        }));
 
         div()
             .id("search-overlay")
@@ -1882,6 +1888,33 @@ mod tests {
     /// Issue #322: every find-bar control is a named button for AccessKit,
     /// the regex toggle reports its pressed state, and nav with nothing to
     /// step through is exposed as disabled.
+    /// PR #338 review: `Role::Button` controls must fire on click, not
+    /// mouse-down, or AccessKit exposes no `Action::Click` and VoiceOver
+    /// cannot activate them.
+    #[test]
+    fn search_overlay_controls_fire_on_click() {
+        let source = include_str!("view.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production terminal view source");
+        let overlay = source
+            .split("let regex_toggle = search_regex_toggle(")
+            .nth(1)
+            .and_then(|rest| rest.split(".id(\"search-overlay\")").next())
+            .expect("view.rs builds the search overlay controls");
+        for id in ["search-prev", "search-next", "search-close"] {
+            assert!(
+                overlay.contains(&format!("\"{id}\",")),
+                "search overlay lost the {id} control"
+            );
+        }
+        let clicks = overlay.matches(".on_click(").count();
+        assert!(
+            clicks >= 4,
+            "regex toggle, prev, next and close must all fire on click; found {clicks} on_click"
+        );
+    }
+
     #[test]
     fn search_overlay_controls_expose_names_and_states() {
         use gpui::accesskit::{Node, Role, Toggled};

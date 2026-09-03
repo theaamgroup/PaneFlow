@@ -1,8 +1,9 @@
 //! Pane-swap mode toggle for `PaneFlowApp`.
 //!
-//! Entering swap mode arms every `TerminalView` in the active tab so Escape
-//! from whichever pane is focused cancels (issue #299: per-view flags with one
-//! writer, no process-global). Focus-direction keys then swap the source pane
+//! Entering swap mode arms every `TerminalView` in every tab of every
+//! workspace, so Escape from whichever pane ends up focused, after a click, a
+//! tab switch, or a workspace switch, still cancels (issue #299: per-view flags
+//! with one writer, no process-global). Focus-direction keys then swap the source pane
 //! with the target (see [`super::focus`]). `set_swap_source` is the only
 //! writer of `swap_source`, so arming and disarming can never drift from it.
 //!
@@ -43,20 +44,23 @@ impl PaneFlowApp {
     }
 
     /// Issue #299: the single writer of swap state. Disarms whatever was
-    /// armed last time and arms every leaf pane's terminals in the active
-    /// tab, so Escape cancels from any pane the user focuses meanwhile (the
-    /// pre-#299 process-global check allowed that too) and `swap_source` and
-    /// the per-view flags change together.
+    /// armed last time and arms every leaf pane's terminals across all
+    /// workspaces and tabs, so Escape cancels from any pane the user focuses
+    /// meanwhile, including after a tab or workspace switch (the pre-#299
+    /// process-global check allowed that too), and `swap_source` and the
+    /// per-view flags change together.
     pub(crate) fn set_swap_source(&mut self, source: Option<Entity<Pane>>, cx: &mut Context<Self>) {
         for pane in std::mem::take(&mut self.swap_armed_panes) {
             Self::arm_swap_terminal(&pane, false, cx);
         }
         if let Some(pane) = &source {
-            let mut armed = self
-                .active_workspace()
-                .and_then(|ws| ws.active_tab().root.as_ref())
-                .map(|root| root.collect_leaves())
-                .unwrap_or_default();
+            let mut armed: Vec<Entity<Pane>> = self
+                .workspaces
+                .iter()
+                .flat_map(|ws| ws.tabs().iter())
+                .filter_map(|tab| tab.root.as_ref())
+                .flat_map(|root| root.collect_leaves())
+                .collect();
             if !armed.contains(pane) {
                 armed.push(pane.clone());
             }
