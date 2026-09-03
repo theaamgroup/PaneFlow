@@ -64,7 +64,8 @@
 
 **Interfaces:**
 - Consumes: `crate::ai_types::AgentState`, `crate::agent_launcher::TerminalAgent`.
-- Produces: `CardMeta`, `TabGroup`, `WorkspaceGroup`, `group_cards`, `filter_cards`, `flat_order`, `move_selection`, `live_thumbnail_ids`, `MAX_LIVE_THUMBNAILS`. Tasks 5-7 depend on every one of these names.
+- Produces: `CardMeta`, `TabGroup`, `WorkspaceGroup`, `group_cards`, `filter_cards`, `flat_order`, `initial_selection`, `move_selection`, `live_thumbnail_ids`, `MAX_LIVE_THUMBNAILS`. Tasks 5-7 depend on every one of these names.
+- `WorkspaceGroup` keeps `is_active` and `branch` (the spec's §6 definition). `CardMeta.is_active` means **the focused pane** of the active tab of the active workspace - one card at most - not "any pane in the active tab"; `ws_is_active` is the separate workspace-level flag the header uses.
 
 - [ ] **Step 1: Declare the module**
 
@@ -115,6 +116,8 @@ mod tests {
             rows: 24,
             exited: false,
             is_active: false,
+            ws_is_active: false,
+            ws_branch: String::new(),
         }
     }
 
@@ -141,6 +144,36 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].tabs.len(), 1);
         assert_eq!(groups[0].tabs[0].cards.len(), 2);
+    }
+
+    /// Product decision (2026-09-03): a workspace with no terminal pane -
+    /// empty, or holding only markdown / diff panes - gets no section and no
+    /// header. Grouping does this as a side effect (a group only exists once
+    /// a card lands in it); this test makes it a decision, not an accident.
+    #[test]
+    fn group_cards_omits_workspaces_with_no_terminal_cards() {
+        // Workspace 1 has no cards at all: nothing was enumerated for it.
+        let groups = group_cards(vec![card(1, 0, 0, "a"), card(3, 2, 0, "c")]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].ws_idx, 0);
+        assert_eq!(groups[1].ws_idx, 2);
+        assert!(groups.iter().all(|g| !g.tabs.is_empty()));
+        assert!(groups.iter().all(|g| g.tabs.iter().all(|t| !t.cards.is_empty())));
+    }
+
+    /// The section header marks the active workspace and shows its branch,
+    /// lifted from the cards rather than looked up again.
+    #[test]
+    fn grouping_lifts_the_active_workspace_and_branch_onto_the_header() {
+        let mut a = card(1, 0, 0, "a");
+        a.ws_is_active = true;
+        a.ws_branch = "main".to_string();
+        let b = card(2, 1, 0, "b");
+        let groups = group_cards(vec![a, b]);
+        assert!(groups[0].is_active);
+        assert_eq!(groups[0].branch, "main");
+        assert!(!groups[1].is_active);
+        assert_eq!(groups[1].branch, "");
     }
 
     #[test]
@@ -175,6 +208,25 @@ mod tests {
             card(2, 0, 1, "b"),
         ]);
         assert_eq!(flat_order(&groups), vec![1, 2, 3]);
+    }
+
+    /// Product decision (2026-09-03): the overlay opens on the current pane's
+    /// card, so Esc then Enter is a no-op round trip.
+    #[test]
+    fn initial_selection_starts_on_the_current_card() {
+        let order = vec![10, 20, 30];
+        assert_eq!(initial_selection(&order, Some(30)), 2);
+        assert_eq!(initial_selection(&order, Some(10)), 0);
+    }
+
+    /// No focused terminal (or the focused pane is a markdown / diff pane):
+    /// fall back to the first card rather than guessing.
+    #[test]
+    fn initial_selection_falls_back_to_the_first_card() {
+        let order = vec![10, 20, 30];
+        assert_eq!(initial_selection(&order, Some(99)), 0);
+        assert_eq!(initial_selection(&order, None), 0);
+        assert_eq!(initial_selection(&[], Some(10)), 0);
     }
 
     #[test]
@@ -242,8 +294,8 @@ use crate::ai_types::AgentState;
 /// Cards past this many, in visible order, render a static shell instead of a
 /// live thumbnail.
 ///
-/// The eight-pane perf gate (`layout/render.rs`) already spends a whole 60 Hz
-/// frame on eight painted terminals, and the theoretical worst case here is
+/// The `#[ignore]`d eight-pane benchmark (`layout/render.rs:464-469`) already
+/// spends a whole 60 Hz frame on eight painted terminals, and the theoretical worst case here is
 /// 20 workspaces x 32 tabs x 32 panes = 20,480 panes. Off-screen cards cull
 /// themselves in prepaint; this cap bounds what is left when a very large
 /// grid IS on screen.
@@ -267,7 +319,17 @@ pub(crate) struct CardMeta {
     pub cols: usize,
     pub rows: usize,
     pub exited: bool,
+    /// The focused pane of the active tab of the active workspace - the one
+    /// card the overlay opens on and marks "current". True for at most one
+    /// card. NOT "any pane of the active tab".
     pub is_active: bool,
+    /// The card's workspace is the active workspace. Lifted onto
+    /// `WorkspaceGroup::is_active` by `group_cards`; kept separate from
+    /// `is_active` so the header still marks the active workspace when its
+    /// focused pane is a markdown or diff pane.
+    pub ws_is_active: bool,
+    /// `Workspace::git_branch`, empty when the workspace is not a checkout.
+    pub ws_branch: String,
 }
 
 impl CardMeta {
@@ -302,6 +364,10 @@ pub(crate) struct TabGroup {
 pub(crate) struct WorkspaceGroup {
     pub ws_idx: usize,
     pub title: String,
+    /// Shown in the section header beside the title; empty when none.
+    pub branch: String,
+    /// The header's active marker.
+    pub is_active: bool,
     pub tabs: Vec<TabGroup>,
 }
 
@@ -310,6 +376,12 @@ pub(crate) struct WorkspaceGroup {
 /// Input order is the caller's traversal order (workspace index, then tab
 /// index, then layout traversal); grouping is stable and never re-sorts, so
 /// the on-screen order matches `flat_order`.
+///
+/// A workspace with no card - empty, or holding only markdown / diff panes -
+/// never gets a group: a group is created by the first card that lands in it.
+/// That is the product decision pinned by
+/// `group_cards_omits_workspaces_with_no_terminal_cards`, not an accident of
+/// this loop, so do not "fix" it by pre-seeding one group per workspace.
 pub(crate) fn group_cards(cards: Vec<CardMeta>) -> Vec<WorkspaceGroup> {
     let mut groups: Vec<WorkspaceGroup> = Vec::new();
     for card in cards {
@@ -319,6 +391,8 @@ pub(crate) fn group_cards(cards: Vec<CardMeta>) -> Vec<WorkspaceGroup> {
                 groups.push(WorkspaceGroup {
                     ws_idx: card.ws_idx,
                     title: card.ws_title.clone(),
+                    branch: card.ws_branch.clone(),
+                    is_active: card.ws_is_active,
                     tabs: Vec::new(),
                 });
                 groups.len() - 1
@@ -371,6 +445,17 @@ pub(crate) fn flat_order(groups: &[WorkspaceGroup]) -> Vec<u64> {
         .collect()
 }
 
+/// Where the selection cursor starts when the overlay opens: on the current
+/// pane's card (the focused pane of the active tab of the active workspace),
+/// so Esc then Enter is a no-op round trip. Falls back to the first card when
+/// `current` is `None` or not in `order` - no focused terminal, or the focused
+/// pane is a markdown / diff pane the overlay does not list.
+pub(crate) fn initial_selection(order: &[u64], current: Option<u64>) -> usize {
+    current
+        .and_then(|sid| order.iter().position(|id| *id == sid))
+        .unwrap_or(0)
+}
+
 /// Move the selection cursor by `delta`, clamped. Never wraps: wrapping from
 /// the last card of the last workspace to the first is disorienting in a
 /// grouped grid where the two are visually far apart.
@@ -391,7 +476,7 @@ pub(crate) fn live_thumbnail_ids(order: &[u64], cap: usize) -> HashSet<u64> {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cargo test -p paneflow-app pane_overview::rows 2>&1 | tail -20`
-Expected: PASS — 11 tests.
+Expected: PASS — 15 tests.
 
 - [ ] **Step 6: Format, lint, commit**
 
@@ -513,7 +598,8 @@ This is the highest-risk part of the feature, isolated into a GPUI-free function
 
 **Interfaces:**
 - Consumes: `TerminalSessionBackend::{render_content, grid_metrics}`, `TerminalWindowSize`, `Content`.
-- Produces: `THUMBNAIL_ROWS`, `THUMBNAIL_FONT_PX`, `thumbnail_snapshot(&TerminalSessionBackend) -> ThumbnailSnapshot`, `struct ThumbnailSnapshot { content, first_visible_row, last_visible_row }`. Task 4 uses all of them.
+- Produces: `THUMBNAIL_ROWS`, `THUMBNAIL_FONT_PX`, `THUMBNAIL_BAND_W/H`, `thumbnail_cell_dimensions`, `thumbnail_font`, `thumbnail_snapshot(&TerminalSessionBackend) -> ThumbnailSnapshot`, `struct ThumbnailSnapshot { content, first_visible_row, last_visible_row }`. Task 4 uses all of them.
+- Font and cell metrics come from `font::cached_font_config()` (`font.rs:290`, `pub(super)`, reachable from `element::thumbnail` because a child module sees its parent's private items). **Do not use `font::base_font()`**: it is `#[cfg(test)]`-gated (`font.rs:449-451`, and its re-export at `element/mod.rs:30-32` is `cfg(test)` too), so a production call does not compile. Do not propose un-gating it.
 
 - [ ] **Step 1: Declare the module**
 
@@ -582,13 +668,27 @@ mod tests {
         assert_eq!(snap.last_visible_row, snap.content.rows as i32);
     }
 
-    /// 9 px is above the quantization floor: `round(9 * 0.6) = 5` and
-    /// `round(9 * 1.2) = 11`, so a 320x132 band is exactly 64 columns by 12
-    /// rows. Below ~4 px cell width the rounding dominates and columns drift,
-    /// which is why the design crops rather than scaling the whole grid.
+    /// 9 px is above the quantization floor at the DEFAULT multipliers:
+    /// `round(9 * 0.6) = 5` and `round(9 * 1.2) = 11`, so a 320x132 band is
+    /// exactly 64 columns by 12 rows. Below ~4 px cell width the rounding
+    /// dominates and columns drift, which is why the design crops rather than
+    /// scaling the whole grid.
+    ///
+    /// The multipliers are config-driven (`settings.cell_width` /
+    /// `settings.line_height`), so this test pins the band against the
+    /// defaults explicitly rather than reading the developer's own config
+    /// through `cached_font_config()`.
     #[test]
     fn the_thumbnail_band_is_a_whole_number_of_cells() {
-        let dims = thumbnail_cell_dimensions();
+        use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
+
+        let defaults = FontSettings {
+            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            size: 13.0,
+            line_height: DEFAULT_LINE_HEIGHT,
+            cell_width: DEFAULT_CELL_WIDTH,
+        };
+        let dims = thumbnail_cell_dimensions_for(&defaults);
         assert_eq!(f32::from(dims.cell_width), 5.0);
         assert_eq!(f32::from(dims.line_height), 11.0);
         assert_eq!(THUMBNAIL_BAND_W / f32::from(dims.cell_width), 64.0);
@@ -645,22 +745,33 @@ pub(super) const THUMBNAIL_ROWS: usize = 12;
 
 /// Font size for a thumbnail, in pixels.
 ///
-/// Cell geometry is a pure function of this scalar - `font.rs` computes
-/// `cell_width = round(size * 0.6)` and `line_height = round(size * 1.2)`,
-/// with no glyph measurement - so 9 px yields exactly 5x11 px cells.
+/// Cell geometry is a pure function of this scalar and the two configured
+/// multipliers - `font::cell_dimensions` (`font.rs:579-584`) computes
+/// `cell_width = round(size * settings.cell_width)` and
+/// `line_height = round(size * settings.line_height)`, with no glyph
+/// measurement. At the 0.6 / 1.2 defaults (`font.rs:26-27`) 9 px yields
+/// exactly 5x11 px cells.
 pub(super) const THUMBNAIL_FONT_PX: f32 = 9.0;
 
-/// Thumbnail band size. Both divide evenly by the cell metrics above, which
-/// `the_thumbnail_band_is_a_whole_number_of_cells` pins.
+/// Thumbnail band size, in pixels. These are the DEFAULT-derived figure:
+/// 64 columns x 12 rows at 5x11 px cells. They stay hardcoded on purpose -
+/// the card box is sized to them - and a user with non-default
+/// `cell_width` / `line_height` gets a different number of cells in the same
+/// band, not a different band. `the_thumbnail_band_is_a_whole_number_of_cells`
+/// pins them against the defaults.
 pub(super) const THUMBNAIL_BAND_W: f32 = 320.0;
 pub(super) const THUMBNAIL_BAND_H: f32 = 132.0;
 
-/// Cell metrics for a thumbnail, mirroring `font.rs`'s multipliers.
+/// Cell metrics for a thumbnail under `settings`: the same two multipliers
+/// the pane uses, applied to the thumbnail font size through the same
+/// rounding as the pane (`font::cell_dimensions`).
+pub(super) fn thumbnail_cell_dimensions_for(settings: &super::font::FontSettings) -> CellDimensions {
+    super::font::cell_dimensions(settings, px(THUMBNAIL_FONT_PX))
+}
+
+/// Cell metrics for a thumbnail under the live config.
 pub(super) fn thumbnail_cell_dimensions() -> CellDimensions {
-    CellDimensions {
-        cell_width: px((THUMBNAIL_FONT_PX * 0.6).round()),
-        line_height: px((THUMBNAIL_FONT_PX * 1.2).round()),
-    }
+    thumbnail_cell_dimensions_for(&super::font::cached_font_config())
 }
 
 /// A grid snapshot plus the row window a thumbnail paints.
@@ -707,18 +818,25 @@ pub(super) fn thumbnail_snapshot(backend: &TerminalSessionBackend) -> ThumbnailS
 
 /// Base font for a thumbnail: the same family the pane uses, at thumbnail size.
 ///
-/// `font::base_font()` is `pub(super)` in `element/font.rs` and takes no
-/// `&mut Window`, so the thumbnail resolves its own font rather than having one
-/// threaded in from the overlay. Note it does NOT go through
-/// `resolve_frame_metrics`, whose `size_override` is clamped to [8.0, 32.0] pt
-/// and so could not produce a 9 px thumbnail face.
+/// `font::cached_font_config()` (`font.rs:290`) is `pub(super)` in
+/// `element/font.rs` and takes no `&mut Window`, so the thumbnail resolves its
+/// own font rather than having one threaded in from the overlay. It is the
+/// same 500 ms mtime-cached read the renderer's `resolve_frame_metrics`
+/// makes, so a font change reaches thumbnails and panes together. Note it
+/// does NOT go through `resolve_frame_metrics` itself, whose `size_override`
+/// is clamped to [8.0, 32.0] pt and so could not produce a 9 px thumbnail
+/// face. (`font::base_font()` would read the same way but is
+/// `#[cfg(test)]`-gated at `font.rs:449-451`: a production call does not
+/// compile.)
 pub(super) fn thumbnail_font() -> (Font, Pixels) {
-    (super::font::base_font(), px(THUMBNAIL_FONT_PX))
+    (super::font::cached_font_config().font, px(THUMBNAIL_FONT_PX))
 }
 ```
 
-If `mod font;` is declared private in `element/mod.rs`, `element::thumbnail` can still reach it as
-`super::font::base_font()` — a child module sees its parent's private items.
+`mod font;` is private in `element/mod.rs`; `element::thumbnail` still reaches
+`super::font::cached_font_config()`, `super::font::cell_dimensions` and
+`super::font::FontSettings` (all `pub(super)`) because a child module sees its parent's private
+items. `DEFAULT_CELL_WIDTH` / `DEFAULT_LINE_HEIGHT` are `pub(crate)`.
 
 If `terminal_metric_to_u16` is not re-exported from `crate::terminal::types`, import it from wherever `element/mod.rs` imports it — it is defined at `src-app/src/terminal/types.rs:71`.
 
@@ -745,7 +863,8 @@ git commit -m "feat(terminal): read-only thumbnail snapshot that never resizes t
 
 **Interfaces:**
 - Consumes: everything Task 3 produced, plus `super::{layout_from_snapshot, LayoutInputs, CellGeometry}` and `super::paint::*`.
-- Produces: `pub(crate) struct TerminalThumbnail` with `TerminalThumbnail::new(backend, base_font, theme)`. Task 7 constructs one per live card.
+- Produces: `pub(crate) struct TerminalThumbnail` with `TerminalThumbnail::new(backend, theme)` — two arguments; the font is resolved inside via `thumbnail_font()`, not passed in. Task 7 constructs one per live card.
+- **Snapshot lifetime rule (spec §4.2e / §5).** `CellMirror::publish` (`ghostty_session.rs:4241-4245`) reuses its recycled back buffer only when `Arc::get_mut` succeeds; a thumbnail holding a `Content.cells` clone across a publish forces a full-grid conversion for that pane that frame. So: the `ThumbnailSnapshot` is a prepaint local, the `LayoutState` is `take()`n and dropped in paint, and `TerminalThumbnail` stores no `Content`, no `Arc<[Cell]>`, and no `LayoutState` field. Never cache any of them across frames.
 
 - [ ] **Step 1: Write the element**
 
@@ -760,10 +879,17 @@ use gpui::{
 };
 
 use super::geometry::CellGeometry;
-use super::{LayoutInputs, LayoutState, layout_from_snapshot, paint};
+use super::{LayoutInputs, LayoutState, cursor_from_content, layout_from_snapshot, paint};
+use crate::terminal::types::CursorShape;
 use crate::theme::TerminalTheme;
 
 /// A pane's last [`THUMBNAIL_ROWS`] rows, painted read-only into a card.
+///
+/// Holds no snapshot: `ThumbnailSnapshot` lives only inside `prepaint`, and
+/// the `LayoutState` it produces is consumed and dropped by `paint`. Keeping
+/// either across frames would hold the pane's `Content.cells` `Arc` across
+/// the runtime thread's next `CellMirror::publish`, defeating its
+/// `Arc::get_mut` buffer reuse and forcing a full-grid conversion.
 pub(crate) struct TerminalThumbnail {
     backend: TerminalSessionBackend,
     theme: Arc<TerminalTheme>,
@@ -829,11 +955,36 @@ impl Element for TerminalThumbnail {
 
         let dims = thumbnail_cell_dimensions();
         let (base_font, _size) = thumbnail_font();
+        // A dim, non-blinking block cursor (spec §4.3): a useful "parked at a
+        // prompt" signal for one quad. `cursor_from_content` is the private
+        // helper `build_layout` uses (`element/mod.rs:533`); `focused: true`
+        // because the helper returns `None` for an unfocused pane and a
+        // thumbnail is never "unfocused". It filters `CursorShape::Hidden`
+        // itself. The shape is then forced to `Block` regardless of the pane's
+        // own beam/underline/vintage mode - a 5 px beam is invisible - and
+        // `text` is cleared so the block does not try to re-shape the glyph
+        // under it. Blink is not a layout input: it only gates whether
+        // `paint` draws the cursor, and this element always draws it.
+        // `CursorInfo`'s fields are private to `element`, which this child
+        // module can see.
+        let cursor = cursor_from_content(
+            snap.content.cursor,
+            true,
+            self.theme.cursor.opacity(0.5),
+            CursorShape::Block,
+            &self.theme,
+        )
+        .map(|mut c| {
+            c.shape = CursorShape::Block;
+            c.text = None;
+            c
+        });
         Some(layout_from_snapshot(LayoutInputs {
+            // The only `Arc<[Cell]>` clone this element makes; `snap` goes
+            // out of scope at the end of prepaint and the `LayoutState` is
+            // dropped in `paint`.
             cells: snap.content.cells.clone(),
-            // No cursor: a thumbnail is not focused, and a blinking or hollow
-            // cursor in a 5px cell reads as noise rather than as a signal.
-            cursor: None,
+            cursor,
             // Selection, copy mode, and search belong to the live pane.
             selection_range: None,
             copy_mode_cursor: None,
@@ -891,6 +1042,12 @@ impl Element for TerminalThumbnail {
         let (base_font, font_size) = thumbnail_font();
 
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            // No-op here: the band's background is transparent (the card
+            // paints `theme.background` under it) and `paint_base_fill` only
+            // emits a quad when `background_color.a > 0.0`
+            // (`paint/background.rs:23`). Kept so the sequence mirrors
+            // `TerminalElement::paint` and a reader does not go looking for
+            // the missing fill.
             paint::background::paint_base_fill(&layout, bounds, window);
             paint::background::paint_cell_backgrounds(
                 &layout,
@@ -907,7 +1064,13 @@ impl Element for TerminalThumbnail {
                 window,
             );
             paint::text::paint_text_runs(&layout, &geom, &base_font, font_size, window, cx);
+            // The dim block cursor built in prepaint. Unconditional: there is
+            // no blink phase here.
+            paint::cursor::paint_cursor(&layout, &geom, &base_font, font_size, window, cx);
         });
+        // `layout` (and with it the pane's `Arc<[Cell]>`) drops here. Do not
+        // stash it on `self` for the next frame - see the struct doc.
+        drop(layout);
         // Deliberately not painted: selection, search highlights, hyperlink
         // underlines, IME preedit, the scrollbar and its match rail, and Kitty
         // graphics. Kitty in particular: each pane carries a 32 MiB image cap,
@@ -932,6 +1095,7 @@ Run: `cargo build -p paneflow-app 2>&1 | tail -30`
 Expected: it may fail on module privacy. Fix by widening in `src-app/src/terminal/element/mod.rs` **only as far as `pub(super)`**, never `pub(crate)`:
 - if `mod paint;` is not visible, change the `mod geometry;`/`mod paint;` declarations the compiler names to `pub(super) mod`;
 - if `LayoutState`'s fields are unreachable, they are private to `element` and a child module CAN read them — a failure here means the file was created outside `element/`;
+- the same holds for `cursor_from_content` (a private fn at `element/mod.rs:533`) and `CursorInfo`'s private fields (`element/mod.rs:457`): reachable from `element::thumbnail`, and a failure means the file is in the wrong place;
 - `CellGeometry`'s fields are `pub(super)` in `geometry.rs`, which is `pub(in element)` and therefore visible.
 
 Re-run until it builds clean.
@@ -1151,13 +1315,21 @@ use gpui::{Context, FocusableView, KeyDownEvent, Window};
 
 use crate::PaneFlowApp;
 use crate::limits::clamp_untrusted_label;
-use rows::{CardMeta, MAX_LIVE_THUMBNAILS, filter_cards, flat_order, group_cards, move_selection};
+use rows::{
+    CardMeta, MAX_LIVE_THUMBNAILS, filter_cards, flat_order, group_cards, initial_selection,
+    move_selection,
+};
 
 /// Open-overlay state. Cards are never cached here - only the query and the
 /// cursor - so live agent state and live terminal content cannot go stale.
 pub(crate) struct PaneOverviewState {
     pub query: String,
     pub selected: usize,
+    /// The pane that held focus when the overlay opened - the card that
+    /// carries the "current" marker. Captured once at open: while the overlay
+    /// is up its own focus handle holds focus, so it cannot be re-derived on
+    /// render. `None` when no terminal pane was focused.
+    pub current: Option<u64>,
     /// Cards per wrapped row, captured from the last render's real pixel
     /// width. Up/Down move by this. Captured rather than estimated for the
     /// same reason `Container::container_size` is: the old hardcoded 800px
@@ -1170,6 +1342,7 @@ impl Default for PaneOverviewState {
         Self {
             query: String::new(),
             selected: 0,
+            current: None,
             cards_per_row: 1,
         }
     }
@@ -1191,7 +1364,18 @@ impl PaneFlowApp {
             self.close_pane_overview_and_restore_focus(window, cx);
             return;
         }
-        self.pane_overview = Some(PaneOverviewState::default());
+        // Product decision (2026-09-03): open on the current pane's card, so
+        // Esc then Enter is a no-op round trip. `is_active` is the focused
+        // pane, resolved while the terminal still holds focus - i.e. BEFORE
+        // the overlay takes it below.
+        let cards = self.collect_pane_overview_cards(window, cx);
+        let current = cards.iter().find(|c| c.is_active).map(|c| c.surface_id);
+        let order = flat_order(&group_cards(cards));
+        self.pane_overview = Some(PaneOverviewState {
+            selected: initial_selection(&order, current),
+            current,
+            ..PaneOverviewState::default()
+        });
         self.pane_overview_focus.focus(window, cx);
         cx.notify();
     }
@@ -1239,10 +1423,35 @@ impl PaneFlowApp {
     /// `Workspace::collect_panes`, which dedupes with a linear `contains` per
     /// pane - `Tab::collect_panes` already dedupes `root` against
     /// `saved_layout`, so a zoomed tab yields each pane exactly once.
-    pub(crate) fn collect_pane_overview_cards(&self, cx: &Context<Self>) -> Vec<CardMeta> {
+    ///
+    /// Takes a `&Window` because `is_active` is the FOCUSED pane, and focus
+    /// is a window property: `LayoutTree::focused_pane(window, cx)`
+    /// (`layout/queries.rs:12`) is the accessor - the same one
+    /// `workspace_ops/focus.rs:29`, `workspace_ops/layout.rs:67` and
+    /// `workspace_ops/mod.rs:1671` use - and it walks the tree testing each
+    /// leaf's `focus_handle(cx).is_focused(window)`. There is no
+    /// `Workspace::focused_pane`; go through `ws.active_tab().root`.
+    pub(crate) fn collect_pane_overview_cards(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Vec<CardMeta> {
         let mut cards = Vec::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            let ws_is_active = ws_idx == self.active_idx;
             let active_tab_idx = ws.active_tab_idx();
+            // The one pane that is "current": only the active workspace's
+            // active tab can hold focus, so resolve it once per workspace and
+            // only there. `None` when focus sits in chrome, in a markdown or
+            // diff pane, or on the empty-workspace placeholder.
+            let focused_pane = if ws_is_active {
+                ws.active_tab()
+                    .root
+                    .as_ref()
+                    .and_then(|root| root.focused_pane(window, cx))
+            } else {
+                None
+            };
             for (tab_idx, tab) in ws.tabs().iter().enumerate() {
                 let tab_title = crate::app::sidebar::tab_row_title(tab, tab_idx, cx);
                 for pane in tab.collect_panes() {
@@ -1280,7 +1489,13 @@ impl PaneFlowApp {
                         cols: metrics.columns,
                         rows: metrics.screen_lines,
                         exited: view.terminal.exit_status().is_some(),
-                        is_active: ws_idx == self.active_idx && tab_idx == active_tab_idx,
+                        // The focused pane, not merely a pane of the active
+                        // tab: `Entity<Pane>` compares by entity id, so this
+                        // is true for exactly one card at most.
+                        is_active: tab_idx == active_tab_idx
+                            && focused_pane.as_ref() == Some(&pane),
+                        ws_is_active,
+                        ws_branch: ws.git_branch.clone(),
                     });
                 }
             }
@@ -1299,7 +1514,7 @@ impl PaneFlowApp {
             return;
         };
         let per_row = state.cards_per_row.max(1) as isize;
-        let cards = filter_cards(&self.collect_pane_overview_cards(cx), &state.query);
+        let cards = filter_cards(&self.collect_pane_overview_cards(window, cx), &state.query);
         let order = flat_order(&group_cards(cards));
         let len = order.len();
         let selected = state.selected.min(len.saturating_sub(1));
@@ -1328,6 +1543,9 @@ impl PaneFlowApp {
     }
 }
 ```
+
+`ws.git_branch` is a `pub String` on `Workspace` (`workspace/mod.rs:124`), empty when the
+workspace is not a checkout; the sidebar reads it the same way (`sidebar/mod.rs:2110`).
 
 If `TerminalState` exposes the exit status under a different name than `exit_status()`, find it with
 `grep -n "exit" src-app/src/terminal/pty_session.rs | grep -i "pub"` and use that accessor; the field
@@ -1359,7 +1577,8 @@ git commit -m "feat(pane_overview): overlay state, enumeration and key handling 
 
 **Interfaces:**
 - Consumes: Task 4's `TerminalThumbnail`, Task 6's state machine, Task 1's `live_thumbnail_ids`.
-- Produces: `PaneFlowApp::render_pane_overview(&mut self, cx) -> AnyElement`.
+- Produces: `PaneFlowApp::render_pane_overview(&mut self, window, cx) -> AnyElement`. It takes the `&Window` because `collect_pane_overview_cards` needs it for the focused pane; `PaneFlowApp::render` (`main.rs:1841`) already has one in scope.
+- Renders three things the first draft of this plan left out: the workspace header's **branch** and **active marker** (`WorkspaceGroup::{branch, is_active}`), and a **"current" marker** on the focused pane's card (`CardMeta::is_active`), distinct from the moving selection fill.
 
 - [ ] **Step 1: Write the render**
 
@@ -1382,7 +1601,11 @@ const CARD_RADIUS: f32 = 10.0;
 const GRID_PADDING: f32 = 16.0;
 
 impl PaneFlowApp {
-    pub(crate) fn render_pane_overview(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_pane_overview(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ui = crate::theme::ui_colors();
         let theme = crate::theme::active_theme();
         let query = self
@@ -1390,7 +1613,10 @@ impl PaneFlowApp {
             .as_ref()
             .map(|s| s.query.clone())
             .unwrap_or_default();
-        let all = self.collect_pane_overview_cards(cx);
+        // Note: while the overlay is open its own focus handle holds focus,
+        // so `is_active` is false for every card on re-render. That is fine -
+        // the "current" marker is decided once, at open, and carried below.
+        let all = self.collect_pane_overview_cards(window, cx);
         let groups = group_cards(filter_cards(&all, &query));
         let order = flat_order(&groups);
         let live = live_thumbnail_ids(&order, MAX_LIVE_THUMBNAILS);
@@ -1398,6 +1624,7 @@ impl PaneFlowApp {
             .pane_overview
             .as_ref()
             .and_then(|s| order.get(s.selected.min(order.len().saturating_sub(1))).copied());
+        let current_id = self.pane_overview.as_ref().and_then(|s| s.current);
 
         let mut body = div().flex().flex_col().gap(px(18.)).p(px(GRID_PADDING));
 
@@ -1417,13 +1644,40 @@ impl PaneFlowApp {
             );
         } else {
             for group in &groups {
-                let mut section = div().flex().flex_col().gap(px(10.)).child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(ui.text)
-                        .child(SharedString::from(group.title.clone())),
-                );
+                // Section header: title, branch, active marker (spec §7.1).
+                let mut header = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(ui.text)
+                            .child(SharedString::from(group.title.clone())),
+                    );
+                if !group.branch.is_empty() {
+                    header = header.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(ui.muted)
+                            .child(SharedString::from(group.branch.clone())),
+                    );
+                }
+                if group.is_active {
+                    header = header.child(
+                        div()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(ui.subtle)
+                            .text_size(px(10.))
+                            .text_color(ui.text)
+                            .child("active"),
+                    );
+                }
+                let mut section = div().flex().flex_col().gap(px(10.)).child(header);
                 for tab in &group.tabs {
                     let mut row = div()
                         .flex()
@@ -1441,6 +1695,7 @@ impl PaneFlowApp {
                             card,
                             live.contains(&card.surface_id),
                             selected_id == Some(card.surface_id),
+                            current_id == Some(card.surface_id),
                             ui,
                             &theme,
                             cx,
@@ -1543,12 +1798,26 @@ Then the card renderer, in the same `impl` block:
         card: &CardMeta,
         live: bool,
         selected: bool,
+        current: bool,
         ui: crate::theme::UiColors,
         theme: &std::sync::Arc<crate::theme::TerminalTheme>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sid = card.surface_id;
         let (dot, dot_color, status) = pane_overview_status_visual(card.state.as_ref(), ui);
+        // The "current" marker (spec §7.1): the pane that held focus when the
+        // overlay opened. It does not move with the selection.
+        let current_chip = current.then(|| {
+            div()
+                .flex_none()
+                .px(px(5.))
+                .py(px(1.))
+                .rounded(px(4.))
+                .bg(ui.subtle)
+                .text_size(px(9.))
+                .text_color(ui.text)
+                .child("current")
+        });
         let mut shell = div()
             .id(SharedString::from(format!("pane-overview-card-{sid}")))
             .flex_none()
@@ -1586,6 +1855,7 @@ Then the card renderer, in the same `impl` block:
                             .text_color(ui.text)
                             .child(SharedString::from(card.name.clone())),
                     )
+                    .children(current_chip)
                     .child(
                         div()
                             .flex_none()
@@ -1695,8 +1965,10 @@ pub(crate) use thumbnail::{THUMBNAIL_BAND_H, THUMBNAIL_BAND_W, TerminalThumbnail
 ```
 
 and change those three items in `thumbnail.rs` from `pub(super)` to `pub(crate)`. Nothing else
-needs widening: the thumbnail resolves its own font from `font::base_font()`, which is
-`pub(super)` in `element/font.rs` and therefore already reachable from `element::thumbnail`.
+needs widening: the thumbnail resolves its own font and cell metrics from
+`font::cached_font_config()` / `font::cell_dimensions`, which are `pub(super)` in `element/font.rs`
+and therefore already reachable from `element::thumbnail` (`font::base_font()` is `#[cfg(test)]`
+only and is not used).
 
 - [ ] **Step 2: Compose it into the render root**
 
@@ -1706,7 +1978,7 @@ In `src-app/src/main.rs`, after the fleet-search block (which ends at line 2543)
 ```rust
         // Issue #339: Pane Overview (same mode gate).
         if self.pane_overview.is_some() && in_cli_mode {
-            app_content = app_content.child(self.render_pane_overview(cx));
+            app_content = app_content.child(self.render_pane_overview(window, cx));
         }
 ```
 
@@ -1757,9 +2029,13 @@ Expected: build exit 0; test names a superset of the pre-task baseline, nothing 
 PANEFLOW_ALLOW_MULTIPLE=1 PANEFLOW_SOCKET_PATH=/tmp/paneflow-overview.sock cargo run -p paneflow-app
 ```
 Open two workspaces, put a pane in a **non-active tab**, press `Cmd+Shift+P`. Confirm: every pane
-appears including the background-tab one; thumbnails show readable text and update; arrows move the
-ring; Enter and click both land on the right pane; Esc closes. Then confirm each pane's content is
-undisturbed — the no-resize guard is a unit test, but see it hold live.
+appears including the background-tab one; the selection opens **on the pane you were in** and that
+card carries the "current" chip; the active workspace's header shows its branch and the "active"
+marker; thumbnails show readable text, a dim block cursor, and update; arrows move the ring; Enter
+and click both land on the right pane; `Esc` then `Cmd+Shift+P` then `Enter` puts you back where you
+started; Esc closes. Add a third workspace with only a markdown pane (or none) and confirm it has no
+section at all. Then confirm each pane's content is undisturbed — the no-resize guard is a unit test,
+but see it hold live.
 
 - [ ] **Step 6: Format, lint, commit**
 
@@ -2020,10 +2296,11 @@ Append a test module to `src-app/src/app/pane_overview/mod.rs`:
 ```rust
 #[cfg(test)]
 mod perf {
-    /// The overlay's frame budget, mirroring the eight-pane gate in
-    /// `layout/render.rs` (`INPUT_TO_FRAME_P95_LIMIT_US = 16_700`, one 60 Hz
-    /// frame). Eight painted terminals already spend that whole frame, which
-    /// is why the overview caps live thumbnails and culls off-screen cards.
+    /// The overlay's frame budget, mirroring the `#[ignore]`d eight-pane
+    /// benchmark in `layout/render.rs:464-469`
+    /// (`INPUT_TO_FRAME_P95_LIMIT_US = 16_700`, one 60 Hz frame). Eight
+    /// painted terminals already spend that whole frame, which is why the
+    /// overview caps live thumbnails and culls off-screen cards.
     ///
     /// `#[ignore]` like its sibling: run with
     /// `cargo test --release -p paneflow-app -- --ignored pane_overview`.
@@ -2152,7 +2429,12 @@ Checked against the spec, section by section:
 **One claim worth recording**, because a research pass got it backwards and the whole design rests
 on it: `TerminalSessionBackend::render_content`'s doc comment reads *"Resize and snapshot in one
 runtime round-trip"*, which describes only the `clear_on_resize: true` path. Verified against
-`ghostty_session.rs:1433`: every mutation (`resize.requested`, `clear_initial_requested`,
-`submit_requested_resize`) sits inside `if clear_on_resize`, and `normalized_window_size` is a pure
-clamp. On the `false` path the call is one `RwLock` read plus an `Arc` refcount bump. Do not "fix"
+`ghostty_session.rs:1527` (trait fn at `pty_session.rs:183`): every mutation (`resize.requested`,
+`clear_initial_requested`, `submit_requested_resize`) sits inside `if clear_on_resize`, and
+`normalized_window_size` is a pure clamp. On the `false` path the call is one `RwLock` read plus an
+`Arc` refcount bump (`ghostty_session.rs:1535-1536`), with no consumer-side bookkeeping in the
+`0185ee4f` frame-publication gate, so a second reader cannot starve the pane. Do not "fix"
 `thumbnail_snapshot` to avoid `render_content` on the strength of that doc comment.
+
+**Citations were read on `main` at `7642b564`** (contains `origin/main` `6a47fea4`); the spec header
+records the same tree.

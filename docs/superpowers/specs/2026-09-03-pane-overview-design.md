@@ -4,6 +4,9 @@
 **Status:** approved design, not yet implemented
 **Scope:** one new overlay surface, one new terminal painter, three entry points
 **Issue:** #339 (tooltip audit split out as #340)
+**Tree:** every `file:line` citation below was read on `main` at `7642b564`,
+which contains `origin/main` `6a47fea4`. Re-verify them before quoting on a
+later tree.
 
 A Mission-Control-style overlay that shows every open terminal pane across
 every workspace and tab at once, each rendered legibly enough to identify,
@@ -44,15 +47,30 @@ Settled with the user before design:
 | Closing panes from the overlay | **Out of scope** |
 | App-wide tooltip audit | **Separate issue**, not part of this design |
 
+Settled with the user on 2026-09-03, after the first draft:
+
+| Question | Decision |
+|---|---|
+| Workspaces with no terminal pane | **Omitted entirely** — an empty workspace, or one holding only markdown / diff panes, gets no section and no header (§7.5) |
+| Where the cursor starts | **On the current pane** — the overlay opens with the selection on the card of the focused pane (the active tab's focused pane of the active workspace), not on index 0, so `Esc` then `Enter` is a no-op round trip; if no card matches, index 0. That card carries a visible "current" marker, and the workspace section header shows title, branch, and the active marker (§7.1, §7.3) |
+
 ## 3. Naming and placement
 
 **Pane Overview.** Action `OpenPaneOverview`, registry name `open_pane_overview`.
 
 It is a full-window `deferred(...).with_priority(6)` overlay — a peer of the
-Attention Queue (`attention_queue.rs:380`) and Fleet Search
-(`fleet_search.rs:548`), which occupy the same priority band. It is deliberately
-**not** title-bar chrome: `title_bar.rs:378` carries a guard test asserting that
-removed title-bar popover surfaces stay removed.
+four overlays that already defer at 6: the Attention Queue
+(`attention_queue.rs:380`), Fleet Search (`fleet_search.rs:548`), the theme
+picker (`theme_picker.rs:381`), and the broadcast groups panel
+(`broadcast.rs:643`). Those four are mutually exclusive — at most one is open
+at a time — and the overview joins that set rather than stacking on any of
+them. The ceiling is fixed by a source-read guard:
+`the_close_confirmation_defers_above_every_overlay_it_can_share_a_frame_with`
+(`close_confirm.rs:1652`) scans every source file for `priority(` and requires
+the close confirmation's 11 to exceed every other value, so the overlay must
+never exceed 10, and the new file is picked up by that scan automatically. It
+is deliberately **not** title-bar chrome: `title_bar.rs:378` carries a guard
+test asserting that removed title-bar popover surfaces stay removed.
 
 It renders from `PaneFlowApp::render` between the fleet-search block and the
 `custom_buttons_modal` block, inside the same `in_cli_mode` gate the other
@@ -69,7 +87,7 @@ Agents or Review surfaces after a mode switch.
 | `src-app/src/terminal/element/thumbnail.rs` | the miniature read-only painter |
 
 The painter *must* live under `terminal/element/`. `LayoutState`'s fields are
-all private (`element/mod.rs:606`), `mod paint` is a private module, and
+all private (`element/mod.rs:611`), `mod paint` is a private module, and
 `CellGeometry` is `pub(super)`. A painter anywhere else in the crate could call
 `layout_from_snapshot` (it is `pub(crate)`) but could not paint the
 `LayoutState` it returns.
@@ -81,10 +99,10 @@ all private (`element/mod.rs:606`), `mod paint` is a private module, and
 ### 4.1 The trap this design exists to avoid
 
 `TerminalElement` **cannot** be reused at a smaller size. Its `build_layout`
-resizes the child process as a side effect of layout:
+(`element/mod.rs:863`) resizes the child process as a side effect of layout:
 
 ```rust
-// src-app/src/terminal/element/mod.rs:867
+// src-app/src/terminal/element/mod.rs:960
 if notify_resize {
     self.backend.notify_window_size(window_size);   // → SIGWINCH to the child
 }
@@ -96,9 +114,10 @@ each open of the overlay would corrupt the layout of every pane it displayed.
 
 ### 4.2 The seam it uses instead
 
-`layout_from_snapshot` (`element/mod.rs:921`) is an explicitly `Window`-free,
-`App`-free pure function. Its `LayoutInputs` (`element/mod.rs:578`) takes cell
-dimensions and the base font as plain values, so it lays out at any scale. It
+`layout_from_snapshot` (`element/mod.rs:1041`) is an explicitly `Window`-free,
+`App`-free pure function. Its `LayoutInputs` (`element/mod.rs:583`) takes cell
+dimensions (`CellDimensions`, `element/mod.rs:283`) and the base font as plain
+values, so it lays out at any scale. It
 exists so the golden-frame tests can assert layout with no GPU or display; a
 thumbnail is the same kind of consumer.
 
@@ -118,18 +137,21 @@ TerminalThumbnail::prepaint(bounds, window, cx):
 TerminalThumbnail::paint(bounds, layout, window, cx):
     with_content_mask(bounds):
         origin = bounds.origin - point(0, first * line_height)           // (d)
-        backgrounds → block quads → box drawing → text runs → dim block cursor
+        base fill (no-op, see below) → cell backgrounds → block quads
+          → box drawing → text runs → dim block cursor
+    drop the snapshot and the layout here — never keep either across frames   // (e)
 ```
 
 - **(a)** is the culling mechanism. A card scrolled out of view does no terminal
   work at all — not even the lock read.
 - **(b)** `clear_on_resize: false` is load-bearing: the `true` branch mutates
   `ResizeState` and calls `submit_requested_resize`. Verified against
-  `ghostty_session.rs:1433` — on the `false` path `window_size` is consumed only
-  by `normalized_window_size` and then discarded, and the two visible-row
-  arguments are `_`-prefixed and ignored outright (culling happens later, in
-  `layout_from_snapshot`). Deriving the size from `grid_metrics()` anyway keeps
-  the call honest rather than relying on arguments being inert.
+  `ghostty_session.rs:1527` (the `TerminalSessionBackend` trait fn it sits
+  behind is `pty_session.rs:183`) — on the `false` path `window_size` is
+  consumed only by `normalized_window_size` and then discarded, and the two
+  visible-row arguments are `_`-prefixed and ignored outright (culling happens
+  later, in `layout_from_snapshot`). Deriving the size from `grid_metrics()`
+  anyway keeps the call honest rather than relying on arguments being inert.
 - The snapshot is the **viewport**, not scrollback, with `display_offset`
   already applied. So a pane the user has scrolled up shows, in its thumbnail,
   exactly what the pane itself is showing. That is the correct behaviour and
@@ -138,6 +160,15 @@ TerminalThumbnail::paint(bounds, layout, window, cx):
 - **(d)** shifts the origin up so the cropped band lands at the top of the card.
   Cells keep their absolute line numbers through `layout_from_snapshot`, which
   culls by line index rather than renumbering.
+- **(e)** is a frame-budget rule, not tidiness: holding a `Content.cells` clone
+  across the runtime thread's next publish costs that pane a full-grid
+  conversion (§5). The snapshot is a prepaint local and the layout is consumed
+  by paint; the element itself stores neither.
+- The base fill is listed for completeness and is a **no-op** here: the band's
+  background is transparent (the card paints `theme.background` under it), and
+  `paint_base_fill` only emits a quad when `background_color.a > 0.0`
+  (`paint/background.rs:23`). Listing it saves a reader wondering why it is
+  called.
 
 `render_content` for a read-only consumer is an `RwLock::read()` plus an
 `Arc<[Cell]>` refcount bump — `Content::cells` is an `Arc`, so the clone is not
@@ -153,17 +184,26 @@ making. The cursor is painted as a dim, non-blinking block — it is a useful
 
 ### 4.4 Geometry
 
-Cell geometry is a pure function of a scalar. `element/font.rs` computes
-`cell_width = round(font_size × 0.6)` and `line_height = round(font_size × 1.2)`;
-there is no glyph measurement to redo. At a 9 px thumbnail font:
+Cell geometry is a pure function of a scalar and two multipliers. `element/font.rs`
+computes `cell_width = round(font_size × settings.cell_width)` and
+`line_height = round(font_size × settings.line_height)` (`font.rs:579-584`);
+there is no glyph measurement to redo. The two multipliers are config-driven
+and the thumbnail reads them from the **same** `FontSettings` the pane uses
+(`font::cached_font_config()`, `font.rs:290`), so a user who has tuned
+`cell_width` / `line_height` gets thumbnails in the same proportions as their
+panes. Their defaults are 0.6 and 1.2 (`DEFAULT_CELL_WIDTH` /
+`DEFAULT_LINE_HEIGHT`, `font.rs:26-27`), and at those defaults a 9 px
+thumbnail font gives:
 
 ```
 cell_width  = round(9 × 0.6) = 5 px
 line_height = round(9 × 1.2) = 11 px
 ```
 
-so a **320 × 132** band is exactly **12 rows × 64 columns**. Lines wider than 64
-columns are truncated at the right edge; that is accepted.
+so a **320 × 132** band is exactly **12 rows × 64 columns**. Those band numbers
+are the default-derived figure and the card box is sized to them; non-default
+multipliers change how many cells fit the band, not the band. Lines wider than
+the band are truncated at the right edge; that is accepted.
 
 The 8.0–32.0 pt clamp in `font.rs` applies to the config and zoom path, not to
 `layout_from_snapshot`, so 9 px is reachable. Below roughly 4 px cell width the
@@ -186,10 +226,11 @@ const OVERVIEW_REFRESH_MS: u64 = 250;
 
 ## 5. Staying inside the frame budget
 
-This is the constraint that shapes the feature. `layout/render.rs:470` holds an
-`#[ignore]`d perf gate asserting that **eight live panes** stay inside a
-`16_700 µs` input-to-paint P95 — one 60 Hz frame. Eight already consumes the
-qualified budget. Three bounds keep the overview under it:
+This is the constraint that shapes the feature. `layout/render.rs:469`
+(`eight_pane_gpui_input_to_paint_performance_gate`, `#[ignore]`d at `:464`)
+is a benchmark test — not a runtime gate — asserting that **eight live panes**
+stay inside a `16_700 µs` input-to-paint P95 — one 60 Hz frame. Eight already
+consumes the qualified budget. Three bounds keep the overview under it:
 
 1. **Element self-culling** (§4.2a). Off-screen cards cost a small div tree and
    nothing else.
@@ -215,6 +256,25 @@ inactive workspaces — which are never rendered, since `main.rs` renders only t
 active workspace — already have live grids sitting in `SharedState`. The
 overview is a pure read; nothing has to be pulled or woken.
 
+**A second reader cannot starve the pane.** On the `clear_on_resize: false`
+path `render_content` is a pure clone of the shared state
+(`ghostty_session.rs:1535-1536`). The `0185ee4f` frame-publication gate is
+producer-side only — it has no consumer bookkeeping, so a thumbnail reading a
+snapshot does not consume anything the pane was waiting for. And the pane's
+layout memo (`SharedLayoutCache`, `element/mod.rs:712`, owned by
+`TerminalView` at `view.rs:249`) is never touched by the thumbnail, which
+builds its own `LayoutState` from scratch each frame and throws it away.
+
+**What a held snapshot does cost.** `CellMirror::publish`
+(`ghostty_session.rs:4241-4245`) reuses its recycled back buffer only when
+`Arc::get_mut` succeeds — that is, when nobody else holds the previous
+`Content.cells`. A thumbnail that keeps a `cells` clone across a publish forces
+a full-grid conversion for that pane on that frame. The exposure is bounded by
+`MAX_LIVE_THUMBNAILS`, but the rule in §4.2(e) is what keeps it small: the
+thumbnail drops its snapshot at the end of paint and never caches it across
+frames, so the window in which it can collide with a publish is one
+prepaint-to-paint span.
+
 ---
 
 ## 6. Data model and enumeration
@@ -231,12 +291,26 @@ pub(crate) struct CardMeta {
     pub state: Option<AgentState>,
     pub cols: usize, pub rows: usize,
     pub exited: bool,
+    /// The focused pane of the active tab of the active workspace - the one
+    /// card the overlay opens on. NOT "any pane of the active tab".
     pub is_active: bool,
+    /// The card's workspace is the active workspace. Lifted onto the
+    /// `WorkspaceGroup` by `group_cards`; kept separate from `is_active` so
+    /// the section header still marks the active workspace when its focused
+    /// pane is not a terminal.
+    pub ws_is_active: bool,
+    pub ws_branch: String,   // `Workspace::git_branch`, empty when none
 }
 
 pub(crate) struct TabGroup { pub tab_idx: usize, pub title: String, pub cards: Vec<CardMeta> }
-pub(crate) struct WorkspaceGroup { pub ws_idx: usize, pub title: String, pub is_active: bool, pub tabs: Vec<TabGroup> }
+pub(crate) struct WorkspaceGroup { pub ws_idx: usize, pub title: String, pub branch: String, pub is_active: bool, pub tabs: Vec<TabGroup> }
 ```
+
+`is_active` is resolved through `LayoutTree::focused_pane(window, cx)`
+(`layout/queries.rs:12`) on `ws.active_tab().root` — the same accessor
+`workspace_ops/focus.rs:29` and `workspace_ops/mod.rs:1671` use — and it is
+`true` for exactly one card at most. The enumeration therefore takes a
+`&Window`.
 
 The GPUI side builds a parallel `Vec<(u64, Entity<TerminalView>)>` for the
 painter; `rows.rs` never sees an entity, which is what keeps it testable.
@@ -301,6 +375,11 @@ active marker). Per tab within it: a labelled row of cards that wraps
 — with the selection ring drawn as a fill, matching the app-wide selection
 grammar documented in `custom_buttons_modal.rs`.
 
+The card of the **current pane** (`CardMeta::is_active`, §6) carries a visible
+"current" marker, distinct from the selection fill: the selection moves, the
+marker does not. Workspaces with no terminal pane have no section at all
+(§7.5).
+
 ### 7.2 Filter
 
 A `TextInput` in the header. It matches **metadata only**: pane name, workspace
@@ -325,6 +404,12 @@ regression test. The overlay's footer hint points at Fleet Search for content.
 `selected: usize` indexes the **flattened, filtered** card order: workspace index
 → tab index → layout traversal — the same stable order `jump_next_session_where`
 uses, so the overview and `Cmd+Shift+J` agree about what "next" means.
+
+On open, `selected` starts on the current pane's card, not at 0: a pure
+`initial_selection(order, current) -> usize` returns the position of the
+focused pane's surface id in the flat order, or 0 when nothing matches (no
+focused terminal, or the focused pane is a markdown / diff pane). `Esc` then
+`Enter` is therefore a no-op round trip.
 
 `cards_per_row` is a render-time value, captured each frame the way
 `Container::container_size` captures its real main-axis pixel width via a
@@ -362,6 +447,10 @@ workspace has no pane (issue #108).
 
 - **No terminal panes anywhere** — a centred empty state naming the two ways to
   make one.
+- **A workspace with no terminal pane** — empty, or holding only markdown /
+  diff panes — is omitted: no section, no header. Grouping does this as a side
+  effect (a group only exists once a card lands in it), and a test in `rows.rs`
+  makes it a decision rather than an accident.
 - **Filter matches nothing** — "No panes match" with the query echoed.
 - **Exited pane** — `Content` still holds the last frame; the card renders it
   dimmed with an "exited" chip.
@@ -466,6 +555,9 @@ entry is missing.
 - filter matches name / workspace / tab / agent / cwd, case-insensitively, and
   drops empty groups
 - flat order equals workspace idx → tab idx → traversal order
+- a workspace with no terminal card produces no group (§7.5)
+- `initial_selection` returns the current card's position, and 0 when there is
+  no match
 - selection movement clamps at both ends and at grid-row boundaries
 - `MAX_LIVE_THUMBNAILS` partitions the visible order into live and shell cards
 
@@ -491,8 +583,8 @@ entry is missing.
   exactly one action claims the chord.
 
 ### Perf
-- an `#[ignore]`d gate mirroring `layout/render.rs`: overlay open with 24 live
-  thumbnails, P95 under `INPUT_TO_FRAME_P95_LIMIT_US`.
+- an `#[ignore]`d benchmark test mirroring `layout/render.rs:464-469`: overlay
+  open with 24 live thumbnails, P95 under `INPUT_TO_FRAME_P95_LIMIT_US`.
 
 ### Source-read guards
 - the Window menu ordering assertion extended for the new item and its separator
