@@ -126,9 +126,20 @@ pub(crate) struct AnimatedHover {
     element: Stateful<Div>,
     style_animator: Option<Box<StyleAnimator>>,
     element_animator: Option<Box<ElementAnimator>>,
+    /// Reported to AccessKit as the node's disabled flag. GPUI's pinned rev
+    /// has no `aria_disabled` builder, so this element carries it.
+    a11y_disabled: bool,
 }
 
 impl AnimatedHover {
+    /// Expose the control as disabled to assistive technology (`aria-disabled`).
+    /// The visual dim stays the caller's job; this only sets the AccessKit
+    /// flag, so it is safe to call from a builder that computes both.
+    pub(crate) fn a11y_disabled(mut self, disabled: bool) -> Self {
+        self.a11y_disabled = disabled;
+        self
+    }
+
     /// Type adapter around a `Stateful<Div>` that already owns its hover paint
     /// (for example `squircle_skin`). No interpolation and no extra animation
     /// frames: `request_layout` forwards to the wrapped element.
@@ -137,6 +148,7 @@ impl AnimatedHover {
             element,
             style_animator: None,
             element_animator: None,
+            a11y_disabled: false,
         }
     }
 }
@@ -213,6 +225,7 @@ impl AnimatedHoverExt for Stateful<Div> {
             element: self.hover(|style| style),
             style_animator: Some(Box::new(animator)),
             element_animator: None,
+            a11y_disabled: false,
         }
     }
 
@@ -224,6 +237,7 @@ impl AnimatedHoverExt for Stateful<Div> {
             element: self.hover(|style| style),
             style_animator: None,
             element_animator: Some(Box::new(animator)),
+            a11y_disabled: false,
         }
     }
 
@@ -272,6 +286,9 @@ impl Element for AnimatedHover {
 
     fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
         self.element.write_a11y_info(node);
+        if self.a11y_disabled {
+            node.set_disabled();
+        }
     }
 
     fn a11y_synthetic_children(
