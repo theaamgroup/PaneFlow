@@ -99,6 +99,11 @@ impl PaneFlowApp {
             [false; crate::agent_sessions::SESSION_AGENT_COUNT];
         self.agent_sessions.sessions_scanning = [false; crate::agent_sessions::SESSION_AGENT_COUNT];
         self.agent_sessions.sessions_selected = 0;
+        // Issue #333: a stale needle from a previous open would hide the rows
+        // the user just asked for.
+        self.agent_sessions
+            .sessions_filter_input
+            .update(cx, |input, cx| input.clear(cx));
         self.agent_sessions.sessions_scan_generation =
             self.agent_sessions.sessions_scan_generation.wrapping_add(1);
         let scan_generation = self.agent_sessions.sessions_scan_generation;
@@ -167,7 +172,7 @@ impl PaneFlowApp {
                     *app.sessions_for_mut(agent) = sessions;
                     app.agent_sessions.sessions_omitted[idx] = omitted;
                     app.agent_sessions.sessions_scanning[idx] = false;
-                    app.clamp_sessions_selection();
+                    app.clamp_sessions_selection(cx);
                     cx.notify();
                 }
             });
@@ -184,6 +189,14 @@ impl PaneFlowApp {
     ) -> AnyElement {
         let ui = crate::theme::ui_colors();
         let theme = crate::theme::active_theme();
+        // Issue #333: the type-to-filter field sits under the header. It is
+        // pointless without a cwd to scan, so the "could not detect" state
+        // keeps the header alone.
+        let filter_row = self
+            .agent_sessions
+            .sessions_cwd
+            .is_some()
+            .then(|| self.sessions_filter_row(ui, cx));
         div()
             .id("sessions-sidebar")
             .flex()
@@ -200,6 +213,7 @@ impl PaneFlowApp {
                 self.cached_config.cockpit_chrome_material_enabled(),
             ))
             .child(self.sessions_sidebar_header(ui, cx))
+            .children(filter_row)
             .child(self.sessions_sidebar_body(ui, cx))
             .into_any_element()
     }
@@ -284,6 +298,91 @@ impl PaneFlowApp {
             .into_any_element()
     }
 
+    /// Issue #333: the type-to-filter field, on the shared [`filter_pill`]
+    /// primitive so it reads as the same system as the Files and Settings
+    /// search fields. Escape empties it and hands focus back to the list; the
+    /// unbound keys (Enter, Up/Down) bubble out of the focused `TextInput` to
+    /// the sidebar container, so Enter still resumes the selected row.
+    ///
+    /// [`filter_pill`]: crate::ui_primitives::filter_pill
+    fn sessions_filter_row(
+        &self,
+        ui: crate::theme::UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_empty = self
+            .agent_sessions
+            .sessions_filter_input
+            .read(cx)
+            .value()
+            .is_empty();
+        div()
+            .flex()
+            .flex_none()
+            .px(px(8.))
+            .pb(px(6.))
+            .child(
+                crate::ui_primitives::filter_pill(
+                    "sessions-sidebar-filter",
+                    "sessions-sidebar-filter-clear",
+                    ui,
+                    self.agent_sessions.sessions_filter_input.clone(),
+                    !is_empty,
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.clear_sessions_filter(window, cx);
+                    }),
+                )
+                .w_full()
+                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                    // Only swallow the Escape that actually cleared something.
+                    // On an already-empty field it keeps bubbling to the
+                    // sidebar container, which closes the sidebar - the
+                    // two-stage Escape the Files sidebar already ships.
+                    if ev.keystroke.key.as_str() == "escape"
+                        && this.clear_sessions_filter(window, cx)
+                    {
+                        cx.stop_propagation();
+                    }
+                })),
+            )
+            .into_any_element()
+    }
+
+    /// Issue #333: drop the filter and hand focus back to the list. Returns
+    /// whether there was anything to clear, so Escape can fall through to
+    /// closing the sidebar when the field is already empty.
+    fn clear_sessions_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self
+            .agent_sessions
+            .sessions_filter_input
+            .read(cx)
+            .value()
+            .is_empty()
+        {
+            return false;
+        }
+        self.agent_sessions
+            .sessions_filter_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.agent_sessions.sessions_selected = 0;
+        self.agent_sessions.sessions_focus.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// The issue #333 needle, normalized for [`filter_sessions`]. Empty means
+    /// "no filter, render every retained row".
+    fn sessions_filter_lowered(&self, cx: &gpui::App) -> String {
+        normalize_session_filter(&self.agent_sessions.sessions_filter_input.read(cx).value())
+    }
+
+    /// One agent's retained rows after the filter, in scan order. Every
+    /// render and navigation path reads the group through here so the rows
+    /// painted, the rows counted and the row Enter resumes are the same list.
+    fn filtered_sessions_for(&self, agent: SessionAgent, needle: &str) -> Vec<&SessionMeta> {
+        filter_sessions(self.sessions_for(agent), needle)
+    }
+
     fn sessions_sidebar_body(
         &self,
         ui: crate::theme::UiColors,
@@ -337,21 +436,26 @@ impl PaneFlowApp {
             .overflow_y_scroll()
             .track_scroll(&self.agent_sessions.sessions_scroll);
 
-        let selected = self.selected_session_target();
+        let needle = self.sessions_filter_lowered(cx);
+        let selected = self.selected_session_target(cx);
         let mut groups_rendered = 0usize;
         let mut scanning_any = false;
         for agent in enabled {
             let idx = agent_index(agent);
             let scanning = self.agent_sessions.sessions_scanning[idx];
             scanning_any |= scanning;
-            if scanning || !self.sessions_for(agent).is_empty() {
+            // Issue #333: a group whose rows all miss the needle hides
+            // entirely - matches stay visible, non-matches hide.
+            if scanning || !self.filtered_sessions_for(agent, &needle).is_empty() {
                 groups_rendered += 1;
-                body = body.child(self.sessions_group(agent, ui, selected, cx));
+                body = body.child(self.sessions_group(agent, ui, selected, &needle, cx));
             }
         }
         if groups_rendered == 0 {
             let message = if scanning_any {
                 "Scanning sessions..."
+            } else if !needle.is_empty() {
+                "No sessions match the filter."
             } else {
                 "No sessions for this directory yet."
             };
@@ -371,13 +475,17 @@ impl PaneFlowApp {
         agent: SessionAgent,
         ui: crate::theme::UiColors,
         selected: Option<SessionNavTarget<'_>>,
+        needle: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let idx = agent_index(agent);
         let collapsed = self.agent_sessions.sessions_group_collapsed[idx];
         let show_all = self.agent_sessions.sessions_group_show_all[idx];
         let scanning = self.agent_sessions.sessions_scanning[idx];
-        let sessions = self.sessions_for(agent);
+        // Issue #333: filter the retained set first, then window it - a hit
+        // at row 50 of the unfiltered list surfaces, and more than `CAP`
+        // hits sit behind the same "Show N more" as before.
+        let sessions = self.filtered_sessions_for(agent, needle);
         let omitted = self.sessions_omitted_for(agent);
         // Distinct chevron per state (US-006): right = collapsed, down =
         // expanded - a static swap, not a tween, so it reads under reduced
@@ -408,7 +516,7 @@ impl PaneFlowApp {
                 this.agent_sessions.sessions_focus.focus(window, cx);
                 this.agent_sessions.sessions_group_collapsed[idx] =
                     !this.agent_sessions.sessions_group_collapsed[idx];
-                this.clamp_sessions_selection();
+                this.clamp_sessions_selection(cx);
                 cx.notify();
             }))
             .child(agent_icon_element(agent, px(14.), ui))
@@ -439,6 +547,8 @@ impl PaneFlowApp {
             // US-004: distinguish a pending scan from a genuinely empty group.
             let msg: SharedString = if scanning {
                 SharedString::from("Scanning\u{2026}")
+            } else if !needle.is_empty() {
+                SharedString::from("No matching sessions.")
             } else {
                 empty_message(agent)
             };
@@ -454,7 +564,7 @@ impl PaneFlowApp {
         } else {
             // US-005: cap at 5, reveal the rest behind "Show N more".
             let (visible, remaining) = visible_window(sessions.len(), show_all, CAP);
-            for session in sessions.iter().take(visible) {
+            for session in sessions.iter().copied().take(visible) {
                 group = group.child(self.sessions_row(
                     session,
                     ui,
@@ -497,7 +607,7 @@ impl PaneFlowApp {
                             this.agent_sessions.sessions_focus.focus(window, cx);
                             this.agent_sessions.sessions_group_show_all[idx] =
                                 !this.agent_sessions.sessions_group_show_all[idx];
-                            this.clamp_sessions_selection();
+                            this.clamp_sessions_selection(cx);
                             cx.notify();
                         }))
                         .child(label),
@@ -591,7 +701,7 @@ impl PaneFlowApp {
             // stays open (unlike the old popover).
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.agent_sessions.sessions_focus.focus(window, cx);
-                this.select_session_row(agent, &session_id);
+                this.select_session_row(agent, &session_id, cx);
                 this.resume_session_from_sidebar(agent, &session_id, window, cx);
                 cx.stop_propagation();
             }))
@@ -735,12 +845,30 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let len = self.sessions_nav_len();
+        let len = self.sessions_nav_len(cx);
+        // Issue #333: while the filter field owns focus, GPUI hands a
+        // printable key it did not stop to the input context *after* this
+        // listener runs, so Space here is a character being typed, not a
+        // resume. Enter reaches the field as an `insertNewline:` selector the
+        // input ignores, so it still resumes the selected row.
+        let filter_focused = self
+            .agent_sessions
+            .sessions_filter_input
+            .read(cx)
+            .focus_handle
+            .is_focused(window);
         match event.keystroke.key.as_str() {
-            "escape" => self.close_sessions_sidebar(cx),
+            // Issue #333: Escape empties the field first; a second Escape (or
+            // one on an already-empty field) closes the sidebar as before.
+            "escape" => {
+                if !self.clear_sessions_filter(window, cx) {
+                    self.close_sessions_sidebar(cx);
+                }
+            }
+            "space" if filter_focused => {}
             "enter" | "space" if len > 0 => {
                 let selected = self.agent_sessions.sessions_selected.min(len - 1);
-                if let Some(target) = self.sessions_nav_target_at(selected) {
+                if let Some(target) = self.sessions_nav_target_at(selected, cx) {
                     let agent = target.agent;
                     let session_id = target.session_id.to_string();
                     self.resume_session_from_sidebar(agent, &session_id, window, cx);
@@ -782,7 +910,8 @@ impl PaneFlowApp {
         }
     }
 
-    fn sessions_nav_len(&self) -> usize {
+    fn sessions_nav_len(&self, cx: &gpui::App) -> usize {
+        let needle = self.sessions_filter_lowered(cx);
         let mut len = 0;
         for agent in crate::agent_sessions::enabled_session_agents_from_config(&self.cached_config)
         {
@@ -790,7 +919,7 @@ impl PaneFlowApp {
             if self.agent_sessions.sessions_group_collapsed[idx] {
                 continue;
             }
-            let sessions = self.sessions_for(agent);
+            let sessions = self.filtered_sessions_for(agent, &needle);
             let (visible, _) = visible_window(
                 sessions.len(),
                 self.agent_sessions.sessions_group_show_all[idx],
@@ -801,7 +930,8 @@ impl PaneFlowApp {
         len
     }
 
-    fn sessions_nav_target_at(&self, index: usize) -> Option<SessionNavTarget<'_>> {
+    fn sessions_nav_target_at(&self, index: usize, cx: &gpui::App) -> Option<SessionNavTarget<'_>> {
+        let needle = self.sessions_filter_lowered(cx);
         let mut cursor = 0usize;
         for agent in crate::agent_sessions::enabled_session_agents_from_config(&self.cached_config)
         {
@@ -809,14 +939,14 @@ impl PaneFlowApp {
             if self.agent_sessions.sessions_group_collapsed[idx] {
                 continue;
             }
-            let sessions = self.sessions_for(agent);
+            let sessions = self.filtered_sessions_for(agent, &needle);
             let (visible, _) = visible_window(
                 sessions.len(),
                 self.agent_sessions.sessions_group_show_all[idx],
                 CAP,
             );
             if index < cursor + visible {
-                let session = &sessions[index - cursor];
+                let session = sessions[index - cursor];
                 return Some(SessionNavTarget {
                     agent,
                     session_id: &session.session_id,
@@ -827,15 +957,24 @@ impl PaneFlowApp {
         None
     }
 
-    fn selected_session_target(&self) -> Option<SessionNavTarget<'_>> {
-        let len = self.sessions_nav_len();
+    fn selected_session_target(&self, cx: &gpui::App) -> Option<SessionNavTarget<'_>> {
+        let len = self.sessions_nav_len(cx);
         if len == 0 {
             return None;
         }
-        self.sessions_nav_target_at(self.agent_sessions.sessions_selected.min(len - 1))
+        self.sessions_nav_target_at(self.agent_sessions.sessions_selected.min(len - 1), cx)
     }
 
-    fn select_session_row(&mut self, agent: SessionAgent, session_id: &str) {
+    /// Index of `(agent, session_id)` among the rows currently painted (the
+    /// filtered, windowed, non-collapsed list), or `None` when it is not on
+    /// screen.
+    fn sessions_nav_position(
+        &self,
+        agent: SessionAgent,
+        session_id: &str,
+        cx: &gpui::App,
+    ) -> Option<usize> {
+        let needle = self.sessions_filter_lowered(cx);
         let mut cursor = 0usize;
         for row_agent in
             crate::agent_sessions::enabled_session_agents_from_config(&self.cached_config)
@@ -844,7 +983,7 @@ impl PaneFlowApp {
             if self.agent_sessions.sessions_group_collapsed[idx] {
                 continue;
             }
-            let sessions = self.sessions_for(row_agent);
+            let sessions = self.filtered_sessions_for(row_agent, &needle);
             let (visible, _) = visible_window(
                 sessions.len(),
                 self.agent_sessions.sessions_group_show_all[idx],
@@ -852,16 +991,22 @@ impl PaneFlowApp {
             );
             for session in sessions.iter().take(visible) {
                 if row_agent == agent && session.session_id == session_id {
-                    self.agent_sessions.sessions_selected = cursor;
-                    return;
+                    return Some(cursor);
                 }
                 cursor += 1;
             }
         }
+        None
     }
 
-    fn clamp_sessions_selection(&mut self) {
-        let len = self.sessions_nav_len();
+    fn select_session_row(&mut self, agent: SessionAgent, session_id: &str, cx: &gpui::App) {
+        if let Some(index) = self.sessions_nav_position(agent, session_id, cx) {
+            self.agent_sessions.sessions_selected = index;
+        }
+    }
+
+    fn clamp_sessions_selection(&mut self, cx: &gpui::App) {
+        let len = self.sessions_nav_len(cx);
         if len == 0 {
             self.agent_sessions.sessions_selected = 0;
         } else if self.agent_sessions.sessions_selected >= len {
@@ -1017,6 +1162,42 @@ fn visible_window(len: usize, show_all: bool, cap: usize) -> (usize, usize) {
         (len, 0)
     } else {
         (cap, len - cap)
+    }
+}
+
+/// Issue #333: normalize the sidebar filter field's raw value into the needle
+/// [`filter_sessions`] expects. Trimmed and lowercased; whitespace-only input
+/// is "no filter". No regex - if that asymmetry with fleet search ever bites,
+/// adopt its toggle rather than inventing a second dialect.
+fn normalize_session_filter(raw: &str) -> String {
+    raw.trim().to_lowercase()
+}
+
+/// Issue #333: does `session` match a non-empty, lowercased `needle`?
+/// Case-insensitive substring over the row title (`summary`) and the
+/// `session_id`, so a row without a summary (titled by its short id) is still
+/// findable.
+fn session_matches_filter(session: &SessionMeta, needle: &str) -> bool {
+    session.session_id.to_lowercase().contains(needle)
+        || session
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.to_lowercase().contains(needle))
+}
+
+/// Issue #333: one group's rows after the filter. An empty `needle` keeps
+/// every row; otherwise only [`session_matches_filter`] hits survive. Order
+/// is the reader's (timestamp-descending) - no relevance ranking. Pure, over
+/// the in-memory set: the per-group `CAP` window is applied to this result,
+/// never before it.
+fn filter_sessions<'a>(sessions: &'a [SessionMeta], needle: &str) -> Vec<&'a SessionMeta> {
+    if needle.is_empty() {
+        sessions.iter().collect()
+    } else {
+        sessions
+            .iter()
+            .filter(|session| session_matches_filter(session, needle))
+            .collect()
     }
 }
 
@@ -1322,6 +1503,93 @@ mod tests {
         );
         assert_eq!(moved_session_selection(1, 3, SessionSelectionMove::Last), 2);
         assert_eq!(moved_session_selection(7, 0, SessionSelectionMove::Last), 0);
+    }
+
+    /// Issue #333 fixtures: only `session_id` and `summary` feed the filter.
+    fn session_meta(id: &str, summary: Option<&str>) -> SessionMeta {
+        SessionMeta {
+            agent: SessionAgent::Claude,
+            session_id: id.to_string(),
+            timestamp: "2026-09-03T00:00:00Z".to_string(),
+            cwd: "/repo".to_string(),
+            git_branch: String::new(),
+            summary: summary.map(str::to_string),
+            model: None,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn filter_sessions_matches_one_summary_and_empty_query_keeps_all() {
+        // Issue #333: three rows, a query matching one summary returns only
+        // that row; an empty (or whitespace-only) query returns all three.
+        let rows = vec![
+            session_meta(
+                "019dc9ea-38d7-7372-9cc4-253ce944d41b",
+                Some("Fix the release pipeline"),
+            ),
+            session_meta(
+                "0b7f1c2d-1111-4222-8333-444455556666",
+                Some("Write docs for the MCP bridge"),
+            ),
+            session_meta("c3d4e5f6-7777-4888-9999-aaaabbbbcccc", None),
+        ];
+
+        let hits = filter_sessions(&rows, &normalize_session_filter("RELEASE"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, rows[0].session_id);
+
+        assert_eq!(
+            filter_sessions(&rows, &normalize_session_filter("")).len(),
+            3
+        );
+        assert_eq!(
+            filter_sessions(&rows, &normalize_session_filter("   ")).len(),
+            3
+        );
+        assert!(filter_sessions(&rows, &normalize_session_filter("nothing here")).is_empty());
+    }
+
+    #[test]
+    fn filter_sessions_matches_session_id_and_keeps_scan_order() {
+        // Issue #333: the id is searchable too (a row without a summary is
+        // titled by its short id), and matches keep the reader's
+        // newest-first order - no relevance ranking.
+        let rows = vec![
+            session_meta("019dc9ea-38d7-7372-9cc4-253ce944d41b", Some("first")),
+            session_meta("0b7f1c2d-1111-4222-8333-444455556666", Some("second")),
+            session_meta("c3d4e5f6-7777-4888-9999-aaaabbbbcccc", None),
+        ];
+
+        let by_id = filter_sessions(&rows, &normalize_session_filter("C3D4"));
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].session_id, rows[2].session_id);
+
+        let ordered: Vec<&str> = filter_sessions(&rows, &normalize_session_filter("0"))
+            .into_iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![rows[0].session_id.as_str(), rows[1].session_id.as_str()]
+        );
+    }
+
+    #[test]
+    fn filter_sessions_windows_the_matches_not_the_source_rows() {
+        // Issue #333: the filter runs over the in-memory set, and the CAP
+        // window applies to the matches - hits past row 5 of the unfiltered
+        // list surface instead of staying behind "Show more".
+        let rows: Vec<SessionMeta> = (0..8)
+            .map(|i| {
+                let summary = if i >= 6 { "needle" } else { "other" };
+                session_meta(&format!("id-{i}"), Some(summary))
+            })
+            .collect();
+        let hits = filter_sessions(&rows, &normalize_session_filter("needle"));
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].session_id, "id-6");
+        assert_eq!(visible_window(hits.len(), false, CAP), (2, 0));
     }
 
     #[test]

@@ -686,6 +686,16 @@ impl PaneFlowApp {
             cx.notify();
         })
         .detach();
+        // Issue #333: the sessions sidebar type-to-filter field - same pattern.
+        let sessions_filter_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter sessions", cx));
+        cx.observe(&sessions_filter_input, |app: &mut PaneFlowApp, _, cx| {
+            // A new needle re-windows every group, so the old row index means
+            // nothing.
+            app.agent_sessions.sessions_selected = 0;
+            cx.notify();
+        })
+        .detach();
         // Codex settings nav search field - same pattern: a real single-line
         // TextInput, observed so each keystroke re-renders the nav to re-filter.
         let settings_search_input =
@@ -827,6 +837,7 @@ impl PaneFlowApp {
                 sessions_group_collapsed: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
                 sessions_group_show_all: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
                 sessions_scanning: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_filter_input,
             },
             files_sidebar_open: false,
             files_sidebar_animation: None,

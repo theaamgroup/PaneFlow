@@ -1020,6 +1020,13 @@ struct AgentSessionsState {
     /// `scanning`: a background scan for this agent is in flight, so an empty
     /// list should read as "loading" not "none" (US-004).
     sessions_scanning: [bool; agent_sessions::SESSION_AGENT_COUNT],
+    /// Issue #333: the sidebar's type-to-filter needle over the *in-memory*
+    /// session set (up to `SIDEBAR_SESSION_RETAINED_PER_SOURCE` rows per
+    /// agent, not just the `CAP` window). Case-insensitive substring on
+    /// `summary` / `session_id`; empty means "no filter". Cleared on every
+    /// open / retarget; observed in `bootstrap.rs` so each keystroke
+    /// re-renders the sidebar.
+    sessions_filter_input: gpui::Entity<crate::widgets::text_input::TextInput>,
 }
 
 /// US-053: Git Diff mode state (mounted single/multi-repo views + their
