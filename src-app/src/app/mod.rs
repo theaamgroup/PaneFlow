@@ -29,6 +29,7 @@ pub mod notifications;
 pub mod pane_overview;
 pub mod pane_palette;
 pub mod profile_menu;
+pub mod pull_request;
 pub mod session;
 pub mod sessions_sidebar;
 pub mod settings;
