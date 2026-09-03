@@ -835,13 +835,14 @@ impl TerminalElement {
     fn layout_cache_key(
         &self,
         content_generation: u64,
+        theme_generation: u64,
         bounds: Bounds<Pixels>,
         first_visible_row: i32,
         last_visible_row: i32,
     ) -> LayoutCacheKey {
         LayoutCacheKey {
             content_generation,
-            theme_generation: crate::theme::theme_generation(),
+            theme_generation,
             bounds,
             first_visible_row,
             last_visible_row,
@@ -866,6 +867,10 @@ impl TerminalElement {
         _cx: &mut App,
     ) -> Arc<LayoutState> {
         let dims = self.frame_metrics.dimensions;
+        // Read the generation before the theme: a hot-reload landing between
+        // the two reads then keys an old-theme layout under the old stamp (one
+        // extra recompute next frame) instead of caching it under the new one.
+        let theme_generation = crate::theme::theme_generation();
         let theme = crate::theme::active_theme();
 
         // Ghostty's window padding model (`src/renderer/size.zig`): the inset
@@ -977,6 +982,7 @@ impl TerminalElement {
         // What follows is the expensive part, so that is what gets memoized.
         let key = self.layout_cache_key(
             content.generation,
+            theme_generation,
             bounds,
             first_visible_row,
             last_visible_row,
@@ -3419,7 +3425,7 @@ mod layout_memo_tests {
 
     fn key_of(element: &TerminalElement) -> LayoutCacheKey {
         let bounds = Bounds::new(Point::default(), gpui::size(px(800.0), px(600.0)));
-        element.layout_cache_key(7, bounds, 0, 24)
+        element.layout_cache_key(7, 1, bounds, 0, 24)
     }
 
     /// The memo hit rate for an unfocused idle pane during a blink is 100%:
