@@ -691,6 +691,9 @@ pub(crate) fn filter_pill_with_arrow_clear(
     )
 }
 
+/// Accessible name and tooltip of the filter pill's clear (x) control.
+const FILTER_CLEAR_LABEL: &str = "Clear filter";
+
 fn filter_pill_with_clear_cursor(
     id: impl Into<ElementId>,
     clear_id: impl Into<ElementId>,
@@ -731,9 +734,15 @@ fn filter_pill_with_clear_cursor(
         field = field.child(
             div()
                 .id(clear_id)
+                .role(Role::Button)
+                .aria_label(FILTER_CLEAR_LABEL)
                 .flex_none()
-                .w(px(16.))
-                .h(px(16.))
+                // WCAG 2.5.8: a 24x24 hit target. The negative margin keeps
+                // the layout footprint at the 16 px glyph box, so the row
+                // does not grow and the glyph stays where it was.
+                .w(px(24.))
+                .h(px(24.))
+                .m(px(-4.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -761,6 +770,7 @@ fn filter_pill_with_clear_cursor(
                         .text_color(icon_color)
                         .into_any_element()]);
                 })
+                .delayed_tooltip(text_tooltip(FILTER_CLEAR_LABEL))
                 .on_click(on_clear),
         );
     }
@@ -937,5 +947,93 @@ mod tests {
             gpui::white(),
         );
         assert_button_a11y(&md, "Open terminal");
+    }
+
+    struct FilterPillHarness {
+        cleared: Rc<Cell<bool>>,
+    }
+
+    impl Render for FilterPillHarness {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let cleared = self.cleared.clone();
+            let ui = crate::theme::ui_colors();
+            // A column so the pill takes its content height instead of the
+            // window's.
+            div().size_full().flex().flex_col().child(
+                filter_pill(
+                    "filter-pill-probe",
+                    "filter-pill-probe-clear",
+                    ui,
+                    div().h(px(20.)).child("abc"),
+                    true,
+                    move |_, _, _| cleared.set(true),
+                )
+                .w(px(200.))
+                .debug_selector(|| "filter-pill-probe".into()),
+            )
+        }
+    }
+
+    /// Issue #317: the filter clear control was a bare 16x16 `.id()` +
+    /// `.on_click()` div - no role, no name, no tooltip, and a hit target
+    /// below the WCAG 2.5.8 24x24 minimum. The clickable area must reach at
+    /// least 24 px around the glyph without growing the pill row, and the
+    /// control must announce as a "Clear filter" button.
+    #[gpui::test]
+    fn filter_pill_clear_control_is_a_labeled_24px_button(cx: &mut TestAppContext) {
+        let this_file = include_str!("ui_primitives.rs");
+        let clear_body = this_file
+            .split("fn filter_pill_with_clear_cursor(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("ui_primitives.rs defines filter_pill_with_clear_cursor");
+        for needle in [
+            ".role(Role::Button)",
+            ".aria_label(FILTER_CLEAR_LABEL)",
+            ".delayed_tooltip(text_tooltip(FILTER_CLEAR_LABEL))",
+        ] {
+            assert!(
+                clear_body.contains(needle),
+                "filter_pill_with_clear_cursor lost `{needle}`; the clear control's \
+                 accessible name lives there"
+            );
+        }
+
+        let cleared = Rc::new(Cell::new(false));
+        let cleared_for_view = cleared.clone();
+        let (_view, cx) = cx.add_window_view(move |_, _| FilterPillHarness {
+            cleared: cleared_for_view,
+        });
+        cx.simulate_resize(size(px(300.), px(100.)));
+        cx.run_until_parked();
+
+        let pill = cx
+            .debug_bounds("filter-pill-probe")
+            .expect("filter pill must be painted");
+        // The row must not grow to make room for the target: 6 px padding on
+        // each side of the 20 px input child.
+        assert_eq!(pill.size.height, px(32.), "the pill row grew");
+        // The clear glyph sits inside the pill's 10 px right padding, so its
+        // layout box (16 px wide) is centered 18 px in from the right edge.
+        let center = point(pill.right() - px(18.), pill.center().y);
+        // Control: a click on the magnifier at the other end of the pill must
+        // not clear, or the positive click below proves nothing.
+        cx.simulate_click(point(pill.left() + px(16.), center.y), Modifiers::default());
+        assert!(
+            !cleared.get(),
+            "a click on the magnifier cleared the filter"
+        );
+        // 10 px below the glyph's center: inside a 24 px target, outside a
+        // 16 px one.
+        cx.simulate_click(point(center.x, center.y + px(10.)), Modifiers::default());
+        assert!(
+            cleared.get(),
+            "a click 10 px from the clear glyph's center missed it; the hit target is \
+             smaller than 24x24"
+        );
     }
 }
