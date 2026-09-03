@@ -399,6 +399,99 @@ mod tests {
             .exists());
     }
 
+    /// Return the `{...}` object literal starting at `open` (brace-balanced).
+    fn brace_block(source: &str, open: usize) -> &str {
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..open + offset + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced object literal in plugin source");
+    }
+
+    /// Top-level property names of one object literal (`key: value` or the
+    /// `key` shorthand); nested objects and spreads contribute no keys.
+    fn top_level_keys(literal: &str) -> Vec<String> {
+        let inner = literal
+            .strip_prefix('{')
+            .and_then(|text| text.strip_suffix('}'))
+            .expect("object literal");
+        let mut keys = Vec::new();
+        let mut depth = 0usize;
+        let mut entry = String::new();
+        for ch in inner.chars().chain(std::iter::once(',')) {
+            match ch {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth -= 1,
+                ',' if depth == 0 => {
+                    let key = entry.split(':').next().unwrap().trim();
+                    if !key.is_empty() && !key.starts_with("...") {
+                        keys.push(key.to_owned());
+                    }
+                    entry.clear();
+                    continue;
+                }
+                _ => {}
+            }
+            entry.push(ch);
+        }
+        keys
+    }
+
+    #[test]
+    fn plugin_frames_are_notifications_shaped_like_ai_hook_frame() {
+        // Mirrors `AiHookFrame::to_value` in paneflow-ipc-client: a JSON-RPC
+        // notification (no `id`), with agent-specific keys nested only under
+        // `hook_payload`.
+        let stringify = OPENCODE_PLUGIN_SOURCE
+            .find("JSON.stringify(")
+            .expect("plugin builds its frame with JSON.stringify");
+        let open = stringify + OPENCODE_PLUGIN_SOURCE[stringify..].find('{').unwrap();
+        let mut frame_keys = top_level_keys(brace_block(OPENCODE_PLUGIN_SOURCE, open));
+        frame_keys.sort();
+        assert_eq!(
+            frame_keys,
+            ["jsonrpc", "method", "params"],
+            "frame must be a JSON-RPC notification: no id, nothing else"
+        );
+
+        const CANONICAL_PARAMS: [&str; 9] = [
+            "workspace_id",
+            "tool",
+            "pid",
+            "surface_id",
+            "tool_name",
+            "exit_code",
+            "event_source",
+            "emitted_at_ms",
+            "hook_payload",
+        ];
+        let mut sends = 0;
+        for (index, _) in OPENCODE_PLUGIN_SOURCE.match_indices("send(\"ai.") {
+            let open = index + OPENCODE_PLUGIN_SOURCE[index..].find('{').unwrap();
+            let literal = brace_block(OPENCODE_PLUGIN_SOURCE, open);
+            for key in top_level_keys(literal) {
+                assert!(
+                    CANONICAL_PARAMS.contains(&key.as_str()),
+                    "`{key}` is not a top-level AiHookParams field; nest it under hook_payload: {literal}"
+                );
+            }
+            sends += 1;
+        }
+        assert!(
+            sends >= 4,
+            "expected every lifecycle handler to call send, found {sends}"
+        );
+    }
+
     #[test]
     fn merge_opencode_plugin_entry_remove_rejects_non_array() {
         let mut root = serde_json::json!({"plugin": "other"});

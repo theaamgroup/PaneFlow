@@ -21,10 +21,12 @@ use serde_json::json;
 
 use crate::agents::{support, AgentConfigWriter, InstallOutcome, StatusOutcome, UninstallOutcome};
 use crate::detect::{self, Presence};
-use crate::{io, merge};
+use crate::merge;
 
 const CLI: &str = "claude";
 const CONTAINER: &str = "mcpServers";
+/// Display name of the watched file, for warnings only.
+const FILE: &str = "~/.claude.json";
 
 #[cfg(test)]
 type CliHook = Box<dyn Fn(&[&str]) -> Result<()>>;
@@ -84,6 +86,15 @@ impl ClaudeCode {
         self.allow_cli && support::cli_on_path(CLI)
     }
 
+    fn cli<'a>(&self, path: &'a Path) -> support::Cli<'a> {
+        support::Cli {
+            path,
+            name: CLI,
+            file: FILE,
+            available: self.cli_available(),
+        }
+    }
+
     fn invoke_cli(&self, args: &[&str]) -> Result<()> {
         #[cfg(test)]
         if let Some(cli) = &self.cli {
@@ -125,13 +136,10 @@ impl AgentConfigWriter for ClaudeCode {
         }
         let had_prior = support::json_entry_present(path, CONTAINER)?;
 
-        if self.cli_available() {
-            io::backup(path)?;
-            // Skip `mcp remove`. A crash between remove and add used to
-            // drop `mcpServers.paneflow` while the rest of the file stayed
-            // intact. `add` is attempted as-is; a non-idempotent CLI (entry
-            // already present) fails here and the locked merge repairs it.
-            match self.invoke_cli(&[
+        support::cli_install(
+            &self.cli(path),
+            had_prior,
+            &[
                 "mcp",
                 "add",
                 "-s",
@@ -141,30 +149,11 @@ impl AgentConfigWriter for ClaudeCode {
                 "paneflow",
                 "--",
                 &bridge_s,
-            ]) {
-                Ok(()) => match self.status(Some(bridge))? {
-                    StatusOutcome::Installed { .. } => {
-                        return Ok(if had_prior {
-                            InstallOutcome::Updated
-                        } else {
-                            InstallOutcome::Installed
-                        });
-                    }
-                    _ => {
-                        log::warn!(
-                            "paneflow mcp: `claude mcp add` exited 0 but ~/.claude.json does not match the managed entry; falling back to direct merge"
-                        );
-                    }
-                },
-                Err(e) => {
-                    log::warn!(
-                        "paneflow mcp: `claude mcp add` failed ({e:#}); falling back to direct ~/.claude.json merge"
-                    );
-                }
-            }
-        }
-
-        support::json_install(path, CONTAINER, Self::entry(&bridge_s))
+            ],
+            |args| self.invoke_cli(args),
+            || self.status(Some(bridge)),
+            || support::json_install(path, CONTAINER, Self::entry(&bridge_s)),
+        )
     }
 
     fn uninstall(&self) -> Result<UninstallOutcome> {
@@ -180,28 +169,15 @@ impl AgentConfigWriter for ClaudeCode {
         if !support::json_entry_present(path, CONTAINER)? {
             return Ok(UninstallOutcome::NothingToRemove);
         }
-        if self.cli_available() {
-            io::backup(path)?;
-            // Same scope as install (`-s user`): without it the CLI can act
-            // on a different scope and still exit 0. Like install, trust the
-            // on-disk postcondition, not the CLI's exit status (issue #215).
-            match self.invoke_cli(&["mcp", "remove", "-s", "user", "paneflow"]) {
-                Ok(()) => match self.status(None)? {
-                    StatusOutcome::NotInstalled => return Ok(UninstallOutcome::Removed),
-                    _ => {
-                        log::warn!(
-                            "paneflow mcp: `claude mcp remove` exited 0 but ~/.claude.json still carries the paneflow entry; falling back to direct removal"
-                        );
-                    }
-                },
-                Err(e) => {
-                    log::warn!(
-                        "paneflow mcp: `claude mcp remove` failed ({e:#}); falling back to direct ~/.claude.json removal"
-                    );
-                }
-            }
-        }
-        support::json_uninstall(path, CONTAINER)
+        // Same scope as install (`-s user`): without it the CLI can act on
+        // a different scope and still exit 0.
+        support::cli_uninstall(
+            &self.cli(path),
+            &["mcp", "remove", "-s", "user", "paneflow"],
+            |args| self.invoke_cli(args),
+            || self.status(None),
+            || support::json_uninstall(path, CONTAINER),
+        )
     }
 
     fn status(&self, bridge: Option<&Path>) -> Result<StatusOutcome> {
@@ -418,6 +394,53 @@ mod tests {
             json!("/data/paneflow-mcp")
         );
         assert_eq!(v["mcpServers"]["paneflow"]["type"], json!("stdio"));
+    }
+
+    #[test]
+    fn install_cli_success_with_mismatched_entry_reports_installed() {
+        // Issue #319: the CLI-then-fallback flow must be the same one Codex
+        // runs. With no prior entry, a `mcp add` that exits 0 but writes an
+        // off-schema entry (env block) is repaired by the locked merge and
+        // must report Installed, keyed on the state before the install ran,
+        // not Updated because the fallback happened to find the CLI's entry.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join(".claude.json");
+        let dest = p.clone();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_h = Rc::clone(&calls);
+        let w = ClaudeCode {
+            config_path: Some(p.clone()),
+            allow_cli: true,
+            cli: Some(Box::new(move |args| {
+                record_args(&calls_h, args);
+                std::fs::write(
+                    &dest,
+                    serde_json::to_vec(&json!({
+                        "mcpServers": {
+                            "paneflow": {
+                                "command": "/data/paneflow-mcp",
+                                "env": { "PANEFLOW_SOCKET_PATH": "/tmp/x.sock" }
+                            }
+                        }
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                Ok(())
+            })),
+        };
+
+        assert_eq!(
+            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
+            InstallOutcome::Installed
+        );
+        assert_add_without_remove(&calls.borrow());
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(
+            v["mcpServers"]["paneflow"],
+            ClaudeCode::entry("/data/paneflow-mcp"),
+            "fallback must replace the off-schema entry the CLI wrote"
+        );
     }
 
     #[test]

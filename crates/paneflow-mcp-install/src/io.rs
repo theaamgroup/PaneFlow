@@ -102,14 +102,22 @@ pub fn write_if_changed(path: &Path, contents: &[u8]) -> Result<bool> {
 /// Same as [`write_if_changed`], but assumes the caller already holds
 /// [`ConfigLock`] for `path`.
 pub(crate) fn write_if_changed_unlocked(path: &Path, contents: &[u8]) -> Result<bool> {
-    // Edition 2021 (workspace default) - no let-chains, so nest the guard.
-    if let Ok(existing) = std::fs::read(path) {
-        if existing == contents {
-            return Ok(false);
+    // Only a missing file may proceed to the write; any other read failure
+    // (permission, I/O, not a regular file) must not be mistaken for "the
+    // bytes differ" and replace a config we could not inspect.
+    match std::fs::read(path) {
+        Ok(existing) => {
+            if existing == contents {
+                return Ok(false);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).context(format!("read {} failed", path.display()));
         }
     }
-    // Bytes differ (or the file is absent / unreadable): back up the old
-    // contents first, then publish the new bytes atomically.
+    // Bytes differ (or the file is absent): back up the old contents first,
+    // then publish the new bytes atomically.
     backup(path)?;
     write_atomic(path, contents)?;
     Ok(true)
@@ -253,6 +261,47 @@ mod tests {
             std::fs::read(PathBuf::from(bak)).unwrap(),
             b"old",
             "backup must hold the pre-write contents"
+        );
+    }
+
+    #[test]
+    fn write_if_changed_refuses_an_unreadable_file_before_backup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root reads a 0o000 file fine, so the probe below is meaningless.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.json");
+        std::fs::write(&p, b"old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&p).is_ok() {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            eprintln!("skipping: process can read a 0o000 file (running as root?)");
+            return;
+        }
+
+        let err = write_if_changed_unlocked(&p, b"new").unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("read ") && !msg.contains("backup"),
+            "a read failure must be reported as such, not fall through to backup: {err:#}"
+        );
+        let io_kind = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<std::io::Error>().map(std::io::Error::kind));
+        assert_eq!(io_kind, Some(std::io::ErrorKind::PermissionDenied));
+
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            b"old",
+            "original must be untouched"
+        );
+        let mut bak = p.as_os_str().to_owned();
+        bak.push(".bak");
+        assert!(
+            !PathBuf::from(bak).exists(),
+            "no backup may be attempted for a file that could not be read"
         );
     }
 

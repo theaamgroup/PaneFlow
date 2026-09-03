@@ -84,22 +84,27 @@ impl DiffView {
                     // rows - `revalidate` then sees HEAD moved and reloads (a harmless
                     // extra reload) rather than matching a stale fingerprint and
                     // showing pre-commit rows as current (the unsafe direction).
-                    let fingerprint = super::super::git::column_fingerprint(&path, &base);
+                    // Issue #309: fingerprint, diff, and file stats run under ONE
+                    // git budget with a shared toplevel + merge-base, so a wedged
+                    // git fails the column once, not once per pipeline.
                     let t0 = Instant::now();
-                    let diff = super::super::git::compute_worktree_diff(&path, &base);
-                    let file_stats =
-                        match super::super::git::compute_worktree_file_stats(&path, &base) {
-                            Ok(stats) => stats,
-                            Err(e) => {
-                                // Counters fall back to the diff's own hunk
-                                // counts below; never an empty map read as
-                                // "no changes".
-                                log::warn!(
-                                    "diff: col {i} ({bc}) file stats unavailable, using hunk counts: {e}"
-                                );
-                                std::collections::HashMap::new()
-                            }
-                        };
+                    let super::super::git::ColumnLoad {
+                        fingerprint,
+                        diff,
+                        file_stats,
+                    } = super::super::git::load_column(&path, &base);
+                    let file_stats = match file_stats {
+                        Ok(stats) => stats,
+                        Err(e) => {
+                            // Counters fall back to the diff's own hunk
+                            // counts below; never an empty map read as
+                            // "no changes".
+                            log::warn!(
+                                "diff: col {i} ({bc}) file stats unavailable, using hunk counts: {e}"
+                            );
+                            std::collections::HashMap::new()
+                        }
+                    };
                     log::debug!(
                         "diff: col {i} ({bc}) computed {} files in {:?} (error={:?})",
                         diff.files.len(),

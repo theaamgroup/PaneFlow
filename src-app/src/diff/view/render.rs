@@ -802,8 +802,8 @@ impl DiffView {
             // --- hunk navigation: prev / counter / next ---
             .when_some(hunk_nav, |d, (total, current)| {
                 let shown = current.clamp(1, total);
-                let nav_btn = |id: &'static str, icon_path: &'static str| {
-                    crate::ui_primitives::icon_button_sm(id, icon_path, ui.muted, ui.subtle)
+                let nav_btn = |id: &'static str, icon_path: &'static str, label: &'static str| {
+                    crate::ui_primitives::icon_button_sm(id, icon_path, label, ui.muted, ui.subtle)
                 };
                 d.child(
                     div()
@@ -814,13 +814,19 @@ impl DiffView {
                         .gap(px(1.))
                         .ml(px(4.))
                         .child(
-                            nav_btn("diff-hunk-prev", "icons/chevron_up.svg")
-                                .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                                    "Previous hunk ([)",
-                                ))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            nav_btn(
+                                "diff-hunk-prev",
+                                "icons/chevron_up.svg",
+                                "Previous hunk ([)",
+                            )
+                            .delayed_tooltip(crate::ui_primitives::text_tooltip(
+                                "Previous hunk ([)",
+                            ))
+                            .on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| {
                                     this.goto_hunk(false, window, cx);
-                                })),
+                                },
+                            )),
                         )
                         .child(
                             div()
@@ -831,7 +837,7 @@ impl DiffView {
                                 .child(format!("{shown}/{total}")),
                         )
                         .child(
-                            nav_btn("diff-hunk-next", "icons/chevron-down.svg")
+                            nav_btn("diff-hunk-next", "icons/chevron-down.svg", "Next hunk (])")
                                 .delayed_tooltip(crate::ui_primitives::text_tooltip(
                                     "Next hunk (])",
                                 ))
@@ -913,6 +919,7 @@ impl DiffView {
                     crate::ui_primitives::icon_button_md(
                         "diff-toolbar-terminal",
                         "icons/terminal.svg",
+                        "Open a shell here to run git commands in this worktree",
                         ui.muted,
                         ui.text.opacity(0.12),
                     )

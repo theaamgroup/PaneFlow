@@ -22,9 +22,11 @@ use anyhow::{anyhow, Result};
 
 use crate::agents::{support, AgentConfigWriter, InstallOutcome, StatusOutcome, UninstallOutcome};
 use crate::detect::{self, Presence};
-use crate::{io, merge};
+use crate::merge;
 
 const CLI: &str = "codex";
+/// Display name of the watched file, for warnings only.
+const FILE: &str = "~/.codex/config.toml";
 
 #[cfg(test)]
 type CliHook = Box<dyn Fn(&[&str]) -> Result<()>>;
@@ -61,6 +63,15 @@ impl Codex {
             return true;
         }
         self.allow_cli && support::cli_on_path(CLI)
+    }
+
+    fn cli<'a>(&self, path: &'a Path) -> support::Cli<'a> {
+        support::Cli {
+            path,
+            name: CLI,
+            file: FILE,
+            available: self.cli_available(),
+        }
     }
 
     fn invoke_cli(&self, args: &[&str]) -> Result<()> {
@@ -110,44 +121,14 @@ impl AgentConfigWriter for Codex {
         }
         let had_prior = support::toml_entry_present(path)?;
 
-        if self.cli_available() {
-            io::backup(path)?;
-            // Skip `mcp remove`. A crash between remove and add used to
-            // drop `[mcp_servers.paneflow]` while the rest of the file
-            // stayed intact. `add` is attempted as-is; a non-idempotent
-            // CLI (entry already present) fails here and the locked merge
-            // repairs it without wiping unknown keys.
-            match self.invoke_cli(&["mcp", "add", "paneflow", "--", &bridge_s]) {
-                Ok(()) => match self.status(Some(bridge))? {
-                    StatusOutcome::Installed { .. } => {
-                        return Ok(if had_prior {
-                            InstallOutcome::Updated
-                        } else {
-                            InstallOutcome::Installed
-                        });
-                    }
-                    _ => {
-                        log::warn!(
-                            "paneflow mcp: `codex mcp add` exited 0 but ~/.codex/config.toml does not match the managed entry; falling back to direct edit"
-                        );
-                    }
-                },
-                Err(e) => {
-                    log::warn!(
-                        "paneflow mcp: `codex mcp add` failed ({e:#}); falling back to direct ~/.codex/config.toml edit"
-                    );
-                }
-            }
-        }
-
-        let fallback = support::toml_install(path, &bridge_s)?;
-        Ok(match fallback {
-            InstallOutcome::AlreadyCurrent => InstallOutcome::AlreadyCurrent,
-            InstallOutcome::Installed | InstallOutcome::Updated if had_prior => {
-                InstallOutcome::Updated
-            }
-            InstallOutcome::Installed | InstallOutcome::Updated => InstallOutcome::Installed,
-        })
+        support::cli_install(
+            &self.cli(path),
+            had_prior,
+            &["mcp", "add", "paneflow", "--", &bridge_s],
+            |args| self.invoke_cli(args),
+            || self.status(Some(bridge)),
+            || support::toml_install(path, &bridge_s),
+        )
     }
 
     fn uninstall(&self) -> Result<UninstallOutcome> {
@@ -164,28 +145,13 @@ impl AgentConfigWriter for Codex {
         if !support::toml_entry_present(path)? {
             return Ok(UninstallOutcome::NothingToRemove);
         }
-        if self.cli_available() {
-            io::backup(path)?;
-            // Like install, trust the on-disk postcondition, not the CLI's
-            // exit status (issue #215): `codex mcp remove` can exit 0 while
-            // the watched file still carries the entry.
-            match self.invoke_cli(&["mcp", "remove", "paneflow"]) {
-                Ok(()) => match self.status(None)? {
-                    StatusOutcome::NotInstalled => return Ok(UninstallOutcome::Removed),
-                    _ => {
-                        log::warn!(
-                            "paneflow mcp: `codex mcp remove` exited 0 but ~/.codex/config.toml still carries the paneflow entry; falling back to direct edit"
-                        );
-                    }
-                },
-                Err(e) => {
-                    log::warn!(
-                        "paneflow mcp: `codex mcp remove` failed ({e:#}); falling back to direct ~/.codex/config.toml edit"
-                    );
-                }
-            }
-        }
-        support::toml_uninstall(path)
+        support::cli_uninstall(
+            &self.cli(path),
+            &["mcp", "remove", "paneflow"],
+            |args| self.invoke_cli(args),
+            || self.status(None),
+            || support::toml_uninstall(path),
+        )
     }
 
     fn status(&self, bridge: Option<&Path>) -> Result<StatusOutcome> {

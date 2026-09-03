@@ -164,17 +164,41 @@ pub fn paint_ime_preedit<H, F>(
     }
 }
 
+/// Colour pair for the process-exit banner: `(glyph colour, plate colour)`.
+///
+/// Glyphs in the theme foreground on an opaque plate in the theme background,
+/// the same recipe as [`ime_preedit_colors`]. Issue #325 was a hardcoded
+/// Catppuccin Overlay0 grey painted straight over live cells with no plate
+/// (2.87:1 on PaneFlow Dark, below WCAG AA 4.5:1). The glyph colour is pushed
+/// through `ensure_minimum_contrast` so the pair clears `MIN_APCA_CONTRAST`
+/// on any theme.
+pub(crate) fn exit_overlay_colors(theme_foreground: Hsla, theme_background: Hsla) -> (Hsla, Hsla) {
+    let plate = Hsla {
+        a: 1.0,
+        ..theme_background
+    };
+    let glyph = ensure_minimum_contrast(
+        Hsla {
+            a: 1.0,
+            ..theme_foreground
+        },
+        plate,
+        MIN_APCA_CONTRAST,
+    );
+    (glyph, plate)
+}
+
 /// Paint the centered "[Process exited with code N]" message when the shell
-/// child has exited. `exit_fg` is the Catppuccin Overlay6 grey passed in so
-/// the overlay module stays free of color-helper imports.
-#[allow(clippy::too_many_arguments)]
+/// child has exited. The colours come from `layout.exit_overlay_*` (see
+/// [`exit_overlay_colors`]); an opaque plate one cell wider than the text on
+/// each side is painted first so the banner stays readable over whatever
+/// cells the dead process left behind.
 pub fn paint_exit_overlay(
     layout: &LayoutState,
     geom: &CellGeometry,
     bounds: Bounds<Pixels>,
     font_size: Pixels,
     base_font: &Font,
-    exit_fg: gpui::Hsla,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -184,6 +208,7 @@ pub fn paint_exit_overlay(
 
     let CellGeometry {
         origin,
+        cell_width,
         line_height,
         ..
     } = *geom;
@@ -198,7 +223,7 @@ pub fn paint_exit_overlay(
     let run = TextRun {
         len: msg.len(),
         font: base_font.clone(),
-        color: exit_fg,
+        color: layout.exit_overlay_foreground,
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -210,6 +235,19 @@ pub fn paint_exit_overlay(
     let text_width = shaped.width();
     let x = origin.x + (bounds.size.width - text_width) * 0.5;
     let y = origin.y + (bounds.size.height - line_height) * 0.5;
+    // Opaque plate behind the banner (issue #325) so it never competes with
+    // the cells underneath.
+    let plate = Bounds::new(
+        Point {
+            x: x - cell_width,
+            y,
+        },
+        gpui::Size {
+            width: text_width + cell_width * 2.0,
+            height: line_height,
+        },
+    );
+    window.paint_quad(fill(plate, layout.exit_overlay_background));
     let _ = shaped.paint(
         Point { x, y },
         line_height,
@@ -270,6 +308,48 @@ mod tests {
     /// glyphs and the erase quad, and that slot is `transparent_black`, so a
     /// CJK / dead-key composition painted nothing. The pair must be readable
     /// on every bundled theme, light and dark.
+    /// WCAG 2.x contrast ratio (`(L1 + 0.05) / (L2 + 0.05)`), independent of
+    /// the APCA helper the production code uses.
+    fn wcag_contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+        fn luminance(c: Hsla) -> f32 {
+            let rgba = gpui::Rgba::from(c);
+            let lin = |v: f32| {
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(rgba.r) + 0.7152 * lin(rgba.g) + 0.0722 * lin(rgba.b)
+        }
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Issue #325: the exit banner was a hardcoded Catppuccin grey painted
+    /// with no plate over live cells (2.87:1 on PaneFlow Dark). The pair must
+    /// be opaque and clear WCAG AA 4.5:1 on every bundled theme.
+    #[test]
+    fn exit_overlay_colors_are_opaque_and_readable_on_every_bundled_theme() {
+        for (name, make) in crate::theme::THEMES {
+            let theme = make();
+            let (glyph, plate) = exit_overlay_colors(theme.foreground, theme.background);
+            assert_eq!(plate.a, 1.0, "{name}: exit plate must be opaque");
+            assert_eq!(glyph.a, 1.0, "{name}: exit glyphs must be opaque");
+            assert_ne!(glyph, plate, "{name}: glyphs must not match the plate");
+            let ratio = wcag_contrast_ratio(glyph, plate);
+            assert!(
+                ratio >= 4.5,
+                "{name}: exit banner contrast {ratio:.2}:1 is below WCAG AA 4.5:1"
+            );
+            assert!(
+                apca_contrast(glyph, plate).abs() >= MIN_APCA_CONTRAST,
+                "{name}: exit banner below Lc {MIN_APCA_CONTRAST}"
+            );
+        }
+    }
+
     #[test]
     fn ime_preedit_colors_are_opaque_and_readable() {
         for theme in [

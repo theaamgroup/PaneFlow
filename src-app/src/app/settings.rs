@@ -200,8 +200,15 @@ impl PaneFlowApp {
             && key == "default_shell"
             && normalized_shell_setting(self.cached_config.default_shell.as_deref())
                 != normalized_shell_setting(value.as_str());
-        self.cached_config =
-            config_writer::with_field(&self.cached_config, nested, key, value.clone());
+        // Issue #300: a value the typed config cannot hold must not reach
+        // disk either, or the render cache and `paneflow.json` diverge.
+        match config_writer::with_field(&self.cached_config, nested, key, value.clone()) {
+            Ok(next) => self.cached_config = next,
+            Err(_) => {
+                self.show_toast(format!("Could not apply setting: {key}"), cx);
+                return;
+            }
+        }
         config_writer::publish_config_snapshot(cx, &self.cached_config);
         if !nested && matches!(key, "macos_chrome_material") {
             for ws in &self.workspaces {

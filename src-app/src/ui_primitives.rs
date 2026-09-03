@@ -18,7 +18,7 @@ pub(crate) mod squircle;
 use gpui::{
     AnimationExt, AnyElement, AnyView, App, Bounds, ClickEvent, CursorStyle, Div, Element,
     ElementId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement,
-    IntoElement, ParentElement, Pixels, Render, Rgba, SharedString, Stateful,
+    IntoElement, ParentElement, Pixels, Render, Rgba, Role, SharedString, Stateful,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::*, px, svg,
 };
 use std::time::{Duration, Instant};
@@ -126,9 +126,20 @@ pub(crate) struct AnimatedHover {
     element: Stateful<Div>,
     style_animator: Option<Box<StyleAnimator>>,
     element_animator: Option<Box<ElementAnimator>>,
+    /// Reported to AccessKit as the node's disabled flag. GPUI's pinned rev
+    /// has no `aria_disabled` builder, so this element carries it.
+    a11y_disabled: bool,
 }
 
 impl AnimatedHover {
+    /// Expose the control as disabled to assistive technology (`aria-disabled`).
+    /// The visual dim stays the caller's job; this only sets the AccessKit
+    /// flag, so it is safe to call from a builder that computes both.
+    pub(crate) fn a11y_disabled(mut self, disabled: bool) -> Self {
+        self.a11y_disabled = disabled;
+        self
+    }
+
     /// Type adapter around a `Stateful<Div>` that already owns its hover paint
     /// (for example `squircle_skin`). No interpolation and no extra animation
     /// frames: `request_layout` forwards to the wrapped element.
@@ -137,6 +148,7 @@ impl AnimatedHover {
             element,
             style_animator: None,
             element_animator: None,
+            a11y_disabled: false,
         }
     }
 }
@@ -213,6 +225,7 @@ impl AnimatedHoverExt for Stateful<Div> {
             element: self.hover(|style| style),
             style_animator: Some(Box::new(animator)),
             element_animator: None,
+            a11y_disabled: false,
         }
     }
 
@@ -224,6 +237,7 @@ impl AnimatedHoverExt for Stateful<Div> {
             element: self.hover(|style| style),
             style_animator: None,
             element_animator: Some(Box::new(animator)),
+            a11y_disabled: false,
         }
     }
 
@@ -272,6 +286,9 @@ impl Element for AnimatedHover {
 
     fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
         self.element.write_a11y_info(node);
+        if self.a11y_disabled {
+            node.set_disabled();
+        }
     }
 
     fn a11y_synthetic_children(
@@ -565,12 +582,15 @@ fn icon_button(
     id: impl Into<ElementId>,
     outer: Pixels,
     icon: &'static str,
+    label: impl Into<SharedString>,
     icon_size: Pixels,
     icon_color: Hsla,
     hover_bg: Hsla,
 ) -> AnimatedHover {
     div()
         .id(id.into())
+        .role(Role::Button)
+        .aria_label(label)
         .flex_none()
         .flex()
         .items_center()
@@ -587,26 +607,30 @@ fn icon_button(
         )
 }
 
-/// 20×20 icon button (12px glyph). The caller chains `.on_click` / `.tooltip`
-/// and any resting-state `.bg(..)`.
+/// 20×20 icon button (12px glyph). `label` is the accessible name announced by
+/// assistive technology (usually the tooltip text). The caller chains
+/// `.on_click` / `.tooltip` and any resting-state `.bg(..)`.
 pub(crate) fn icon_button_sm(
     id: impl Into<ElementId>,
     icon: &'static str,
+    label: impl Into<SharedString>,
     icon_color: Hsla,
     hover_bg: Hsla,
 ) -> AnimatedHover {
-    icon_button(id, px(20.), icon, px(12.), icon_color, hover_bg)
+    icon_button(id, px(20.), icon, label, px(12.), icon_color, hover_bg)
 }
 
-/// 24×24 icon button (13px glyph). The caller chains `.on_click` / `.tooltip`
-/// and any resting-state `.bg(..)`.
+/// 24×24 icon button (13px glyph). `label` is the accessible name announced by
+/// assistive technology (usually the tooltip text). The caller chains
+/// `.on_click` / `.tooltip` and any resting-state `.bg(..)`.
 pub(crate) fn icon_button_md(
     id: impl Into<ElementId>,
     icon: &'static str,
+    label: impl Into<SharedString>,
     icon_color: Hsla,
     hover_bg: Hsla,
 ) -> AnimatedHover {
-    icon_button(id, px(24.), icon, px(13.), icon_color, hover_bg)
+    icon_button(id, px(24.), icon, label, px(13.), icon_color, hover_bg)
 }
 
 // ── Toolbar pill ─────────────────────────────────────────────────────────────
@@ -684,6 +708,9 @@ pub(crate) fn filter_pill_with_arrow_clear(
     )
 }
 
+/// Accessible name and tooltip of the filter pill's clear (x) control.
+const FILTER_CLEAR_LABEL: &str = "Clear filter";
+
 fn filter_pill_with_clear_cursor(
     id: impl Into<ElementId>,
     clear_id: impl Into<ElementId>,
@@ -724,9 +751,15 @@ fn filter_pill_with_clear_cursor(
         field = field.child(
             div()
                 .id(clear_id)
+                .role(Role::Button)
+                .aria_label(FILTER_CLEAR_LABEL)
                 .flex_none()
-                .w(px(16.))
-                .h(px(16.))
+                // WCAG 2.5.8: a 24x24 hit target. The negative margin keeps
+                // the layout footprint at the 16 px glyph box, so the row
+                // does not grow and the glyph stays where it was.
+                .w(px(24.))
+                .h(px(24.))
+                .m(px(-4.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -754,6 +787,7 @@ fn filter_pill_with_clear_cursor(
                         .text_color(icon_color)
                         .into_any_element()]);
                 })
+                .delayed_tooltip(text_tooltip(FILTER_CLEAR_LABEL))
                 .on_click(on_clear),
         );
     }
@@ -893,6 +927,130 @@ mod tests {
         assert!(
             progress.get() > 0.0,
             "hover progress stayed at zero after pointer entry"
+        );
+    }
+
+    fn assert_button_a11y(button: &AnimatedHover, expected_label: &str) {
+        assert_eq!(
+            Element::a11y_role(button),
+            Some(gpui::accesskit::Role::Button),
+            "icon button did not expose Role::Button"
+        );
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        Element::write_a11y_info(button, &mut node);
+        assert_eq!(
+            node.label(),
+            Some(expected_label),
+            "icon button did not expose its accessible name"
+        );
+    }
+
+    #[test]
+    fn icon_buttons_expose_button_role_and_accessible_name() {
+        let sm = icon_button_sm(
+            "a11y-icon-sm",
+            "icons/terminal.svg",
+            "Open terminal",
+            gpui::black(),
+            gpui::white(),
+        );
+        assert_button_a11y(&sm, "Open terminal");
+
+        let md = icon_button_md(
+            "a11y-icon-md",
+            "icons/terminal.svg",
+            "Open terminal",
+            gpui::black(),
+            gpui::white(),
+        );
+        assert_button_a11y(&md, "Open terminal");
+    }
+
+    struct FilterPillHarness {
+        cleared: Rc<Cell<bool>>,
+    }
+
+    impl Render for FilterPillHarness {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let cleared = self.cleared.clone();
+            let ui = crate::theme::ui_colors();
+            // A column so the pill takes its content height instead of the
+            // window's.
+            div().size_full().flex().flex_col().child(
+                filter_pill(
+                    "filter-pill-probe",
+                    "filter-pill-probe-clear",
+                    ui,
+                    div().h(px(20.)).child("abc"),
+                    true,
+                    move |_, _, _| cleared.set(true),
+                )
+                .w(px(200.))
+                .debug_selector(|| "filter-pill-probe".into()),
+            )
+        }
+    }
+
+    /// Issue #317: the filter clear control was a bare 16x16 `.id()` +
+    /// `.on_click()` div - no role, no name, no tooltip, and a hit target
+    /// below the WCAG 2.5.8 24x24 minimum. The clickable area must reach at
+    /// least 24 px around the glyph without growing the pill row, and the
+    /// control must announce as a "Clear filter" button.
+    #[gpui::test]
+    fn filter_pill_clear_control_is_a_labeled_24px_button(cx: &mut TestAppContext) {
+        let this_file = include_str!("ui_primitives.rs");
+        let clear_body = this_file
+            .split("fn filter_pill_with_clear_cursor(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("ui_primitives.rs defines filter_pill_with_clear_cursor");
+        for needle in [
+            ".role(Role::Button)",
+            ".aria_label(FILTER_CLEAR_LABEL)",
+            ".delayed_tooltip(text_tooltip(FILTER_CLEAR_LABEL))",
+        ] {
+            assert!(
+                clear_body.contains(needle),
+                "filter_pill_with_clear_cursor lost `{needle}`; the clear control's \
+                 accessible name lives there"
+            );
+        }
+
+        let cleared = Rc::new(Cell::new(false));
+        let cleared_for_view = cleared.clone();
+        let (_view, cx) = cx.add_window_view(move |_, _| FilterPillHarness {
+            cleared: cleared_for_view,
+        });
+        cx.simulate_resize(size(px(300.), px(100.)));
+        cx.run_until_parked();
+
+        let pill = cx
+            .debug_bounds("filter-pill-probe")
+            .expect("filter pill must be painted");
+        // The row must not grow to make room for the target: 6 px padding on
+        // each side of the 20 px input child.
+        assert_eq!(pill.size.height, px(32.), "the pill row grew");
+        // The clear glyph sits inside the pill's 10 px right padding, so its
+        // layout box (16 px wide) is centered 18 px in from the right edge.
+        let center = point(pill.right() - px(18.), pill.center().y);
+        // Control: a click on the magnifier at the other end of the pill must
+        // not clear, or the positive click below proves nothing.
+        cx.simulate_click(point(pill.left() + px(16.), center.y), Modifiers::default());
+        assert!(
+            !cleared.get(),
+            "a click on the magnifier cleared the filter"
+        );
+        // 10 px below the glyph's center: inside a 24 px target, outside a
+        // 16 px one.
+        cx.simulate_click(point(center.x, center.y + px(10.)), Modifiers::default());
+        assert!(
+            cleared.get(),
+            "a click 10 px from the clear glyph's center missed it; the hit target is \
+             smaller than 24x24"
         );
     }
 }

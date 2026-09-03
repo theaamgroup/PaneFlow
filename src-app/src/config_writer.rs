@@ -514,13 +514,31 @@ fn apply_agent_panel_field(json: &mut serde_json::Value, key: &str, value: serde
 /// cache instantly, then persists asynchronously. `nested` routes the field
 /// into the `terminal` block; a `Null` value clears it. The config is the typed
 /// view (no unknown fields), so the JSON round-trip is lossless for it.
+///
+/// Issue #300: a round-trip failure is logged and returned as `Err` so the
+/// caller keeps its cache and skips the disk write, instead of the cache
+/// silently holding the previous config while `paneflow.json` takes the value.
 pub fn with_field(
     config: &paneflow_config::schema::PaneFlowConfig,
     nested: bool,
     key: &str,
     value: serde_json::Value,
-) -> paneflow_config::schema::PaneFlowConfig {
-    let mut json = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
+) -> Result<paneflow_config::schema::PaneFlowConfig, serde_json::Error> {
+    with_field_in(config, nested, key, value).inspect_err(|error| {
+        log::warn!("config: {key} did not round-trip in memory, not saving: {error}");
+    })
+}
+
+/// Typed body of [`with_field`], generic so the failure path is testable
+/// (every `PaneFlowConfig` field deserializes leniently, so it never fails
+/// the round-trip in practice).
+fn with_field_in<T: serde::Serialize + serde::de::DeserializeOwned>(
+    config: &T,
+    nested: bool,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<T, serde_json::Error> {
+    let mut json = serde_json::to_value(config)?;
     if nested {
         apply_terminal_field(&mut json, key, value);
     } else if let Some(root) = json.as_object_mut() {
@@ -530,7 +548,7 @@ pub fn with_field(
             root.insert(key.to_string(), value);
         }
     }
-    serde_json::from_value(json).unwrap_or_else(|_| config.clone())
+    serde_json::from_value(json)
 }
 
 /// In-memory companion for [`save_agent_panel_field_checked`].
@@ -708,11 +726,12 @@ mod tests {
         AGENT_BUTTON_VISIBILITY_MIGRATION_KEY, ConfigWritePrecondition, FieldPersistSeq,
         FieldScope, apply_agent_panel_field, apply_reset_shortcuts, apply_terminal_field,
         load_raw_config, merge_shortcut, migrate_agent_button_visibility_at, reset_shortcuts_at,
-        save_commands_at_if_current, save_field_at_if_current, with_commands, write_config_checked,
-        write_config_checked_with_precondition,
+        save_commands_at_if_current, save_field_at_if_current, with_commands, with_field,
+        with_field_in, write_config_checked, write_config_checked_with_precondition,
     };
     use crate::agent_launcher::TerminalAgent;
-    use paneflow_config::schema::CommandDefinition;
+    use paneflow_config::schema::{CommandDefinition, PaneFlowConfig};
+    use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -725,6 +744,42 @@ mod tests {
             workspace: None,
             command: Some(command.to_string()),
         }
+    }
+
+    /// Issue #300: a value that does not survive the in-memory round-trip
+    /// must surface as an error, not silently become the previous config, so
+    /// `persist_setting` can skip the matching disk write instead of leaving
+    /// the render cache and `paneflow.json` on different values.
+    #[test]
+    fn with_field_surfaces_round_trip_failure() {
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Strict {
+            font_size: f32,
+        }
+        let strict = Strict { font_size: 13.0 };
+
+        let err = with_field_in(&strict, false, "font_size", json!("big")).unwrap_err();
+        assert!(err.to_string().contains("expected f32"), "{err}");
+        assert!(with_field_in(&strict, true, "font_size", json!(14.0)).is_err());
+        assert_eq!(
+            with_field_in(&strict, false, "font_size", json!(14.0)).unwrap(),
+            Strict { font_size: 14.0 }
+        );
+    }
+
+    #[test]
+    fn with_field_round_trips_typed_config() {
+        let base = PaneFlowConfig::default();
+        let top = with_field(&base, false, "font_size", json!(14.0)).unwrap();
+        assert_eq!(top.font_size, Some(14.0));
+        let cleared = with_field(&top, false, "font_size", Value::Null).unwrap();
+        assert_eq!(cleared, base);
+        let nested = with_field(&base, true, "scroll_multiplier", json!(1.5)).unwrap();
+        assert_eq!(
+            nested.terminal.as_ref().and_then(|t| t.scroll_multiplier),
+            Some(1.5)
+        );
     }
 
     #[test]

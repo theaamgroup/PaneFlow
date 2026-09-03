@@ -26,7 +26,7 @@ mod paint;
 #[cfg(debug_assertions)]
 pub(super) mod pixel_probe;
 
-use color::{convert_color, rgb_to_hsla};
+use color::convert_color;
 pub(crate) use font::{
     DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, normalize_font_weight_key,
 };
@@ -58,6 +58,22 @@ pub(crate) use paint::scrollbar::ScrollbarMetrics;
 /// Lc 45 is "minimum for large fluent text" per ARC Bronze Simple Mode - matches Zed's default.
 /// APCA is more accurate than WCAG 2.0 on dark backgrounds (polarity-aware, perceptually uniform).
 pub(crate) const MIN_APCA_CONTRAST: f32 = 45.0;
+
+/// Translucent wash painted under inactive search matches (amber).
+pub(crate) const SEARCH_MATCH_COLOR: Hsla = Hsla {
+    h: 0.11,
+    s: 0.9,
+    l: 0.55,
+    a: 0.45,
+};
+
+/// Translucent wash painted under the active search match (brighter orange).
+pub(crate) const SEARCH_ACTIVE_COLOR: Hsla = Hsla {
+    h: 0.08,
+    s: 1.0,
+    l: 0.6,
+    a: 0.7,
+};
 
 /// Returns `true` for characters whose colors should be preserved exactly
 /// (no contrast adjustment). Covers box-drawing, block elements, geometric
@@ -127,6 +143,35 @@ fn is_cell_in_selection(point: GridPoint, sel: &SelectionRange, display_offset: 
     } else {
         true
     }
+}
+
+/// Issue #326: returns the translucent wash painted under `point` when the
+/// cell sits inside a search match rect, mirroring the display-line mapping
+/// used to build `search_rects` below. The active match wins when rects
+/// overlap. Used inside the cell loop so the cell's `fg` can be re-checked
+/// against the wash composited over its background, the same way selected
+/// cells get `selection_foreground`.
+fn search_hit_wash(
+    point: GridPoint,
+    highlights: &[SearchHighlight],
+    display_offset: usize,
+) -> Option<Hsla> {
+    let mut wash = None;
+    for highlight in highlights {
+        let display_line = highlight.start.line.0 + display_offset as i32;
+        if point.line.0 != display_line {
+            continue;
+        }
+        let col = point.column.0;
+        if col < highlight.start.column.0 || col > highlight.end.column.0 {
+            continue;
+        }
+        if highlight.is_active {
+            return Some(SEARCH_ACTIVE_COLOR);
+        }
+        wash = Some(SEARCH_MATCH_COLOR);
+    }
+    wash
 }
 
 /// Merge vertically adjacent background rects that share the same column span
@@ -591,6 +636,10 @@ pub struct LayoutState {
     ime_preedit_foreground: Hsla,
     /// Opaque erase fill painted behind the IME preedit (issue #324).
     ime_preedit_background: Hsla,
+    /// Glyph colour for the process-exit banner (issue #325).
+    exit_overlay_foreground: Hsla,
+    /// Opaque plate painted behind the process-exit banner (issue #325).
+    exit_overlay_background: Hsla,
     /// Whether emoji glyphs should use GPUI's platform color-emoji path.
     color_emoji_enabled: bool,
 }
@@ -897,6 +946,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
     let background_color = gpui::transparent_black();
     let (ime_preedit_foreground, ime_preedit_background) =
         paint::overlay::ime_preedit_colors(theme.foreground, theme.background);
+    let (exit_overlay_foreground, exit_overlay_background) =
+        paint::overlay::exit_overlay_colors(theme.foreground, theme.background);
     let selection_color = theme.selection;
 
     let cursor_snapshot = cursor_snapshot.and_then(|mut cursor| {
@@ -1039,6 +1090,26 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
             && is_cell_in_selection(point, sel, display_offset)
         {
             fg = theme.selection_foreground;
+        }
+
+        // Issue #326: cells under a search-hit wash. The wash is painted
+        // between the cell background (and any selection quad) and the
+        // text, so the fg must clear `MIN_APCA_CONTRAST` against the wash
+        // composited over what lies beneath it, not against the bare cell
+        // background checked above. Same decorative-character exclusion as
+        // the selection override.
+        if !is_decorative_character(*c)
+            && let Some(wash) = search_hit_wash(point, search_highlights, display_offset)
+        {
+            let selected = selection_range
+                .as_ref()
+                .is_some_and(|sel| is_cell_in_selection(point, sel, display_offset));
+            let under = if selected {
+                bg.blend(theme.selection)
+            } else {
+                bg
+            };
+            fg = ensure_minimum_contrast(fg, under.blend(wash), MIN_APCA_CONTRAST);
         }
 
         // Background rect - paint for ALL cells. Default-bg cells normally use
@@ -1282,18 +1353,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
     }
 
     // Build search match highlight rects
-    let search_match_color = Hsla {
-        h: 0.11,
-        s: 0.9,
-        l: 0.55,
-        a: 0.45,
-    }; // Amber for inactive matches
-    let search_active_color = Hsla {
-        h: 0.08,
-        s: 1.0,
-        l: 0.6,
-        a: 0.7,
-    }; // Brighter orange for active match
+    let search_match_color = SEARCH_MATCH_COLOR;
+    let search_active_color = SEARCH_ACTIVE_COLOR;
 
     let mut search_rects = Vec::new();
     for highlight in search_highlights {
@@ -1359,6 +1420,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
         ime_cursor_bounds,
         ime_preedit_foreground,
         ime_preedit_background,
+        exit_overlay_foreground,
+        exit_overlay_background,
         color_emoji_enabled,
     }
 }
@@ -1755,9 +1818,8 @@ impl Element for TerminalElement {
             );
 
             // 7. Exit overlay
-            let exit_fg = rgb_to_hsla(0x6c, 0x70, 0x86); // Overlay6
             paint::overlay::paint_exit_overlay(
-                &layout, &geom, bounds, font_size, base_font, exit_fg, window, cx,
+                &layout, &geom, bounds, font_size, base_font, window, cx,
             );
         });
 
@@ -2217,6 +2279,7 @@ mod golden_frame_tests {
     //! never touching a GPUI context - is the Window-free proof (AC-1). Each
     //! fixture asserts against a committed golden under `golden/` (AC-2);
     //! regenerate with `PANEFLOW_BLESS_GOLDEN=1` (AC-3).
+    use super::color::rgb_to_hsla;
     use super::*;
     use crate::terminal::types::{RenderableCursor, Rgb};
 
@@ -2970,6 +3033,89 @@ mod golden_frame_tests {
             state.rects.iter().any(|rect| rect.color.a > 0.0),
             "explicit ANSI backgrounds must remain painted"
         );
+    }
+
+    /// Issue #326: text under a search-hit wash must stay readable. The wash
+    /// is translucent and painted between the cell background and the text,
+    /// so the foreground has to clear `MIN_APCA_CONTRAST` against the wash
+    /// composited over the cell background, mirroring the selection remap.
+    #[test]
+    fn search_hit_foreground_meets_apca_contrast_against_wash() {
+        let theme = crate::theme::paneflow_dark();
+        // Truecolor fg (skips the plain cell-vs-bg contrast pass) chosen to
+        // sit right on the inactive wash's composited color.
+        let fg = Color::Spec(Rgb {
+            r: 123,
+            g: 91,
+            b: 30,
+        });
+        let mut cells = text_row(0, "hit", fg, CellFlags::empty());
+        cells.extend(text_row(1, "hit", fg, CellFlags::empty()));
+        cells.extend(text_row(2, "hit", fg, CellFlags::empty()));
+        let highlights = [
+            SearchHighlight {
+                start: GridPoint::new(0, 0),
+                end: GridPoint::new(0, 2),
+                is_active: false,
+            },
+            SearchHighlight {
+                start: GridPoint::new(1, 0),
+                end: GridPoint::new(1, 2),
+                is_active: true,
+            },
+        ];
+        let state = layout_from_snapshot(LayoutInputs {
+            cells: cells.into(),
+            cursor: None,
+            selection_range: None,
+            copy_mode_cursor: None,
+            search_highlights: &highlights,
+            display_offset: 0,
+            history_size: 0,
+            desired_cols: COLS,
+            desired_rows: ROWS,
+            first_visible_row: 0,
+            last_visible_row: ROWS as i32,
+            dims: test_dims(),
+            base_font: test_font(),
+            theme: &theme,
+            exited: None,
+            exit_signal: None,
+            integrated_glyphs_enabled: true,
+            color_emoji_enabled: true,
+        });
+
+        let raw_fg = convert_color(fg, &theme);
+        let cell_bg = convert_color(default_bg(), &theme);
+        for (line, wash) in [(0, SEARCH_MATCH_COLOR), (1, SEARCH_ACTIVE_COLOR)] {
+            let composited = cell_bg.blend(wash);
+            // Control: the raw fg really is unreadable on this wash, so a
+            // no-op layout cannot pass the assertion below.
+            assert!(
+                apca_contrast(raw_fg, composited).abs() < MIN_APCA_CONTRAST,
+                "fixture fg must start below the threshold on line {line}"
+            );
+            let runs: Vec<_> = state
+                .batched_runs
+                .iter()
+                .filter(|r| r.line == line)
+                .collect();
+            assert!(!runs.is_empty(), "line {line} should produce a text run");
+            for run in runs {
+                let lc = apca_contrast(run.color, composited).abs();
+                assert!(
+                    lc >= MIN_APCA_CONTRAST,
+                    "search-hit fg on line {line} has Lc {lc:.1} < {MIN_APCA_CONTRAST} against the wash"
+                );
+            }
+        }
+
+        // Cells outside every search rect keep their exact truecolor fg.
+        let untouched: Vec<_> = state.batched_runs.iter().filter(|r| r.line == 2).collect();
+        assert!(!untouched.is_empty());
+        for run in untouched {
+            assert_eq!(hsla_repr(run.color), hsla_repr(raw_fg));
+        }
     }
 
     /// Issue #324: the IME preedit must not paint in the (transparent) layout

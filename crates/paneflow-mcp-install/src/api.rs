@@ -339,6 +339,29 @@ mod tests {
         ];
         assert_eq!(overall_state(&partial), OverallState::NeedsInstall);
 
+        // A writer error alongside an installed agent → needs install.
+        let partial_error = vec![
+            AgentResult {
+                id: "a".into(),
+                label: "A".into(),
+                kind: StatusKind::Installed { path: "/p".into() },
+            },
+            AgentResult {
+                id: "b".into(),
+                label: "B".into(),
+                kind: StatusKind::Error("read failed".into()),
+            },
+        ];
+        assert_eq!(overall_state(&partial_error), OverallState::NeedsInstall);
+
+        // Only a writer error → needs install, never all installed.
+        let only_error = vec![AgentResult {
+            id: "a".into(),
+            label: "A".into(),
+            kind: StatusKind::Error("read failed".into()),
+        }];
+        assert_eq!(overall_state(&only_error), OverallState::NeedsInstall);
+
         // All installed.
         let all = vec![AgentResult {
             id: "a".into(),

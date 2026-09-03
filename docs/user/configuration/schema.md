@@ -142,6 +142,7 @@ preserved; an invalid config is left untouched.
 | `terminal.cursor_blink` | string or null | `terminal_controlled` | `on`, `off`, or `terminal_controlled`. |
 | `terminal.env` | object or null | none | Environment variables injected into new terminals. Protected keys are filtered at PTY spawn. |
 | `terminal.scroll_multiplier` | number or null | `1.0` | Mouse-wheel multiplier outside mouse-reporting and alternate-screen modes. Clamped to `0.1` to `10.0`; NaN and infinity revert to the default. |
+| `terminal.osc52_clipboard` | string or null | `copy_only` | `copy_only` lets a focused pane write the system clipboard through OSC 52; `disabled` ignores every OSC 52 write. Clipboard reads are never served. Applies to newly created terminals. |
 
 ```json
 {

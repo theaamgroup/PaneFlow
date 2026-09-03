@@ -256,6 +256,12 @@
           "minimum": 0.1,
           "maximum": 10.0,
           "default": 1.0
+        },
+        "osc52_clipboard": {
+          "type": ["string", "null"],
+          "description": "OSC 52 clipboard policy for programs running in a pane. 'copy_only' lets a focused pane write the system clipboard; 'disabled' ignores every OSC 52 write. Clipboard reads are never served. Applied to newly-created terminals.",
+          "enum": ["copy_only", "disabled", null],
+          "default": "copy_only"
         }
       }
     },

@@ -190,6 +190,11 @@ pub(crate) fn build_request(id: u64, method: &str, params: Value) -> Value {
 pub(crate) fn parse_response(line: &str) -> Result<Value, String> {
     let value: Value = serde_json::from_str(line.trim())
         .map_err(|e| format!("invalid JSON-RPC response from paneflow: {e}"))?;
+    if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(
+            "invalid JSON-RPC response from paneflow: missing `\"jsonrpc\": \"2.0\"`".to_string(),
+        );
+    }
     if let Some(message) = jsonrpc_error_message_from_value(&value) {
         return Err(message);
     }
@@ -206,12 +211,22 @@ pub fn jsonrpc_error_message(line: &str) -> Option<String> {
 
 fn jsonrpc_error_message_from_value(value: &Value) -> Option<String> {
     let err = value.get("error")?;
-    let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
-    let message = err
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown error");
-    Some(format!("paneflow error {code}: {message}"))
+    // JSON-RPC 2.0 requires `error` to be an object with an integer `code`
+    // and a string `message`; anything else is a malformed frame, not an
+    // error with a made-up code.
+    let (Some(code), Some(message)) = (
+        err.get("code").and_then(Value::as_i64),
+        err.get("message").and_then(Value::as_str),
+    ) else {
+        return Some(format!(
+            "malformed JSON-RPC error from paneflow (expected `{{\"code\": integer, \"message\": string}}`): {err}"
+        ));
+    };
+    let data = err
+        .get("data")
+        .map(|data| format!(" ({data})"))
+        .unwrap_or_default();
+    Some(format!("paneflow error {code}: {message}{data}"))
 }
 
 /// Open a connection, write the newline-terminated request, and read back one
@@ -664,6 +679,48 @@ mod tests {
     #[test]
     fn parse_response_rejects_malformed_json() {
         assert!(parse_response("not json").is_err());
+    }
+
+    #[test]
+    fn parse_response_rejects_frame_without_jsonrpc_version() {
+        // A bare `{"result": ...}` is not a JSON-RPC 2.0 response and must not
+        // be accepted as a success.
+        assert!(parse_response(r#"{"result":{},"id":1}"#).is_err());
+        assert!(parse_response(r#"{"jsonrpc":"1.0","result":{},"id":1}"#).is_err());
+    }
+
+    #[test]
+    fn parse_response_rejects_malformed_error_member() {
+        // `error` must be `{code: i64, message: string}`; a missing code must
+        // not be reported as "paneflow error 0".
+        for line in [
+            r#"{"jsonrpc":"2.0","error":{},"id":1}"#,
+            r#"{"jsonrpc":"2.0","error":{"message":"no code"},"id":1}"#,
+            r#"{"jsonrpc":"2.0","error":{"code":-32602},"id":1}"#,
+            r#"{"jsonrpc":"2.0","error":{"code":"-32602","message":"x"},"id":1}"#,
+            r#"{"jsonrpc":"2.0","error":"boom","id":1}"#,
+        ] {
+            let err = parse_response(line).expect_err("malformed error must fail parse");
+            assert!(
+                !err.contains("error 0:"),
+                "synthesized code 0 for {line}: {err}"
+            );
+            assert!(
+                !err.contains("unknown error"),
+                "synthesized message for {line}: {err}"
+            );
+        }
+        assert!(jsonrpc_error_message(r#"{"error":{},"id":null}"#)
+            .is_some_and(|e| !e.contains("error 0:")));
+    }
+
+    #[test]
+    fn parse_response_keeps_real_error_code_and_data() {
+        let line = r#"{"jsonrpc":"2.0","error":{"code":-32001,"message":"nope","data":{"surface_id":9}},"id":1}"#;
+        let err = parse_response(line).expect_err("err");
+        assert!(err.contains("-32001"), "got: {err}");
+        assert!(err.contains("nope"), "got: {err}");
+        assert!(err.contains("surface_id"), "error.data dropped: {err}");
     }
 
     #[test]

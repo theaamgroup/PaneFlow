@@ -277,10 +277,11 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Cancel swap mode on Escape - checked before any other mode handling
-        if crate::SWAP_MODE.load(std::sync::atomic::Ordering::Relaxed)
-            && event.keystroke.key == "escape"
-        {
+        // Cancel swap mode on Escape - checked before any other mode handling.
+        // Issue #299: the flag is per view (armed on the swap source pane), and
+        // clears here so a stale arm can never swallow Escape more than once.
+        if self.swap_mode_armed && event.keystroke.key == "escape" {
+            self.swap_mode_armed = false;
             cx.emit(TerminalEvent::CancelSwapMode);
             return;
         }
@@ -1309,6 +1310,74 @@ mod tests {
     use super::{paths_to_pty_text, wrap_bracketed_paste};
     use crate::terminal::types::{Modes, ShellQuoting};
     use std::path::PathBuf;
+
+    /// Issue #299: swap-mode Escape is a per-view flag, not a process-global.
+    /// Only the armed view intercepts Escape, one Escape disarms it, and a
+    /// view that was never armed forwards Escape as usual.
+    #[gpui::test]
+    fn swap_mode_escape_is_scoped_to_the_armed_view(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::{TerminalEvent, TerminalView};
+        use gpui::AppContext;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let cx = cx.add_empty_window();
+        let armed = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let other = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+
+        let cancels = Rc::new(Cell::new(0usize));
+        for view in [&armed, &other] {
+            let cancels = cancels.clone();
+            cx.update(|_, cx| {
+                cx.subscribe(view, move |_, event: &TerminalEvent, _| {
+                    if matches!(event, TerminalEvent::CancelSwapMode) {
+                        cancels.set(cancels.get() + 1);
+                    }
+                })
+                .detach();
+            });
+        }
+
+        armed.update(cx, |view, cx| view.set_swap_mode_armed(true, cx));
+        assert!(cx.update(|_, cx| armed.read(cx).swap_mode_armed()));
+        assert!(!cx.update(|_, cx| other.read(cx).swap_mode_armed()));
+
+        let escape = || gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("escape").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+
+        other.update_in(cx, |view, window, cx| {
+            view.handle_key_down(&escape(), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cancels.get(),
+            0,
+            "an unarmed view must not cancel swap mode"
+        );
+
+        armed.update_in(cx, |view, window, cx| {
+            view.handle_key_down(&escape(), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cancels.get(),
+            1,
+            "the armed view cancels swap mode on Escape"
+        );
+        assert!(
+            !cx.update(|_, cx| armed.read(cx).swap_mode_armed()),
+            "one Escape disarms the view"
+        );
+
+        armed.update_in(cx, |view, window, cx| {
+            view.handle_key_down(&escape(), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cancels.get(), 1, "a disarmed view forwards Escape again");
+    }
 
     #[test]
     fn printable_altgr_commit_preserves_key_metadata_and_consumes_ctrl_alt() {

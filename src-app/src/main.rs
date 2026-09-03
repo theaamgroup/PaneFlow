@@ -1455,6 +1455,9 @@ struct PaneFlowApp {
     jump_cursor: Option<u64>,
     /// Source pane for swap mode, or `None` if not in swap mode.
     swap_source: Option<Entity<crate::pane::Pane>>,
+    /// Panes whose terminals `set_swap_source` armed for Escape, so the same
+    /// set is disarmed even if the layout changed meanwhile (issue #299).
+    swap_armed_panes: Vec<Entity<crate::pane::Pane>>,
     /// LIFO stack of recently closed panes for undo-close (US-014).
     /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
     /// `Cmd+Shift+T` restores whichever kind was closed most recently.
@@ -1594,11 +1597,6 @@ struct PaneFlowApp {
     /// nothing at all.
     sidebar_rename_focus: FocusHandle,
 }
-
-/// Global flag for swap mode, checked by TerminalView to intercept Escape.
-/// A process-global `AtomicBool` (rather than threading state through every
-/// `TerminalView`) because the check sits on the keystroke hot path.
-pub static SWAP_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl PaneFlowApp {
     fn primary_sidebar_expanded_width(&self) -> f32 {

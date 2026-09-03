@@ -836,6 +836,7 @@ impl PaneFlowApp {
             _toast_task: None,
             jump_cursor: None,
             swap_source: None,
+            swap_armed_panes: Vec::new(),
             closed_items: Vec::new(),
             pending_worktree_teardowns: restored_pending_worktree_teardowns,
             show_about_dialog: false,

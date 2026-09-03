@@ -49,6 +49,8 @@ Common examples:
 * `terminal.scrollback_lines` for per-terminal scrollback history.
 * `terminal.ligatures`, `terminal.cursor_blink`, `terminal.env`, and
   `terminal.scroll_multiplier` for advanced terminal behavior.
+* `terminal.osc52_clipboard` to stop programs from writing the system
+  clipboard through OSC 52 (`"disabled"`; the default is `"copy_only"`).
 * `commands[]` entries that are not workspace templates.
 * Profiles, window-decoration, and agent-panel options.
 * `option_as_meta`, which defaults to off on macOS. Set it to `true` if you want Option to send an ESC prefix instead of producing Unicode input.

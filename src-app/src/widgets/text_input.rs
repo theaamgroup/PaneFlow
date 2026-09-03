@@ -7,8 +7,10 @@
 //! clipboard bindings (Linux-first but macOS-correct).
 //!
 //! Supports: mouse click to position cursor, click-drag to select, shift+click
-//! to extend selection, arrow keys (+ shift to select), Home / End, Backspace /
-//! Delete, Ctrl/Cmd+A / C / V / X, IME composition (CJK, dead keys).
+//! to extend selection, arrow keys (+ shift to select), Home / End (+ shift to
+//! select), Option+Left / Right (word, + shift to select), Cmd+Left / Right
+//! (line start / end, + shift to select), Option+Backspace (delete word),
+//! Backspace / Delete, Ctrl/Cmd+A / C / V / X, IME composition (CJK, dead keys).
 
 use std::ops::Range;
 
@@ -30,9 +32,16 @@ actions!(
         Right,
         SelectLeft,
         SelectRight,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordLeft,
         SelectAll,
         Home,
         End,
+        SelectHome,
+        SelectEnd,
         ShowCharacterPalette,
         TextInputPaste,
         TextInputCut,
@@ -54,6 +63,23 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
+        KeyBinding::new("shift-home", SelectHome, Some("TextInput")),
+        KeyBinding::new("shift-end", SelectEnd, Some("TextInput")),
+    ]);
+
+    // macOS word / line motion, matching NSTextField: Option moves by word,
+    // Cmd jumps to the line edge, Shift extends the selection.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("alt-left", WordLeft, Some("TextInput")),
+        KeyBinding::new("alt-right", WordRight, Some("TextInput")),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, Some("TextInput")),
+        KeyBinding::new("alt-shift-right", SelectWordRight, Some("TextInput")),
+        KeyBinding::new("alt-backspace", DeleteWordLeft, Some("TextInput")),
+        KeyBinding::new("cmd-left", Home, Some("TextInput")),
+        KeyBinding::new("cmd-right", End, Some("TextInput")),
+        KeyBinding::new("cmd-shift-left", SelectHome, Some("TextInput")),
+        KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
     ]);
 
     // Primary-modifier clipboard bindings. Cmd, matching the macOS convention
@@ -154,6 +180,42 @@ impl TextInput {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(
+                Self::previous_word_boundary(&self.content, self.cursor_offset()),
+                cx,
+            );
+        } else {
+            self.move_to(self.selected_range.start, cx)
+        }
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(
+                Self::next_word_boundary(&self.content, self.cursor_offset()),
+                cx,
+            );
+        } else {
+            self.move_to(self.selected_range.end, cx)
+        }
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(
+            Self::previous_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(
+            Self::next_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
@@ -167,9 +229,34 @@ impl TextInput {
         self.move_to(self.content.len(), cx);
     }
 
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
+            if self.cursor_offset() == prev {
+                window.play_system_bell();
+                return;
+            }
+            self.select_to(prev, cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let prev = Self::previous_word_boundary(&self.content, self.cursor_offset());
             if self.cursor_offset() == prev {
                 window.play_system_bell();
                 return;
@@ -373,6 +460,52 @@ impl TextInput {
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
+    }
+
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+
+    /// Start of the previous word (Option+Left): skip whitespace back, then a
+    /// run of one character class (word or punctuation), like NSTextField.
+    fn previous_word_boundary(text: &str, offset: usize) -> usize {
+        let offset = offset.min(text.len());
+        let head: Vec<(usize, char)> = text[..offset].char_indices().collect();
+        let mut i = head.len();
+        while i > 0 && head[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        if i > 0 {
+            let word = Self::is_word_char(head[i - 1].1);
+            while i > 0
+                && !head[i - 1].1.is_whitespace()
+                && Self::is_word_char(head[i - 1].1) == word
+            {
+                i -= 1;
+            }
+        }
+        head.get(i).map(|(b, _)| *b).unwrap_or(offset)
+    }
+
+    /// End of the next word (Option+Right): skip whitespace forward, then a
+    /// run of one character class (word or punctuation), like NSTextField.
+    fn next_word_boundary(text: &str, offset: usize) -> usize {
+        let offset = offset.min(text.len());
+        let tail: Vec<(usize, char)> = text[offset..].char_indices().collect();
+        let mut i = 0;
+        while i < tail.len() && tail[i].1.is_whitespace() {
+            i += 1;
+        }
+        if i < tail.len() {
+            let word = Self::is_word_char(tail[i].1);
+            while i < tail.len()
+                && !tail[i].1.is_whitespace()
+                && Self::is_word_char(tail[i].1) == word
+            {
+                i += 1;
+            }
+        }
+        tail.get(i).map(|(b, _)| offset + *b).unwrap_or(text.len())
     }
 }
 
@@ -720,9 +853,16 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -769,6 +909,38 @@ mod tests {
         assert_eq!(
             TextInput::byte_range_from_utf16_in_text(text, &(0..99)),
             0..2
+        );
+    }
+
+    #[test]
+    fn word_boundaries_skip_whitespace_then_one_run_of_word_chars() {
+        let text = "foo_bar  baz-qux";
+
+        // Option+Left from the end: back over `qux`.
+        assert_eq!(TextInput::previous_word_boundary(text, text.len()), 13);
+        // From the start of `qux`: back over the `-` punctuation run.
+        assert_eq!(TextInput::previous_word_boundary(text, 13), 12);
+        // From the start of `baz`: skip the two spaces, then all of `foo_bar`.
+        assert_eq!(TextInput::previous_word_boundary(text, 9), 0);
+        assert_eq!(TextInput::previous_word_boundary(text, 0), 0);
+
+        // Option+Right from the start: to the end of `foo_bar`.
+        assert_eq!(TextInput::next_word_boundary(text, 0), 7);
+        // From the end of `foo_bar`: skip the spaces, then all of `baz`.
+        assert_eq!(TextInput::next_word_boundary(text, 7), 12);
+        // From the start of `-`: just the punctuation run.
+        assert_eq!(TextInput::next_word_boundary(text, 12), 13);
+        assert_eq!(TextInput::next_word_boundary(text, text.len()), text.len());
+    }
+
+    #[test]
+    fn word_boundaries_stay_on_char_boundaries_for_multibyte_text() {
+        let text = "héllo wörld";
+
+        assert_eq!(TextInput::next_word_boundary(text, 0), "héllo".len());
+        assert_eq!(
+            TextInput::previous_word_boundary(text, text.len()),
+            "héllo ".len()
         );
     }
 }

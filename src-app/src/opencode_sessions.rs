@@ -131,7 +131,8 @@ fn run_opencode_list(program: &str, cwd: &str) -> Option<Vec<u8>> {
 /// Parse the CLI's JSON output and project it onto [`SessionMeta`],
 /// filtering by `directory == cwd`. Tolerant: unknown fields are
 /// ignored; records missing `id` or `directory` are skipped silently;
-/// bad UTF-8 / malformed JSON yields an empty list rather than a panic.
+/// bad UTF-8 / malformed JSON / non-array JSON yields an empty list rather
+/// than a panic, with a warn log so the empty list is explainable.
 ///
 /// Field map (validated against opencode 1.14.41 in the US-001 spike):
 /// - `id` → [`SessionMeta::session_id`]
@@ -151,7 +152,29 @@ fn parse_sessions(stdout: &[u8], cwd: &str) -> (Vec<SessionMeta>, usize) {
     }
     let array: Vec<Value> = match serde_json::from_slice(stdout) {
         Ok(Value::Array(arr)) => arr,
-        Ok(_) | Err(_) => return (Vec::new(), 0),
+        Ok(other) => {
+            // Valid JSON of the wrong shape: most likely a CLI format
+            // change. Log it so an empty OpenCode group is explainable.
+            log::warn!(
+                "opencode session list output is not a JSON array (got {}); OpenCode tab will be empty",
+                json_kind(&other)
+            );
+            return (Vec::new(), 0);
+        }
+        Err(err) => {
+            // Truncated or garbage payload. Same scrubbing and cap as the
+            // stderr path so a misbehaving binary cannot inject control
+            // sequences into the log.
+            let snippet: String = String::from_utf8_lossy(stdout)
+                .chars()
+                .take(STDERR_LOG_CAP)
+                .map(|c| if c.is_control() && c != '\n' { '?' } else { c })
+                .collect();
+            log::warn!(
+                "opencode session list output is not valid JSON ({err}); OpenCode tab will be empty: {snippet}"
+            );
+            return (Vec::new(), 0);
+        }
     };
 
     let sessions = array
@@ -161,6 +184,18 @@ fn parse_sessions(stdout: &[u8], cwd: &str) -> (Vec<SessionMeta>, usize) {
         sessions,
         crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE,
     )
+}
+
+/// Short JSON type name for the non-array warning above.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Convert one CLI record into a [`SessionMeta`] iff its `directory`
@@ -350,6 +385,51 @@ mod tests {
         let (sessions, omitted) = parse_sessions(b"{not valid json", "/anywhere");
         assert_eq!(omitted, 0);
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_sessions_logs_malformed_json() {
+        // A truncated payload must be distinguishable from a real empty
+        // list: the UI still gets nothing, but the log says why.
+        crate::diff::capture_logs();
+        let (sessions, omitted) = parse_sessions(b"[{\"id\":\"ses_a\",\"directory\":", "/p");
+        assert_eq!(omitted, 0);
+        assert!(sessions.is_empty());
+        assert!(
+            crate::diff::captured_logs_contain("opencode session list output is not valid JSON"),
+            "malformed JSON should emit a warning"
+        );
+    }
+
+    #[test]
+    fn parse_sessions_logs_non_array_json() {
+        // Valid JSON of the wrong shape (a CLI format change) is not a
+        // parse error, so it needs its own warning.
+        crate::diff::capture_logs();
+        let (sessions, omitted) = parse_sessions(b"{\"sessions\":[]}", "/p");
+        assert_eq!(omitted, 0);
+        assert!(sessions.is_empty());
+        assert!(
+            crate::diff::captured_logs_contain("opencode session list output is not a JSON array"),
+            "non-array JSON should emit a warning"
+        );
+    }
+
+    #[test]
+    fn parse_sessions_scrubs_control_chars_from_malformed_json_log() {
+        // Same scrubbing as stderr: a misbehaving binary cannot inject
+        // terminal control sequences into the log line.
+        crate::diff::capture_logs();
+        let (sessions, _) = parse_sessions(b"\x1b[31mnope", "/p");
+        assert!(sessions.is_empty());
+        assert!(
+            crate::diff::captured_logs_contain("?[31mnope"),
+            "control chars should be replaced"
+        );
+        assert!(
+            !crate::diff::captured_logs_contain("\x1b[31m"),
+            "raw escape must not reach the log"
+        );
     }
 
     #[test]

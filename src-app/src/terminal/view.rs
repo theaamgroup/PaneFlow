@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use gpui::{
     App, ClipboardItem, Context, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
-    KeyContext, MouseButton, Render, Styled, Window, div, prelude::*,
+    KeyContext, MouseButton, Render, Role, Styled, Window, div, prelude::*,
 };
 use paneflow_config::schema::{TerminalConfig, TerminalSurfaceProfile};
 
@@ -26,7 +26,10 @@ use super::types::{
     CopyModeCursorState, CursorShape, HyperlinkZone, Line, Modes, Point, SearchHighlight,
     TerminalWindowSize,
 };
-use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
+use crate::theme::UiColors;
+use crate::ui_primitives::{
+    AnimatedHover, AnimatedHoverExt, TooltipDelayExt, lerp_color, text_tooltip,
+};
 
 use super::ghostty_session::GhosttyStartError;
 
@@ -301,6 +304,11 @@ pub struct TerminalView {
     pub(super) color_emoji_enabled: bool,
     /// Whether copy mode (keyboard-driven selection) is active
     pub(super) copy_mode_active: bool,
+    /// Issue #299: a pane swap is armed in this view's tab, so Escape cancels
+    /// swap mode instead of reaching the PTY. Set by
+    /// `PaneFlowApp::set_swap_source` on every terminal of the active tab, so
+    /// swap state has one owner and no process-global mirror.
+    pub(super) swap_mode_armed: bool,
     /// Copy mode cursor position in grid coordinates
     pub(super) copy_cursor: Point,
     /// Display offset frozen at copy mode entry to prevent auto-scroll
@@ -414,6 +422,19 @@ impl TerminalView {
         }
     }
 
+    /// Issue #299: arm or disarm swap-mode Escape interception on this view.
+    pub(crate) fn set_swap_mode_armed(&mut self, armed: bool, cx: &mut Context<Self>) {
+        if self.swap_mode_armed != armed {
+            self.swap_mode_armed = armed;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn swap_mode_armed(&self) -> bool {
+        self.swap_mode_armed
+    }
+
     pub(crate) fn set_cursor_color_override(
         &mut self,
         color: Option<Hsla>,
@@ -499,6 +520,7 @@ impl TerminalView {
             profile,
             &config,
         );
+        let osc52_mode = crate::terminal::pty_session::Osc52Mode::from_config(&config);
         let max_scrollback = config
             .terminal
             .unwrap_or_default()
@@ -509,6 +531,7 @@ impl TerminalView {
             params.profile,
             params.shell_quoting,
         );
+        terminal.set_spawn_osc52_mode(osc52_mode);
         // Publish the resolved launch CWD before scheduling the background PTY
         // open. Worktree retirement scans placeholders too; leaving this None
         // creates a window where a pending spawn is invisible and its checkout
@@ -835,6 +858,7 @@ impl TerminalView {
             integrated_glyphs_enabled,
             color_emoji_enabled,
             copy_mode_active: false,
+            swap_mode_armed: false,
             copy_cursor: Point::new(0, 0),
             copy_mode_frozen_offset: 0,
             was_focused: false,
@@ -1283,7 +1307,7 @@ impl TerminalView {
     /// Build the top-right search overlay bar. Caller is responsible for
     /// adding it to the main element tree (and for gating on `search_active`).
     fn render_search_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui::{FontWeight, Hsla, MouseButton, hsla, px, svg};
+        use gpui::{MouseButton, px, svg};
 
         // Themed chrome (One Dark / PaneFlow Light), not hardcoded Catppuccin -
         // keeps the find bar consistent with the fleet-search card and sidebar.
@@ -1327,36 +1351,15 @@ impl TerminalView {
 
         // Regex toggle (.*): active state reads as a pressed pill with an accent
         // hairline - a full accent fill would drop below 4.5:1 on the light theme.
-        let regex_background = if regex_active {
-            ui.subtle
-        } else {
-            ui.subtle.opacity(0.0)
-        };
-        let regex_toggle = div()
-            .id("search-regex-toggle")
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(22.))
-            .rounded(px(5.))
-            .border_1()
-            .text_size(px(12.))
-            .font_weight(FontWeight::MEDIUM)
-            .bg(regex_background)
-            .border_color(if regex_active {
-                ui.accent
-            } else {
-                hsla(0., 0., 0., 0.)
-            })
-            .text_color(if regex_active { ui.text } else { ui.muted })
-            .animated_hover(move |style, delta| {
-                style.bg(lerp_color(regex_background, ui.subtle, delta));
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| this.toggle_search_regex(cx)),
-            )
-            .child(".*");
+        // The controls fire on click (not mouse-down) so AccessKit exposes
+        // `Action::Click` and VoiceOver can activate them; the mouse-down
+        // handler only stops the press from reaching the terminal underneath.
+        let regex_toggle = search_regex_toggle(regex_active, ui)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_search_regex(cx);
+            }));
 
         // EP-006 US-018: fan the query out to every pane of every workspace. The
         // clickable counterpart of the remappable `toggle_fleet_search` action.
@@ -1387,41 +1390,52 @@ impl TerminalView {
                 cx.listener(|this, _, _window, cx| this.request_fleet_search(cx)),
             );
 
-        // Icon-only square button (chevrons + close): hover surface, dimmable.
-        let icon_btn = |id: &'static str, icon: &'static str, color: Hsla| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(22.))
-                .rounded(px(5.))
-                .animated_hover(move |style, delta| {
-                    style.bg(lerp_color(ui.subtle.opacity(0.0), ui.subtle, delta));
-                })
-                .child(svg().size(px(14.)).flex_none().path(icon).text_color(color))
-        };
         let nav_color = if has_matches {
             ui.muted
         } else {
             ui.muted.opacity(0.35)
         };
 
-        let prev_btn = icon_btn("search-prev", "icons/chevron_up.svg", nav_color).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _window, cx| this.search_prev(cx)),
-        );
-        let next_btn = icon_btn("search-next", "icons/chevron_down.svg", nav_color).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _window, cx| this.search_next(cx)),
-        );
-        let close_btn = icon_btn("search-close", "icons/close.svg", ui.muted).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                this.dismiss_search(cx);
-                this.focus_handle.clone().focus(window, cx);
-            }),
-        );
+        let prev_btn = search_icon_button(
+            "search-prev",
+            "icons/chevron_up.svg",
+            "Previous match",
+            nav_color,
+            ui.subtle,
+            has_matches,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _window, cx| {
+            cx.stop_propagation();
+            this.search_prev(cx);
+        }));
+        let next_btn = search_icon_button(
+            "search-next",
+            "icons/chevron_down.svg",
+            "Next match",
+            nav_color,
+            ui.subtle,
+            has_matches,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _window, cx| {
+            cx.stop_propagation();
+            this.search_next(cx);
+        }));
+        let close_btn = search_icon_button(
+            "search-close",
+            "icons/close.svg",
+            "Close search",
+            ui.muted,
+            ui.subtle,
+            true,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.dismiss_search(cx);
+            this.focus_handle.clone().focus(window, cx);
+        }));
 
         div()
             .id("search-overlay")
@@ -1454,6 +1468,12 @@ impl TerminalView {
                 el.child(
                     div()
                         .id("search-status")
+                        // Status role so AccessKit reports the node and
+                        // screen readers announce count / No results /
+                        // Invalid regex changes while focus stays in the
+                        // field. The pinned GPUI has no live-region setter.
+                        .role(Role::Status)
+                        .aria_label(status_text.clone())
                         .flex_none()
                         .text_size(px(12.))
                         .text_color(status_color)
@@ -1787,10 +1807,176 @@ fn resolve_cursor_visible(
     }
 }
 
+/// Regex toggle (.*) of the find bar: active state reads as a pressed pill
+/// with an accent hairline - a full accent fill would drop below 4.5:1 on the
+/// light theme. The glyph is not a name, so the node carries its own label
+/// and the pressed state AccessKit needs. The caller chains the mouse
+/// listener.
+fn search_regex_toggle(regex_active: bool, ui: UiColors) -> AnimatedHover {
+    use gpui::{FontWeight, hsla, px};
+
+    let regex_background = if regex_active {
+        ui.subtle
+    } else {
+        ui.subtle.opacity(0.0)
+    };
+    div()
+        .id("search-regex-toggle")
+        .role(Role::Button)
+        .aria_label("Regular expression")
+        .aria_toggled(crate::settings::components::switch_toggled(regex_active))
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(22.))
+        .rounded(px(5.))
+        .border_1()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .bg(regex_background)
+        .border_color(if regex_active {
+            ui.accent
+        } else {
+            hsla(0., 0., 0., 0.)
+        })
+        .text_color(if regex_active { ui.text } else { ui.muted })
+        .animated_hover(move |style, delta| {
+            style.bg(lerp_color(regex_background, ui.subtle, delta));
+        })
+        .delayed_tooltip(text_tooltip("Regular expression"))
+        .child(".*")
+}
+
+/// Icon-only square find-bar button (chevrons + close): hover surface,
+/// dimmable, and a named `Role::Button` with a tooltip so the glyph is not
+/// its only description. `enabled` is false when the control has nothing to
+/// act on (nav with no matches); the caller passes the dimmed `color` for
+/// that state, this reports it as disabled, and the caller chains the mouse
+/// listener.
+fn search_icon_button(
+    id: &'static str,
+    icon: &'static str,
+    label: &'static str,
+    color: Hsla,
+    hover_bg: Hsla,
+    enabled: bool,
+) -> AnimatedHover {
+    use gpui::{px, svg};
+
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(22.))
+        .rounded(px(5.))
+        .animated_hover(move |style, delta| {
+            style.bg(lerp_color(hover_bg.opacity(0.0), hover_bg, delta));
+        })
+        .a11y_disabled(!enabled)
+        .delayed_tooltip(text_tooltip(label))
+        .child(svg().size(px(14.)).flex_none().path(icon).text_color(color))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::terminal::pty_session::strip_partial_ansi_tail;
+
+    /// Issue #322: every find-bar control is a named button for AccessKit,
+    /// the regex toggle reports its pressed state, and nav with nothing to
+    /// step through is exposed as disabled.
+    /// PR #338 review: `Role::Button` controls must fire on click, not
+    /// mouse-down, or AccessKit exposes no `Action::Click` and VoiceOver
+    /// cannot activate them.
+    #[test]
+    fn search_overlay_controls_fire_on_click() {
+        let source = include_str!("view.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production terminal view source");
+        let overlay = source
+            .split("let regex_toggle = search_regex_toggle(")
+            .nth(1)
+            .and_then(|rest| rest.split(".id(\"search-overlay\")").next())
+            .expect("view.rs builds the search overlay controls");
+        for id in ["search-prev", "search-next", "search-close"] {
+            assert!(
+                overlay.contains(&format!("\"{id}\",")),
+                "search overlay lost the {id} control"
+            );
+        }
+        let clicks = overlay.matches(".on_click(").count();
+        assert!(
+            clicks >= 4,
+            "regex toggle, prev, next and close must all fire on click; found {clicks} on_click"
+        );
+    }
+
+    #[test]
+    fn search_overlay_controls_expose_names_and_states() {
+        use gpui::accesskit::{Node, Role, Toggled};
+
+        fn a11y<E: gpui::Element>(element: &E) -> (Option<Role>, Node) {
+            let mut node = Node::new(Role::Unknown);
+            element.write_a11y_info(&mut node);
+            (element.a11y_role(), node)
+        }
+
+        let ui = crate::theme::ui_colors();
+        let nav = [
+            ("search-prev", "icons/chevron_up.svg", "Previous match"),
+            ("search-next", "icons/chevron_down.svg", "Next match"),
+        ];
+        for (id, icon, label) in nav {
+            for enabled in [false, true] {
+                let button = search_icon_button(id, icon, label, ui.muted, ui.subtle, enabled);
+                let (role, node) = a11y(&button);
+                assert_eq!(role, Some(Role::Button), "{id} did not expose Role::Button");
+                assert_eq!(node.label(), Some(label), "{id} did not expose its name");
+                assert_eq!(
+                    node.is_disabled(),
+                    !enabled,
+                    "{id} with enabled={enabled} reported the wrong disabled state"
+                );
+            }
+        }
+
+        let close = search_icon_button(
+            "search-close",
+            "icons/close.svg",
+            "Close search",
+            ui.muted,
+            ui.subtle,
+            true,
+        );
+        let (role, node) = a11y(&close);
+        assert_eq!(role, Some(Role::Button));
+        assert_eq!(node.label(), Some("Close search"));
+        assert!(!node.is_disabled());
+
+        for active in [false, true] {
+            let toggle = search_regex_toggle(active, ui);
+            let (role, node) = a11y(&toggle);
+            assert_eq!(
+                role,
+                Some(Role::Button),
+                "regex toggle did not expose Role::Button"
+            );
+            assert_eq!(node.label(), Some("Regular expression"));
+            assert_eq!(
+                node.toggled(),
+                Some(if active {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                }),
+                "regex toggle with active={active} reported the wrong pressed state"
+            );
+        }
+    }
 
     /// Issue #298: the view-level terminal settings come from the in-memory
     /// config snapshot, not from a re-read of `paneflow.json` that can still
@@ -1955,6 +2141,31 @@ mod tests {
             scrollback.is_none(),
             "Expected None for an empty history, got: {scrollback:?}"
         );
+    }
+
+    /// Issue #323: the find-bar status ("3/10", "No results", "Invalid
+    /// regex") was a plain div with no role, so AccessKit never reported it
+    /// and screen-reader users typing in the field heard nothing when the
+    /// result count changed. This scan pins the status node to `Role::Status`
+    /// (the pinned GPUI exposes no separate live-region setter) with its text
+    /// as the accessible name.
+    #[test]
+    fn search_status_is_an_accessible_status_region() {
+        let source = include_str!("view.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production terminal view source");
+        let chain = source
+            .split(".id(\"search-status\")")
+            .nth(1)
+            .and_then(|rest| rest.split(".child(status_text.clone())").next())
+            .expect("view.rs builds the search-status node");
+        for needle in [".role(Role::Status)", ".aria_label(status_text.clone())"] {
+            assert!(
+                chain.contains(needle),
+                "search-status lost `{needle}`; AccessKit needs it to announce result changes"
+            );
+        }
     }
 
     #[test]

@@ -32,6 +32,7 @@ fn test_terminal_ligatures_default_when_block_empty() {
             cursor_blink: None,
             env: None,
             scroll_multiplier: None,
+            osc52_clipboard: None,
         })
     );
     assert_eq!(
@@ -46,6 +47,7 @@ fn test_terminal_ligatures_default_when_block_empty() {
             cursor_blink: None,
             env: None,
             scroll_multiplier: None,
+            osc52_clipboard: None,
         })
     );
 }
@@ -65,6 +67,7 @@ fn test_terminal_ligatures_true() {
             cursor_blink: None,
             env: None,
             scroll_multiplier: None,
+            osc52_clipboard: None,
         })
     );
 
@@ -90,6 +93,7 @@ fn test_terminal_ligatures_false() {
             cursor_blink: None,
             env: None,
             scroll_multiplier: None,
+            osc52_clipboard: None,
         })
     );
 }
@@ -119,6 +123,7 @@ fn test_terminal_integrated_glyphs_default_on_and_false_opt_out() {
             cursor_blink: None,
             env: None,
             scroll_multiplier: None,
+            osc52_clipboard: None,
         })
     );
     assert!(
@@ -156,6 +161,7 @@ fn test_terminal_color_emoji_default_on_and_false_opt_out() {
             cursor_blink: None,
             env: None,
             scroll_multiplier: None,
+            osc52_clipboard: None,
         })
     );
     assert!(
@@ -190,6 +196,7 @@ fn test_terminal_scrollback_lines_clamps_out_of_range() {
         cursor_blink: None,
         env: None,
         scroll_multiplier: None,
+        osc52_clipboard: None,
     };
     assert_eq!(
         tc.resolved_scrollback_lines(),
@@ -205,6 +212,7 @@ fn test_terminal_scrollback_lines_clamps_out_of_range() {
         cursor_blink: None,
         env: None,
         scroll_multiplier: None,
+        osc52_clipboard: None,
     };
     assert_eq!(
         tc.resolved_scrollback_lines(),

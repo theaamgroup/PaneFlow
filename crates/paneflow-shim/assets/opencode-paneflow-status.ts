@@ -26,8 +26,9 @@ export const PaneflowStatus = async () => {
       };
       const sid = process.env["PANEFLOW_SURFACE_ID"];
       if (sid) p.surface_id = Number(sid);
-      const frame =
-        JSON.stringify({ jsonrpc: "2.0", method, params: p, id: 1 }) + "\n";
+      // A JSON-RPC notification (no id), matching AiHookFrame: the server
+      // must not write a reply onto a socket we are about to close.
+      const frame = JSON.stringify({ jsonrpc: "2.0", method, params: p }) + "\n";
       // Fire-and-forget: connect, write one frame, close. Never throws into
       // the agent loop (the 'error' handler swallows a missing/closed pipe).
       const conn = net.connect(sock);
@@ -56,7 +57,6 @@ export const PaneflowStatus = async () => {
         send("ai.stop", { hook_payload: {} });
       } else if (event?.type === "permission.asked") {
         send("ai.notification", {
-          notification_type: "permission_prompt",
           hook_payload: {
             notification_type: "permission_prompt",
             message: "OpenCode needs permission",
