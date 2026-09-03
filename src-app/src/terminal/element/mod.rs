@@ -26,7 +26,7 @@ mod paint;
 #[cfg(debug_assertions)]
 pub(super) mod pixel_probe;
 
-use color::{convert_color, rgb_to_hsla};
+use color::convert_color;
 pub(crate) use font::{
     DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, normalize_font_weight_key,
 };
@@ -591,6 +591,10 @@ pub struct LayoutState {
     ime_preedit_foreground: Hsla,
     /// Opaque erase fill painted behind the IME preedit (issue #324).
     ime_preedit_background: Hsla,
+    /// Glyph colour for the process-exit banner (issue #325).
+    exit_overlay_foreground: Hsla,
+    /// Opaque plate painted behind the process-exit banner (issue #325).
+    exit_overlay_background: Hsla,
     /// Whether emoji glyphs should use GPUI's platform color-emoji path.
     color_emoji_enabled: bool,
 }
@@ -897,6 +901,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
     let background_color = gpui::transparent_black();
     let (ime_preedit_foreground, ime_preedit_background) =
         paint::overlay::ime_preedit_colors(theme.foreground, theme.background);
+    let (exit_overlay_foreground, exit_overlay_background) =
+        paint::overlay::exit_overlay_colors(theme.foreground, theme.background);
     let selection_color = theme.selection;
 
     let cursor_snapshot = cursor_snapshot.and_then(|mut cursor| {
@@ -1359,6 +1365,8 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
         ime_cursor_bounds,
         ime_preedit_foreground,
         ime_preedit_background,
+        exit_overlay_foreground,
+        exit_overlay_background,
         color_emoji_enabled,
     }
 }
@@ -1755,9 +1763,8 @@ impl Element for TerminalElement {
             );
 
             // 7. Exit overlay
-            let exit_fg = rgb_to_hsla(0x6c, 0x70, 0x86); // Overlay6
             paint::overlay::paint_exit_overlay(
-                &layout, &geom, bounds, font_size, base_font, exit_fg, window, cx,
+                &layout, &geom, bounds, font_size, base_font, window, cx,
             );
         });
 
@@ -2217,6 +2224,7 @@ mod golden_frame_tests {
     //! never touching a GPUI context - is the Window-free proof (AC-1). Each
     //! fixture asserts against a committed golden under `golden/` (AC-2);
     //! regenerate with `PANEFLOW_BLESS_GOLDEN=1` (AC-3).
+    use super::color::rgb_to_hsla;
     use super::*;
     use crate::terminal::types::{RenderableCursor, Rgb};
 
