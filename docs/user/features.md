@@ -35,6 +35,13 @@ PaneFlow drops you back into the layout you left - splits, working
 directories, and running shells intact. Pick up a long-running agent
 thread or a dev server exactly where you stopped.
 
+A tab bound to a Git worktree (see [Git worktrees](#git-worktrees))
+remembers that binding too: `session.json` carries the checkout path per
+tab, so the tab comes back on its branch. A session written by an older
+PaneFlow restores with every tab unbound, and a tab whose checkout was
+removed between two runs restores unbound with a warning in the log
+rather than pointing at a missing directory.
+
 ## Dev-server port detection
 
 When a process inside a pane binds a port, PaneFlow surfaces it
@@ -112,6 +119,27 @@ Create a Git worktree to run an experiment or an independent task
 without touching your main checkout. PaneFlow opens the worktree as its
 own context - isolated branch, isolated files - so you can run parallel
 work side by side and throw it away cleanly when you're done.
+
+Each tab can stand on a checkout of its own. The **New pane** palette
+(`Cmd+Alt+T`, or the folder row's `+`) and a tab's right-click menu list
+the repository's local branches: pick one that already has a worktree
+and the tab reuses it; pick one that has none and PaneFlow checks it out
+under `<workspace>.worktrees/<branch>` next to the repository, then
+starts the pane there. Picking the branch the repository itself is on
+unbinds the tab. The sidebar shows a bound tab's branch under its title,
+and the diff dock and Review scope follow the active tab's checkout.
+
+The binding decides where the *next* pane lands: a split or a new pane
+in a bound tab always starts inside that worktree, and a running pane is
+never moved. When an agent creates a branch and `cd`s into its worktree
+from inside a pane, only that pane's tab takes on the new checkout - the
+sibling tabs keep the branch they were on.
+
+A checkout made from the palette or the tab menu is yours: closing the
+workspace never removes it (`git worktree list` still shows it), unlike
+the managed worktrees `paneflow up` or the Launch Pad create, which are
+torn down with their workspace when clean. Remove it with
+`git worktree remove` when you are done.
 
 ## Agent chat
 

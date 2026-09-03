@@ -34,5 +34,6 @@ pub mod settings;
 pub mod sidebar;
 pub mod sidebar_actions_menu;
 pub mod system_info_dialog;
+pub mod tab_worktree;
 pub mod theme_picker;
 pub mod workspace_ops;

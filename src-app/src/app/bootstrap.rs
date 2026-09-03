@@ -295,6 +295,12 @@ impl PaneFlowApp {
                         // Collect CWDs of affected workspaces (main thread)
                         let cwds = cx.update(|cx| {
                             this.update(cx, |app: &mut Self, _cx: &mut Context<Self>| {
+                                // A bound tab's worktree is probed with its
+                                // workspace (issue #347): a linked worktree's
+                                // index lives under the main repository's git
+                                // dir, which is the one being watched, so the
+                                // event that fires for the workspace is the
+                                // same event that means the tab's counts moved.
                                 app.workspaces
                                     .iter()
                                     .filter(|ws| {
@@ -302,7 +308,13 @@ impl PaneFlowApp {
                                             .as_ref()
                                             .is_some_and(|gd| affected_dirs.contains(gd))
                                     })
-                                    .map(|ws| ws.cwd.clone())
+                                    .flat_map(|ws| {
+                                        std::iter::once(ws.cwd.clone())
+                                            .chain(ws.bound_tab_worktrees())
+                                    })
+                                    .filter(|cwd| !cwd.is_empty())
+                                    .collect::<std::collections::BTreeSet<String>>()
+                                    .into_iter()
                                     .collect::<Vec<String>>()
                             })
                         });
@@ -529,14 +541,10 @@ impl PaneFlowApp {
                     // one subprocess per tick.
                     let cwds = cx.update(|cx| {
                         this.update(cx, |app: &mut Self, _cx: &mut Context<Self>| {
-                            let mut seen = std::collections::HashSet::new();
-                            let mut out = Vec::new();
-                            for ws in &app.workspaces {
-                                if seen.insert(ws.cwd.clone()) {
-                                    out.push(ws.cwd.clone());
-                                }
-                            }
-                            out
+                            // Workspace roots plus every bound tab's worktree
+                            // (issue #347), deduplicated: two tabs on one
+                            // worktree cost one subprocess per tick, not two.
+                            app.git_probe_cwds()
                         })
                     });
                     let cwds = match cwds {
@@ -798,6 +806,8 @@ impl PaneFlowApp {
             font_search: String::new(),
             theme_mode,
             workspace_menu_open: None,
+            worktree_states: crate::app::tab_worktree::WorktreeStates::default(),
+            branch_checkout_pending: None,
             tab_menu_open: None,
             pane_menu_open: None,
             pending_pane_focus: None,

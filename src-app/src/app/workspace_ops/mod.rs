@@ -113,6 +113,31 @@ fn layout_uses_worktree(
     }
 }
 
+/// Unbind every tab whose worktree lies under one of `retired` (issue #347),
+/// returning the `(workspace id, tab id)` of each tab changed. The binding is
+/// the only thing touched: the tab's panes keep the shells they have.
+fn unbind_tabs_under_retired_paths(
+    workspaces: &mut [Workspace],
+    retired: &[std::path::PathBuf],
+) -> Vec<(u64, u64)> {
+    let mut unbound = Vec::new();
+    for workspace in workspaces {
+        let ws_id = workspace.id;
+        for tab in workspace.tabs_mut() {
+            let doomed = tab.worktree.as_deref().is_some_and(|bound| {
+                retired
+                    .iter()
+                    .any(|path| path_is_within_worktree(bound, path))
+            });
+            if doomed {
+                tab.worktree = None;
+                unbound.push((ws_id, tab.id));
+            }
+        }
+    }
+    unbound
+}
+
 fn closed_record_uses_worktree(record: &ClosedRecord, worktree: &std::path::Path) -> bool {
     match record {
         ClosedRecord::Pane(record) => match &record.surface {
@@ -640,6 +665,7 @@ fn capture_closed_tab_record(
         title: tab.title.clone(),
         index,
         layout,
+        worktree: tab.worktree.clone(),
     })
 }
 
@@ -666,6 +692,7 @@ fn capture_closed_workspace_record(
             .map(|tab| ClosedWorkspaceTabRecord {
                 title: tab.title.clone(),
                 layout: capture_closed_tab_layout_with_budget(tab, cx, &remaining_scrollback),
+                worktree: tab.worktree.clone(),
             })
             .collect(),
         custom_buttons: workspace.custom_buttons.clone(),
@@ -947,6 +974,24 @@ impl PaneFlowApp {
         is_repo: bool,
         stats: crate::workspace::GitDiffStats,
     ) -> bool {
+        self.apply_git_state_probed_at(cwd, cwd, branch, is_repo, stats)
+    }
+
+    /// [`Self::apply_git_state_for_cwd`] for a probe that ran somewhere other
+    /// than the tracked key: the workspace fields follow the pane's shell as
+    /// they always have, but the per-checkout cache (issue #347) only takes
+    /// a result probed at the checkout it is keyed by. A pane that walked
+    /// into a foreign directory used to write that directory's branch under
+    /// the workspace-root key, where a bound tab's row would read it back.
+    pub(crate) fn apply_git_state_probed_at(
+        &mut self,
+        tracked_cwd: &str,
+        probed_cwd: &str,
+        branch: String,
+        is_repo: bool,
+        stats: crate::workspace::GitDiffStats,
+    ) -> bool {
+        let cwd = tracked_cwd;
         let mut changed = false;
         for workspace in &mut self.workspaces {
             if workspace.cwd == cwd {
@@ -964,6 +1009,19 @@ impl PaneFlowApp {
                 }
             }
         }
+        // The same result also answers for a tab bound to this checkout
+        // (issue #347), which is not necessarily any workspace's root - so the
+        // probe is stored whether or not a workspace matched, but only under
+        // the directory it was actually taken at.
+        changed |= self.worktree_states.set_checkout_probed_at(
+            cwd,
+            probed_cwd,
+            crate::app::tab_worktree::CheckoutGit {
+                branch,
+                is_repo,
+                stats,
+            },
+        );
         changed
     }
 
@@ -980,6 +1038,14 @@ impl PaneFlowApp {
                 workspace.git_stats = stats.clone();
                 changed = true;
             }
+        }
+        if let Some(current) = self.worktree_states.checkout(cwd).cloned()
+            && current.stats != stats
+        {
+            changed |= self.worktree_states.set_checkout(
+                cwd,
+                crate::app::tab_worktree::CheckoutGit { stats, ..current },
+            );
         }
         changed
     }
@@ -1214,6 +1280,12 @@ impl PaneFlowApp {
                             owned.path.starts_with(worktree_path)
                                 || worktree_path.starts_with(&owned.path)
                         })
+                        // A tab bound to the checkout spawns its next pane
+                        // there (issue #347): retiring it under the tab would
+                        // leave every later spawn failing on a missing path.
+                        || workspace.bound_tab_worktrees().iter().any(|cwd| {
+                            path_is_within_worktree(std::path::Path::new(cwd), worktree_path)
+                        })
                         || workspace.collect_panes().into_iter().any(|pane| {
                             pane.read(cx).terminals().any(|terminal| {
                                 terminal
@@ -1278,6 +1350,18 @@ impl PaneFlowApp {
             .iter()
             .map(|worktree| worktree.path.clone())
             .collect();
+        // A tab still bound under a path about to be removed would spawn its
+        // next pane into the hole (issue #347). The live check above keeps a
+        // bound checkout out of the batch; this covers a journal replayed
+        // from disk against tabs restored after the retirement was recorded.
+        let retired: Vec<std::path::PathBuf> = completed_paths.iter().cloned().collect();
+        let unbound = unbind_tabs_under_retired_paths(&mut self.workspaces, &retired);
+        for (ws_id, tab_id) in &unbound {
+            log::warn!("workspace {ws_id} tab {tab_id}: unbound from a worktree being retired");
+        }
+        if !unbound.is_empty() {
+            cx.notify();
+        }
         let completed_worktrees = worktrees.clone();
         let protected_session_ids = self.live_terminal_session_ids(cx);
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
@@ -1397,7 +1481,7 @@ impl PaneFlowApp {
     /// switch (re-target) and close (Multi-project group reconcile). Deferred so
     /// the rebuild (which mounts a fresh entity) never runs inside a
     /// render/callback. No-op outside Diff mode.
-    fn reconcile_diff_after_workspace_change(&self, cx: &mut Context<Self>) {
+    pub(crate) fn reconcile_diff_after_workspace_change(&self, cx: &mut Context<Self>) {
         if matches!(self.mode, paneflow_config::schema::AppMode::Diff) {
             let weak = cx.weak_entity();
             cx.defer(move |cx| {
@@ -1549,9 +1633,16 @@ impl PaneFlowApp {
         &self,
         source_cwd: Option<std::path::PathBuf>,
     ) -> Option<std::path::PathBuf> {
-        source_cwd.or_else(|| {
-            self.active_workspace()
-                .map(|ws| ws.cwd.as_str())
+        let Some(ws) = self.active_workspace() else {
+            return source_cwd;
+        };
+        // A bound tab confines every pane opened in it to its worktree (issue
+        // #347). This is the single choke point every in-app pane creation
+        // goes through, which is why the rule lives here rather than being
+        // repeated at each call site.
+        let confined = ws.active_tab().confine_cwd(source_cwd);
+        confined.or_else(|| {
+            Some(ws.cwd.as_str())
                 .filter(|cwd| !cwd.is_empty())
                 .map(std::path::PathBuf::from)
         })
@@ -1753,8 +1844,11 @@ impl PaneFlowApp {
             && ws.active_tab().root.is_none()
         {
             let ws_id = ws.id;
-            let cwd = std::path::PathBuf::from(&ws.cwd);
-            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, Some(cwd), None, cx));
+            // Through `new_terminal_cwd` rather than straight from `ws.cwd`:
+            // respawning the last pane of a bound tab must land back in that
+            // tab's worktree, not at the workspace root (issue #347).
+            let cwd = self.new_terminal_cwd(None);
+            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd, None, cx));
             // US-028: do NOT subscribe here - `create_pane` already wires
             // `handle_terminal_event` (main.rs:539). The duplicate subscription
             // fired every terminal event twice (double toast / port-scan /
@@ -1934,6 +2028,7 @@ impl PaneFlowApp {
             title,
             index,
             layout,
+            worktree,
         } = record;
 
         // Copy the workspace's identity out and own its cwd before building
@@ -1942,6 +2037,12 @@ impl PaneFlowApp {
         let ws = &self.workspaces[ws_idx];
         let ws_id = ws.id;
         let fallback_cwd = std::path::PathBuf::from(&ws.cwd);
+        // Undo puts the tab back on the checkout it was bound to; a checkout
+        // removed in between restores unbound, the rule session restore uses.
+        // Settled before the panes spawn, because the binding is where they
+        // spawn (issue #347).
+        let bound_to = crate::workspace::existing_worktree_dir(worktree.clone());
+        let spawn_root = crate::workspace::tab_spawn_root(bound_to.as_deref(), &fallback_cwd);
         // The deque starts EMPTY on purpose: `from_layout_node` reuses handed-in
         // panes verbatim and ignores their `SurfaceDefinition`, so any reuse
         // here would silently drop a leaf's cwd, custom name and scrollback.
@@ -1951,7 +2052,7 @@ impl PaneFlowApp {
                 LayoutNode::Pane { surfaces } => surfaces.as_slice(),
                 _ => &[],
             };
-            Self::spawn_pane_from_surfaces(ws_id, surfaces, &fallback_cwd, cx)
+            Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)
         });
 
         // Rebuildable because `title` is cloned rather than moved and `layout`
@@ -1964,13 +2065,14 @@ impl PaneFlowApp {
                     title: title.clone(),
                     index,
                     layout: layout.clone(),
+                    worktree: worktree.clone(),
                 }),
                 cx,
             );
             this.show_toast("Could not restore the tab", cx);
         };
 
-        let tab = crate::workspace::Tab::new(title.clone(), Some(root));
+        let tab = crate::workspace::Tab::restored(title.clone(), Some(root), bound_to);
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             // Unreachable: `ws_idx` was resolved above and the entity lease
             // stops `self.workspaces` changing under this body. Kept as a
@@ -2034,6 +2136,12 @@ impl PaneFlowApp {
         let tabs = tabs
             .into_iter()
             .map(|tab| {
+                // Same rule as undo-close-tab and session restore (issue
+                // #347): a checkout gone since the close restores the tab
+                // unbound, and a binding that survives is where its panes
+                // spawn.
+                let bound = crate::workspace::existing_worktree_dir(tab.worktree);
+                let spawn_root = crate::workspace::tab_spawn_root(bound.as_deref(), &fallback_cwd);
                 let root = tab.layout.map(|layout| {
                     LayoutTree::from_layout_node(
                         &layout,
@@ -2043,16 +2151,11 @@ impl PaneFlowApp {
                                 LayoutNode::Pane { surfaces } => surfaces.as_slice(),
                                 _ => &[],
                             };
-                            Self::spawn_pane_from_surfaces(
-                                workspace_id,
-                                surfaces,
-                                &fallback_cwd,
-                                cx,
-                            )
+                            Self::spawn_pane_from_surfaces(workspace_id, surfaces, &spawn_root, cx)
                         },
                     )
                 });
-                crate::workspace::Tab::new(tab.title, root)
+                crate::workspace::Tab::restored(tab.title, root, bound)
             })
             .collect();
         let mut workspace =
@@ -2156,6 +2259,12 @@ impl PaneFlowApp {
             return false;
         }
         self.workspace_menu_open = None;
+        // The tab menu addresses its target by workspace index; once a
+        // workspace leaves the list those indices name another workspace's
+        // tab, and the menu's Branch rows would bind a worktree in the wrong
+        // repository (issue #347). An IPC `workspace.close` has no window
+        // gesture to dismiss it, so it is dismissed here.
+        self.tab_menu_open = None;
         // Issue #111: capture the entire workspace before dropping any pane
         // entity. Older pane/tab records for this id become redundant once the
         // whole workspace is represented by one newer record, and leaving
@@ -2189,6 +2298,9 @@ impl PaneFlowApp {
         // its freshly spawned PTYs. FIFO eviction or graceful app exit retires
         // them once the workspace is no longer undoable.
         self.workspaces.remove(idx);
+        // Every checkout this workspace's tabs were bound to leaves with it
+        // (issue #347): the cached git state goes, the checkout itself stays.
+        self.prune_worktree_states();
         self.active_idx =
             active_idx_after_workspace_remove(self.active_idx, idx, self.workspaces.len());
         if let Some(window) = window {
@@ -3067,6 +3179,7 @@ mod tests {
             workspace_id,
             title: "tab".to_string(),
             index: 0,
+            worktree: None,
             layout: LayoutNode::Split {
                 direction: "vertical".to_string(),
                 ratio: None,
@@ -3898,6 +4011,188 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_path_unbinds_every_tab_under_it_and_no_other() {
+        // Issue #347 review, finding 3: teardown ignored tab bindings, so a
+        // tab bound to a checkout another workspace retired kept spawning
+        // panes into a directory that no longer existed.
+        let retired = std::path::PathBuf::from("/repo.worktrees/feat-x");
+        let bound = crate::workspace::Tab::restored("feat", None, Some(retired.clone()));
+        let nested = crate::workspace::Tab::restored("feat-src", None, Some(retired.join("src")));
+        let other = crate::workspace::Tab::restored(
+            "billing",
+            None,
+            Some(std::path::PathBuf::from("/repo.worktrees/feat-billing")),
+        );
+        let free = crate::workspace::Tab::new("free", None);
+        let ws_a = Workspace::restored_with_id(
+            41,
+            "a",
+            std::path::PathBuf::from("/repo"),
+            vec![bound, other],
+            0,
+        );
+        let ws_b = Workspace::restored_with_id(
+            42,
+            "b",
+            std::path::PathBuf::from("/repo"),
+            vec![nested, free],
+            0,
+        );
+        let mut workspaces = vec![ws_a, ws_b];
+        let nested_id = workspaces[1].tabs()[0].id;
+        let bound_id = workspaces[0].tabs()[0].id;
+
+        let mut unbound =
+            unbind_tabs_under_retired_paths(&mut workspaces, std::slice::from_ref(&retired));
+        unbound.sort_unstable();
+        let mut expected = vec![(41, bound_id), (42, nested_id)];
+        expected.sort_unstable();
+        assert_eq!(
+            unbound, expected,
+            "the tab on the path and the one under it"
+        );
+        assert!(workspaces[0].tabs()[0].worktree.is_none());
+        assert!(workspaces[1].tabs()[0].worktree.is_none());
+        assert_eq!(
+            workspaces[0].tabs()[1].worktree.as_deref(),
+            Some(std::path::Path::new("/repo.worktrees/feat-billing")),
+            "a sibling checkout is not under the retired path"
+        );
+        assert!(workspaces[1].tabs()[1].worktree.is_none());
+        assert!(
+            unbind_tabs_under_retired_paths(&mut workspaces, std::slice::from_ref(&retired))
+                .is_empty(),
+            "a second sweep finds nothing left to unbind"
+        );
+    }
+
+    #[test]
+    fn worktree_retirement_unbinds_tabs_before_the_directory_goes() {
+        let src = include_str!("mod.rs");
+        let body = source_slice(
+            src,
+            "pub(crate) fn spawn_persisted_worktree_teardown(",
+            "/// Resume the retirement journal loaded from `session.json`.",
+        );
+        let unbind_at = body
+            .find("unbind_tabs_under_retired_paths(&mut self.workspaces, &retired)")
+            .expect("teardown must unbind the tabs under its batch");
+        let spawn_at = body.find("cx.spawn(").expect("teardown spawn");
+        assert!(
+            unbind_at < spawn_at,
+            "tabs must be unbound before the removal starts, not after: {body}"
+        );
+    }
+
+    #[test]
+    fn undo_close_restores_a_bound_tab_into_its_checkout_when_it_still_exists() {
+        // Issue #347 review, findings 1 and 4: both undo paths spawn the
+        // rebuilt panes from the tab's binding, and both drop a binding whose
+        // directory is gone - undo-close-workspace used to restore it
+        // unfiltered.
+        let src = include_str!("mod.rs");
+        let tab_undo = source_slice(
+            src,
+            "fn restore_closed_tab_record(",
+            "fn restore_closed_workspace_record(",
+        );
+        let bound_at = tab_undo
+            .find("crate::workspace::existing_worktree_dir(worktree.clone())")
+            .expect("undo-close-tab filters the binding by existence");
+        let spawn_root_at = tab_undo
+            .find("crate::workspace::tab_spawn_root(bound_to.as_deref(), &fallback_cwd)")
+            .expect("undo-close-tab derives the spawn root from the binding");
+        let spawn_at = tab_undo
+            .find("Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)")
+            .expect("undo-close-tab spawns from the tab's root");
+        assert!(
+            bound_at < spawn_root_at && spawn_root_at < spawn_at,
+            "{tab_undo}"
+        );
+        assert!(
+            !tab_undo.contains("&fallback_cwd, cx)"),
+            "no undo-close-tab pane may spawn from the workspace cwd: {tab_undo}"
+        );
+
+        let ws_undo = source_slice(
+            src,
+            "fn restore_closed_workspace_record(",
+            "pub(crate) fn handle_new_workspace(",
+        );
+        let bound_at = ws_undo
+            .find("crate::workspace::existing_worktree_dir(tab.worktree)")
+            .expect("undo-close-workspace filters each tab's binding by existence");
+        let spawn_root_at = ws_undo
+            .find("crate::workspace::tab_spawn_root(bound.as_deref(), &fallback_cwd)")
+            .expect("undo-close-workspace derives each tab's spawn root from its binding");
+        let spawn_at = ws_undo
+            .find("Self::spawn_pane_from_surfaces(workspace_id, surfaces, &spawn_root, cx)")
+            .expect("undo-close-workspace spawns from the tab's root");
+        assert!(
+            bound_at < spawn_root_at && spawn_root_at < spawn_at,
+            "{ws_undo}"
+        );
+        assert!(
+            ws_undo.contains("crate::workspace::Tab::restored(tab.title, root, bound)"),
+            "the restored tab carries the filtered binding, never the raw record: {ws_undo}"
+        );
+        assert!(
+            !ws_undo.contains("&fallback_cwd,\n                                cx,")
+                && !ws_undo.contains("Tab::restored(tab.title, root, tab.worktree)"),
+            "{ws_undo}"
+        );
+    }
+
+    #[test]
+    fn closing_a_workspace_dismisses_the_tab_menu() {
+        // Issue #347 review, finding 9: `TabContextMenu` stores positional
+        // indices, and its Branch rows bind through them; a workspace closed
+        // under an open menu (IPC `workspace.close`) re-pointed those indices
+        // at another workspace's tab.
+        let src = include_str!("mod.rs");
+        let close = source_slice(
+            src,
+            "pub(crate) fn close_workspace_at_inner(",
+            "capture_closed_workspace_record(&self.workspaces[idx], idx, cx)",
+        );
+        assert!(
+            close.contains("self.workspace_menu_open = None;"),
+            "{close}"
+        );
+        assert!(
+            close.contains("self.tab_menu_open = None;"),
+            "the tab menu must not survive the workspace list changing: {close}"
+        );
+    }
+
+    #[test]
+    fn a_palette_surface_does_not_open_in_a_retiring_worktree() {
+        // Issue #347 review, finding 3: `open_tab_with_surface` was the one
+        // pane-creation path with no retirement gate; `split_pane` and the
+        // IPC paths all refuse a cwd inside a worktree being torn down.
+        let src = include_str!("tab.rs");
+        let open = source_slice(
+            src,
+            "pub(crate) fn open_tab_with_surface(",
+            "pub(crate) fn handle_new_tab(",
+        );
+        let gate_at = open
+            .find("self.pending_worktree_teardown_conflicts(")
+            .expect("open_tab_with_surface must consult the retirement journal");
+        let spawn_at = open
+            .find("TerminalView::with_cwd_and_profile(")
+            .expect("terminal spawn site");
+        assert!(
+            gate_at < spawn_at,
+            "the gate must run before the terminal is built: {open}"
+        );
+        assert!(
+            open[gate_at..spawn_at].contains("Worktree is still being retired"),
+            "the refusal must reach the user as the standard toast: {open}"
+        );
+    }
+
+    #[test]
     fn live_worktree_scan_includes_every_pane_terminal_cwd() {
         let src = include_str!("mod.rs");
         let scan = source_slice(
@@ -3909,6 +4204,12 @@ mod tests {
         assert!(scan.contains(".terminals()"), "{scan}");
         assert!(scan.contains("current_cwd"), "{scan}");
         assert!(scan.contains(".canonicalize()"), "{scan}");
+        // Issue #347 review, finding 3: a tab bound to the checkout counts as
+        // using it, or its retirement leaves the tab spawning into a hole.
+        assert!(
+            scan.contains("workspace.bound_tab_worktrees()"),
+            "the scan must count every bound tab: {scan}"
+        );
         assert!(
             !scan.contains("cwd_now()"),
             "live_workspace_uses_worktree must use cached current_cwd only: {scan}"

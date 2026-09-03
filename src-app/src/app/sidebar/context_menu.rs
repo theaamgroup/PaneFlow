@@ -40,6 +40,25 @@ fn workspace_context_menu_counts(
     (menu_rows, separator_rows)
 }
 
+/// The tallest a select menu is drawn: `select_menu` caps its surface at this
+/// and scrolls the rows inside it (`settings/components.rs`).
+const SELECT_MENU_MAX_HEIGHT: f32 = 320.;
+
+/// Height of the tab context menu as it is actually drawn: the menu chrome,
+/// its two fixed rows, and - when `branch_rows` is non-zero - the Branch
+/// section (header plus one row per branch), all capped at the surface's own
+/// ceiling. The on-screen clamp has to measure what is painted: sizing a
+/// forty-branch list at its uncapped height pinned the menu at `y = 0`
+/// (issue #347).
+pub(crate) fn tab_context_menu_height(branch_rows: usize) -> Pixels {
+    let branch_rows = if branch_rows > 0 {
+        1. + branch_rows as f32
+    } else {
+        0.
+    };
+    px((8. + (2. + branch_rows) * 28.).min(SELECT_MENU_MAX_HEIGHT))
+}
+
 pub(crate) fn clamped_context_menu_position(
     position: gpui::Point<Pixels>,
     width: Pixels,
@@ -432,7 +451,15 @@ impl PaneFlowApp {
             tab_idx,
             position,
         } = menu;
-        let menu_height = px(8. + 2. * 28.);
+        // Issue #347: the branches this tab can be moved to, one row each,
+        // exactly what the New pane picker offers - a branch with no worktree
+        // yet gets one when it is chosen. The repository's own branch is in
+        // there like any other, and picking it unbinds the tab.
+        let branches = self.tab_menu_branch_rows(ws_idx, tab_idx);
+        // A single branch is where the tab already works: the section would
+        // only restate it.
+        let show_branches = branches.len() > 1;
+        let menu_height = tab_context_menu_height(if show_branches { branches.len() } else { 0 });
         let menu_pos = clamped_context_menu_position(position, px(248.), menu_height, window);
         let close_shortcut = self
             .shortcut_for_action("close_tab")
@@ -478,7 +505,113 @@ impl PaneFlowApp {
                     cx.stop_propagation();
                 }),
             ))
+            .when(show_branches, |menu| {
+                let mut menu = menu.child(context_menu_divider(ui)).child(
+                    div()
+                        .px(px(8.))
+                        .pb(px(4.))
+                        .text_size(px(10.))
+                        .text_color(ui.muted)
+                        .child("Branch"),
+                );
+                for (detached, label, selected) in branches {
+                    let branch = label.clone();
+                    menu = menu.child(
+                        select_item(
+                            SharedString::from(format!("tab-branch-{label}")),
+                            selected,
+                            ui,
+                        )
+                        .cursor(CursorStyle::Arrow)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.tab_menu_open = None;
+                            match detached.clone() {
+                                Some(path) => {
+                                    this.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
+                                }
+                                None => {
+                                    this.bind_tab_to_branch(ws_idx, tab_idx, branch.clone(), cx)
+                                }
+                            }
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_x_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_color(ui.text)
+                                .child(label),
+                        ),
+                    );
+                }
+                menu
+            })
             .into_any_element()
+    }
+
+    /// The rows of the tab menu's Branch section: `(detached checkout path,
+    /// label, selected)`. A branch row carries `None` and is bound through
+    /// [`PaneFlowApp::bind_tab_to_branch`]; a detached checkout has no branch
+    /// to resolve and is bound to its path directly. Empty outside a
+    /// repository.
+    fn tab_menu_branch_rows(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Vec<(Option<PathBuf>, String, bool)> {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let Some(root) = ws.repo_root.clone() else {
+            return Vec::new();
+        };
+        let bound = ws.tabs().get(tab_idx).and_then(|tab| tab.worktree.clone());
+        let listing = self.workspace_worktree_listing(ws_idx);
+        let on_branch = match bound.as_ref() {
+            Some(path) => listing
+                .iter()
+                .find(|entry| entry.path == *path)
+                .and_then(|entry| entry.branch.clone()),
+            None => Some(self.workspace_checkout_label(ws_idx)),
+        };
+        // A branch whose checkout this tab may not stand on - one another
+        // workspace owns, or one being retired - is not offered at all: a row
+        // that can only refuse is a row that should not be there.
+        let bindable = |entry: &crate::workspace::worktree::WorktreeEntry| {
+            entry.path == root || self.checkout_is_bindable(&entry.path, ws_idx)
+        };
+        let mut rows: Vec<(Option<PathBuf>, String, bool)> = self
+            .workspace_branches(ws_idx)
+            .iter()
+            .filter(|branch| {
+                listing
+                    .iter()
+                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
+                    .is_none_or(bindable)
+            })
+            .map(|branch| {
+                let selected = on_branch.as_deref() == Some(branch.as_str());
+                (None, branch.clone(), selected)
+            })
+            .collect();
+        // A detached checkout is under no branch, and dropping it would strand
+        // a tab already bound to one.
+        rows.extend(
+            listing
+                .iter()
+                .filter(|entry| entry.branch.is_none() && !entry.is_bare && entry.path != root)
+                .filter(|entry| bindable(entry))
+                .map(|entry| {
+                    let label =
+                        crate::workspace::worktree::checkout_label(None, &entry.path, &root);
+                    let selected = bound.as_deref() == Some(entry.path.as_path());
+                    (Some(entry.path.clone()), label, selected)
+                }),
+        );
+        rows
     }
 
     pub(crate) fn render_pane_context_menu(
@@ -687,7 +820,23 @@ impl PaneFlowApp {
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_context_menu_counts;
+    use super::{tab_context_menu_height, workspace_context_menu_counts};
+    use gpui::px;
+
+    #[test]
+    fn tab_menu_height_never_exceeds_the_surface_cap() {
+        // Issue #347 review, finding 7: the height fed to the on-screen
+        // clamp counted every branch row, while `select_menu` caps the
+        // surface at 320 px, so a long branch list pinned the menu at y = 0.
+        assert_eq!(tab_context_menu_height(0), px(64.), "chrome + two rows");
+        assert_eq!(
+            tab_context_menu_height(2),
+            px(8. + (2. + 3.) * 28.),
+            "the section header and one row per branch, under the cap"
+        );
+        assert_eq!(tab_context_menu_height(40), px(320.));
+        assert_eq!(tab_context_menu_height(400), px(320.));
+    }
 
     #[test]
     fn workspace_menu_geometry_uses_filtered_editor_rows() {

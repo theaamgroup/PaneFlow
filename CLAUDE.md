@@ -135,7 +135,19 @@ cargo test <test_name> -- --nocapture  # single test with output
 # Lint
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
+
+# Benchmark (release profile; see bench/README.md)
+scripts/bench-terminal.sh                # terminal pipeline benchmark: writes bench/results/<stamp>-<sha>.json,
+                                         # prints a Markdown comparison against bench/baseline.json when it exists
+scripts/bench-terminal.sh --set-baseline # same run, then make it the baseline
 ```
+
+Performance claims about the terminal pipeline need evidence from that
+suite: the ignored `terminal_pipeline_benchmark` in
+`src-app/src/terminal/perf_bench.rs` measures it GPU-free under the release
+profile and prints the comparison table `bench/README.md` documents. Do not
+ship a perf number you did not measure, and do not publish a run that
+printed `PANEFLOW_BENCH_WARNING` (another workload was competing).
 
 Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`):
 config, data, cache, and the default IPC socket (`paneflow-dev.sock`). A
@@ -211,6 +223,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
 │   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
+│   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
+│   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
 ├── cli/                               ← `paneflow up|flow|watch|wait|send|read` over the IPC socket
 ├── window_chrome/
@@ -293,7 +307,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ### Thread model
 
 - **Main thread**: GPUI event loop, owns all Entity state, rendering, input dispatch. No locks around UI state.
-- **Ghostty runtime thread** (`paneflow-ghostty-runtime`, one per terminal): owns the `!Send` `DisplayTerminal`, the PTY master and the child; drains the mailbox (input, resize, selection, shutdown) and publishes `Content` snapshots. A sibling **PTY reader thread** (`paneflow-ghostty-pty-reader`) feeds it 32 KiB chunks through a 4-buffer pool.
+- **Ghostty runtime thread** (`paneflow-ghostty-runtime`, one per terminal): owns the `!Send` `DisplayTerminal`, the PTY master and the child; drains the mailbox (input, resize, selection, shutdown) and publishes `Content` snapshots through a `PublishGate` (#343, upstream 799ab51d + 8d8a9d88 + e03972c5). The gate holds a frame for two reasons: DEC 2026 synchronized output is set (one FFI mode query per wake, `DisplayTerminal::synchronized_output`), or the previous publish is newer than **8 ms** (`MIN_PUBLISH_INTERVAL`; deferred to the interval's end through `next_wake`, never dropped). A 2026 hold expires after **150 ms** (`SYNC_OUTPUT_MAX_HOLD`) so a program that opens a frame and dies cannot freeze the pane. Resize, scroll, scrollback clear, reset, select-all, a command mark, the first frame of a session, and the frame preceding `ChildExited` bypass the gate (`publish_now`). A `Wakeup` is queued only for a frame that was actually published. Publishing converts only the rows the engine flagged (`ghostty::Content::dirty_rows` → `CellMirror`, two alternating `Arc<[Cell]>` buffers, full conversion when the render thread still holds the back buffer). The loop blocks 10 ms (`RUNTIME_IDLE_TICK`) only while output flows, a drag is held, or a child is winding down, and **100 ms** (`RUNTIME_QUIET_TICK`) once a pane has been silent for a second; the display-only runtime blocks for a second. A `Shutdown` message wakes the mailbox at once, so neither tick delays the close guard, and the gate touches nothing but the grid: it never signals or reaps (see the close-guard trap above). A sibling **PTY reader thread** (`paneflow-ghostty-pty-reader`) feeds it 32 KiB chunks through a 4-buffer pool. An OSC 8 hover lookup is a `HyperlinkHover` message answered by `GhosttyUiEvent::HyperlinkResolved`, never a blocking round trip from the UI thread.
 - **IPC thread**: Unix socket server. The runtime dir resolves through a fallback chain (`runtime_paths.rs`): `$XDG_RUNTIME_DIR` → `dirs::runtime_dir()` (None on macOS) → `$TMPDIR` (the macOS path, usually `/var/folders/xx/.../T/`) → `dirs::cache_dir()/run`. Socket at `<runtime_dir>/<APP_SUBDIR>/<socket>`: `paneflow/paneflow.sock` in release, `paneflow-dev/paneflow-dev.sock` under `debug_assertions`. The composed path is rejected if it exceeds the `sockaddr_un.sun_path` ceiling (104 bytes on macOS). `PANEFLOW_SOCKET_PATH` overrides the computed path so an isolated debug instance and the panes it launches agree on one endpoint.
 - **Watcher threads**: config (notify, 300 ms debounce, 1 s max-wait ceiling), theme, git state.
 - **Shared state**: `parking_lot::RwLock<SharedState>` (`Content` cells + modes + metrics + kitty placements) written by the runtime thread and read by the GPUI thread; `UiEventState` slots carry title/cwd/progress/notification/clipboard events. The libghostty C handle never leaves the runtime thread.
@@ -304,9 +318,15 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
 → write_ghostty_key() → RuntimeMessage::KeyInput → runtime thread → DisplayTerminal::encode_key() → PTY write
 → shell output → pty-reader thread → RuntimeMessage::Output → DisplayTerminal::feed()
-→ update_shared_state(): snapshot → RwLock<SharedState>; queue_wakeup → GhosttyUiEvent::Wakeup
-→ 4ms coalescing batch (terminal/view.rs) → process_backend_wakeup() → dirty=true → cx.notify()
+→ PublishGate::request(): held while DEC 2026 is set (150 ms max) or the last frame is < 8 ms old
+   (deferred via next_wake, never dropped); resize/scroll/first frame/pre-ChildExited bypass it
+→ commit(): snapshot (dirty rows only, CellMirror) → RwLock<SharedState> with a new Content::generation;
+   queue_wakeup → GhosttyUiEvent::Wakeup (only on a real publish)
+→ 4ms coalescing batch (terminal/view.rs; a timer for event bursts, not the frame gate)
+→ process_backend_wakeup() → dirty=true → cx.notify()
 → TerminalElement::prepaint() → session_backend().render_content() (RwLock read + Arc<[Cell]> clone)
+→ build_layout(): LayoutCacheKey (Content::generation + theme generation + bounds/font/cursor/focus/
+   search/exit inputs) hit → Arc<LayoutState> clone; miss → layout_from_snapshot()
 → TerminalElement::paint() → paint_quad + shape_line (+ kitty placements) → Metal
 ```
 

@@ -145,6 +145,44 @@ fn parse_terminal_profile(
     }
 }
 
+/// The directory a `surface.split` pane starts in, given the tab it lands in
+/// (issue #347).
+///
+/// An unbound tab takes the explicit `cwd`, or `default` without one. A tab
+/// bound to a worktree starts a pane with no `cwd` in that worktree, and an
+/// explicit `cwd` where it points - provided that is inside the worktree. A
+/// `cwd` outside it is refused with `-32602`: the alternative, moving the
+/// pane into the worktree without saying so, spawned a pane in one checkout
+/// while the `managed_worktree` record it carried registered another. The
+/// worktree side is also compared canonicalized, as ownership checks are, so
+/// a `/var` vs `/private/var` spelling cannot refuse a directory that is in
+/// fact inside.
+fn split_spawn_cwd(
+    tab: &crate::workspace::Tab,
+    explicit: Option<PathBuf>,
+    default: PathBuf,
+) -> Result<PathBuf, JsonRpcError> {
+    let Some(worktree) = tab.worktree.as_deref() else {
+        return Ok(explicit.unwrap_or(default));
+    };
+    let Some(cwd) = explicit else {
+        return Ok(worktree.to_path_buf());
+    };
+    let inside = cwd.starts_with(worktree)
+        || worktree
+            .canonicalize()
+            .is_ok_and(|resolved| cwd.starts_with(resolved));
+    if inside {
+        Ok(cwd)
+    } else {
+        Err(JsonRpcError::invalid_params(format!(
+            "cwd {} is outside the target tab's worktree {}",
+            cwd.display(),
+            worktree.display()
+        )))
+    }
+}
+
 fn surface_split_root(tab: &crate::workspace::Tab) -> Result<&LayoutTree, JsonRpcError> {
     if tab.is_zoomed() {
         return Err(JsonRpcError::invalid_params(
@@ -225,6 +263,45 @@ pub(crate) fn build_up_layout(
         "tiled" => LayoutTree::tiled(panes),
         _ => LayoutTree::from_panes_equal(SplitDirection::Vertical, panes),
     }
+}
+
+/// Split `workspace.up`'s panes into one tab per git worktree (issue #347).
+///
+/// Returns each tab's worktree (`None` for the workspace's own checkout) with
+/// the pane indices it holds, in display order: the unbound panes first, then
+/// one tab per distinct worktree in first-appearance order.
+///
+/// `up` accepts a per-pane `worktree = "branch"`, creates each checkout, and
+/// used to stack every pane into a single tab where two worktrees sat side by
+/// side, visually identical. One tab per worktree makes switching checkout a
+/// deliberate gesture with a visible target, and binds each tab so the panes
+/// opened in it later land in the same checkout.
+///
+/// A batch that declares no worktree at all yields exactly one group holding
+/// every pane in order - byte-for-byte the layout `up` has always built.
+pub(crate) fn group_up_panes_by_worktree(
+    worktrees: &[Option<String>],
+) -> Vec<(Option<String>, Vec<usize>)> {
+    let mut unbound: Vec<usize> = Vec::new();
+    // Insertion-ordered rather than a map: the tab order must follow the order
+    // the panes were declared in, which is the order the conductor wrote them.
+    let mut bound: Vec<(String, Vec<usize>)> = Vec::new();
+    for (idx, worktree) in worktrees.iter().enumerate() {
+        match worktree {
+            None => unbound.push(idx),
+            Some(path) => match bound.iter_mut().find(|(known, _)| known == path) {
+                Some((_, panes)) => panes.push(idx),
+                None => bound.push((path.clone(), vec![idx])),
+            },
+        }
+    }
+
+    let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::with_capacity(bound.len() + 1);
+    if !unbound.is_empty() {
+        groups.push((None, unbound));
+    }
+    groups.extend(bound.into_iter().map(|(path, panes)| (Some(path), panes)));
+    groups
 }
 
 /// Keyboard focus needs a `&mut Window`, which IPC dispatch does not carry.
@@ -2116,6 +2193,12 @@ impl PaneFlowApp {
         // down (US-009) and session restore keeps the record across a crash.
         let mut managed_worktrees: Vec<crate::workspace::worktree::ManagedWorktree> = Vec::new();
         let mut managed_paths = std::collections::HashSet::new();
+        // Which worktree each pane belongs to, by pane index (issue #347). Kept
+        // parallel to `planned` rather than folded into the flat ownership
+        // list above: the tab split below needs the pane-to-checkout mapping,
+        // and reading it back from cwd prefixes would guess where the spec
+        // already states it.
+        let mut pane_worktrees: Vec<Option<String>> = Vec::with_capacity(pane_specs.len());
         let mut planned: Vec<PlannedPane> = Vec::with_capacity(pane_specs.len());
         for (i, spec) in pane_specs.iter().enumerate() {
             let managed_value = spec
@@ -2145,6 +2228,11 @@ impl PaneFlowApp {
                         ))
                         .into_value();
                     }
+                    pane_worktrees.push(
+                        managed_worktree
+                            .as_ref()
+                            .map(|worktree| worktree.path.to_string_lossy().into_owned()),
+                    );
                     if let Some(worktree) = managed_worktree {
                         if plan.cwd.as_deref() != Some(worktree.path.as_path()) {
                             return JsonRpcError::invalid_params(format!(
@@ -2241,15 +2329,66 @@ impl PaneFlowApp {
 
         let focus_idx = planned.iter().position(|p| p.focus).unwrap_or(0);
         let focus_pane = panes.get(focus_idx).cloned();
-        let Some(tree) = build_up_layout(preset, panes, focus_idx) else {
-            return JsonRpcError::invalid_params("could not build layout from panes").into_value();
-        };
 
-        let ws_cwd = planned
+        // Issue #347: one tab per worktree. With no worktree declared this is
+        // a single group holding every pane, so the layout is the one `up` has
+        // always built. Every pane was already spawned above, so a batch the
+        // tab cap cannot hold is refused here rather than silently truncated
+        // by `restored_with_id`.
+        let groups = group_up_panes_by_worktree(&pane_worktrees);
+        if groups.len() > crate::workspace::MAX_TABS_PER_WORKSPACE {
+            return JsonRpcError::invalid_params(format!(
+                "layout spans {} worktrees, more than the {} tabs a workspace holds",
+                groups.len(),
+                crate::workspace::MAX_TABS_PER_WORKSPACE
+            ))
+            .into_value();
+        }
+        let all_panes = panes;
+        let mut tabs: Vec<crate::workspace::Tab> = Vec::with_capacity(groups.len());
+        let mut active_tab = 0;
+        for (tab_idx, (worktree, pane_idxs)) in groups.iter().enumerate() {
+            if pane_idxs.contains(&focus_idx) {
+                active_tab = tab_idx;
+            }
+            let panes: Vec<Entity<Pane>> =
+                pane_idxs.iter().map(|i| all_panes[*i].clone()).collect();
+            // The focused pane's position WITHIN this tab: `main_vertical`
+            // promotes it, and a global index would promote the wrong pane.
+            let focus_idx = pane_idxs.iter().position(|i| *i == focus_idx).unwrap_or(0);
+            let Some(tree) = build_up_layout(preset, panes, focus_idx) else {
+                return JsonRpcError::invalid_params("could not build layout from panes")
+                    .into_value();
+            };
+            // A worktree tab is named by its branch; a pane rename or the
+            // agent's own session title still replaces it, as for any tab.
+            let title = worktree
+                .as_ref()
+                .and_then(|path| {
+                    managed_worktrees
+                        .iter()
+                        .find(|mw| mw.path.to_string_lossy() == path.as_str())
+                        .map(|mw| mw.branch.clone())
+                })
+                .unwrap_or_default();
+            tabs.push(crate::workspace::Tab::restored(
+                title,
+                Some(tree),
+                worktree.as_ref().map(std::path::PathBuf::from),
+            ));
+        }
+
+        // The workspace root is the checkout the unbound panes are in, so a
+        // batch that puts every agent in its own worktree still roots the
+        // workspace at the repository rather than at whichever worktree came
+        // first.
+        let ws_cwd = groups
             .iter()
-            .find_map(|p| p.cwd.clone())
+            .find(|(worktree, _)| worktree.is_none())
+            .and_then(|(_, pane_idxs)| pane_idxs.iter().find_map(|i| planned[*i].cwd.clone()))
+            .or_else(|| planned.iter().find_map(|p| p.cwd.clone()))
             .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
-        let mut ws = Workspace::with_layout_and_id(ws_id, &name, ws_cwd, tree);
+        let mut ws = Workspace::restored_with_id(ws_id, &name, ws_cwd, tabs, active_tab);
         ws.managed_worktrees = managed_worktrees;
         self.watch_git_dir(&ws);
         Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
@@ -3513,18 +3652,20 @@ impl PaneFlowApp {
                 if pane_spec_requires_orchestration(params) && !ipc_orchestration_enabled() {
                     return orchestration_disabled_error("surface.split").into_value();
                 }
-                let spawn_cwd = match params.get("cwd").and_then(|c| c.as_str()) {
+                // Kept apart from the default it falls back to: whether the
+                // caller NAMED a directory decides below whether the target
+                // tab's worktree binding applies (issue #347).
+                let explicit_cwd = match params.get("cwd").and_then(|c| c.as_str()) {
                     Some(raw) => match canonicalize_workspace_cwd(raw) {
                         Ok(canonical) => Some(canonical),
                         Err(err) => return err.into_value(),
                     },
                     None => None,
                 };
-                let spawn_cwd =
-                    Some(spawn_cwd.unwrap_or_else(crate::launch_cwd::implicit_launch_cwd));
-                if self.pending_worktree_teardown_conflicts(
-                    spawn_cwd.as_deref().expect("effective split cwd"),
-                ) {
+                let default_cwd = explicit_cwd
+                    .clone()
+                    .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
+                if self.pending_worktree_teardown_conflicts(&default_cwd) {
                     return JsonRpcError::invalid_params("cwd is inside a worktree being retired")
                         .into_value();
                 }
@@ -3544,7 +3685,7 @@ impl PaneFlowApp {
                     None => None,
                 };
                 if let Some(worktree) = &spawn_managed_worktree
-                    && spawn_cwd.as_deref() != Some(worktree.path.as_path())
+                    && default_cwd != worktree.path
                 {
                     return JsonRpcError::invalid_params("managed_worktree path must match cwd")
                         .into_value();
@@ -3629,6 +3770,17 @@ impl PaneFlowApp {
                 {
                     return JsonRpcError::invalid_params("Surface not found").into_value();
                 }
+                // Issue #347: a split into a tab bound to a worktree starts in
+                // that worktree when no `cwd` was given. An explicit `cwd` is
+                // honoured as written - a conductor that names a directory
+                // means it - but only inside the bound worktree: one outside
+                // it (and the `managed_worktree` that has to match it) is
+                // refused rather than silently moved, so the pane and the
+                // ownership record it registers can never disagree.
+                let spawn_cwd = match split_spawn_cwd(tab, explicit_cwd, default_cwd) {
+                    Ok(cwd) => Some(cwd),
+                    Err(err) => return err.into_value(),
+                };
                 // EP-004 US-015: stage a (possibly large) `context` blob to a
                 // temp file and pass its path via PANEFLOW_CONTEXT_FILE. Write
                 // before spawn; a failure is a JSON-RPC error, not success.
@@ -4773,6 +4925,153 @@ mod tests {
                 .unwrap_or_else(|| panic!("{malformed} must be rejected, not defaulted"));
             assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
         }
+    }
+
+    #[test]
+    fn a_batch_without_worktrees_is_the_single_tab_it_has_always_been() {
+        // The regression guard for the split below: `up` must not grow a second
+        // tab for a plain batch, and the pane order inside it is the order the
+        // conductor declared - `surface_ids` in the response are keyed on it.
+        let groups = group_up_panes_by_worktree(&[None, None, None]);
+        assert_eq!(groups, vec![(None, vec![0, 1, 2])]);
+        assert_eq!(group_up_panes_by_worktree(&[]), vec![]);
+    }
+
+    #[test]
+    fn each_worktree_gets_its_own_tab_in_declaration_order() {
+        let wt = |p: &str| Some(p.to_string());
+        // Two agents on one worktree share its tab; the shell that stayed in
+        // the main checkout keeps the workspace's own tab, which leads.
+        let groups = group_up_panes_by_worktree(&[
+            wt("/r.worktrees/b"),
+            None,
+            wt("/r.worktrees/a"),
+            wt("/r.worktrees/b"),
+        ]);
+        assert_eq!(
+            groups,
+            vec![
+                (None, vec![1]),
+                (wt("/r.worktrees/b"), vec![0, 3]),
+                (wt("/r.worktrees/a"), vec![2]),
+            ],
+            "tab order follows first appearance, not path order"
+        );
+    }
+
+    #[test]
+    fn a_split_into_a_bound_tab_keeps_an_explicit_cwd_inside_it_and_refuses_one_outside() {
+        // Issue #347 review, finding 2: `surface.split` confined every cwd
+        // to the bound tab's worktree, so a conductor splitting a feat-a pane
+        // with `cwd` = feat-b (and a matching `managed_worktree`) got a pane in
+        // feat-a while the workspace recorded ownership of feat-b.
+        let sandbox = tempfile::tempdir().expect("tempdir");
+        let feat_a = sandbox.path().join("repo.worktrees").join("feat-a");
+        let feat_b = sandbox.path().join("repo.worktrees").join("feat-b");
+        std::fs::create_dir_all(feat_a.join("src")).expect("feat-a");
+        std::fs::create_dir_all(&feat_b).expect("feat-b");
+        let default = sandbox.path().join("elsewhere");
+        let bound = crate::workspace::Tab::restored("a", None, Some(feat_a.clone()));
+
+        // No cwd: the bound worktree, never the process default.
+        assert_eq!(
+            split_spawn_cwd(&bound, None, default.clone()).expect("bound default"),
+            feat_a
+        );
+        // A cwd inside the worktree is honoured as written.
+        assert_eq!(
+            split_spawn_cwd(&bound, Some(feat_a.join("src")), default.clone())
+                .expect("inside the worktree"),
+            feat_a.join("src")
+        );
+        // A cwd outside it is refused, not silently moved.
+        let refused = split_spawn_cwd(&bound, Some(feat_b.clone()), default.clone())
+            .expect_err("a sibling worktree is outside");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert!(
+            refused
+                .message
+                .contains("outside the target tab's worktree"),
+            "{}",
+            refused.message
+        );
+        // A canonical spelling of a directory inside the worktree is inside.
+        let canonical_inside = feat_a.canonicalize().expect("canonical feat-a").join("src");
+        assert_eq!(
+            split_spawn_cwd(&bound, Some(canonical_inside.clone()), default.clone())
+                .expect("canonical spelling"),
+            canonical_inside
+        );
+
+        // An unbound tab keeps the pre-#347 contract: the explicit cwd, or
+        // the default without one.
+        let free = crate::workspace::Tab::new("free", None);
+        assert_eq!(
+            split_spawn_cwd(&free, Some(feat_b.clone()), default.clone()).expect("explicit"),
+            feat_b
+        );
+        assert_eq!(
+            split_spawn_cwd(&free, None, default.clone()).expect("default"),
+            default
+        );
+    }
+
+    #[test]
+    fn surface_split_routes_its_cwd_through_the_bound_tab_rule() {
+        let src = include_str!("ipc_handler.rs");
+        let split =
+            crate::source_probe::source_slice(src, "\"surface.split\" => {", "\"fleet.list\" => {");
+        assert!(
+            split.contains("split_spawn_cwd(tab, explicit_cwd, default_cwd)"),
+            "the split must tell the rule whether a cwd was named: {split}"
+        );
+        assert!(
+            !split.contains("confine_cwd("),
+            "the unconditional confinement rewrote an explicit cwd: {split}"
+        );
+    }
+
+    #[test]
+    fn an_all_worktree_batch_opens_no_empty_main_tab() {
+        let wt = |p: &str| Some(p.to_string());
+        let groups = group_up_panes_by_worktree(&[wt("/r.worktrees/a"), wt("/r.worktrees/b")]);
+        assert_eq!(
+            groups,
+            vec![
+                (wt("/r.worktrees/a"), vec![0]),
+                (wt("/r.worktrees/b"), vec![1])
+            ],
+            "no pane in the main checkout means no tab for it"
+        );
+    }
+
+    #[test]
+    fn workspace_up_binds_one_tab_per_worktree() {
+        // Issue #347: the source-level contract of the split above - the
+        // groups drive the tabs, every tab carries its worktree, and the
+        // workspace roots at the unbound panes' checkout.
+        let src = include_str!("ipc_handler.rs");
+        let body = src
+            .split("pub(crate) fn handle_workspace_up")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn schedule_prompt_prefill").next())
+            .expect("handle_workspace_up body");
+        assert!(
+            body.contains("group_up_panes_by_worktree(&pane_worktrees)"),
+            "up must group its panes by managed worktree"
+        );
+        assert!(
+            body.contains("crate::workspace::Tab::restored("),
+            "each group must become a tab bound to its worktree"
+        );
+        assert!(
+            body.contains("Workspace::restored_with_id(ws_id, &name, ws_cwd, tabs, active_tab)"),
+            "the workspace must be built from the grouped tabs"
+        );
+        assert!(
+            !body.contains("Workspace::with_layout_and_id"),
+            "the single-tab constructor would flatten every worktree into one tab"
+        );
     }
 
     fn test_ipc_request(method: &str, cancelled: bool) -> crate::ipc::IpcRequest {

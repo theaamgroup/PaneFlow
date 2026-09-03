@@ -41,12 +41,14 @@ pub(crate) fn path_is_in_retiring_worktree(path: &std::path::Path) -> bool {
     })
 }
 
-pub use git::{GitDiffStats, detect_branch, find_git_dir, resolve_repo_root};
+pub use git::{
+    GitDiffStats, detect_branch, find_git_dir, resolve_repo_root, resolve_worktree_root,
+};
 #[cfg(test)]
 pub(crate) use ports::PortEntry;
 pub use ports::{PaneScan, scan_panes};
-pub use tab::Tab;
 pub(crate) use tab::apply_pane_rename_to_tab;
+pub use tab::{Tab, existing_worktree_dir, tab_spawn_root};
 
 /// Hard cap on open workspaces (US-054: single source for the bound previously
 /// re-declared as a local `const` at every create/IPC site).
@@ -362,6 +364,13 @@ impl Workspace {
         &self.tabs
     }
 
+    /// Every tab, mutably, for a sweep over their bindings (issue #347).
+    /// The tab list itself stays private, so the "at least one tab"
+    /// invariant cannot be observed broken through this either.
+    pub fn tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.tabs.iter_mut()
+    }
+
     /// Number of tabs. Always >= 1.
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
@@ -402,6 +411,24 @@ impl Workspace {
     /// Index of the tab owning `pane`, zoom-saved trees included.
     pub fn tab_index_containing_pane(&self, pane: &Entity<Pane>) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.contains_pane(pane))
+    }
+
+    /// The tab holding `pane`, or `None` when no tab of this workspace does.
+    /// Used to resolve which checkout a pane belongs to: with a tab bound to a
+    /// worktree (issue #347), that is the tab's, not the workspace's.
+    pub fn tab_for_pane(&self, pane: &Entity<Pane>) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| tab.contains_pane(pane))
+    }
+
+    /// The worktree of every tab bound to one, as absolute path strings.
+    /// Feeds the git probe set: a bound tab needs its own branch and diffstat,
+    /// which the workspace's own fields cannot answer.
+    pub fn bound_tab_worktrees(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| tab.worktree.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
     }
 
     /// Whether this workspace is an empty folder: one unnamed tab holding no
@@ -589,6 +616,10 @@ impl Workspace {
             .map(|tab| TabSession {
                 title: tab.title.clone(),
                 layout: persisted_tab_layout(tab.serialize_without_scrollback(cx)),
+                worktree: tab
+                    .worktree
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
             })
             .collect()
     }

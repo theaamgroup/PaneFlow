@@ -27,6 +27,9 @@ mod paint;
 pub(super) mod pixel_probe;
 
 use color::convert_color;
+/// The benchmark resolves the base font the way the renderer does per frame.
+#[cfg(test)]
+pub(crate) use font::base_font;
 pub(crate) use font::{
     DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, normalize_font_weight_key,
 };
@@ -276,7 +279,7 @@ fn selection_marker_color() -> Hsla {
 // Layout types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct CellDimensions {
     pub cell_width: Pixels,
     pub line_height: Pixels,
@@ -524,15 +527,17 @@ fn selection_marker_cursor(
     })
 }
 
+/// The cursor as the layout carries it. The blink phase is not an input: it
+/// only decides whether `paint` draws this, so a blink never invalidates the
+/// memoized layout of the pane, let alone of every other pane.
 fn cursor_from_content(
     cursor: RenderableCursor,
-    cursor_visible: bool,
     focused: bool,
     cursor_color: Hsla,
     default_cursor_shape: CursorShape,
     theme: &crate::theme::TerminalTheme,
 ) -> Option<CursorInfo> {
-    if matches!(cursor.shape, CursorShape::Hidden) || !cursor_visible || !focused {
+    if matches!(cursor.shape, CursorShape::Hidden) || !focused {
         return None;
     }
 
@@ -648,15 +653,63 @@ pub struct LayoutState {
 // Cell style - used for batching comparison
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq)]
+/// What decides whether two adjacent cells share a text run.
+///
+/// The font is not stored: within one layout pass it is a pure function of
+/// the base font and these two flags, so comparing the flags is comparing
+/// the fonts, without cloning shared strings for every cell of the grid.
+#[derive(Clone, Copy, PartialEq)]
 struct CellStyle {
-    font: Font,
+    bold: bool,
+    italic: bool,
     fg: Hsla,
     bg: Hsla,
     underline: bool,
     undercurl: bool,
     strikethrough: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Layout memoization
+// ---------------------------------------------------------------------------
+
+/// Everything `layout_from_snapshot` reads, reduced to something comparable.
+///
+/// The grid itself collapses to `content_generation`: the runtime stamps every
+/// published frame, so one integer stands in for the cells, the cursor, the
+/// selection, the scroll offset, and the grid size. The rest are the render
+/// inputs the view recomputes each frame and that the snapshot cannot know
+/// about.
+#[derive(Clone, PartialEq)]
+pub(crate) struct LayoutCacheKey {
+    content_generation: u64,
+    theme_generation: u64,
+    bounds: Bounds<Pixels>,
+    first_visible_row: i32,
+    last_visible_row: i32,
+    dimensions: CellDimensions,
+    base_font: Font,
+    focused: bool,
+    copy_mode_cursor: Option<CopyModeCursorState>,
+    search_highlights: Vec<SearchHighlight>,
+    exited: Option<i32>,
+    exit_signal: Option<String>,
+    default_cursor_shape: CursorShape,
+    cursor_color_override: Option<Hsla>,
+    integrated_glyphs_enabled: bool,
+    color_emoji_enabled: bool,
+}
+
+/// One pane's memoized layout.
+///
+/// GPUI re-renders the whole element tree whenever any view in it is dirty:
+/// `Window::mark_view_dirty` walks the ancestor path, the root re-renders, and
+/// `refreshing` then defeats the per-view element cache for every descendant.
+/// In a workspace of parallel agents that means one pane's output pays for a
+/// full re-layout of every other pane, sixty times a second, with nothing
+/// changed in any of them. This is the shortcut: an untouched pane compares a
+/// key and clones an `Arc`.
+pub(crate) type SharedLayoutCache = Arc<Mutex<Option<(LayoutCacheKey, Arc<LayoutState>)>>>;
 
 // ---------------------------------------------------------------------------
 // TerminalElement
@@ -714,6 +767,8 @@ pub struct TerminalElement {
     /// Timestamp of the keystroke that triggered this render, for latency measurement.
     #[cfg(debug_assertions)]
     last_keystroke_at: Option<std::time::Instant>,
+    /// Memoized layout for this pane, shared with the view across frames.
+    layout_cache: SharedLayoutCache,
 }
 
 impl TerminalElement {
@@ -741,6 +796,7 @@ impl TerminalElement {
         color_emoji_enabled: bool,
         frame_metrics: TerminalFrameMetrics,
         alt_screen: bool,
+        layout_cache: SharedLayoutCache,
         #[cfg(debug_assertions)] last_keystroke_at: Option<std::time::Instant>,
     ) -> Self {
         Self {
@@ -766,8 +822,41 @@ impl TerminalElement {
             color_emoji_enabled,
             frame_metrics,
             alt_screen,
+            layout_cache,
             #[cfg(debug_assertions)]
             last_keystroke_at,
+        }
+    }
+
+    /// The memo key for one frame of this pane: every input the layout pass
+    /// reads, and nothing it does not. The blink phase (`cursor_visible`) is
+    /// deliberately absent - it only decides whether `paint` draws the cursor
+    /// the layout already carries - so a blink tick never invalidates a memo.
+    fn layout_cache_key(
+        &self,
+        content_generation: u64,
+        theme_generation: u64,
+        bounds: Bounds<Pixels>,
+        first_visible_row: i32,
+        last_visible_row: i32,
+    ) -> LayoutCacheKey {
+        LayoutCacheKey {
+            content_generation,
+            theme_generation,
+            bounds,
+            first_visible_row,
+            last_visible_row,
+            dimensions: self.frame_metrics.dimensions,
+            base_font: self.frame_metrics.base_font.clone(),
+            focused: self.focused,
+            copy_mode_cursor: self.copy_mode_cursor.clone(),
+            search_highlights: self.search_highlights.clone(),
+            exited: self.exited,
+            exit_signal: self.exit_signal.clone(),
+            default_cursor_shape: self.default_cursor_shape,
+            cursor_color_override: self.cursor_color_override,
+            integrated_glyphs_enabled: self.integrated_glyphs_enabled,
+            color_emoji_enabled: self.color_emoji_enabled,
         }
     }
 
@@ -776,8 +865,12 @@ impl TerminalElement {
         bounds: Bounds<Pixels>,
         window: &mut Window,
         _cx: &mut App,
-    ) -> LayoutState {
+    ) -> Arc<LayoutState> {
         let dims = self.frame_metrics.dimensions;
+        // Read the generation before the theme: a hot-reload landing between
+        // the two reads then keys an old-theme layout under the old stamp (one
+        // extra recompute next frame) instead of caching it under the new one.
+        let theme_generation = crate::theme::theme_generation();
         let theme = crate::theme::active_theme();
 
         // Ghostty's window padding model (`src/renderer/size.zig`): the inset
@@ -875,7 +968,6 @@ impl TerminalElement {
 
         let cursor_snapshot = cursor_from_content(
             content.cursor,
-            self.cursor_visible,
             self.focused,
             cursor_color,
             self.default_cursor_shape,
@@ -884,9 +976,32 @@ impl TerminalElement {
         let copy_mode_cursor =
             focused_copy_mode_cursor(self.copy_mode_cursor.as_ref(), self.focused);
 
+        // Everything above this point is either cheap (an `RwLock` read and an
+        // `Arc` clone for the snapshot) or load-bearing side effects the cache
+        // must not skip: the resize notification and the initial-clear latch.
+        // What follows is the expensive part, so that is what gets memoized.
+        let key = self.layout_cache_key(
+            content.generation,
+            theme_generation,
+            bounds,
+            first_visible_row,
+            last_visible_row,
+        );
+        {
+            let cache = self
+                .layout_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((cached_key, cached_layout)) = cache.as_ref()
+                && *cached_key == key
+            {
+                return cached_layout.clone();
+            }
+        }
+
         let cells = content.cells;
 
-        layout_from_snapshot(LayoutInputs {
+        let layout = Arc::new(layout_from_snapshot(LayoutInputs {
             cells,
             cursor: cursor_snapshot,
             selection_range,
@@ -905,7 +1020,12 @@ impl TerminalElement {
             exit_signal: self.exit_signal.clone(),
             integrated_glyphs_enabled: self.integrated_glyphs_enabled,
             color_emoji_enabled: self.color_emoji_enabled,
-        })
+        }));
+        *self
+            .layout_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, layout.clone()));
+        layout
     }
 }
 
@@ -1200,8 +1320,7 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
             continue;
         }
 
-        // Build cell style for batching comparison
-        let mut font = base_font.clone();
+        // Build cell style for batching comparison.
         // OSC 8 hyperlinks must render with an underline even when the cell
         // flags don't carry `UNDERLINE` - the engine does not auto-set the
         // flag on OSC 8 cells, so without this we'd lose the visual
@@ -1213,42 +1332,22 @@ pub(crate) fn layout_from_snapshot(inputs: LayoutInputs<'_>) -> LayoutState {
             || flags.contains(CellFlags::DOTTED_UNDERLINE)
             || flags.contains(CellFlags::DASHED_UNDERLINE)
             || *hyperlink;
-        let is_undercurl = flags.contains(CellFlags::UNDERCURL);
-        let is_strikethrough = flags.contains(CellFlags::STRIKEOUT);
-
-        if flags.contains(CellFlags::BOLD) || flags.contains(CellFlags::BOLD_ITALIC) {
-            font.weight = FontWeight::BOLD;
-        }
-        if flags.contains(CellFlags::ITALIC) || flags.contains(CellFlags::BOLD_ITALIC) {
-            font.style = FontStyle::Italic;
-        }
-
         let style = CellStyle {
-            font: font.clone(),
+            bold: flags.contains(CellFlags::BOLD) || flags.contains(CellFlags::BOLD_ITALIC),
+            italic: flags.contains(CellFlags::ITALIC) || flags.contains(CellFlags::BOLD_ITALIC),
             fg,
             bg,
             underline: is_underline,
-            undercurl: is_undercurl,
-            strikethrough: is_strikethrough,
+            undercurl: flags.contains(CellFlags::UNDERCURL),
+            strikethrough: flags.contains(CellFlags::STRIKEOUT),
         };
 
         // Check if we can append to current batch
-        if batch.can_append(&style, point.line.0, point.column.0) {
+        if batch.can_append(style, point.line.0, point.column.0) {
             batch.append(c, cell_cols);
         } else {
             batch.flush();
-            batch.start(
-                c,
-                cell_cols,
-                style,
-                font,
-                fg,
-                is_underline,
-                is_undercurl,
-                is_strikethrough,
-                point.line.0,
-                point.column.0,
-            );
+            batch.start(c, cell_cols, style, point.line.0, point.column.0);
         }
 
         // Append zero-width combining characters (diacriticals, ZWJ, variation selectors)
@@ -1430,6 +1529,8 @@ struct BatchAccumulator {
     runs: Vec<BatchedTextRun>,
     text: String,
     style: Option<CellStyle>,
+    /// The pane's font; each run derives its own from this and its style.
+    base_font: Font,
     font: Font,
     fg: Hsla,
     underline: bool,
@@ -1441,12 +1542,13 @@ struct BatchAccumulator {
 }
 
 impl BatchAccumulator {
-    fn new(font: Font) -> Self {
+    fn new(base_font: Font) -> Self {
         Self {
             runs: Vec::new(),
             text: String::new(),
             style: None,
-            font,
+            font: base_font.clone(),
+            base_font,
             fg: Hsla::default(),
             underline: false,
             undercurl: false,
@@ -1457,9 +1559,9 @@ impl BatchAccumulator {
         }
     }
 
-    fn can_append(&self, style: &CellStyle, line: i32, col: usize) -> bool {
+    fn can_append(&self, style: CellStyle, line: i32, col: usize) -> bool {
         match &self.style {
-            Some(cs) => *cs == *style && self.line == line && col == self.col_end,
+            Some(cs) => *cs == style && self.line == line && col == self.col_end,
             None => false,
         }
     }
@@ -1483,27 +1585,22 @@ impl BatchAccumulator {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn start(
-        &mut self,
-        c: char,
-        cell_cols: usize,
-        style: CellStyle,
-        font: Font,
-        fg: Hsla,
-        underline: bool,
-        undercurl: bool,
-        strikethrough: bool,
-        line: i32,
-        col_start: usize,
-    ) {
+    fn start(&mut self, c: char, cell_cols: usize, style: CellStyle, line: i32, col_start: usize) {
         self.text.push(c);
-        self.style = Some(style);
+        // One font per run, not per cell: the clone bumps shared strings.
+        let mut font = self.base_font.clone();
+        if style.bold {
+            font.weight = FontWeight::BOLD;
+        }
+        if style.italic {
+            font.style = FontStyle::Italic;
+        }
         self.font = font;
-        self.fg = fg;
-        self.underline = underline;
-        self.undercurl = undercurl;
-        self.strikethrough = strikethrough;
+        self.fg = style.fg;
+        self.underline = style.underline;
+        self.undercurl = style.undercurl;
+        self.strikethrough = style.strikethrough;
+        self.style = Some(style);
         self.line = line;
         self.col_start = col_start;
         self.col_end = col_start + cell_cols;
@@ -1588,7 +1685,7 @@ impl TerminalElement {
 
 impl Element for TerminalElement {
     type RequestLayoutState = ();
-    type PrepaintState = Option<LayoutState>;
+    type PrepaintState = Option<Arc<LayoutState>>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -1762,8 +1859,12 @@ impl Element for TerminalElement {
             // 3b. Hyperlink underline (Ctrl+hover)
             paint::overlay::paint_hyperlink_underline(self, &layout, &geom, window);
 
-            // 4. Primary cursor
-            paint::cursor::paint_cursor(&layout, &geom, base_font, font_size, window, cx);
+            // 4. Primary cursor, skipped on the off phase of a blink. The
+            // layout keeps the cursor either way, so the IME popup anchor and
+            // the memoized layout do not follow the blink.
+            if self.cursor_visible {
+                paint::cursor::paint_cursor(&layout, &geom, base_font, font_size, window, cx);
+            }
 
             // 4b. Copy-mode / mouse-selection secondary marker
             paint::cursor::paint_anchor_cursor(&layout, &geom, base_font, font_size, window, cx);
@@ -2776,12 +2877,11 @@ mod golden_frame_tests {
         let theme = crate::theme::paneflow_dark();
 
         assert!(
-            cursor_from_content(cursor, true, true, white(), CursorShape::Block, &theme,).is_some(),
+            cursor_from_content(cursor, true, white(), CursorShape::Block, &theme).is_some(),
             "focused terminals should keep the live cursor"
         );
         assert!(
-            cursor_from_content(cursor, true, false, white(), CursorShape::Block, &theme,)
-                .is_none(),
+            cursor_from_content(cursor, false, white(), CursorShape::Block, &theme).is_none(),
             "unfocused terminals must not paint a hollow cursor outline"
         );
     }
@@ -2790,15 +2890,8 @@ mod golden_frame_tests {
     fn configured_custom_cursor_shapes_override_native_fallbacks() {
         let block_cursor = renderable_cursor_at(0, CursorShape::Block, 'a');
         let theme = crate::theme::paneflow_dark();
-        let vintage = cursor_from_content(
-            block_cursor,
-            true,
-            true,
-            white(),
-            CursorShape::Vintage,
-            &theme,
-        )
-        .unwrap();
+        let vintage =
+            cursor_from_content(block_cursor, true, white(), CursorShape::Vintage, &theme).unwrap();
         assert_eq!(vintage.shape, CursorShape::Vintage);
         assert!(
             vintage.text.is_none(),
@@ -2808,7 +2901,6 @@ mod golden_frame_tests {
         let underline_cursor = renderable_cursor_at(0, CursorShape::Underline, 'a');
         let double = cursor_from_content(
             underline_cursor,
-            true,
             true,
             white(),
             CursorShape::DoubleUnderline,
@@ -2829,21 +2921,20 @@ mod golden_frame_tests {
         let mut cursor = renderable_cursor_at(0, CursorShape::Block, 'x');
         cursor.bg = explicit_bg;
 
-        let info = cursor_from_content(cursor, true, true, white(), CursorShape::Block, &theme)
+        let info = cursor_from_content(cursor, true, white(), CursorShape::Block, &theme)
             .expect("cursor visible");
         assert_eq!(info.cell_bg, rgb_to_hsla(12, 34, 56));
 
         let mut inverse = renderable_cursor_at(0, CursorShape::Block, 'x');
         inverse.fg = Color::Spec(Rgb { r: 90, g: 8, b: 7 });
         inverse.flags = CellFlags::INVERSE;
-        let info = cursor_from_content(inverse, true, true, white(), CursorShape::Block, &theme)
+        let info = cursor_from_content(inverse, true, white(), CursorShape::Block, &theme)
             .expect("cursor visible");
         assert_eq!(info.cell_bg, rgb_to_hsla(90, 8, 7));
 
         let transparent = renderable_cursor_at(0, CursorShape::Block, 'x');
-        let info =
-            cursor_from_content(transparent, true, true, white(), CursorShape::Block, &theme)
-                .expect("cursor visible");
+        let info = cursor_from_content(transparent, true, white(), CursorShape::Block, &theme)
+            .expect("cursor visible");
         assert_eq!(info.cell_bg.a, 0.0);
     }
 
@@ -3233,6 +3324,136 @@ mod golden_frame_tests {
         assert!(
             state.rects.iter().all(|rect| rect.color == card_bg),
             "neutral panel backgrounds should align with the Codex panel color"
+        );
+    }
+}
+
+#[cfg(test)]
+mod layout_memo_tests {
+    //! Issue #344: the layout memo must survive a cursor blink and must not
+    //! survive a font-size change. Both are properties of `LayoutCacheKey`,
+    //! so they are pinned through the key one real element produces rather
+    //! than through a live window.
+    use super::*;
+    use crate::terminal::{TerminalState, TerminalView};
+    use gpui::{AppContext as _, TestAppContext};
+
+    fn test_font() -> Font {
+        Font {
+            family: "test-mono".into(),
+            features: gpui::FontFeatures::default(),
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        }
+    }
+
+    /// The metrics `resolve_frame_metrics` would produce for one point size,
+    /// minus the `Window` it needs for the font-id resolution and the probe.
+    fn frame_metrics_at(size_points: f32) -> TerminalFrameMetrics {
+        let settings = font::FontSettings {
+            font: test_font(),
+            size: size_points,
+            line_height: DEFAULT_LINE_HEIGHT,
+            cell_width: DEFAULT_CELL_WIDTH,
+        };
+        let font_size = font::font_points_to_pixels(size_points);
+        TerminalFrameMetrics {
+            dimensions: font::cell_dimensions(&settings, font_size),
+            base_font: settings.font,
+            font_size,
+        }
+    }
+
+    struct Fixture {
+        backend: TerminalSessionBackend,
+        focus_handle: gpui::FocusHandle,
+        view: gpui::Entity<TerminalView>,
+        layout_cache: SharedLayoutCache,
+    }
+
+    impl Fixture {
+        fn new(cx: &mut TestAppContext) -> Self {
+            let state = TerminalState::new_display_only(24, 80);
+            let backend = state.session_backend();
+            let focus_handle = cx.update(|cx| cx.focus_handle());
+            let view = cx.update(|cx| cx.new(|cx| TerminalView::display_only_for_test(1, cx)));
+            Self {
+                backend,
+                focus_handle,
+                view,
+                layout_cache: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// One focused, idle element, varying only in the blink phase and the
+        /// frame metrics the view resolved for it.
+        fn element(
+            &self,
+            cursor_visible: bool,
+            frame_metrics: TerminalFrameMetrics,
+        ) -> TerminalElement {
+            TerminalElement::new(
+                self.backend.clone(),
+                cursor_visible,
+                true,
+                None,
+                None,
+                Arc::new(Mutex::new(Point::default())),
+                Vec::new(),
+                None,
+                None,
+                String::new(),
+                self.focus_handle.clone(),
+                self.view.clone(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(Mutex::new(None)),
+                Arc::new(Mutex::new(None)),
+                Vec::new(),
+                CursorShape::Block,
+                None,
+                true,
+                true,
+                frame_metrics,
+                false,
+                self.layout_cache.clone(),
+                #[cfg(debug_assertions)]
+                None,
+            )
+        }
+    }
+
+    fn key_of(element: &TerminalElement) -> LayoutCacheKey {
+        let bounds = Bounds::new(Point::default(), gpui::size(px(800.0), px(600.0)));
+        element.layout_cache_key(7, 1, bounds, 0, 24)
+    }
+
+    /// The memo hit rate for an unfocused idle pane during a blink is 100%:
+    /// two keys built on opposite phases of the blink are the same key.
+    #[gpui::test]
+    fn layout_cache_key_ignores_the_blink_phase(cx: &mut TestAppContext) {
+        let fixture = Fixture::new(cx);
+        let on_phase = key_of(&fixture.element(true, frame_metrics_at(DEFAULT_FONT_SIZE)));
+        let off_phase = key_of(&fixture.element(false, frame_metrics_at(DEFAULT_FONT_SIZE)));
+        assert!(
+            on_phase == off_phase,
+            "a blink tick must not invalidate the memoized layout"
+        );
+    }
+
+    /// `Cmd+=` / `Cmd+-` / `Cmd+0` change the cell grid, so every pane must
+    /// re-lay-out: the key follows the font size through the dimensions.
+    #[gpui::test]
+    fn layout_cache_key_follows_the_font_size(cx: &mut TestAppContext) {
+        let fixture = Fixture::new(cx);
+        let base = key_of(&fixture.element(true, frame_metrics_at(DEFAULT_FONT_SIZE)));
+        let zoomed_in = key_of(&fixture.element(true, frame_metrics_at(DEFAULT_FONT_SIZE + 1.0)));
+        let zoomed_out = key_of(&fixture.element(true, frame_metrics_at(DEFAULT_FONT_SIZE - 1.0)));
+        assert!(base != zoomed_in, "zooming in must miss the layout memo");
+        assert!(base != zoomed_out, "zooming out must miss the layout memo");
+        assert!(
+            base == key_of(&fixture.element(true, frame_metrics_at(DEFAULT_FONT_SIZE))),
+            "resetting to the same size must hit the layout memo again"
         );
     }
 }

@@ -124,7 +124,81 @@ pub(crate) fn ensure_minimum_contrast(fg: Hsla, bg: Hsla, min_lc: f32) -> Hsla {
     if min_lc <= 0.0 {
         return fg;
     }
+    contrast_cache_get_or_insert(fg, bg, min_lc)
+}
 
+/// Number of slots in the direct-mapped contrast cache.
+///
+/// A terminal grid holds tens of thousands of cells drawn from a handful of
+/// distinct (foreground, background) pairs, so a small table absorbs
+/// essentially all of the traffic. Direct-mapped rather than a `HashMap`
+/// because a collision here costs one recomputation, which is exactly what the
+/// uncached path already did, while a map would cost an allocation and
+/// unbounded growth over a long session.
+const CONTRAST_CACHE_SLOTS: usize = 128;
+
+#[derive(Clone, Copy)]
+struct ContrastEntry {
+    key: [u32; 9],
+    value: Hsla,
+}
+
+thread_local! {
+    /// Thread-local because the layout pass is single-threaded per window;
+    /// sharing it would trade `powf` calls for lock traffic on the hottest
+    /// loop in the renderer.
+    static CONTRAST_CACHE: std::cell::RefCell<[Option<ContrastEntry>; CONTRAST_CACHE_SLOTS]> =
+        const { std::cell::RefCell::new([None; CONTRAST_CACHE_SLOTS]) };
+}
+
+/// Exact bit pattern of the three inputs.
+///
+/// Compared for equality, never interpreted, so `-0.0` versus `0.0` and NaN
+/// only ever cost a miss.
+fn contrast_key(fg: Hsla, bg: Hsla, min_lc: f32) -> [u32; 9] {
+    [
+        fg.h.to_bits(),
+        fg.s.to_bits(),
+        fg.l.to_bits(),
+        fg.a.to_bits(),
+        bg.h.to_bits(),
+        bg.s.to_bits(),
+        bg.l.to_bits(),
+        bg.a.to_bits(),
+        min_lc.to_bits(),
+    ]
+}
+
+/// FNV-1a over the key, folded to a slot index.
+fn contrast_slot(key: &[u32; 9]) -> usize {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for word in key {
+        hash ^= u64::from(*word);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash as usize) % CONTRAST_CACHE_SLOTS
+}
+
+fn contrast_cache_get_or_insert(fg: Hsla, bg: Hsla, min_lc: f32) -> Hsla {
+    let key = contrast_key(fg, bg, min_lc);
+    let slot = contrast_slot(&key);
+    CONTRAST_CACHE.with(|cache| {
+        if let Ok(cache) = cache.try_borrow()
+            && let Some(entry) = cache[slot].as_ref()
+            && entry.key == key
+        {
+            return entry.value;
+        }
+        let value = compute_minimum_contrast(fg, bg, min_lc);
+        if let Ok(mut cache) = cache.try_borrow_mut() {
+            cache[slot] = Some(ContrastEntry { key, value });
+        }
+        value
+    })
+}
+
+/// The uncached three-stage search. See [`ensure_minimum_contrast`].
+fn compute_minimum_contrast(fg: Hsla, bg: Hsla, min_lc: f32) -> Hsla {
     if apca_contrast(fg, bg).abs() >= min_lc {
         return fg;
     }
@@ -301,6 +375,266 @@ pub(super) fn rgb_to_hsla(r: u8, g: u8, b: u8) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cache is transparent or it is a rendering bug: every hit must
+    /// return exactly what the uncached search would have. Sweeps enough
+    /// distinct pairs to overflow `CONTRAST_CACHE_SLOTS`, so evictions and
+    /// index collisions are covered too.
+    #[test]
+    fn the_contrast_cache_never_changes_the_answer() {
+        let min_lc = 45.0;
+        let mut pairs = Vec::new();
+        for step in 0..(CONTRAST_CACHE_SLOTS * 3) {
+            let t = step as f32 / (CONTRAST_CACHE_SLOTS * 3) as f32;
+            let fg = Hsla {
+                h: t,
+                s: 0.6,
+                l: 0.5 + t * 0.4,
+                a: 1.0,
+            };
+            let bg = Hsla {
+                h: 1.0 - t,
+                s: 0.3,
+                l: 0.5 - t * 0.4,
+                a: 1.0,
+            };
+            pairs.push((fg, bg));
+        }
+
+        for (fg, bg) in &pairs {
+            let cached = ensure_minimum_contrast(*fg, *bg, min_lc);
+            let direct = compute_minimum_contrast(*fg, *bg, min_lc);
+            assert_eq!(
+                (cached.h, cached.s, cached.l, cached.a),
+                (direct.h, direct.s, direct.l, direct.a),
+                "cache diverged for fg={fg:?} bg={bg:?}"
+            );
+        }
+        // Second pass: now served from the table rather than computed.
+        for (fg, bg) in &pairs {
+            let cached = ensure_minimum_contrast(*fg, *bg, min_lc);
+            let direct = compute_minimum_contrast(*fg, *bg, min_lc);
+            assert_eq!(
+                (cached.h, cached.s, cached.l),
+                (direct.h, direct.s, direct.l)
+            );
+        }
+    }
+
+    /// `min_lc` is part of the key: two call sites asking for different
+    /// thresholds on the same colors must not share an entry.
+    #[test]
+    fn the_contrast_cache_keys_on_the_threshold_too() {
+        let fg = Hsla {
+            h: 0.1,
+            s: 0.5,
+            l: 0.52,
+            a: 1.0,
+        };
+        let bg = Hsla {
+            h: 0.1,
+            s: 0.5,
+            l: 0.48,
+            a: 1.0,
+        };
+        let lenient = ensure_minimum_contrast(fg, bg, 15.0);
+        let strict = ensure_minimum_contrast(fg, bg, 75.0);
+        assert_ne!(
+            (lenient.l, lenient.s),
+            (strict.l, strict.s),
+            "a stricter threshold must move the foreground further"
+        );
+        assert_eq!(strict.l, compute_minimum_contrast(fg, bg, 75.0).l);
+    }
+
+    fn bits(color: Hsla) -> [u32; 4] {
+        [
+            color.h.to_bits(),
+            color.s.to_bits(),
+            color.l.to_bits(),
+            color.a.to_bits(),
+        ]
+    }
+
+    /// Every foreground slot of every bundled theme against every background
+    /// the renderer can put behind it: the theme grounds, the selection, and
+    /// the sixteen ANSI colors a program can paint as a cell background.
+    fn bundled_theme_pairs() -> Vec<(&'static str, Hsla, Hsla)> {
+        let mut pairs = Vec::new();
+        for (name, build) in crate::theme::THEMES {
+            let theme = build();
+            let ansi = [
+                theme.black,
+                theme.red,
+                theme.green,
+                theme.yellow,
+                theme.blue,
+                theme.magenta,
+                theme.cyan,
+                theme.white,
+                theme.bright_black,
+                theme.bright_red,
+                theme.bright_green,
+                theme.bright_yellow,
+                theme.bright_blue,
+                theme.bright_magenta,
+                theme.bright_cyan,
+                theme.bright_white,
+            ];
+            let mut foregrounds = vec![
+                theme.foreground,
+                theme.bright_foreground,
+                theme.dim_foreground,
+                theme.dim_black,
+                theme.dim_red,
+                theme.dim_green,
+                theme.dim_yellow,
+                theme.dim_blue,
+                theme.dim_magenta,
+                theme.dim_cyan,
+                theme.dim_white,
+            ];
+            foregrounds.extend(ansi);
+            let mut backgrounds = vec![theme.background, theme.ansi_background, theme.selection];
+            backgrounds.extend(ansi);
+            for fg in &foregrounds {
+                for bg in &backgrounds {
+                    pairs.push((*name, *fg, *bg));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// The cache must be invisible on the pairs the renderer actually feeds
+    /// it: every bundled theme, at the threshold `build_layout` passes. The
+    /// sweep holds more distinct keys than the table has slots and lands
+    /// several of them in one slot, so it exercises eviction and index
+    /// collisions rather than just warm hits.
+    #[test]
+    fn the_contrast_cache_matches_the_uncached_search_across_the_bundled_themes() {
+        let min_lc = crate::terminal::element::MIN_APCA_CONTRAST;
+        let pairs = bundled_theme_pairs();
+
+        let mut keys: Vec<[u32; 9]> = pairs
+            .iter()
+            .map(|(_, fg, bg)| contrast_key(*fg, *bg, min_lc))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert!(
+            keys.len() > CONTRAST_CACHE_SLOTS,
+            "sweep must overflow the table: {} distinct keys for {CONTRAST_CACHE_SLOTS} slots",
+            keys.len()
+        );
+        let mut occupancy = [0usize; CONTRAST_CACHE_SLOTS];
+        for key in &keys {
+            occupancy[contrast_slot(key)] += 1;
+        }
+        let colliding_slots = occupancy.iter().filter(|count| **count > 1).count();
+        assert!(
+            colliding_slots > 0,
+            "sweep must collide inside the table to cover the miss-on-occupied path"
+        );
+
+        // Pass 0 populates, pass 1 replays in the same order (hits where the
+        // slot survived, recomputation where it was evicted), pass 2 replays
+        // reversed so the eviction order differs.
+        for pass in 0..3 {
+            let ordered: Box<dyn Iterator<Item = &(&str, Hsla, Hsla)>> = if pass == 2 {
+                Box::new(pairs.iter().rev())
+            } else {
+                Box::new(pairs.iter())
+            };
+            for (name, fg, bg) in ordered {
+                let cached = ensure_minimum_contrast(*fg, *bg, min_lc);
+                let direct = compute_minimum_contrast(*fg, *bg, min_lc);
+                assert_eq!(
+                    bits(cached),
+                    bits(direct),
+                    "pass {pass}: cache diverged for theme {name:?} fg={fg:?} bg={bg:?}"
+                );
+            }
+        }
+    }
+
+    /// A theme hot-reload (`theme/watcher.rs`) swaps every color the renderer
+    /// feeds this cache but never clears the table - there is no clear API.
+    /// That is only sound because a hit needs the exact bit pattern of both
+    /// colors and the threshold, so an entry computed for the old theme can
+    /// never answer for the new one. Proven two ways rather than assumed:
+    /// every ordered pair of bundled themes, priming with the old one and
+    /// sweeping the new one against the uncached search; and an adversarial
+    /// neighbour - the same background and threshold, a foreground one or
+    /// more ULPs away in lightness, hashed to the same slot - which is the
+    /// closest a reload can come to a false hit.
+    #[test]
+    fn a_theme_reload_never_serves_a_stale_contrast_entry() {
+        let min_lc = crate::terminal::element::MIN_APCA_CONTRAST;
+        let pairs = bundled_theme_pairs();
+        let names: Vec<&str> = crate::theme::THEMES.iter().map(|(n, _)| *n).collect();
+
+        for old in &names {
+            for new in &names {
+                if old == new {
+                    continue;
+                }
+                for (name, fg, bg) in &pairs {
+                    if name == old {
+                        ensure_minimum_contrast(*fg, *bg, min_lc);
+                    }
+                }
+                for (name, fg, bg) in &pairs {
+                    if name == new {
+                        assert_eq!(
+                            bits(ensure_minimum_contrast(*fg, *bg, min_lc)),
+                            bits(compute_minimum_contrast(*fg, *bg, min_lc)),
+                            "reload {old:?} -> {new:?} served a stale entry for fg={fg:?} bg={bg:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let theme = crate::theme::paneflow_dark();
+        let (fg, bg) = (theme.foreground, theme.background);
+        assert!(
+            apca_contrast(fg, bg).abs() >= min_lc,
+            "the default theme's foreground passes through uncorrected"
+        );
+        let key = contrast_key(fg, bg, min_lc);
+        let slot = contrast_slot(&key);
+        let neighbour = (1u32..100_000)
+            .map(|ulps| Hsla {
+                l: f32::from_bits(fg.l.to_bits() + ulps),
+                ..fg
+            })
+            .find(|candidate| contrast_slot(&contrast_key(*candidate, bg, min_lc)) == slot)
+            .expect("a 128-slot table has a same-slot neighbour within a few hundred ULPs");
+        assert_ne!(bits(neighbour), bits(fg));
+        assert!(apca_contrast(neighbour, bg).abs() >= min_lc);
+
+        let before = ensure_minimum_contrast(fg, bg, min_lc);
+        let occupant = CONTRAST_CACHE.with(|cache| cache.borrow()[slot].map(|entry| entry.key));
+        assert_eq!(occupant, Some(key), "priming must land in the shared slot");
+
+        let after = ensure_minimum_contrast(neighbour, bg, min_lc);
+        assert_eq!(
+            bits(after),
+            bits(compute_minimum_contrast(neighbour, bg, min_lc))
+        );
+        assert_ne!(
+            bits(after),
+            bits(before),
+            "the neighbour's own answer differs from the occupant's, so a stale hit would be visible"
+        );
+        let occupant = CONTRAST_CACHE.with(|cache| cache.borrow()[slot].map(|entry| entry.key));
+        assert_eq!(
+            occupant,
+            Some(contrast_key(neighbour, bg, min_lc)),
+            "the colliding slot was overwritten, not served"
+        );
+    }
 
     #[test]
     fn default_ground_colors_use_the_terminal_theme_slots() {

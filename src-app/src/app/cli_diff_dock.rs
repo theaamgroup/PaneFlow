@@ -118,6 +118,19 @@ fn park_dock_slot(parked: &mut HashMap<u64, DiffDockSlot>, owner: Option<u64>, s
     }
 }
 
+/// Forget a parked slot's snapshot when it was taken at `from` (issue #347):
+/// the session's tab now stands on another checkout, and
+/// [`PaneFlowApp::restore_diff_dock`] reopens a snapshot-less slot on the
+/// active tab's checkout, which by then is the new one. A snapshot of some
+/// other folder is left alone - the dock was opened there on purpose.
+fn retarget_parked_dock_slot(slot: &mut DiffDockSlot, from: &str) -> bool {
+    if slot.data.as_ref().is_some_and(|data| data.cwd == from) {
+        slot.data = None;
+        return true;
+    }
+    false
+}
+
 /// Drop the slots of sessions that no longer exist in `workspaces`.
 fn prune_parked_dock_slots(parked: &mut HashMap<u64, DiffDockSlot>, workspaces: &[Workspace]) {
     parked.retain(|id, _| session_is_live(workspaces, *id));
@@ -292,6 +305,35 @@ impl PaneFlowApp {
         );
     }
 
+    /// Point tab `tab_id`'s dock at `to` when it is showing `from` (issue
+    /// #347): the tab's checkout changed under it. The live dock recomputes
+    /// in place; a parked slot forgets its snapshot so it reopens on the new
+    /// checkout when the tab comes back. A dock showing any other folder is
+    /// untouched.
+    pub(crate) fn retarget_diff_dock_for_tab(
+        &mut self,
+        tab_id: u64,
+        from: &str,
+        to: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff_dock.owner == Some(tab_id) {
+            if self.diff_dock.open
+                && self
+                    .diff_dock
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.cwd == from)
+            {
+                self.refresh_diff_dock(to.to_string(), cx);
+            }
+        } else if let Some(slot) = self.diff_dock.parked.get_mut(&tab_id)
+            && retarget_parked_dock_slot(slot, from)
+        {
+            cx.notify();
+        }
+    }
+
     /// Live CWDs of terminal tabs in both the mounted and parked diff docks.
     /// These terminals are not represented by workspace panes.
     pub(crate) fn diff_dock_terminal_cwds(&self, cx: &App) -> Vec<std::path::PathBuf> {
@@ -412,9 +454,7 @@ impl PaneFlowApp {
             // Reopening on the snapshot's own folder, not the workspace root:
             // the two are the same today, and asking the data keeps the warm
             // snapshot valid if a dock is ever opened on a subfolder.
-            let cwd = cwd
-                .or_else(|| self.active_workspace().map(|ws| ws.cwd.clone()))
-                .unwrap_or_default();
+            let cwd = cwd.or_else(|| self.active_checkout()).unwrap_or_default();
             self.open_diff_dock_panel(cwd, cx);
         }
     }
@@ -551,6 +591,51 @@ mod tests {
             active_tab: 0,
             data: None,
         }
+    }
+
+    #[test]
+    fn a_parked_dock_forgets_a_snapshot_of_the_checkout_its_tab_left() {
+        // Issue #347 review, finding 11: binding a tab never re-targeted its
+        // dock, so the slot came back showing the checkout the tab had left.
+        let mut parked = slot(true, true, 1);
+        parked.data = Some(DiffDockData::loading("/repo".to_string()));
+        assert!(
+            !retarget_parked_dock_slot(&mut parked, "/other"),
+            "a dock opened on some other folder was opened there on purpose"
+        );
+        assert!(parked.data.is_some());
+        assert!(retarget_parked_dock_slot(&mut parked, "/repo"));
+        assert!(
+            parked.data.is_none(),
+            "a snapshot-less slot reopens on the active tab's checkout, which is the new one"
+        );
+        assert!(
+            parked.open,
+            "forgetting the snapshot does not close the dock"
+        );
+        assert!(!retarget_parked_dock_slot(&mut parked, "/repo"));
+    }
+
+    #[test]
+    fn retargeting_refreshes_the_live_dock_and_forgets_the_parked_one() {
+        let src = include_str!("cli_diff_dock.rs");
+        let body = crate::source_probe::source_slice(
+            src,
+            "pub(crate) fn retarget_diff_dock_for_tab(",
+            "/// Live CWDs of terminal tabs in both the mounted and parked diff docks.",
+        );
+        assert!(
+            body.contains("self.diff_dock.owner == Some(tab_id)"),
+            "the live dock is only re-targeted when this tab owns it: {body}"
+        );
+        assert!(
+            body.contains("self.refresh_diff_dock(to.to_string(), cx);"),
+            "the live dock recomputes on the new checkout: {body}"
+        );
+        assert!(
+            body.contains("retarget_parked_dock_slot(slot, from)"),
+            "a parked slot goes through the pure helper: {body}"
+        );
     }
 
     /// A workspace on `cwd` holding `titles.len()` named tabs, in order, with

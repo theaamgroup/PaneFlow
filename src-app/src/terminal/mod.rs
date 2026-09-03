@@ -16,10 +16,14 @@ mod ghostty_stress;
 mod input;
 pub mod kitty;
 mod marks;
+#[cfg(test)]
+mod perf_bench;
 mod pty_session;
 mod search;
 mod service_detector;
 pub mod shell;
+#[cfg(test)]
+pub(crate) mod test_allocator;
 pub mod types;
 pub mod view;
 

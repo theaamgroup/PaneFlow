@@ -581,3 +581,73 @@ fn workspace_pinned_defaults_to_false_when_the_key_is_absent() {
     let written = serde_json::to_string(&ws).unwrap();
     assert!(!written.contains("pinned"), "{written}");
 }
+
+/// Issue #347: a tab's worktree binding is additive on v2, exactly like
+/// `pinned` - `SESSION_SCHEMA_VERSION` must NOT move for it.
+#[test]
+fn tab_worktree_survives_a_session_round_trip() {
+    let mut ws = make_workspace(
+        "bound",
+        "/home/user/project",
+        vec![TabSession::empty(), TabSession::empty()],
+    );
+    ws.tabs[1].worktree = Some("/home/user/project.worktrees/parser".to_string());
+
+    let json = serde_json::to_string(&ws).unwrap();
+    assert!(
+        json.contains("\"worktree\":\"/home/user/project.worktrees/parser\""),
+        "{json}"
+    );
+
+    let back: WorkspaceSession = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, ws);
+    assert_eq!(back.tabs[0].worktree, None, "an unbound tab stays unbound");
+    assert_eq!(
+        back.tabs[1].worktree.as_deref(),
+        Some("/home/user/project.worktrees/parser")
+    );
+}
+
+#[test]
+fn tab_worktree_defaults_to_none_when_the_key_is_absent() {
+    // A 0.2.1 session.json, written before the field existed: every tab
+    // restores unbound rather than failing to load.
+    let ws: WorkspaceSession = serde_json::from_str(
+        r#"{"title":"old","cwd":"/tmp/old","tabs":[{"title":"sprint 3","layout":null},{"title":"","layout":null}]}"#,
+    )
+    .unwrap();
+    assert_eq!(ws.tabs.len(), 2);
+    assert!(
+        ws.tabs.iter().all(|tab| tab.worktree.is_none()),
+        "an older session must restore every tab unbound"
+    );
+
+    // And an unbound tab writes no key, so no existing file gains one.
+    let written = serde_json::to_string(&ws).unwrap();
+    assert!(!written.contains("worktree"), "{written}");
+}
+
+#[test]
+fn tab_worktree_needs_no_schema_bump() {
+    let state = SessionState {
+        version: SESSION_SCHEMA_VERSION,
+        active_workspace: 0,
+        workspaces: vec![make_workspace(
+            "main",
+            "/home/user/project",
+            vec![TabSession {
+                title: "parser".to_string(),
+                layout: None,
+                worktree: Some("/home/user/project.worktrees/parser".to_string()),
+            }],
+        )],
+        pending_worktree_teardowns: vec![],
+        mode: AppMode::default(),
+        diff_scope: None,
+        primary_sidebar_collapsed: false,
+    };
+    let json = serde_json::to_string_pretty(&state).unwrap();
+    let restored: SessionState = serde_json::from_str(&json).unwrap();
+    assert_eq!(state, restored);
+    assert_eq!(restored.version, 2, "the binding rides v2 unchanged");
+}

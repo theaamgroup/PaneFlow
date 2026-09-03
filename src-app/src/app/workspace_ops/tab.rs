@@ -52,7 +52,28 @@ impl PaneFlowApp {
             return false;
         };
         let ws_id = ws.id;
-        let cwd = (!ws.cwd.is_empty()).then(|| std::path::PathBuf::from(&ws.cwd));
+        // The active tab is the one this surface lands in when it is empty (the
+        // palette's own tab, and any tab whose last pane closed), so its
+        // worktree binding decides the cwd (issue #347). A surface that opens a
+        // NEW tab instead starts unbound, at the workspace root. Reading
+        // `ws.cwd` directly here was the one pane-creation path that bypassed
+        // `Tab::confine_cwd`, which meant an agent picked from the palette in a
+        // bound tab spawned in the wrong checkout.
+        let fills_active_tab =
+            ws.active_tab().root.is_none() && ws.active_tab().saved_layout.is_none();
+        let cwd = fills_active_tab
+            .then(|| ws.active_tab().worktree.clone())
+            .flatten()
+            .or_else(|| (!ws.cwd.is_empty()).then(|| std::path::PathBuf::from(&ws.cwd)));
+        // The same gate every other pane-creation path holds
+        // (`split_pane`, `surface.split`, `workspace.up`): a checkout being
+        // torn down is not a place to start a shell.
+        if let Some(cwd) = cwd.as_deref()
+            && self.pending_worktree_teardown_conflicts(cwd)
+        {
+            self.show_toast("Worktree is still being retired", cx);
+            return false;
+        }
         // A preset label reaches the sidebar verbatim, and a custom command's
         // name is user input: strip CLI decoration (spinners, zero-width
         // glyphs) the way every other title path does.
@@ -205,6 +226,12 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Issue #347: a tab bound to a worktree reviews that checkout, so
+        // switching tab inside the active workspace can change what Diff mode
+        // is looking at - which the workspace-switch reconcile below never
+        // covers, because the workspace did not change. The dock needs no help:
+        // it already parks and restores per tab id.
+        let checkout_before = self.active_checkout();
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
             ws.set_active_tab(tab_idx);
         }
@@ -214,6 +241,9 @@ impl PaneFlowApp {
                 window.focus(&self.empty_workspace_focus, cx);
             }
             self.save_session(cx);
+            if self.active_checkout() != checkout_before {
+                self.reconcile_diff_after_workspace_change(cx);
+            }
         } else {
             self.select_workspace(ws_idx, window, cx);
         }
@@ -257,6 +287,10 @@ impl PaneFlowApp {
         if let Some(tab_id) = closed_tab_id {
             self.drop_diff_dock_for_tab(tab_id, cx);
         }
+        // The closed tab may have been the last reader of a worktree's git
+        // state (issue #347). The checkout itself is left alone: tearing it
+        // down is a separate, destructive decision.
+        self.prune_worktree_states();
         if let Some(record) = record {
             self.push_closed_record(ClosedRecord::Tab(record), cx);
         }

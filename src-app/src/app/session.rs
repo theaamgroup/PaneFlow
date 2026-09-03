@@ -666,18 +666,22 @@ impl PaneFlowApp {
                 }
                 workspace_terminals += n;
             }
+            // The binding is settled BEFORE the panes spawn: a bound tab's
+            // shells start in its checkout, not at the workspace root with
+            // only the row claiming the branch (issue #347).
+            let bound = restored_tab_worktree(&title, tab_session.worktree.as_deref());
+            let spawn_root = crate::workspace::tab_spawn_root(bound.as_deref(), &cwd);
             let root = restored_layout.map(|layout| {
                 let mut pane_deque: VecDeque<Entity<Pane>> = VecDeque::new();
-                let ws_cwd = cwd.clone();
                 LayoutTree::from_layout_node(&layout, &mut pane_deque, &mut |node| {
                     let surfaces = match node {
                         LayoutNode::Pane { surfaces } => surfaces.as_slice(),
                         _ => &[],
                     };
-                    Self::spawn_pane_from_surfaces(ws_id, surfaces, &ws_cwd, cx)
+                    Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)
                 })
             });
-            tabs.push(Tab::new(tab_session.title.clone(), root));
+            tabs.push(Tab::restored(tab_session.title.clone(), root, bound));
         }
         let mut workspace =
             Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
@@ -1174,6 +1178,31 @@ fn rehydrate_expanded_path(cwd: &str, rel: &str) -> Option<PathBuf> {
         return None;
     }
     Some(abs)
+}
+
+/// Rehydrate a tab's worktree binding (issue #347), dropping it when the
+/// checkout is gone.
+///
+/// A worktree can be removed between two runs - by `git worktree remove`, by
+/// another PaneFlow session tearing down its own, or by hand. Restoring a
+/// binding to a directory that no longer exists would spawn every pane of that
+/// tab into a missing path; dropping it simply returns the tab to unbound,
+/// which is the state it can always fall back to. Logged, so a binding that
+/// silently vanished can be traced.
+///
+/// Deliberately a plain `is_dir` and no canonicalization: this runs on the
+/// bootstrap path, and a stat is bounded where resolving symlinks across a
+/// dead network mount is not.
+fn restored_tab_worktree(workspace_title: &str, path: Option<&str>) -> Option<PathBuf> {
+    let path = PathBuf::from(path.filter(|p| !p.is_empty())?);
+    if path.is_dir() {
+        return Some(path);
+    }
+    log::warn!(
+        "session restore: workspace \"{workspace_title}\" had a tab bound to {}, which no longer exists; restoring it unbound",
+        path.display()
+    );
+    None
 }
 
 pub(super) fn rehydrate_managed_worktree(
@@ -2115,6 +2144,63 @@ mod tests {
             deferred,
             "deferred write must be skipped after a quit-time bump"
         );
+    }
+
+    #[test]
+    fn a_restored_bound_tab_spawns_its_panes_in_its_checkout() {
+        // Issue #347 review, finding 1: the spawn closure used the workspace
+        // cwd and the binding was only attached afterwards, so a tab bound to
+        // `feat/x` came back with its shells in the repository root on main.
+        let src = include_str!("session.rs");
+        let restore = crate::source_probe::source_slice(
+            src,
+            "for tab_session in ws_session.tabs.iter().take(MAX_TABS_PER_WORKSPACE) {",
+            "Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab)",
+        );
+        let bound_at = restore
+            .find("let bound = restored_tab_worktree(")
+            .expect("the binding must be resolved before the layout closure");
+        let root_at = restore
+            .find("crate::workspace::tab_spawn_root(bound.as_deref(), &cwd)")
+            .expect("the spawn root must derive from the binding");
+        let spawn_at = restore
+            .find("Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)")
+            .expect("the panes must spawn from the tab's own root");
+        assert!(bound_at < root_at && root_at < spawn_at, "{restore}");
+        assert!(
+            !restore.contains("&ws_cwd, cx)"),
+            "no restored pane may spawn from the workspace cwd once its tab is bound: {restore}"
+        );
+        assert!(
+            restore.contains("Tab::restored(tab_session.title.clone(), root, bound)"),
+            "the tab carries the same binding its panes spawned from: {restore}"
+        );
+    }
+
+    #[test]
+    fn a_tab_bound_to_a_missing_worktree_restores_unbound() {
+        // Issue #347: a 0.2.1 session has no binding at all.
+        assert_eq!(restored_tab_worktree("ws", None), None);
+        assert_eq!(restored_tab_worktree("ws", Some("")), None);
+        // A path that was removed between two runs is dropped, not resurrected.
+        let gone = std::env::temp_dir().join(format!(
+            "paneflow-347-gone-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        assert_eq!(restored_tab_worktree("ws", gone.to_str()), None);
+        // A directory that still exists keeps the binding verbatim.
+        let live = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            restored_tab_worktree("ws", live.path().to_str()),
+            Some(live.path().to_path_buf())
+        );
+        // A file is not a checkout either.
+        let file = live.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("write");
+        assert_eq!(restored_tab_worktree("ws", file.to_str()), None);
     }
 
     #[test]
