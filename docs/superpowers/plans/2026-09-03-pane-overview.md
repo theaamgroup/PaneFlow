@@ -1816,8 +1816,10 @@ with:
                         12.,
                         ui,
                     )
+                    .role(gpui::Role::Button)
+                    .aria_label(pane_overview_label.clone())
                     .delayed_tooltip(crate::ui_primitives::text_tooltip(
-                        "Show all panes · ⇧⌘P",
+                        pane_overview_label.clone(),
                     ))
                     .on_click(cx.listener(|_this, _: &ClickEvent, window, cx| {
                         window.dispatch_action(Box::new(crate::OpenPaneOverview), cx);
@@ -1826,6 +1828,20 @@ with:
                 ),
         );
 ```
+
+Bind the label once, above the `sidebar = sidebar.child(` statement:
+
+```rust
+        let pane_overview_label = SharedString::from("Show all panes · \u{21E7}\u{2318}P");
+```
+
+**The `role` + `aria_label` pair is not optional.** Issue #321 established the repo recipe for an
+icon button — `.role(Role::Button)` + `.aria_label(..)` bound to the same string as the tooltip +
+`.on_click` (never `on_mouse_down`, which AccessKit does not expose as activation) — and pinned it
+with the source-read guard `sidebar_toggle_is_an_accessible_named_button`
+(`window_chrome/title_bar.rs:390`). Without the pair, an icon-only control is invisible to a screen
+reader. Note the sidebar module currently has **zero** `aria_label` call sites, so this button is
+the first there; issue #340 covers retrofitting the rest.
 
 If `window.dispatch_action` is not the right call for this GPUI revision, use the form already used
 elsewhere in the file — find it with
