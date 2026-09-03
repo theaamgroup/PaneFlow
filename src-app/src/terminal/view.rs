@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use gpui::{
     App, ClipboardItem, Context, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
-    KeyContext, MouseButton, Render, Styled, Window, div, prelude::*,
+    KeyContext, MouseButton, Render, Role, Styled, Window, div, prelude::*,
 };
 use paneflow_config::schema::{TerminalConfig, TerminalSurfaceProfile};
 
@@ -1454,6 +1454,12 @@ impl TerminalView {
                 el.child(
                     div()
                         .id("search-status")
+                        // Status role so AccessKit reports the node and
+                        // screen readers announce count / No results /
+                        // Invalid regex changes while focus stays in the
+                        // field. The pinned GPUI has no live-region setter.
+                        .role(Role::Status)
+                        .aria_label(status_text.clone())
                         .flex_none()
                         .text_size(px(12.))
                         .text_color(status_color)
@@ -1955,6 +1961,31 @@ mod tests {
             scrollback.is_none(),
             "Expected None for an empty history, got: {scrollback:?}"
         );
+    }
+
+    /// Issue #323: the find-bar status ("3/10", "No results", "Invalid
+    /// regex") was a plain div with no role, so AccessKit never reported it
+    /// and screen-reader users typing in the field heard nothing when the
+    /// result count changed. This scan pins the status node to `Role::Status`
+    /// (the pinned GPUI exposes no separate live-region setter) with its text
+    /// as the accessible name.
+    #[test]
+    fn search_status_is_an_accessible_status_region() {
+        let source = include_str!("view.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production terminal view source");
+        let chain = source
+            .split(".id(\"search-status\")")
+            .nth(1)
+            .and_then(|rest| rest.split(".child(status_text.clone())").next())
+            .expect("view.rs builds the search-status node");
+        for needle in [".role(Role::Status)", ".aria_label(status_text.clone())"] {
+            assert!(
+                chain.contains(needle),
+                "search-status lost `{needle}`; AccessKit needs it to announce result changes"
+            );
+        }
     }
 
     #[test]
