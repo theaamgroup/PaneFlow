@@ -304,9 +304,9 @@ pub struct TerminalView {
     pub(super) color_emoji_enabled: bool,
     /// Whether copy mode (keyboard-driven selection) is active
     pub(super) copy_mode_active: bool,
-    /// Issue #299: this view is the source of an armed pane swap, so Escape
-    /// cancels swap mode instead of reaching the PTY. Set by
-    /// `PaneFlowApp::set_swap_source` on the source pane's terminal only, so
+    /// Issue #299: a pane swap is armed in this view's tab, so Escape cancels
+    /// swap mode instead of reaching the PTY. Set by
+    /// `PaneFlowApp::set_swap_source` on every terminal of the active tab, so
     /// swap state has one owner and no process-global mirror.
     pub(super) swap_mode_armed: bool,
     /// Copy mode cursor position in grid coordinates

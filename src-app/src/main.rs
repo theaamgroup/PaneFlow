@@ -1455,6 +1455,9 @@ struct PaneFlowApp {
     jump_cursor: Option<u64>,
     /// Source pane for swap mode, or `None` if not in swap mode.
     swap_source: Option<Entity<crate::pane::Pane>>,
+    /// Panes whose terminals `set_swap_source` armed for Escape, so the same
+    /// set is disarmed even if the layout changed meanwhile (issue #299).
+    swap_armed_panes: Vec<Entity<crate::pane::Pane>>,
     /// LIFO stack of recently closed panes for undo-close (US-014).
     /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
     /// `Cmd+Shift+T` restores whichever kind was closed most recently.
