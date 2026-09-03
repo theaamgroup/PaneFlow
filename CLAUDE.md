@@ -339,6 +339,7 @@ KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
 | `paneflow-mcp` | `crates/paneflow-mcp/` | Binary | Read-only stdio MCP server (see below) |
 | `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | GPU-free per-agent MCP config merge engine |
+| `paneflow-agent-setup` | `crates/paneflow-agent-setup/` | Library | GPU-free rulebook inventory (instruction files, skills, rules, hooks, MCP) behind the dock's Agent setup tab (#331) |
 | `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 16 agent CLIs |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |

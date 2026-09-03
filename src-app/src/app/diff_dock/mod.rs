@@ -29,6 +29,7 @@ mod model;
 mod new_tab_menu;
 mod options_menu;
 mod render;
+mod setup;
 mod surface_picker;
 mod tabs;
 
@@ -361,6 +362,17 @@ impl PaneFlowApp {
             // No toolbar either: the file header describes an open document,
             // and this tab is the one that has none yet.
             Some(DiffDockTab::PendingFile) => (None, render::render_pending_file_body(ui)),
+            // The inventory follows the dock's folder: a dock retargeted onto
+            // another checkout rescans, a repaint does not.
+            Some(DiffDockTab::Setup(view)) => {
+                let folder = if cwd.is_empty() {
+                    self.diff_setup_cwd()
+                } else {
+                    cwd.clone()
+                };
+                view.update(cx, |view, cx| view.sync_cwd(folder, cx));
+                (None, view.clone().into_any_element())
+            }
             // A file tab swaps the diff's files toolbar for its own header
             // (US-018): same 36 px band, describing the open document instead
             // of the working tree.

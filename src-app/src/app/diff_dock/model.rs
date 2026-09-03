@@ -48,6 +48,11 @@ pub(crate) enum DiffDockTab {
     /// waits for a click. At most one exists at a time, and the next document
     /// opened takes its slot.
     PendingFile,
+    /// The Agent setup inventory (issue #331): the instruction files, skills,
+    /// rules, hooks and MCP entries the agents in this folder read. Opened
+    /// from the `+` menu and the surface picker; at most one per dock, see
+    /// `super::setup::setup_tab_index`.
+    Setup(gpui::Entity<super::setup::SetupView>),
 }
 
 /// The chrome's read-only view of the dock state, bundled so the header and its

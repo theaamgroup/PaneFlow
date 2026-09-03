@@ -10,8 +10,8 @@
 //! the next project starts from the same question rather than inheriting an
 //! answer given for another repository.
 //!
-//! Three surfaces, matching the tabs the dock can actually host
-//! ([`super::model::DiffDockTab`]): Changes, Terminal, File. Nothing here opens
+//! Four surfaces, matching the tabs the dock can actually host
+//! ([`super::model::DiffDockTab`]): Changes, Terminal, File, Agent setup. Nothing here opens
 //! a surface itself - each card routes to the exact entry point the tab strip's
 //! `+` menu uses, so the two doors into the dock cannot drift apart.
 
@@ -64,6 +64,8 @@ pub(crate) enum DiffDockSurface {
     Changes,
     Terminal,
     File,
+    /// The Agent setup inventory (issue #331).
+    Setup,
 }
 
 impl PaneFlowApp {
@@ -86,6 +88,7 @@ impl PaneFlowApp {
             // Same as the `+` menu's File row: the Files tree is the picker, and
             // a row there opens the document as a dock tab.
             DiffDockSurface::File => self.open_diff_file_picker(window, cx),
+            DiffDockSurface::Setup => self.open_diff_setup_tab(window, cx),
         }
         cx.notify();
     }
@@ -120,7 +123,7 @@ pub(super) fn render_diff_picker_header(
 
 /// The card grid, centered in the dock body. Wraps rather than fixing a column
 /// count: at the dock's minimum width two cards fit per row, and a widened dock
-/// puts all three on one line.
+/// puts all four on one line.
 pub(super) fn render_diff_surface_picker(
     ui: crate::theme::UiColors,
     cx: &mut Context<PaneFlowApp>,
@@ -160,6 +163,14 @@ pub(super) fn render_diff_surface_picker(
                     "icons/file-text.svg",
                     "File",
                     DiffDockSurface::File,
+                    ui,
+                    cx,
+                ))
+                .child(card(
+                    "diff-dock-picker-setup",
+                    "icons/list.svg",
+                    "Agent setup",
+                    DiffDockSurface::Setup,
                     ui,
                     cx,
                 )),

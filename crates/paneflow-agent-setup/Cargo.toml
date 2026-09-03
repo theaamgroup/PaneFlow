@@ -1,0 +1,23 @@
+[package]
+name = "paneflow-agent-setup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "GPU-free inventory of the agent rulebook a workspace loads: instruction files, skills, rules, hooks and MCP entries, project-scoped and global (issue #331)."
+
+[dependencies]
+serde_json.workspace = true
+# `~/.codex/config.toml` `[mcp_servers.*]` keys. Same crate and version the
+# MCP installer already compiles, so nothing new enters the dependency graph.
+toml_edit = "0.25"
+# JSONC parsing (Gemini / opencode configs carry comments) plus the
+# `CLAUDE_CONFIG_DIR` / `CODEX_HOME` precedence rules, so this crate never
+# re-derives an agent's config location.
+paneflow-agent-config.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

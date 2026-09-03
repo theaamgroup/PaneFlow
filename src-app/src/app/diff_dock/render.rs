@@ -178,6 +178,7 @@ fn render_diff_tab(
         (DiffDockTab::Changes, _) => ("icons/plus-minus.svg", "Changes".to_string()),
         (DiffDockTab::Terminal(_), _) => ("icons/terminal.svg", "Terminal".to_string()),
         (DiffDockTab::PendingFile, _) => ("icons/file-text.svg", "Open a file".to_string()),
+        (DiffDockTab::Setup(_), _) => ("icons/list.svg", "Agent setup".to_string()),
         (_, Some((icon, label, _))) => (*icon, label.clone()),
         // Unreachable: `File` is the only remaining variant and it always
         // resolves `file` above. Kept total rather than panicking in a paint.
@@ -234,7 +235,10 @@ fn render_diff_tab(
 
     if matches!(
         tab,
-        DiffDockTab::Terminal(_) | DiffDockTab::File(_) | DiffDockTab::PendingFile
+        DiffDockTab::Terminal(_)
+            | DiffDockTab::File(_)
+            | DiffDockTab::PendingFile
+            | DiffDockTab::Setup(_)
     ) {
         // Cursor's grammar: a modified document trades the close glyph for a
         // dot at rest, the dot yields the slot back to the glyph while the

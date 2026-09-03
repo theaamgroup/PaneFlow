@@ -60,7 +60,7 @@ pub(super) fn render_diff_new_tab_menu(
                 "diff-dock-new-tab-file",
                 "icons/file-text.svg",
                 "File",
-                "secondary-g",
+                Some("secondary-g"),
                 ui,
             )
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -73,12 +73,28 @@ pub(super) fn render_diff_new_tab_menu(
                 "diff-dock-new-tab-terminal",
                 "icons/terminal.svg",
                 "Terminal",
-                "secondary-j",
+                Some("secondary-j"),
                 ui,
             )
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.close_diff_new_tab_menu(cx);
                 this.open_diff_terminal_tab(window, cx);
+            })),
+        )
+        .child(
+            // No chord (issue #331): the row spends no binding and adds no
+            // `keybindings/registry.rs` entry, so its shortcut column is
+            // omitted rather than left ragged.
+            menu_row(
+                "diff-dock-new-tab-setup",
+                "icons/list.svg",
+                "Agent setup",
+                None,
+                ui,
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_diff_new_tab_menu(cx);
+                this.open_diff_setup_tab(window, cx);
             })),
         );
 
@@ -99,12 +115,13 @@ pub(super) fn render_diff_new_tab_menu(
 /// `shortcut` is the binding as `keybindings::defaults` declares it, not a
 /// pre-rendered label: `secondary-` resolves to Ctrl on Linux and Windows and
 /// to Cmd on macOS, so the row has to be formatted here or it advertises a
-/// chord that does not exist on one of the three platforms.
+/// chord that does not exist on one of the three platforms. `None` is a row
+/// with no chord at all, which simply has no hint column.
 fn menu_row(
     id: &'static str,
     icon: &'static str,
     label: &'static str,
-    shortcut: &'static str,
+    shortcut: Option<&'static str>,
     ui: crate::theme::UiColors,
 ) -> AnimatedHover {
     select_item(id, false, ui)
@@ -126,12 +143,12 @@ fn menu_row(
                 .text_color(ui.text)
                 .child(label),
         )
-        .child(
+        .children(shortcut.map(|shortcut| {
             div()
                 .flex_none()
                 .whitespace_nowrap()
                 .text_size(px(12.))
                 .text_color(ui.muted)
-                .child(crate::keybindings::format_keystroke(shortcut)),
-        )
+                .child(crate::keybindings::format_keystroke(shortcut))
+        }))
 }
