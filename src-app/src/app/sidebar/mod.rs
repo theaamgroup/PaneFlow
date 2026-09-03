@@ -1938,6 +1938,11 @@ impl PaneFlowApp {
                         tab_idx,
                         position,
                     });
+                    // Issue #347: refresh the repository's branch and worktree
+                    // lists for the menu's Branch section. Off the render
+                    // thread, and only on this gesture - the menu is the only
+                    // reader.
+                    this.spawn_worktree_listing(ws_idx, cx);
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -2010,7 +2015,19 @@ impl PaneFlowApp {
             row_shell
         };
 
-        let row = squircle_row(row_shell, tab_group, resting_bg, hovered_bg, title_row);
+        // Issue #347: a bound tab names the branch of its own checkout on a
+        // second line, so two tabs of one workspace on two worktrees read
+        // apart at a glance. An unbound tab draws nothing extra - its branch
+        // is the workspace's, already on the folder row above.
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(SIDEBAR_ROW_GAP))
+            .child(title_row);
+        if let Some(meta_row) = self.render_tab_worktree_meta_row(tab, ui) {
+            body = body.child(meta_row);
+        }
+        let row = squircle_row(row_shell, tab_group, resting_bg, hovered_bg, body);
 
         div()
             .id(SharedString::from(format!("tab-drop-{tab_id}")))
@@ -2020,6 +2037,64 @@ impl PaneFlowApp {
             .flex_col()
             .rounded(ROW_RADIUS)
             .child(row)
+    }
+
+    /// The branch line under a bound tab's title (issue #347): the branch its
+    /// worktree is on, from the cached probe, or the checkout's directory name
+    /// while the first probe is in flight or when HEAD is detached. `None` for
+    /// an unbound tab, which has nothing of its own to say.
+    fn render_tab_worktree_meta_row(
+        &self,
+        tab: &Tab,
+        ui: crate::theme::UiColors,
+    ) -> Option<AnyElement> {
+        let path = tab.worktree.as_ref()?;
+        let branch = self
+            .tab_checkout_git(tab)
+            .map(|git| git.branch.clone())
+            .unwrap_or_default();
+        let repo_root = self
+            .workspaces
+            .iter()
+            .find(|ws| ws.tabs().iter().any(|t| t.id == tab.id))
+            .map(|ws| ws.worktree_root.clone())
+            .unwrap_or_default();
+        let label = crate::workspace::worktree::checkout_label(Some(&branch), path, &repo_root);
+        if label.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .pl(px(SIDEBAR_FOLDER_ICON_WIDTH + SIDEBAR_TITLE_ROW_GAP))
+                .w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
+                .max_w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
+                .h(px(14.))
+                .overflow_x_hidden()
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(ui.muted)
+                .child(
+                    svg()
+                        .size(px(10.))
+                        .flex_none()
+                        .path("icons/git-branch-sidebar.svg")
+                        .text_color(ui.muted),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_x_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_workspace_meta_row(

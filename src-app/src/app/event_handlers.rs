@@ -616,16 +616,20 @@ impl PaneFlowApp {
                 self.open_sessions_sidebar_for_pane(&pane, None, cx);
             }
             pane::PaneEvent::ToggleDiffDock => {
-                // The dock diffs the pane's *workspace folder*, not the shell's
-                // current directory: the folder is the unit the git pipeline
-                // operates on.
+                // The dock diffs the pane's *checkout*, not the shell's current
+                // directory: the checkout is the unit the git pipeline operates
+                // on. For a tab bound to a worktree (issue #347) that is the
+                // tab's worktree, so two tabs of one workspace diff two
+                // different branches instead of both reporting the repository
+                // root. The dock stays keyed by `Tab::id`; only its folder
+                // changes.
                 let owner_id = pane.read(cx).workspace_id;
-                let Some(cwd) = self
-                    .workspaces
-                    .iter()
-                    .find(|ws| ws.id == owner_id)
-                    .map(|ws| ws.cwd.clone())
-                else {
+                let Some(cwd) = self.checkout_for_pane(&pane).or_else(|| {
+                    self.workspaces
+                        .iter()
+                        .find(|ws| ws.id == owner_id)
+                        .map(|ws| ws.cwd.clone())
+                }) else {
                     return;
                 };
                 self.toggle_cli_diff_dock(cwd, cx);
@@ -1664,25 +1668,34 @@ impl PaneFlowApp {
     }
 
     /// Handle a CWD change from a terminal. Matches every pane across every
-    /// tab of the owning workspace, so a cwd change in a background tab still
-    /// updates workspace git tracking.
+    /// tab of the owning workspace: a pane that walks into another checkout
+    /// gives its TAB an identity whether or not you are looking at it (issue
+    /// #347), and a cwd change in a background tab still updates workspace git
+    /// tracking.
     fn handle_cwd_change(
         &mut self,
         terminal: &Entity<TerminalView>,
         new_cwd: &str,
         cx: &mut Context<Self>,
     ) {
-        // Find workspace where this terminal lives in any tab's layout.
+        // Find the tab holding this terminal, in any workspace.
         // US-020: skip markdown panes - they have no active terminal, so the
         // identity check via `active_terminal_opt` returns None for them.
-        let ws_idx = self.workspaces.iter().position(|ws| {
-            ws.collect_panes().iter().any(|pane| {
-                pane.read(cx)
-                    .active_terminal_opt()
-                    .is_some_and(|t| *t == *terminal)
-            })
+        let located = self.workspaces.iter().enumerate().find_map(|(ws_idx, ws)| {
+            ws.tabs()
+                .iter()
+                .position(|tab| {
+                    tab.any_pane(&mut |pane| {
+                        pane.read(cx)
+                            .active_terminal_opt()
+                            .is_some_and(|t| *t == *terminal)
+                    })
+                })
+                .map(|tab_idx| (ws_idx, tab_idx))
         });
-        let Some(ws_idx) = ws_idx else { return };
+        let Some((ws_idx, tab_idx)) = located else {
+            return;
+        };
 
         if self.workspaces[ws_idx].cwd == new_cwd {
             return;
@@ -1694,8 +1707,11 @@ impl PaneFlowApp {
         // the `Vec`, so a reused `ws_idx` would point at a *different*
         // workspace (silent git-state corruption + watch refcount desync).
         // Re-resolve the index by identity after the await - model:
-        // `run_port_scan` / `spawn_initial_git_stats`.
+        // `run_port_scan` / `spawn_initial_git_stats`. Same for the tab.
         let ws_id = self.workspaces[ws_idx].id;
+        let tab_id = self.workspaces[ws_idx].tabs()[tab_idx].id;
+        let ws_repo_root = self.workspaces[ws_idx].repo_root.clone();
+        let ws_worktree_root = self.workspaces[ws_idx].worktree_root.clone();
 
         let new_cwd_owned = new_cwd.to_string();
 
@@ -1703,13 +1719,25 @@ impl PaneFlowApp {
         cx.spawn({
             let new_cwd = new_cwd_owned.clone();
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                let (git_dir, branch, is_repo, stats) = smol::unblock({
+                let (git_dir, branch, is_repo, stats, checkout) = smol::unblock({
                     let cwd = new_cwd.clone();
                     move || {
                         let git_dir = crate::workspace::find_git_dir(&cwd);
                         let (branch, is_repo) = crate::workspace::detect_branch(&cwd);
                         let stats = crate::workspace::GitDiffStats::from_cwd(&cwd);
-                        (git_dir, branch, is_repo, stats)
+                        // Which checkout of which repository the pane is now
+                        // in. All file reads under `.git`, no subprocess.
+                        let checkout = git_dir.as_deref().map(|dir| {
+                            let (repo_root, is_worktree) = crate::workspace::resolve_repo_root(dir);
+                            let root = crate::workspace::resolve_worktree_root(
+                                &cwd,
+                                Some(dir),
+                                repo_root.as_deref(),
+                                is_worktree,
+                            );
+                            (repo_root, root)
+                        });
+                        (git_dir, branch, is_repo, stats, checkout)
                     }
                 })
                 .await;
@@ -1722,6 +1750,35 @@ impl PaneFlowApp {
                         else {
                             return;
                         };
+                        // The pane walked into another checkout of the same
+                        // repository - an agent that made itself a worktree,
+                        // typically. That is this TAB's identity now (issue
+                        // #347), and it must not be written onto the
+                        // workspace: the other tabs still work in the
+                        // repository's own checkout, and until now this branch
+                        // landed on `ws.cwd`'s git state, showing every one of
+                        // them a branch none of them was on.
+                        if let Some((repo_root, checkout)) = checkout
+                            && repo_root.is_some()
+                            && repo_root == ws_repo_root
+                            && checkout != ws_worktree_root
+                        {
+                            if let Some((ws_idx, tab_idx)) = app.tab_position(ws_id, tab_id) {
+                                app.set_tab_worktree(ws_idx, tab_idx, Some(checkout.clone()), cx);
+                            }
+                            let key = checkout.to_string_lossy().into_owned();
+                            if app.worktree_states.set_checkout(
+                                &key,
+                                crate::app::tab_worktree::CheckoutGit {
+                                    branch,
+                                    is_repo,
+                                    stats,
+                                },
+                            ) {
+                                cx.notify();
+                            }
+                            return;
+                        }
                         // Unwatch old git dir
                         let old_git_dir = app.workspaces[ws_idx].git_dir.clone();
                         if let Some(ref dir) = old_git_dir {

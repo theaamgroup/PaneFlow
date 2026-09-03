@@ -483,7 +483,9 @@ fn render_diff_branch_menu_status(
         .into_any_element()
 }
 
-fn list_branches(cwd: &str) -> Result<Vec<String>, String> {
+/// Local branches of the repository at `cwd`, sorted and deduplicated. Shared
+/// with the tab worktree picker (issue #347) so the app has one branch reader.
+pub(crate) fn list_branches(cwd: &str) -> Result<Vec<String>, String> {
     let mut command = crate::workspace::worktree::git_command();
     command
         .args(["branch", "--format=%(refname:short)"])

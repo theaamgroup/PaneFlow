@@ -432,7 +432,21 @@ impl PaneFlowApp {
             tab_idx,
             position,
         } = menu;
-        let menu_height = px(8. + 2. * 28.);
+        // Issue #347: the branches this tab can be moved to, one row each,
+        // exactly what the New pane picker offers - a branch with no worktree
+        // yet gets one when it is chosen. The repository's own branch is in
+        // there like any other, and picking it unbinds the tab.
+        let branches = self.tab_menu_branch_rows(ws_idx, tab_idx);
+        // A single branch is where the tab already works: the section would
+        // only restate it.
+        let show_branches = branches.len() > 1;
+        let branch_rows = if show_branches {
+            // The section header and its divider, plus one row per branch.
+            1. + branches.len() as f32
+        } else {
+            0.
+        };
+        let menu_height = px(8. + (2. + branch_rows) * 28.);
         let menu_pos = clamped_context_menu_position(position, px(248.), menu_height, window);
         let close_shortcut = self
             .shortcut_for_action("close_tab")
@@ -478,7 +492,100 @@ impl PaneFlowApp {
                     cx.stop_propagation();
                 }),
             ))
+            .when(show_branches, |menu| {
+                let mut menu = menu.child(context_menu_divider(ui)).child(
+                    div()
+                        .px(px(8.))
+                        .pb(px(4.))
+                        .text_size(px(10.))
+                        .text_color(ui.muted)
+                        .child("Branch"),
+                );
+                for (detached, label, selected) in branches {
+                    let branch = label.clone();
+                    menu = menu.child(
+                        select_item(
+                            SharedString::from(format!("tab-branch-{label}")),
+                            selected,
+                            ui,
+                        )
+                        .cursor(CursorStyle::Arrow)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.tab_menu_open = None;
+                            match detached.clone() {
+                                Some(path) => {
+                                    this.set_tab_worktree(ws_idx, tab_idx, Some(path), cx)
+                                }
+                                None => {
+                                    this.bind_tab_to_branch(ws_idx, tab_idx, branch.clone(), cx)
+                                }
+                            }
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_x_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_color(ui.text)
+                                .child(label),
+                        ),
+                    );
+                }
+                menu
+            })
             .into_any_element()
+    }
+
+    /// The rows of the tab menu's Branch section: `(detached checkout path,
+    /// label, selected)`. A branch row carries `None` and is bound through
+    /// [`PaneFlowApp::bind_tab_to_branch`]; a detached checkout has no branch
+    /// to resolve and is bound to its path directly. Empty outside a
+    /// repository.
+    fn tab_menu_branch_rows(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Vec<(Option<PathBuf>, String, bool)> {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let Some(root) = ws.repo_root.clone() else {
+            return Vec::new();
+        };
+        let bound = ws.tabs().get(tab_idx).and_then(|tab| tab.worktree.clone());
+        let listing = self.workspace_worktree_listing(ws_idx);
+        let on_branch = match bound.as_ref() {
+            Some(path) => listing
+                .iter()
+                .find(|entry| entry.path == *path)
+                .and_then(|entry| entry.branch.clone()),
+            None => Some(self.workspace_checkout_label(ws_idx)),
+        };
+        let mut rows: Vec<(Option<PathBuf>, String, bool)> = self
+            .workspace_branches(ws_idx)
+            .iter()
+            .map(|branch| {
+                let selected = on_branch.as_deref() == Some(branch.as_str());
+                (None, branch.clone(), selected)
+            })
+            .collect();
+        // A detached checkout is under no branch, and dropping it would strand
+        // a tab already bound to one.
+        rows.extend(
+            listing
+                .iter()
+                .filter(|entry| entry.branch.is_none() && !entry.is_bare && entry.path != root)
+                .map(|entry| {
+                    let label =
+                        crate::workspace::worktree::checkout_label(None, &entry.path, &root);
+                    let selected = bound.as_deref() == Some(entry.path.as_path());
+                    (Some(entry.path.clone()), label, selected)
+                }),
+        );
+        rows
     }
 
     pub(crate) fn render_pane_context_menu(

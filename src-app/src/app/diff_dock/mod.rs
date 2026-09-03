@@ -32,7 +32,7 @@ mod render;
 mod surface_picker;
 mod tabs;
 
-pub(crate) use branch::DiffBranchMenuState;
+pub(crate) use branch::{DiffBranchMenuState, list_branches};
 pub(crate) use model::{
     DIFF_DOCK_PANEL_MAX_WIDTH, DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_WIDTH, DiffDockData,
     DiffDockHScrollDrag, DiffDockTab,

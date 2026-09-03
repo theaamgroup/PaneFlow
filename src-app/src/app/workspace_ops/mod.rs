@@ -640,6 +640,7 @@ fn capture_closed_tab_record(
         title: tab.title.clone(),
         index,
         layout,
+        worktree: tab.worktree.clone(),
     })
 }
 
@@ -666,6 +667,7 @@ fn capture_closed_workspace_record(
             .map(|tab| ClosedWorkspaceTabRecord {
                 title: tab.title.clone(),
                 layout: capture_closed_tab_layout_with_budget(tab, cx, &remaining_scrollback),
+                worktree: tab.worktree.clone(),
             })
             .collect(),
         custom_buttons: workspace.custom_buttons.clone(),
@@ -964,6 +966,17 @@ impl PaneFlowApp {
                 }
             }
         }
+        // The same result also answers for a tab bound to this checkout
+        // (issue #347), which is not necessarily any workspace's root - so the
+        // probe is stored whether or not a workspace matched.
+        changed |= self.worktree_states.set_checkout(
+            cwd,
+            crate::app::tab_worktree::CheckoutGit {
+                branch,
+                is_repo,
+                stats,
+            },
+        );
         changed
     }
 
@@ -980,6 +993,14 @@ impl PaneFlowApp {
                 workspace.git_stats = stats.clone();
                 changed = true;
             }
+        }
+        if let Some(current) = self.worktree_states.checkout(cwd).cloned()
+            && current.stats != stats
+        {
+            changed |= self.worktree_states.set_checkout(
+                cwd,
+                crate::app::tab_worktree::CheckoutGit { stats, ..current },
+            );
         }
         changed
     }
@@ -1397,7 +1418,7 @@ impl PaneFlowApp {
     /// switch (re-target) and close (Multi-project group reconcile). Deferred so
     /// the rebuild (which mounts a fresh entity) never runs inside a
     /// render/callback. No-op outside Diff mode.
-    fn reconcile_diff_after_workspace_change(&self, cx: &mut Context<Self>) {
+    pub(crate) fn reconcile_diff_after_workspace_change(&self, cx: &mut Context<Self>) {
         if matches!(self.mode, paneflow_config::schema::AppMode::Diff) {
             let weak = cx.weak_entity();
             cx.defer(move |cx| {
@@ -1549,9 +1570,16 @@ impl PaneFlowApp {
         &self,
         source_cwd: Option<std::path::PathBuf>,
     ) -> Option<std::path::PathBuf> {
-        source_cwd.or_else(|| {
-            self.active_workspace()
-                .map(|ws| ws.cwd.as_str())
+        let Some(ws) = self.active_workspace() else {
+            return source_cwd;
+        };
+        // A bound tab confines every pane opened in it to its worktree (issue
+        // #347). This is the single choke point every in-app pane creation
+        // goes through, which is why the rule lives here rather than being
+        // repeated at each call site.
+        let confined = ws.active_tab().confine_cwd(source_cwd);
+        confined.or_else(|| {
+            Some(ws.cwd.as_str())
                 .filter(|cwd| !cwd.is_empty())
                 .map(std::path::PathBuf::from)
         })
@@ -1753,8 +1781,11 @@ impl PaneFlowApp {
             && ws.active_tab().root.is_none()
         {
             let ws_id = ws.id;
-            let cwd = std::path::PathBuf::from(&ws.cwd);
-            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, Some(cwd), None, cx));
+            // Through `new_terminal_cwd` rather than straight from `ws.cwd`:
+            // respawning the last pane of a bound tab must land back in that
+            // tab's worktree, not at the workspace root (issue #347).
+            let cwd = self.new_terminal_cwd(None);
+            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd, None, cx));
             // US-028: do NOT subscribe here - `create_pane` already wires
             // `handle_terminal_event` (main.rs:539). The duplicate subscription
             // fired every terminal event twice (double toast / port-scan /
@@ -1934,6 +1965,7 @@ impl PaneFlowApp {
             title,
             index,
             layout,
+            worktree,
         } = record;
 
         // Copy the workspace's identity out and own its cwd before building
@@ -1964,13 +1996,17 @@ impl PaneFlowApp {
                     title: title.clone(),
                     index,
                     layout: layout.clone(),
+                    worktree: worktree.clone(),
                 }),
                 cx,
             );
             this.show_toast("Could not restore the tab", cx);
         };
 
-        let tab = crate::workspace::Tab::new(title.clone(), Some(root));
+        // Undo puts the tab back on the checkout it was bound to; a checkout
+        // removed in between restores unbound, the rule session restore uses.
+        let bound_to = worktree.clone().filter(|path| path.is_dir());
+        let tab = crate::workspace::Tab::restored(title.clone(), Some(root), bound_to);
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             // Unreachable: `ws_idx` was resolved above and the entity lease
             // stops `self.workspaces` changing under this body. Kept as a
@@ -2052,7 +2088,7 @@ impl PaneFlowApp {
                         },
                     )
                 });
-                crate::workspace::Tab::new(tab.title, root)
+                crate::workspace::Tab::restored(tab.title, root, tab.worktree)
             })
             .collect();
         let mut workspace =
@@ -2189,6 +2225,9 @@ impl PaneFlowApp {
         // its freshly spawned PTYs. FIFO eviction or graceful app exit retires
         // them once the workspace is no longer undoable.
         self.workspaces.remove(idx);
+        // Every checkout this workspace's tabs were bound to leaves with it
+        // (issue #347): the cached git state goes, the checkout itself stays.
+        self.prune_worktree_states();
         self.active_idx =
             active_idx_after_workspace_remove(self.active_idx, idx, self.workspaces.len());
         if let Some(window) = window {
@@ -3067,6 +3106,7 @@ mod tests {
             workspace_id,
             title: "tab".to_string(),
             index: 0,
+            worktree: None,
             layout: LayoutNode::Split {
                 direction: "vertical".to_string(),
                 ratio: None,

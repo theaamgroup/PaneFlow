@@ -293,6 +293,9 @@ pub(crate) struct ClosedTabRecord {
     pub(crate) index: usize,
     /// The tab's whole layout, serialized WITH scrollback.
     pub(crate) layout: paneflow_config::schema::LayoutNode,
+    /// The worktree the tab was bound to (issue #347), restored with it when
+    /// the checkout still exists.
+    pub(crate) worktree: Option<std::path::PathBuf>,
 }
 
 /// One tab inside a closed-workspace undo record. Unlike [`ClosedTabRecord`],
@@ -301,6 +304,8 @@ pub(crate) struct ClosedTabRecord {
 pub(crate) struct ClosedWorkspaceTabRecord {
     pub(crate) title: String,
     pub(crate) layout: Option<paneflow_config::schema::LayoutNode>,
+    /// The worktree the tab was bound to (issue #347).
+    pub(crate) worktree: Option<std::path::PathBuf>,
 }
 
 /// Captured state of a closed workspace: identity, position, presentation
@@ -1381,7 +1386,16 @@ struct PaneFlowApp {
     theme_mode: ThemeMode,
     /// Workflow action menu currently open in the sidebar (`None` = closed).
     workspace_menu_open: Option<WorkspaceContextMenu>,
-    /// US-010: right-click menu on a sidebar tab row (Rename / Close).
+    /// Git state of every checkout that is not a workspace root: the worktree
+    /// of each bound tab (issue #347), plus each repository's worktree list and
+    /// local branches for the pickers. Filled by the same off-thread probes
+    /// that feed `Workspace::git_branch`.
+    pub(crate) worktree_states: crate::app::tab_worktree::WorktreeStates,
+    /// Branch whose worktree is being checked out right now, if any. One at a
+    /// time: the picker names it while git works, and refuses to launch a pane
+    /// that would otherwise start in the checkout being left behind.
+    pub(crate) branch_checkout_pending: Option<String>,
+    /// US-010: right-click menu on a sidebar tab row (Rename / Close / Branch).
     tab_menu_open: Option<TabContextMenu>,
     /// Pane header context menu (EP-002 US-007), or `None` when closed.
     pane_menu_open: Option<PaneContextMenu>,

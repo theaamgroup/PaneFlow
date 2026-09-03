@@ -41,7 +41,9 @@ pub(crate) fn path_is_in_retiring_worktree(path: &std::path::Path) -> bool {
     })
 }
 
-pub use git::{GitDiffStats, detect_branch, find_git_dir, resolve_repo_root};
+pub use git::{
+    GitDiffStats, detect_branch, find_git_dir, resolve_repo_root, resolve_worktree_root,
+};
 #[cfg(test)]
 pub(crate) use ports::PortEntry;
 pub use ports::{PaneScan, scan_panes};
@@ -404,6 +406,24 @@ impl Workspace {
         self.tabs.iter().position(|tab| tab.contains_pane(pane))
     }
 
+    /// The tab holding `pane`, or `None` when no tab of this workspace does.
+    /// Used to resolve which checkout a pane belongs to: with a tab bound to a
+    /// worktree (issue #347), that is the tab's, not the workspace's.
+    pub fn tab_for_pane(&self, pane: &Entity<Pane>) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| tab.contains_pane(pane))
+    }
+
+    /// The worktree of every tab bound to one, as absolute path strings.
+    /// Feeds the git probe set: a bound tab needs its own branch and diffstat,
+    /// which the workspace's own fields cannot answer.
+    pub fn bound_tab_worktrees(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| tab.worktree.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
     /// Whether this workspace is an empty folder: one unnamed tab holding no
     /// pane at all. True for a freshly created workspace and for one whose
     /// last pane was closed, and false as soon as a tab is opened, named, or
@@ -589,6 +609,10 @@ impl Workspace {
             .map(|tab| TabSession {
                 title: tab.title.clone(),
                 layout: persisted_tab_layout(tab.serialize_without_scrollback(cx)),
+                worktree: tab
+                    .worktree
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
             })
             .collect()
     }

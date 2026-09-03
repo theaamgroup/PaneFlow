@@ -211,6 +211,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
 │   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
+│   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
+│   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
 ├── cli/                               ← `paneflow up|flow|watch|wait|send|read` over the IPC socket
 ├── window_chrome/

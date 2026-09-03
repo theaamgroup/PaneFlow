@@ -143,6 +143,17 @@ pub struct TabSession {
     /// Pane layout tree for this tab. `None` = the tab holds no pane.
     #[serde(default)]
     pub layout: Option<LayoutNode>,
+    /// Absolute path of the git worktree this tab is bound to (issue #347),
+    /// or `None` for an unbound tab.
+    ///
+    /// Additive and defaulted, so it needs no schema version bump: a v2 file
+    /// written before this field parses with `None`, and an older PaneFlow
+    /// reading a file that has it ignores the key rather than failing (no
+    /// `deny_unknown_fields` anywhere in this schema). A path that no longer
+    /// exists at restore is dropped, not resurrected. Skipped on write while
+    /// unbound, so a session with no bound tab gains no key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 impl TabSession {
@@ -156,6 +167,7 @@ impl TabSession {
         Self {
             title: String::new(),
             layout: Some(layout),
+            worktree: None,
         }
     }
 }
@@ -298,6 +310,8 @@ fn demote_panes_to_focused_surface(node: &mut LayoutNode, promoted: &mut Vec<Tab
                     layout: Some(LayoutNode::Pane {
                         surfaces: vec![surface],
                     }),
+                    // A v1 file predates tab worktrees by definition.
+                    worktree: None,
                 });
             }
         }

@@ -157,6 +157,15 @@ tracked agent returns idle state, not an error.
 `${port_offset}` substitutes only inside `env` values. Unknown keys are
 errors. Workspace creation validates paths before creating panes.
 
+Panes are grouped into **one tab per worktree**: the panes with no
+`worktree` share the workspace's own tab (first, rooted at the
+repository), and each distinct `worktree` gets a tab of its own, in the
+order the panes were declared, bound to that checkout and titled by its
+branch. A file with no `worktree` at all still produces the single tab it
+always did. Over JSON-RPC the same grouping reads each pane's
+`managed_worktree` record. A `surface.split` into a bound tab starts in
+that tab's worktree unless `cwd` names a directory inside it.
+
 ## Flow spec
 
 `paneflow flow run <file>` reads a TOML flow spec and runs it against
