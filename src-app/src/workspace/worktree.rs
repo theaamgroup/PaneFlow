@@ -88,22 +88,50 @@ impl WorktreeIdentity {
         if !metadata.is_dir() {
             return Err(format!("worktree {} is not a directory", path.display()));
         }
-        Ok(Self(format!(
-            "{}:{}:{}:{}",
+        Self::from_parts(
+            path,
             metadata.st_dev(),
             metadata.st_ino(),
             metadata.st_birthtime(),
-            metadata.st_birthtime_nsec()
-        )))
+            metadata.st_birthtime_nsec(),
+        )
+    }
+
+    /// Birth time is the only field that changes on a remove/recreate at the
+    /// same path; without it the identity is dev/inode alone and an
+    /// immediately reused inode looks identical. Volumes that do not implement
+    /// it (NFS, some SMB/FUSE mounts) report 0/0, so that reading is treated as
+    /// "identity unavailable" and every caller fails closed - no teardown, no
+    /// marker recovery - instead of trusting inode reuse.
+    fn from_parts(
+        path: &Path,
+        dev: u64,
+        ino: u64,
+        birthtime: i64,
+        birthtime_nsec: i64,
+    ) -> Result<Self, String> {
+        if birthtime == 0 && birthtime_nsec == 0 {
+            return Err(format!(
+                "worktree {} is on a filesystem without directory birth time",
+                path.display()
+            ));
+        }
+        Ok(Self(format!("{dev}:{ino}:{birthtime}:{birthtime_nsec}")))
     }
 
     fn from_persisted(raw: &str) -> Option<Self> {
         let mut fields = raw.split(':');
         fields.next()?.parse::<u64>().ok()?;
         fields.next()?.parse::<u64>().ok()?;
-        fields.next()?.parse::<i64>().ok()?;
-        fields.next()?.parse::<i64>().ok()?;
+        let birthtime = fields.next()?.parse::<i64>().ok()?;
+        let birthtime_nsec = fields.next()?.parse::<i64>().ok()?;
         if fields.next().is_some() {
+            return None;
+        }
+        // A 0/0 birth time asserts nothing beyond inode reuse (see
+        // `from_parts`), so it is refused rather than matched against a live
+        // directory.
+        if birthtime == 0 && birthtime_nsec == 0 {
             return None;
         }
         Some(Self(raw.to_string()))
@@ -1761,6 +1789,27 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].teardown, TeardownPolicy::Keep);
+    }
+
+    #[test]
+    fn zero_birthtime_directory_identity_is_refused() {
+        let path = Path::new("/tmp/repo.worktrees/feature");
+        assert!(
+            WorktreeIdentity::from_parts(path, 1, 2, 0, 0).is_err(),
+            "a volume without birth time cannot distinguish a recreated directory"
+        );
+        assert!(
+            WorktreeIdentity::from_parts(path, 1, 2, 0, 1).is_ok(),
+            "a non-zero birth time still yields an identity"
+        );
+        assert!(
+            WorktreeIdentity::from_persisted("1:2:0:0").is_none(),
+            "a 0/0 birth time is only dev/inode, so it must not restore ownership"
+        );
+        assert!(
+            WorktreeIdentity::from_persisted("1:2:3:4").is_some(),
+            "an identity with a real birth time is still accepted"
+        );
     }
 
     #[test]

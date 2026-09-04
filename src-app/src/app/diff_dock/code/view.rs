@@ -509,22 +509,32 @@ impl CodeView {
             syntax,
             cx,
             |view: &mut Self, generation, outcome: CodeOpen, cx| {
-                if !view.slot.accept(generation) {
-                    return;
-                }
-                view.state = CodeLoadState::from_outcome(outcome);
-                // The indent unit and the disk stamp are both properties of the
-                // file that just landed, so they are taken here rather than at
-                // the first Tab or the first save, when the file may already
-                // have moved on.
-                if let Some(doc) = view.state.document() {
-                    view.indent = IndentUnit::detect(doc);
-                }
-                view.stamp = FileStamp::read(&view.path);
-                view.start_watcher(cx);
-                cx.notify();
+                view.apply_load(generation, outcome, cx);
             },
         );
+    }
+
+    /// Land a guarded open outcome. A stale generation is dropped without
+    /// repainting (US-002).
+    fn apply_load(&mut self, generation: u64, outcome: CodeOpen, cx: &mut Context<Self>) {
+        if !self.slot.accept(generation) {
+            return;
+        }
+        // The indent unit and the disk stamp are both properties of the file
+        // that just landed, so they are taken here rather than at the first
+        // Tab or the first save, when the file may already have moved on. The
+        // stamp is the one the loader took from the handle it read, never a
+        // fresh stat of the path: by now an agent may have rewritten the file,
+        // and a stamp of that rewrite would let the next save clobber it
+        // without a conflict.
+        let stamp = outcome.as_ref().ok().and_then(|loaded| loaded.stamp);
+        self.state = CodeLoadState::from_outcome(outcome);
+        if let Some(doc) = self.state.document() {
+            self.indent = IndentUnit::detect(doc);
+        }
+        self.stamp = stamp;
+        self.start_watcher(cx);
+        cx.notify();
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -2397,7 +2407,7 @@ mod tests {
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
 
     use super::super::highlight::CodeHighlighter;
-    use super::super::load::{LoadedCode, build_document};
+    use super::super::load::{LoadedCode, build_document, open_blocking};
     use super::*;
 
     /// Build a view around `text` inside a real window: the action handlers
@@ -2424,6 +2434,7 @@ mod tests {
             CodeLoadState::Ready(Box::new(LoadedCode {
                 document,
                 highlighter,
+                stamp: None,
             }))
         };
         cx.add_window_view(move |_window, cx| CodeView {
@@ -2704,11 +2715,12 @@ mod tests {
             &document,
             DiffSyntax::from_theme(&crate::theme::paneflow_dark()),
         );
+        let stamp = FileStamp::read(&path);
         let state = CodeLoadState::Ready(Box::new(LoadedCode {
             document,
             highlighter,
+            stamp,
         }));
-        let stamp = FileStamp::read(&path);
         let (view, cx) = {
             let path = path.clone();
             cx.add_window_view(move |_window, cx| {
@@ -2833,6 +2845,7 @@ mod tests {
         let state = CodeLoadState::Ready(Box::new(LoadedCode {
             document,
             highlighter,
+            stamp: None,
         }));
         let (view, cx) = cx.add_window_view(move |_window, cx| CodeView {
             element_id: "code-view:test".into(),
@@ -3180,6 +3193,48 @@ mod tests {
         );
         view.update(cx, |view, _cx| {
             assert!(view.has_conflict(), "the user is asked to choose");
+            assert!(view.is_dirty(), "the in-memory edits survived");
+            assert_eq!(text_of(view), "one\nmine\n");
+        });
+    }
+
+    /// A rewrite that lands after the off-thread read returned but before the
+    /// outcome is applied on the main thread must still be caught: the stamp
+    /// the view adopts is the loader's, of the bytes it read, so the next save
+    /// refuses and the rewrite stays on disk.
+    #[gpui::test]
+    fn a_rewrite_between_the_read_and_its_landing_still_conflicts(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\n", false);
+        let path = dir.path().join("main.rs");
+        let outcome = open_blocking(
+            &path,
+            DiffSyntax::from_theme(&crate::theme::paneflow_dark()),
+        );
+        // An agent gets there between the read and the apply callback. The
+        // length changes, so this does not depend on timestamp granularity.
+        std::fs::write(&path, "written by someone else\n").expect("agent write");
+
+        view.update(cx, |view, cx| {
+            let generation = view.slot.begin();
+            view.apply_load(generation, outcome, cx);
+            assert_eq!(text_of(view), "one\n", "the buffer holds what was read");
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            view.selection = CodeSelection::at(4);
+            view.replace_text_in_range(None, "mine\n", window, cx);
+            view.save_action(&CeSave, window, cx);
+        });
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "written by someone else\n",
+            "the agent's rewrite was not clobbered"
+        );
+        view.update(cx, |view, _cx| {
+            assert_eq!(view.disk, DiskState::Conflict);
             assert!(view.is_dirty(), "the in-memory edits survived");
             assert_eq!(text_of(view), "one\nmine\n");
         });

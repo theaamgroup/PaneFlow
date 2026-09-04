@@ -13,10 +13,19 @@ pub struct GitDiffStats {
     pub deletions: usize,
 }
 
-/// Wall-clock deadline for `git diff --shortstat` (U-035). A healthy repo
-/// answers in well under a second; this bounds a dead/slow network mount or a
-/// `.git/config` external helper that hangs.
+/// Wall-clock deadline for ONE `GitDiffStats::from_cwd` probe (U-035). A healthy
+/// repo answers in well under a second; this bounds a dead/slow network mount or
+/// a `.git/config` external helper that hangs. Issue #365: it is the budget for
+/// the whole probe, not for each git invocation inside it - `rev-parse`,
+/// `diff --shortstat` and `ls-files` share it, so they cannot stack.
 const GIT_DIFF_STAT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wall-clock budget for one sidebar git sweep (issue #365). Every checkout in a
+/// tick draws on this single deadline, so N workspaces cannot stack N
+/// independent [`GIT_DIFF_STAT_DEADLINE`]s on one blocking-pool thread. It
+/// matches the 30 s poll interval, so a sweep can never outlast the tick that
+/// started it.
+pub const GIT_STATS_SWEEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// stdout cap for `git diff --shortstat` - the command emits a single summary
 /// line, so 256 KiB is far beyond any real output while bounding a hijacked git.
@@ -34,13 +43,22 @@ impl GitDiffStats {
     /// nonzero git exit this returns the empty (`is_empty()`) default - the
     /// "stats unavailable" state the badge renders.
     pub fn from_cwd(cwd: &str) -> Self {
-        let deadline_at = std::time::Instant::now() + GIT_DIFF_STAT_DEADLINE;
-        let base = git_stdout(cwd, &["rev-parse", "--verify", "HEAD"])
+        Self::from_cwd_within(cwd, std::time::Instant::now() + GIT_DIFF_STAT_DEADLINE)
+    }
+
+    /// [`Self::from_cwd`] drawing on a caller-owned budget (issue #365). The
+    /// probe stops at `budget_until` or at its own [`GIT_DIFF_STAT_DEADLINE`],
+    /// whichever comes first, and every git invocation inside it shares that one
+    /// deadline: an exhausted budget spawns nothing and yields the empty
+    /// ("stats unavailable") default.
+    pub fn from_cwd_within(cwd: &str, budget_until: std::time::Instant) -> Self {
+        let deadline_at = budget_until.min(std::time::Instant::now() + GIT_DIFF_STAT_DEADLINE);
+        let base = git_stdout(cwd, &["rev-parse", "--verify", "HEAD"], deadline_at)
             .map(|out| String::from_utf8_lossy(&out).trim().to_string())
             .filter(|base| !base.is_empty())
             .unwrap_or_else(|| EMPTY_TREE_SHA.to_string());
 
-        let mut stats = git_stdout(cwd, &["diff", "--shortstat", &base, "--"])
+        let mut stats = git_stdout(cwd, &["diff", "--shortstat", &base, "--"], deadline_at)
             .map(|out| {
                 let text = String::from_utf8_lossy(&out);
                 Self::parse_shortstat(&text)
@@ -86,8 +104,11 @@ impl GitDiffStats {
     }
 
     fn add_untracked(&mut self, cwd: &str, deadline_at: std::time::Instant) {
-        let Some(out) = git_stdout(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])
-        else {
+        let Some(out) = git_stdout(
+            cwd,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            deadline_at,
+        ) else {
             return;
         };
         let text = String::from_utf8_lossy(&out);
@@ -153,7 +174,15 @@ fn untracked_insertions_within(
     insertions
 }
 
-fn git_stdout(cwd: &str, args: &[&str]) -> Option<Vec<u8>> {
+/// Run one git plumbing command against the shared probe budget (issue #365).
+/// The subprocess deadline is whatever is left of `deadline_at`, so a probe's
+/// commands cannot stack independent [`GIT_DIFF_STAT_DEADLINE`]s; an exhausted
+/// budget spawns no process at all.
+fn git_stdout(cwd: &str, args: &[&str], deadline_at: std::time::Instant) -> Option<Vec<u8>> {
+    let remaining = deadline_at.checked_duration_since(std::time::Instant::now())?;
+    if remaining.is_zero() {
+        return None;
+    }
     // Isolated spawn: the repo's core.fsmonitor / core.hooksPath / diff.external
     // and an inherited GIT_DIR must not steer the sidebar's periodic stats.
     let mut cmd = super::worktree::git_command();
@@ -163,8 +192,7 @@ fn git_stdout(cwd: &str, args: &[&str]) -> Option<Vec<u8>> {
         // blocking-pool task. With no terminal git fails fast instead.
         .env("GIT_TERMINAL_PROMPT", "0");
     let output =
-        paneflow_process::run_with_timeout(cmd, GIT_DIFF_STAT_DEADLINE, GIT_DIFF_STAT_STDOUT_CAP)
-            .ok()?;
+        paneflow_process::run_with_timeout(cmd, remaining, GIT_DIFF_STAT_STDOUT_CAP).ok()?;
     output.status.success().then_some(output.stdout)
 }
 
@@ -816,6 +844,43 @@ mod tests {
         assert_eq!(stats.files_changed, 2);
         assert_eq!(stats.insertions, 3);
         assert_eq!(stats.deletions, 0);
+    }
+
+    #[test]
+    fn from_cwd_within_runs_no_git_once_the_shared_budget_is_gone() {
+        // #365: every git invocation used to take a fresh GIT_DIFF_STAT_DEADLINE,
+        // so rev-parse + diff --shortstat + ls-files stacked three independent
+        // 10 s timeouts per checkout, and the 30 s sweep stacked that again per
+        // workspace. One shared deadline means an exhausted budget spawns no
+        // further git at all.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !test_git(root, &["init"]) {
+            return;
+        }
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        assert!(test_git(root, &["add", "tracked.txt"]));
+        std::fs::write(root.join("untracked.txt"), "alpha\nbeta\n").unwrap();
+
+        // Sanity: with a live budget the same checkout does report stats.
+        let live = GitDiffStats::from_cwd_within(
+            root.to_str().unwrap(),
+            std::time::Instant::now() + GIT_DIFF_STAT_DEADLINE,
+        );
+        assert!(!live.is_empty(), "live budget should report stats");
+
+        let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let stats = GitDiffStats::from_cwd_within(root.to_str().unwrap(), spent);
+        let elapsed = started.elapsed();
+        assert!(
+            stats.is_empty(),
+            "an exhausted budget must not spawn git, got {stats:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "an exhausted budget must return without running git: {elapsed:?}"
+        );
     }
 
     #[test]

@@ -99,7 +99,7 @@ impl Tab {
             return inherited;
         };
         match inherited {
-            Some(cwd) if cwd.starts_with(worktree) => Some(cwd),
+            Some(cwd) if cwd_is_inside_worktree(worktree, &cwd) => Some(cwd),
             _ => Some(worktree.clone()),
         }
     }
@@ -247,6 +247,40 @@ pub(crate) fn apply_pane_rename_to_tab(tab: &mut Tab, new_name: Option<&str>) {
     tab.title = new_name.unwrap_or("").trim().to_string();
 }
 
+/// Whether `cwd` names a directory at or below `worktree` (issue #366).
+///
+/// Not `Path::starts_with`: that compares components byte-for-byte, while the
+/// default macOS volume is case-insensitive and case-preserving. A pane's cwd
+/// comes from OSC 7 (whatever the user typed) or from `proc_pidinfo` (the
+/// on-disk spelling), and the stored checkout path is whatever
+/// `git worktree add` recorded - three spellings of one directory that need
+/// not match byte-for-byte. A component-wise case-folded compare treats them
+/// as the same place while still keeping a longer sibling name (`feats` next
+/// to `feat`) outside.
+///
+/// A `..` anywhere in the inherited path is rejected outright rather than
+/// resolved: the prefix it walks out of says nothing about where it lands,
+/// and resolving it means touching the filesystem on a path that may not
+/// exist.
+fn cwd_is_inside_worktree(worktree: &std::path::Path, cwd: &std::path::Path) -> bool {
+    if cwd
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let mut actual = cwd.components();
+    worktree.components().all(|expected| {
+        actual.next().is_some_and(|got| {
+            got == expected
+                || got
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+        })
+    })
+}
+
 /// A tab binding that can still be honoured: the path, when it is a directory
 /// now, and `None` otherwise (issue #347).
 ///
@@ -383,5 +417,38 @@ mod tests {
         // Nothing inherited at all still lands in the worktree, never at the
         // process cwd.
         assert_eq!(tab.confine_cwd(None), Some(worktree));
+    }
+
+    #[test]
+    fn a_case_folded_spelling_of_the_checkout_is_still_inside_it() {
+        // Issue #366: `Path::starts_with` compares components byte-for-byte,
+        // but the default macOS volume is case-insensitive and
+        // case-preserving. OSC 7 reports whatever the user typed, so a `cd`
+        // through a case variant left every later pane yanked back to the
+        // worktree root.
+        let worktree = std::path::PathBuf::from("/Repo.worktrees/feat");
+        let tab = Tab::restored("feat", None, Some(worktree.clone()));
+
+        let folded = std::path::PathBuf::from("/repo.worktrees/FEAT/src");
+        assert_eq!(
+            tab.confine_cwd(Some(folded.clone())),
+            Some(folded),
+            "a case variant of the bound checkout is the same directory"
+        );
+
+        // A path that walks out through `..` is not inside, however its
+        // literal prefix reads.
+        assert_eq!(
+            tab.confine_cwd(Some(worktree.join("../feat-billing"))),
+            Some(worktree.clone()),
+            "a `..` escape must reset to the worktree root"
+        );
+
+        // Case folding must not swallow a genuinely different sibling.
+        assert_eq!(
+            tab.confine_cwd(Some(std::path::PathBuf::from("/repo.worktrees/feats"))),
+            Some(worktree),
+            "a longer sibling name is outside, case-folded or not"
+        );
     }
 }

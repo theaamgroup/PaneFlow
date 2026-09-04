@@ -44,6 +44,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::widgets::text_input::TextInput;
+
 /// Max delay between mouse clicks to count as a double / triple
 /// click. Mirrors the OS default on Linux/macOS (400 ms ~= GTK's
 /// `gtk-double-click-time`).
@@ -69,6 +71,13 @@ actions!(
         TaSelectAll,
         TaHome,
         TaEnd,
+        TaSelectHome,
+        TaSelectEnd,
+        TaWordLeft,
+        TaWordRight,
+        TaSelectWordLeft,
+        TaSelectWordRight,
+        TaDeleteWordLeft,
         TaInsertNewline,
         TaCopy,
         TaCut,
@@ -108,6 +117,8 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("shift-down", TaSelectDown, Some("PaneflowTextArea")),
         KeyBinding::new("home", TaHome, Some("PaneflowTextArea")),
         KeyBinding::new("end", TaEnd, Some("PaneflowTextArea")),
+        KeyBinding::new("shift-home", TaSelectHome, Some("PaneflowTextArea")),
+        KeyBinding::new("shift-end", TaSelectEnd, Some("PaneflowTextArea")),
         // PRD AC #2: Shift+Enter for a literal newline; plain Enter
         // fires `TaSubmit` which the Composer interprets as "send".
         KeyBinding::new("enter", TaSubmit, Some("PaneflowTextArea")),
@@ -125,6 +136,25 @@ pub fn register_keybindings(cx: &mut App) {
             TaSubmitImmediate,
             Some("PaneflowTextArea"),
         ),
+    ]);
+    // macOS word / line motion, matching NSTextView and the
+    // single-line `TextInput`: Option moves by word, Cmd jumps to the
+    // line edge, Shift extends the selection.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("alt-left", TaWordLeft, Some("PaneflowTextArea")),
+        KeyBinding::new("alt-right", TaWordRight, Some("PaneflowTextArea")),
+        KeyBinding::new("alt-shift-left", TaSelectWordLeft, Some("PaneflowTextArea")),
+        KeyBinding::new(
+            "alt-shift-right",
+            TaSelectWordRight,
+            Some("PaneflowTextArea"),
+        ),
+        KeyBinding::new("alt-backspace", TaDeleteWordLeft, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-left", TaHome, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-right", TaEnd, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-shift-left", TaSelectHome, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-shift-right", TaSelectEnd, Some("PaneflowTextArea")),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -209,6 +239,13 @@ pub struct TextArea {
     on_escape: Option<EscapeFn>,
     on_submit_immediate: Option<SubmitImmediateFn>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// Shaped lines from the most recent paint, shared with the paint
+    /// pass. IME / accessibility caret geometry is answered from these
+    /// so the reported caret is the painted caret on soft-wrapped and
+    /// non-monospace text.
+    last_layout: Option<Arc<Vec<ShapedLineInfo>>>,
+    /// Line height the lines in `last_layout` were laid out with.
+    last_line_height: Pixels,
     /// EP-002 (Launch Pad): when `true`, Enter fires `on_submit` even on an
     /// empty buffer (optional field in a form whose Enter confirms the whole
     /// form). Default `false` - every other consumer keeps the empty no-op.
@@ -238,6 +275,8 @@ impl TextArea {
             on_escape: None,
             on_submit_immediate: None,
             last_bounds: None,
+            last_layout: None,
+            last_line_height: px(20.),
             submit_on_empty: false,
             decorations: Vec::new(),
         }
@@ -809,6 +848,70 @@ impl TextArea {
         self.move_to(self.snap_out_of_chip(target, false), cx);
     }
 
+    fn select_home(&mut self, _: &TaSelectHome, _w: &mut Window, cx: &mut Context<Self>) {
+        let target = line_start(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn select_end(&mut self, _: &TaSelectEnd, _w: &mut Window, cx: &mut Context<Self>) {
+        let target = line_end(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn word_left(&mut self, _: &TaWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let target = TextInput::previous_word_boundary(&self.content, self.cursor());
+            self.move_to(self.snap_out_of_chip(target, true), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx);
+        }
+    }
+
+    fn word_right(&mut self, _: &TaWordRight, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let target = TextInput::next_word_boundary(&self.content, self.cursor());
+            self.move_to(self.snap_out_of_chip(target, false), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx);
+        }
+    }
+
+    fn select_word_left(&mut self, _: &TaSelectWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        let target = TextInput::previous_word_boundary(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &TaSelectWordRight,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = TextInput::next_word_boundary(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn delete_word_left(&mut self, _: &TaDeleteWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            // Same chip contract as `backspace`: a chip flush against
+            // the cursor is selected first, deleted on the next press.
+            if let Some(range) = self.decoration_ending_at(self.cursor()) {
+                self.selected_range = range;
+                cx.notify();
+                return;
+            }
+            let prev = TextInput::previous_word_boundary(&self.content, self.cursor());
+            // Never cut a chip in half: a boundary landing inside one
+            // widens the deletion to the whole decoration.
+            let prev = self.snap_out_of_chip(prev, true);
+            if prev == self.cursor() {
+                return;
+            }
+            self.selected_range = prev..self.cursor();
+        }
+        self.replace_selection("", cx);
+    }
+
     fn copy(&mut self, _: &TaCopy, _w: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -969,15 +1072,10 @@ impl EntityInputHandler for TextArea {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let offset = range.start.min(self.content.len());
-        let row = self.content[..offset]
-            .chars()
-            .filter(|ch| *ch == '\n')
-            .count();
-        let line_start = line_start(&self.content, offset);
-        let col = self.content[line_start..offset].chars().count();
-        let x = element_bounds.left() + px(col as f32 * 7.0);
-        let y = element_bounds.top() + px(row as f32 * 20.0);
-        Some(Bounds::new(point(x, y), size(px(1.0), px(20.0))))
+        let lines = self.last_layout.clone()?;
+        let line_height = self.last_line_height;
+        let origin = caret_position(&lines, element_bounds.origin, line_height, offset)?;
+        Some(Bounds::new(origin, size(px(1.0), line_height)))
     }
 
     fn character_index_for_point(
@@ -986,25 +1084,13 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let local = self
-            .last_bounds
-            .and_then(|bounds| bounds.localize(&point))
-            .unwrap_or(point);
-        let row = (local.y.as_f32() / 20.0).max(0.0).floor() as usize;
-        let col = (local.x.as_f32() / 7.0).max(0.0).floor() as usize;
-        let mut byte_offset = 0;
-        for (idx, line) in self.content.split('\n').enumerate() {
-            if idx == row {
-                let local = line
-                    .char_indices()
-                    .nth(col)
-                    .map(|(offset, _)| offset)
-                    .unwrap_or(line.len());
-                return Some(self.offset_to_utf16(byte_offset + local));
-            }
-            byte_offset += line.len() + 1;
-        }
-        Some(self.offset_to_utf16(self.content.len()))
+        // Same wrap-aware walk a mouse click takes, so an IME or
+        // VoiceOver hit-test resolves to the byte the user would get
+        // by clicking that pixel.
+        let lines = self.last_layout.clone()?;
+        let bounds = self.last_bounds?;
+        let offset = hit_test(&lines, bounds.origin, self.last_line_height, point);
+        Some(self.offset_to_utf16(offset))
     }
 }
 
@@ -1073,6 +1159,13 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
@@ -1388,8 +1481,12 @@ impl Element for TextAreaContent {
                 ElementInputHandler::new(bounds, entity.clone()),
                 cx,
             );
+            let lines = prepaint.lines.clone();
+            let line_height = self.line_height;
             entity.update(cx, |this, _cx| {
                 this.last_bounds = Some(bounds);
+                this.last_layout = Some(lines);
+                this.last_line_height = line_height;
             });
         }
 
@@ -1578,20 +1675,13 @@ impl Element for TextAreaContent {
             let (caret_x, caret_y) = if content_empty {
                 (bounds.origin.x, bounds.origin.y)
             } else {
-                let cursor_pos = self.cursor;
-                let line = prepaint
-                    .lines
-                    .iter()
-                    .find(|l| cursor_pos >= l.byte_start && cursor_pos <= l.byte_end)
-                    .or_else(|| prepaint.lines.last());
-                match line {
-                    Some(line) => {
-                        let local = cursor_pos.saturating_sub(line.byte_start);
-                        match line.wrapped.position_for_index(local, self.line_height) {
-                            Some(pos) => (bounds.origin.x + pos.x, line.y_top + pos.y),
-                            None => (bounds.origin.x, line.y_top),
-                        }
-                    }
+                match caret_position(
+                    &prepaint.lines,
+                    bounds.origin,
+                    self.line_height,
+                    self.cursor,
+                ) {
+                    Some(pos) => (pos.x, pos.y),
                     None => (bounds.origin.x, bounds.origin.y),
                 }
             };
@@ -1678,6 +1768,36 @@ impl Element for TextAreaContent {
                 })
                 .ok();
         });
+    }
+}
+
+/// Caret origin for the byte `offset`, computed from the shaped lines
+/// of the last layout. `origin` is the element's top-left corner.
+/// Shared by the paint pass and by the IME / accessibility
+/// `bounds_for_range`, so the reported caret is the painted caret --
+/// wrap rows and real glyph advances included, rather than a fixed
+/// character cell.
+fn caret_position(
+    lines: &[ShapedLineInfo],
+    origin: Point<Pixels>,
+    line_height: Pixels,
+    offset: usize,
+) -> Option<Point<Pixels>> {
+    // `y_top` is absolute to the frame the lines were shaped in;
+    // re-anchor it on `origin` so a moved element still reports
+    // correctly.
+    let first_y = lines.first()?.y_top;
+    let line = lines
+        .iter()
+        .find(|l| offset >= l.byte_start && offset <= l.byte_end)
+        .or_else(|| lines.last())?;
+    let row_y = origin.y + (line.y_top - first_y);
+    let local = offset
+        .saturating_sub(line.byte_start)
+        .min(line.wrapped.len());
+    match line.wrapped.position_for_index(local, line_height) {
+        Some(pos) => Some(point(origin.x + pos.x, row_y + pos.y)),
+        None => Some(point(origin.x, row_y)),
     }
 }
 
@@ -2196,6 +2316,150 @@ mod tests {
         assert_eq!(
             find_decoration_starting_at(&decos, 12).map(|r| r.end),
             Some(14)
+        );
+    }
+
+    /// The IME / accessibility caret must be the caret the user sees.
+    /// It used to be derived from a hardcoded 7x20 cell grid over
+    /// *logical* lines, so on soft-wrapped (or non-monospace) text the
+    /// CJK candidate window and the VoiceOver caret landed on the
+    /// wrong glyph. Both must come from the same shaped lines the
+    /// paint pass draws the caret from.
+    #[gpui::test]
+    fn ime_caret_bounds_match_the_shaped_line_geometry(cx: &mut gpui::TestAppContext) {
+        const CONTENT: &str = "ab cd ef\nxy";
+        const FIRST_LINE: &str = "ab cd ef";
+        const WIDTH: f32 = 30.0;
+
+        struct Probe {
+            area: gpui::Entity<TextArea>,
+        }
+
+        impl Render for Probe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                // A flex column stretches its child across the full
+                // width, so the textarea shapes against a definite
+                // wrap width instead of an indefinite one.
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(WIDTH))
+                    .child(self.area.clone())
+            }
+        }
+
+        let (probe, cx) = cx.add_window_view(|_window, cx| {
+            let area = cx.new(|cx| {
+                let mut area = TextArea::new("", cx);
+                area.set_value(CONTENT, cx);
+                area
+            });
+            Probe { area }
+        });
+        cx.simulate_resize(size(px(400.0), px(200.0)));
+        cx.run_until_parked();
+
+        let area = probe.read_with(cx, |probe, _cx| probe.area.clone());
+        let bounds = area
+            .read_with(cx, |area, _cx| area.last_bounds)
+            .expect("the text area must have painted");
+
+        // What the text system itself reports for the first logical
+        // line at this width: the x of byte 3, and how many visual
+        // rows the line occupies once it soft-wraps.
+        let (expected_x, first_line_rows) = cx.update(|window, _cx| {
+            let runs = [TextRun {
+                len: FIRST_LINE.len(),
+                font: window.text_style().font(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }];
+            let wrapped = window
+                .text_system()
+                .shape_text(
+                    FIRST_LINE.into(),
+                    px(13.0),
+                    &runs,
+                    Some(bounds.size.width),
+                    None,
+                )
+                .expect("shaping the first line must succeed");
+            let line = &wrapped[0];
+            (
+                line.position_for_index(3, px(20.0))
+                    .expect("shaped x for byte 3")
+                    .x,
+                line.wrap_boundaries().len() + 1,
+            )
+        });
+        assert!(
+            first_line_rows > 1,
+            "the probe must be narrow enough to soft-wrap, got {first_line_rows} row(s)"
+        );
+
+        let (mid_line, next_line) = area.update_in(cx, |area, window, cx| {
+            let mid = area
+                .bounds_for_range(3..3, bounds, window, cx)
+                .expect("caret bounds inside the first logical line");
+            let next = area
+                .bounds_for_range(9..9, bounds, window, cx)
+                .expect("caret bounds on the second logical line");
+            (mid, next)
+        });
+
+        assert_eq!(
+            mid_line.origin.x - bounds.left(),
+            expected_x,
+            "IME caret x must come from the shaped line, not a fixed cell width"
+        );
+        assert_eq!(
+            next_line.origin.y - bounds.top(),
+            px(20.0 * first_line_rows as f32),
+            "IME caret y must clear every visual row of the wrapped line above it"
+        );
+    }
+
+    /// macOS text fields move and delete by word with Option+Arrow /
+    /// Option+Backspace. The textarea registers its own key context,
+    /// so those bindings have to exist there too.
+    #[gpui::test]
+    fn option_arrows_move_and_delete_by_word(cx: &mut gpui::TestAppContext) {
+        cx.update(register_keybindings);
+
+        let (area, cx) = cx.add_window_view(|window, cx| {
+            let mut area = TextArea::new("", cx);
+            area.set_value("alpha beta gamma", cx);
+            window.focus(&area.focus_handle, cx);
+            area
+        });
+        cx.simulate_resize(size(px(400.0), px(200.0)));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("alt-left");
+        assert_eq!(
+            area.read_with(cx, |area, _cx| area.cursor_offset()),
+            "alpha beta ".len(),
+            "Option+Left must move to the start of the previous word"
+        );
+
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(
+            area.read_with(cx, |area, _cx| area.value()),
+            "alpha gamma",
+            "Option+Backspace must delete the word to the left"
+        );
+
+        cx.simulate_keystrokes("alt-right");
+        assert_eq!(
+            area.read_with(cx, |area, _cx| area.cursor_offset()),
+            "alpha gamma".len(),
+            "Option+Right must move to the end of the next word"
         );
     }
 }

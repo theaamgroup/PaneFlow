@@ -389,24 +389,47 @@ pub fn select_chevron(ui: crate::theme::UiColors) -> impl IntoElement {
 
 /// The subtle-gray select trigger pill (Codex style). Returns a `relative` `Div`
 /// so a deferred menu can anchor to it; the caller adds the value cluster,
-/// [`select_chevron`], an open/close `on_mouse_down`, and (when open) the menu.
-pub fn select_trigger(id: impl Into<ElementId>, ui: crate::theme::UiColors) -> AnimatedHover {
+/// [`select_chevron`], the open/close listeners, and (when open) the menu.
+/// `expanded` is the menu's open state, which the trigger reports as its
+/// `aria-expanded` (issue #361).
+pub fn select_trigger(
+    id: impl Into<ElementId>,
+    ui: crate::theme::UiColors,
+    expanded: bool,
+) -> AnimatedHover {
     // Same hover as `secondary_button`: a tint of `ui.text` over `ui.subtle`,
     // not a fixed lightness cut. The cut darkened in both themes, so a light
     // theme's trigger and its neighbouring Reset button reacted in opposite
     // directions; the lerp lifts on dark and deepens on light, one recipe for
     // every subtle-gray control on the settings pages.
-    select_trigger_with_hover(id, ui, lerp_color(ui.subtle, ui.text, 0.06))
+    select_trigger_with_hover(id, ui, lerp_color(ui.subtle, ui.text, 0.06), expanded)
 }
 
+/// The accessibility contract of a Settings select lives here (issue #361).
+///
+/// Beyond the `Role::ComboBox` the trigger always had: it reports the menu's
+/// open state as `aria-expanded`, and it is a focusable tab stop. Focusability
+/// is what makes GPUI synthesize `ClickEvent::Keyboard` from an unmodified
+/// Space / Enter KeyUp on the trigger (`paint_mouse_listeners` in `div.rs`) and
+/// what puts `accesskit::Action::Focus` on the node. The matching
+/// `accesskit::Action::Click` - the one VoiceOver's "Click" sends - is only
+/// advertised when the element carries a click listener, so every caller
+/// chains an `.on_click()` open/close arm next to its `.on_mouse_down()` one;
+/// the click arm filters on `ClickEvent::Keyboard` because the pointer already
+/// opened the menu on press and would otherwise toggle it shut on release.
+/// (A VoiceOver Click arrives as the synthesized mouse pair, so it opens
+/// through the pointer arm and is filtered out of the keyboard one.)
 pub fn select_trigger_with_hover(
     id: impl Into<ElementId>,
     ui: crate::theme::UiColors,
     hover_bg: Hsla,
+    expanded: bool,
 ) -> AnimatedHover {
     div()
         .id(id.into())
         .role(Role::ComboBox)
+        .aria_expanded(expanded)
+        .tab_index(0)
         .relative()
         .flex()
         .flex_row()
@@ -616,6 +639,38 @@ pub fn select_item(
     ))
 }
 
+/// The listbox a Settings [`select_trigger`] opens (issue #361): a
+/// [`select_menu`] that reports `Role::ListBox`, so the rows a screen reader
+/// walks are the options of the combo box that owns them rather than an
+/// unlabelled group. Only the select menus take it - the app's context menus
+/// keep the plain [`select_menu`], which is not a listbox.
+pub fn select_listbox(id: impl Into<ElementId>, ui: crate::theme::UiColors) -> SelectMenu {
+    select_menu(id, ui).role(Role::ListBox)
+}
+
+/// One row of a [`select_listbox`] (issue #361): a [`select_item`] that reports
+/// `Role::ListBoxOption` and whether it is the selected value, so a screen
+/// reader announces the options of the combo box and which one is current.
+/// `select_item` itself stays role-less because it also builds context-menu
+/// rows, which are not listbox options.
+///
+/// The row is deliberately *not* focusable, unlike the trigger. A row is
+/// destroyed the moment it is activated (choosing a value closes the menu), and
+/// a focusable element takes window focus on mouse-down, so a focusable row
+/// would strand focus on a dropped handle and leave the settings panel - the
+/// element that owns Escape and the font typeahead - unable to see another
+/// keystroke. VoiceOver still activates a row: its existing `.on_click()`
+/// listener is what puts `accesskit::Action::Click` on the node.
+pub fn select_option(
+    id: impl Into<ElementId>,
+    selected: bool,
+    ui: crate::theme::UiColors,
+) -> AnimatedHover {
+    select_item(id, selected, ui)
+        .role(Role::ListBoxOption)
+        .aria_selected(selected)
+}
+
 /// Wrap a built menu in the deferred, occluding popover anchored just under the
 /// trigger's right edge. Use as the trigger's last child while it is open.
 pub fn deferred_select_menu(menu: SelectMenu) -> AnyElement {
@@ -707,6 +762,113 @@ mod tests {
             violations.is_empty(),
             "settings tabs must build toggles with `toggle_switch`, not wrap `toggle_pill` \
              themselves (the wrapper has no switch role):\n{}",
+            violations.join("\n")
+        );
+    }
+
+    /// Issue #361: the Settings selects were a bare `Role::ComboBox` div that
+    /// opened only from `on_mouse_down` - no expanded state, not focusable, and
+    /// with no click listener, so nothing put `accesskit::Action::Click` on the
+    /// node (VoiceOver's "Click" did nothing) and GPUI never synthesized the
+    /// Space/Enter click it gives a focused element. The menu and its rows
+    /// carried no listbox semantics either. Those semantics live in
+    /// [`select_trigger_with_hover`], [`select_listbox`] and [`select_option`];
+    /// this scan fails with the offending `file:line` if a settings tab drops
+    /// back to the role-less primitives, if a page with a select loses its
+    /// keyboard activation arm, or if one of the three primitives loses a
+    /// required attribute.
+    #[test]
+    fn settings_selects_are_accessible_comboboxes() {
+        use std::path::{Path, PathBuf};
+
+        let this_file = include_str!("components.rs");
+        let body_of = |signature: &str| -> String {
+            this_file
+                .split(signature)
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .expect("components.rs defines the select primitive")
+                .to_string()
+        };
+
+        for (signature, needles) in [
+            (
+                "pub fn select_trigger_with_hover(",
+                [
+                    ".role(Role::ComboBox)",
+                    ".aria_expanded(expanded)",
+                    ".tab_index(0)",
+                ],
+            ),
+            (
+                "pub fn select_listbox(",
+                [".role(Role::ListBox)", "select_menu(id, ui)", "SelectMenu"],
+            ),
+            (
+                "pub fn select_option(",
+                [
+                    ".role(Role::ListBoxOption)",
+                    ".aria_selected(selected)",
+                    "select_item(id, selected, ui)",
+                ],
+            ),
+        ] {
+            let body = body_of(signature);
+            for needle in needles {
+                assert!(
+                    body.contains(needle),
+                    "`{signature}` lost `{needle}`; the select semantics live there"
+                );
+            }
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings");
+        let mut violations = Vec::new();
+        let mut stack: Vec<PathBuf> = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if rel == "components.rs" {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (idx, line) in text.lines().enumerate() {
+                    // `deferred_select_menu` is the popover wrapper, not the
+                    // menu container, so it is not a violation.
+                    let line_without_wrapper = line.replace("deferred_select_menu(", "");
+                    if line_without_wrapper.contains("select_item(")
+                        || line_without_wrapper.contains("select_menu(")
+                    {
+                        violations.push(format!(
+                            "{rel}:{}: {} (use `select_option` / `select_listbox`)",
+                            idx + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+                if text.contains("select_trigger") && !text.contains("ClickEvent::Keyboard") {
+                    violations.push(format!(
+                        "{rel}: builds a select trigger but carries no `ClickEvent::Keyboard` \
+                         arm, so Space/Enter and VoiceOver's Click cannot open it"
+                    ));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "settings selects must go through the accessible primitives:\n{}",
             violations.join("\n")
         );
     }

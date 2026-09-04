@@ -42,7 +42,8 @@ pub(crate) fn path_is_in_retiring_worktree(path: &std::path::Path) -> bool {
 }
 
 pub use git::{
-    GitDiffStats, detect_branch, find_git_dir, resolve_repo_root, resolve_worktree_root,
+    GIT_STATS_SWEEP_DEADLINE, GitDiffStats, detect_branch, find_git_dir, resolve_repo_root,
+    resolve_worktree_root,
 };
 #[cfg(test)]
 pub(crate) use ports::PortEntry;

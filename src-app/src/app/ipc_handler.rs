@@ -1674,6 +1674,24 @@ fn resolved_event_surface_id(
     session_surface_id.or(explicit_surface_id)
 }
 
+/// Key of the marker a handler returns when it has taken ownership of the
+/// JSON-RPC response and will send it itself (issue #363).
+const IPC_DEFERRED_KEY: &str = "_ipc_deferred";
+
+/// The marker value. Never reaches a client: `process_ipc_requests` drops the
+/// frame instead of sending it.
+fn ipc_deferred_response() -> serde_json::Value {
+    serde_json::json!({ IPC_DEFERRED_KEY: true })
+}
+
+/// Whether a handler already owns the reply for this request.
+fn ipc_response_is_deferred(value: &serde_json::Value) -> bool {
+    value
+        .get(IPC_DEFERRED_KEY)
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
 fn drain_ipc_requests_for_tick(
     rx: &std::sync::mpsc::Receiver<crate::ipc::IpcRequest>,
 ) -> Vec<crate::ipc::IpcRequest> {
@@ -1773,7 +1791,20 @@ impl PaneFlowApp {
             if !crate::ipc::try_start_dispatch(&req.dispatch) {
                 continue;
             }
-            let result = self.handle_ipc(&req.method, &req.params, req.caller_pid, cx);
+            let result = self.handle_ipc(
+                &req.method,
+                &req.params,
+                req.caller_pid,
+                Some(&req.response_tx),
+                cx,
+            );
+            // Issue #363: `surface.read` / `surface.search` took the response
+            // channel and answer from a background worker, so the blocking
+            // runtime wait never runs on this 50 ms GPUI tick. Sending here
+            // too would answer the caller with the marker.
+            if ipc_response_is_deferred(&result) {
+                continue;
+            }
             // EP-002 US-006: mirror a SUCCESSFUL ai.* lifecycle frame to event-
             // bus subscribers. Broadcast after the handler so the looked-up
             // session carries the just-applied state.
@@ -2979,6 +3010,10 @@ impl PaneFlowApp {
         // EP-003 US-010 (agent-control-plane): socket peer PID for the
         // free-access write trace; None on macOS/Windows. Advisory only.
         caller_pid: Option<i64>,
+        // Issue #363: the channel the socket thread is waiting on. A handler
+        // that hands its blocking work to a background worker clones this,
+        // answers from there, and returns `ipc_deferred_response()`.
+        responder: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
         // Issue #210: thin per-namespace router. Every family's match arms
@@ -2988,7 +3023,7 @@ impl PaneFlowApp {
         if method.starts_with("workspace.") {
             self.handle_workspace_method(method, params, cx)
         } else if method.starts_with("surface.") {
-            self.handle_surface_method(method, params, caller_pid, cx)
+            self.handle_surface_method(method, params, caller_pid, responder, cx)
         } else if method.starts_with("fleet.") {
             self.handle_fleet_method(method, params, cx)
         } else if method.starts_with("ai.") {
@@ -3227,6 +3262,8 @@ impl PaneFlowApp {
         // EP-003 US-010 (agent-control-plane): socket peer PID for the
         // free-access write trace; None on macOS/Windows. Advisory only.
         caller_pid: Option<i64>,
+        // Issue #363: response channel for the reads that answer off-thread.
+        responder: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
         match method {
@@ -3292,43 +3329,6 @@ impl PaneFlowApp {
                 // timer heuristic (kills the flow engine's settling poll).
                 let output_generation = terminal.read(cx).terminal.output_generation;
                 let sid = terminal.entity_id().as_u64();
-                let read_started = std::time::Instant::now();
-                // The engine cuts the window (`DisplayTerminal::transcript_window`):
-                // it reads the screen plus the `lines` rows the page covers,
-                // never the whole 4000-row history, so a wait/flow poll costs
-                // what it asks for (issue #29). The rows are the history
-                // followed by the live screen (#184 Phase 3.6): a full-screen
-                // TUI has no history, so the screen is what a reader gets.
-                // `None` is a runtime that did not answer - an error, not a
-                // blank pane, or wait/flow would settle on a wedged runtime.
-                let Some((text, returned, total, eof)) = terminal
-                    .read(cx)
-                    .terminal
-                    .extract_scrollback_window(lines, offset)
-                else {
-                    return JsonRpcError::internal_error("terminal runtime did not answer")
-                        .into_value();
-                };
-                let extract_elapsed = read_started.elapsed();
-                let total_elapsed = read_started.elapsed();
-                if total_elapsed >= std::time::Duration::from_millis(10) {
-                    log::debug!(
-                        "surface.read sid={sid} lines={lines} offset={offset} total_lines={total} returned={returned} bytes={} extract_ms={} total_ms={}",
-                        text.len(),
-                        extract_elapsed.as_millis(),
-                        total_elapsed.as_millis()
-                    );
-                }
-                // US-025: an offset past the oldest retained line is a client
-                // error, not a silent empty read. The old `saturating_sub`
-                // path returned `("", 0, total, true)`, indistinguishable from
-                // "you legitimately scrolled to the very top" (offset == total).
-                if offset > total {
-                    return JsonRpcError::invalid_params(format!(
-                        "offset {offset} out of range (total_lines={total})"
-                    ))
-                    .into_value();
-                }
                 // EP-003 US-011 (agent-control-plane): wrap the returned text as
                 // untrusted so a malicious peer pane cannot hijack a conductor
                 // reading it. Default follows the global `ai_injection_fence`
@@ -3339,16 +3339,79 @@ impl PaneFlowApp {
                 // read path a conductor uses directly, mirroring the MCP fence.
                 let fenced =
                     fenced.unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
-                let (text, returned, truncated) = truncate_ipc_text(text, returned);
-                let text = if fenced {
-                    wrap_untrusted(
-                        &surface_read_header_attrs(sid, total, eof, truncated),
-                        &text,
-                    )
-                } else {
-                    text
+                // Issue #363: the extract parks on the runtime's reply for up
+                // to a second, and this runs on the 50 ms GPUI automation tick
+                // that `wait`/`flow` hit every 500 ms. Clone the `Send` reader
+                // here (an `Arc` bump) and do the waiting on a background
+                // worker, so a slow or silent runtime cannot stall painting.
+                let reader = terminal.read(cx).terminal.scrollback_reader();
+                let Some(responder) = responder.cloned() else {
+                    return JsonRpcError::internal_error("no response channel for surface.read")
+                        .into_value();
                 };
-                surface_read_value(text, returned, total, eof, output_generation, truncated)
+                cx.background_spawn(async move {
+                    let read_started = std::time::Instant::now();
+                    // The engine cuts the window (`DisplayTerminal::transcript_window`):
+                    // it reads the screen plus the `lines` rows the page covers,
+                    // never the whole 4000-row history, so a wait/flow poll costs
+                    // what it asks for (issue #29). The rows are the history
+                    // followed by the live screen (#184 Phase 3.6): a full-screen
+                    // TUI has no history, so the screen is what a reader gets.
+                    // `None` is a runtime that did not answer - an error, not a
+                    // blank pane, or wait/flow would settle on a wedged runtime.
+                    let window =
+                        smol::unblock(move || reader.extract_scrollback_window(lines, offset))
+                            .await;
+                    let Some((text, returned, total, eof)) = window else {
+                        let _ = responder.send(
+                            JsonRpcError::internal_error("terminal runtime did not answer")
+                                .into_value(),
+                        );
+                        return;
+                    };
+                    let extract_elapsed = read_started.elapsed();
+                    let total_elapsed = read_started.elapsed();
+                    if total_elapsed >= std::time::Duration::from_millis(10) {
+                        log::debug!(
+                            "surface.read sid={sid} lines={lines} offset={offset} total_lines={total} returned={returned} bytes={} extract_ms={} total_ms={}",
+                            text.len(),
+                            extract_elapsed.as_millis(),
+                            total_elapsed.as_millis()
+                        );
+                    }
+                    // US-025: an offset past the oldest retained line is a client
+                    // error, not a silent empty read. The old `saturating_sub`
+                    // path returned `("", 0, total, true)`, indistinguishable from
+                    // "you legitimately scrolled to the very top" (offset == total).
+                    if offset > total {
+                        let _ = responder.send(
+                            JsonRpcError::invalid_params(format!(
+                                "offset {offset} out of range (total_lines={total})"
+                            ))
+                            .into_value(),
+                        );
+                        return;
+                    }
+                    let (text, returned, truncated) = truncate_ipc_text(text, returned);
+                    let text = if fenced {
+                        wrap_untrusted(
+                            &surface_read_header_attrs(sid, total, eof, truncated),
+                            &text,
+                        )
+                    } else {
+                        text
+                    };
+                    let _ = responder.send(surface_read_value(
+                        text,
+                        returned,
+                        total,
+                        eof,
+                        output_generation,
+                        truncated,
+                    ));
+                })
+                .detach();
+                ipc_deferred_response()
             }
             "surface.status" => {
                 // EP-001 US-002 (agent-control-plane): one pane's agent state.
@@ -3391,15 +3454,46 @@ impl PaneFlowApp {
                     Ok(max_matches) => max_matches.unwrap_or(DEFAULT_MAX),
                     Err(e) => return e.into_value(),
                 };
-                let (matches, truncated) = terminal
-                    .read(cx)
-                    .terminal
-                    .search_scrollback(pattern, max_matches);
-                let arr: Vec<_> = matches
-                    .into_iter()
-                    .map(|(line, text)| serde_json::json!({"line": line, "text": text}))
-                    .collect();
-                serde_json::json!({"matches": arr, "truncated": truncated})
+                // Issue #363: the scan is one blocking runtime wait per
+                // `SearchChunk`, so a large buffer serialized many of them on
+                // the GPUI tick. Clone the `Send` reader here and scan on a
+                // background worker.
+                let reader = terminal.read(cx).terminal.scrollback_reader();
+                let pattern = pattern.to_owned();
+                let Some(responder) = responder.cloned() else {
+                    return JsonRpcError::internal_error("no response channel for surface.search")
+                        .into_value();
+                };
+                cx.background_spawn(async move {
+                    let found =
+                        smol::unblock(move || reader.search_scrollback(&pattern, max_matches))
+                            .await;
+                    // Issue #362: an unanswered or failed runtime is an error,
+                    // not `matches=[] truncated=true` - `truncated` means the
+                    // cap or the cell budget cut a scan that did finish, and a
+                    // caller must not read a wedged pane as "pattern absent".
+                    // `surface.read` maps the same failure the same way.
+                    let (matches, truncated) = match found {
+                        Ok(found) => found,
+                        Err(reason) => {
+                            let _ = responder.send(
+                                JsonRpcError::internal_error(format!(
+                                    "terminal runtime did not answer: {reason}"
+                                ))
+                                .into_value(),
+                            );
+                            return;
+                        }
+                    };
+                    let arr: Vec<_> = matches
+                        .into_iter()
+                        .map(|(line, text)| serde_json::json!({"line": line, "text": text}))
+                        .collect();
+                    let _ =
+                        responder.send(serde_json::json!({"matches": arr, "truncated": truncated}));
+                })
+                .detach();
+                ipc_deferred_response()
             }
             "surface.rename" => {
                 // US-013 / issue #86: `name` is the documented new-name key;
@@ -4778,6 +4872,14 @@ pub(crate) fn promote_response(
     })
 }
 
+/// Test-only stand-in for a dead network mount: resolving any path listed
+/// here stalls for [`STALLED_CWD_DELAY`] before the filesystem answers.
+#[cfg(test)]
+static STALLED_CWD_PATHS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+const STALLED_CWD_DELAY: Duration = Duration::from_secs(2);
+
 /// US-014 (cli-hardening-followup-2026-Q3): validate and canonicalize the
 /// `cwd` field of a `workspace.create` IPC request.
 ///
@@ -4795,8 +4897,59 @@ pub(crate) fn promote_response(
 ///
 /// Successful canonicalization is logged at `info!` for audit trail
 /// (relative-path resolution and symlink traversal visibility).
+///
+/// Issue #358: every caller runs on the GPUI automation tick, and `stat`
+/// on a dead NFS/SMB/iCloud mount can block for the kernel mount timeout,
+/// which would freeze painting and the 50 ms IPC drain. The filesystem
+/// work therefore runs on a helper thread with the same bounded probe as
+/// session restore: a late answer is refused with `-32602` and the stalled
+/// thread is left to unwind once the filesystem finally answers.
 pub(crate) fn canonicalize_workspace_cwd(raw: &str) -> Result<std::path::PathBuf, JsonRpcError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = raw.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("ipc-cwd-probe".to_string())
+        .spawn(move || {
+            let _ = tx.send(canonicalize_workspace_cwd_blocking(&owned));
+        });
+    if let Err(err) = spawned {
+        return Err(JsonRpcError::invalid_params(format!(
+            "cwd could not be probed: {raw} ({err})"
+        )));
+    }
+    match rx.recv_timeout(WORKSPACE_CWD_PROBE_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => {
+            log::warn!(
+                "ipc: cwd {raw:?} did not answer stat within {WORKSPACE_CWD_PROBE_TIMEOUT:?}; refusing it"
+            );
+            Err(JsonRpcError::invalid_params(format!(
+                "cwd did not answer within {WORKSPACE_CWD_PROBE_TIMEOUT:?} (unresponsive volume?): {raw}"
+            )))
+        }
+    }
+}
+
+/// Longest an IPC cwd probe may hold the automation tick. A local directory
+/// answers in microseconds; only a dead network or cloud mount runs this
+/// out, and such a cwd is refused rather than letting `stat` pin the render
+/// thread for the mount's own timeout (matches session restore's bound).
+const WORKSPACE_CWD_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The blocking half of [`canonicalize_workspace_cwd`]: runs on the probe
+/// thread, never on the GPUI thread.
+fn canonicalize_workspace_cwd_blocking(raw: &str) -> Result<std::path::PathBuf, JsonRpcError> {
     let expanded = expand_tilde(raw);
+    #[cfg(test)]
+    {
+        let stalled = STALLED_CWD_PATHS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&expanded);
+        if stalled {
+            std::thread::sleep(STALLED_CWD_DELAY);
+        }
+    }
     let canonical = std::fs::canonicalize(&expanded).map_err(|e| {
         JsonRpcError::invalid_params(format!("cwd does not exist or is unreadable: {raw} ({e})"))
     })?;
@@ -6011,6 +6164,38 @@ mod tests {
         );
     }
 
+    /// Issue #358: `workspace.create` / `workspace.up` / `surface.split`
+    /// resolve `cwd` on the GPUI automation tick. A cwd on a dead NFS/SMB
+    /// mount can pin `stat` for the kernel mount timeout, so the probe must
+    /// answer within a bounded window (`-32602` on timeout) like session
+    /// restore does, instead of freezing paint and the 50 ms IPC drain.
+    #[test]
+    fn workspace_cwd_probe_returns_invalid_params_when_stat_stalls() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stalled = tmp.path().to_path_buf();
+        let stalled_str = stalled.to_string_lossy().into_owned();
+        super::STALLED_CWD_PATHS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(stalled.clone());
+        let bound = super::STALLED_CWD_DELAY / 2;
+
+        let started = std::time::Instant::now();
+        let result = super::canonicalize_workspace_cwd(&stalled_str);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < bound,
+            "cwd probe blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+        let err = result.expect_err("a stalled cwd must be refused, not trusted");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(
+            err.message.contains("did not answer"),
+            "error must mention the timeout, got: {}",
+            err.message
+        );
+    }
+
     /// Sanity: a real, existing directory must canonicalize successfully.
     #[test]
     fn workspace_create_accepts_existing_directory() {
@@ -6121,6 +6306,69 @@ mod tests {
             4 > total_past,
             "offset > total is out of range → handler returns -32602"
         );
+    }
+
+    /// Issue #362: `surface.search` must not answer a wedged runtime with
+    /// `matches=[] truncated=true`, which reads as "pattern absent" or
+    /// "raise max_matches". It maps the failure the way `surface.read` does.
+    #[test]
+    fn surface_search_maps_a_runtime_failure_to_an_error() {
+        let src = include_str!("ipc_handler.rs");
+        let arm = src
+            .split("\"surface.search\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"surface.rename\"").next())
+            .expect("surface.search arm");
+        assert!(
+            arm.contains("Err(reason) =>") && arm.contains("internal_error"),
+            "an unanswered or failed scan is a JSON-RPC error, not an empty capped result"
+        );
+    }
+
+    /// Issue #363: `GhosttySession::request` parks its caller on the runtime
+    /// for up to a second. `surface.read` and `surface.search` are dispatched
+    /// from `process_automation_tick` on the GPUI thread - `wait`/`flow` poll
+    /// a read every 500 ms, and a search over a large buffer is one wait per
+    /// chunk - so neither may perform that wait inline. Both hand it to a
+    /// background worker and answer through the response channel from there.
+    #[test]
+    fn surface_reads_never_wait_on_the_runtime_from_the_gpui_tick() {
+        let src = include_str!("ipc_handler.rs");
+        for (method, next) in [
+            ("\"surface.read\"", "\"surface.status\""),
+            ("\"surface.search\"", "\"surface.rename\""),
+        ] {
+            let arm = src
+                .split(method)
+                .nth(1)
+                .and_then(|rest| rest.split(next).next())
+                .expect("surface arm");
+            assert!(
+                arm.contains("smol::unblock("),
+                "{method} must run the blocking runtime wait off the GPUI thread"
+            );
+            assert!(
+                arm.contains("ipc_deferred_response()"),
+                "{method} must hand the response channel to the background task"
+            );
+            assert!(
+                arm.contains("responder.send("),
+                "{method} must answer from the background task"
+            );
+        }
+    }
+
+    /// The deferral marker is internal: the tick must recognise it and drop
+    /// the frame instead of sending it to the caller (issue #363).
+    #[test]
+    fn a_deferred_marker_is_recognised_and_never_a_normal_result() {
+        assert!(super::ipc_response_is_deferred(
+            &super::ipc_deferred_response()
+        ));
+        assert!(!super::ipc_response_is_deferred(
+            &serde_json::json!({"matches": [], "truncated": false})
+        ));
+        assert!(!super::ipc_response_is_deferred(&serde_json::json!(null)));
     }
 
     #[test]

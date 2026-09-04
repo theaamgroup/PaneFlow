@@ -228,14 +228,36 @@ fn strip_codex_feature_block(content: &str) -> Option<StrippedCodexFeatureBlock>
         return None;
     }
 
-    let mut head_end = marker;
-    if head_end > 0 && lines[head_end - 1].is_empty() {
-        head_end -= 1;
-    }
+    // #368: keys that landed in the managed [features] table after the
+    // install belong to that table. Removing the header would promote them
+    // to the file root, so keep the header and drop only what PaneFlow owns.
+    let table_end = lines[section + 2..]
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .map_or(lines.len(), |offset| section + 2 + offset);
+    let has_foreign_keys = lines[section + 2..table_end]
+        .iter()
+        .any(|line| !line.trim().is_empty());
+
     let mut output = String::new();
-    for line in lines[..head_end].iter().chain(lines[section + 2..].iter()) {
-        output.push_str(line);
-        output.push('\n');
+    if has_foreign_keys {
+        for line in lines[..marker]
+            .iter()
+            .chain(std::iter::once(&lines[section]))
+            .chain(lines[section + 2..].iter())
+        {
+            output.push_str(line);
+            output.push('\n');
+        }
+    } else {
+        let mut head_end = marker;
+        if head_end > 0 && lines[head_end - 1].is_empty() {
+            head_end -= 1;
+        }
+        for line in lines[..head_end].iter().chain(lines[section + 2..].iter()) {
+            output.push_str(line);
+            output.push('\n');
+        }
     }
     if !content.ends_with('\n') && output.ends_with('\n') {
         output.pop();
@@ -330,6 +352,28 @@ mod tests {
         assert!(
             !feature.exists(),
             "the feature flag must not be enabled when the hooks install is refused"
+        );
+    }
+
+    #[test]
+    fn feature_cleanup_keeps_later_features_keys_in_their_table() {
+        // Issue #368: a key Codex or the user appends to the managed
+        // [features] table must stay in that table, not be promoted to
+        // the file root when the managed block is removed.
+        let temp = tempfile::TempDir::new().unwrap();
+        let feature = temp.path().join("config.toml");
+        std::fs::write(&feature, "model = \"o3\"\n").unwrap();
+        let project = temp.path().join("project").join(".codex");
+
+        let guard = CodexHookConfigGuard::install_at(&project, Some(&feature)).unwrap();
+        let mut with_extra = std::fs::read_to_string(&feature).unwrap();
+        with_extra.push_str("foo = 1\n");
+        std::fs::write(&feature, &with_extra).unwrap();
+        drop(guard);
+
+        assert_eq!(
+            std::fs::read_to_string(&feature).unwrap(),
+            "model = \"o3\"\n\n[features]\nfoo = 1\n"
         );
     }
 
