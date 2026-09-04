@@ -252,13 +252,26 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
         return (Vec::new(), 0);
     };
 
-    let sessions = entries.flatten().filter_map(|entry| {
-        let path = entry.path();
-        if !is_jsonl_file(&path) {
-            return None;
-        }
-        read_session_meta(&path).filter(|meta| crate::agent_sessions::cwd_matches(&meta.cwd, cwd))
-    });
+    const MAX_WALK_ENTRIES: usize = 4_096;
+    let sessions = entries
+        .flatten()
+        .take(MAX_WALK_ENTRIES)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                return None;
+            };
+            if !file_type.is_file()
+                || path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("jsonl"))
+            {
+                return None;
+            }
+            read_session_meta(&path)
+                .filter(|meta| crate::agent_sessions::cwd_matches(&meta.cwd, cwd))
+        });
 
     let (sessions, omitted) = crate::agent_sessions::collect_recent_sessions(
         sessions,

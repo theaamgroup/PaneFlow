@@ -939,6 +939,7 @@ impl PaneFlowApp {
             pending_palette_focus: false,
             pending_close: None,
             claude_registry_seen: Default::default(),
+            claude_registry_sweep_pending: false,
             pending_close_focus: cx.focus_handle(),
             pending_close_focus_claim: false,
             custom_buttons_modal: None,
