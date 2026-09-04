@@ -47,20 +47,29 @@ const SELECT_MENU_MAX_HEIGHT: f32 = 320.;
 /// Height of the tab context menu as it is actually drawn: the menu chrome,
 /// its two fixed rows, when `branch_rows` is non-zero the Branch section
 /// (header plus one row per branch), and when `remove_row` the "Remove
-/// worktree" row a bound tab carries (issue #348; its divider is folded into
-/// the row it introduces, like the Branch header), all capped at the
-/// surface's own ceiling. The on-screen clamp has to measure what is painted:
-/// sizing a forty-branch list at its uncapped height pinned the menu at
-/// `y = 0` (issue #347).
+/// worktree" row a bound tab carries with the divider that introduces it
+/// (issue #348; [`context_menu_divider`] is a 1 px rule with 4 px margins
+/// either side, and unlike the Branch header it is not folded into a row of
+/// its own), all capped at the surface's own ceiling. The on-screen clamp
+/// has to measure what is painted: sizing a forty-branch list at its
+/// uncapped height pinned the menu at `y = 0` (issue #347).
 pub(crate) fn tab_context_menu_height(branch_rows: usize, remove_row: bool) -> Pixels {
     let branch_rows = if branch_rows > 0 {
         1. + branch_rows as f32
     } else {
         0.
     };
-    let remove_rows = if remove_row { 1. } else { 0. };
-    px((8. + (2. + branch_rows + remove_rows) * 28.).min(SELECT_MENU_MAX_HEIGHT))
+    let remove = if remove_row {
+        28. + CONTEXT_MENU_DIVIDER_PX
+    } else {
+        0.
+    };
+    px((8. + (2. + branch_rows) * 28. + remove).min(SELECT_MENU_MAX_HEIGHT))
 }
+
+/// Painted height of [`context_menu_divider`]: the 1 px rule plus its 4 px
+/// vertical margins.
+const CONTEXT_MENU_DIVIDER_PX: f32 = 1. + 2. * 4.;
 
 pub(crate) fn clamped_context_menu_position(
     position: gpui::Point<Pixels>,
@@ -873,17 +882,17 @@ mod tests {
     #[test]
     fn a_bound_tab_menu_is_one_row_taller_for_remove_worktree() {
         // Issue #348: the "Remove worktree" row exists only for a bound tab,
-        // and the clamp must measure it or the menu overshoots the window
-        // bottom by exactly one row.
+        // and the clamp must measure it, divider included, or the menu
+        // overshoots the window bottom by the row and its rule.
         assert_eq!(
             tab_context_menu_height(0, true),
-            px(8. + 3. * 28.),
-            "chrome, two rows, and the removal row"
+            px(8. + 3. * 28. + 9.),
+            "chrome, two rows, the divider, and the removal row"
         );
         assert_eq!(
             tab_context_menu_height(2, true),
-            px(8. + (2. + 3. + 1.) * 28.),
-            "the removal row sits under the Branch section"
+            px(8. + (2. + 3. + 1.) * 28. + 9.),
+            "the removal row and its divider sit under the Branch section"
         );
         assert_eq!(tab_context_menu_height(40, true), px(320.));
     }

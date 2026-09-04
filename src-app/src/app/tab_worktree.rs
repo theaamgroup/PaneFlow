@@ -583,15 +583,12 @@ impl PaneFlowApp {
         let Some(path) = ws.tabs().get(tab_idx).and_then(|tab| tab.worktree.clone()) else {
             return;
         };
-        // Snapshotted on purpose: the refusal decides against the workspaces
-        // and terminals open at the click. A workspace opened during the
-        // await is re-resolved by `forget_removed_worktree`, which walks every
-        // workspace afterwards rather than trusting an index across it.
-        let open_roots: Vec<std::path::PathBuf> = self
-            .workspaces
-            .iter()
-            .map(|ws| ws.worktree_root.clone())
-            .collect();
+        // Snapshotted at the click for the off-thread checks, then taken
+        // again on the main thread right before the delete (below): a
+        // workspace opened at the checkout while the git probes ran has no
+        // terminal yet for the cwd scan to find, so only a re-read of the
+        // live workspace list can refuse it.
+        let open_roots = self.open_workspace_roots();
         let reserved = self.teardown_owned_worktrees();
         // The same live-process gate managed teardown applies: a shell or
         // agent still working in the checkout (a tab restored from a session
@@ -600,10 +597,46 @@ impl PaneFlowApp {
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let (probe_root, probe_path) = (repo_root.clone(), path.clone());
-                let removed = smol::unblock(move || {
-                    remove_checkout(&probe_root, &probe_path, &open_roots, &reserved, &protected)
+                let checked = smol::unblock(move || {
+                    check_checkout_removable(
+                        &probe_root,
+                        &probe_path,
+                        &open_roots,
+                        &reserved,
+                        &protected,
+                    )
                 })
                 .await;
+                // Re-validate against the workspaces open *now*, on the main
+                // thread, and only then delete. The remaining window is the
+                // one managed teardown has too: git itself still refuses a
+                // checkout that turned dirty in between.
+                let revalidated = cx.update(|cx| {
+                    this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                        let refusal = checked.err().or_else(|| {
+                            open_or_reserved_refusal(
+                                &path,
+                                &app.open_workspace_roots(),
+                                &app.teardown_owned_worktrees(),
+                            )
+                        });
+                        match refusal {
+                            Some(message) => {
+                                app.show_toast(message, cx);
+                                cx.notify();
+                                false
+                            }
+                            None => true,
+                        }
+                    })
+                });
+                if !matches!(revalidated, Ok(true)) {
+                    return;
+                }
+                let (remove_root, remove_path) = (repo_root.clone(), path.clone());
+                let removed =
+                    smol::unblock(move || remove_validated_checkout(&remove_root, &remove_path))
+                        .await;
                 let _ = cx.update(|cx| {
                     this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
                         match removed {
@@ -616,6 +649,15 @@ impl PaneFlowApp {
             },
         )
         .detach();
+    }
+
+    /// The checkout every open workspace stands in, for the open-workspace
+    /// refusal (issue #348).
+    fn open_workspace_roots(&self) -> Vec<std::path::PathBuf> {
+        self.workspaces
+            .iter()
+            .map(|ws| ws.worktree_root.clone())
+            .collect()
     }
 
     /// Every checkout the teardown path owns and removes on its own schedule:
@@ -709,18 +751,8 @@ fn removal_refusal(
     open_roots: &[std::path::PathBuf],
     reserved: &[std::path::PathBuf],
 ) -> Option<String> {
-    if open_roots.iter().any(|root| root.starts_with(path)) {
-        return Some(format!(
-            "{} is open as a workspace - close it first",
-            path.display()
-        ));
-    }
-    let overlaps = |owned: &std::path::Path| owned.starts_with(path) || path.starts_with(owned);
-    if reserved.iter().any(|owned| overlaps(owned)) {
-        return Some(format!(
-            "{} is managed by workspace teardown - it is removed when its workspace closes",
-            path.display()
-        ));
+    if let Some(reason) = open_or_reserved_refusal(path, open_roots, reserved) {
+        return Some(reason);
     }
     let ours = branch.is_some_and(|branch| {
         crate::workspace::worktree::is_paneflow_worktree_dir(repo_root, branch, path)
@@ -751,7 +783,48 @@ fn removal_refusal(
 /// report an error rather than "clean" when they cannot prove it, and that
 /// error propagates: never delete what cannot be read. The BRANCH IS NEVER
 /// DELETED.
+#[cfg(test)]
 fn remove_checkout(
+    repo_root: &std::path::Path,
+    path: &std::path::Path,
+    open_roots: &[std::path::PathBuf],
+    reserved: &[std::path::PathBuf],
+    protected_session_ids: &[u32],
+) -> Result<(), String> {
+    check_checkout_removable(repo_root, path, open_roots, reserved, protected_session_ids)?;
+    remove_validated_checkout(repo_root, path)
+}
+
+/// The two workspace-state refusals of [`removal_refusal`], on their own so
+/// [`PaneFlowApp::remove_tab_worktree`] can apply them a second time on the
+/// main thread, against the workspaces open at that moment, after the git
+/// probes and before the delete (issue #348). `open_roots` are matched at
+/// or under the path; `reserved` paths both ways, like the binding gate.
+fn open_or_reserved_refusal(
+    path: &std::path::Path,
+    open_roots: &[std::path::PathBuf],
+    reserved: &[std::path::PathBuf],
+) -> Option<String> {
+    if open_roots.iter().any(|root| root.starts_with(path)) {
+        return Some(format!(
+            "{} is open as a workspace - close it first",
+            path.display()
+        ));
+    }
+    let overlaps = |owned: &std::path::Path| owned.starts_with(path) || path.starts_with(owned);
+    if reserved.iter().any(|owned| overlaps(owned)) {
+        return Some(format!(
+            "{} is managed by workspace teardown - it is removed when its workspace closes",
+            path.display()
+        ));
+    }
+    None
+}
+
+/// The read-only half of [`remove_checkout`]: every refusal, nothing
+/// deleted. Runs off the render thread; a passing result is re-validated on
+/// the main thread before [`remove_validated_checkout`] runs.
+fn check_checkout_removable(
     repo_root: &std::path::Path,
     path: &std::path::Path,
     open_roots: &[std::path::PathBuf],
@@ -787,6 +860,17 @@ fn remove_checkout(
             path.display()
         ));
     }
+    Ok(())
+}
+
+/// The deleting half of [`remove_checkout`]: `git worktree remove` (which
+/// refuses by itself a checkout that turned dirty since the check) and the
+/// prune that drops the administrative entry. The BRANCH IS NEVER DELETED.
+fn remove_validated_checkout(
+    repo_root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    use crate::workspace::worktree;
     worktree::remove_worktree(repo_root, path)?;
     // The directory is gone; drop the administrative entry with it, so a
     // later `worktree add` for the same branch is not refused by a stale
