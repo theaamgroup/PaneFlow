@@ -32,7 +32,8 @@ use paneflow_config::schema::{CursorShapeConfig, normalize_hex_color};
 
 use crate::settings::components::{
     SETTINGS_CONTROL_CORNER_RADIUS, deferred_select_menu, hairline, section_header, select_chevron,
-    select_item, select_menu, select_trigger_with_hover, setting_card, setting_text, toggle_switch,
+    select_listbox, select_option, select_trigger_with_hover, setting_card, setting_text,
+    toggle_switch,
 };
 use crate::ui_primitives::AnimatedHoverExt;
 
@@ -281,6 +282,48 @@ impl PaneFlowApp {
             .child(display_card)
     }
 
+    /// Open or close the font dropdown. Shared by the trigger's pointer and
+    /// keyboard arms (issue #361) so the two cannot drift: closing the enum
+    /// dropdown, resetting the typeahead, kicking off the font scan on first
+    /// open, and handing focus back to the settings panel all happen once.
+    fn open_font_dropdown(
+        &mut self,
+        open: bool,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal_dropdown = None;
+        self.font_dropdown_open = open;
+        self.font_search.clear();
+        if self.font_dropdown_open && self.mono_font_names.is_empty() {
+            cx.spawn(async move |this, cx| {
+                let fonts = smol::unblock(crate::fonts::load_mono_fonts).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.mono_font_names = fonts;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        self.settings_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Open the named enum dropdown (`None` closes it). Shared by the trigger's
+    /// pointer and keyboard arms (issue #361).
+    fn open_terminal_dropdown(
+        &mut self,
+        which: Option<TerminalDropdown>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.font_dropdown_open = false;
+        self.font_search.clear();
+        self.terminal_dropdown = which;
+        self.settings_focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn terminal_font_family_row(
         &self,
         current_font: String,
@@ -305,39 +348,40 @@ impl PaneFlowApp {
 
         let font_open = self.font_dropdown_open;
         let trigger_hover_bg = lighter_control_hover(ui.subtle);
-        let mut trigger =
-            select_trigger_with_hover("terminal-font-family-trigger", ui, trigger_hover_bg)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.terminal_dropdown = None;
-                        this.font_dropdown_open = !font_open;
-                        this.font_search.clear();
-                        if this.font_dropdown_open && this.mono_font_names.is_empty() {
-                            cx.spawn(async move |this, cx| {
-                                let fonts = smol::unblock(crate::fonts::load_mono_fonts).await;
-                                let _ = this.update(cx, |this, cx| {
-                                    this.mono_font_names = fonts;
-                                    cx.notify();
-                                });
-                            })
-                            .detach();
-                        }
-                        this.settings_focus.focus(window, cx);
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(12.))
-                        .text_color(trigger_label_color)
-                        .truncate()
-                        .child(trigger_label),
-                )
-                .child(select_chevron(ui));
+        let mut trigger = select_trigger_with_hover(
+            "terminal-font-family-trigger",
+            ui,
+            trigger_hover_bg,
+            font_open,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.open_font_dropdown(!font_open, window, cx);
+            }),
+        )
+        // Keyboard / assistive-tech activation (issue #361): the pointer opens
+        // on press above, so this arm takes only the `ClickEvent::Keyboard`
+        // GPUI synthesizes from Space / Enter on the focused trigger. Carrying
+        // a click listener is also what puts `accesskit::Action::Click` on the
+        // node for VoiceOver.
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if !matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            this.open_font_dropdown(!font_open, window, cx);
+        }))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(trigger_label_color)
+                .truncate()
+                .child(trigger_label),
+        )
+        .child(select_chevron(ui));
 
         if self.font_dropdown_open {
             let search = self.font_search.to_lowercase();
@@ -353,7 +397,7 @@ impl PaneFlowApp {
                 })
                 .collect();
 
-            let mut menu = select_menu("terminal-font-dropdown", ui).on_mouse_down_out(
+            let mut menu = select_listbox("terminal-font-dropdown", ui).on_mouse_down_out(
                 cx.listener(|this, _, _w, cx| {
                     if this.font_dropdown_open {
                         this.font_dropdown_open = false;
@@ -365,7 +409,7 @@ impl PaneFlowApp {
 
             if default_matches {
                 menu = menu.child(
-                    select_item(
+                    select_option(
                         ("terminal-font-default", 0usize),
                         current_font == default_font,
                         ui,
@@ -391,7 +435,7 @@ impl PaneFlowApp {
                 let name_owned = (*name).clone();
                 let is_current = **name == current_font;
                 menu = menu.child(
-                    select_item(("terminal-font", i), is_current, ui)
+                    select_option(("terminal-font", i), is_current, ui)
                         .cursor(CursorStyle::Arrow)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                             this.font_dropdown_open = false;
@@ -624,18 +668,26 @@ impl PaneFlowApp {
             SharedString::from(format!("term-dd-{config_key}")),
             ui,
             trigger_hover_bg,
+            is_open,
         )
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
-                this.font_dropdown_open = false;
-                this.font_search.clear();
-                this.terminal_dropdown = if is_open { None } else { Some(which) };
-                this.settings_focus.focus(window, cx);
-                cx.notify();
+                this.open_terminal_dropdown((!is_open).then_some(which), window, cx);
             }),
         )
+        // Keyboard / assistive-tech activation (issue #361): the pointer opens
+        // on press above, so this arm takes only the `ClickEvent::Keyboard`
+        // GPUI synthesizes from Space / Enter on the focused trigger. Carrying
+        // a click listener is also what puts `accesskit::Action::Click` on the
+        // node for VoiceOver.
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if !matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            this.open_terminal_dropdown((!is_open).then_some(which), window, cx);
+        }))
         .child(
             div()
                 .flex_1()
@@ -649,7 +701,7 @@ impl PaneFlowApp {
 
         if is_open {
             let mut menu =
-                select_menu(SharedString::from(format!("term-dd-list-{config_key}")), ui)
+                select_listbox(SharedString::from(format!("term-dd-list-{config_key}")), ui)
                     .on_mouse_down_out(cx.listener(move |this, _, _w, cx| {
                         if this.terminal_dropdown == Some(which) {
                             this.terminal_dropdown = None;
@@ -658,7 +710,7 @@ impl PaneFlowApp {
                     }));
             for (i, (label, value, selected)) in options.into_iter().enumerate() {
                 let value_for_click = value;
-                let item = select_item((config_key, i), selected, ui)
+                let item = select_option((config_key, i), selected, ui)
                     .cursor(CursorStyle::Arrow)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.terminal_dropdown = None;

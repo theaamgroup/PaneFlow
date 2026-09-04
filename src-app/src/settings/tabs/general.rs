@@ -32,9 +32,9 @@ use serde_json::Value;
 use crate::GeneralDropdown;
 use crate::PaneFlowApp;
 use crate::settings::components::{
-    Logo, deferred_select_menu, hairline, render_logo, section_header, select_chevron, select_item,
-    select_menu, select_trigger, setting_card, setting_text, toggle_row, toggle_row_with,
-    toggle_switch,
+    Logo, deferred_select_menu, hairline, render_logo, section_header, select_chevron,
+    select_listbox, select_option, select_trigger, setting_card, setting_text, toggle_row,
+    toggle_row_with, toggle_switch,
 };
 
 /// One select option: display label, optional leading logo, the JSON value
@@ -384,22 +384,38 @@ impl PaneFlowApp {
         // Decide open/close from the render-time `is_open` snapshot, not the
         // live state: the menu's `on_mouse_down_out` fires on this same press and
         // may have already cleared the state, so a live toggle would re-open.
-        let mut trigger =
-            select_trigger(SharedString::from(format!("general-dd-{config_key}")), ui)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.general_dropdown = if is_open { None } else { Some(which) };
-                        this.settings_focus.focus(window, cx);
-                        cx.notify();
-                    }),
-                )
-                .child(value)
-                .child(select_chevron(ui));
+        let mut trigger = select_trigger(
+            SharedString::from(format!("general-dd-{config_key}")),
+            ui,
+            is_open,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.general_dropdown = if is_open { None } else { Some(which) };
+                this.settings_focus.focus(window, cx);
+                cx.notify();
+            }),
+        )
+        // Keyboard / assistive-tech activation (issue #361): the pointer opens
+        // on press above, so this arm takes only the `ClickEvent::Keyboard`
+        // GPUI synthesizes from Space / Enter on the focused trigger. Carrying
+        // a click listener is also what puts `accesskit::Action::Click` on the
+        // node for VoiceOver.
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if !matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            this.general_dropdown = if is_open { None } else { Some(which) };
+            this.settings_focus.focus(window, cx);
+            cx.notify();
+        }))
+        .child(value)
+        .child(select_chevron(ui));
 
         if is_open {
-            let mut menu = select_menu(
+            let mut menu = select_listbox(
                 SharedString::from(format!("general-dd-list-{config_key}")),
                 ui,
             )
@@ -413,7 +429,7 @@ impl PaneFlowApp {
             }));
             for (i, (label, icon, value, selected)) in options.into_iter().enumerate() {
                 let value_for_click = value;
-                let mut item = select_item((config_key, i), selected, ui)
+                let mut item = select_option((config_key, i), selected, ui)
                     .cursor(CursorStyle::Arrow)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.general_dropdown = None;
