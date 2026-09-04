@@ -114,6 +114,14 @@ fn cursor_flat_remove_drops_version_when_nothing_else_remains() {
 }
 
 #[test]
+fn merge_cursor_hooks_refuses_non_object_root() {
+    let mut root = json!(["not-an-object"]);
+    let error = merge_cursor_hooks(&mut root).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(root, json!(["not-an-object"]));
+}
+
+#[test]
 fn managed_guard_install_and_drop_roundtrip_in_clone_dir() {
     // End-to-end for the clone path: .codebuddy/settings.local.json is
     // created with Claude-format hooks, then fully cleaned up on drop
@@ -298,6 +306,24 @@ fn opencode_guard_skips_jsonc_only_setup() {
     std::fs::write(dir.join("opencode.jsonc"), "{ /* user comment */ }").unwrap();
     assert!(OpenCodePluginGuard::install_at(&dir).is_err());
     assert!(!dir.join("opencode.json").exists());
+}
+
+#[test]
+fn opencode_guard_skips_when_jsonc_and_json_both_exist() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join("opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = dir.join("opencode.json");
+    let jsonc = dir.join("opencode.jsonc");
+    std::fs::write(&json, r#"{"plugin":[]}"#).unwrap();
+    std::fs::write(&jsonc, "{ /* user comment */ }").unwrap();
+    assert!(OpenCodePluginGuard::install_at(&dir).is_err());
+    assert_eq!(std::fs::read_to_string(&json).unwrap(), r#"{"plugin":[]}"#);
+    assert_eq!(
+        std::fs::read_to_string(&jsonc).unwrap(),
+        "{ /* user comment */ }"
+    );
+    assert!(!dir.join("plugins").join(PANEFLOW_TS_BASENAME).exists());
 }
 
 #[test]

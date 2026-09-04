@@ -67,20 +67,29 @@ pub(crate) fn remove_gemini_hooks(root: &mut serde_json::Value) {
 }
 
 pub(crate) fn merge_cursor_hooks(root: &mut serde_json::Value) -> std::io::Result<()> {
-    merge_flat_hooks(root, CURSOR_HOOK_EVENTS, true);
-    Ok(())
+    merge_flat_hooks(root, CURSOR_HOOK_EVENTS, true)
 }
 
 pub(crate) fn remove_cursor_hooks(root: &mut serde_json::Value) {
     remove_flat_hooks(root, CURSOR_HOOK_EVENTS);
 }
 
-fn merge_flat_hooks(root: &mut serde_json::Value, events: &[(&str, &str)], add_version: bool) {
+fn merge_flat_hooks(
+    root: &mut serde_json::Value,
+    events: &[(&str, &str)],
+    add_version: bool,
+) -> std::io::Result<()> {
     if !root.is_object() {
-        *root = serde_json::json!({});
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "hooks config root must be a JSON object, not a {}",
+                json_type_name(root)
+            ),
+        ));
     }
     let Some(root) = root.as_object_mut() else {
-        return;
+        return Ok(());
     };
     if add_version {
         root.entry("version")
@@ -88,10 +97,16 @@ fn merge_flat_hooks(root: &mut serde_json::Value, events: &[(&str, &str)], add_v
     }
     let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
     if !hooks.is_object() {
-        *hooks = serde_json::json!({});
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "hooks config key `hooks` must be an object, not a {}",
+                json_type_name(hooks)
+            ),
+        ));
     }
     let Some(hooks) = hooks.as_object_mut() else {
-        return;
+        return Ok(());
     };
 
     for (foreign, canonical) in events {
@@ -106,6 +121,18 @@ fn merge_flat_hooks(root: &mut serde_json::Value, events: &[(&str, &str)], add_v
             "command": resolve_plain_hook_command(canonical),
             "timeout": 5,
         }));
+    }
+    Ok(())
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 

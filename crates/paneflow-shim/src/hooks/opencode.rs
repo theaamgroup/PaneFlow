@@ -65,7 +65,11 @@ impl OpenCodePluginGuard {
 
     pub(crate) fn install_at(directory: &Path) -> std::io::Result<Self> {
         let config_path = directory.join("opencode.json");
-        if !config_path.exists() && directory.join("opencode.jsonc").exists() {
+        // serde_json cannot round-trip comments. If a jsonc file is present
+        // (alone or beside json), OpenCode loads jsonc first — writing json
+        // would either clobber comments or register the plugin in a file
+        // OpenCode does not read.
+        if directory.join("opencode.jsonc").exists() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "OpenCode uses opencode.jsonc; refusing a competing JSON config",
