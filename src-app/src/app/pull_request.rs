@@ -23,8 +23,8 @@
 //!
 //! The subprocess environment is deliberately *not* scrubbed the way
 //! `workspace::worktree::git_command` isolates git: `gh` reads `GH_TOKEN` and
-//! its own config, and stripping them would fail auth silently and blacklist
-//! the repository for the session.
+//! its own config, and stripping them would fail auth silently and put
+//! the repository into the failure backoff.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -41,6 +41,13 @@ const TTL: Duration = Duration::from_secs(300);
 /// Wall-clock bound for one `gh` call, well under the 30 s tick.
 const DEADLINE: Duration = Duration::from_secs(15);
 const STDOUT_CAP: u64 = 256 * 1024;
+/// How long a repository whose lookup failed is left alone before it is
+/// asked again. `gh` exits 1 "for any reason" - a timeout, a rate limit, a
+/// missing GitHub remote - so a failure cannot be told apart from a permanent
+/// one, and blacklisting for the whole session turned one flaky call into
+/// "no marker until restart" (PR #354 review). A backoff keeps the sidebar
+/// refresh from hammering a dead remote while still recovering on its own.
+const FAILURE_BACKOFF: Duration = Duration::from_secs(600);
 
 /// A branch's pull request, in GitHub's own vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,12 +112,14 @@ pub(crate) struct PrStates {
     /// Lookups in flight, so a 30 s tick landing on a slow `gh` does not stack
     /// a second call on the same branch.
     inflight: HashSet<(String, String)>,
-    /// Repositories `gh` cannot answer for: logged out, or not a GitHub
-    /// remote. Asked once, never again this session - the answer does not
-    /// change under us, and retrying every tick would spend a subprocess per
-    /// repository forever. Per repository, never global: one non-GitHub
+    /// Repositories `gh` could not answer for: logged out, not a GitHub
+    /// remote, or a transient timeout or rate limit - `gh` exits 1 for all of
+    /// them alike. Left alone for [`FAILURE_BACKOFF`], then asked again, so
+    /// a flaky call recovers without a restart while a dead remote is not
+    /// probed every tick. Per repository, never global: one non-GitHub
     /// checkout must not silence the marker for the GitHub one beside it.
-    unavailable: HashSet<String>,
+    /// Repository -> the instant before which it is not asked again.
+    unavailable: HashMap<String, Instant>,
 }
 
 impl PrStates {
@@ -132,7 +141,11 @@ impl PrStates {
 
     /// [`Self::is_stale`] against an explicit clock, so the TTL is testable.
     fn is_stale_at(&self, repo_root: &str, branch: &str, now: Instant) -> bool {
-        if self.unavailable.contains(repo_root) {
+        if self
+            .unavailable
+            .get(repo_root)
+            .is_some_and(|until| now < *until)
+        {
             return false;
         }
         let key = Self::key(repo_root, branch);
@@ -169,8 +182,13 @@ impl PrStates {
     }
 
     fn mark_unavailable(&mut self, repo_root: &str, branch: &str) {
+        self.mark_unavailable_at(repo_root, branch, Instant::now());
+    }
+
+    fn mark_unavailable_at(&mut self, repo_root: &str, branch: &str, now: Instant) {
         self.inflight.remove(&Self::key(repo_root, branch));
-        self.unavailable.insert(repo_root.to_string());
+        self.unavailable
+            .insert(repo_root.to_string(), now + FAILURE_BACKOFF);
     }
 }
 
@@ -205,8 +223,8 @@ fn gh_binary() -> Option<&'static std::path::Path> {
 /// Read the pull request of one branch. Blocking: the caller runs it through
 /// `smol::unblock`.
 ///
-/// `Err` means `gh` could not answer at all - the repository is then dropped
-/// for the session. `Ok(None)` is a real answer: no pull request here.
+/// `Err` means `gh` could not answer at all - the repository then sits out
+/// [`FAILURE_BACKOFF`]. `Ok(None)` is a real answer: no pull request here.
 fn lookup(
     gh: &std::path::Path,
     repo_root: &std::path::Path,
@@ -246,7 +264,7 @@ fn lookup(
         );
     })?;
     if !out.status.success() {
-        // The only trace of a repository being dropped for the session: the
+        // The only trace of a repository entering the backoff: the
         // caller turns this `Err` into a silent blacklist entry, so without a
         // line here a wrong invocation looks exactly like "no GitHub remote".
         log::debug!(
@@ -402,7 +420,9 @@ impl PaneFlowApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{PrState, PrStates, PullRequest, TTL, parse_pr_list, pick, should_look_up};
+    use super::{
+        FAILURE_BACKOFF, PrState, PrStates, PullRequest, TTL, parse_pr_list, pick, should_look_up,
+    };
     use std::time::{Duration, Instant};
 
     fn row(number: u64, state: &str, draft: bool) -> serde_json::Value {
@@ -575,11 +595,23 @@ mod tests {
     fn a_failed_lookup_blacklists_only_that_repository() {
         let mut states = PrStates::default();
         states.mark_inflight("/gitlab", "feature");
-        states.mark_unavailable("/gitlab", "feature");
         let now = Instant::now();
+        states.mark_unavailable_at("/gitlab", "feature", now);
         assert!(
             !states.is_stale_at("/gitlab", "feature", now),
-            "the failed repo is never asked again this session"
+            "the failed repo is not asked again inside the backoff"
+        );
+        assert!(
+            !states.is_stale_at(
+                "/gitlab",
+                "feature",
+                now + FAILURE_BACKOFF - Duration::from_secs(1)
+            ),
+            "still inside the backoff"
+        );
+        assert!(
+            states.is_stale_at("/gitlab", "feature", now + FAILURE_BACKOFF),
+            "a transient failure is retried once the backoff has passed (PR #354 review)"
         );
         assert!(
             !states.is_stale_at("/gitlab", "another-branch", now),

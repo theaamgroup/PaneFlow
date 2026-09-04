@@ -2432,6 +2432,33 @@ impl PaneFlowApp {
     /// until idle (two equal reads) or MAX elapses; then write the prompt
     /// WITHOUT a carriage return - human-in-loop, the user submits. Shared by
     /// `workspace.up` and the spawn-capable `surface.split` (EP-003).
+    /// The text a prompt prefill writes, given whether the surface has
+    /// enabled bracketed paste (`ESC[?2004h`).
+    ///
+    /// Inside paste mode the block travels verbatim between the paste markers
+    /// and every embedded newline stays literal. Outside it a terminal treats
+    /// LF as Enter, so a six-line handoff would submit line by line (or run
+    /// its lines in the shell if the agent failed to start). That case gets a
+    /// single line: each line trimmed, blank lines dropped, joined by one
+    /// space. Nothing is ever rewritten to `\r` and nothing follows the text
+    /// (PR #354 review, issue #334).
+    pub(crate) fn prefill_text_for(
+        prompt: &str,
+        bracketed_paste: bool,
+    ) -> std::borrow::Cow<'_, str> {
+        if bracketed_paste || !prompt.contains('\n') {
+            return std::borrow::Cow::Borrowed(prompt);
+        }
+        std::borrow::Cow::Owned(
+            prompt
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
+
     pub(crate) fn schedule_prompt_prefill(
         terminal: &Entity<TerminalView>,
         prompt: String,
@@ -2462,9 +2489,13 @@ impl PaneFlowApp {
                     // Issue #334: `inject_text`, not the raw `send_text`. A
                     // surface that has enabled `ESC[?2004h` gets the block
                     // inside bracketed-paste markers so its embedded newlines
-                    // stay literal; one that has not gets it verbatim, never
-                    // rewritten to `\r`. Either way nothing submits.
-                    t.read(cx).inject_text(&prompt);
+                    // stay literal. One that has not treats each LF as Enter,
+                    // so the block is flattened to one line first
+                    // (`prefill_text_for`, PR #354 review): never rewritten
+                    // to `\r`, never submitted.
+                    let view = t.read(cx);
+                    let text = Self::prefill_text_for(&prompt, view.bracketed_paste_enabled());
+                    view.inject_text(&text);
                 }
             });
         })
@@ -7098,12 +7129,36 @@ mod tests {
             .and_then(|rest| rest.split("pub(crate) fn schedule_launch_command(").next())
             .expect("schedule_prompt_prefill body");
         assert!(
-            body.contains("t.read(cx).inject_text(&prompt);"),
-            "prefill must go through inject_text: {body}"
+            body.contains("prefill_text_for(&prompt, view.bracketed_paste_enabled())")
+                && body.contains("view.inject_text(&text);"),
+            "prefill must go through prefill_text_for and inject_text: {body}"
         );
         assert!(
             !body.contains("send_text(&prompt)") && !body.contains("send_command("),
             "prefill must not write raw bytes or a command: {body}"
+        );
+    }
+
+    #[test]
+    fn prefill_text_is_verbatim_in_paste_mode_and_one_line_outside_it() {
+        // PR #354 review on issue #334: outside bracketed paste every LF is
+        // an Enter, so the multi-line handoff must not reach the PTY as lines.
+        let block = "Continue this work from a prior Claude Code session.\nSession: abc\n\nSummary:\n  fix the race  \n";
+        assert_eq!(
+            PaneFlowApp::prefill_text_for(block, true).as_ref(),
+            block,
+            "paste mode carries the block verbatim"
+        );
+        let flat = PaneFlowApp::prefill_text_for(block, false);
+        assert_eq!(
+            flat.as_ref(),
+            "Continue this work from a prior Claude Code session. Session: abc Summary: fix the race"
+        );
+        assert!(!flat.contains('\n') && !flat.contains('\r'));
+        assert_eq!(
+            PaneFlowApp::prefill_text_for("one line", false).as_ref(),
+            "one line",
+            "a single line is untouched either way"
         );
     }
 

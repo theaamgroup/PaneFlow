@@ -32,13 +32,21 @@ use crate::terminal::TerminalSessionBackend;
 use crate::terminal::types::{Content, CursorShape, TerminalWindowSize, terminal_metric_to_u16};
 use crate::theme::TerminalTheme;
 
-/// Rows of the pane's viewport a card shows, counted from the bottom.
+/// Rows of the pane's viewport a card shows at the DEFAULT cell metrics,
+/// counted from the bottom.
 ///
 /// Bottom-crop, always - one rule, one test. It loses a full-screen TUI's
 /// header row; that was weighed against centring on the cursor (which makes
 /// the card jitter between refreshes) and against pinning row 0 (two layout
-/// passes per card), and the fixed rule won on determinism.
-pub(crate) const THUMBNAIL_ROWS: usize = 12;
+/// passes per card), and the fixed rule won on determinism. The live count
+/// is [`thumbnail_rows_for`]: the band is fixed, so a taller `line_height`
+/// fits fewer rows, and cropping fewer keeps the LAST rows - the prompt and
+/// the cursor - inside the band rather than clipping them off its bottom
+/// (PR #354 review). Test-only since then: production reads the derived
+/// count, and the tests pin that the derivation lands on this figure at the
+/// defaults.
+#[cfg(test)]
+pub(super) const THUMBNAIL_ROWS: usize = 12;
 
 /// Font size for a thumbnail, in pixels.
 ///
@@ -70,6 +78,13 @@ pub(super) fn thumbnail_cell_dimensions_for(
 /// Cell metrics for a thumbnail under the live config.
 pub(super) fn thumbnail_cell_dimensions() -> CellDimensions {
     thumbnail_cell_dimensions_for(&super::font::cached_font_config())
+}
+
+/// How many viewport rows fit the fixed band at these cell metrics: at the
+/// 0.6 / 1.2 defaults exactly twelve (`THUMBNAIL_ROWS`); at `line_height = 2.5`
+/// (23 px rows) five. Never zero, so a card always shows the prompt row.
+pub(super) fn thumbnail_rows_for(dims: &CellDimensions) -> usize {
+    ((THUMBNAIL_BAND_H / f32::from(dims.line_height)).floor() as usize).max(1)
 }
 
 /// A grid snapshot plus the row window a thumbnail paints.
@@ -106,7 +121,7 @@ pub(super) fn thumbnail_snapshot(backend: &TerminalSessionBackend) -> ThumbnailS
     let (content, _initial_clear_consumed) = backend.render_content(window_size, 0, 0, false);
 
     let last_visible_row = content.rows as i32;
-    let first_visible_row = content.rows.saturating_sub(THUMBNAIL_ROWS) as i32;
+    let first_visible_row = content.rows.saturating_sub(thumbnail_rows_for(&dims)) as i32;
     ThumbnailSnapshot {
         content,
         first_visible_row,
@@ -127,7 +142,7 @@ pub(super) fn thumbnail_font() -> (Font, Pixels) {
     )
 }
 
-/// A pane's last [`THUMBNAIL_ROWS`] rows, painted read-only into a card.
+/// A pane's last [`thumbnail_rows_for`] rows, painted read-only into a card.
 pub(crate) struct TerminalThumbnail {
     backend: TerminalSessionBackend,
     theme: Arc<TerminalTheme>,
@@ -394,6 +409,38 @@ mod tests {
         assert_eq!(
             THUMBNAIL_BAND_H / f32::from(dims.line_height),
             THUMBNAIL_ROWS as f32
+        );
+    }
+
+    #[test]
+    fn a_taller_line_height_crops_fewer_rows_so_the_prompt_stays_in_the_band() {
+        // PR #354 review: the band is fixed at 132 px. At the default 1.2 the
+        // crop is the 12 rows the constant names; at the 2.5 ceiling a row is
+        // 23 px, so only five fit, and cropping five from the bottom keeps the
+        // prompt row and the cursor inside the band instead of below it.
+        use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
+
+        let mut settings = FontSettings {
+            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            size: 13.0,
+            line_height: DEFAULT_LINE_HEIGHT,
+            cell_width: DEFAULT_CELL_WIDTH,
+        };
+        assert_eq!(
+            thumbnail_rows_for(&thumbnail_cell_dimensions_for(&settings)),
+            THUMBNAIL_ROWS
+        );
+        settings.line_height = 2.5;
+        let dims = thumbnail_cell_dimensions_for(&settings);
+        let rows = thumbnail_rows_for(&dims);
+        assert_eq!(rows, 5);
+        assert!(
+            rows as f32 * f32::from(dims.line_height) <= THUMBNAIL_BAND_H,
+            "every cropped row fits the band"
+        );
+        assert!(
+            (rows + 1) as f32 * f32::from(dims.line_height) > THUMBNAIL_BAND_H,
+            "one more row would not"
         );
     }
 

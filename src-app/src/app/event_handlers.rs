@@ -1889,6 +1889,11 @@ impl PaneFlowApp {
                             if changed && !refreshed_diff {
                                 cx.notify();
                             }
+                            // The branch just landed, so the pull-request
+                            // marker (#350) can be asked for now rather than
+                            // after the 30 s fallback tick (PR #354 review).
+                            // Gated on the switch inside; a no-op while off.
+                            app.refresh_pull_requests(cx);
                         }
                     })
                 });
