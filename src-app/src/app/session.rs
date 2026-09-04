@@ -193,6 +193,10 @@ impl PaneFlowApp {
                     // Issue #107: the sidebar pin is a choice about a project,
                     // not a view state, so it survives a quit.
                     pinned: ws.pinned,
+                    // Issue #349: a folded rail row survives a restart too.
+                    // Written only when folded (`skip_serializing_if`), so a
+                    // user who never folds a row gains no key.
+                    sidebar_collapsed: !ws.sidebar_expanded,
                 })
                 .collect(),
             pending_worktree_teardowns: persisted_pending_worktree_teardowns(
@@ -690,6 +694,9 @@ impl PaneFlowApp {
         // Issue #107: restore the sidebar pin. Additive on v2 - an older
         // session has no key and deserializes to `false` (unpinned).
         workspace.pinned = ws_session.pinned;
+        // Issue #349: restore the rail fold. Additive on v2 - an older session
+        // has no key and deserializes to `false` (unfolded, as always).
+        workspace.sidebar_expanded = !ws_session.sidebar_collapsed;
         // EP-002 (orchestration-v2): rehydrate worktree ownership so the
         // close-time teardown still applies after a restart.
         let mut restored_worktrees =

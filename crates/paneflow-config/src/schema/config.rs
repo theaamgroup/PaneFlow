@@ -339,24 +339,60 @@ pub struct PaneFlowConfig {
 
 /// What the workspaces rail shows beyond a row's name and its activity.
 ///
-/// Shaped as an object so later switches (a branch line, a diffstat, an
-/// indent guide) land as sibling keys rather than as more top-level booleans.
-/// Everything off is the rail as it ships: no lookup runs, nothing is drawn.
+/// Shaped as an object so the switches land as sibling keys rather than as
+/// more top-level booleans. One switch per line, toggled from the rail's
+/// Customize Sidebar menu (issue #349) or by hand.
+///
+/// The defaults are the rail as it shipped before the menu existed (issue
+/// #349): the branch painted, no diffstat, no pull-request marker, no indent
+/// guide. So a `paneflow.json` without this key renders exactly as it did,
+/// and only `branch` reads an absent value as `true`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidebarShow {
+    /// Show the git branch: the workspace's on its folder row, and a bound
+    /// tab's worktree branch on that tab's row. `None` is `true` (issue #349):
+    /// the rail has always painted the branch, and an absent key keeps it.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub branch: Option<bool>,
+    /// Show that same checkout's insertion and deletion counts, pinned to the
+    /// right of the branch line and drawn only when there is something to
+    /// report. `None` is `false` (issue #349): the rail painted no diffstat
+    /// before the switch existed.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub diffstat: Option<bool>,
     /// Mark a branch that already has a pull request: its icon becomes the
     /// pull-request glyph, in GitHub's color for the request's state. Needs
     /// the `gh` CLI, and answers for GitHub remotes only. `None` is `false`,
     /// and while it is off no `gh` process is ever spawned (issue #350).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub pr: Option<bool>,
+    /// Draw a hairline under a workspace's folder icon, running down its tab
+    /// rows, the way a tree view ties children to their parent. `None` is
+    /// `false` (issue #349).
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub indent_guide: Option<bool>,
 }
 
 impl SidebarShow {
+    /// Whether the branch line is on. Absent means on (issue #349).
+    pub fn branch_enabled(&self) -> bool {
+        self.branch.unwrap_or(true)
+    }
+
+    /// Whether the diffstat is on. Absent means off.
+    pub fn diffstat_enabled(&self) -> bool {
+        self.diffstat.unwrap_or(false)
+    }
+
     /// Whether the pull-request marker is on. Absent means off.
     pub fn pr_enabled(&self) -> bool {
         self.pr.unwrap_or(false)
+    }
+
+    /// Whether the rail draws its indent hairline. Absent means off.
+    pub fn indent_guide_enabled(&self) -> bool {
+        self.indent_guide.unwrap_or(false)
     }
 }
 

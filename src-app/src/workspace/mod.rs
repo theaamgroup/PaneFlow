@@ -190,14 +190,14 @@ pub struct Workspace {
     /// record. Empty for every workspace not built by `up` with worktrees.
     pub managed_worktrees: Vec<worktree::ManagedWorktree>,
     /// US-008: whether the sidebar folder row for this workspace shows its
-    /// tab children. Session-only, exactly like the Files sidebar expansion
-    /// state - it is never written to `session.json`, so a restart starts
-    /// every workspace expanded.
+    /// tab children. Persisted since issue #349 as
+    /// `WorkspaceSession::sidebar_collapsed` (written only when folded), so a
+    /// fold survives a restart; a session without the key starts expanded.
     pub sidebar_expanded: bool,
     /// Issue #107: whether the user pinned this workspace to the top of the
-    /// sidebar. Unlike [`Workspace::sidebar_expanded`] this IS persisted (as
-    /// `WorkspaceSession::pinned`) - a pin is a deliberate choice about a
-    /// project, not a transient view state, so it has to outlive a quit.
+    /// sidebar. Persisted (as `WorkspaceSession::pinned`) - a pin is a
+    /// deliberate choice about a project, not a transient view state, so it
+    /// has to outlive a quit.
     ///
     /// Only the Auto ordering reads it; under Manual ordering the rail keeps
     /// storage order and the pin is inert (the star still renders, so the

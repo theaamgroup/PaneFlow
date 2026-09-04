@@ -1410,6 +1410,11 @@ struct PaneFlowApp {
     /// read through `gh` only while `sidebar_show.pr` is on. Refreshed by the
     /// same ticks that refresh the git state, never from a render.
     pub(crate) pr_states: crate::app::pull_request::PrStates,
+    /// Whether the rail header's Customize Sidebar popover is up (issue #349).
+    pub(crate) sidebar_customize_menu_open: bool,
+    /// Whether that popover's "Show" submenu is unfolded. Closing the parent
+    /// folds it, so the menu always reopens collapsed.
+    pub(crate) sidebar_show_submenu_open: bool,
     /// US-010: right-click menu on a sidebar tab row (Rename / Close / Branch).
     tab_menu_open: Option<TabContextMenu>,
     /// Pane header context menu (EP-002 US-007), or `None` when closed.

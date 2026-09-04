@@ -229,6 +229,17 @@ pub struct WorkspaceSession {
     /// changes meaning or gains a key.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
+    /// Issue #349: whether the rail row of this workspace was folded at save
+    /// time, so a fold survives a restart instead of being undone by every
+    /// launch.
+    ///
+    /// Additive on v2, exactly like `pinned`: [`SESSION_SCHEMA_VERSION`] must
+    /// NOT move for it. `false` (unfolded, how the rail has always come up) is
+    /// both the default for a session written before this field and the value
+    /// skipped on write, so a user who never folds a row gains no key and no
+    /// existing session.json changes meaning.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sidebar_collapsed: bool,
 }
 
 /// Migrate a v1 `session.json` in place to the v2 tab shape (US-018).
