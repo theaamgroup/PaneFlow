@@ -583,24 +583,31 @@ impl PaneFlowApp {
         let Some(path) = ws.tabs().get(tab_idx).and_then(|tab| tab.worktree.clone()) else {
             return;
         };
-        let ws_id = ws.id;
+        // Snapshotted on purpose: the refusal decides against the workspaces
+        // and terminals open at the click. A workspace opened during the
+        // await is re-resolved by `forget_removed_worktree`, which walks every
+        // workspace afterwards rather than trusting an index across it.
         let open_roots: Vec<std::path::PathBuf> = self
             .workspaces
             .iter()
             .map(|ws| ws.worktree_root.clone())
             .collect();
         let reserved = self.teardown_owned_worktrees();
+        // The same live-process gate managed teardown applies: a shell or
+        // agent still working in the checkout (a tab restored from a session
+        // spawned its panes there) must not have its cwd deleted from under it.
+        let protected = self.live_terminal_session_ids(cx);
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let (probe_root, probe_path) = (repo_root.clone(), path.clone());
                 let removed = smol::unblock(move || {
-                    remove_checkout(&probe_root, &probe_path, &open_roots, &reserved)
+                    remove_checkout(&probe_root, &probe_path, &open_roots, &reserved, &protected)
                 })
                 .await;
                 let _ = cx.update(|cx| {
                     this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
                         match removed {
-                            Ok(()) => app.forget_removed_worktree(ws_id, &repo_root, &path, cx),
+                            Ok(()) => app.forget_removed_worktree(&repo_root, &path, cx),
                             Err(message) => app.show_toast(message, cx),
                         }
                         cx.notify();
@@ -635,31 +642,45 @@ impl PaneFlowApp {
     /// worked in it, forget its cached git state, refresh what the picker
     /// offers, and make the Worktree-scope diff recount its columns.
     ///
-    /// Tabs are collected by index first: [`Self::set_tab_worktree`] takes
-    /// `&mut self`, and it is the one place a binding is allowed to change,
-    /// so the unbind goes through it rather than writing the field here.
+    /// Every workspace is walked, not only the one whose menu was clicked: a
+    /// picker checkout is marker-less, so two workspaces on the same
+    /// repository may both have tabs bound to it, and the one that clicked
+    /// may have closed during the await. Tabs are collected by index first:
+    /// [`Self::set_tab_worktree`] takes `&mut self`, and it is the one place
+    /// a binding is allowed to change, so the unbind goes through it rather
+    /// than writing the field here.
     fn forget_removed_worktree(
         &mut self,
-        ws_id: u64,
         repo_root: &std::path::Path,
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) {
-        let Some(ws_idx) = self.workspaces.iter().position(|ws| ws.id == ws_id) else {
-            return;
-        };
-        let orphaned: Vec<usize> = self.workspaces[ws_idx]
-            .tabs()
+        let orphaned: Vec<(usize, usize)> = self
+            .workspaces
             .iter()
             .enumerate()
-            .filter(|(_, tab)| tab.worktree.as_deref() == Some(path))
-            .map(|(idx, _)| idx)
+            .flat_map(|(ws_idx, ws)| {
+                ws.tabs()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, tab)| tab.worktree.as_deref() == Some(path))
+                    .map(move |(tab_idx, _)| (ws_idx, tab_idx))
+            })
             .collect();
-        for tab_idx in orphaned {
+        for (ws_idx, tab_idx) in orphaned {
             self.set_tab_worktree(ws_idx, tab_idx, None, cx);
         }
         self.prune_worktree_states();
-        self.spawn_worktree_listing(ws_idx, cx);
+        let on_repo: Vec<usize> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| ws.repo_root.as_deref() == Some(repo_root))
+            .map(|(ws_idx, _)| ws_idx)
+            .collect();
+        for ws_idx in on_repo {
+            self.spawn_worktree_listing(ws_idx, cx);
+        }
         self.invalidate_worktree_diff_cache(repo_root, cx);
     }
 }
@@ -720,14 +741,22 @@ fn removal_refusal(
 /// The branch is read from a fresh `git worktree list` rather than the
 /// picker's cached listing, so the ownership test runs against what git holds
 /// now; a path git no longer lists is refused too, there being nothing to
-/// remove. `is_clean` reports an error rather than "clean" when it cannot
-/// prove cleanliness, and that error propagates: never delete what cannot be
-/// read. The BRANCH IS NEVER DELETED.
+/// remove. Cleanliness is [`worktree::is_clean_for_removal`]: tracked
+/// modifications and untracked files refuse, ignored files (the `.env*`
+/// copies the picker makes, build output) do not, the same gate
+/// `git worktree remove` applies. A live process whose cwd is inside the
+/// checkout refuses too ([`worktree::worktree_has_live_process_cwd`], the
+/// managed-teardown gate, with the open terminals' sessions protected): a
+/// shell or agent must not have its directory deleted from under it. Both
+/// report an error rather than "clean" when they cannot prove it, and that
+/// error propagates: never delete what cannot be read. The BRANCH IS NEVER
+/// DELETED.
 fn remove_checkout(
     repo_root: &std::path::Path,
     path: &std::path::Path,
     open_roots: &[std::path::PathBuf],
     reserved: &[std::path::PathBuf],
+    protected_session_ids: &[u32],
 ) -> Result<(), String> {
     use crate::workspace::worktree;
     let entries = worktree::list_worktrees(repo_root)?;
@@ -746,9 +775,15 @@ fn remove_checkout(
     ) {
         return Err(reason);
     }
-    if !worktree::is_clean(path)? {
+    if !worktree::is_clean_for_removal(path)? {
         return Err(format!(
             "{} has uncommitted changes - commit or discard them first",
+            path.display()
+        ));
+    }
+    if worktree::worktree_has_live_process_cwd(path, protected_session_ids)? {
+        return Err(format!(
+            "{} is in use by a running process - close the shell or agent working there first",
             path.display()
         ));
     }
@@ -1043,14 +1078,21 @@ mod tests {
         );
         git(&repo_root, &["config", "user.name", "PaneFlow Tests"]);
         std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        std::fs::write(repo_root.join(".gitignore"), ".env\n").expect("ignore rule");
         git(&repo_root, &["add", "."]);
         git(&repo_root, &["commit", "-q", "-m", "fixture"]);
         git(&repo_root, &["branch", "feat/clean"]);
         git(&repo_root, &["branch", "feat/dirty"]);
         // Through the same door as the picker, so what is removed is exactly
-        // what the picker makes.
+        // what the picker makes: `prepare_branch_checkout` copies the
+        // project's `.env*` into the new checkout, and that copy is ignored.
+        std::fs::write(repo_root.join(".env"), "SECRET=1\n").expect("ignored env file");
         let clean = prepare_branch_checkout(&repo_root, "feat/clean").expect("clean checkout");
         let dirty = prepare_branch_checkout(&repo_root, "feat/dirty").expect("dirty checkout");
+        assert!(
+            clean.join(".env").is_file(),
+            "the picker copies .env into its checkout; the test must exercise that"
+        );
         std::fs::write(dirty.join("scratch.txt"), "wip\n").expect("dirty file");
         let foreign = sandbox.join("foreign");
         let foreign_s = foreign.to_string_lossy().into_owned();
@@ -1061,26 +1103,63 @@ mod tests {
         let before = list_worktrees(&repo_root).expect("listing");
         assert_eq!(before.len(), 4, "root, two picker checkouts, one foreign");
 
-        let refused = remove_checkout(&repo_root, &dirty, &[], &[]).expect_err("dirty is refused");
+        let refused =
+            remove_checkout(&repo_root, &dirty, &[], &[], &[]).expect_err("dirty is refused");
         assert!(refused.contains("uncommitted"), "{refused}");
         assert!(dirty.is_dir());
         let refused =
-            remove_checkout(&repo_root, &foreign, &[], &[]).expect_err("foreign is refused");
+            remove_checkout(&repo_root, &foreign, &[], &[], &[]).expect_err("foreign is refused");
         assert!(refused.contains("not created by PaneFlow"), "{refused}");
         assert!(foreign.is_dir());
-        let refused = remove_checkout(&repo_root, &clean, std::slice::from_ref(&clean), &[])
+        let refused = remove_checkout(&repo_root, &clean, std::slice::from_ref(&clean), &[], &[])
             .expect_err("an open workspace is refused");
         assert!(refused.contains("open as a workspace"), "{refused}");
-        let refused = remove_checkout(&repo_root, &clean, &[], std::slice::from_ref(&clean))
+        let refused = remove_checkout(&repo_root, &clean, &[], std::slice::from_ref(&clean), &[])
             .expect_err("a managed checkout is refused");
         assert!(refused.contains("teardown"), "{refused}");
+
+        // A shell still working in the checkout keeps it: the same gate
+        // managed teardown applies, so its cwd is never deleted from under it.
+        struct ChildCleanup(std::process::Child);
+        impl Drop for ChildCleanup {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "echo ready; exec sleep 30"])
+            .current_dir(&clean)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a process in the checkout");
+        let mut child = ChildCleanup(child);
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.0.stdout.take().expect("child stdout")),
+            &mut ready,
+        )
+        .expect("read child readiness");
+        assert_eq!(ready.trim_end(), "ready");
+        let refused = remove_checkout(&repo_root, &clean, &[], &[], &[])
+            .expect_err("a checkout with a live process inside is refused");
+        assert!(refused.contains("in use by a running process"), "{refused}");
+        assert!(clean.is_dir());
+        child.0.kill().expect("stop the live-cwd fixture");
+        child.0.wait().expect("reap the live-cwd fixture");
+        drop(child);
         assert_eq!(
             list_worktrees(&repo_root).expect("listing"),
             before,
             "a refusal leaves `git worktree list` exactly as it was"
         );
 
-        remove_checkout(&repo_root, &clean, &[], &[]).expect("a clean owned checkout is removed");
+        // The ignored `.env` copy is still there, and it is not "uncommitted
+        // work": the checkout the picker made is removable as it stands.
+        assert!(clean.join(".env").is_file());
+        remove_checkout(&repo_root, &clean, &[], &[], &[])
+            .expect("a clean owned checkout is removed");
         assert!(!clean.exists(), "the directory is gone");
         let after = list_worktrees(&repo_root).expect("listing");
         assert_eq!(after.len(), 3);

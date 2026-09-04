@@ -940,7 +940,7 @@ impl PaneFlowApp {
     /// PTY session IDs whose members can independently `cd` after the UI-side
     /// retirement sample. The background worker uses these plus PaneFlow's
     /// current descendant tree for its final process-CWD safety check.
-    fn live_terminal_session_ids(&self, cx: &App) -> Vec<u32> {
+    pub(crate) fn live_terminal_session_ids(&self, cx: &App) -> Vec<u32> {
         let mut terminals: Vec<_> = self
             .workspaces
             .iter()
