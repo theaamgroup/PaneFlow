@@ -253,9 +253,14 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
     };
 
     const MAX_WALK_ENTRIES: usize = 4_096;
+    // PR #373 review: the cap is deliberate, but hitting it silently drops
+    // sessions the user has, so say so once per scan rather than leaving a
+    // short list unexplained.
+    let mut walked = 0usize;
     let sessions = entries
         .flatten()
         .take(MAX_WALK_ENTRIES)
+        .inspect(|_| walked += 1)
         .filter_map(|entry| {
             let path = entry.path();
             let Ok(file_type) = entry.file_type() else {
@@ -277,6 +282,13 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
         sessions,
         crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE,
     );
+    if walked >= MAX_WALK_ENTRIES {
+        log::warn!(
+            "claude sessions: stopped at the {MAX_WALK_ENTRIES}-entry walk cap in {}; \
+             older sessions there are not listed",
+            project_dir.display()
+        );
+    }
     if let Some(snapshot_mtime) = project_snapshot_mtime(&project_dir) {
         crate::agent_sessions::cache::store_result_with_mtime(
             SessionAgent::Claude,

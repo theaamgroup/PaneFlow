@@ -344,8 +344,15 @@ impl PaneFlowApp {
                 })
                 .await;
                 cx.update(|cx| {
-                    let _ = this.update(cx, |app, cx| {
+                    // PR #373 review: drop the guard in its own update, before
+                    // the records are applied. Clearing it alongside the apply
+                    // meant anything that stopped that closure completing left
+                    // the flag set, and every later sweep returned at the top
+                    // until the app restarted.
+                    let _ = this.update(cx, |app, _cx| {
                         app.claude_registry_sweep_pending = false;
+                    });
+                    let _ = this.update(cx, |app, cx| {
                         app.apply_registry_records(records, cx);
                     });
                 });
