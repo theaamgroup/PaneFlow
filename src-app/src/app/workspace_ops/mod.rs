@@ -940,7 +940,7 @@ impl PaneFlowApp {
     /// PTY session IDs whose members can independently `cd` after the UI-side
     /// retirement sample. The background worker uses these plus PaneFlow's
     /// current descendant tree for its final process-CWD safety check.
-    fn live_terminal_session_ids(&self, cx: &App) -> Vec<u32> {
+    pub(crate) fn live_terminal_session_ids(&self, cx: &App) -> Vec<u32> {
         let mut terminals: Vec<_> = self
             .workspaces
             .iter()
@@ -1085,6 +1085,10 @@ impl PaneFlowApp {
         self.profile_menu_open = None;
         self.files_menu_open = None;
         self.agent_sessions.sessions_menu_open = None;
+        // Issue #349: the rail header's Customize Sidebar popover is a menu
+        // like the rest, and folds its submenu with it.
+        self.sidebar_customize_menu_open = false;
+        self.sidebar_show_submenu_open = false;
     }
 
     /// End a live inline rename WITHOUT keeping the typed name, and hand focus

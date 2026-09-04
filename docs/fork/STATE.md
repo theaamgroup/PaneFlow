@@ -1,10 +1,84 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-01, through #184 Phase 4 and its audit (the
-libghostty-vt session-host swap, the engine-product features on it, and the
-Phase 4 chrome work), plus the About / app-menu GitHub links (#226, #227,
-#228). The prior entry covered the 2026-08-28 five-agent deep review and the
-`v0.1.1` cut.
+Living handoff record. Updated 2026-09-04, through #341 (upstream v0.11.0
+adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
+menu, the pull-request marker, and the 0.3.0 cut). The prior entry covered
+#184 Phase 4 and its audit plus the About / app-menu GitHub links (#226,
+#227, #228); the one before it the 2026-08-28 five-agent deep review and
+the `v0.1.1` cut.
+
+**2026-09-04 #341: upstream v0.11.0 adopted.** Nine code sub-issues landed
+one PR each (#342 through #350), then the 0.3.0 cut. What is now true, and
+where the evidence is:
+
+- **`PublishGate`** (#342, #343; `src-app/src/terminal/ghostty_session.rs`).
+  The runtime thread holds a frame while DEC 2026 synchronized output is set
+  (one FFI mode query per wake, `DisplayTerminal::synchronized_output` in
+  `crates/paneflow-terminal-ghostty/src/engine.rs`, `SYNC_OUTPUT_MAX_HOLD`
+  150 ms so a program that opens a bracket and dies cannot freeze the pane)
+  or while the previous publish is under `MIN_PUBLISH_INTERVAL` (8 ms;
+  deferred through `next_wake`, never dropped). Resize, scroll, scrollback
+  clear, reset, select-all, a command mark, the first frame, and the frame
+  before `ChildExited` bypass it (`publish_now`); a `Wakeup` is queued only
+  for a frame that was published, and only the engine's dirty rows are
+  converted (`CellMirror`). Pinned by
+  `a_trickle_publishes_once_per_interval`,
+  `synchronized_output_holds_a_frame_the_rate_limit_would_have_allowed`,
+  `a_synchronized_output_hold_expires_so_a_stalled_program_cannot_freeze_the_pane`,
+  `a_synchronized_redraw_is_not_published_until_the_bracket_closes_or_the_hold_expires`,
+  and `a_synchronized_output_hold_parks_the_loop_instead_of_spinning_it`.
+- **Cursor blink out of the layout memo, shared `FontSettings`** (#344;
+  `terminal/element/font.rs`, `LayoutCacheKey` in `terminal/element/mod.rs`,
+  `layout_cache_key_ignores_the_blink_phase`) and the **memoized per-cell
+  contrast** (#345; `contrast_cache_get_or_insert` in
+  `terminal/element/color.rs`,
+  `the_contrast_cache_matches_the_uncached_search_across_the_bundled_themes`).
+- **Reproducible terminal benchmark** (#346) re-baselined on this machine:
+  `bench/baseline.json` and `bench/results/` hold only fork-measured JSON.
+- **Per-tab worktree binding** (#347). `Tab::worktree`
+  (`src-app/src/workspace/tab.rs`), `bind_tab_to_branch` in
+  `src-app/src/app/tab_worktree.rs` (`prepare_branch_checkout` runs
+  off-thread and owns nothing: a tab checkout is marker-less, never
+  managed). Session carries it as `TabSession.worktree` (additive; a
+  missing key restores unbound: `a_tab_bound_to_a_missing_worktree_restores_unbound`,
+  `tab_worktree_needs_no_schema_bump`,
+  `every_picked_checkout_passes_through_the_binding_gate`).
+- **Remove worktree** (#348, commit `d1f79614`). A row on the tab context
+  menu (`sidebar/context_menu.rs`, `tab-context-remove-worktree`, present
+  only for a bound tab) into `remove_tab_worktree`. Ownership is option B:
+  `is_paneflow_worktree_dir` (`workspace/worktree.rs`) decides, there is no
+  owner marker. Four refusals (`removal_refusal` + the dirty check in
+  `remove_checkout`): open as a workspace, managed by workspace teardown,
+  not created by PaneFlow, uncommitted changes. The branch is never
+  deleted. Pinned by
+  `removal_is_refused_for_what_is_not_ours_open_or_reserved` and
+  `a_clean_owned_checkout_is_removed_keeping_its_branch_and_a_dirty_one_is_refused`.
+- **Customize Sidebar** (#349, commit `36ca19ad`;
+  `sidebar/customize_menu.rs`). A "Show" submenu over `sidebar_show`
+  (`crates/paneflow-config/src/schema/config.rs::SidebarShow`; defaults
+  `branch` true, `diffstat` / `pr` / `indent_guide` false, so a config with
+  no key renders as before) plus Expand all / Collapse all; every flip
+  writes the whole object through `config_writer`
+  (`every_flip_writes_the_whole_sidebar_show_object`,
+  `the_customize_menu_offers_no_settings_affordance`). Per-workspace fold
+  state persists as `WorkspaceSession.sidebar_collapsed`.
+- **Pull-request marker** (#350, commit `e7d1a6b6`;
+  `src-app/src/app/pull_request.rs`). `gh pr list --json
+  number,state,isDraft` behind `sidebar_show.pr`, off by default, cached
+  with a TTL, one failed repository blacklisted on its own; `gh` is never
+  spawned while the switch is off
+  (`the_switch_gates_the_lookup_before_gh_is_consulted`,
+  `a_failed_lookup_blacklists_only_that_repository`).
+- **Session schema stays v2** (`SESSION_SCHEMA_VERSION` in
+  `crates/paneflow-config/src/schema/session.rs`): `TabSession.worktree`
+  and `WorkspaceSession.sidebar_collapsed` are additive, written only when
+  set. The "Terminal shell resolved" log line rode along
+  (`terminal/pty_session.rs`).
+- **Verified SKIP list**, not ported: the Windows shell work,
+  `timeBeginPeriod`, the verbatim prefix, libghostty CI automation, and
+  Fedora / Discord / CHANGELOG / AppStream.
+- **0.3.0 cut**: `Cargo.toml` workspace version, every `paneflow-*` entry
+  in `Cargo.lock`, the `--version` gates in `CLAUDE.md` and `INSTALL.md`.
 
 **2026-09-01 #226 #227 #228: About and PaneFlow-menu GitHub links.** About
 shows a **View on GitHub** button (`https://github.com/theaamgroup/paneflow`)
@@ -308,17 +382,17 @@ even though signed release DMGs are also available.
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.2.0** (the libghostty-vt engine; #184). Before it, **0.1.3.** First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. |
+| Version | **0.3.0** (upstream v0.11.0 adopted; #341). Before it, **0.2.1**, and **0.2.0** was the libghostty-vt engine (#184). First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. |
 
 ## Verified green, and how to reproduce it
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 2473 names, 0 failed, 2 ignored (2026-09-01, #184 through the audit + the 0.2.0 cut)
+cargo test --workspace                       # 2843 names, 0 failed, 3 ignored (2026-09-04, #341 upstream v0.11.0 + the 0.3.0 cut)
 cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
-./target/debug/paneflow --version            # paneflow 0.1.1
+./target/debug/paneflow --version            # paneflow 0.3.0
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
                                              # negative control: cfg(unix) 151, cfg(macos) 92 (2026-08-31)

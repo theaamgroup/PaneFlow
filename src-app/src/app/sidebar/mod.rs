@@ -8,6 +8,7 @@
 //! remain in `main.rs` because they cross module boundaries.
 
 pub(crate) mod context_menu;
+pub(crate) mod customize_menu;
 
 use crate::ui_primitives::TooltipDelayExt;
 use gpui::{
@@ -375,6 +376,101 @@ fn sidebar_hover_actions(group: SharedString) -> gpui::Div {
 /// `svg()` is a mask: it paints nothing without its own `text_color`, and the
 /// parent's does NOT cascade - the same trap the sidebar header's `+`
 /// documents.
+/// The hairline that ties a workspace's tab rows to the folder above them
+/// (issue #349, `sidebar_show.indent_guide`).
+///
+/// Centered on the folder icon's slot rather than inset from the row's edge:
+/// what the line stands under is that glyph, which is also where the tab rows
+/// align their own leading slot. Painted before the row, so a selected row's
+/// fill covers it instead of the line cutting across the card.
+///
+/// One segment per row rather than one line for the group: the rail is a flat
+/// list of rows - that is what the drop dividers between them address - so
+/// there is no element spanning a workspace's tabs to hang a single line on.
+/// The rows are contiguous, so the segments read as one line.
+fn render_sidebar_indent_guide(ui: crate::theme::UiColors, interrupted: bool) -> Vec<gpui::Div> {
+    let color = ui.text.opacity(0.08);
+    let left = px(SIDEBAR_ROW_PADDING_X + (SIDEBAR_FOLDER_ICON_WIDTH / 2.).floor());
+    let segment = move || div().absolute().left(left).w(px(1.)).bg(color);
+    if !interrupted {
+        return vec![segment().top_0().bottom_0()];
+    }
+    // A row whose agent badge sits in that same column breaks the line rather
+    // than letting it run under the glyph: the spinner is a moving mark, and a
+    // hairline crossing it reads as part of it. The gap is the badge's own
+    // slot, so the line resumes exactly where the glyph ends.
+    let center = SIDEBAR_ROW_PADDING_Y + SIDEBAR_ROW_LINE_HEIGHT / 2.;
+    let radius = SIDEBAR_AGENT_ICON_SLOT_WIDTH / 2.;
+    vec![
+        segment().top_0().h(px(center - radius)),
+        segment().top(px(center + radius)).bottom_0(),
+    ]
+}
+
+/// Whether a row prints its checkout's insertion and deletion counts
+/// (issue #349, `sidebar_show.diffstat`).
+///
+/// Two ways to get nothing: the switch is off (the default, so a config
+/// without the key paints no counts, as the rail never did), or the checkout
+/// is clean. The counts answer "how much has changed here", and when the
+/// answer is none the question was never asked - a permanent "+0 −0" would
+/// spend a slot on the rows with the least to say.
+fn diffstat_visible(
+    show: paneflow_config::schema::SidebarShow,
+    stats: &crate::workspace::GitDiffStats,
+) -> bool {
+    show.diffstat_enabled() && (stats.insertions > 0 || stats.deletions > 0)
+}
+
+/// The counts themselves, pinned to the right of a meta line by the caller:
+/// insertions in the diff view's added color, deletions in its deleted color,
+/// at the meta line's 10 px so they read as the same line as the branch.
+fn render_diffstat_counts(
+    stats: &crate::workspace::GitDiffStats,
+    ui: crate::theme::UiColors,
+) -> AnyElement {
+    div()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .text_size(px(10.))
+        .font_weight(FontWeight::MEDIUM)
+        .child(
+            div()
+                .text_color(ui.vc_added)
+                .child(format!("+{}", stats.insertions)),
+        )
+        .child(
+            div()
+                .text_color(ui.vc_deleted)
+                .child(format!("\u{2212}{}", stats.deletions)),
+        )
+        .into_any_element()
+}
+
+/// The fold state the Customize Sidebar menu's Expand all / Collapse all row
+/// applies (issue #349), from `(has child rows, expanded)` per workspace.
+///
+/// `Some(false)` (collapse everything) when every workspace with rows is
+/// unfolded, `Some(true)` (expand everything) as soon as one of them is
+/// folded, and `None` when none has rows: an empty shell shows no child row
+/// whether it is folded or not, so counting it would offer a "Collapse all"
+/// that visibly does nothing.
+fn fold_all_target(rows: impl IntoIterator<Item = (bool, bool)>) -> Option<bool> {
+    let mut rows_somewhere = false;
+    let mut all_expanded = true;
+    for (has_rows, expanded) in rows {
+        if !has_rows {
+            continue;
+        }
+        rows_somewhere = true;
+        all_expanded &= expanded;
+    }
+    rows_somewhere.then_some(!all_expanded)
+}
+
 fn sidebar_action_button(
     id: SharedString,
     label: SharedString,
@@ -1041,25 +1137,49 @@ impl PaneFlowApp {
                         .text_color(ui.muted)
                         .child("Workspaces"),
                 )
-                // Issue #339: Pane Overview. Issue #105 stripped this header's
-                // `+` as a redundant fifth route to New Workspace; the overview
-                // is the opposite case - it has three entry points and no other
-                // discoverable one. Dispatches the action rather than calling
-                // the handler so the button and Cmd+Shift+P cannot drift.
                 .child(
-                    sidebar_action_button(
-                        SharedString::from("sidebar-pane-overview"),
-                        SharedString::from("Show all panes \u{b7} \u{21e7}\u{2318}P"),
-                        "icons/layout-grid.svg",
-                        12.,
-                        ui,
-                    )
-                    .on_click(cx.listener(
-                        |_this, _: &ClickEvent, window, cx| {
-                            window.dispatch_action(Box::new(crate::OpenPaneOverview), cx);
-                            cx.stop_propagation();
-                        },
-                    )),
+                    div()
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        // Tight enough that the pair reads as one trailing
+                        // cluster rather than as two unrelated controls.
+                        .gap(px(2.))
+                        // Issue #349: Customize Sidebar. Its popover writes
+                        // `sidebar_show` and folds rows; it is not a Settings
+                        // entry point (issue #105).
+                        .child(customize_menu::render_customize_sidebar_button(
+                            customize_menu::CustomizeMenuState {
+                                open: self.sidebar_customize_menu_open,
+                                submenu_open: self.sidebar_show_submenu_open,
+                                show: self.cached_config.sidebar_show,
+                                fold_target: self.sidebar_fold_all_target(),
+                            },
+                            ui,
+                            cx,
+                        ))
+                        // Issue #339: Pane Overview. Issue #105 stripped this
+                        // header's `+` as a redundant fifth route to New
+                        // Workspace; the overview is the opposite case - it has
+                        // three entry points and no other discoverable one.
+                        // Dispatches the action rather than calling the handler
+                        // so the button and Cmd+Shift+P cannot drift.
+                        .child(
+                            sidebar_action_button(
+                                SharedString::from("sidebar-pane-overview"),
+                                SharedString::from("Show all panes \u{b7} \u{21e7}\u{2318}P"),
+                                "icons/layout-grid.svg",
+                                12.,
+                                ui,
+                            )
+                            .on_click(cx.listener(
+                                |_this, _: &ClickEvent, window, cx| {
+                                    window.dispatch_action(Box::new(crate::OpenPaneOverview), cx);
+                                    cx.stop_propagation();
+                                },
+                            )),
+                        ),
                 ),
         );
 
@@ -1703,6 +1823,9 @@ impl PaneFlowApp {
         };
         let tab_sessions = || tab_row_sessions(ws.agent_sessions.values(), &surfaces);
         let row_agent_status = sidebar_agent_summary(tab_sessions(), false);
+        // Issue #349: the indent hairline breaks around an agent badge in its
+        // column. Read here, before the badge consumes the summary below.
+        let indent_guide_interrupted = row_agent_status.is_some();
         let agent_status = ai_types::workspace_agent_status(tab_sessions(), &tab_agents);
         // One tint for both states, deliberately: the selected row rests at the
         // very fill a hovered row lifts to, so moving the pointer across the
@@ -2042,31 +2165,49 @@ impl PaneFlowApp {
             .flex_none()
             .flex()
             .flex_col()
+            // The indent hairline is absolute against this box, so it spans a
+            // row whether that row grew a second line or not.
+            .relative()
             .rounded(ROW_RADIUS)
+            .when(
+                self.cached_config.sidebar_show.indent_guide_enabled(),
+                |el| el.children(render_sidebar_indent_guide(ui, indent_guide_interrupted)),
+            )
             .child(row)
     }
 
-    /// The branch line under a bound tab's title (issue #347): the branch its
+    /// The git line under a bound tab's title (issue #347): the branch its
     /// worktree is on, from the cached probe, or the checkout's directory name
-    /// while the first probe is in flight or when HEAD is detached. `None` for
-    /// an unbound tab, which has nothing of its own to say.
+    /// while the first probe is in flight or when HEAD is detached - and,
+    /// behind its own switch (issue #349), that worktree's diffstat pinned
+    /// right. `None` for an unbound tab, which has nothing of its own to say:
+    /// its checkout is the workspace's, already on the folder row above.
+    ///
+    /// Each value sits behind its `sidebar_show` switch. With the branch off
+    /// and nothing to count, no line is built at all, so the row keeps the
+    /// single-line geometry it has always had.
     fn render_tab_worktree_meta_row(
         &self,
         tab: &Tab,
         ui: crate::theme::UiColors,
     ) -> Option<AnyElement> {
         let path = tab.worktree.as_ref()?;
-        let branch = self
-            .tab_checkout_git(tab)
-            .map(|git| git.branch.clone())
-            .unwrap_or_default();
+        let show = self.cached_config.sidebar_show;
+        let git = self.tab_checkout_git(tab);
+        let branch = git.map(|git| git.branch.clone()).unwrap_or_default();
         let owner = self
             .workspaces
             .iter()
             .find(|ws| ws.tabs().iter().any(|t| t.id == tab.id));
         let worktree_root = owner.map(|ws| ws.worktree_root.clone()).unwrap_or_default();
         let label = crate::workspace::worktree::checkout_label(Some(&branch), path, &worktree_root);
-        if label.is_empty() {
+        let draw_branch = show.branch_enabled() && !label.is_empty();
+        // The bound checkout's own counts (`CheckoutGit::stats`), never the
+        // workspace's: two tabs on two worktrees differ by exactly this.
+        let counts = git
+            .filter(|git| git.is_repo && diffstat_visible(show, &git.stats))
+            .map(|git| git.stats.clone());
+        if !draw_branch && counts.is_none() {
             return None;
         }
         // A branch already in review is marked by its own glyph rather than by
@@ -2090,28 +2231,36 @@ impl PaneFlowApp {
                 .whitespace_nowrap()
                 .text_xs()
                 .text_color(ui.muted)
-                .child(
-                    svg()
-                        .size(px(10.))
-                        .flex_none()
-                        .path(match pr {
-                            Some(_) => "icons/git-pull-request.svg",
-                            None => "icons/git-branch-sidebar.svg",
-                        })
-                        .text_color(match pr {
-                            Some(pr) => pr.state.color(ui),
-                            None => ui.muted,
-                        }),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_x_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(label),
-                )
+                .when(draw_branch, |row| {
+                    row.child(
+                        svg()
+                            .size(px(10.))
+                            .flex_none()
+                            .path(match pr {
+                                Some(_) => "icons/git-pull-request.svg",
+                                None => "icons/git-branch-sidebar.svg",
+                            })
+                            .text_color(match pr {
+                                Some(pr) => pr.state.color(ui),
+                                None => ui.muted,
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_x_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label),
+                    )
+                })
+                .when_some(counts, |row, stats| {
+                    // Pinned right: a spacer takes the slack the branch leaves,
+                    // and with the branch off the counts still sit at the edge.
+                    row.child(div().flex_1())
+                        .child(render_diffstat_counts(&stats, ui))
+                })
                 .into_any_element(),
         )
     }
@@ -2123,13 +2272,20 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        // Branch + detected services on one clipped line. Diffstat stays out of
-        // the rail (Diff view owns change counts); the branch is the identity
-        // cue that makes sibling worktrees distinguishable at a glance.
-        let has_branch = !ws.git_branch.is_empty();
+        // Branch + detected services on one clipped line, with the checkout's
+        // diffstat pinned right behind its own switch (issue #349). The branch
+        // is the identity cue that makes sibling worktrees distinguishable at
+        // a glance, so it is on unless `sidebar_show.branch` says otherwise;
+        // the counts are off unless `sidebar_show.diffstat` says otherwise,
+        // and never drawn for a clean checkout.
+        let show = self.cached_config.sidebar_show;
+        let has_branch = show.branch_enabled() && !ws.git_branch.is_empty();
         let service = sidebar_service_summary(&ws.active_ports, &ws.service_labels);
         let has_ports = service.is_some();
-        if !has_branch && !has_ports {
+        // The workspace checkout's counts (`Workspace::git_stats`): what an
+        // unbound tab works in. A bound tab's worktree reports on its own row.
+        let has_counts = ws.is_git_repo && diffstat_visible(show, &ws.git_stats);
+        if !has_branch && !has_ports && !has_counts {
             return None;
         }
 
@@ -2298,6 +2454,14 @@ impl PaneFlowApp {
                         .child(format!("+{overflow}")),
                 );
             }
+        }
+
+        if has_counts {
+            // Pinned right: the spacer takes the slack the branch and the
+            // ports leave, so the counts sit at the edge whatever else is on.
+            meta_row = meta_row
+                .child(div().flex_1())
+                .child(render_diffstat_counts(&ws.git_stats, ui));
         }
 
         Some(meta_row.into_any_element())
@@ -2781,11 +2945,11 @@ mod tests {
         SIDEBAR_TAB_CARD_ICON_SIZE, SIDEBAR_TAB_CARD_WIDTH, SIDEBAR_TAB_ICON_CAP,
         SIDEBAR_TAB_ICON_SIZE, SIDEBAR_TITLE_ROW_GAP, SIDEBAR_WIDTH, SidebarAgentState,
         SidebarAgentSummary, SidebarDropSlot, SidebarRow, SidebarServiceSummary, WorkspaceOrderKey,
-        compute_auto_order, folder_row_sessions, rename_editor_skin, rename_key_action,
-        reorder_target, sidebar_agent_summary, sidebar_drop_slots, sidebar_row_shell,
-        sidebar_service_summary, sidebar_tab_title_opacity, sidebar_workspace_tone,
-        tab_display_title, tab_icon_cluster_split, tab_row_sessions, tab_row_title,
-        take_rename_selection, visible_service_ports,
+        compute_auto_order, diffstat_visible, fold_all_target, folder_row_sessions,
+        rename_editor_skin, rename_key_action, reorder_target, sidebar_agent_summary,
+        sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary, sidebar_tab_title_opacity,
+        sidebar_workspace_tone, tab_display_title, tab_icon_cluster_split, tab_row_sessions,
+        tab_row_title, take_rename_selection, visible_service_ports,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
@@ -2800,6 +2964,82 @@ mod tests {
 
     fn session(state: AgentState) -> AgentSession {
         AgentSession::new(TerminalAgent::ClaudeCode, state)
+    }
+
+    fn show(diffstat: bool) -> paneflow_config::schema::SidebarShow {
+        paneflow_config::schema::SidebarShow {
+            branch: Some(true),
+            diffstat: Some(diffstat),
+            pr: Some(false),
+            indent_guide: Some(false),
+        }
+    }
+
+    fn dirty() -> crate::workspace::GitDiffStats {
+        crate::workspace::GitDiffStats {
+            files_changed: 3,
+            insertions: 142,
+            deletions: 38,
+        }
+    }
+
+    /// Issue #349: the diffstat needs both its switch and something to
+    /// report. A permanent "+0 −0" would spend a slot on the rows with the
+    /// least to say, and a paneflow.json without `sidebar_show` must keep
+    /// painting no counts at all.
+    #[test]
+    fn the_diffstat_needs_both_a_switch_and_something_to_report() {
+        let clean = crate::workspace::GitDiffStats::default();
+        assert!(
+            !diffstat_visible(paneflow_config::schema::SidebarShow::default(), &dirty()),
+            "the counts are opt-in: an absent key paints none even on a dirty checkout"
+        );
+        assert!(
+            !diffstat_visible(show(false), &dirty()),
+            "the counts are opt-in even on a dirty checkout"
+        );
+        assert!(
+            !diffstat_visible(show(true), &clean),
+            "a clean checkout prints its branch and stops"
+        );
+        assert!(diffstat_visible(show(true), &dirty()));
+        // Deletions alone are something to report.
+        let deletions_only = crate::workspace::GitDiffStats {
+            files_changed: 1,
+            insertions: 0,
+            deletions: 4,
+        };
+        assert!(diffstat_visible(show(true), &deletions_only));
+    }
+
+    /// Issue #349: the Customize Sidebar menu's Expand all / Collapse all row
+    /// is one row whose label is the action, so the fold state it will apply
+    /// is decided from the rows that can actually fold.
+    #[test]
+    fn fold_all_targets_the_state_the_rail_is_not_in() {
+        // Rows are `(has child rows, expanded)`.
+        assert_eq!(
+            fold_all_target([(true, true), (true, true)]),
+            Some(false),
+            "every row unfolded: the action is Collapse all"
+        );
+        assert_eq!(
+            fold_all_target([(true, true), (true, false)]),
+            Some(true),
+            "one row folded: the action is Expand all"
+        );
+        assert_eq!(
+            fold_all_target([(true, false), (true, false)]),
+            Some(true),
+            "every row folded: Expand all"
+        );
+        // An empty shell shows no child row whether it is folded or not, so
+        // it never decides the label.
+        assert_eq!(fold_all_target([(true, true), (false, false)]), Some(false));
+        assert_eq!(fold_all_target([(true, false), (false, true)]), Some(true));
+        // Nothing has rows: the action is hidden rather than offered inert.
+        assert_eq!(fold_all_target([(false, true), (false, false)]), None);
+        assert_eq!(fold_all_target([]), None);
     }
 
     #[test]

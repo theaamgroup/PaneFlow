@@ -80,7 +80,12 @@ mod tests {
             macos_chrome_material: Some(true),
             unfocused_pane_opacity: Some(0.7),
             reduce_motion: Some(false),
-            sidebar_show: SidebarShow { pr: Some(true) },
+            sidebar_show: SidebarShow {
+                branch: Some(true),
+                diffstat: Some(true),
+                pr: Some(true),
+                indent_guide: Some(true),
+            },
             workspace_auto_sort: Some(false),
             workspace_zed_menu_visible: Some(true),
             workspace_cursor_menu_visible: Some(false),
@@ -641,14 +646,90 @@ mod tests {
 
         // Round trip: the switch survives serialization under its own key.
         let json = serde_json::to_value(&cfg).unwrap();
-        assert_eq!(json["sidebar_show"], serde_json::json!({ "pr": null }));
+        assert_eq!(
+            json["sidebar_show"],
+            serde_json::json!({ "branch": null, "diffstat": null, "pr": null, "indent_guide": null })
+        );
         let on = PaneFlowConfig {
-            sidebar_show: SidebarShow { pr: Some(true) },
+            sidebar_show: SidebarShow {
+                pr: Some(true),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let back: PaneFlowConfig =
             serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert!(back.sidebar_show.pr_enabled());
+    }
+
+    #[test]
+    fn sidebar_show_branch_stays_on_and_the_other_lines_stay_off_by_default() {
+        // Issue #349: a 0.2.1 paneflow.json with no `sidebar_show` must render
+        // the rail exactly as before - the branch painted, no diffstat, no
+        // indent guide, no PR marker - so absent means `true` for `branch`
+        // alone and `false` for its three siblings.
+        let cfg: PaneFlowConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(cfg.sidebar_show.branch_enabled());
+        assert!(!cfg.sidebar_show.diffstat_enabled());
+        assert!(!cfg.sidebar_show.pr_enabled());
+        assert!(!cfg.sidebar_show.indent_guide_enabled());
+
+        // An explicit null is the default, not an error, and the defaults of
+        // an empty object are the defaults of an absent key.
+        let cfg: PaneFlowConfig = serde_json::from_str(
+            r#"{"sidebar_show": {"branch": null, "diffstat": null, "indent_guide": null}}"#,
+        )
+        .unwrap();
+        assert!(cfg.sidebar_show.branch_enabled());
+        assert!(!cfg.sidebar_show.diffstat_enabled());
+        assert!(!cfg.sidebar_show.indent_guide_enabled());
+        let cfg: PaneFlowConfig = serde_json::from_str(r#"{"sidebar_show": {}}"#).unwrap();
+        assert_eq!(cfg.sidebar_show, SidebarShow::default());
+        assert!(cfg.sidebar_show.branch_enabled());
+
+        // Each line is its own switch: the branch can be turned off, and one
+        // sibling turned on does not turn on another.
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"sidebar_show": {"branch": false, "diffstat": true}}"#)
+                .unwrap();
+        assert!(!cfg.sidebar_show.branch_enabled());
+        assert!(cfg.sidebar_show.diffstat_enabled());
+        assert!(!cfg.sidebar_show.indent_guide_enabled());
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"sidebar_show": {"indent_guide": true}}"#).unwrap();
+        assert!(cfg.sidebar_show.indent_guide_enabled());
+        assert!(cfg.sidebar_show.branch_enabled());
+        assert!(!cfg.sidebar_show.diffstat_enabled());
+
+        // A malformed field costs that field (falling back to ITS default,
+        // so a garbage `branch` keeps the branch painted), never a sibling and
+        // never the rest of the file.
+        let cfg: PaneFlowConfig = serde_json::from_str(
+            r#"{"theme": "One Dark", "sidebar_show": {"branch": "yes", "diffstat": true, "indent_guide": 1}}"#,
+        )
+        .unwrap();
+        assert!(cfg.sidebar_show.branch_enabled());
+        assert!(cfg.sidebar_show.diffstat_enabled());
+        assert!(!cfg.sidebar_show.indent_guide_enabled());
+        assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
+
+        // Round trip: every switch survives serialization, `false` included -
+        // a branch turned off must not come back on after a save.
+        let all = PaneFlowConfig {
+            sidebar_show: SidebarShow {
+                branch: Some(false),
+                diffstat: Some(true),
+                pr: Some(false),
+                indent_guide: Some(true),
+            },
+            ..Default::default()
+        };
+        let back: PaneFlowConfig =
+            serde_json::from_str(&serde_json::to_string(&all).unwrap()).unwrap();
+        assert_eq!(back.sidebar_show, all.sidebar_show);
+        assert!(!back.sidebar_show.branch_enabled());
+        assert!(back.sidebar_show.diffstat_enabled());
+        assert!(back.sidebar_show.indent_guide_enabled());
     }
 
     #[test]

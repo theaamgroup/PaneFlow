@@ -98,12 +98,27 @@
     },
     "sidebar_show": {
       "type": ["object", "null"],
-      "description": "What the workspaces rail shows beyond a row's name. Everything off is the default rail.",
+      "description": "What the workspaces rail shows beyond a row's name, one switch per line, toggled from the rail's Customize Sidebar menu or by hand. The defaults are the rail before the menu existed: branch on, everything else off.",
       "additionalProperties": false,
       "properties": {
+        "branch": {
+          "type": ["boolean", "null"],
+          "description": "Show the git branch: the workspace's on its folder row, and a bound tab's worktree branch on that tab's row. Default true.",
+          "default": true
+        },
+        "diffstat": {
+          "type": ["boolean", "null"],
+          "description": "Show that same checkout's insertion and deletion counts, pinned right of the branch line and drawn only when the checkout has something to report. Default false.",
+          "default": false
+        },
         "pr": {
           "type": ["boolean", "null"],
           "description": "Mark a branch that already has a pull request: its icon becomes the pull-request glyph, colored by the request's state. Needs the 'gh' CLI (installed and authenticated), and answers for GitHub remotes only. While off, no 'gh' process is ever spawned. Default false.",
+          "default": false
+        },
+        "indent_guide": {
+          "type": ["boolean", "null"],
+          "description": "Draw a hairline under a workspace's folder icon, running down its tab rows. Default false.",
           "default": false
         }
       }

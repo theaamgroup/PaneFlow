@@ -855,6 +855,8 @@ impl PaneFlowApp {
             worktree_states: crate::app::tab_worktree::WorktreeStates::default(),
             branch_checkout_pending: None,
             pr_states: crate::app::pull_request::PrStates::default(),
+            sidebar_customize_menu_open: false,
+            sidebar_show_submenu_open: false,
             tab_menu_open: None,
             pane_menu_open: None,
             pending_pane_focus: None,

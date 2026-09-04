@@ -17,9 +17,13 @@ method rules this project has already paid for. Read it before planning a
 pass so you do not redo finished work or repeat a falsified finding. Open
 work lives on GitHub issues, not in that file.
 
-**Where this fork stands (2026-08-31):** product is PaneFlow (the PanesCLI
-rename was dropped). Version **0.2.0**. Origin `theaamgroup/paneflow` on
-`main`. Windows, Linux, the telemetry crate, the published
+**Where this fork stands (2026-09-04):** product is PaneFlow (the PanesCLI
+rename was dropped). Version **0.3.0**. Origin `theaamgroup/paneflow` on
+`main`. Upstream v0.11.0 is adopted (#341: the `PublishGate` with DEC 2026
+synchronized output, per-tab worktree binding with a Remove worktree row,
+the Customize Sidebar menu, the `gh` pull-request marker); the verified SKIP
+list (Windows shell, `timeBeginPeriod`, verbatim prefix, libghostty CI
+automation, Fedora/Discord/CHANGELOG/AppStream) stays not-ported. Windows, Linux, the telemetry crate, the published
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The Ghostty engine, deleted on 2026-08-25, is
 back as the **only** engine since #184 Phase 2 (2026-08-31): Alacritty is gone,
@@ -40,7 +44,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.2.0
+./target/debug/paneflow --version          # paneflow 0.3.0
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 
@@ -215,7 +219,9 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     and a drag pinned at the render ceiling leaves a wider preference alone
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
 │   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
-│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus; footer mode tabs
+│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348),
+│   │                                     Customize Sidebar menu (`customize_menu.rs`: `sidebar_show` toggles,
+│   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
 │   ├── attention_queue.rs             ← "which agent needs me" queue
@@ -476,6 +482,7 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 - **`option_as_meta`**: **defaults to `false`**. `keys::default_option_as_meta()` returns the literal `false` (`keys.rs:69`); it used to compute `!cfg!(target_os = "macos")`, which was a runtime expression that is constant in a macOS-only fork. So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior. The published JSON Schema and `docs/user/configuration/schema.md` both declare `false` too - they moved together in `6a7b14d` and a drift test reads the doc off disk.
 - **`macos_chrome_material`**: opts the sidebar and title bar into a native AppKit material (`window_chrome/macos_backdrop.rs`). `windows_terminal_material` and `windows_chrome_material` are **gone from the published schema** and the Rust struct. The loader still accepts those leftover keys (and a leftover `telemetry` block) as ignored no-ops so existing `paneflow.json` files keep loading.
 - **`review_enabled`**: master switch for the Review surface, **defaults to `true`** (`None`-is-on, like `shell_integration` and `agent_stall_detection`). Off, the footer's mode strip is not rendered **at all** - one reachable mode is not a choice, and the segment builder already drops the click handler from the active segment, so a lone "Agents" button would be dead chrome. `enter_diff_mode` (`app/diff_view_actions.rs`) is the single chokepoint every entry path funnels through, so `Cmd+Shift+G` becomes a silent no-op. Two demotion paths exist because the tick has no `Window`: the Settings toggle calls `enter_cli_mode` (restores focus), while a hand edit to `paneflow.json` lands in `leave_review_if_disabled` on the automation tick (no focus move, relying on the issue #110 `on_focus_lost` fallback). Session restore folds the switch into the existing diff-viability test in `bootstrap.rs`.
+- **`sidebar_show`** (issue #349, `crates/paneflow-config/src/schema/config.rs::SidebarShow`): what a rail row shows beyond its name, one `Option<bool>` switch per line, toggled from the rail header's Customize Sidebar menu (`app/sidebar/customize_menu.rs`, "Show" submenu, plus Expand all / Collapse all) or by hand. Defaults are the rail before the menu existed, so a `paneflow.json` with no `sidebar_show` renders exactly as before: `branch` = **`true`** (the workspace's branch on its folder row, a bound tab's worktree branch on its tab row), `diffstat` = **`false`** (insertions and deletions pinned right of the branch line, from the tab's bound `CheckoutGit.stats` or else `Workspace::git_stats`, drawn only when non-zero), `pr` = **`false`** (issue #350, the `gh` pull-request marker), `indent_guide` = **`false`** (a hairline under the folder icon down the tab rows). The menu writes the whole object through `config_writer`; a hand edit hot-reloads. The fold state of each workspace row persists separately as `WorkspaceSession.sidebar_collapsed` (written only when folded; session schema stays v2).
 - **`new_pane_shows_sessions`**: when `true`, every Tab-placement New pane picker also opens the Agent sessions sidebar on the right, scoped to the workspace cwd, so a listed session can be resumed into that pane. **Defaults to `false`**. Split-placement pickers leave the sidebar alone. Off (the default) keeps today's behaviour: history is only reachable from a pane-header button.
 - **Sessions-sidebar row menu** (issue #334, `app/sessions_context_menu.rs`): right-click a session row for Resume / Copy summary / Continue in ▸. "Continue in" lists every visible launcher except the row's own agent (reader-less ones carry a "no session history" hint) and opens a **new workspace tab** at the session's cwd running the target's launch command (`open_agent_tab_at_cwd`, `workspace_ops/tab.rs`, the lift of the drop handler's center band, with the #347 worktree binding), then prefills the handoff block from the pure `app/sessions_handoff.rs` (`handoff_prompt`: source agent, `Session:`, `Cwd:`, `Branch:` when known, `Summary:` capped at `HANDOFF_SUMMARY_CAP` = 4 KiB; identifier fallback when nothing usable was recorded; `Session: (id withheld)` when the id fails the resume allow-list). "Copy summary" puts the same payload chain on the clipboard. The prefill (`schedule_prompt_prefill`) writes through `inject_text` - bracketed-paste markers when the surface enabled `ESC[?2004h`, verbatim otherwise - and **never submits**; no agent is ever spawned to write a summary.
 - **`ConfigWatcher`** (notify crate, 300 ms debounce with a 1 s max-wait ceiling so a continuous event stream cannot starve the reload): fully wired, a background thread detects changes and deposits new config for the GPUI main thread to apply.

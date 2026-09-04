@@ -897,6 +897,24 @@ fn managed_status_is_clean(status: &str) -> bool {
         .all(|line| matches!(line, "?? .paneflow-worktree" | "!! .paneflow-worktree"))
 }
 
+/// True when the worktree holds no uncommitted work a user could lose: no
+/// tracked modification and no untracked file that git would track. Ignored
+/// files do not count (issue #348), which is exactly the gate
+/// `git worktree remove` applies itself: the `.env*` copies
+/// [`prepare_branch_checkout`] makes for a picker checkout, build output, and
+/// caches are all ignored, and a removal that refused them would refuse every
+/// checkout the picker ever made. [`is_clean`] stays stricter for managed
+/// teardown, which deletes without a user in the loop. An error is NOT
+/// "clean", as with [`is_clean`].
+pub fn is_clean_for_removal(worktree_path: &Path) -> Result<bool, String> {
+    run_git(
+        worktree_path,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+        GIT_DEADLINE,
+    )
+    .map(|out| out.trim().is_empty())
+}
+
 /// `git worktree remove <path>`. Refuses dirty worktrees by itself too (git
 /// native), but callers must check [`is_clean`] first to control messaging.
 /// The BRANCH IS NEVER DELETED - that is the US-009 invariant, not a TODO.
@@ -1227,7 +1245,7 @@ fn process_still_requires_cwd_probe(
 /// scan is bounded by [`GIT_DEADLINE`]: leftover best-effort PIDs are skipped
 /// when the budget expires, and the gate fails closed only if a required
 /// descendant or protected-session probe could not complete.
-fn worktree_has_live_process_cwd(
+pub(crate) fn worktree_has_live_process_cwd(
     worktree_path: &Path,
     protected_session_ids: &[u32],
 ) -> Result<bool, String> {

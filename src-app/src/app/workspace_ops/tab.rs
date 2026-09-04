@@ -21,11 +21,15 @@ use crate::{CloseTab, ClosedRecord, NewTab, NextTab, PaneFlowApp, PreviousTab, T
 use super::capture_closed_tab_record;
 
 impl PaneFlowApp {
-    /// US-008: toggle the sidebar folder row for `ws_idx`. Session-only state,
-    /// so nothing is persisted.
+    /// US-008: toggle the sidebar folder row for `ws_idx`.
+    ///
+    /// Persisted since issue #349 (`WorkspaceSession::sidebar_collapsed`): a
+    /// fold made on purpose has to survive a restart, or closing ten folders
+    /// and reopening two is a chore redone every launch.
     pub(crate) fn toggle_workspace_expanded(&mut self, ws_idx: usize, cx: &mut Context<Self>) {
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
             ws.sidebar_expanded = !ws.sidebar_expanded;
+            self.save_session(cx);
             cx.notify();
         }
     }
