@@ -4616,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-agent-config"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs",
  "serde_json",
@@ -4625,7 +4625,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-agent-setup"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "paneflow-agent-config",
  "serde_json",
@@ -4635,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-ai-hook"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "interprocess",
  "paneflow-ipc-client",
@@ -4645,7 +4645,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4718,7 +4718,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-config"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs",
  "notify",
@@ -4731,7 +4731,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-ghostty-smoke"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -4741,7 +4741,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-ipc-client"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "interprocess",
  "serde_json",
@@ -4750,7 +4750,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-libghostty-sys"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "sha2",
@@ -4760,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "paneflow-ipc-client",
  "serde",
@@ -4769,7 +4769,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-mcp-install"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -4784,11 +4784,11 @@ dependencies = [
 
 [[package]]
 name = "paneflow-process"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "paneflow-shim"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "paneflow-agent-config",
@@ -4800,7 +4800,7 @@ dependencies = [
 
 [[package]]
 name = "paneflow-terminal-ghostty"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "paneflow-libghostty-sys",
  "regex",
