@@ -1882,21 +1882,21 @@ impl TerminalState {
         lines: usize,
         offset: usize,
     ) -> Option<(String, usize, usize, bool)> {
-        let reason = match self.ghostty.transcript(lines, offset) {
-            Some(Ok(window)) => {
-                return Some((window.text, window.returned, window.total, window.eof));
-            }
-            Some(Err(error)) => format!("engine error: {error}"),
-            None => "the runtime did not answer (mailbox full or closed, or no reply within 1 s)"
-                .to_owned(),
-        };
-        log::warn!(
-            target: "paneflow::terminal::ghostty",
-            "transcript of surface {:?} (child pid {}) unavailable: {reason}",
-            self.title,
-            self.child_pid
-        );
-        None
+        self.scrollback_reader()
+            .extract_scrollback_window(lines, offset)
+    }
+
+    /// A `Send` view of this surface's runtime for the two scrollback reads
+    /// whose wait must not run on the GPUI thread (issue #363).
+    ///
+    /// Cloning this on the render thread costs an `Arc` bump; the blocking
+    /// wait then happens on a background worker.
+    pub(crate) fn scrollback_reader(&self) -> ScrollbackReader {
+        ScrollbackReader {
+            ghostty: self.ghostty.clone(),
+            title: self.title.clone(),
+            child_pid: self.child_pid,
+        }
     }
 
     /// The screen half of a read on its own, trailing blank rows trimmed.
@@ -1935,30 +1935,6 @@ impl TerminalState {
     /// title.
     pub fn foreground_command(&self) -> Option<String> {
         self.cached_foreground_command.clone()
-    }
-
-    /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
-    /// return matching lines as `(grid_line, text)` pairs, deduped by line and
-    /// capped at `max_matches`. The bool is `true` when the cap (or the cell
-    /// budget) truncated an otherwise finished scan. Backs the
-    /// `surface.search` IPC method. The engine performs the search and the
-    /// matched-line extraction atomically on its runtime thread.
-    ///
-    /// `Err` is a runtime that did not answer (mailbox full or closed, no
-    /// reply within a second) or an engine that failed the scan. Issue #362:
-    /// that is not a finished scan with no hits, and it is not the cap
-    /// either - `surface.search` turns it into an error, the way
-    /// `surface.read` already does, so a caller cannot read a wedged pane as
-    /// "pattern absent" or "raise max_matches".
-    pub fn search_scrollback(
-        &self,
-        pattern: &str,
-        max_matches: usize,
-    ) -> Result<(Vec<(i32, String)>, bool), String> {
-        if pattern.is_empty() || max_matches == 0 {
-            return Ok((Vec::new(), false));
-        }
-        self.ghostty.search_scrollback(pattern, max_matches)
     }
 
     /// EP-005 US-014: remember a port announced by a service URL in this
@@ -2339,6 +2315,77 @@ fn restore_or_drop_env_key(
         None => {
             env.remove(key);
         }
+    }
+}
+
+/// A `Send` handle over one surface's runtime for the scrollback reads that
+/// must not block the GPUI thread (issue #363).
+///
+/// [`GhosttySession::request`] parks its caller on the runtime's reply for up
+/// to a second, so a slow or silent runtime froze painting for that long on
+/// every `surface.read` (`wait`/`flow` poll one every 500 ms) and once per
+/// `SearchChunk` of a `surface.search`. The handle is cloned out of the
+/// entity on the render thread and the wait happens on a background worker.
+#[derive(Clone)]
+pub(crate) struct ScrollbackReader {
+    ghostty: GhosttySession,
+    title: String,
+    child_pid: u32,
+}
+
+impl ScrollbackReader {
+    /// Windowed extract for `surface.read`, the body
+    /// [`TerminalState::extract_scrollback_window`] delegates to.
+    ///
+    /// **Blocking**: waits on the runtime thread. Call it from inside
+    /// `smol::unblock`, never on the GPUI thread.
+    pub(crate) fn extract_scrollback_window(
+        &self,
+        lines: usize,
+        offset: usize,
+    ) -> Option<(String, usize, usize, bool)> {
+        let reason = match self.ghostty.transcript(lines, offset) {
+            Some(Ok(window)) => {
+                return Some((window.text, window.returned, window.total, window.eof));
+            }
+            Some(Err(error)) => format!("engine error: {error}"),
+            None => "the runtime did not answer (mailbox full or closed, or no reply within 1 s)"
+                .to_owned(),
+        };
+        log::warn!(
+            target: "paneflow::terminal::ghostty",
+            "transcript of surface {:?} (child pid {}) unavailable: {reason}",
+            self.title,
+            self.child_pid
+        );
+        None
+    }
+
+    /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
+    /// return matching lines as `(grid_line, text)` pairs, deduped by line and
+    /// capped at `max_matches`. The bool is `true` when the cap (or the cell
+    /// budget) truncated an otherwise finished scan. Backs the
+    /// `surface.search` IPC method. The engine performs the search and the
+    /// matched-line extraction atomically on its runtime thread.
+    ///
+    /// `Err` is a runtime that did not answer (mailbox full or closed, no
+    /// reply within a second) or an engine that failed the scan. Issue #362:
+    /// that is not a finished scan with no hits, and it is not the cap
+    /// either - `surface.search` turns it into an error, the way
+    /// `surface.read` already does, so a caller cannot read a wedged pane as
+    /// "pattern absent" or "raise max_matches".
+    ///
+    /// **Blocking**: one runtime wait per chunk. Same rule as
+    /// [`Self::extract_scrollback_window`].
+    pub(crate) fn search_scrollback(
+        &self,
+        pattern: &str,
+        max_matches: usize,
+    ) -> Result<(Vec<(i32, String)>, bool), String> {
+        if pattern.is_empty() || max_matches == 0 {
+            return Ok((Vec::new(), false));
+        }
+        self.ghostty.search_scrollback(pattern, max_matches)
     }
 }
 
@@ -3433,6 +3480,7 @@ mod tests {
         state.write_output(b"first needle needle\nsecond needle\nthird needle\nwithout marker");
 
         let (limited, hit_cap) = state
+            .scrollback_reader()
             .search_scrollback("needle", 2)
             .expect("scan completed");
         assert_eq!(limited.len(), 2);
@@ -3441,6 +3489,7 @@ mod tests {
         assert!(limited[1].1.contains("second needle"));
 
         let (all, hit_cap) = state
+            .scrollback_reader()
             .search_scrollback("needle", 8)
             .expect("scan completed");
         assert_eq!(all.len(), 3);
@@ -3457,6 +3506,7 @@ mod tests {
         let state = TerminalState::new_display_only(5, 80);
         state.write_output(b"first needle\nsecond needle\nwithout marker");
         let (found, hit_cap) = state
+            .scrollback_reader()
             .search_scrollback("needle", 8)
             .expect("scan completed");
         assert_eq!(found.len(), 2);
@@ -3465,7 +3515,10 @@ mod tests {
         state.ghostty.shutdown();
 
         assert!(
-            state.search_scrollback("needle", 8).is_err(),
+            state
+                .scrollback_reader()
+                .search_scrollback("needle", 8)
+                .is_err(),
             "no answer must not read as an empty, capped scan"
         );
     }
