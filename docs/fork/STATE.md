@@ -1,11 +1,66 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-04, through #341 (upstream v0.11.0
-adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
-menu, the pull-request marker, and the 0.3.0 cut). The prior entry covered
-#184 Phase 4 and its audit plus the About / app-menu GitHub links (#226,
-#227, #228); the one before it the 2026-08-28 five-agent deep review and
-the `v0.1.1` cut.
+Living handoff record. Updated 2026-09-04, through the deep-review sweep of
+that day (PRs #372 and #373, issues #357-#371) and the 0.3.1 cut. The prior
+entry covered #341 (upstream v0.11.0 adopted: the `PublishGate`, per-tab
+worktree binding, the Customize Sidebar menu, the pull-request marker, and
+the 0.3.0 cut); before that, #184 Phase 4 and its audit plus the About /
+app-menu GitHub links (#226, #227, #228).
+
+**2026-09-04 deep review: 33 findings landed, 0.3.1 cut.** A `/deep-review`
+pass at `e5b01e4` over ten lenses found 36 problems and split them: 18 it
+fixed in place, 18 it referred for a human decision. Sixteen of the latter
+became issues #356-#371. Both halves are now on `main`.
+
+- **PR #372 (`bdd21e37`)** fixed 15 of those issues, one commit each, each
+  with its own test. The thread they share is work running where it must
+  not: `canonicalize_workspace_cwd` and the `surface.read` / `surface.search`
+  runtime waits both left the GPUI automation tick (#358, #363; the latter
+  answers through the request's own channel and returns a deferral marker
+  `process_ipc_requests` recognises), and `GitDiffStats::from_cwd` now
+  threads one budget through its three git probes instead of stacking three
+  10 s deadlines (#365). Three more fixed a stale or unresolved on-disk
+  identity: the editor's conflict stamp now comes from the handle the bytes
+  were read through (#357), `session.json` publishes onto a symlink's target
+  instead of replacing the link (#360), and a zero `st_birthtime` is refused
+  rather than collapsing worktree identity to inode reuse (#371). The rest:
+  a global cap on concurrent `gh` lookups (#359), `surface.search` returning
+  a JSON-RPC error where it used to return `truncated=true` (#362),
+  keyboard- and AT-reachable Settings combo boxes (#361), shaped IME caret
+  geometry and macOS word chords in `TextArea` (#364, #370), a UTF-8 locale
+  the child actually gets (#369), case-folded `confine_cwd` (#366), and hook
+  cleanup that reports a failed delete (#367, #368).
+- **PR #373 (`08a00a09`)** committed the 18 auto-fixed findings, which had
+  been sitting uncommitted in one working tree and would have been lost with
+  it. Seven commits grouped by subsystem: hook merges that refuse a hostile
+  config shape instead of overwriting it, Pi status frames as JSON-RPC
+  notifications, honest `send_keystroke` and agent-panel write failures,
+  bounded session sweeps and walks, `wait` no longer reading every `-32602`
+  as a closed pane, Sentry's `server_name` no longer carrying the hostname,
+  and a tilde-expanded `default_shell`.
+- **Five bugs the reviews of those PRs found** are fixed on top, three of
+  them in code #372 had already landed. `is_utf8_locale` required a dot, so
+  Terminal.app's codeset-only `LC_CTYPE=UTF-8` read as non-UTF-8 and the
+  override forced `LC_ALL` over the user's other categories.
+  `confine_cwd` case-folded on every volume, so on a case-sensitive one a
+  sibling checkout differing only by case counted as inside; it now asks
+  `pathconf(_PC_CASE_SENSITIVE)` and fails closed when the path cannot be
+  probed. And a no-pid `ai.*` frame minted a fresh synthetic session row
+  each time once two rows of that tool existed - each row it made left the
+  next frame ambiguous too, and nothing collected them, because the stale
+  sweep only probes real PIDs; the band now holds one row per tool.
+- **Release `v0.3.1`** is on `a6e7043f`, Developer ID signed, notarized and
+  stapled, verified from the downloaded artifact (`spctl` reports
+  `source=Notarized Developer ID`, `stapler validate` passes, the `.sha256`
+  matches). The `release` environment gates both jobs of `release.yml`, so a
+  tag push waits for an approval before signing and again before publishing.
+- **The fork's tags collide with upstream's.** `v0.3.1` already existed
+  locally as `arthjean/paneflow`'s tag on an unrelated commit, and the
+  fork's own `v0.3.0` on `origin` names a different commit from upstream's
+  `v0.3.0`. Cutting a release means deleting the local upstream ref first
+  (`git fetch upstream --tags` restores it). Unresolved: a fork tag prefix
+  would end it but changes a naming contract `release.yml`, the Sparkle
+  appcast, and the runbook all share.
 
 **2026-09-04 #341: upstream v0.11.0 adopted.** Nine code sub-issues landed
 one PR each (#342 through #350), then the 0.3.0 cut. What is now true, and
@@ -382,20 +437,20 @@ even though signed release DMGs are also available.
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.3.0** (upstream v0.11.0 adopted; #341). Before it, **0.2.1**, and **0.2.0** was the libghostty-vt engine (#184). First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. |
+| Version | **0.3.1** (the 2026-09-04 deep-review sweep, PRs #372 and #373; tag on `a6e7043f`, signed + notarized + stapled). Before it, **0.3.0** (upstream v0.11.0 adopted; #341), **0.2.1**, and **0.2.0** was the libghostty-vt engine (#184). First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. Fork tag names collide with upstream's - see the 2026-09-04 entry. |
 
 ## Verified green, and how to reproduce it
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 2843 names, 0 failed, 3 ignored (2026-09-04, #341 upstream v0.11.0 + the 0.3.0 cut)
-cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-08-27)
+cargo test --workspace                       # 2877 names, 0 failed, 3 ignored (2026-09-04, the deep-review sweep + the 0.3.1 cut)
+cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-09-04)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
-./target/debug/paneflow --version            # paneflow 0.3.0
+./target/debug/paneflow --version            # paneflow 0.3.1
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
-                                             # negative control: cfg(unix) 151, cfg(macos) 92 (2026-08-31)
+                                             # negative control: cfg(unix) 172, cfg(macos) 94 (2026-09-04)
 ```
 
 The census negative control is not decoration. Read it every time: a census
