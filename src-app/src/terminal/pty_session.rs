@@ -1939,17 +1939,24 @@ impl TerminalState {
 
     /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
     /// return matching lines as `(grid_line, text)` pairs, deduped by line and
-    /// capped at `max_matches`. The bool is `true` when the cap truncated the
-    /// result. Backs the `surface.search` IPC method . The engine
-    /// performs the search and the matched-line extraction atomically on its
-    /// runtime thread.
+    /// capped at `max_matches`. The bool is `true` when the cap (or the cell
+    /// budget) truncated an otherwise finished scan. Backs the
+    /// `surface.search` IPC method. The engine performs the search and the
+    /// matched-line extraction atomically on its runtime thread.
+    ///
+    /// `Err` is a runtime that did not answer (mailbox full or closed, no
+    /// reply within a second) or an engine that failed the scan. Issue #362:
+    /// that is not a finished scan with no hits, and it is not the cap
+    /// either - `surface.search` turns it into an error, the way
+    /// `surface.read` already does, so a caller cannot read a wedged pane as
+    /// "pattern absent" or "raise max_matches".
     pub fn search_scrollback(
         &self,
         pattern: &str,
         max_matches: usize,
-    ) -> (Vec<(i32, String)>, bool) {
+    ) -> Result<(Vec<(i32, String)>, bool), String> {
         if pattern.is_empty() || max_matches == 0 {
-            return (Vec::new(), false);
+            return Ok((Vec::new(), false));
         }
         self.ghostty.search_scrollback(pattern, max_matches)
     }
@@ -3425,16 +3432,42 @@ mod tests {
         let state = TerminalState::new_display_only(5, 80);
         state.write_output(b"first needle needle\nsecond needle\nthird needle\nwithout marker");
 
-        let (limited, hit_cap) = state.search_scrollback("needle", 2);
+        let (limited, hit_cap) = state
+            .search_scrollback("needle", 2)
+            .expect("scan completed");
         assert_eq!(limited.len(), 2);
         assert!(hit_cap);
         assert!(limited[0].1.contains("first needle needle"));
         assert!(limited[1].1.contains("second needle"));
 
-        let (all, hit_cap) = state.search_scrollback("needle", 8);
+        let (all, hit_cap) = state
+            .search_scrollback("needle", 8)
+            .expect("scan completed");
         assert_eq!(all.len(), 3);
         assert!(!hit_cap);
         assert!(all[2].1.contains("third needle"));
+    }
+
+    /// Issue #362: a runtime that cannot answer is not a finished scan with
+    /// zero hits. `surface.search` used to report `matches=[] truncated=true`
+    /// for it, which a conductor reads as "raise max_matches" or "pattern
+    /// absent"; the same unanswered runtime is an error on `surface.read`.
+    #[test]
+    fn search_scrollback_fails_when_the_runtime_does_not_answer() {
+        let state = TerminalState::new_display_only(5, 80);
+        state.write_output(b"first needle\nsecond needle\nwithout marker");
+        let (found, hit_cap) = state
+            .search_scrollback("needle", 8)
+            .expect("scan completed");
+        assert_eq!(found.len(), 2);
+        assert!(!hit_cap);
+
+        state.ghostty.shutdown();
+
+        assert!(
+            state.search_scrollback("needle", 8).is_err(),
+            "no answer must not read as an empty, capped scan"
+        );
     }
 
     // A display-only terminal (child_pid == 0, no real PTY) must resolve no CWD

@@ -3391,10 +3391,24 @@ impl PaneFlowApp {
                     Ok(max_matches) => max_matches.unwrap_or(DEFAULT_MAX),
                     Err(e) => return e.into_value(),
                 };
-                let (matches, truncated) = terminal
+                // Issue #362: an unanswered or failed runtime is an error,
+                // not `matches=[] truncated=true` - `truncated` means the
+                // cap or the cell budget cut a scan that did finish, and a
+                // caller must not read a wedged pane as "pattern absent".
+                // `surface.read` maps the same failure the same way.
+                let (matches, truncated) = match terminal
                     .read(cx)
                     .terminal
-                    .search_scrollback(pattern, max_matches);
+                    .search_scrollback(pattern, max_matches)
+                {
+                    Ok(found) => found,
+                    Err(reason) => {
+                        return JsonRpcError::internal_error(format!(
+                            "terminal runtime did not answer: {reason}"
+                        ))
+                        .into_value();
+                    }
+                };
                 let arr: Vec<_> = matches
                     .into_iter()
                     .map(|(line, text)| serde_json::json!({"line": line, "text": text}))
@@ -6211,6 +6225,23 @@ mod tests {
         assert!(
             4 > total_past,
             "offset > total is out of range → handler returns -32602"
+        );
+    }
+
+    /// Issue #362: `surface.search` must not answer a wedged runtime with
+    /// `matches=[] truncated=true`, which reads as "pattern absent" or
+    /// "raise max_matches". It maps the failure the way `surface.read` does.
+    #[test]
+    fn surface_search_maps_a_runtime_failure_to_an_error() {
+        let src = include_str!("ipc_handler.rs");
+        let arm = src
+            .split("\"surface.search\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"surface.rename\"").next())
+            .expect("surface.search arm");
+        assert!(
+            arm.contains("Err(reason) =>") && arm.contains("internal_error"),
+            "an unanswered or failed scan is a JSON-RPC error, not an empty capped result"
         );
     }
 
