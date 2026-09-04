@@ -127,6 +127,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pi_plugin_frames_are_notifications() {
+        assert!(
+            !PI_EXTENSION_SOURCE.contains("id: 1"),
+            "Pi frames must be JSON-RPC notifications (no id), matching OpenCode"
+        );
+        assert!(
+            PI_EXTENSION_SOURCE.contains("JSON.stringify({ jsonrpc: \"2.0\", method, params: p })"),
+            "Pi stringify must emit jsonrpc/method/params only"
+        );
+    }
+
+    #[test]
     fn preexisting_pi_extension_survives_cleanup() {
         let temp = tempfile::TempDir::new().unwrap();
         let directory = temp.path().join("extensions");
