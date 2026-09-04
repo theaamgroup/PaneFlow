@@ -388,8 +388,7 @@ impl PaneFlowApp {
         self.pr_states.get(&repo_root.to_string_lossy(), branch)
     }
 
-    /// Every `(repository, branch)` the rail is currently showing: each
-    /// workspace's own branch, plus the branch of every bound tab (#347).
+    /// Workspace and bound-tab branches, plus each terminal's current checkout.
     fn pr_probe_targets(&self) -> Vec<(std::path::PathBuf, String)> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -412,6 +411,14 @@ impl PaneFlowApp {
                 if let Some(git) = self.tab_checkout_git(tab) {
                     push(&git.branch.clone(), &mut out);
                 }
+            }
+        }
+        for git in self.terminal_branches.values() {
+            if let Some(repo_root) = &git.repo_root
+                && !git.branch.is_empty()
+                && seen.insert((repo_root.clone(), git.branch.clone()))
+            {
+                out.push((repo_root.clone(), git.branch.clone()));
             }
         }
         out

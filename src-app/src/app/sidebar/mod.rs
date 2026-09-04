@@ -7,6 +7,8 @@
 //! types (`WorkspaceContextMenu`, `WorkspaceDrag`, `WorkspaceDragPreview`)
 //! remain in `main.rs` because they cross module boundaries.
 
+mod branches;
+pub(crate) use branches::TerminalBranch;
 pub(crate) mod context_menu;
 pub(crate) mod customize_menu;
 
@@ -2145,16 +2147,94 @@ impl PaneFlowApp {
             row_shell
         };
 
-        // Issue #347: a bound tab names the branch of its own checkout on a
-        // second line, so two tabs of one workspace on two worktrees read
-        // apart at a glance. An unbound tab draws nothing extra - its branch
-        // is the workspace's, already on the folder row above.
         let mut body = div()
             .flex()
             .flex_col()
             .gap(px(SIDEBAR_ROW_GAP))
             .child(title_row);
-        if let Some(meta_row) = self.render_tab_worktree_meta_row(tab, ui) {
+        for pane in &panes {
+            if !self.cached_config.sidebar_show.branch_enabled() {
+                break;
+            }
+            let pane_id = pane.entity_id().as_u64();
+            let pane = pane.read(cx);
+            let Some(terminal) = pane.active_terminal_opt() else {
+                continue;
+            };
+            let terminal = terminal.read(cx);
+            let Some(cwd) = terminal.terminal.current_cwd.as_deref() else {
+                continue;
+            };
+            let Some(git) = self
+                .terminal_branches
+                .get(cwd)
+                .filter(|git| !git.branch.is_empty())
+            else {
+                continue;
+            };
+            let branch = &git.branch;
+            let pr = git
+                .repo_root
+                .as_deref()
+                .and_then(|repo_root| self.pull_request_for(repo_root, branch));
+            let title = crate::pane::Pane::surface_title(&pane.surface, cx);
+            let label = if panes.len() > 1 {
+                format!("{title}: {branch}")
+            } else {
+                branch.clone()
+            };
+            let tooltip: SharedString = format!("{title} — {branch}\n{cwd}").into();
+            body = body.child(
+                div()
+                    .id(SharedString::from(format!("terminal-branch-{pane_id}")))
+                    .pl(px(SIDEBAR_FOLDER_ICON_WIDTH + SIDEBAR_TITLE_ROW_GAP))
+                    .w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
+                    .max_w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .min_w_0()
+                    .h(px(14.))
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(
+                        ui.muted
+                            .opacity(sidebar_tab_title_opacity(is_active_workspace)),
+                    )
+                    .delayed_tooltip(move |_, cx| {
+                        cx.new(|_| SidebarTooltip {
+                            label: tooltip.clone(),
+                        })
+                        .into()
+                    })
+                    .child(
+                        svg()
+                            .size(px(10.))
+                            .flex_none()
+                            .path(match pr {
+                                Some(_) => "icons/git-pull-request.svg",
+                                None => "icons/git-branch-sidebar.svg",
+                            })
+                            .text_color(
+                                match pr {
+                                    Some(pr) => pr.state.color(ui),
+                                    None => ui.muted,
+                                }
+                                .opacity(sidebar_tab_title_opacity(is_active_workspace)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label),
+                    ),
+            );
+        }
+        if let Some(meta_row) = self.render_tab_diffstat_row(tab, ui) {
             body = body.child(meta_row);
         }
         let row = squircle_row(row_shell, tab_group, resting_bg, hovered_bg, body);
@@ -2176,91 +2256,19 @@ impl PaneFlowApp {
             .child(row)
     }
 
-    /// The git line under a bound tab's title (issue #347): the branch its
-    /// worktree is on, from the cached probe, or the checkout's directory name
-    /// while the first probe is in flight or when HEAD is detached - and,
-    /// behind its own switch (issue #349), that worktree's diffstat pinned
-    /// right. `None` for an unbound tab, which has nothing of its own to say:
-    /// its checkout is the workspace's, already on the folder row above.
-    ///
-    /// Each value sits behind its `sidebar_show` switch. With the branch off
-    /// and nothing to count, no line is built at all, so the row keeps the
-    /// single-line geometry it has always had.
-    fn render_tab_worktree_meta_row(
-        &self,
-        tab: &Tab,
-        ui: crate::theme::UiColors,
-    ) -> Option<AnyElement> {
-        let path = tab.worktree.as_ref()?;
-        let show = self.cached_config.sidebar_show;
-        let git = self.tab_checkout_git(tab);
-        let branch = git.map(|git| git.branch.clone()).unwrap_or_default();
-        let owner = self
-            .workspaces
-            .iter()
-            .find(|ws| ws.tabs().iter().any(|t| t.id == tab.id));
-        let worktree_root = owner.map(|ws| ws.worktree_root.clone()).unwrap_or_default();
-        let label = crate::workspace::worktree::checkout_label(Some(&branch), path, &worktree_root);
-        let draw_branch = show.branch_enabled() && !label.is_empty();
-        // The bound checkout's own counts (`CheckoutGit::stats`), never the
-        // workspace's: two tabs on two worktrees differ by exactly this.
-        let counts = git
-            .filter(|git| git.is_repo && diffstat_visible(show, &git.stats))
-            .map(|git| git.stats.clone());
-        if !draw_branch && counts.is_none() {
+    /// Optional diff counts for a tab explicitly bound to a worktree.
+    fn render_tab_diffstat_row(&self, tab: &Tab, ui: crate::theme::UiColors) -> Option<AnyElement> {
+        tab.worktree.as_ref()?;
+        let git = self.tab_checkout_git(tab)?;
+        if !git.is_repo || !diffstat_visible(self.cached_config.sidebar_show, &git.stats) {
             return None;
         }
-        // A branch already in review is marked by its own glyph rather than by
-        // an extra one (issue #350): `pull_request_for` answers only while the
-        // switch is on and a lookup has landed, so the row is otherwise the
-        // #347 row unchanged.
-        let pr = owner
-            .and_then(|ws| ws.repo_root.as_deref())
-            .and_then(|repo_root| self.pull_request_for(repo_root, &branch));
         Some(
             div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
-                .pl(px(SIDEBAR_FOLDER_ICON_WIDTH + SIDEBAR_TITLE_ROW_GAP))
-                .w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
-                .max_w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
+                .justify_end()
                 .h(px(14.))
-                .overflow_x_hidden()
-                .whitespace_nowrap()
-                .text_xs()
-                .text_color(ui.muted)
-                .when(draw_branch, |row| {
-                    row.child(
-                        svg()
-                            .size(px(10.))
-                            .flex_none()
-                            .path(match pr {
-                                Some(_) => "icons/git-pull-request.svg",
-                                None => "icons/git-branch-sidebar.svg",
-                            })
-                            .text_color(match pr {
-                                Some(pr) => pr.state.color(ui),
-                                None => ui.muted,
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_x_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(label),
-                    )
-                })
-                .when_some(counts, |row, stats| {
-                    // Pinned right: a spacer takes the slack the branch leaves,
-                    // and with the branch off the counts still sit at the edge.
-                    row.child(div().flex_1())
-                        .child(render_diffstat_counts(&stats, ui))
-                })
+                .child(render_diffstat_counts(&git.stats, ui))
                 .into_any_element(),
         )
     }
@@ -2272,20 +2280,14 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        // Branch + detected services on one clipped line, with the checkout's
-        // diffstat pinned right behind its own switch (issue #349). The branch
-        // is the identity cue that makes sibling worktrees distinguishable at
-        // a glance, so it is on unless `sidebar_show.branch` says otherwise;
-        // the counts are off unless `sidebar_show.diffstat` says otherwise,
-        // and never drawn for a clean checkout.
+        // Workspace services and optional checkout counts stay on the folder row.
         let show = self.cached_config.sidebar_show;
-        let has_branch = show.branch_enabled() && !ws.git_branch.is_empty();
         let service = sidebar_service_summary(&ws.active_ports, &ws.service_labels);
         let has_ports = service.is_some();
         // The workspace checkout's counts (`Workspace::git_stats`): what an
         // unbound tab works in. A bound tab's worktree reports on its own row.
         let has_counts = ws.is_git_repo && diffstat_visible(show, &ws.git_stats);
-        if !has_branch && !has_ports && !has_counts {
+        if !has_ports && !has_counts {
             return None;
         }
 
@@ -2302,68 +2304,6 @@ impl PaneFlowApp {
             .text_xs()
             .opacity(opacity)
             .text_color(ui.muted);
-
-        if has_branch {
-            let branch_width = if has_ports {
-                126.0
-            } else {
-                SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH
-            };
-            // The branch glyph becomes the pull-request glyph, in GitHub's
-            // state color, once a `gh` lookup has said the branch is in review
-            // (issue #350). `pull_request_for` is `None` while the switch is
-            // off, so the row is otherwise untouched.
-            let pr = ws
-                .repo_root
-                .as_deref()
-                .and_then(|repo_root| self.pull_request_for(repo_root, &ws.git_branch));
-            meta_row = meta_row.child(
-                div()
-                    .id(SharedString::from(format!("branch-{}", ws.id)))
-                    .min_w_0()
-                    .max_w(px(branch_width))
-                    .overflow_x_hidden()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.))
-                    .delayed_tooltip({
-                        let label: SharedString = ws.git_branch.clone().into();
-                        move |_w, cx| {
-                            cx.new(|_| SidebarTooltip {
-                                label: label.clone(),
-                            })
-                            .into()
-                        }
-                    })
-                    .child(
-                        svg()
-                            .size(px(10.))
-                            .flex_none()
-                            .path(match pr {
-                                Some(_) => "icons/git-pull-request.svg",
-                                None => "icons/git-branch-sidebar.svg",
-                            })
-                            .text_color(match pr {
-                                Some(pr) => pr.state.color(ui),
-                                None => ui.muted,
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_x_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(ws.git_branch.clone()),
-                    ),
-            );
-        }
-
-        if has_branch && has_ports {
-            meta_row = meta_row.child(div().flex_none().text_color(ui.muted).child("·"));
-        }
 
         if let Some(service) = service {
             let port = service.primary;
@@ -3970,72 +3910,28 @@ mod tests {
         );
     }
 
-    /// Workspace folder rows show the detected git branch under the title.
-    /// Issue #88's tab-level redesign dropped it as "crowding"; without it,
-    /// sibling worktrees of one repo are hard to tell apart in the rail.
     #[test]
-    fn the_workspace_meta_row_renders_the_git_branch() {
-        let production = include_str!("mod.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production half of the module");
+    fn branch_labels_belong_to_terminal_rows_and_keep_pr_markers() {
+        let production = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
+        let tab = source_slice(
+            production,
+            "fn render_tab_row(",
+            "fn render_workspace_meta_row(",
+        );
+        assert!(tab.contains("terminal.terminal.current_cwd"));
+        assert!(tab.contains(".terminal_branches"));
+        assert!(tab.contains(".get(cwd)"));
+        assert!(tab.contains("sidebar_show.branch_enabled()"));
+        assert!(tab.contains("self.pull_request_for(repo_root, branch)"));
+        assert!(tab.contains("icons/git-pull-request.svg"));
+        assert!(tab.contains("icons/git-branch-sidebar.svg"));
+        assert!(tab.contains("pr.state.color(ui)"));
         let meta = source_slice(
             production,
             "fn render_workspace_meta_row(",
             "\n    pub(crate) fn ",
         );
-        assert!(
-            meta.contains("icons/git-branch-sidebar.svg"),
-            "workspace meta row must paint the git branch icon"
-        );
-        assert!(
-            meta.contains("ws.git_branch"),
-            "workspace meta row must read Workspace::git_branch"
-        );
-        assert!(
-            !meta.contains("Neither the git branch nor a diffstat"),
-            "stale comment still claims the branch was dropped from the rail"
-        );
-    }
-
-    /// Issue #350: both branch glyph sites (the workspace meta row and the
-    /// bound tab's #347 line) swap to the pull-request glyph off the cached
-    /// `gh` answer, and nothing in the render path spawns a lookup.
-    #[test]
-    fn both_branch_glyphs_swap_to_the_pull_request_marker_from_the_cache() {
-        let production = include_str!("mod.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production half of the module");
-        let tab_meta = source_slice(
-            production,
-            "fn render_tab_worktree_meta_row(",
-            "fn render_workspace_meta_row(",
-        );
-        let ws_meta = source_slice(
-            production,
-            "fn render_workspace_meta_row(",
-            "\n    pub(crate) fn ",
-        );
-        for (label, body) in [("tab meta row", tab_meta), ("workspace meta row", ws_meta)] {
-            assert!(
-                body.contains("self.pull_request_for(repo_root, "),
-                "{label} must read the cached answer through pull_request_for"
-            );
-            assert!(
-                body.contains("icons/git-pull-request.svg")
-                    && body.contains("icons/git-branch-sidebar.svg"),
-                "{label} must keep the branch glyph as the fallback"
-            );
-            assert!(
-                body.contains("pr.state.color(ui)"),
-                "{label} must tint the marker with GitHub's state color"
-            );
-            assert!(
-                !body.contains("refresh_pull_requests") && !body.contains("Command::new"),
-                "{label} must never look a pull request up from a render"
-            );
-        }
+        assert!(!meta.contains("ws.git_branch"));
     }
 
     #[test]

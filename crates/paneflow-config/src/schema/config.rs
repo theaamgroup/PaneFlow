@@ -350,13 +350,13 @@ pub struct PaneFlowConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidebarShow {
-    /// Show the git branch: the workspace's on its folder row, and a bound
-    /// tab's worktree branch on that tab's row. `None` is `true` (issue #349):
+    /// Show each terminal's current git branch beneath its sidebar name.
+    /// Split tabs show a labeled branch line per terminal. `None` is `true` (issue #349):
     /// the rail has always painted the branch, and an absent key keeps it.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub branch: Option<bool>,
-    /// Show that same checkout's insertion and deletion counts, pinned to the
-    /// right of the branch line and drawn only when there is something to
+    /// Show right-aligned checkout counts on the workspace row or a bound
+    /// tab's metadata line, drawn only when there is something to
     /// report. `None` is `false` (issue #349): the rail painted no diffstat
     /// before the switch existed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
