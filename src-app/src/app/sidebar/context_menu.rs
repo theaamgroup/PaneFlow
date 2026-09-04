@@ -45,18 +45,21 @@ fn workspace_context_menu_counts(
 const SELECT_MENU_MAX_HEIGHT: f32 = 320.;
 
 /// Height of the tab context menu as it is actually drawn: the menu chrome,
-/// its two fixed rows, and - when `branch_rows` is non-zero - the Branch
-/// section (header plus one row per branch), all capped at the surface's own
-/// ceiling. The on-screen clamp has to measure what is painted: sizing a
-/// forty-branch list at its uncapped height pinned the menu at `y = 0`
-/// (issue #347).
-pub(crate) fn tab_context_menu_height(branch_rows: usize) -> Pixels {
+/// its two fixed rows, when `branch_rows` is non-zero the Branch section
+/// (header plus one row per branch), and when `remove_row` the "Remove
+/// worktree" row a bound tab carries (issue #348; its divider is folded into
+/// the row it introduces, like the Branch header), all capped at the
+/// surface's own ceiling. The on-screen clamp has to measure what is painted:
+/// sizing a forty-branch list at its uncapped height pinned the menu at
+/// `y = 0` (issue #347).
+pub(crate) fn tab_context_menu_height(branch_rows: usize, remove_row: bool) -> Pixels {
     let branch_rows = if branch_rows > 0 {
         1. + branch_rows as f32
     } else {
         0.
     };
-    px((8. + (2. + branch_rows) * 28.).min(SELECT_MENU_MAX_HEIGHT))
+    let remove_rows = if remove_row { 1. } else { 0. };
+    px((8. + (2. + branch_rows + remove_rows) * 28.).min(SELECT_MENU_MAX_HEIGHT))
 }
 
 pub(crate) fn clamped_context_menu_position(
@@ -459,11 +462,33 @@ impl PaneFlowApp {
         // A single branch is where the tab already works: the section would
         // only restate it.
         let show_branches = branches.len() > 1;
-        let menu_height = tab_context_menu_height(if show_branches { branches.len() } else { 0 });
+        // Issue #348: only a bound tab has a checkout to remove. Built here
+        // rather than inside the `when_some` below because
+        // `render_select_menu_item` needs `self`, like every other item.
+        let is_bound = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs().get(tab_idx))
+            .is_some_and(|tab| tab.worktree.is_some());
+        let menu_height =
+            tab_context_menu_height(if show_branches { branches.len() } else { 0 }, is_bound);
         let menu_pos = clamped_context_menu_position(position, px(248.), menu_height, window);
         let close_shortcut = self
             .shortcut_for_action("close_tab")
             .map(|key| SharedString::from(key.to_string()));
+        let remove_worktree_item = is_bound.then(|| {
+            self.render_select_menu_item(
+                "tab-context-remove-worktree".into(),
+                "Remove worktree",
+                None,
+                ui,
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.tab_menu_open = None;
+                    this.remove_tab_worktree(ws_idx, tab_idx, cx);
+                    cx.stop_propagation();
+                }),
+            )
+        });
 
         select_menu("tab-context-menu", ui)
             .occlude()
@@ -548,6 +573,9 @@ impl PaneFlowApp {
                     );
                 }
                 menu
+            })
+            .when_some(remove_worktree_item, |menu, item| {
+                menu.child(context_menu_divider(ui)).child(item)
             })
             .into_any_element()
     }
@@ -828,14 +856,36 @@ mod tests {
         // Issue #347 review, finding 7: the height fed to the on-screen
         // clamp counted every branch row, while `select_menu` caps the
         // surface at 320 px, so a long branch list pinned the menu at y = 0.
-        assert_eq!(tab_context_menu_height(0), px(64.), "chrome + two rows");
         assert_eq!(
-            tab_context_menu_height(2),
+            tab_context_menu_height(0, false),
+            px(64.),
+            "chrome + two rows"
+        );
+        assert_eq!(
+            tab_context_menu_height(2, false),
             px(8. + (2. + 3.) * 28.),
             "the section header and one row per branch, under the cap"
         );
-        assert_eq!(tab_context_menu_height(40), px(320.));
-        assert_eq!(tab_context_menu_height(400), px(320.));
+        assert_eq!(tab_context_menu_height(40, false), px(320.));
+        assert_eq!(tab_context_menu_height(400, false), px(320.));
+    }
+
+    #[test]
+    fn a_bound_tab_menu_is_one_row_taller_for_remove_worktree() {
+        // Issue #348: the "Remove worktree" row exists only for a bound tab,
+        // and the clamp must measure it or the menu overshoots the window
+        // bottom by exactly one row.
+        assert_eq!(
+            tab_context_menu_height(0, true),
+            px(8. + 3. * 28.),
+            "chrome, two rows, and the removal row"
+        );
+        assert_eq!(
+            tab_context_menu_height(2, true),
+            px(8. + (2. + 3. + 1.) * 28.),
+            "the removal row sits under the Branch section"
+        );
+        assert_eq!(tab_context_menu_height(40, true), px(320.));
     }
 
     #[test]
