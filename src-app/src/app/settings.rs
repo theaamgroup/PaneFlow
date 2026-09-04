@@ -293,8 +293,13 @@ impl PaneFlowApp {
         value: serde_json::Value,
         cx: &mut Context<Self>,
     ) {
-        self.cached_config =
-            config_writer::with_agent_panel_field(&self.cached_config, key, value.clone());
+        match config_writer::with_agent_panel_field(&self.cached_config, key, value.clone()) {
+            Ok(next) => self.cached_config = next,
+            Err(_) => {
+                self.show_toast(format!("Could not apply agent panel setting: {key}"), cx);
+                return;
+            }
+        }
         config_writer::publish_config_snapshot(cx, &self.cached_config);
         cx.notify();
         let seq = self

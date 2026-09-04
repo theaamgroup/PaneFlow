@@ -436,6 +436,7 @@ fn crash_reporting_options() -> sentry::ClientOptions {
     sentry::ClientOptions::new()
         .maybe_release(sentry::release_name!())
         .send_default_pii(false)
+        .server_name("paneflow")
 }
 
 /// Top-level `--help`/`-h` text. Built as a function so tests can assert the
@@ -724,6 +725,11 @@ mod crash_reporting_tests {
         // re-enabled at a second construction site (needle composed at
         // runtime: `include_str!` captures this test's own source too).
         assert!(!crash_reporting_options().send_default_pii);
+        assert_eq!(
+            crash_reporting_options().server_name.as_deref(),
+            Some("paneflow"),
+            "server_name must be a fixed label, not the machine hostname"
+        );
         let source = include_str!("main.rs");
         let pii_on = format!("send_default_pii({})", "true");
         assert!(
@@ -1585,6 +1591,8 @@ struct PaneFlowApp {
     /// without a watermark the same state would be re-applied every tick and
     /// keep resetting the stall clock. See `app::agent_status`.
     claude_registry_seen: app::agent_status::RegistryWatermark,
+    /// Skip spawning a new Claude registry sweep while one is in flight.
+    claude_registry_sweep_pending: bool,
     /// Focus handle routing key events to the close-confirm modal while open.
     pending_close_focus: FocusHandle,
     /// Set when a modal close confirmation is armed; the next render claims
