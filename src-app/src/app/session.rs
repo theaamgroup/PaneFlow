@@ -1316,8 +1316,34 @@ fn write_session_json_if_current(
     write_session_json_inner(path, state)
 }
 
+/// Resolve where a session write must land. A symlinked session.json is
+/// published onto its target so the link survives the atomic rename; a
+/// dangling link is an error, not a path to create.
+fn session_write_target(path: &Path) -> Result<PathBuf, std::io::Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path),
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(error),
+    }
+}
+
 fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::SessionState) -> bool {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    // A dotfiles-managed session.json is a symlink into another store. Publish
+    // onto the link's target so the atomic rename updates that store and leaves
+    // the link standing, and refuse a dangling link rather than replacing it
+    // with a regular file. Mirrors `config_writer::config_write_target`.
+    let path = &match session_write_target(path) {
+        Ok(target) => target,
+        Err(e) => {
+            log::warn!(
+                "session save failed: cannot resolve write target {}: {e}",
+                path.display()
+            );
+            return false;
+        }
+    };
     if let Some(parent) = path.parent() {
         // Owner-only: session.json stores absolute workspace cwds, tab titles,
         // and custom-button commands. `mode` only applies to directories this
@@ -2462,6 +2488,67 @@ mod tests {
             .find("std::fs::rename")
             .expect("session temp file must be atomically published");
         assert!(sync < rename, "temp-file sync must happen before rename");
+    }
+
+    /// A dotfiles-managed session.json is a symlink into another store. The
+    /// atomic publish must land on the link's target (like
+    /// `config_writer::config_write_target`), leaving the link standing,
+    /// instead of replacing the symlink inode with a regular file and
+    /// leaving the linked store stale.
+    #[test]
+    fn write_session_json_persists_through_a_symlink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("store");
+        std::fs::create_dir_all(&store).expect("store dir");
+        let target = store.join("session.json");
+        std::fs::write(&target, "stale").expect("seed target");
+        let live = tmp.path().join("live");
+        std::fs::create_dir_all(&live).expect("live dir");
+        let link = live.join("session.json");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        assert!(write_session_json(&link, &empty_session_state()));
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link still present")
+                .file_type()
+                .is_symlink(),
+            "session.json must stay a symlink after a save"
+        );
+        let loaded: paneflow_config::schema::SessionState =
+            serde_json::from_str(&std::fs::read_to_string(&target).expect("target readable"))
+                .expect("the link target must hold the new session");
+        assert_eq!(
+            loaded.version,
+            paneflow_config::schema::SESSION_SCHEMA_VERSION
+        );
+        assert!(
+            std::fs::read_dir(&live)
+                .expect("live dir")
+                .filter_map(Result::ok)
+                .all(|entry| entry.file_name() == "session.json"),
+            "no temp file may be left beside the link"
+        );
+    }
+
+    #[test]
+    fn write_session_json_refuses_a_dangling_symlink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let link = tmp.path().join("session.json");
+        let missing = tmp.path().join("missing").join("session.json");
+        std::os::unix::fs::symlink(&missing, &link).expect("symlink");
+        assert!(
+            !write_session_json(&link, &empty_session_state()),
+            "a dangling session.json link must not be replaced by a regular file"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link still present")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!missing.exists());
     }
 
     #[test]
