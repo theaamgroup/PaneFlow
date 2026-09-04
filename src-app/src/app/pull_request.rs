@@ -26,7 +26,7 @@
 //! its own config, and stripping them would fail auth silently and put
 //! the repository into the failure backoff.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,12 @@ const STDOUT_CAP: u64 = 256 * 1024;
 /// "no marker until restart" (PR #354 review). A backoff keeps the sidebar
 /// refresh from hammering a dead remote while still recovering on its own.
 const FAILURE_BACKOFF: Duration = Duration::from_secs(600);
+/// How many `gh` processes may run at once, across every repository (issue
+/// #359). Stale branches queue behind this many workers, each running one
+/// lookup at a time, so a session with a dozen checkouts cannot pin a dozen
+/// 15 s `gh` calls on the blocking pool that git stats and session listings
+/// also run on.
+const MAX_CONCURRENT_LOOKUPS: usize = 2;
 
 /// A branch's pull request, in GitHub's own vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,9 +115,14 @@ struct Cached {
 #[derive(Default)]
 pub(crate) struct PrStates {
     entries: HashMap<(String, String), Cached>,
-    /// Lookups in flight, so a 30 s tick landing on a slow `gh` does not stack
-    /// a second call on the same branch.
+    /// Lookups in flight - queued or running - so a 30 s tick landing on a
+    /// slow `gh` does not stack a second call on the same branch.
     inflight: HashSet<(String, String)>,
+    /// Branches waiting for a worker, in the order the rail listed them.
+    queue: VecDeque<(std::path::PathBuf, String)>,
+    /// Workers currently draining [`Self::queue`], never more than
+    /// [`MAX_CONCURRENT_LOOKUPS`].
+    workers: usize,
     /// Repositories `gh` could not answer for: logged out, not a GitHub
     /// remote, or a transient timeout or rate limit - `gh` exits 1 for all of
     /// them alike. Left alone for [`FAILURE_BACKOFF`], then asked again, so
@@ -159,6 +170,48 @@ impl PrStates {
 
     fn mark_inflight(&mut self, repo_root: &str, branch: &str) {
         self.inflight.insert(Self::key(repo_root, branch));
+    }
+
+    /// Queue a branch for a worker. It counts as in flight from here on.
+    fn enqueue(&mut self, repo_root: std::path::PathBuf, branch: String) {
+        self.mark_inflight(&repo_root.to_string_lossy(), &branch);
+        self.queue.push_back((repo_root, branch));
+    }
+
+    /// How many workers a refresh should start now: enough to drain the
+    /// queue, never past the cap, counting the ones already running. Records
+    /// them as running.
+    fn workers_to_start(&mut self) -> usize {
+        let wanted = self.queue.len().min(MAX_CONCURRENT_LOOKUPS);
+        let start = wanted.saturating_sub(self.workers);
+        self.workers += start;
+        start
+    }
+
+    /// The next branch for a worker to look up, or `None` when the queue is
+    /// empty - which retires the worker asking, in the same step, so a
+    /// refresh can never see "queue full, workers at cap" while one is on
+    /// its way out. A branch whose repository failed since it was queued is
+    /// dropped rather than spending a deadline on it.
+    fn next_lookup(&mut self) -> Option<(std::path::PathBuf, String)> {
+        self.next_lookup_at(Instant::now())
+    }
+
+    fn next_lookup_at(&mut self, now: Instant) -> Option<(std::path::PathBuf, String)> {
+        while let Some((repo_root, branch)) = self.queue.pop_front() {
+            let key = Self::key(&repo_root.to_string_lossy(), &branch);
+            if self
+                .unavailable
+                .get(&key.0)
+                .is_some_and(|until| now < *until)
+            {
+                self.inflight.remove(&key);
+                continue;
+            }
+            return Some((repo_root, branch));
+        }
+        self.workers = self.workers.saturating_sub(1);
+        None
     }
 
     /// Record an answer. Returns `true` when it differs from what was cached,
@@ -387,42 +440,63 @@ impl PaneFlowApp {
             })
             .collect();
         for (repo_root, branch) in stale {
-            self.pr_states
-                .mark_inflight(&repo_root.to_string_lossy(), &branch);
-            let gh = gh.to_path_buf();
-            cx.spawn(
-                async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                    let read = smol::unblock({
-                        let repo_root = repo_root.clone();
-                        let branch = branch.clone();
-                        move || lookup(&gh, &repo_root, &branch)
-                    })
-                    .await;
-                    let _ = cx.update(|cx| {
-                        this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
-                            let key = repo_root.to_string_lossy();
-                            match read {
-                                Ok(value) => {
-                                    if app.pr_states.store(&key, &branch, value) {
-                                        cx.notify();
-                                    }
-                                }
-                                Err(()) => app.pr_states.mark_unavailable(&key, &branch),
-                            }
-                        })
-                    });
-                },
-            )
-            .detach();
+            self.pr_states.enqueue(repo_root, branch);
         }
+        // Issue #359: the queue drains through a capped pool, one `gh` per
+        // worker, never one per stale branch.
+        for _ in 0..self.pr_states.workers_to_start() {
+            self.spawn_pull_request_worker(gh, cx);
+        }
+    }
+
+    /// One worker: pulls branches off the queue and looks them up one at a
+    /// time, off the render thread, until the queue is empty.
+    fn spawn_pull_request_worker(&self, gh: &'static std::path::Path, cx: &mut Context<Self>) {
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| loop {
+                let next = cx
+                    .update(|cx| {
+                        this.update(cx, |app: &mut Self, _cx: &mut Context<Self>| {
+                            app.pr_states.next_lookup()
+                        })
+                    })
+                    .ok()
+                    .flatten();
+                let Some((repo_root, branch)) = next else {
+                    return;
+                };
+                let read = smol::unblock({
+                    let repo_root = repo_root.clone();
+                    let branch = branch.clone();
+                    move || lookup(gh, &repo_root, &branch)
+                })
+                .await;
+                let _ = cx.update(|cx| {
+                    this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                        let key = repo_root.to_string_lossy();
+                        match read {
+                            Ok(value) => {
+                                if app.pr_states.store(&key, &branch, value) {
+                                    cx.notify();
+                                }
+                            }
+                            Err(()) => app.pr_states.mark_unavailable(&key, &branch),
+                        }
+                    })
+                });
+            },
+        )
+        .detach();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FAILURE_BACKOFF, PrState, PrStates, PullRequest, TTL, parse_pr_list, pick, should_look_up,
+        FAILURE_BACKOFF, MAX_CONCURRENT_LOOKUPS, PrState, PrStates, PullRequest, TTL,
+        parse_pr_list, pick, should_look_up,
     };
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     fn row(number: u64, state: &str, draft: bool) -> serde_json::Value {
@@ -589,6 +663,81 @@ mod tests {
         assert!(states.store_at("/repo", "main", None, t0 + TTL * 4));
         assert_eq!(states.get("/repo", "main"), None);
         assert!(!states.is_stale_at("/repo", "main", t0 + TTL * 4));
+    }
+
+    #[test]
+    fn many_stale_branches_never_start_more_than_a_few_gh_processes_at_once() {
+        // Issue #359: a session with a dozen checkouts used to fan out a dozen
+        // concurrent 15 s `gh` calls and exhaust the blocking pool. Lookups
+        // now queue behind a small fixed number of workers, each running one
+        // `gh` at a time.
+        assert!(
+            (1..=2).contains(&MAX_CONCURRENT_LOOKUPS),
+            "a small fixed cap, not a per-branch fan-out"
+        );
+        let mut states = PrStates::default();
+        let now = Instant::now();
+        for i in 0..12 {
+            states.enqueue(PathBuf::from(format!("/repo{i}")), "main".to_string());
+        }
+        assert!(
+            !states.is_stale_at("/repo3", "main", now),
+            "a queued branch counts as in flight: the next tick does not queue it again"
+        );
+        assert_eq!(
+            states.workers_to_start(),
+            MAX_CONCURRENT_LOOKUPS,
+            "twelve stale branches start only the capped number of workers"
+        );
+        assert_eq!(
+            states.workers_to_start(),
+            0,
+            "a tick landing while the workers run starts none"
+        );
+
+        // The workers drain the queue one lookup at a time, in order.
+        let (first, branch) = states.next_lookup_at(now).expect("queue is not empty");
+        assert_eq!(
+            (first.as_path(), branch.as_str()),
+            (PathBuf::from("/repo0").as_path(), "main")
+        );
+        for _ in 1..12 {
+            assert!(states.next_lookup_at(now).is_some());
+        }
+        // An empty queue retires the worker asking; only then does the next
+        // refresh get to start one again.
+        assert!(states.next_lookup_at(now).is_none());
+        assert_eq!(states.workers_to_start(), 0, "one worker is still running");
+        assert!(states.next_lookup_at(now).is_none());
+        states.enqueue(PathBuf::from("/repo0"), "feature".to_string());
+        assert_eq!(
+            states.workers_to_start(),
+            1,
+            "both retired: one restarts for one branch"
+        );
+    }
+
+    #[test]
+    fn a_failed_repository_drops_its_queued_branches_instead_of_timing_out_each() {
+        // Sequential lookups would otherwise spend a 15 s deadline on every
+        // queued branch of a dead remote.
+        let mut states = PrStates::default();
+        let now = Instant::now();
+        states.enqueue(PathBuf::from("/dead"), "a".to_string());
+        states.enqueue(PathBuf::from("/dead"), "b".to_string());
+        states.enqueue(PathBuf::from("/live"), "c".to_string());
+        assert_eq!(states.next_lookup_at(now).unwrap().1, "a");
+        states.mark_unavailable_at("/dead", "a", now);
+        assert_eq!(
+            states.next_lookup_at(now).unwrap().1,
+            "c",
+            "the dead repository's other branch is skipped"
+        );
+        assert!(
+            states.is_stale_at("/dead", "b", now + FAILURE_BACKOFF),
+            "and is not left marked in flight past the backoff"
+        );
+        assert!(states.next_lookup_at(now).is_none());
     }
 
     #[test]
