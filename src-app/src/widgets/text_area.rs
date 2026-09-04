@@ -209,6 +209,13 @@ pub struct TextArea {
     on_escape: Option<EscapeFn>,
     on_submit_immediate: Option<SubmitImmediateFn>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// Shaped lines from the most recent paint, shared with the paint
+    /// pass. IME / accessibility caret geometry is answered from these
+    /// so the reported caret is the painted caret on soft-wrapped and
+    /// non-monospace text.
+    last_layout: Option<Arc<Vec<ShapedLineInfo>>>,
+    /// Line height the lines in `last_layout` were laid out with.
+    last_line_height: Pixels,
     /// EP-002 (Launch Pad): when `true`, Enter fires `on_submit` even on an
     /// empty buffer (optional field in a form whose Enter confirms the whole
     /// form). Default `false` - every other consumer keeps the empty no-op.
@@ -238,6 +245,8 @@ impl TextArea {
             on_escape: None,
             on_submit_immediate: None,
             last_bounds: None,
+            last_layout: None,
+            last_line_height: px(20.),
             submit_on_empty: false,
             decorations: Vec::new(),
         }
@@ -969,15 +978,10 @@ impl EntityInputHandler for TextArea {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let offset = range.start.min(self.content.len());
-        let row = self.content[..offset]
-            .chars()
-            .filter(|ch| *ch == '\n')
-            .count();
-        let line_start = line_start(&self.content, offset);
-        let col = self.content[line_start..offset].chars().count();
-        let x = element_bounds.left() + px(col as f32 * 7.0);
-        let y = element_bounds.top() + px(row as f32 * 20.0);
-        Some(Bounds::new(point(x, y), size(px(1.0), px(20.0))))
+        let lines = self.last_layout.clone()?;
+        let line_height = self.last_line_height;
+        let origin = caret_position(&lines, element_bounds.origin, line_height, offset)?;
+        Some(Bounds::new(origin, size(px(1.0), line_height)))
     }
 
     fn character_index_for_point(
@@ -986,25 +990,13 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let local = self
-            .last_bounds
-            .and_then(|bounds| bounds.localize(&point))
-            .unwrap_or(point);
-        let row = (local.y.as_f32() / 20.0).max(0.0).floor() as usize;
-        let col = (local.x.as_f32() / 7.0).max(0.0).floor() as usize;
-        let mut byte_offset = 0;
-        for (idx, line) in self.content.split('\n').enumerate() {
-            if idx == row {
-                let local = line
-                    .char_indices()
-                    .nth(col)
-                    .map(|(offset, _)| offset)
-                    .unwrap_or(line.len());
-                return Some(self.offset_to_utf16(byte_offset + local));
-            }
-            byte_offset += line.len() + 1;
-        }
-        Some(self.offset_to_utf16(self.content.len()))
+        // Same wrap-aware walk a mouse click takes, so an IME or
+        // VoiceOver hit-test resolves to the byte the user would get
+        // by clicking that pixel.
+        let lines = self.last_layout.clone()?;
+        let bounds = self.last_bounds?;
+        let offset = hit_test(&lines, bounds.origin, self.last_line_height, point);
+        Some(self.offset_to_utf16(offset))
     }
 }
 
@@ -1388,8 +1380,12 @@ impl Element for TextAreaContent {
                 ElementInputHandler::new(bounds, entity.clone()),
                 cx,
             );
+            let lines = prepaint.lines.clone();
+            let line_height = self.line_height;
             entity.update(cx, |this, _cx| {
                 this.last_bounds = Some(bounds);
+                this.last_layout = Some(lines);
+                this.last_line_height = line_height;
             });
         }
 
@@ -1578,20 +1574,13 @@ impl Element for TextAreaContent {
             let (caret_x, caret_y) = if content_empty {
                 (bounds.origin.x, bounds.origin.y)
             } else {
-                let cursor_pos = self.cursor;
-                let line = prepaint
-                    .lines
-                    .iter()
-                    .find(|l| cursor_pos >= l.byte_start && cursor_pos <= l.byte_end)
-                    .or_else(|| prepaint.lines.last());
-                match line {
-                    Some(line) => {
-                        let local = cursor_pos.saturating_sub(line.byte_start);
-                        match line.wrapped.position_for_index(local, self.line_height) {
-                            Some(pos) => (bounds.origin.x + pos.x, line.y_top + pos.y),
-                            None => (bounds.origin.x, line.y_top),
-                        }
-                    }
+                match caret_position(
+                    &prepaint.lines,
+                    bounds.origin,
+                    self.line_height,
+                    self.cursor,
+                ) {
+                    Some(pos) => (pos.x, pos.y),
                     None => (bounds.origin.x, bounds.origin.y),
                 }
             };
@@ -1678,6 +1667,36 @@ impl Element for TextAreaContent {
                 })
                 .ok();
         });
+    }
+}
+
+/// Caret origin for the byte `offset`, computed from the shaped lines
+/// of the last layout. `origin` is the element's top-left corner.
+/// Shared by the paint pass and by the IME / accessibility
+/// `bounds_for_range`, so the reported caret is the painted caret --
+/// wrap rows and real glyph advances included, rather than a fixed
+/// character cell.
+fn caret_position(
+    lines: &[ShapedLineInfo],
+    origin: Point<Pixels>,
+    line_height: Pixels,
+    offset: usize,
+) -> Option<Point<Pixels>> {
+    // `y_top` is absolute to the frame the lines were shaped in;
+    // re-anchor it on `origin` so a moved element still reports
+    // correctly.
+    let first_y = lines.first()?.y_top;
+    let line = lines
+        .iter()
+        .find(|l| offset >= l.byte_start && offset <= l.byte_end)
+        .or_else(|| lines.last())?;
+    let row_y = origin.y + (line.y_top - first_y);
+    let local = offset
+        .saturating_sub(line.byte_start)
+        .min(line.wrapped.len());
+    match line.wrapped.position_for_index(local, line_height) {
+        Some(pos) => Some(point(origin.x + pos.x, row_y + pos.y)),
+        None => Some(point(origin.x, row_y)),
     }
 }
 
@@ -2196,6 +2215,112 @@ mod tests {
         assert_eq!(
             find_decoration_starting_at(&decos, 12).map(|r| r.end),
             Some(14)
+        );
+    }
+
+    /// The IME / accessibility caret must be the caret the user sees.
+    /// It used to be derived from a hardcoded 7x20 cell grid over
+    /// *logical* lines, so on soft-wrapped (or non-monospace) text the
+    /// CJK candidate window and the VoiceOver caret landed on the
+    /// wrong glyph. Both must come from the same shaped lines the
+    /// paint pass draws the caret from.
+    #[gpui::test]
+    fn ime_caret_bounds_match_the_shaped_line_geometry(cx: &mut gpui::TestAppContext) {
+        const CONTENT: &str = "ab cd ef\nxy";
+        const FIRST_LINE: &str = "ab cd ef";
+        const WIDTH: f32 = 30.0;
+
+        struct Probe {
+            area: gpui::Entity<TextArea>,
+        }
+
+        impl Render for Probe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                // A flex column stretches its child across the full
+                // width, so the textarea shapes against a definite
+                // wrap width instead of an indefinite one.
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(WIDTH))
+                    .child(self.area.clone())
+            }
+        }
+
+        let (probe, cx) = cx.add_window_view(|_window, cx| {
+            let area = cx.new(|cx| {
+                let mut area = TextArea::new("", cx);
+                area.set_value(CONTENT, cx);
+                area
+            });
+            Probe { area }
+        });
+        cx.simulate_resize(size(px(400.0), px(200.0)));
+        cx.run_until_parked();
+
+        let area = probe.read_with(cx, |probe, _cx| probe.area.clone());
+        let bounds = area
+            .read_with(cx, |area, _cx| area.last_bounds)
+            .expect("the text area must have painted");
+
+        // What the text system itself reports for the first logical
+        // line at this width: the x of byte 3, and how many visual
+        // rows the line occupies once it soft-wraps.
+        let (expected_x, first_line_rows) = cx.update(|window, _cx| {
+            let runs = [TextRun {
+                len: FIRST_LINE.len(),
+                font: window.text_style().font(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }];
+            let wrapped = window
+                .text_system()
+                .shape_text(
+                    FIRST_LINE.into(),
+                    px(13.0),
+                    &runs,
+                    Some(bounds.size.width),
+                    None,
+                )
+                .expect("shaping the first line must succeed");
+            let line = &wrapped[0];
+            (
+                line.position_for_index(3, px(20.0))
+                    .expect("shaped x for byte 3")
+                    .x,
+                line.wrap_boundaries().len() + 1,
+            )
+        });
+        assert!(
+            first_line_rows > 1,
+            "the probe must be narrow enough to soft-wrap, got {first_line_rows} row(s)"
+        );
+
+        let (mid_line, next_line) = area.update_in(cx, |area, window, cx| {
+            let mid = area
+                .bounds_for_range(3..3, bounds, window, cx)
+                .expect("caret bounds inside the first logical line");
+            let next = area
+                .bounds_for_range(9..9, bounds, window, cx)
+                .expect("caret bounds on the second logical line");
+            (mid, next)
+        });
+
+        assert_eq!(
+            mid_line.origin.x - bounds.left(),
+            expected_x,
+            "IME caret x must come from the shaped line, not a fixed cell width"
+        );
+        assert_eq!(
+            next_line.origin.y - bounds.top(),
+            px(20.0 * first_line_rows as f32),
+            "IME caret y must clear every visual row of the wrapped line above it"
         );
     }
 }
