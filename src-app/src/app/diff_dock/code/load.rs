@@ -20,13 +20,14 @@
 //! free of any GPUI type, so the ordering rule is unit-testable without a test
 //! app; [`spawn_code_load`] is the thin GPUI wrapper over it.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 use gpui::{AsyncApp, Context, WeakEntity};
 
 use super::document::{CodeDocument, ReadOnlyReason};
 use super::highlight::CodeHighlighter;
+use super::save::FileStamp;
 use crate::diff::DiffSyntax;
 
 /// Largest file the editor will open, aligned with the markdown viewer's
@@ -100,6 +101,7 @@ impl CodeLoadError {
 
 /// What reading a file produced: either an open document (possibly read-only)
 /// or a written refusal.
+#[cfg(test)]
 pub(crate) type CodeLoad = Result<CodeDocument, CodeLoadError>;
 
 /// A document plus the highlighter built from it, both produced by the same
@@ -107,6 +109,12 @@ pub(crate) type CodeLoad = Result<CodeDocument, CodeLoadError>;
 pub(crate) struct LoadedCode {
     pub(crate) document: CodeDocument,
     pub(crate) highlighter: CodeHighlighter,
+    /// What the bytes in `document` looked like on disk, stat'd from the
+    /// handle they were read through. `None` when the handle no longer
+    /// describes a regular file. The view adopts this rather than re-stat'ing
+    /// the path on the main thread, which would describe whatever an agent
+    /// wrote in between and let the next save clobber it without a conflict.
+    pub(crate) stamp: Option<FileStamp>,
 }
 
 /// What a completed open produced (US-002): the pair, or the same written
@@ -120,8 +128,27 @@ pub(crate) type CodeOpen = Result<LoadedCode, CodeLoadError>;
 /// Order matters: metadata first (cheapest refusal), then bytes, then the
 /// binary sniff, then UTF-8, then the giant-line downgrade. A refusal never
 /// panics and never surfaces a raw OS error.
+///
+/// The document alone, for the guardrail tests; the editor goes through
+/// [`open_blocking`], which also carries the stamp of the bytes it read.
+#[cfg(test)]
 pub(crate) fn load_blocking(path: &Path) -> CodeLoad {
-    let meta = match std::fs::metadata(path) {
+    load_stamped(path).map(|(document, _stamp)| document)
+}
+
+/// [`load_blocking`] plus the [`FileStamp`] of the bytes it returned.
+///
+/// The file is opened once and both the guardrail metadata and the stamp are
+/// taken from that handle, so the stamp is of the inode the bytes came from.
+/// A rename over the path after the open leaves the handle on the old inode
+/// and the stamp with it, and the next save then sees a different file and
+/// refuses rather than overwriting what landed.
+fn load_stamped(path: &Path) -> Result<(CodeDocument, Option<FileStamp>), CodeLoadError> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => return Err(io_error(&err)),
+    };
+    let meta = match file.metadata() {
         Ok(meta) => meta,
         Err(err) => return Err(io_error(&err)),
     };
@@ -136,10 +163,17 @@ pub(crate) fn load_blocking(path: &Path) -> CodeLoad {
         });
     }
 
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    let mut bytes = Vec::with_capacity(len);
+    if let Err(err) = file.read_to_end(&mut bytes) {
+        return Err(io_error(&err));
+    }
+    // Stat the handle again after the read: the stamp has to describe the
+    // bytes that were read, not the file as it stood before them.
+    let stamp = match file.metadata() {
+        Ok(meta) => FileStamp::from_metadata(&meta),
         Err(err) => return Err(io_error(&err)),
     };
+    drop(file);
     // Re-check after the read: the file may have grown between `metadata` and
     // `read`, and `metadata` reports 0 for several virtual filesystems.
     if bytes.len() > MAX_FILE_BYTES {
@@ -156,10 +190,9 @@ pub(crate) fn load_blocking(path: &Path) -> CodeLoad {
         Err(_) => return Err(CodeLoadError::NotUtf8),
     };
 
-    Ok(build_document(
-        path.to_path_buf(),
-        &text,
-        is_read_only(&meta),
+    Ok((
+        build_document(path.to_path_buf(), &text, is_read_only(&meta)),
+        stamp,
     ))
 }
 
@@ -191,11 +224,12 @@ pub(crate) fn build_document(path: PathBuf, text: &str, read_only_on_disk: bool)
 /// order of magnitude as the read itself, so leaving it on the render thread
 /// would hand back the stall the off-thread load was there to remove.
 pub(crate) fn open_blocking(path: &Path, syntax: DiffSyntax) -> CodeOpen {
-    let document = load_blocking(path)?;
+    let (document, stamp) = load_stamped(path)?;
     let highlighter = CodeHighlighter::new(&document, syntax);
     Ok(LoadedCode {
         document,
         highlighter,
+        stamp,
     })
 }
 
@@ -630,7 +664,30 @@ mod tests {
         LoadedCode {
             document,
             highlighter,
+            stamp: None,
         }
+    }
+
+    /// The stamp is of the bytes that were read, not of the path: a rewrite
+    /// that lands after `open_blocking` returns must differ from it, or the
+    /// editor's next save would overwrite the rewrite without a conflict.
+    #[test]
+    fn the_open_stamp_describes_the_bytes_read_not_the_path_later() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write(&dir, "main.rs", b"fn main() {}\n");
+
+        let opened = open_blocking(&path, syntax()).expect("open");
+        let stamp = opened.stamp.expect("a regular file has a stamp");
+        assert_eq!(Some(stamp), FileStamp::read(&path));
+
+        // The agent's rewrite changes the length, so this does not depend on
+        // the filesystem's timestamp granularity.
+        std::fs::write(&path, b"fn main() { rewritten() }\n").expect("agent write");
+        let now = FileStamp::read(&path).expect("stat");
+        assert!(
+            stamp.differs(&now),
+            "the stamp taken at open must not describe the later rewrite"
+        );
     }
 
     /// US-002: the read, the rope and the initial parse are one blocking unit,

@@ -25,8 +25,8 @@ use crate::editor::WorkspaceEditor;
 use crate::layout::MAX_PANES;
 use crate::settings::components::{
     SETTINGS_CONTROL_CORNER_RADIUS, card_color, card_tint, deferred_select_menu, hairline,
-    render_logo, section_header, section_header_with_action, select_chevron, select_item,
-    select_menu, select_trigger, setting_card, toggle_row, with_alpha,
+    render_logo, section_header, section_header_with_action, select_chevron, select_listbox,
+    select_option, select_trigger, setting_card, toggle_row, with_alpha,
 };
 use crate::terminal::TerminalView;
 use crate::ui_primitives::{AnimatedHover, AnimatedHoverExt};
@@ -467,7 +467,7 @@ impl PaneFlowApp {
         let is_open = self.workspace_template_dropdown == Some(WorkspaceTemplateDropdown::Layout);
         let pane_count = template_surfaces(workspace).len().max(1);
 
-        let mut trigger = select_trigger("workspace-layout-trigger", ui)
+        let mut trigger = select_trigger("workspace-layout-trigger", ui, is_open)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -481,6 +481,23 @@ impl PaneFlowApp {
                     cx.notify();
                 }),
             )
+            // Keyboard / assistive-tech activation (issue #361): the pointer
+            // opens on press above, so this arm takes only the
+            // `ClickEvent::Keyboard` GPUI synthesizes from Space / Enter on the
+            // focused trigger. Carrying a click listener is also what puts
+            // `accesskit::Action::Click` on the node for VoiceOver.
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                this.workspace_template_dropdown = if is_open {
+                    None
+                } else {
+                    Some(WorkspaceTemplateDropdown::Layout)
+                };
+                this.settings_focus.focus(window, cx);
+                cx.notify();
+            }))
             .child(layout_preview(preset, pane_count, ui))
             .child(
                 div()
@@ -494,19 +511,19 @@ impl PaneFlowApp {
             .child(select_chevron(ui));
 
         if is_open {
-            let mut menu = select_menu("workspace-layout-menu", ui).on_mouse_down_out(cx.listener(
-                |this, _, _w, cx| {
+            let mut menu = select_listbox("workspace-layout-menu", ui).on_mouse_down_out(
+                cx.listener(|this, _, _w, cx| {
                     if this.workspace_template_dropdown == Some(WorkspaceTemplateDropdown::Layout) {
                         this.workspace_template_dropdown = None;
                         cx.notify();
                     }
-                },
-            ));
+                }),
+            );
             for (i, (value, label)) in LAYOUT_PRESETS.iter().enumerate() {
                 let selected = preset == *value;
                 let next = (*value).to_string();
                 menu = menu.child(
-                    select_item(("workspace-layout", i), selected, ui)
+                    select_option(("workspace-layout", i), selected, ui)
                         .cursor(CursorStyle::Arrow)
                         .h(px(44.))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {

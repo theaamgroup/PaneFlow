@@ -583,12 +583,20 @@ impl PaneFlowApp {
                         Err(_) => break,
                     };
 
-                    // Phase 2: run git probes off main thread
+                    // Phase 2: run git probes off main thread. Issue #365: the
+                    // whole sweep draws on ONE deadline, so N checkouts cannot
+                    // stack N per-checkout timeouts on the blocking-pool thread;
+                    // a starved checkout is simply retried on the next tick.
                     let results = smol::unblock(move || {
+                        let sweep_until =
+                            std::time::Instant::now() + crate::workspace::GIT_STATS_SWEEP_DEADLINE;
                         cwds.into_iter()
                             .map(|cwd| {
                                 let (branch, is_repo) = crate::workspace::detect_branch(&cwd);
-                                let stats = crate::workspace::GitDiffStats::from_cwd(&cwd);
+                                let stats = crate::workspace::GitDiffStats::from_cwd_within(
+                                    &cwd,
+                                    sweep_until,
+                                );
                                 (cwd, branch, is_repo, stats)
                             })
                             .collect::<Vec<_>>()

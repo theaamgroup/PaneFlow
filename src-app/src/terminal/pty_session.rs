@@ -1882,21 +1882,21 @@ impl TerminalState {
         lines: usize,
         offset: usize,
     ) -> Option<(String, usize, usize, bool)> {
-        let reason = match self.ghostty.transcript(lines, offset) {
-            Some(Ok(window)) => {
-                return Some((window.text, window.returned, window.total, window.eof));
-            }
-            Some(Err(error)) => format!("engine error: {error}"),
-            None => "the runtime did not answer (mailbox full or closed, or no reply within 1 s)"
-                .to_owned(),
-        };
-        log::warn!(
-            target: "paneflow::terminal::ghostty",
-            "transcript of surface {:?} (child pid {}) unavailable: {reason}",
-            self.title,
-            self.child_pid
-        );
-        None
+        self.scrollback_reader()
+            .extract_scrollback_window(lines, offset)
+    }
+
+    /// A `Send` view of this surface's runtime for the two scrollback reads
+    /// whose wait must not run on the GPUI thread (issue #363).
+    ///
+    /// Cloning this on the render thread costs an `Arc` bump; the blocking
+    /// wait then happens on a background worker.
+    pub(crate) fn scrollback_reader(&self) -> ScrollbackReader {
+        ScrollbackReader {
+            ghostty: self.ghostty.clone(),
+            title: self.title.clone(),
+            child_pid: self.child_pid,
+        }
     }
 
     /// The screen half of a read on its own, trailing blank rows trimmed.
@@ -1935,23 +1935,6 @@ impl TerminalState {
     /// title.
     pub fn foreground_command(&self) -> Option<String> {
         self.cached_foreground_command.clone()
-    }
-
-    /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
-    /// return matching lines as `(grid_line, text)` pairs, deduped by line and
-    /// capped at `max_matches`. The bool is `true` when the cap truncated the
-    /// result. Backs the `surface.search` IPC method . The engine
-    /// performs the search and the matched-line extraction atomically on its
-    /// runtime thread.
-    pub fn search_scrollback(
-        &self,
-        pattern: &str,
-        max_matches: usize,
-    ) -> (Vec<(i32, String)>, bool) {
-        if pattern.is_empty() || max_matches == 0 {
-            return (Vec::new(), false);
-        }
-        self.ghostty.search_scrollback(pattern, max_matches)
     }
 
     /// EP-005 US-014: remember a port announced by a service URL in this
@@ -2189,6 +2172,81 @@ fn is_valid_env_name(key: &str) -> bool {
     !key.is_empty() && !key.contains('=') && !key.contains('\0')
 }
 
+/// Locale names installed on this machine, read once per process. macOS builds
+/// `locale -a` from the entries of `/usr/share/locale` (plus the builtin `C` /
+/// `POSIX`), so reading that directory lists the same locale names without
+/// spawning a subprocess on the render thread. Empty when the directory cannot
+/// be read, which makes the UTF-8 override a no-op rather than naming a locale
+/// the system may not have.
+fn installed_locale_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| match std::fs::read_dir("/usr/share/locale") {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect(),
+        Err(err) => {
+            log::warn!(
+                target: "paneflow::terminal::backend",
+                "could not enumerate installed locales: {err}"
+            );
+            Vec::new()
+        }
+    })
+}
+
+/// The language/territory part of a locale name: `fr_FR` from
+/// `fr_FR.ISO8859-1@euro`.
+fn locale_base(locale: &str) -> &str {
+    let base = locale.split('.').next().unwrap_or(locale);
+    base.split('@').next().unwrap_or(base)
+}
+
+/// True if `locale` selects the UTF-8 codeset (`en_US.UTF-8`, `C.UTF-8`, ...).
+fn is_utf8_locale(locale: &str) -> bool {
+    locale
+        .split_once('.')
+        .map(|(_, codeset)| codeset.split('@').next().unwrap_or(codeset))
+        .is_some_and(|codeset| {
+            codeset.eq_ignore_ascii_case("UTF-8") || codeset.eq_ignore_ascii_case("UTF8")
+        })
+}
+
+/// Pick the locale to force on a child PTY, or `None` when the inherited block
+/// already selects UTF-8 (or no listed candidate exists).
+///
+/// The character encoding a child ends up with is `LC_ALL`, else `LC_CTYPE`,
+/// else `LANG` - so a non-UTF-8 `LC_ALL` has to be overridden, not merely
+/// out-voted by a `LANG` insert. Candidates, first one `available` wins: the
+/// inherited language/territory re-spelled as UTF-8 (keeps a non-English
+/// machine in its own language), then `C.UTF-8`, then `en_US.UTF-8`. Nothing
+/// listed means nothing is forced: naming an uninstalled locale is what makes a
+/// shell print `setlocale: LC_ALL: cannot change locale`.
+fn utf8_locale_override(
+    lang: Option<&str>,
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    available: &[String],
+) -> Option<String> {
+    fn set(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    let effective = set(lc_all).or(set(lc_ctype)).or(set(lang));
+    if effective.is_some_and(is_utf8_locale) {
+        return None;
+    }
+    let preferred = [set(lc_all), set(lc_ctype), set(lang)]
+        .into_iter()
+        .flatten()
+        .map(locale_base)
+        .find(|base| !matches!(*base, "C" | "POSIX"))
+        .map(|base| format!("{base}.UTF-8"));
+    preferred
+        .into_iter()
+        .chain(["C.UTF-8".to_string(), "en_US.UTF-8".to_string()])
+        .find(|candidate| available.iter().any(|name| name == candidate))
+}
+
 /// Assemble the child PTY environment: PaneFlow identity vars, explicit TERM /
 /// locale / terminal-program identification, the AI-hook PATH prepend, and the
 /// user-env merge (a user var wins on collision EXCEPT the protected keys
@@ -2227,9 +2285,19 @@ fn assemble_pty_env(
     // Explicit TERM so TUI apps detect capabilities correctly.
     env.insert("TERM".into(), "xterm-256color".into());
 
-    // Ensure a UTF-8 locale in minimal environments (containers, etc.).
-    if std::env::var("LANG").map_or(true, |v| v.is_empty()) {
-        env.insert("LANG".into(), "en_US.UTF-8".into());
+    // Ensure a UTF-8 locale in minimal environments (GUI launches with no
+    // locale block, containers, etc.). POSIX resolves the character encoding as
+    // LC_ALL > LC_CTYPE > LANG, so setting LANG alone silently lost to an
+    // inherited `LC_ALL=C`; the override sets both, and only ever names a
+    // locale this machine actually has installed.
+    if let Some(locale) = utf8_locale_override(
+        std::env::var("LANG").ok().as_deref(),
+        std::env::var("LC_ALL").ok().as_deref(),
+        std::env::var("LC_CTYPE").ok().as_deref(),
+        installed_locale_names(),
+    ) {
+        env.insert("LANG".into(), locale.clone());
+        env.insert("LC_ALL".into(), locale);
     }
 
     // Standard terminal identification for capability detection.
@@ -2332,6 +2400,77 @@ fn restore_or_drop_env_key(
         None => {
             env.remove(key);
         }
+    }
+}
+
+/// A `Send` handle over one surface's runtime for the scrollback reads that
+/// must not block the GPUI thread (issue #363).
+///
+/// [`GhosttySession::request`] parks its caller on the runtime's reply for up
+/// to a second, so a slow or silent runtime froze painting for that long on
+/// every `surface.read` (`wait`/`flow` poll one every 500 ms) and once per
+/// `SearchChunk` of a `surface.search`. The handle is cloned out of the
+/// entity on the render thread and the wait happens on a background worker.
+#[derive(Clone)]
+pub(crate) struct ScrollbackReader {
+    ghostty: GhosttySession,
+    title: String,
+    child_pid: u32,
+}
+
+impl ScrollbackReader {
+    /// Windowed extract for `surface.read`, the body
+    /// [`TerminalState::extract_scrollback_window`] delegates to.
+    ///
+    /// **Blocking**: waits on the runtime thread. Call it from inside
+    /// `smol::unblock`, never on the GPUI thread.
+    pub(crate) fn extract_scrollback_window(
+        &self,
+        lines: usize,
+        offset: usize,
+    ) -> Option<(String, usize, usize, bool)> {
+        let reason = match self.ghostty.transcript(lines, offset) {
+            Some(Ok(window)) => {
+                return Some((window.text, window.returned, window.total, window.eof));
+            }
+            Some(Err(error)) => format!("engine error: {error}"),
+            None => "the runtime did not answer (mailbox full or closed, or no reply within 1 s)"
+                .to_owned(),
+        };
+        log::warn!(
+            target: "paneflow::terminal::ghostty",
+            "transcript of surface {:?} (child pid {}) unavailable: {reason}",
+            self.title,
+            self.child_pid
+        );
+        None
+    }
+
+    /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
+    /// return matching lines as `(grid_line, text)` pairs, deduped by line and
+    /// capped at `max_matches`. The bool is `true` when the cap (or the cell
+    /// budget) truncated an otherwise finished scan. Backs the
+    /// `surface.search` IPC method. The engine performs the search and the
+    /// matched-line extraction atomically on its runtime thread.
+    ///
+    /// `Err` is a runtime that did not answer (mailbox full or closed, no
+    /// reply within a second) or an engine that failed the scan. Issue #362:
+    /// that is not a finished scan with no hits, and it is not the cap
+    /// either - `surface.search` turns it into an error, the way
+    /// `surface.read` already does, so a caller cannot read a wedged pane as
+    /// "pattern absent" or "raise max_matches".
+    ///
+    /// **Blocking**: one runtime wait per chunk. Same rule as
+    /// [`Self::extract_scrollback_window`].
+    pub(crate) fn search_scrollback(
+        &self,
+        pattern: &str,
+        max_matches: usize,
+    ) -> Result<(Vec<(i32, String)>, bool), String> {
+        if pattern.is_empty() || max_matches == 0 {
+            return Ok((Vec::new(), false));
+        }
+        self.ghostty.search_scrollback(pattern, max_matches)
     }
 }
 
@@ -3101,6 +3240,92 @@ mod tests {
         );
     }
 
+    // Issue #369: POSIX resolves the codeset as LC_ALL > LC_CTYPE > LANG, so a
+    // LANG-only insert lost to an inherited LC_ALL=C and the pane stayed in the
+    // C locale. Whatever this test process inherited, the child env must either
+    // carry both keys or neither, and never name an uninstalled locale.
+    #[test]
+    fn pty_env_locale_override_sets_lang_and_lc_all_together() {
+        let env = assemble_pty_env(HashMap::new(), 1, 1, None);
+
+        assert_eq!(
+            env.get("LANG"),
+            env.get("LC_ALL"),
+            "a forced locale must set LANG and LC_ALL together"
+        );
+        if let Some(forced) = env.get("LANG") {
+            assert!(
+                is_utf8_locale(forced),
+                "a forced locale must be UTF-8, got {forced}"
+            );
+            assert!(
+                installed_locale_names().iter().any(|name| name == forced),
+                "a forced locale must be installed, got {forced}"
+            );
+        }
+    }
+
+    fn locales(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn inherited_lc_all_c_is_overridden_with_a_utf8_locale() {
+        let available = locales(&["C", "C.UTF-8", "en_US.UTF-8"]);
+
+        let forced = utf8_locale_override(Some(""), Some("C"), None, &available)
+            .expect("LC_ALL=C with no LANG must be overridden");
+
+        assert!(
+            is_utf8_locale(&forced),
+            "forced locale must be UTF-8, got {forced}"
+        );
+    }
+
+    #[test]
+    fn utf8_locale_override_never_names_an_uninstalled_locale() {
+        // No UTF-8 locale installed at all: nothing may be forced, least of all
+        // the `en_US.UTF-8` the old code inserted unconditionally.
+        let bare = locales(&["C", "POSIX", "fr_FR.ISO8859-1"]);
+        assert_eq!(utf8_locale_override(None, Some("C"), None, &bare), None);
+
+        assert_eq!(
+            utf8_locale_override(
+                Some("fr_FR.ISO8859-1"),
+                None,
+                None,
+                &locales(&["fr_FR.UTF-8"])
+            ),
+            Some("fr_FR.UTF-8".to_string()),
+            "the inherited language is kept when its UTF-8 spelling is installed"
+        );
+    }
+
+    #[test]
+    fn utf8_locale_override_leaves_a_utf8_block_alone() {
+        let available = locales(&["C.UTF-8", "en_US.UTF-8", "de_DE.UTF-8"]);
+
+        assert_eq!(
+            utf8_locale_override(Some("de_DE.UTF-8"), None, None, &available),
+            None
+        );
+        assert_eq!(
+            utf8_locale_override(Some("C"), Some("de_DE.UTF-8"), None, &available),
+            None,
+            "a UTF-8 LC_ALL outranks everything and needs no override"
+        );
+        assert_eq!(
+            utf8_locale_override(None, None, Some("de_DE.UTF-8"), &available),
+            None,
+            "LC_CTYPE outranks LANG for the codeset"
+        );
+        assert_eq!(
+            utf8_locale_override(Some("de_DE.UTF-8"), None, Some("C"), &available),
+            Some("de_DE.UTF-8".to_string()),
+            "a non-UTF-8 LC_CTYPE outranks LANG and must be overridden"
+        );
+    }
+
     // user-supplied env vars are merged into the child PTY env.
     #[test]
     fn user_env_is_merged_into_pty_env() {
@@ -3425,16 +3650,48 @@ mod tests {
         let state = TerminalState::new_display_only(5, 80);
         state.write_output(b"first needle needle\nsecond needle\nthird needle\nwithout marker");
 
-        let (limited, hit_cap) = state.search_scrollback("needle", 2);
+        let (limited, hit_cap) = state
+            .scrollback_reader()
+            .search_scrollback("needle", 2)
+            .expect("scan completed");
         assert_eq!(limited.len(), 2);
         assert!(hit_cap);
         assert!(limited[0].1.contains("first needle needle"));
         assert!(limited[1].1.contains("second needle"));
 
-        let (all, hit_cap) = state.search_scrollback("needle", 8);
+        let (all, hit_cap) = state
+            .scrollback_reader()
+            .search_scrollback("needle", 8)
+            .expect("scan completed");
         assert_eq!(all.len(), 3);
         assert!(!hit_cap);
         assert!(all[2].1.contains("third needle"));
+    }
+
+    /// Issue #362: a runtime that cannot answer is not a finished scan with
+    /// zero hits. `surface.search` used to report `matches=[] truncated=true`
+    /// for it, which a conductor reads as "raise max_matches" or "pattern
+    /// absent"; the same unanswered runtime is an error on `surface.read`.
+    #[test]
+    fn search_scrollback_fails_when_the_runtime_does_not_answer() {
+        let state = TerminalState::new_display_only(5, 80);
+        state.write_output(b"first needle\nsecond needle\nwithout marker");
+        let (found, hit_cap) = state
+            .scrollback_reader()
+            .search_scrollback("needle", 8)
+            .expect("scan completed");
+        assert_eq!(found.len(), 2);
+        assert!(!hit_cap);
+
+        state.ghostty.shutdown();
+
+        assert!(
+            state
+                .scrollback_reader()
+                .search_scrollback("needle", 8)
+                .is_err(),
+            "no answer must not read as an empty, capped scan"
+        );
     }
 
     // A display-only terminal (child_pid == 0, no real PTY) must resolve no CWD

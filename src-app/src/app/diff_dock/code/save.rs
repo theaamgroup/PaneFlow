@@ -54,7 +54,14 @@ impl FileStamp {
     /// Stat `path`. `None` means the file is not there (or cannot be stat'd),
     /// which US-016 treats as "deleted on disk" rather than as an error.
     pub(crate) fn read(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
+        Self::from_metadata(&std::fs::metadata(path).ok()?)
+    }
+
+    /// The stamp of metadata already in hand. The load path stats the handle
+    /// it read from rather than the path, so the stamp describes the bytes
+    /// that landed in the buffer and not whatever an agent renamed over the
+    /// path in the meantime.
+    pub(crate) fn from_metadata(meta: &std::fs::Metadata) -> Option<Self> {
         if !meta.is_file() {
             return None;
         }

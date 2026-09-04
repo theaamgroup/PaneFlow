@@ -8,7 +8,7 @@ use gpui::{
 use crate::PaneFlowApp;
 use crate::settings::components::{
     deferred_select_menu, secondary_button, section_header, section_header_with_action,
-    select_chevron, select_item, select_menu, select_trigger, setting_card, setting_text,
+    select_chevron, select_listbox, select_option, select_trigger, setting_card, setting_text,
     toggle_switch, with_alpha,
 };
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
@@ -298,7 +298,7 @@ impl PaneFlowApp {
         // Decide open/close from the render-time snapshot, not the live state:
         // the menu's `on_mouse_down_out` fires on this same press and may have
         // already cleared it, so a live toggle would re-open the menu.
-        let mut trigger = select_trigger("theme-preset-select", ui)
+        let mut trigger = select_trigger("theme-preset-select", ui, is_open)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -308,6 +308,19 @@ impl PaneFlowApp {
                     cx.notify();
                 }),
             )
+            // Keyboard / assistive-tech activation (issue #361): the pointer
+            // opens on press above, so this arm takes only the
+            // `ClickEvent::Keyboard` GPUI synthesizes from Space / Enter on the
+            // focused trigger. Carrying a click listener is also what puts
+            // `accesskit::Action::Click` on the node for VoiceOver.
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                this.theme_dropdown_open = !is_open;
+                this.settings_focus.focus(window, cx);
+                cx.notify();
+            }))
             .child(
                 div()
                     .flex()
@@ -329,7 +342,7 @@ impl PaneFlowApp {
             .child(select_chevron(ui));
 
         if is_open {
-            let mut menu = select_menu("theme-preset-list", ui).on_mouse_down_out(cx.listener(
+            let mut menu = select_listbox("theme-preset-list", ui).on_mouse_down_out(cx.listener(
                 |this, _, _w, cx| {
                     if this.theme_dropdown_open {
                         this.theme_dropdown_open = false;
@@ -340,7 +353,7 @@ impl PaneFlowApp {
             for (idx, preset) in crate::theme::PRESETS.iter().enumerate() {
                 let is_current = preset.name == current_name;
                 menu = menu.child(
-                    select_item(("theme-preset", idx), is_current, ui)
+                    select_option(("theme-preset", idx), is_current, ui)
                         .cursor(CursorStyle::Arrow)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.theme_dropdown_open = false;

@@ -1792,28 +1792,42 @@ impl GhosttySession {
         })
     }
 
-    pub(super) fn search(&self, query: &str, regex: bool) -> crate::search::SearchResult {
-        self.search_with_cancel(query, regex, &AtomicBool::new(false))
-    }
-
     pub(super) fn search_with_cancel(
         &self,
         query: &str,
         regex: bool,
         cancelled: &AtomicBool,
     ) -> crate::search::SearchResult {
+        self.search_scan(query, regex, cancelled).0
+    }
+
+    /// The scan behind [`Self::search_with_cancel`], with the reason it
+    /// stopped. The second element is `Some(reason)` only when the runtime
+    /// could not answer a `SearchChunk` or the engine failed one - never for
+    /// a cancel, a superseding search, or the cell budget, which are ordinary
+    /// truncation. Issue #362: a caller that has to tell a wedged runtime
+    /// from a finished-but-capped scan reads it; the UI search drops it.
+    fn search_scan(
+        &self,
+        query: &str,
+        regex: bool,
+        cancelled: &AtomicBool,
+    ) -> (crate::search::SearchResult, Option<String>) {
         let mut search = match ghostty::SearchEngine::new(query, regex) {
             Ok(search) => search,
             Err(error) => {
-                return crate::search::SearchResult {
-                    matches: Vec::new(),
-                    regex_error: Some(error.to_string()),
-                    truncated: false,
-                };
+                return (
+                    crate::search::SearchResult {
+                        matches: Vec::new(),
+                        regex_error: Some(error.to_string()),
+                        truncated: false,
+                    },
+                    None,
+                );
             }
         };
         if search.is_done() {
-            return search_result_from_ghostty(search.finish(false));
+            return (search_result_from_ghostty(search.finish(false)), None);
         }
 
         let generation = self
@@ -1827,35 +1841,48 @@ impl GhosttySession {
             if cancelled.load(Ordering::Acquire)
                 || self.inner.search_generation.load(Ordering::Acquire) != generation
             {
-                return search_result_from_ghostty(search.finish(true));
+                return (search_result_from_ghostty(search.finish(true)), None);
             }
             let remaining = ghostty::MAX_SEARCH_CELLS.saturating_sub(scanned_cells);
             if remaining == 0 {
-                return search_result_from_ghostty(search.finish(true));
+                return (search_result_from_ghostty(search.finish(true)), None);
             }
             let requested_cells = remaining.min(ghostty::SEARCH_CHUNK_CELLS);
-            let chunk = self
-                .request(|reply| RuntimeMessage::SearchChunk {
-                    start_row: next_row,
-                    max_cells: requested_cells,
-                    reply,
-                })
-                .and_then(Result::ok);
-            let Some(chunk) = chunk else {
-                return search_result_from_ghostty(search.finish(true));
+            let chunk = self.request(|reply| RuntimeMessage::SearchChunk {
+                start_row: next_row,
+                max_cells: requested_cells,
+                reply,
+            });
+            let chunk = match chunk {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(error)) => {
+                    return (
+                        search_result_from_ghostty(search.finish(true)),
+                        Some(format!("engine error: {error}")),
+                    );
+                }
+                None => {
+                    return (
+                        search_result_from_ghostty(search.finish(true)),
+                        Some(RUNTIME_UNANSWERED.to_owned()),
+                    );
+                }
             };
             if chunk.next_row == next_row && chunk.next_row < chunk.total_rows {
-                return search_result_from_ghostty(search.finish(true));
+                return (
+                    search_result_from_ghostty(search.finish(true)),
+                    Some("the engine stopped making progress over the grid".to_owned()),
+                );
             }
             scanned_cells =
                 scanned_cells.saturating_add(chunk.lines.len().saturating_mul(chunk.cols));
             for line in chunk.lines {
                 if !search.push_line(line.line, &line.text, &line.char_to_column) {
-                    return search_result_from_ghostty(search.finish(false));
+                    return (search_result_from_ghostty(search.finish(false)), None);
                 }
             }
             if chunk.next_row >= chunk.total_rows {
-                return search_result_from_ghostty(search.finish(false));
+                return (search_result_from_ghostty(search.finish(false)), None);
             }
             next_row = chunk.next_row;
         }
@@ -1865,11 +1892,14 @@ impl GhosttySession {
         &self,
         query: &str,
         max_matches: usize,
-    ) -> (Vec<(i32, String)>, bool) {
+    ) -> Result<(Vec<(i32, String)>, bool), String> {
         if query.is_empty() || max_matches == 0 {
-            return (Vec::new(), false);
+            return Ok((Vec::new(), false));
         }
-        let search = self.search(query, false);
+        let (search, failure) = self.search_scan(query, false, &AtomicBool::new(false));
+        if let Some(reason) = failure {
+            return Err(reason);
+        }
         let mut seen = std::collections::HashSet::new();
         let mut rows = Vec::new();
         let mut hit_cap = search.truncated;
@@ -1882,18 +1912,16 @@ impl GhosttySession {
                 }
             }
         }
-        let lines = self
-            .request(|reply| RuntimeMessage::LineTexts { lines: rows, reply })
-            .and_then(Result::ok);
-        match lines {
-            Some(mut lines) => {
+        match self.request(|reply| RuntimeMessage::LineTexts { lines: rows, reply }) {
+            Some(Ok(mut lines)) => {
                 for (_, text) in &mut lines {
                     let trimmed_len = text.trim_end().len();
                     text.truncate(trimmed_len);
                 }
-                (lines, hit_cap)
+                Ok((lines, hit_cap))
             }
-            None => (Vec::new(), true),
+            Some(Err(error)) => Err(format!("engine error: {error}")),
+            None => Err(RUNTIME_UNANSWERED.to_owned()),
         }
     }
 
@@ -2004,6 +2032,11 @@ impl GhosttySession {
         reply_rx.recv_timeout(Duration::from_secs(1)).ok()
     }
 }
+
+/// Why a runtime request came back empty when the mailbox is full or closed,
+/// or no reply landed within the one-second budget.
+const RUNTIME_UNANSWERED: &str =
+    "the runtime did not answer (mailbox full or closed, or no reply within 1 s)";
 
 fn search_result_from_ghostty(result: ghostty::SearchResult) -> crate::search::SearchResult {
     crate::search::SearchResult {
