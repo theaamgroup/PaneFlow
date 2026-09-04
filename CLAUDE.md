@@ -17,9 +17,13 @@ method rules this project has already paid for. Read it before planning a
 pass so you do not redo finished work or repeat a falsified finding. Open
 work lives on GitHub issues, not in that file.
 
-**Where this fork stands (2026-08-31):** product is PaneFlow (the PanesCLI
-rename was dropped). Version **0.2.0**. Origin `theaamgroup/paneflow` on
-`main`. Windows, Linux, the telemetry crate, the published
+**Where this fork stands (2026-09-04):** product is PaneFlow (the PanesCLI
+rename was dropped). Version **0.3.0**. Origin `theaamgroup/paneflow` on
+`main`. Upstream v0.11.0 is adopted (#341: the `PublishGate` with DEC 2026
+synchronized output, per-tab worktree binding with a Remove worktree row,
+the Customize Sidebar menu, the `gh` pull-request marker); the verified SKIP
+list (Windows shell, `timeBeginPeriod`, verbatim prefix, libghostty CI
+automation, Fedora/Discord/CHANGELOG/AppStream) stays not-ported. Windows, Linux, the telemetry crate, the published
 `windows_*_material` schema, and community files (`SECURITY.md`,
 `CONTRIBUTING.md`) are gone. The Ghostty engine, deleted on 2026-08-25, is
 back as the **only** engine since #184 Phase 2 (2026-08-31): Alacritty is gone,
@@ -40,7 +44,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.2.0
+./target/debug/paneflow --version          # paneflow 0.3.0
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 
@@ -215,7 +219,9 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     and a drag pinned at the render ceiling leaves a wider preference alone
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
 │   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
-│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus; footer mode tabs
+│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348),
+│   │                                     Customize Sidebar menu (`customize_menu.rs`: `sidebar_show` toggles,
+│   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
 │   ├── attention_queue.rs             ← "which agent needs me" queue
