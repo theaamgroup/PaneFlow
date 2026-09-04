@@ -99,7 +99,9 @@ impl Tab {
             return inherited;
         };
         match inherited {
-            Some(cwd) if cwd_is_inside_worktree(worktree, &cwd) => Some(cwd),
+            Some(cwd) if cwd_is_inside_worktree(worktree, &cwd, volume_folds_case(worktree)) => {
+                Some(cwd)
+            }
             _ => Some(worktree.clone()),
         }
     }
@@ -262,11 +264,27 @@ pub(crate) fn apply_pane_rename_to_tab(tab: &mut Tab, new_name: Option<&str>) {
 /// resolved: the prefix it walks out of says nothing about where it lands,
 /// and resolving it means touching the filesystem on a path that may not
 /// exist.
-fn cwd_is_inside_worktree(worktree: &std::path::Path, cwd: &std::path::Path) -> bool {
+/// `fold_case` says whether the volume holding `worktree` treats two spellings
+/// that differ only by case as one directory. It does on the default macOS
+/// volume and does not on a case-sensitive one, where `feat` and `FEAT` are
+/// two checkouts and folding would let a pane in the wrong one keep its cwd
+/// (PR #372 review).
+fn cwd_is_inside_worktree(
+    worktree: &std::path::Path,
+    cwd: &std::path::Path,
+    fold_case: bool,
+) -> bool {
     if cwd
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
     {
+        return false;
+    }
+    // Byte-exact is the common answer and costs nothing.
+    if cwd.starts_with(worktree) {
+        return true;
+    }
+    if !fold_case {
         return false;
     }
     let mut actual = cwd.components();
@@ -279,6 +297,22 @@ fn cwd_is_inside_worktree(worktree: &std::path::Path, cwd: &std::path::Path) -> 
                     .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
         })
     })
+}
+
+/// Whether the volume holding `path` folds case, from
+/// `pathconf(_PC_CASE_SENSITIVE)`: 1 is case-sensitive, 0 folds. Anything else
+/// (an unsupported volume, or a path that is gone) is read as case-sensitive,
+/// which keeps an inherited cwd out of the tab rather than letting a sibling
+/// checkout in - the same fail-closed direction as the rest of `confine_cwd`.
+fn volume_folds_case(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call,
+    // and `pathconf` only reads it.
+    let answer = unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+    answer == 0
 }
 
 /// A tab binding that can still be honoured: the path, when it is a directory
@@ -427,28 +461,71 @@ mod tests {
         // through a case variant left every later pane yanked back to the
         // worktree root.
         let worktree = std::path::PathBuf::from("/Repo.worktrees/feat");
-        let tab = Tab::restored("feat", None, Some(worktree.clone()));
-
         let folded = std::path::PathBuf::from("/repo.worktrees/FEAT/src");
-        assert_eq!(
-            tab.confine_cwd(Some(folded.clone())),
-            Some(folded),
-            "a case variant of the bound checkout is the same directory"
+
+        assert!(
+            cwd_is_inside_worktree(&worktree, &folded, true),
+            "on a case-folding volume a case variant is the same directory"
         );
+        // PR #372 review: on a case-sensitive volume `feat` and `FEAT` are two
+        // checkouts, so the same spelling must not be treated as inside.
+        assert!(
+            !cwd_is_inside_worktree(&worktree, &folded, false),
+            "on a case-sensitive volume a case variant is a different checkout"
+        );
+        // The exact spelling is inside either way, and costs no case compare.
+        assert!(cwd_is_inside_worktree(
+            &worktree,
+            &worktree.join("src"),
+            false
+        ));
 
         // A path that walks out through `..` is not inside, however its
-        // literal prefix reads.
+        // literal prefix reads, on either kind of volume.
+        for fold in [true, false] {
+            assert!(
+                !cwd_is_inside_worktree(&worktree, &worktree.join("../feat-billing"), fold),
+                "a `..` escape is never inside (fold_case={fold})"
+            );
+            // Case folding must not swallow a genuinely different sibling.
+            assert!(
+                !cwd_is_inside_worktree(
+                    &worktree,
+                    std::path::Path::new("/repo.worktrees/feats"),
+                    fold
+                ),
+                "a longer sibling name is outside, case-folded or not (fold_case={fold})"
+            );
+        }
+
+        // The binding still resets anything outside, through the real
+        // `confine_cwd` entry point and its live volume probe.
+        let tab = Tab::restored("feat", None, Some(worktree.clone()));
         assert_eq!(
             tab.confine_cwd(Some(worktree.join("../feat-billing"))),
             Some(worktree.clone()),
             "a `..` escape must reset to the worktree root"
         );
-
-        // Case folding must not swallow a genuinely different sibling.
         assert_eq!(
-            tab.confine_cwd(Some(std::path::PathBuf::from("/repo.worktrees/feats"))),
-            Some(worktree),
-            "a longer sibling name is outside, case-folded or not"
+            tab.confine_cwd(Some(worktree.join("src"))),
+            Some(worktree.join("src")),
+            "the exact spelling of a path inside the checkout is kept"
+        );
+    }
+
+    /// The volume probe answers for a directory that exists, and fails closed
+    /// (case-sensitive, so `confine_cwd` resets rather than admits a sibling)
+    /// for one that does not.
+    #[test]
+    fn volume_case_probe_fails_closed_on_a_missing_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Whatever this volume answers, asking twice must agree: the probe is
+        // a property of the volume, not of the call.
+        let live = volume_folds_case(dir.path());
+        assert_eq!(live, volume_folds_case(dir.path()));
+        assert!(
+            !volume_folds_case(&dir.path().join("no-such-directory")),
+            "a path that cannot be probed must not enable case folding"
         );
     }
 }

@@ -32,13 +32,10 @@ pub(crate) fn path_is_in_retiring_worktree(path: &std::path::Path) -> bool {
     let retiring = RETIRING_WORKTREE_PATHS
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    retiring.iter().any(|root| {
-        path.starts_with(root)
-            || path
-                .canonicalize()
-                .ok()
-                .is_some_and(|resolved| resolved.starts_with(root))
-    })
+    // Lexical prefix only: `canonicalize` on a hung NFS/SMB cwd blocks the
+    // UI thread for the mount timeout. Retirement roots are already stored
+    // as the path the journal recorded.
+    retiring.iter().any(|root| path.starts_with(root))
 }
 
 pub use git::{

@@ -1052,7 +1052,9 @@ impl TerminalView {
                      surface.send_text with submit=true (`paneflow send --submit`) instead"
                 ));
             }
-            self.terminal.write_to_pty(seq.as_bytes().to_vec());
+            self.terminal
+                .try_write_to_pty(seq.as_bytes().to_vec())
+                .map_err(|err| err.to_string())?;
         } else if let Some(ref key_char) = keystroke.key_char {
             if sequence_would_submit(key_char) {
                 return Err(format!(
@@ -1060,7 +1062,11 @@ impl TerminalView {
                      surface.send_text with submit=true (`paneflow send --submit`) instead"
                 ));
             }
-            self.terminal.write_to_pty(key_char.as_bytes().to_vec());
+            self.terminal
+                .try_write_to_pty(key_char.as_bytes().to_vec())
+                .map_err(|err| err.to_string())?;
+        } else {
+            return Err(format!("keystroke '{keystroke_str}' produced no PTY bytes"));
         }
         Ok(())
     }
@@ -1389,6 +1395,8 @@ impl TerminalView {
         // clickable counterpart of the remappable `toggle_fleet_search` action.
         let fleet_toggle = div()
             .id("search-fleet-toggle")
+            .role(Role::Button)
+            .aria_label("Fleet search")
             .flex()
             .flex_row()
             .items_center()
@@ -1401,6 +1409,7 @@ impl TerminalView {
             .animated_hover(move |style, delta| {
                 style.bg(lerp_color(ui.subtle.opacity(0.0), ui.subtle, delta));
             })
+            .delayed_tooltip(text_tooltip("Fleet search"))
             .child(
                 svg()
                     .size(px(13.))
@@ -1409,10 +1418,11 @@ impl TerminalView {
                     .text_color(ui.muted),
             )
             .child("Fleet")
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| this.request_fleet_search(cx)),
-            );
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                this.request_fleet_search(cx);
+            }));
 
         let nav_color = if has_matches {
             ui.muted
@@ -1933,10 +1943,14 @@ mod tests {
                 "search overlay lost the {id} control"
             );
         }
+        assert!(
+            overlay.contains("search-fleet-toggle"),
+            "search overlay lost the fleet toggle"
+        );
         let clicks = overlay.matches(".on_click(").count();
         assert!(
-            clicks >= 4,
-            "regex toggle, prev, next and close must all fire on click; found {clicks} on_click"
+            clicks >= 5,
+            "regex, fleet, prev, next and close must all fire on click; found {clicks} on_click"
         );
     }
 
@@ -2092,6 +2106,30 @@ mod tests {
         assert!(!sequence_would_submit("\x1b[A")); // arrow key
         assert!(!sequence_would_submit("\x03")); // ctrl-c
         assert!(!sequence_would_submit("a"));
+    }
+
+    #[test]
+    fn send_keystroke_uses_fallible_pty_write() {
+        let source = include_str!("view.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production terminal view source");
+        let body = source
+            .split("pub fn send_keystroke(")
+            .nth(1)
+            .expect("send_keystroke");
+        assert!(
+            body.contains("try_write_to_pty"),
+            "send_keystroke must not report sent after a rejected PTY write"
+        );
+        assert!(
+            body.contains("produced no PTY bytes"),
+            "an unencodable keystroke must return Err, not Ok"
+        );
+        assert!(
+            !body.contains(".write_to_pty("),
+            "the infallible write_to_pty path must not remain in send_keystroke"
+        );
     }
 
     #[test]

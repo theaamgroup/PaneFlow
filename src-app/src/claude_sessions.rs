@@ -252,18 +252,43 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
         return (Vec::new(), 0);
     };
 
-    let sessions = entries.flatten().filter_map(|entry| {
-        let path = entry.path();
-        if !is_jsonl_file(&path) {
-            return None;
-        }
-        read_session_meta(&path).filter(|meta| crate::agent_sessions::cwd_matches(&meta.cwd, cwd))
-    });
+    const MAX_WALK_ENTRIES: usize = 4_096;
+    // PR #373 review: the cap is deliberate, but hitting it silently drops
+    // sessions the user has, so say so once per scan rather than leaving a
+    // short list unexplained.
+    let mut walked = 0usize;
+    let sessions = entries
+        .flatten()
+        .take(MAX_WALK_ENTRIES)
+        .inspect(|_| walked += 1)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                return None;
+            };
+            if !file_type.is_file()
+                || path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("jsonl"))
+            {
+                return None;
+            }
+            read_session_meta(&path)
+                .filter(|meta| crate::agent_sessions::cwd_matches(&meta.cwd, cwd))
+        });
 
     let (sessions, omitted) = crate::agent_sessions::collect_recent_sessions(
         sessions,
         crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE,
     );
+    if walked >= MAX_WALK_ENTRIES {
+        log::warn!(
+            "claude sessions: stopped at the {MAX_WALK_ENTRIES}-entry walk cap in {}; \
+             older sessions there are not listed",
+            project_dir.display()
+        );
+    }
     if let Some(snapshot_mtime) = project_snapshot_mtime(&project_dir) {
         crate::agent_sessions::cache::store_result_with_mtime(
             SessionAgent::Claude,

@@ -231,7 +231,9 @@ pub(super) fn resolve_default_shell(configured: Option<&str>) -> String {
 /// hard-code `/opt/homebrew/bin/pwsh`.
 fn configured_shell_if_usable(path: &str) -> Option<String> {
     let has_separator = path.contains('/');
-    let candidate: std::path::PathBuf = if has_separator {
+    let candidate: std::path::PathBuf = if let Some(rest) = path.strip_prefix("~/") {
+        dirs::home_dir()?.join(rest)
+    } else if has_separator {
         std::path::PathBuf::from(path)
     } else {
         // PATH search first; fall back to well-known install dirs so a
@@ -465,6 +467,23 @@ mod tests {
     // (B) Unix well-known-dir shell lookup: a bare name not on PATH still
     // resolves from a standard install dir (the macOS pwsh-under-Homebrew gap),
     // while a bogus name yields None. `/bin/sh` exists on every Unix target.
+    #[cfg(unix)]
+    #[test]
+    fn tilde_default_shell_expands_to_home() {
+        assert!(
+            super::configured_shell_if_usable("~/definitely-not-a-paneflow-shell").is_none(),
+            "a missing ~/path must not be treated as a relative directory named ~"
+        );
+        let tilde = super::configured_shell_if_usable("~/../../bin/sh")
+            .expect("~/../../bin/sh must expand under $HOME");
+        let abs = super::configured_shell_if_usable("/bin/sh").expect("/bin/sh");
+        assert_eq!(
+            std::fs::canonicalize(&tilde).expect("tilde path"),
+            std::fs::canonicalize(&abs).expect("abs path"),
+            "~/../../bin/sh must be the same file as /bin/sh"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn well_known_shell_lookup_finds_sh_and_rejects_bogus() {

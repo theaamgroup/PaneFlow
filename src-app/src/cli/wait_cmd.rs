@@ -230,8 +230,7 @@ fn legacy_error_message(value: &Value) -> Option<String> {
 }
 
 fn is_surface_gone_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("not found") || lower.contains("-32602")
+    message.to_ascii_lowercase().contains("not found")
 }
 
 fn read_matches_since(
@@ -929,6 +928,16 @@ mod tests {
         );
         let err = read_snapshot(&ReadError("server error -32000: overloaded"), 1).unwrap_err();
         assert!(err.message.contains("overloaded"), "got: {}", err.message);
+        let range = read_snapshot(
+            &ReadError("server error -32602: offset 4 out of range (total_lines=3)"),
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            range.message.contains("out of range"),
+            "offset-out-of-range must not look like a gone surface, got: {}",
+            range.message
+        );
     }
 
     #[test]

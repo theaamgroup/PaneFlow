@@ -230,6 +230,10 @@ mod tests {
             .clear_screen_and_scrollback()
             .expect("clear must succeed");
 
+        // libghostty-vt currently keeps `is_live` true after RIS/clear and
+        // reports screen (0, 0). Tightening this to `!is_live()` fails against
+        // the vendored archive; leave the original disjunct until a libghostty
+        // bump invalidates the ref.
         assert!(
             !anchor.is_live()
                 || terminal.tracked_point(&anchor).expect("point").is_none()

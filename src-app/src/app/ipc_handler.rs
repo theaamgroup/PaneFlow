@@ -1313,6 +1313,12 @@ fn surface_list_workspace_scope(
 /// `(text, returned_line_count, total_lines, eof)`, where `eof` is `true`
 /// once the window reaches the oldest retained line.
 ///
+/// US-025: `offset == total` is a valid empty eof page; `offset > total` is
+/// JSON-RPC -32602. Extracted so the handler and its test share one predicate.
+fn surface_read_offset_out_of_range(offset: usize, total: usize) -> bool {
+    offset > total
+}
+
 /// Live `surface.read` paginates on the grid (`extract_scrollback_window`,
 /// history followed by the live screen); this helper stays as the
 /// string-level spec the windowed extract is tested against.
@@ -3383,7 +3389,7 @@ impl PaneFlowApp {
                     // error, not a silent empty read. The old `saturating_sub`
                     // path returned `("", 0, total, true)`, indistinguishable from
                     // "you legitimately scrolled to the very top" (offset == total).
-                    if offset > total {
+                    if surface_read_offset_out_of_range(offset, total) {
                         let _ = responder.send(
                             JsonRpcError::invalid_params(format!(
                                 "offset {offset} out of range (total_lines={total})"
@@ -4541,6 +4547,27 @@ fn session_end_fallback_candidate(
 /// overlap.
 const SYNTHETIC_SESSION_PID_BASE: u32 = 0xFFFF_0000;
 
+/// True for a key this function allocated rather than one an OS handed out.
+fn is_synthetic_session_key(key: u32) -> bool {
+    key >= SYNTHETIC_SESSION_PID_BASE
+}
+
+/// The synthetic row already standing in for `tool`'s no-pid frames, if any.
+///
+/// Lowest key first so the answer does not depend on `HashMap` order: the band
+/// is walked down from `u32::MAX`, so the lowest key is the newest row and the
+/// one a later frame most likely belongs to.
+fn synthetic_session_for_tool(
+    sessions: &std::collections::HashMap<u32, AgentSession>,
+    tool: crate::agent_launcher::TerminalAgent,
+) -> Option<u32> {
+    sessions
+        .iter()
+        .filter(|(k, s)| is_synthetic_session_key(**k) && s.tool == tool)
+        .map(|(k, _)| *k)
+        .min()
+}
+
 /// Insert or update a session in `ws.agent_sessions`. When `pid` is
 /// known, the session is keyed by PID (the desired path - supports
 /// many concurrent sessions of the same tool). When `pid` is `None`
@@ -4599,8 +4626,19 @@ fn upsert_session_state_with_start(
     let key = match pid {
         Some(p) => p,
         None => {
-            if let Some((existing_pid, _)) = sessions.iter().find(|(_, s)| s.tool == tool) {
-                *existing_pid
+            if let Some(existing_pid) = session_end_fallback_candidate(sessions, Some(tool), None) {
+                existing_pid
+            } else if let Some(existing_synthetic) = synthetic_session_for_tool(sessions, tool) {
+                // PR #373 review: the candidate search above answers only when
+                // exactly one row of this tool exists, so from the second row
+                // on every no-pid frame used to mint a fresh synthetic key -
+                // and each one it minted was itself another row of this tool,
+                // so the next frame was ambiguous too. A shim that never sends
+                // `pid` grew the sidebar until restart, and nothing collected
+                // the rows: the stale sweep only probes real PIDs. One
+                // synthetic row per tool is the whole point of the band, so
+                // reuse it rather than allocating beside it.
+                existing_synthetic
             } else {
                 // US-026: allocate from a reserved high band that is disjoint
                 // from every supported platform's real PID range (Linux pid_max
@@ -6294,17 +6332,18 @@ mod tests {
         // US-025: the surface.read handler rejects `offset > total` with a
         // structured -32602. `offset == total` is the valid "scrolled to the
         // very top" boundary (empty window, eof) and must NOT be rejected.
-        // paginate exposes the true `total` either way, so the guard can fire.
-        let (_, _, total_at_top, eof_at_top) = super::paginate_scrollback("a\nb\nc", 2, 3);
-        assert_eq!(total_at_top, 3);
-        assert!(eof_at_top);
-        assert!(3 <= total_at_top, "offset == total is in range (boundary)");
-
-        let (_, _, total_past, _) = super::paginate_scrollback("a\nb\nc", 2, 4);
-        assert_eq!(total_past, 3);
         assert!(
-            4 > total_past,
-            "offset > total is out of range → handler returns -32602"
+            !super::surface_read_offset_out_of_range(3, 3),
+            "offset == total is in range"
+        );
+        assert!(
+            super::surface_read_offset_out_of_range(4, 3),
+            "offset > total is out of range"
+        );
+        let source = include_str!("ipc_handler.rs");
+        assert!(
+            source.contains("surface_read_offset_out_of_range(offset, total)"),
+            "the live surface.read arm must use the shared predicate"
         );
     }
 
@@ -6714,6 +6753,77 @@ mod tests {
             key >= super::SYNTHETIC_SESSION_PID_BASE,
             "synthetic key lands in the reserved band"
         );
+    }
+
+    #[test]
+    fn upsert_no_pid_does_not_pick_an_arbitrary_same_tool_row() {
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{
+            AgentLifecycleEvent, AgentSession, AgentState, reduce_lifecycle_event,
+        };
+        let mut sessions: std::collections::HashMap<u32, AgentSession> =
+            std::collections::HashMap::new();
+        sessions.insert(
+            11,
+            AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Thinking),
+        );
+        sessions.insert(
+            22,
+            AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Thinking),
+        );
+        let before_11 = sessions[&11].clone();
+        let before_22 = sessions[&22].clone();
+        let key = super::upsert_session_state(
+            &mut sessions,
+            None,
+            TerminalAgent::ClaudeCode,
+            reduce_lifecycle_event(AgentLifecycleEvent::Stop { summary: None }),
+            None,
+            ai_types::AgentStateSource::Hook,
+        )
+        .expect("synthetic allocation is accepted");
+        assert!(
+            key >= super::SYNTHETIC_SESSION_PID_BASE,
+            "two same-tool rows must not steal a no-pid frame"
+        );
+        assert_eq!(sessions[&11].state, before_11.state);
+        assert_eq!(sessions[&22].state, before_22.state);
+        assert_eq!(sessions[&key].state, AgentState::Finished);
+
+        // PR #373 review: the synthetic row is itself another row of this
+        // tool, so the next no-pid frame is ambiguous too. It must reuse the
+        // row it already made, not mint one beside it - nothing collects
+        // these, and a shim that never sends `pid` would fill the sidebar.
+        for _ in 0..50 {
+            let again = super::upsert_session_state(
+                &mut sessions,
+                None,
+                TerminalAgent::ClaudeCode,
+                reduce_lifecycle_event(AgentLifecycleEvent::PromptSubmit),
+                None,
+                ai_types::AgentStateSource::Hook,
+            )
+            .expect("a no-pid frame is still accepted");
+            assert_eq!(again, key, "the same synthetic row answers every frame");
+        }
+        assert_eq!(
+            sessions.len(),
+            3,
+            "two real rows and exactly one synthetic row, however many frames arrive"
+        );
+
+        // A different tool still gets its own synthetic row.
+        let other = super::upsert_session_state(
+            &mut sessions,
+            None,
+            TerminalAgent::Codex,
+            reduce_lifecycle_event(AgentLifecycleEvent::PromptSubmit),
+            None,
+            ai_types::AgentStateSource::Hook,
+        )
+        .expect("a first frame for another tool is accepted");
+        assert_ne!(other, key, "one synthetic row per tool, not one overall");
+        assert_eq!(sessions.len(), 4);
     }
 
     #[test]

@@ -24,8 +24,9 @@ export default function (pi) {
       };
       const sid = process.env["PANEFLOW_SURFACE_ID"];
       if (sid) p.surface_id = Number(sid);
+      // A JSON-RPC notification (no id), matching AiHookFrame / the OpenCode plugin.
       const frame =
-        JSON.stringify({ jsonrpc: "2.0", method, params: p, id: 1 }) + "\n";
+        JSON.stringify({ jsonrpc: "2.0", method, params: p }) + "\n";
       const conn = net.connect(sock);
       conn.on("error", () => {});
       conn.on("connect", () => {

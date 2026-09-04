@@ -308,6 +308,9 @@ impl PaneFlowApp {
     /// attributed anywhere - an agent running in a terminal Paneflow does not
     /// own has no row to update.
     pub(crate) fn sweep_claude_session_registry(&mut self, cx: &mut Context<Self>) {
+        if self.claude_registry_sweep_pending {
+            return;
+        }
         let Some(candidates) = self.registry_surface_candidates(cx) else {
             // Nothing to describe. Forget the watermark too, so an agent
             // started later is applied from its first observed state instead
@@ -318,6 +321,7 @@ impl PaneFlowApp {
         let Some(dir) = claude_session_registry::sessions_dir() else {
             return;
         };
+        self.claude_registry_sweep_pending = true;
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let records = smol::unblock(move || {
@@ -340,6 +344,14 @@ impl PaneFlowApp {
                 })
                 .await;
                 cx.update(|cx| {
+                    // PR #373 review: drop the guard in its own update, before
+                    // the records are applied. Clearing it alongside the apply
+                    // meant anything that stopped that closure completing left
+                    // the flag set, and every later sweep returned at the top
+                    // until the app restarted.
+                    let _ = this.update(cx, |app, _cx| {
+                        app.claude_registry_sweep_pending = false;
+                    });
                     let _ = this.update(cx, |app, cx| {
                         app.apply_registry_records(records, cx);
                     });

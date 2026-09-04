@@ -2,7 +2,7 @@
 
 use gpui::{
     ClickEvent, Context, CursorStyle, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, SharedString, Styled, div, prelude::*, px, svg,
+    ParentElement, Role, SharedString, Styled, div, prelude::*, px, svg,
 };
 
 use crate::PaneFlowApp;
@@ -239,6 +239,9 @@ impl PaneFlowApp {
 
         let frame = div()
             .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .aria_toggled(crate::settings::components::switch_toggled(is_active))
             .w_full()
             .h(px(THEME_MODE_TILE_HEIGHT))
             .rounded(px(THEME_MODE_TILE_RADIUS))

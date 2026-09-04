@@ -2203,13 +2203,21 @@ fn locale_base(locale: &str) -> &str {
 }
 
 /// True if `locale` selects the UTF-8 codeset (`en_US.UTF-8`, `C.UTF-8`, ...).
+///
+/// A bare `UTF-8`, with no language part, counts. Terminal.app sets exactly
+/// that in `LC_CTYPE` when "Set locale environment variables on startup" is
+/// on and the region has no matching locale, and macOS resolves it as UTF-8.
+/// Reading it as non-UTF-8 made the override force `LC_ALL=en_US.UTF-8` on
+/// every pane of such a session, replacing the user's language, date and
+/// number categories (PR #372 review).
 fn is_utf8_locale(locale: &str) -> bool {
-    locale
-        .split_once('.')
-        .map(|(_, codeset)| codeset.split('@').next().unwrap_or(codeset))
-        .is_some_and(|codeset| {
-            codeset.eq_ignore_ascii_case("UTF-8") || codeset.eq_ignore_ascii_case("UTF8")
-        })
+    let codeset = match locale.split_once('.') {
+        Some((_, codeset)) => codeset,
+        // No `.`: the whole value is a codeset only if it names one.
+        None => locale,
+    };
+    let codeset = codeset.split('@').next().unwrap_or(codeset);
+    codeset.eq_ignore_ascii_case("UTF-8") || codeset.eq_ignore_ascii_case("UTF8")
 }
 
 /// Pick the locale to force on a child PTY, or `None` when the inherited block
@@ -2239,7 +2247,13 @@ fn utf8_locale_override(
         .into_iter()
         .flatten()
         .map(locale_base)
-        .find(|base| !matches!(*base, "C" | "POSIX"))
+        // `C`/`POSIX` name no language, and a bare `UTF-8` is a codeset, not a
+        // language, so neither can seed a `<base>.UTF-8` candidate.
+        .find(|base| {
+            !matches!(*base, "C" | "POSIX")
+                && !base.eq_ignore_ascii_case("UTF-8")
+                && !base.eq_ignore_ascii_case("UTF8")
+        })
         .map(|base| format!("{base}.UTF-8"));
     preferred
         .into_iter()
@@ -3318,6 +3332,12 @@ mod tests {
             utf8_locale_override(None, None, Some("de_DE.UTF-8"), &available),
             None,
             "LC_CTYPE outranks LANG for the codeset"
+        );
+        assert_eq!(
+            utf8_locale_override(None, None, Some("UTF-8"), &available),
+            None,
+            "Terminal.app's codeset-only LC_CTYPE=UTF-8 already selects UTF-8, \
+             so forcing LC_ALL would replace the user's other categories"
         );
         assert_eq!(
             utf8_locale_override(Some("de_DE.UTF-8"), None, Some("C"), &available),

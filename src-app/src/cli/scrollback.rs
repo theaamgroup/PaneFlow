@@ -116,4 +116,20 @@ mod tests {
             "SENTINEL\nmore work\n"
         );
     }
+
+    #[test]
+    fn equal_totals_with_different_text_are_empty() {
+        assert_eq!(
+            new_text_since_baseline("old\n", "new\n", Some(10), Some(10)),
+            ""
+        );
+    }
+
+    #[test]
+    fn decreased_totals_return_the_whole_current_window() {
+        assert_eq!(
+            new_text_since_baseline("aaaa\nbbbb\n", "reset\n", Some(50), Some(1)),
+            "reset\n"
+        );
+    }
 }

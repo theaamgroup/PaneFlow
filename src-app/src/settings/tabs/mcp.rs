@@ -11,8 +11,8 @@
 //! inline-settings migration.
 
 use gpui::{
-    ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Styled, div, prelude::*, px,
+    ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Role,
+    SharedString, Styled, div, prelude::*, px,
 };
 
 use paneflow_mcp_install::{InstallKind, OverallState, StatusKind};
@@ -71,6 +71,8 @@ impl PaneFlowApp {
         };
         let button = div()
             .id("mcp-install-btn")
+            .role(Role::Button)
+            .aria_label(label.clone())
             .flex_shrink_0()
             .px(px(12.))
             .py(px(6.))

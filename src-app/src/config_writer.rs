@@ -552,14 +552,27 @@ fn with_field_in<T: serde::Serialize + serde::de::DeserializeOwned>(
 }
 
 /// In-memory companion for [`save_agent_panel_field_checked`].
+///
+/// Same Issue #300 contract as [`with_field`]: a round-trip failure is
+/// returned as `Err` so the caller keeps its cache and skips the disk write.
 pub fn with_agent_panel_field(
     config: &paneflow_config::schema::PaneFlowConfig,
     key: &str,
     value: serde_json::Value,
-) -> paneflow_config::schema::PaneFlowConfig {
-    let mut json = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
+) -> Result<paneflow_config::schema::PaneFlowConfig, serde_json::Error> {
+    with_agent_panel_field_in(config, key, value).inspect_err(|error| {
+        log::warn!("config: agent_panel.{key} did not round-trip in memory, not saving: {error}");
+    })
+}
+
+fn with_agent_panel_field_in<T: serde::Serialize + serde::de::DeserializeOwned>(
+    config: &T,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<T, serde_json::Error> {
+    let mut json = serde_json::to_value(config)?;
     apply_agent_panel_field(&mut json, key, value);
-    serde_json::from_value(json).unwrap_or_else(|_| config.clone())
+    serde_json::from_value(json)
 }
 
 /// In-memory companion for [`save_commands_checked_if_current`]. Replaces the
@@ -726,8 +739,9 @@ mod tests {
         AGENT_BUTTON_VISIBILITY_MIGRATION_KEY, ConfigWritePrecondition, FieldPersistSeq,
         FieldScope, apply_agent_panel_field, apply_reset_shortcuts, apply_terminal_field,
         load_raw_config, merge_shortcut, migrate_agent_button_visibility_at, reset_shortcuts_at,
-        save_commands_at_if_current, save_field_at_if_current, with_commands, with_field,
-        with_field_in, write_config_checked, write_config_checked_with_precondition,
+        save_commands_at_if_current, save_field_at_if_current, with_agent_panel_field,
+        with_agent_panel_field_in, with_commands, with_field, with_field_in, write_config_checked,
+        write_config_checked_with_precondition,
     };
     use crate::agent_launcher::TerminalAgent;
     use paneflow_config::schema::{CommandDefinition, PaneFlowConfig};
@@ -765,6 +779,38 @@ mod tests {
         assert_eq!(
             with_field_in(&strict, false, "font_size", json!(14.0)).unwrap(),
             Strict { font_size: 14.0 }
+        );
+    }
+
+    #[test]
+    fn with_agent_panel_field_surfaces_round_trip_failure() {
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct Panel {
+            notify_when_agent_waiting: bool,
+        }
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct Strict {
+            agent_panel: Option<Panel>,
+        }
+        let strict = Strict {
+            agent_panel: Some(Panel {
+                notify_when_agent_waiting: true,
+            }),
+        };
+        let err = with_agent_panel_field_in(&strict, "notify_when_agent_waiting", json!("nope"))
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid type"), "{err}");
+        let ok = with_agent_panel_field(
+            &PaneFlowConfig::default(),
+            "notify_when_agent_waiting",
+            json!("Never"),
+        )
+        .unwrap();
+        assert_eq!(
+            ok.agent_panel
+                .as_ref()
+                .and_then(|p| p.notify_when_agent_waiting),
+            Some(paneflow_config::schema::NotifyWhenAgentWaiting::Never)
         );
     }
 
