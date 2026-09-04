@@ -4778,6 +4778,14 @@ pub(crate) fn promote_response(
     })
 }
 
+/// Test-only stand-in for a dead network mount: resolving any path listed
+/// here stalls for [`STALLED_CWD_DELAY`] before the filesystem answers.
+#[cfg(test)]
+static STALLED_CWD_PATHS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+const STALLED_CWD_DELAY: Duration = Duration::from_secs(2);
+
 /// US-014 (cli-hardening-followup-2026-Q3): validate and canonicalize the
 /// `cwd` field of a `workspace.create` IPC request.
 ///
@@ -4795,8 +4803,59 @@ pub(crate) fn promote_response(
 ///
 /// Successful canonicalization is logged at `info!` for audit trail
 /// (relative-path resolution and symlink traversal visibility).
+///
+/// Issue #358: every caller runs on the GPUI automation tick, and `stat`
+/// on a dead NFS/SMB/iCloud mount can block for the kernel mount timeout,
+/// which would freeze painting and the 50 ms IPC drain. The filesystem
+/// work therefore runs on a helper thread with the same bounded probe as
+/// session restore: a late answer is refused with `-32602` and the stalled
+/// thread is left to unwind once the filesystem finally answers.
 pub(crate) fn canonicalize_workspace_cwd(raw: &str) -> Result<std::path::PathBuf, JsonRpcError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = raw.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("ipc-cwd-probe".to_string())
+        .spawn(move || {
+            let _ = tx.send(canonicalize_workspace_cwd_blocking(&owned));
+        });
+    if let Err(err) = spawned {
+        return Err(JsonRpcError::invalid_params(format!(
+            "cwd could not be probed: {raw} ({err})"
+        )));
+    }
+    match rx.recv_timeout(WORKSPACE_CWD_PROBE_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => {
+            log::warn!(
+                "ipc: cwd {raw:?} did not answer stat within {WORKSPACE_CWD_PROBE_TIMEOUT:?}; refusing it"
+            );
+            Err(JsonRpcError::invalid_params(format!(
+                "cwd did not answer within {WORKSPACE_CWD_PROBE_TIMEOUT:?} (unresponsive volume?): {raw}"
+            )))
+        }
+    }
+}
+
+/// Longest an IPC cwd probe may hold the automation tick. A local directory
+/// answers in microseconds; only a dead network or cloud mount runs this
+/// out, and such a cwd is refused rather than letting `stat` pin the render
+/// thread for the mount's own timeout (matches session restore's bound).
+const WORKSPACE_CWD_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The blocking half of [`canonicalize_workspace_cwd`]: runs on the probe
+/// thread, never on the GPUI thread.
+fn canonicalize_workspace_cwd_blocking(raw: &str) -> Result<std::path::PathBuf, JsonRpcError> {
     let expanded = expand_tilde(raw);
+    #[cfg(test)]
+    {
+        let stalled = STALLED_CWD_PATHS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&expanded);
+        if stalled {
+            std::thread::sleep(STALLED_CWD_DELAY);
+        }
+    }
     let canonical = std::fs::canonicalize(&expanded).map_err(|e| {
         JsonRpcError::invalid_params(format!("cwd does not exist or is unreadable: {raw} ({e})"))
     })?;
@@ -6007,6 +6066,38 @@ mod tests {
         assert!(
             err.message.contains("not a directory"),
             "error must mention not-a-directory, got: {}",
+            err.message
+        );
+    }
+
+    /// Issue #358: `workspace.create` / `workspace.up` / `surface.split`
+    /// resolve `cwd` on the GPUI automation tick. A cwd on a dead NFS/SMB
+    /// mount can pin `stat` for the kernel mount timeout, so the probe must
+    /// answer within a bounded window (`-32602` on timeout) like session
+    /// restore does, instead of freezing paint and the 50 ms IPC drain.
+    #[test]
+    fn workspace_cwd_probe_returns_invalid_params_when_stat_stalls() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stalled = tmp.path().to_path_buf();
+        let stalled_str = stalled.to_string_lossy().into_owned();
+        super::STALLED_CWD_PATHS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(stalled.clone());
+        let bound = super::STALLED_CWD_DELAY / 2;
+
+        let started = std::time::Instant::now();
+        let result = super::canonicalize_workspace_cwd(&stalled_str);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < bound,
+            "cwd probe blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+        let err = result.expect_err("a stalled cwd must be refused, not trusted");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(
+            err.message.contains("did not answer"),
+            "error must mention the timeout, got: {}",
             err.message
         );
     }
