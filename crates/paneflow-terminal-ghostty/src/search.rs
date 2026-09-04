@@ -232,4 +232,16 @@ mod tests {
         assert!(search.is_done());
         assert!(search.finish(false).regex_error.is_some());
     }
+
+    #[test]
+    fn dense_plain_query_stops_at_max_matches() {
+        let text = "a".repeat(MAX_MATCHES + 8);
+        let cols: Vec<usize> = (0..text.len()).collect();
+        let mut search = SearchEngine::new("a", false).unwrap();
+        assert!(!search.push_line(0, &text, &cols));
+        assert!(search.is_done());
+        let result = search.finish(false);
+        assert_eq!(result.matches.len(), MAX_MATCHES);
+        assert!(result.truncated);
+    }
 }
