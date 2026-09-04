@@ -468,7 +468,7 @@ impl TextInput {
 
     /// Start of the previous word (Option+Left): skip whitespace back, then a
     /// run of one character class (word or punctuation), like NSTextField.
-    fn previous_word_boundary(text: &str, offset: usize) -> usize {
+    pub(crate) fn previous_word_boundary(text: &str, offset: usize) -> usize {
         let offset = offset.min(text.len());
         let head: Vec<(usize, char)> = text[..offset].char_indices().collect();
         let mut i = head.len();
@@ -489,7 +489,7 @@ impl TextInput {
 
     /// End of the next word (Option+Right): skip whitespace forward, then a
     /// run of one character class (word or punctuation), like NSTextField.
-    fn next_word_boundary(text: &str, offset: usize) -> usize {
+    pub(crate) fn next_word_boundary(text: &str, offset: usize) -> usize {
         let offset = offset.min(text.len());
         let tail: Vec<(usize, char)> = text[offset..].char_indices().collect();
         let mut i = 0;

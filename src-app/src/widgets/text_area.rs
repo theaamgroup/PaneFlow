@@ -44,6 +44,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::widgets::text_input::TextInput;
+
 /// Max delay between mouse clicks to count as a double / triple
 /// click. Mirrors the OS default on Linux/macOS (400 ms ~= GTK's
 /// `gtk-double-click-time`).
@@ -69,6 +71,13 @@ actions!(
         TaSelectAll,
         TaHome,
         TaEnd,
+        TaSelectHome,
+        TaSelectEnd,
+        TaWordLeft,
+        TaWordRight,
+        TaSelectWordLeft,
+        TaSelectWordRight,
+        TaDeleteWordLeft,
         TaInsertNewline,
         TaCopy,
         TaCut,
@@ -108,6 +117,8 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("shift-down", TaSelectDown, Some("PaneflowTextArea")),
         KeyBinding::new("home", TaHome, Some("PaneflowTextArea")),
         KeyBinding::new("end", TaEnd, Some("PaneflowTextArea")),
+        KeyBinding::new("shift-home", TaSelectHome, Some("PaneflowTextArea")),
+        KeyBinding::new("shift-end", TaSelectEnd, Some("PaneflowTextArea")),
         // PRD AC #2: Shift+Enter for a literal newline; plain Enter
         // fires `TaSubmit` which the Composer interprets as "send".
         KeyBinding::new("enter", TaSubmit, Some("PaneflowTextArea")),
@@ -125,6 +136,25 @@ pub fn register_keybindings(cx: &mut App) {
             TaSubmitImmediate,
             Some("PaneflowTextArea"),
         ),
+    ]);
+    // macOS word / line motion, matching NSTextView and the
+    // single-line `TextInput`: Option moves by word, Cmd jumps to the
+    // line edge, Shift extends the selection.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("alt-left", TaWordLeft, Some("PaneflowTextArea")),
+        KeyBinding::new("alt-right", TaWordRight, Some("PaneflowTextArea")),
+        KeyBinding::new("alt-shift-left", TaSelectWordLeft, Some("PaneflowTextArea")),
+        KeyBinding::new(
+            "alt-shift-right",
+            TaSelectWordRight,
+            Some("PaneflowTextArea"),
+        ),
+        KeyBinding::new("alt-backspace", TaDeleteWordLeft, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-left", TaHome, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-right", TaEnd, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-shift-left", TaSelectHome, Some("PaneflowTextArea")),
+        KeyBinding::new("cmd-shift-right", TaSelectEnd, Some("PaneflowTextArea")),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -818,6 +848,70 @@ impl TextArea {
         self.move_to(self.snap_out_of_chip(target, false), cx);
     }
 
+    fn select_home(&mut self, _: &TaSelectHome, _w: &mut Window, cx: &mut Context<Self>) {
+        let target = line_start(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn select_end(&mut self, _: &TaSelectEnd, _w: &mut Window, cx: &mut Context<Self>) {
+        let target = line_end(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn word_left(&mut self, _: &TaWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let target = TextInput::previous_word_boundary(&self.content, self.cursor());
+            self.move_to(self.snap_out_of_chip(target, true), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx);
+        }
+    }
+
+    fn word_right(&mut self, _: &TaWordRight, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let target = TextInput::next_word_boundary(&self.content, self.cursor());
+            self.move_to(self.snap_out_of_chip(target, false), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx);
+        }
+    }
+
+    fn select_word_left(&mut self, _: &TaSelectWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        let target = TextInput::previous_word_boundary(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &TaSelectWordRight,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = TextInput::next_word_boundary(&self.content, self.cursor());
+        self.select_to(target, cx);
+    }
+
+    fn delete_word_left(&mut self, _: &TaDeleteWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            // Same chip contract as `backspace`: a chip flush against
+            // the cursor is selected first, deleted on the next press.
+            if let Some(range) = self.decoration_ending_at(self.cursor()) {
+                self.selected_range = range;
+                cx.notify();
+                return;
+            }
+            let prev = TextInput::previous_word_boundary(&self.content, self.cursor());
+            // Never cut a chip in half: a boundary landing inside one
+            // widens the deletion to the whole decoration.
+            let prev = self.snap_out_of_chip(prev, true);
+            if prev == self.cursor() {
+                return;
+            }
+            self.selected_range = prev..self.cursor();
+        }
+        self.replace_selection("", cx);
+    }
+
     fn copy(&mut self, _: &TaCopy, _w: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -1065,6 +1159,13 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
@@ -2321,6 +2422,44 @@ mod tests {
             next_line.origin.y - bounds.top(),
             px(20.0 * first_line_rows as f32),
             "IME caret y must clear every visual row of the wrapped line above it"
+        );
+    }
+
+    /// macOS text fields move and delete by word with Option+Arrow /
+    /// Option+Backspace. The textarea registers its own key context,
+    /// so those bindings have to exist there too.
+    #[gpui::test]
+    fn option_arrows_move_and_delete_by_word(cx: &mut gpui::TestAppContext) {
+        cx.update(register_keybindings);
+
+        let (area, cx) = cx.add_window_view(|window, cx| {
+            let mut area = TextArea::new("", cx);
+            area.set_value("alpha beta gamma", cx);
+            window.focus(&area.focus_handle, cx);
+            area
+        });
+        cx.simulate_resize(size(px(400.0), px(200.0)));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("alt-left");
+        assert_eq!(
+            area.read_with(cx, |area, _cx| area.cursor_offset()),
+            "alpha beta ".len(),
+            "Option+Left must move to the start of the previous word"
+        );
+
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(
+            area.read_with(cx, |area, _cx| area.value()),
+            "alpha gamma",
+            "Option+Backspace must delete the word to the left"
+        );
+
+        cx.simulate_keystrokes("alt-right");
+        assert_eq!(
+            area.read_with(cx, |area, _cx| area.cursor_offset()),
+            "alpha gamma".len(),
+            "Option+Right must move to the end of the next word"
         );
     }
 }
