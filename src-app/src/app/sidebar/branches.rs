@@ -46,6 +46,7 @@ impl PaneFlowApp {
                     .update(cx, |app, cx| {
                         if app.terminal_branches != branches {
                             app.terminal_branches = branches;
+                            app.refresh_pull_requests(cx);
                             cx.notify();
                         }
                     })
