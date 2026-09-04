@@ -80,6 +80,7 @@ mod tests {
             macos_chrome_material: Some(true),
             unfocused_pane_opacity: Some(0.7),
             reduce_motion: Some(false),
+            sidebar_show: SidebarShow { pr: Some(true) },
             workspace_auto_sort: Some(false),
             workspace_zed_menu_visible: Some(true),
             workspace_cursor_menu_visible: Some(false),
@@ -156,6 +157,11 @@ mod tests {
             object_keys(&serialized),
             schema_top_level,
             "top-level PaneFlowConfig and public JSON Schema drifted"
+        );
+        assert_eq!(
+            object_keys(&serialized["sidebar_show"]),
+            object_keys(&schema["properties"]["sidebar_show"]["properties"]),
+            "SidebarShow and public JSON Schema drifted"
         );
         assert_eq!(
             object_keys(&serialized["terminal"]),
@@ -601,6 +607,48 @@ mod tests {
             Some("One Dark"),
             "siblings survive a malformed AI-access toggle"
         );
+    }
+
+    #[test]
+    fn sidebar_show_pr_is_off_by_default_and_tolerant() {
+        // Issue #350: the pull-request marker costs a `gh` subprocess per
+        // branch, so an absent key must leave it off.
+        let cfg: PaneFlowConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!cfg.sidebar_show.pr_enabled());
+        assert_eq!(cfg.sidebar_show, SidebarShow::default());
+
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"sidebar_show": {"pr": true}}"#).unwrap();
+        assert!(cfg.sidebar_show.pr_enabled());
+
+        // An explicit null is the default, not an error.
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"sidebar_show": {"pr": null}}"#).unwrap();
+        assert!(!cfg.sidebar_show.pr_enabled());
+
+        // A malformed field costs that field, never the rest of the file.
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"theme": "One Dark", "sidebar_show": {"pr": "yes"}}"#)
+                .unwrap();
+        assert!(!cfg.sidebar_show.pr_enabled());
+        assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
+
+        // A wholly malformed object costs the setting, not the file.
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"theme": "One Dark", "sidebar_show": "detailed"}"#).unwrap();
+        assert!(!cfg.sidebar_show.pr_enabled());
+        assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
+
+        // Round trip: the switch survives serialization under its own key.
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["sidebar_show"], serde_json::json!({ "pr": null }));
+        let on = PaneFlowConfig {
+            sidebar_show: SidebarShow { pr: Some(true) },
+            ..Default::default()
+        };
+        let back: PaneFlowConfig =
+            serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.sidebar_show.pr_enabled());
     }
 
     #[test]

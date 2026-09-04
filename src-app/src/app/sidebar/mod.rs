@@ -2060,16 +2060,22 @@ impl PaneFlowApp {
             .tab_checkout_git(tab)
             .map(|git| git.branch.clone())
             .unwrap_or_default();
-        let repo_root = self
+        let owner = self
             .workspaces
             .iter()
-            .find(|ws| ws.tabs().iter().any(|t| t.id == tab.id))
-            .map(|ws| ws.worktree_root.clone())
-            .unwrap_or_default();
-        let label = crate::workspace::worktree::checkout_label(Some(&branch), path, &repo_root);
+            .find(|ws| ws.tabs().iter().any(|t| t.id == tab.id));
+        let worktree_root = owner.map(|ws| ws.worktree_root.clone()).unwrap_or_default();
+        let label = crate::workspace::worktree::checkout_label(Some(&branch), path, &worktree_root);
         if label.is_empty() {
             return None;
         }
+        // A branch already in review is marked by its own glyph rather than by
+        // an extra one (issue #350): `pull_request_for` answers only while the
+        // switch is on and a lookup has landed, so the row is otherwise the
+        // #347 row unchanged.
+        let pr = owner
+            .and_then(|ws| ws.repo_root.as_deref())
+            .and_then(|repo_root| self.pull_request_for(repo_root, &branch));
         Some(
             div()
                 .flex()
@@ -2088,8 +2094,14 @@ impl PaneFlowApp {
                     svg()
                         .size(px(10.))
                         .flex_none()
-                        .path("icons/git-branch-sidebar.svg")
-                        .text_color(ui.muted),
+                        .path(match pr {
+                            Some(_) => "icons/git-pull-request.svg",
+                            None => "icons/git-branch-sidebar.svg",
+                        })
+                        .text_color(match pr {
+                            Some(pr) => pr.state.color(ui),
+                            None => ui.muted,
+                        }),
                 )
                 .child(
                     div()
@@ -2141,6 +2153,14 @@ impl PaneFlowApp {
             } else {
                 SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH
             };
+            // The branch glyph becomes the pull-request glyph, in GitHub's
+            // state color, once a `gh` lookup has said the branch is in review
+            // (issue #350). `pull_request_for` is `None` while the switch is
+            // off, so the row is otherwise untouched.
+            let pr = ws
+                .repo_root
+                .as_deref()
+                .and_then(|repo_root| self.pull_request_for(repo_root, &ws.git_branch));
             meta_row = meta_row.child(
                 div()
                     .id(SharedString::from(format!("branch-{}", ws.id)))
@@ -2164,8 +2184,14 @@ impl PaneFlowApp {
                         svg()
                             .size(px(10.))
                             .flex_none()
-                            .path("icons/git-branch-sidebar.svg")
-                            .text_color(ui.muted),
+                            .path(match pr {
+                                Some(_) => "icons/git-pull-request.svg",
+                                None => "icons/git-branch-sidebar.svg",
+                            })
+                            .text_color(match pr {
+                                Some(pr) => pr.state.color(ui),
+                                None => ui.muted,
+                            }),
                     )
                     .child(
                         div()
@@ -3730,6 +3756,46 @@ mod tests {
             !meta.contains("Neither the git branch nor a diffstat"),
             "stale comment still claims the branch was dropped from the rail"
         );
+    }
+
+    /// Issue #350: both branch glyph sites (the workspace meta row and the
+    /// bound tab's #347 line) swap to the pull-request glyph off the cached
+    /// `gh` answer, and nothing in the render path spawns a lookup.
+    #[test]
+    fn both_branch_glyphs_swap_to_the_pull_request_marker_from_the_cache() {
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let tab_meta = source_slice(
+            production,
+            "fn render_tab_worktree_meta_row(",
+            "fn render_workspace_meta_row(",
+        );
+        let ws_meta = source_slice(
+            production,
+            "fn render_workspace_meta_row(",
+            "\n    pub(crate) fn ",
+        );
+        for (label, body) in [("tab meta row", tab_meta), ("workspace meta row", ws_meta)] {
+            assert!(
+                body.contains("self.pull_request_for(repo_root, "),
+                "{label} must read the cached answer through pull_request_for"
+            );
+            assert!(
+                body.contains("icons/git-pull-request.svg")
+                    && body.contains("icons/git-branch-sidebar.svg"),
+                "{label} must keep the branch glyph as the fallback"
+            );
+            assert!(
+                body.contains("pr.state.color(ui)"),
+                "{label} must tint the marker with GitHub's state color"
+            );
+            assert!(
+                !body.contains("refresh_pull_requests") && !body.contains("Command::new"),
+                "{label} must never look a pull request up from a render"
+            );
+        }
     }
 
     #[test]

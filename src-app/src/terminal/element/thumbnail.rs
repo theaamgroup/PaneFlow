@@ -25,37 +25,66 @@ use gpui::{
 };
 
 use super::geometry::CellGeometry;
-use super::{CellDimensions, LayoutInputs, LayoutState, layout_from_snapshot, paint};
+use super::{
+    CellDimensions, LayoutInputs, LayoutState, cursor_from_content, layout_from_snapshot, paint,
+};
 use crate::terminal::TerminalSessionBackend;
-use crate::terminal::types::{Content, TerminalWindowSize, terminal_metric_to_u16};
+use crate::terminal::types::{Content, CursorShape, TerminalWindowSize, terminal_metric_to_u16};
 use crate::theme::TerminalTheme;
 
-/// Rows of the pane's viewport a card shows, counted from the bottom.
+/// Rows of the pane's viewport a card shows at the DEFAULT cell metrics,
+/// counted from the bottom.
 ///
 /// Bottom-crop, always - one rule, one test. It loses a full-screen TUI's
 /// header row; that was weighed against centring on the cursor (which makes
 /// the card jitter between refreshes) and against pinning row 0 (two layout
-/// passes per card), and the fixed rule won on determinism.
-pub(crate) const THUMBNAIL_ROWS: usize = 12;
+/// passes per card), and the fixed rule won on determinism. The live count
+/// is [`thumbnail_rows_for`]: the band is fixed, so a taller `line_height`
+/// fits fewer rows, and cropping fewer keeps the LAST rows - the prompt and
+/// the cursor - inside the band rather than clipping them off its bottom
+/// (PR #354 review). Test-only since then: production reads the derived
+/// count, and the tests pin that the derivation lands on this figure at the
+/// defaults.
+#[cfg(test)]
+pub(super) const THUMBNAIL_ROWS: usize = 12;
 
 /// Font size for a thumbnail, in pixels.
 ///
-/// Cell geometry is a pure function of this scalar - `font.rs` computes
-/// `cell_width = round(size * 0.6)` and `line_height = round(size * 1.2)`,
-/// with no glyph measurement - so 9 px yields exactly 5x11 px cells.
+/// Cell geometry is a pure function of this scalar and the two configured
+/// multipliers - `font::cell_dimensions` computes
+/// `cell_width = round(size * settings.cell_width)` and
+/// `line_height = round(size * settings.line_height)`, with no glyph
+/// measurement. At the 0.6 / 1.2 defaults 9 px yields exactly 5x11 px cells.
 pub(crate) const THUMBNAIL_FONT_PX: f32 = 9.0;
 
-/// Thumbnail band size. Both divide evenly by the cell metrics above, which
-/// `the_thumbnail_band_is_a_whole_number_of_cells` pins.
+/// Thumbnail band size, in pixels. These are the DEFAULT-derived figure:
+/// 64 columns x 12 rows at 5x11 px cells. They stay hardcoded on purpose -
+/// the card box is sized to them - and a user with non-default
+/// `cell_width` / `line_height` gets a different number of cells in the same
+/// band, not a different band. `the_thumbnail_band_is_a_whole_number_of_cells`
+/// pins them against the defaults.
 pub(crate) const THUMBNAIL_BAND_W: f32 = 320.0;
 pub(crate) const THUMBNAIL_BAND_H: f32 = 132.0;
 
-/// Cell metrics for a thumbnail, mirroring `font.rs`'s multipliers.
+/// Cell metrics for a thumbnail under `settings`: the same two multipliers
+/// the pane uses, applied to the thumbnail font size through the same
+/// rounding as the pane (`font::cell_dimensions`).
+pub(super) fn thumbnail_cell_dimensions_for(
+    settings: &super::font::FontSettings,
+) -> CellDimensions {
+    super::font::cell_dimensions(settings, px(THUMBNAIL_FONT_PX))
+}
+
+/// Cell metrics for a thumbnail under the live config.
 pub(super) fn thumbnail_cell_dimensions() -> CellDimensions {
-    CellDimensions {
-        cell_width: px((THUMBNAIL_FONT_PX * 0.6).round()),
-        line_height: px((THUMBNAIL_FONT_PX * 1.2).round()),
-    }
+    thumbnail_cell_dimensions_for(&super::font::cached_font_config())
+}
+
+/// How many viewport rows fit the fixed band at these cell metrics: at the
+/// 0.6 / 1.2 defaults exactly twelve (`THUMBNAIL_ROWS`); at `line_height = 2.5`
+/// (23 px rows) five. Never zero, so a card always shows the prompt row.
+pub(super) fn thumbnail_rows_for(dims: &CellDimensions) -> usize {
+    ((THUMBNAIL_BAND_H / f32::from(dims.line_height)).floor() as usize).max(1)
 }
 
 /// A grid snapshot plus the row window a thumbnail paints.
@@ -92,7 +121,7 @@ pub(super) fn thumbnail_snapshot(backend: &TerminalSessionBackend) -> ThumbnailS
     let (content, _initial_clear_consumed) = backend.render_content(window_size, 0, 0, false);
 
     let last_visible_row = content.rows as i32;
-    let first_visible_row = content.rows.saturating_sub(THUMBNAIL_ROWS) as i32;
+    let first_visible_row = content.rows.saturating_sub(thumbnail_rows_for(&dims)) as i32;
     ThumbnailSnapshot {
         content,
         first_visible_row,
@@ -113,7 +142,7 @@ pub(super) fn thumbnail_font() -> (Font, Pixels) {
     )
 }
 
-/// A pane's last [`THUMBNAIL_ROWS`] rows, painted read-only into a card.
+/// A pane's last [`thumbnail_rows_for`] rows, painted read-only into a card.
 pub(crate) struct TerminalThumbnail {
     backend: TerminalSessionBackend,
     theme: Arc<TerminalTheme>,
@@ -179,11 +208,31 @@ impl Element for TerminalThumbnail {
 
         let dims = thumbnail_cell_dimensions();
         let (base_font, _size) = thumbnail_font();
+        // A dim, non-blinking block cursor (spec §4.3): a useful "parked at a
+        // prompt" signal for one quad. `cursor_from_content` is the private
+        // helper `build_layout` uses; `focused: true` because the helper
+        // returns `None` for an unfocused pane and a thumbnail is never
+        // "unfocused". It filters `CursorShape::Hidden` itself. The shape is
+        // then forced to `Block` regardless of the pane's own beam/underline/
+        // vintage mode - a 5 px beam is invisible - and `text` is cleared so
+        // the block does not try to re-shape the glyph under it. Blink is not
+        // a layout input: it only gates whether `paint` draws the cursor, and
+        // this element always draws it.
+        let cursor = cursor_from_content(
+            snap.content.cursor,
+            true,
+            self.theme.cursor.opacity(0.5),
+            CursorShape::Block,
+            &self.theme,
+        )
+        .map(|mut c| {
+            c.shape = CursorShape::Block;
+            c.text = None;
+            c
+        });
         Some(layout_from_snapshot(LayoutInputs {
             cells: snap.content.cells.clone(),
-            // No cursor: a thumbnail is not focused, and a blinking or hollow
-            // cursor in a 5px cell reads as noise rather than as a signal.
-            cursor: None,
+            cursor,
             // Selection, copy mode, and search belong to the live pane.
             selection_range: None,
             copy_mode_cursor: None,
@@ -257,6 +306,9 @@ impl Element for TerminalThumbnail {
                 window,
             );
             paint::text::paint_text_runs(&layout, &geom, &base_font, font_size, window, cx);
+            // The dim block cursor built in prepaint. Unconditional: there is
+            // no blink phase here.
+            paint::cursor::paint_cursor(&layout, &geom, &base_font, font_size, window, cx);
         });
         // Deliberately not painted: selection, search highlights, hyperlink
         // underlines, IME preedit, the scrollbar and its match rail, and Kitty
@@ -330,19 +382,65 @@ mod tests {
         assert_eq!(snap.last_visible_row, snap.content.rows as i32);
     }
 
-    /// 9 px is above the quantization floor: `round(9 * 0.6) = 5` and
-    /// `round(9 * 1.2) = 11`, so a 320x132 band is exactly 64 columns by 12
-    /// rows. Below ~4 px cell width the rounding dominates and columns drift,
-    /// which is why the design crops rather than scaling the whole grid.
+    /// 9 px is above the quantization floor at the DEFAULT multipliers:
+    /// `round(9 * 0.6) = 5` and `round(9 * 1.2) = 11`, so a 320x132 band is
+    /// exactly 64 columns by 12 rows. Below ~4 px cell width the rounding
+    /// dominates and columns drift, which is why the design crops rather than
+    /// scaling the whole grid.
+    ///
+    /// The multipliers are config-driven (`settings.cell_width` /
+    /// `settings.line_height`), so this test pins the band against the
+    /// defaults explicitly rather than reading the developer's own config
+    /// through `cached_font_config()`.
     #[test]
     fn the_thumbnail_band_is_a_whole_number_of_cells() {
-        let dims = thumbnail_cell_dimensions();
+        use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
+
+        let defaults = FontSettings {
+            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            size: 13.0,
+            line_height: DEFAULT_LINE_HEIGHT,
+            cell_width: DEFAULT_CELL_WIDTH,
+        };
+        let dims = thumbnail_cell_dimensions_for(&defaults);
         assert_eq!(f32::from(dims.cell_width), 5.0);
         assert_eq!(f32::from(dims.line_height), 11.0);
         assert_eq!(THUMBNAIL_BAND_W / f32::from(dims.cell_width), 64.0);
         assert_eq!(
             THUMBNAIL_BAND_H / f32::from(dims.line_height),
             THUMBNAIL_ROWS as f32
+        );
+    }
+
+    #[test]
+    fn a_taller_line_height_crops_fewer_rows_so_the_prompt_stays_in_the_band() {
+        // PR #354 review: the band is fixed at 132 px. At the default 1.2 the
+        // crop is the 12 rows the constant names; at the 2.5 ceiling a row is
+        // 23 px, so only five fit, and cropping five from the bottom keeps the
+        // prompt row and the cursor inside the band instead of below it.
+        use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
+
+        let mut settings = FontSettings {
+            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            size: 13.0,
+            line_height: DEFAULT_LINE_HEIGHT,
+            cell_width: DEFAULT_CELL_WIDTH,
+        };
+        assert_eq!(
+            thumbnail_rows_for(&thumbnail_cell_dimensions_for(&settings)),
+            THUMBNAIL_ROWS
+        );
+        settings.line_height = 2.5;
+        let dims = thumbnail_cell_dimensions_for(&settings);
+        let rows = thumbnail_rows_for(&dims);
+        assert_eq!(rows, 5);
+        assert!(
+            rows as f32 * f32::from(dims.line_height) <= THUMBNAIL_BAND_H,
+            "every cropped row fits the band"
+        );
+        assert!(
+            (rows + 1) as f32 * f32::from(dims.line_height) > THUMBNAIL_BAND_H,
+            "one more row would not"
         );
     }
 

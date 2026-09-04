@@ -52,6 +52,10 @@ pub struct PaneFlowConfig {
     /// through `App::set_reduce_motion`, so it hot-reloads.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub reduce_motion: Option<bool>,
+    /// What the workspaces rail shows beyond a row's name. See [`SidebarShow`].
+    /// Everything off is the rail as it ships.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub sidebar_show: SidebarShow,
     /// Issue #107: order the workspace sidebar automatically - pinned first,
     /// then active, then inactive, alphabetically within each group - instead
     /// of keeping the order the user dragged rows into. `None`/`false` keeps
@@ -331,6 +335,29 @@ pub struct PaneFlowConfig {
         deserialize_with = "lenient_value_or_default"
     )]
     pub tool_permissions: HashMap<String, ToolPermissionsEntry>,
+}
+
+/// What the workspaces rail shows beyond a row's name and its activity.
+///
+/// Shaped as an object so later switches (a branch line, a diffstat, an
+/// indent guide) land as sibling keys rather than as more top-level booleans.
+/// Everything off is the rail as it ships: no lookup runs, nothing is drawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SidebarShow {
+    /// Mark a branch that already has a pull request: its icon becomes the
+    /// pull-request glyph, in GitHub's color for the request's state. Needs
+    /// the `gh` CLI, and answers for GitHub remotes only. `None` is `false`,
+    /// and while it is off no `gh` process is ever spawned (issue #350).
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub pr: Option<bool>,
+}
+
+impl SidebarShow {
+    /// Whether the pull-request marker is on. Absent means off.
+    pub fn pr_enabled(&self) -> bool {
+        self.pr.unwrap_or(false)
+    }
 }
 
 impl PaneFlowConfig {

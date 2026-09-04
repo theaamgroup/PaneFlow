@@ -96,6 +96,18 @@
       "description": "Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. Default false.",
       "default": false
     },
+    "sidebar_show": {
+      "type": ["object", "null"],
+      "description": "What the workspaces rail shows beyond a row's name. Everything off is the default rail.",
+      "additionalProperties": false,
+      "properties": {
+        "pr": {
+          "type": ["boolean", "null"],
+          "description": "Mark a branch that already has a pull request: its icon becomes the pull-request glyph, colored by the request's state. Needs the 'gh' CLI (installed and authenticated), and answers for GitHub remotes only. While off, no 'gh' process is ever spawned. Default false.",
+          "default": false
+        }
+      }
+    },
     "workspace_auto_sort": {
       "type": ["boolean", "null"],
       "description": "Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. Default false (manual, drag-ordered).",

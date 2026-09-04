@@ -712,6 +712,25 @@ impl PaneFlowApp {
                     self.show_toast("Worktree is still being retired", cx);
                     return;
                 }
+                let Some(edge) = edge else {
+                    // EP-002 US-007: a center drop opens the resumed session
+                    // in a NEW WORKSPACE TAB. The pane is mono-surface, so
+                    // there is no strip to append to and overwriting the
+                    // target's live terminal is not an option. Issue #334
+                    // lifted the placement into `open_agent_tab_at_cwd`,
+                    // which also binds the tab to the session's worktree
+                    // (#347). The resume command is skipped when the id
+                    // fails the allow-list (defence-in-depth), and the agent
+                    // is declared only alongside it.
+                    let resume = crate::app::sessions_sidebar::resume_command(
+                        agent,
+                        &session_id,
+                        &self.cached_config,
+                    );
+                    let declared = resume.is_some().then(|| agent.terminal_agent());
+                    self.open_agent_tab_at_cwd(ws_idx, cwd_path, resume, declared, cx);
+                    return;
+                };
                 let term = cx.new(|cx| {
                     TerminalView::with_cwd_and_profile(
                         ws_id,
@@ -733,37 +752,21 @@ impl PaneFlowApp {
                     term.update(cx, |view, _cx| view.declare_agent(agent.terminal_agent()));
                 }
 
-                match edge {
-                    Some(edge) => {
-                        // `create_pane` wires the app-level CWD/port subscription
-                        // and the pane-event subscription (mirrors `DropSplit`).
-                        let new_pane = self.create_pane(term, ws_id, cx);
-                        let inserted = if let Some(root) = self.workspaces[ws_idx]
-                            .tab_mut(tab_idx)
-                            .and_then(|tab| tab.root.as_mut())
-                        {
-                            split_pane_at_edge(root, &target, edge, new_pane.clone())
-                        } else {
-                            false
-                        };
-                        if !inserted {
-                            return;
-                        }
-                        self.pending_pane_focus = Some(new_pane);
-                    }
-                    None => {
-                        // EP-002 US-007: a center drop opens the resumed
-                        // session in a NEW WORKSPACE TAB. The pane is
-                        // mono-surface, so there is no strip to append to and
-                        // overwriting the target's live terminal is not an
-                        // option.
-                        let new_pane = self.create_pane(term, ws_id, cx);
-                        if !self.open_pane_in_new_workspace_tab(ws_idx, new_pane.clone(), cx) {
-                            return;
-                        }
-                        self.pending_pane_focus = Some(new_pane);
-                    }
+                // `create_pane` wires the app-level CWD/port subscription
+                // and the pane-event subscription (mirrors `DropSplit`).
+                let new_pane = self.create_pane(term, ws_id, cx);
+                let inserted = if let Some(root) = self.workspaces[ws_idx]
+                    .tab_mut(tab_idx)
+                    .and_then(|tab| tab.root.as_mut())
+                {
+                    split_pane_at_edge(root, &target, edge, new_pane.clone())
+                } else {
+                    false
+                };
+                if !inserted {
+                    return;
                 }
+                self.pending_pane_focus = Some(new_pane);
                 self.save_session(cx);
                 cx.notify();
             }
@@ -1886,6 +1889,11 @@ impl PaneFlowApp {
                             if changed && !refreshed_diff {
                                 cx.notify();
                             }
+                            // The branch just landed, so the pull-request
+                            // marker (#350) can be asked for now rather than
+                            // after the 30 s fallback tick (PR #354 review).
+                            // Gated on the switch inside; a no-op while off.
+                            app.refresh_pull_requests(cx);
                         }
                     })
                 });
@@ -2092,6 +2100,42 @@ mod tests {
         assert!(
             handler[zoom_guard..terminal].contains("Unzoom before splitting panes"),
             "drop refusal must use the standard split toast"
+        );
+    }
+
+    #[test]
+    fn session_drop_center_band_opens_a_new_tab_at_the_session_cwd() {
+        // Issue #334 lifted the center-band arm into
+        // `open_agent_tab_at_cwd`: a center drop still lands in a NEW
+        // workspace tab at the session cwd, with the resume command, before
+        // the edge arm ever creates its own terminal.
+        let src = include_str!("event_handlers.rs");
+        let handler = src
+            .split("pane::PaneEvent::DropSessionSplit {")
+            .nth(1)
+            .and_then(|rest| rest.split("pane::PaneEvent::DropPaneMove {").next())
+            .expect("DropSessionSplit handler");
+        let center = handler
+            .find("self.open_agent_tab_at_cwd(ws_idx, cwd_path, resume, declared, cx)")
+            .expect("center band goes through the lifted helper");
+        let terminal = handler
+            .find("let term = cx.new")
+            .expect("edge arm terminal creation site");
+        assert!(
+            center < terminal,
+            "the center band must return before the edge arm spawns: {handler}"
+        );
+        assert!(
+            handler[..center].contains("let Some(edge) = edge else {"),
+            "only an edgeless drop takes the helper: {handler}"
+        );
+        assert!(
+            handler[..center].contains("resume_command("),
+            "the center band still resumes the dropped session: {handler}"
+        );
+        assert!(
+            !handler.contains("open_pane_in_new_workspace_tab("),
+            "the handler must not keep a second inline placement: {handler}"
         );
     }
 

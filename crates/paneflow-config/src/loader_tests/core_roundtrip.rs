@@ -25,6 +25,7 @@ fn test_serialization_roundtrip() {
         macos_chrome_material: None,
         unfocused_pane_opacity: None,
         reduce_motion: None,
+        sidebar_show: SidebarShow::default(),
         workspace_auto_sort: None,
         workspace_zed_menu_visible: None,
         workspace_cursor_menu_visible: None,
