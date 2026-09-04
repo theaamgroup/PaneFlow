@@ -297,14 +297,19 @@ pub(crate) fn cleanup_hook_config_file(
         let empty = root.as_object().is_some_and(serde_json::Map::is_empty);
         let owned_file = created_file || lease_created_file;
         if empty && owned_file {
-            let _ = std::fs::remove_file(path);
+            std::fs::remove_file(path)?;
         } else {
             write_json_atomic(path, &root)?;
         }
         Ok(empty && owned_file && created_directory)
     })
-    .ok()
-    .flatten()
+    .unwrap_or_else(|error| {
+        eprintln!(
+            "paneflow-shim: could not clean up {}: {error}",
+            safe_path_display(path)
+        );
+        None
+    })
     .unwrap_or(false);
     if remove_directory {
         let _ = std::fs::remove_dir(directory);

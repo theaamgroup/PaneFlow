@@ -451,3 +451,45 @@ fn merge_does_not_clobber_user_hooks_in_other_events() {
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["matcher"], json!("Bash"));
 }
+
+// Issue #367: when the managed file cannot be deleted, cleanup must not
+// report a successful removal - otherwise it goes on to remove the
+// directory while the PaneFlow hooks are still on disk.
+#[test]
+fn cleanup_keeps_the_directory_when_the_file_delete_fails() {
+    use crate::hooks::{cleanup_hook_config_file, HookLease};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn drop_every_key(root: &mut serde_json::Value) {
+        if let Some(map) = root.as_object_mut() {
+            map.clear();
+        }
+    }
+
+    let td = tempfile::TempDir::new().unwrap();
+    let file_dir = td.path().join("locked");
+    std::fs::create_dir_all(&file_dir).unwrap();
+    let path = file_dir.join("settings.local.json");
+    std::fs::write(&path, r#"{"hooks":{}}"#).unwrap();
+    let directory = td.path().join("created");
+    std::fs::create_dir_all(&directory).unwrap();
+
+    let mut lease = HookLease::acquire(&path).unwrap();
+    // A read-only parent directory makes `remove_file` fail with EACCES.
+    std::fs::set_permissions(&file_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    cleanup_hook_config_file(&path, &directory, true, true, drop_every_key, &mut lease);
+
+    let file_survived = path.exists();
+    let directory_survived = directory.exists();
+    std::fs::set_permissions(&file_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        file_survived,
+        "the delete must actually fail for this test to mean anything"
+    );
+    assert!(
+        directory_survived,
+        "a failed file delete must not be reported as a successful removal"
+    );
+}
