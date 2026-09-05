@@ -428,15 +428,41 @@ fn debug_durable_install_refusal(command: &str) -> Option<String> {
     }
 }
 
+/// Issue #398: scrubs user-identifying filesystem paths (`/Users/<name>/...`)
+/// out of free-text crash strings before an event leaves the machine.
+/// `send_default_pii(false)` keeps Sentry's own PII defaults off, but a
+/// panic message or exception value can still embed a path like
+/// `/Users/alice/Projects/paneflow/src/foo.rs`, which is username-bearing
+/// even with PII off.
+fn redact_home_dir_paths(text: &str) -> String {
+    static USERS_PATH: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"/Users/[^/\s]+").expect("static regex"));
+    USERS_PATH
+        .replace_all(text, "/Users/<redacted>")
+        .into_owned()
+}
+
 /// Issue #204: crash-report client options. One construction site so the
 /// PII policy cannot drift: `send_default_pii` stays OFF, so events never
 /// carry the IP address / request / user defaults Sentry would otherwise
-/// attach.
+/// attach. Issue #398 adds `before_send` so free-text panic/exception
+/// messages get their home-directory paths redacted too.
 fn crash_reporting_options() -> sentry::ClientOptions {
     sentry::ClientOptions::new()
         .maybe_release(sentry::release_name!())
         .send_default_pii(false)
         .server_name("paneflow")
+        .before_send(|mut event| {
+            if let Some(message) = event.message.as_deref() {
+                event.message = Some(redact_home_dir_paths(message));
+            }
+            for exception in &mut event.exception.values {
+                if let Some(value) = exception.value.as_deref() {
+                    exception.value = Some(redact_home_dir_paths(value));
+                }
+            }
+            Some(event)
+        })
 }
 
 /// Top-level `--help`/`-h` text. Built as a function so tests can assert the
@@ -735,6 +761,58 @@ mod crash_reporting_tests {
         assert!(
             !source.contains(&pii_on),
             "crash reporting must never enable send_default_pii"
+        );
+    }
+
+    #[test]
+    fn crash_reporting_before_send_redacts_home_directory() {
+        // Issue #398: `send_default_pii(false)` alone does not stop a
+        // free-text panic or exception message from carrying a
+        // username-bearing path (e.g. a panic firing from a file under
+        // `/Users/<name>/...`). The `before_send` hook must scrub that
+        // path out of both the top-level message and every exception value
+        // before the event would leave the machine.
+        let options = crash_reporting_options();
+        let before_send = options
+            .before_send
+            .clone()
+            .expect("crash_reporting_options must install a before_send hook");
+
+        let mut event = sentry::protocol::Event::default();
+        event.message = Some(
+            "panicked at src-app/src/foo.rs:42: /Users/alice/Projects/paneflow/paneflow.json \
+             not found"
+                .to_string(),
+        );
+        event.exception.values.push(sentry::protocol::Exception {
+            ty: "panic".to_string(),
+            value: Some(
+                "/Users/alice/Library/Application Support/paneflow/paneflow.json: No such \
+                 file or directory"
+                    .to_string(),
+            ),
+            ..Default::default()
+        });
+
+        let redacted = before_send(event).expect("before_send must not drop the event");
+
+        let message = redacted.message.expect("message must survive redaction");
+        assert!(
+            !message.contains("alice"),
+            "home directory must be redacted from the message: {message}"
+        );
+        assert!(
+            message.contains("/Users/<redacted>/"),
+            "redacted message should keep the /Users/<redacted> marker: {message}"
+        );
+
+        let exception_value = redacted.exception.values[0]
+            .value
+            .clone()
+            .expect("exception value must survive redaction");
+        assert!(
+            !exception_value.contains("alice"),
+            "home directory must be redacted from the exception value: {exception_value}"
         );
     }
 
