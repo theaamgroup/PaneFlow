@@ -664,8 +664,13 @@ fn enable_codex_feature_flag_ignores_hooks_key_outside_features() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains(CODEX_TOML_MARKER));
     assert!(content.contains("[features]"));
+    assert_eq!(
+        content.matches("hooks = true").count(),
+        2,
+        "mcp block keeps its hooks key and [features] must add one:\n{content}"
+    );
     assert!(
-        content.contains("hooks = true"),
+        content.contains("[features]\nhooks = true\n"),
         "features block must still set hooks = true:\n{content}"
     );
 }
@@ -686,6 +691,42 @@ fn enable_codex_feature_flag_abstains_on_existing_features_section() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(!content.contains(CODEX_TOML_MARKER));
     assert!(!content.contains("hooks = true"));
+}
+
+#[test]
+fn enable_codex_feature_flag_recognizes_equivalent_features_headers() {
+    for header in ["[ features ]", "[\"features\"]", "['features']"] {
+        let td = tempfile::TempDir::new().unwrap();
+        let with_hooks = td.path().join("with-hooks.toml");
+        std::fs::write(&with_hooks, format!("{header}\nhooks = true\n")).unwrap();
+        assert!(
+            !enable_codex_feature_flag(&with_hooks).unwrap(),
+            "{header} with hooks = true must skip install"
+        );
+        let with_hooks_content = std::fs::read_to_string(&with_hooks).unwrap();
+        assert!(
+            !with_hooks_content.contains(CODEX_TOML_MARKER),
+            "{header} with hooks must be left alone:\n{with_hooks_content}"
+        );
+        assert_eq!(
+            with_hooks_content.matches("[features]").count(),
+            0,
+            "{header} must not gain a second [features]:\n{with_hooks_content}"
+        );
+
+        let without_hooks = td.path().join("without-hooks.toml");
+        std::fs::write(&without_hooks, format!("{header}\nother_flag = false\n")).unwrap();
+        assert!(
+            enable_codex_feature_flag(&without_hooks).is_err(),
+            "{header} without hooks must abstain rather than append [features]"
+        );
+        let without_hooks_content = std::fs::read_to_string(&without_hooks).unwrap();
+        assert_eq!(
+            without_hooks_content,
+            format!("{header}\nother_flag = false\n"),
+            "{header} without hooks must be untouched"
+        );
+    }
 }
 
 #[test]

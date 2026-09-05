@@ -192,7 +192,7 @@ fn load_from_path(path: &Path) -> MarkdownState {
 
     let file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(0x4)
+        .custom_flags(libc::O_NONBLOCK)
         .open(path)
     {
         Ok(file) => file,

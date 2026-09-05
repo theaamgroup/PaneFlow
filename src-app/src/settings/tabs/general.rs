@@ -520,7 +520,7 @@ mod tests {
         assert!(super::shell_preset_eq("/opt/homebrew/bin/fish", "fish"));
         assert!(super::shell_preset_eq("fish", "fish"));
         assert!(
-            !"fish".contains('/'),
+            include_str!("general.rs").contains(r#"("fish", "fish".to_string())"#),
             "the Settings fish chip must persist a bare name so configured_shell_if_usable PATH-searches"
         );
     }

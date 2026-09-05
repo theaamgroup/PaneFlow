@@ -254,7 +254,7 @@ pub(super) fn read_capped(path: &std::path::Path, limit: u64) -> std::io::Result
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(0x4)
+        .custom_flags(libc::O_NONBLOCK)
         .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {

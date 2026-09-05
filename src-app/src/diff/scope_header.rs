@@ -11,7 +11,7 @@
 
 use crate::PaneFlowApp;
 use crate::diff::DiffScope;
-use crate::settings::components::{menu_surface, select_item};
+use crate::settings::components::{menu_surface, select_option};
 use crate::ui_primitives::AnimatedHoverExt;
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, InteractiveElement, IntoElement, ParentElement,
@@ -33,7 +33,6 @@ impl PaneFlowApp {
             .id("diff-scope-trigger")
             .role(Role::ComboBox)
             .aria_expanded(open)
-            .aria_label("Diff scope")
             .tab_index(0)
             .flex_none()
             .flex()
@@ -71,6 +70,7 @@ impl PaneFlowApp {
 
         let popover: Option<AnyElement> = if open {
             let mut menu = menu_surface(div().id("diff-scope-popover"), ui)
+                .role(Role::ListBox)
                 .occlude()
                 .absolute()
                 .left(px(8.))
@@ -88,7 +88,7 @@ impl PaneFlowApp {
             for scope in DiffScope::all() {
                 let is_active = scope == active;
                 menu = menu.child(
-                    select_item(
+                    select_option(
                         SharedString::from(format!("diff-scope-{}", scope.label())),
                         is_active,
                         ui,
@@ -155,7 +155,6 @@ impl PaneFlowApp {
             .id("diff-project-trigger")
             .role(Role::ComboBox)
             .aria_expanded(project_open)
-            .aria_label("Diff project")
             .tab_index(0)
             .flex_none()
             .flex()
@@ -195,6 +194,7 @@ impl PaneFlowApp {
 
         let project_popover: Option<AnyElement> = if project_open {
             let mut menu = menu_surface(div().id("diff-project-popover"), ui)
+                .role(Role::ListBox)
                 .occlude()
                 .absolute()
                 .left(px(0.))
@@ -237,7 +237,7 @@ impl PaneFlowApp {
                 for (idx, name, branch) in repo_workspaces {
                     let is_active = idx == self.active_idx;
                     menu = menu.child(
-                        select_item(
+                        select_option(
                             SharedString::from(format!("diff-project-{idx}")),
                             is_active,
                             ui,
@@ -318,7 +318,6 @@ impl PaneFlowApp {
                         .id("diff-branches-trigger")
                         .role(Role::ComboBox)
                         .aria_expanded(branches_open)
-                        .aria_label("Diff branches")
                         .tab_index(0)
                         .flex_none()
                         .flex()
@@ -380,6 +379,7 @@ impl PaneFlowApp {
                             }));
                         let mut menu = div()
                             .id("diff-branches-popover-list")
+                            .role(Role::ListBox)
                             .flex()
                             .flex_col()
                             .gap(px(1.))
@@ -408,7 +408,7 @@ impl PaneFlowApp {
                                     .map(|p| p.to_string_lossy().into_owned())
                                     .unwrap_or_default();
                                 menu = menu.child(
-                                    select_item(
+                                    select_option(
                                         SharedString::from(format!("diff-branch-opt-{path_str}")),
                                         chosen,
                                         ui,

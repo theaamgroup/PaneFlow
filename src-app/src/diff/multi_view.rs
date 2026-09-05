@@ -259,10 +259,19 @@ impl Render for MultiRepoDiffView {
                 )
             });
 
+        let mut tab_list = div()
+            .id("multi-diff-tablist")
+            .role(Role::TabList)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.))
+            .h_full();
+
         for (i, g) in self.groups.iter().enumerate() {
             let active = i == self.selected;
             let resting_bg = ui.subtle.opacity(0.0);
-            tabs = tabs.child(
+            tab_list = tab_list.child(
                 // Flat browser-style tab: accent underline + content-bg + bold
                 // when active; muted + transparent (border blends into the bar)
                 // otherwise. The 2px bottom border is always present so the row
@@ -298,6 +307,7 @@ impl Render for MultiRepoDiffView {
                     ),
             );
         }
+        tabs = tabs.child(tab_list);
 
         let body: AnyElement = self
             .groups
@@ -326,6 +336,13 @@ impl Render for MultiRepoDiffView {
             .flex_col()
             .bg(ui.base)
             .child(tabs)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .id("multi-diff-tabpanel")
+                    .flex_1()
+                    .min_h_0()
+                    .role(Role::TabPanel)
+                    .child(body),
+            )
     }
 }
