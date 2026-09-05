@@ -180,6 +180,14 @@ impl PaneFlowApp {
         else {
             return;
         };
+        if review
+            && checkout
+                .as_ref()
+                .is_ok_and(|checkout| checkout.head.is_none())
+        {
+            self.show_toast("Create the first commit before opening a branch diff", cx);
+            return;
+        }
         let location = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             ws.tabs()
                 .iter()
@@ -202,8 +210,14 @@ impl PaneFlowApp {
                     branch: checkout.branch,
                     workspace_id: Some(ws_id),
                 };
-                let diff =
-                    cx.new(|cx| crate::diff::DiffView::new(checkout.root, vec![worktree], cx));
+                let diff = cx.new(|cx| {
+                    crate::diff::DiffView::with_base(
+                        checkout.root,
+                        vec![worktree],
+                        checkout.base.or(checkout.head),
+                        cx,
+                    )
+                });
                 let pane = self.create_pane_with_existing_surface(
                     crate::pane::PaneSurface::Diff(diff),
                     ws_id,
@@ -359,20 +373,23 @@ impl PaneFlowApp {
                                     cx.stop_propagation();
                                 })),
                         )
-                        .when(self.cached_config.review_view_enabled(), |actions| {
-                            actions.child(
-                                div()
-                                    .id(("review-diff", index))
-                                    .cursor_pointer()
-                                    .child("Review diff")
-                                    .on_click(cx.listener(
-                                        move |app, _: &ClickEvent, window, cx| {
-                                            app.visit_review_row(index, true, window, cx);
-                                            cx.stop_propagation();
-                                        },
-                                    )),
-                            )
-                        })
+                        .when(
+                            self.cached_config.review_view_enabled() && c.head.is_some(),
+                            |actions| {
+                                actions.child(
+                                    div()
+                                        .id(("review-diff", index))
+                                        .cursor_pointer()
+                                        .child("Review diff")
+                                        .on_click(cx.listener(
+                                            move |app, _: &ClickEvent, window, cx| {
+                                                app.visit_review_row(index, true, window, cx);
+                                                cx.stop_propagation();
+                                            },
+                                        )),
+                                )
+                            },
+                        )
                         .child(
                             div()
                                 .id(("review-context", index))

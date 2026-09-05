@@ -53,8 +53,9 @@ requested, and is limited to 64 distinct starting directories per refresh.
 
 Overlapping changed paths are listed for separate worktrees of the same repo.
 These indicate potential coordination needs; they do not prove a merge conflict.
-Rows offer Open task, Review diff, Copy handoff, and a link to the PR and its
-checks. Arrow keys select rows; Enter opens the task and R opens its diff.
+Rows offer Open task, Copy handoff, and a link to the PR and its checks.
+When Review is enabled and a commit exists, Review diff opens against the
+inspected base. Arrow keys select rows; Enter opens the task and R opens its diff.
 GitHub information uses your existing `gh` authentication. Local repository
 information remains available if GitHub cannot be reached.
 
