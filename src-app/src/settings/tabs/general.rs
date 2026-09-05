@@ -90,7 +90,7 @@ impl PaneFlowApp {
             ("zsh", "/bin/zsh".to_string()),
             ("bash", "/bin/bash".to_string()),
             ("sh", "/bin/sh".to_string()),
-            ("fish", "/usr/bin/fish".to_string()),
+            ("fish", "fish".to_string()),
         ];
 
         let current_shell = config.default_shell.clone().unwrap_or_default();
@@ -517,5 +517,11 @@ mod tests {
         assert!(super::shell_preset_eq("bash", "/bin/bash"));
         assert!(super::shell_preset_eq("sh", "/bin/sh"));
         assert!(super::shell_preset_eq("fish", "/usr/bin/fish"));
+        assert!(super::shell_preset_eq("/opt/homebrew/bin/fish", "fish"));
+        assert!(super::shell_preset_eq("fish", "fish"));
+        assert!(
+            !"fish".contains('/'),
+            "the Settings fish chip must persist a bare name so configured_shell_if_usable PATH-searches"
+        );
     }
 }

@@ -572,22 +572,19 @@ mod tests {
         let outcome = terminal
             .compress(CompressionMode::Incremental)
             .expect("incremental pass");
-        assert!(matches!(
+        assert_ne!(
             outcome,
-            CompressionOutcome::Complete
-                | CompressionOutcome::Pending
-                | CompressionOutcome::Unsupported
-        ));
+            CompressionOutcome::Unsupported,
+            "this fixture must support compression"
+        );
 
-        if outcome != CompressionOutcome::Unsupported {
-            let mut passes = 0;
-            let mut outcome = outcome;
-            while outcome == CompressionOutcome::Pending && passes < 1000 {
-                outcome = terminal.compress(CompressionMode::Full).expect("full pass");
-                passes += 1;
-            }
-            assert_eq!(outcome, CompressionOutcome::Complete);
+        let mut passes = 0;
+        let mut outcome = outcome;
+        while outcome == CompressionOutcome::Pending && passes < 1000 {
+            outcome = terminal.compress(CompressionMode::Full).expect("full pass");
+            passes += 1;
         }
+        assert_eq!(outcome, CompressionOutcome::Complete);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window, div, prelude::*, px,
+    ParentElement, Render, Role, SharedString, Styled, Window, div, prelude::*, px,
 };
 
 use super::DiffWorktree;
@@ -270,6 +270,8 @@ impl Render for MultiRepoDiffView {
                 // icon, no worktree-count badge (kept deliberately minimal).
                 div()
                     .id(SharedString::from(format!("multi-diff-tab-{i}")))
+                    .role(Role::Tab)
+                    .aria_selected(active)
                     .flex_none()
                     .flex()
                     .flex_row()

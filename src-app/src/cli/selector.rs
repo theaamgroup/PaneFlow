@@ -53,6 +53,9 @@ fn parse_selector(raw: &str) -> Result<Selector<'_>, CliError> {
         }
         return Ok(Selector::Cwd(rest));
     }
+    if raw.trim().is_empty() {
+        return Err(CliError::target("name selector needs a non-empty name"));
+    }
     if let Ok(id) = raw.parse::<u64>() {
         return Ok(Selector::Id(id));
     }
@@ -244,6 +247,18 @@ mod tests {
         );
         assert_eq!(
             parse_selector("cwd:").unwrap_err().code,
+            super::super::EXIT_TARGET
+        );
+    }
+
+    #[test]
+    fn empty_name_selectors_are_rejected() {
+        assert_eq!(
+            parse_selector("").unwrap_err().code,
+            super::super::EXIT_TARGET
+        );
+        assert_eq!(
+            parse_selector("   ").unwrap_err().code,
             super::super::EXIT_TARGET
         );
     }

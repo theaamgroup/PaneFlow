@@ -138,16 +138,12 @@ impl OpenCodePluginGuard {
     fn sweep_orphan(directory: &Path) {
         let plugin_path = directory.join("plugins").join(PANEFLOW_TS_BASENAME);
         let config_path = directory.join("opencode.json");
-        let _ = with_orphan_lease(&plugin_path, &plugin_path, |created_plugin| {
-            remove_created_file(&plugin_path, created_plugin)
-        });
-        let _ = with_orphan_lease(&config_path, &config_path, |created_config| {
+        let config_ok = with_orphan_lease(&config_path, &config_path, |created_config| {
             let Some(content) = read_optional_text(&config_path)? else {
                 return Ok(());
             };
-            let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
-                return Ok(());
-            };
+            let mut root = serde_json::from_str::<serde_json::Value>(&content)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             let before = root.clone();
             remove_opencode_plugin_entry(&mut root)?;
             if root == before {
@@ -159,26 +155,25 @@ impl OpenCodePluginGuard {
                 write_json_atomic(&config_path, &root)
             }
         });
+        if config_ok.is_ok() {
+            let _ = with_orphan_lease(&plugin_path, &plugin_path, |created_plugin| {
+                remove_created_file(&plugin_path, created_plugin)
+            });
+        }
     }
 }
 
 impl Drop for OpenCodePluginGuard {
     fn drop(&mut self) {
-        let _ = with_last_lease(
-            &self.plugin_path,
-            &mut self.plugin_lease,
-            |created_plugin| remove_created_file(&self.plugin_path, created_plugin),
-        );
-        let _ = with_last_lease(
+        let config_ok = with_last_lease(
             &self.config_path,
             &mut self.config_lease,
             |lease_created_config| {
                 let Some(content) = read_optional_text(&self.config_path)? else {
                     return Ok(());
                 };
-                let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
-                    return Ok(());
-                };
+                let mut root = serde_json::from_str::<serde_json::Value>(&content)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
                 remove_opencode_plugin_entry(&mut root)?;
                 if (self.created_config || lease_created_config)
                     && root.as_object().is_some_and(serde_json::Map::is_empty)
@@ -189,6 +184,13 @@ impl Drop for OpenCodePluginGuard {
                 }
             },
         );
+        if config_ok.is_ok() {
+            let _ = with_last_lease(
+                &self.plugin_path,
+                &mut self.plugin_lease,
+                |created_plugin| remove_created_file(&self.plugin_path, created_plugin),
+            );
+        }
     }
 }
 

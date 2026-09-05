@@ -185,12 +185,21 @@ fn disable_codex_feature_flag_unlocked(path: &Path) -> std::io::Result<()> {
 }
 
 fn has_hooks_flag(content: &str) -> bool {
+    let mut in_features = false;
     content.lines().any(|line| {
         let line = line.trim_start();
         if line.starts_with('#') {
             return false;
         }
         let assignment = line.split_once('#').map_or(line, |(value, _)| value);
+        let trimmed = assignment.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_features = trimmed == "[features]";
+            return false;
+        }
+        if !in_features {
+            return false;
+        }
         assignment.split_once('=').is_some_and(|(key, value)| {
             matches!(key.trim(), "hooks" | "codex_hooks") && value.trim() == "true"
         })

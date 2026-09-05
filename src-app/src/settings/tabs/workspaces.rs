@@ -1900,6 +1900,7 @@ fn icon_button(
     primary: bool,
     enabled: bool,
 ) -> AnimatedHover {
+    let label = label.into();
     let bg = if primary { switch_blue() } else { ui.subtle };
     let fg = if primary { gpui::white() } else { ui.text };
     let disabled_bg = ui.subtle;
@@ -1914,6 +1915,8 @@ fn icon_button(
     };
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
         .flex()
         .flex_row()
         .items_center()
@@ -1926,6 +1929,7 @@ fn icon_button(
         .font_weight(FontWeight::MEDIUM)
         .text_color(if enabled { fg } else { disabled_fg })
         .animated_hover_bg(resting_background, hover_background)
+        .a11y_disabled(!enabled)
         .child(
             svg()
                 .size(px(13.))
@@ -1933,7 +1937,7 @@ fn icon_button(
                 .path(icon)
                 .text_color(if enabled { fg } else { disabled_fg }),
         )
-        .child(label.into())
+        .child(label)
 }
 
 /// Accessible name and tooltip of a template pane's trash button (issue #340:
@@ -1975,6 +1979,7 @@ fn destructive_icon_button(
     ui: crate::theme::UiColors,
     enabled: bool,
 ) -> AnimatedHover {
+    let label = label.into();
     let bg = apple_red();
     let enabled_hover_background = Hsla {
         l: (bg.l - 0.05).max(0.0),
@@ -1989,6 +1994,8 @@ fn destructive_icon_button(
     };
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
         .flex()
         .flex_row()
         .items_center()
@@ -2001,6 +2008,7 @@ fn destructive_icon_button(
         .font_weight(FontWeight::MEDIUM)
         .text_color(if enabled { fg } else { ui.muted })
         .animated_hover_bg(resting_background, hover_background)
+        .a11y_disabled(!enabled)
         .child(
             svg()
                 .size(px(13.))
@@ -2008,7 +2016,7 @@ fn destructive_icon_button(
                 .path(icon)
                 .text_color(if enabled { fg } else { ui.muted }),
         )
-        .child(label.into())
+        .child(label)
 }
 
 fn save_icon_button(
@@ -2036,8 +2044,11 @@ fn save_icon_button(
         resting_background
     };
 
+    let label = label.into();
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
         .flex()
         .flex_row()
         .items_center()
@@ -2050,6 +2061,7 @@ fn save_icon_button(
         .font_weight(FontWeight::MEDIUM)
         .text_color(if enabled { fg } else { ui.muted })
         .animated_hover_bg(resting_background, hover_background)
+        .a11y_disabled(!enabled)
         .child(
             svg()
                 .size(px(13.))
@@ -2057,7 +2069,7 @@ fn save_icon_button(
                 .path(icon)
                 .text_color(if enabled { fg } else { ui.muted }),
         )
-        .child(label.into())
+        .child(label)
 }
 
 fn pane_kind_chip(

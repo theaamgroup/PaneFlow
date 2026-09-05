@@ -151,6 +151,9 @@ impl PiHeader {
         if value.get("type").and_then(Value::as_str) != Some("session") {
             return None;
         }
+        if value.get("version").and_then(Value::as_u64) != Some(3) {
+            return None;
+        }
         let id = value.get("id").and_then(Value::as_str)?.to_string();
         let cwd = value.get("cwd").and_then(Value::as_str)?.to_string();
         if !crate::agent_sessions::is_valid_session_id(&id)
@@ -159,12 +162,15 @@ impl PiHeader {
         {
             return None;
         }
-        let timestamp = value
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        Some(Self { id, timestamp, cwd })
+        let timestamp = value.get("timestamp").and_then(Value::as_str)?;
+        if timestamp.is_empty() || !timestamp.contains('T') {
+            return None;
+        }
+        Some(Self {
+            id,
+            timestamp: timestamp.to_string(),
+            cwd,
+        })
     }
 }
 
@@ -385,6 +391,46 @@ mod tests {
             user_summary_from_value(&value).as_deref(),
             Some("Ship this now")
         );
+    }
+
+    #[test]
+    fn skips_header_with_non_v3_or_missing_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let v4 = dir.path().join("v4.jsonl");
+        fs::write(
+            &v4,
+            r#"{"type":"session","version":4,"id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"2026-06-29T09:10:11Z","cwd":"/repo"}"#,
+        )
+        .unwrap();
+        assert!(read_sessions_under_root(dir.path(), "/repo").0.is_empty());
+
+        let missing = dir.path().join("no-version.jsonl");
+        fs::write(
+            &missing,
+            r#"{"type":"session","id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"2026-06-29T09:10:11Z","cwd":"/repo"}"#,
+        )
+        .unwrap();
+        assert!(read_sessions_under_root(dir.path(), "/repo").0.is_empty());
+    }
+
+    #[test]
+    fn skips_header_with_missing_or_numeric_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-ts.jsonl");
+        fs::write(
+            &missing,
+            r#"{"type":"session","version":3,"id":"550e8400-e29b-41d4-a716-446655440000","cwd":"/repo"}"#,
+        )
+        .unwrap();
+        assert!(read_sessions_under_root(dir.path(), "/repo").0.is_empty());
+
+        let numeric = dir.path().join("num-ts.jsonl");
+        fs::write(
+            &numeric,
+            r#"{"type":"session","version":3,"id":"550e8400-e29b-41d4-a716-446655440000","timestamp":1,"cwd":"/repo"}"#,
+        )
+        .unwrap();
+        assert!(read_sessions_under_root(dir.path(), "/repo").0.is_empty());
     }
 
     #[test]

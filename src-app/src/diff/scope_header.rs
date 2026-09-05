@@ -15,7 +15,7 @@ use crate::settings::components::{menu_surface, select_item};
 use crate::ui_primitives::AnimatedHoverExt;
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Styled, deferred, div, prelude::*, px, svg,
+    Role, SharedString, Styled, deferred, div, prelude::*, px, svg,
 };
 
 impl PaneFlowApp {
@@ -31,6 +31,10 @@ impl PaneFlowApp {
 
         let trigger = div()
             .id("diff-scope-trigger")
+            .role(Role::ComboBox)
+            .aria_expanded(open)
+            .aria_label("Diff scope")
+            .tab_index(0)
             .flex_none()
             .flex()
             .flex_row()
@@ -149,6 +153,10 @@ impl PaneFlowApp {
 
         let project_trigger = div()
             .id("diff-project-trigger")
+            .role(Role::ComboBox)
+            .aria_expanded(project_open)
+            .aria_label("Diff project")
+            .tab_index(0)
             .flex_none()
             .flex()
             .flex_row()
@@ -308,6 +316,10 @@ impl PaneFlowApp {
                     };
                     let trigger = div()
                         .id("diff-branches-trigger")
+                        .role(Role::ComboBox)
+                        .aria_expanded(branches_open)
+                        .aria_label("Diff branches")
+                        .tab_index(0)
                         .flex_none()
                         .flex()
                         .flex_row()

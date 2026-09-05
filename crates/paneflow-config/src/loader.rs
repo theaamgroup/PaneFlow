@@ -105,7 +105,12 @@ pub fn migrate_session_from_cache(src: &Path, dest: &Path) -> std::io::Result<bo
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(src, dest)?;
+    let tmp = dest.with_extension("json.migrate-tmp");
+    std::fs::copy(src, &tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     if let Err(e) = std::fs::remove_file(src) {
         warn!(
             "migrated session to {} but could not remove {}: {e}",
@@ -188,7 +193,13 @@ pub fn read_config_string(path: &Path) -> Result<Option<String>, ConfigError> {
         }
     }
 
-    let file = match std::fs::File::open(path) {
+    let file = match {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x4)
+            .open(path)
+    } {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {

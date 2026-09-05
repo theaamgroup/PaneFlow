@@ -33,6 +33,10 @@ use crate::agent_sessions::{AssistantUsage, SessionAgent, SessionMeta, clean_ses
 /// user message under the previous cap of 256.
 const TITLE_SCAN_LIMIT: usize = 2048;
 
+/// Directory entries examined by one Claude project walk. Past this the
+/// scan stops so a hostile `projects/<slug>/` tree cannot grow without bound.
+const MAX_WALK_ENTRIES: usize = 4_096;
+
 /// Byte budget for the same scan, and the real bound: transcript lines carry
 /// whole tool results, so line 256 already sits ~600 KB into a working
 /// session file and the line cap alone would allow 2048 x [`MAX_LINE_BYTES`]
@@ -195,9 +199,20 @@ fn project_snapshot_mtime(project_dir: &Path) -> Option<SystemTime> {
         .and_then(|m| m.modified().ok());
     let entries = fs::read_dir(project_dir).ok()?;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !is_jsonl_file(&path) {
+    for (index, entry) in entries.flatten().enumerate() {
+        if index >= MAX_WALK_ENTRIES {
+            break;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file()
+            || entry
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_none_or(|ext| !ext.eq_ignore_ascii_case("jsonl"))
+        {
             continue;
         }
         let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
@@ -252,7 +267,6 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
         return (Vec::new(), 0);
     };
 
-    const MAX_WALK_ENTRIES: usize = 4_096;
     // PR #373 review: the cap is deliberate, but hitting it silently drops
     // sessions the user has, so say so once per scan rather than leaving a
     // short list unexplained.
@@ -317,11 +331,23 @@ pub fn read_sessions_with_usage_for_attribution(cwd: &str, branch: &str) -> Vec<
     };
 
     let mut candidates: Vec<(SessionMeta, PathBuf)> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !is_jsonl_file(&path) {
+    for (index, entry) in entries.flatten().enumerate() {
+        if index >= MAX_WALK_ENTRIES {
+            break;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file()
+            || entry
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_none_or(|ext| !ext.eq_ignore_ascii_case("jsonl"))
+        {
             continue;
         }
+        let path = entry.path();
         if let Some(meta) = read_session_meta(&path)
             && crate::agent_sessions::cwd_matches(&meta.cwd, cwd)
         {
@@ -346,14 +372,6 @@ pub fn read_sessions_with_usage_for_attribution(cwd: &str, branch: &str) -> Vec<
         )
         .collect();
     crate::agent_sessions::match_sessions_to_column(enriched, cwd, branch)
-}
-
-fn is_jsonl_file(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
 /// Read the head of a `.jsonl` and collect everything we need for a UI

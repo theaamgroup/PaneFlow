@@ -251,7 +251,18 @@ fn text_line_count(text: &str) -> usize {
 /// Prevents unbounded reads from malicious or corrupted files.
 pub(super) fn read_capped(path: &std::path::Path, limit: u64) -> std::io::Result<String> {
     use std::io::Read;
-    let file = std::fs::File::open(path)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x4)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
     let mut content = String::new();
     file.take(limit).read_to_string(&mut content)?;
     Ok(content)
@@ -635,6 +646,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = find_git_dir(dir.path().to_str().unwrap());
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_head_returns_empty_on_fifo_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        let head = git_dir.join("HEAD");
+        let c_path = std::ffi::CString::new(head.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let started = std::time::Instant::now();
+        let (branch, is_repo) = parse_head(&git_dir);
+        let elapsed = started.elapsed();
+        assert_eq!(branch, "");
+        assert!(is_repo);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "FIFO HEAD must not block parse_head: {elapsed:?}"
+        );
     }
 
     #[test]
