@@ -16,8 +16,8 @@ pub struct GitDiffStats {
 /// Wall-clock deadline for ONE `GitDiffStats::from_cwd` probe (U-035). A healthy
 /// repo answers in well under a second; this bounds a dead/slow network mount or
 /// a `.git/config` external helper that hangs. Issue #365: it is the budget for
-/// the whole probe, not for each git invocation inside it - `rev-parse`,
-/// `diff --shortstat` and `ls-files` share it, so they cannot stack.
+/// the whole probe, not for each git invocation inside it - `show-toplevel`,
+/// `rev-parse`, `diff --shortstat` and `ls-files` share it, so they cannot stack.
 const GIT_DIFF_STAT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Wall-clock budget for one sidebar git sweep (issue #365). Every checkout in a
@@ -53,6 +53,18 @@ impl GitDiffStats {
     /// ("stats unavailable") default.
     pub fn from_cwd_within(cwd: &str, budget_until: std::time::Instant) -> Self {
         let deadline_at = budget_until.min(std::time::Instant::now() + GIT_DIFF_STAT_DEADLINE);
+        // Same scope as compute_head_diff: the worktree root (`--show-toplevel`),
+        // not the nested cwd and not resolve_repo_root (that is the main checkout
+        // for a linked worktree). Non-repos and exhausted budgets stay empty.
+        let Some(toplevel_out) = git_stdout(cwd, &["rev-parse", "--show-toplevel"], deadline_at)
+        else {
+            return Self::default();
+        };
+        let toplevel = String::from_utf8_lossy(&toplevel_out).trim().to_string();
+        if toplevel.is_empty() {
+            return Self::default();
+        }
+        let cwd = toplevel.as_str();
         let base = git_stdout(cwd, &["rev-parse", "--verify", "HEAD"], deadline_at)
             .map(|out| String::from_utf8_lossy(&out).trim().to_string())
             .filter(|base| !base.is_empty())

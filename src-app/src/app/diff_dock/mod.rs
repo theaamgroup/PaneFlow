@@ -525,8 +525,8 @@ impl PaneFlowApp {
     }
 
     /// The diff body: the shared [`DiffElement`] in an `overflow_y_scroll` host
-    /// (the same render path as the Review view). Empty, loading and error
-    /// states render a centered placeholder instead.
+    /// (the same render path as the Review view). Empty diffs leave the body
+    /// blank; loading and error states render a centered placeholder.
     fn render_diff_dock_body(
         &mut self,
         data: &Option<DiffDockData>,
@@ -547,7 +547,7 @@ impl PaneFlowApp {
             return diff_panel_centered("icons/triangle-alert.svg", error, ui);
         }
         if data.file_count == 0 {
-            return diff_panel_centered("icons/check.svg", "No uncommitted changes.", ui);
+            return div().size_full().into_any_element();
         }
 
         let split = self.diff_dock.split;
