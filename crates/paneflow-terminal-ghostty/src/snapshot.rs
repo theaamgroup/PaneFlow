@@ -425,4 +425,82 @@ mod tests {
         let content = terminal.snapshot().expect("snapshot with off-screen selection");
         assert_eq!(content.selection, None);
     }
+
+    /// `CellMirror` (`src-app/src/terminal/ghostty_session.rs:4249`) trusts
+    /// `Content::dirty_rows` completely: on the incremental path it only
+    /// re-converts rows this crate flags dirty, and keeps the rest of its
+    /// cached grid untouched. `refresh_snapshot_cache`'s in-place partial
+    /// path (above) is the sole place that promise is kept, and a
+    /// self-referential comparison (deriving the "expected" value from the
+    /// very same snapshot under test) can't catch it slipping: a stale cell
+    /// with a matching dirty flag still agrees with itself. This test
+    /// instead reads the live grid independently through
+    /// [`DisplayTerminal::render_cell`], which jumps straight to a cell
+    /// through the FFI row iterator rather than going through
+    /// `snapshot_cache` at all.
+    #[test]
+    fn snapshot_partial_refresh_cells_and_dirty_rows_match_the_live_grid() {
+        let mut terminal = terminal(20, 4, 100);
+
+        // Write four distinct rows, then park the cursor back on the row
+        // that is about to be rewritten so the second write does not force
+        // any other row dirty just because the cursor vacated it.
+        terminal
+            .feed(b"\x1b[1;1Hrow0\x1b[2;1Hrow1\x1b[3;1Hrow2\x1b[4;1Hrow3\x1b[3;1H")
+            .expect("output must parse");
+        let first = terminal.snapshot().expect("first snapshot primes the cache");
+        assert_eq!(first.dirty_rows.len(), 4);
+
+        // Overwrite only row 2, in place, with different text.
+        terminal.feed(b"XXXX").expect("output must parse");
+        let second = terminal
+            .snapshot()
+            .expect("second snapshot takes the incremental path");
+
+        // Exactly the rewritten row comes back dirty.
+        assert_eq!(
+            second.dirty_rows.as_ref(),
+            &[false, false, true, false],
+            "expected only row 2 dirty, got {:?}",
+            second.dirty_rows
+        );
+
+        // The row the cache marked dirty must actually hold the new
+        // content, verified against a read that bypasses the snapshot
+        // cache entirely. A regression that flags a row dirty without
+        // refreshing its cells (or that refreshes the wrong cells) leaves
+        // `second.cells` holding stale data while `dirty_rows` still
+        // (correctly) reports the row as dirty.
+        let expected_row2 = "XXXX                "; // 4 written + 16 blanks = 20 cols
+        assert_eq!(expected_row2.len(), second.cols);
+        for (column, expected_char) in expected_row2.chars().enumerate() {
+            let live = terminal
+                .render_cell(2, u16::try_from(column).expect("column fits u16"))
+                .expect("independent point read of the live grid");
+            let cached = &second.cells[2 * second.cols + column];
+            assert_eq!(
+                live.character, expected_char,
+                "column {column}: live grid does not hold the new text"
+            );
+            assert_eq!(
+                cached.character, expected_char,
+                "column {column}: cached snapshot does not hold the new text"
+            );
+            assert_eq!(
+                live, *cached,
+                "column {column}: cached snapshot cell drifted from the live grid"
+            );
+        }
+
+        // Untouched rows keep their original content in the cache.
+        for (row, expected) in [(0usize, "row0"), (1, "row1"), (3, "row3")] {
+            for (column, expected_char) in expected.chars().enumerate() {
+                let cached = &second.cells[row * second.cols + column];
+                assert_eq!(
+                    cached.character, expected_char,
+                    "row {row} column {column} changed but was never written to"
+                );
+            }
+        }
+    }
 }
