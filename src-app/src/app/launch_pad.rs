@@ -47,6 +47,8 @@ pub(crate) struct LaunchPadState {
     pub(crate) agent_idx: usize,
     pub(crate) branch_input: Entity<TextInput>,
     pub(crate) prompt_input: Entity<TextArea>,
+    pub(crate) issue_input: Entity<TextInput>,
+    pub(crate) issue_loading: bool,
     /// `true` while the worktree creation runs - disables re-submission
     /// (US-005 AC8: no double worktree) and Escape.
     pub(crate) running: bool,
@@ -147,6 +149,7 @@ impl PaneFlowApp {
             .unwrap_or_else(WeakEntity::new_invalid);
 
         let weak_app = cx.entity().downgrade();
+        let issue_input = cx.new(|cx| TextInput::new("", "GitHub issue # or URL (optional)", cx));
         let branch_input = cx.new(|cx| TextInput::new("", "new-branch-name", cx));
         let prompt_input =
             cx.new(|cx| TextArea::new("Prompt (optional) - pre-filled, never submitted", cx));
@@ -186,6 +189,8 @@ impl PaneFlowApp {
             agent_idx,
             branch_input,
             prompt_input,
+            issue_input,
+            issue_loading: false,
             running: false,
             error: None,
         });
@@ -218,7 +223,7 @@ impl PaneFlowApp {
         let Some(lp) = self.launch_pad.as_ref() else {
             return;
         };
-        if lp.running {
+        if lp.running || lp.issue_loading {
             // AC8: a click/Enter during the run never double-creates.
             return;
         }
@@ -613,15 +618,21 @@ impl PaneFlowApp {
         };
         match key {
             "escape" => self.launch_pad_cancel(cx),
+            "enter" if lp.issue_input.read(cx).focus_handle.is_focused(window) => {
+                self.load_launch_pad_issue(cx)
+            }
             "enter" => self.launch_pad_confirm(cx),
             "tab" => {
-                // Toggle focus between the two text fields (custom-buttons
+                // Cycle focus through the three text fields (custom-buttons
                 // modal convention). The agent list is mouse-driven.
                 let branch_focused = lp.branch_input.read(cx).focus_handle.is_focused(window);
-                let next = if branch_focused {
+                let issue_focused = lp.issue_input.read(cx).focus_handle.is_focused(window);
+                let next = if issue_focused {
+                    lp.branch_input.read(cx).focus_handle.clone()
+                } else if branch_focused {
                     lp.prompt_input.read(cx).focus_handle.clone()
                 } else {
-                    lp.branch_input.read(cx).focus_handle.clone()
+                    lp.issue_input.read(cx).focus_handle.clone()
                 };
                 window.focus(&next, cx);
                 cx.notify();
@@ -635,7 +646,7 @@ impl PaneFlowApp {
             return div().into_any_element();
         };
         let ui = crate::theme::ui_colors();
-        let running = lp.running;
+        let running = lp.running || lp.issue_loading;
 
         // Agent picker: every entry of TerminalAgent::ALL, the missing ones
         // grayed out and inert (US-005 AC1).
@@ -734,6 +745,35 @@ impl PaneFlowApp {
             .py(px(10.))
             .child(field_label("Agent"))
             .child(agent_list)
+            .child(field_label("Start from GitHub issue"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .border_1()
+                            .border_color(ui.border)
+                            .rounded(px(6.))
+                            .px(px(8.))
+                            .py(px(4.))
+                            .child(lp.issue_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("launch-issue-load")
+                            .cursor_pointer()
+                            .child(if lp.issue_loading {
+                                "Loading…"
+                            } else {
+                                "Load issue"
+                            })
+                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                app.load_launch_pad_issue(cx)
+                            })),
+                    ),
+            )
             .child(field_label("New branch"))
             .child(
                 div()
@@ -766,7 +806,9 @@ impl PaneFlowApp {
             );
         }
 
-        let confirm_label: SharedString = if running {
+        let confirm_label: SharedString = if lp.issue_loading {
+            "Loading issue…".into()
+        } else if running {
             "Creating…".into()
         } else {
             "Create worktree + launch".into()

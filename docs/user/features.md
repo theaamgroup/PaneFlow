@@ -42,6 +42,39 @@ PaneFlow restores with every tab unbound, and a tab whose checkout was
 removed between two runs restores unbound with a warning in the log
 rather than pointing at a missing directory.
 
+## Work review
+
+Open **Window → Work Review…** (`Cmd+Shift+U`) to inspect open checkouts together. Each row
+shows the branch, changed-file count, GitHub PR checks, and whether those
+checks cover the locally inspected revision. Dirty files, mismatched revisions,
+missing checks, and requested changes remain visible. This is a snapshot:
+use Refresh after further work. Inspection runs off the UI thread, only while
+requested, and is limited to 64 distinct starting directories per refresh.
+
+Overlapping changed paths are listed for separate worktrees of the same repo.
+These indicate potential coordination needs; they do not prove a merge conflict.
+Rows offer Open task, Review diff, Copy handoff, and a link to the PR and its
+checks. Arrow keys select rows; Enter opens the task and R opens its diff.
+GitHub information uses your existing `gh` authentication. Local repository
+information remains available if GitHub cannot be reached.
+
+## Start a task from an issue
+
+In the agent Launch Pad (`Cmd+Shift+L`), enter a GitHub issue number or HTTPS
+issue URL and choose **Load issue**. PaneFlow fills a suggested branch name
+and an editable task prompt. Review those fields and choose your agent before
+creating the worktree. Loading the issue does not launch anything. Issue URLs
+must refer to the open project's repository.
+
+## Automatic updates
+
+Installed apps check at startup and hourly, download verified updates in the
+background, and install when you quit. A downloaded update or failed check
+produces a notice. **PaneFlow → Check for Updates…** opens Sparkle's update UI
+for a manual check or retry; **About PaneFlow** shows the current update status.
+Your running terminals are not restarted by background checks. A source build
+outside an app bundle cannot update itself.
+
 ## Dev-server port detection
 
 When a process inside a pane binds a port, PaneFlow surfaces it
@@ -174,8 +207,11 @@ Summary:
 <the session's title or first message, capped at 4 KiB>
 ```
 
-Only the summary travels - never the transcript - and PaneFlow never
-starts an agent to write one.
+The handoff also includes a bounded repository snapshot: current revision,
+branch, uncommitted-change status, and changed paths. PaneFlow does not copy
+file contents or run tests while preparing it; the prompt states that limitation.
+If Git inspection fails, the summary still transfers with an explicit note.
+The prompt remains editable and is never submitted automatically.
 
 ## System Info
 

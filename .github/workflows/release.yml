@@ -307,6 +307,11 @@ jobs:
                 "$PWD/release-assets"
           rm -f "$notes"
 
+          # Verify against the public key actually shipped in this app, not
+          # just against the CI private key (which could have drifted).
+          swift scripts/verify-update.swift dist/PaneFlow.app/Contents/Info.plist \
+            release-assets/appcast.xml "release-assets/$dmg"
+
           xmllint --noout release-assets/appcast.xml
           grep -Fq "<sparkle:version>${version}</sparkle:version>" release-assets/appcast.xml
           grep -Fq "sparkle:edSignature=" release-assets/appcast.xml
@@ -402,6 +407,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
       - name: Download release artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -452,3 +461,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release edit "${RELEASE_TAG}" --draft=false
+
+      - name: Verify anonymous automatic-update delivery
+        if: ${{ !contains(env.RELEASE_TAG, 'alpha') && !contains(env.RELEASE_TAG, 'beta') && !contains(env.RELEASE_TAG, 'rc') }}
+        run: python3 scripts/verify-update-feed.py --expected-version "${RELEASE_TAG#v}"

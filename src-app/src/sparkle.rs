@@ -5,10 +5,72 @@
 //! feed/signing configuration into `Info.plist`. The framework is loaded at
 //! runtime so ordinary `cargo build` and `cargo test` stay self-contained.
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
+
+thread_local! {
+    // Sparkle is main-thread-only; never send its objects to a worker.
+    static UPDATER: Cell<*mut Object> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+static NOTICE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+
+pub(crate) fn take_notice() -> Option<String> {
+    NOTICE.lock().take()
+}
+
+static STATUS: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
+pub(crate) fn status() -> String {
+    let status = STATUS.lock();
+    if status.is_empty() {
+        "Updates available in the installed app".into()
+    } else {
+        status.clone()
+    }
+}
+
+fn set_status(message: impl Into<String>) {
+    let message = message.into();
+    log::info!("Sparkle: {message}");
+    let mut status = STATUS.lock();
+    if *status != message
+        && (message.contains("downloaded")
+            || message.contains("failed")
+            || message.contains("unavailable")
+            || message.contains("could not start"))
+    {
+        *NOTICE.lock() = Some(message.clone());
+    }
+    *status = message;
+}
+
+/// User-initiated checks use Sparkle's standard UI, including retry/error UI.
+/// Background checks continue to download silently and never force a restart.
+pub(crate) fn check_for_updates() -> Result<(), String> {
+    UPDATER.with(|slot| {
+        let updater = slot.get();
+        if updater.is_null() {
+            return Err(status());
+        }
+        // SAFETY: the retained updater is accessed on AppKit's main thread.
+        unsafe {
+            let allowed: BOOL = msg_send![updater, canCheckForUpdates];
+            if allowed != YES {
+                return Err(format!(
+                    "An update check is already in progress. {}",
+                    status()
+                ));
+            }
+            set_status("Checking for updates…");
+            let _: () = msg_send![updater, checkForUpdates];
+        }
+        Ok(())
+    })
+}
 
 use objc::declare::ClassDecl;
 use objc::runtime::{BOOL, Class, NO, Object, Protocol, Sel, YES};
@@ -28,6 +90,7 @@ pub(crate) fn start_if_bundled() {
             Some("1")
         ) {
             log::info!("Sparkle updater disabled by PANEFLOW_DISABLE_SPARKLE=1");
+            set_status("Automatic updates disabled by PANEFLOW_DISABLE_SPARKLE");
             return;
         }
 
@@ -35,6 +98,7 @@ pub(crate) fn start_if_bundled() {
             Ok(executable) => executable,
             Err(error) => {
                 log::warn!("Sparkle updater: cannot resolve current executable: {error}");
+                set_status(format!("Updates unavailable: {error}"));
                 return;
             }
         };
@@ -43,6 +107,7 @@ pub(crate) fn start_if_bundled() {
             return;
         };
         if !framework.is_file() {
+            set_status("Updates unavailable: Sparkle framework is missing. Reinstall PaneFlow.");
             log::warn!(
                 "Sparkle updater: packaged framework is missing at {}",
                 framework.display()
@@ -56,31 +121,56 @@ pub(crate) fn start_if_bundled() {
         // Sparkle's weak delegate references and scheduler remain valid.
         unsafe {
             let Some(_framework_handle) = load_framework(&framework) else {
+                set_status("Updates unavailable: Sparkle could not load. Reinstall PaneFlow.");
                 return;
             };
             let Some(controller_class) = Class::get("SPUStandardUpdaterController") else {
+                set_status("Updates unavailable: Sparkle controller is missing");
                 log::error!("Sparkle updater: SPUStandardUpdaterController class is unavailable");
                 return;
             };
             let delegate_class = sparkle_delegate_class();
             let delegate: *mut Object = msg_send![delegate_class, new];
             if delegate.is_null() {
+                set_status("Updates unavailable: could not initialize Sparkle delegate");
                 log::error!("Sparkle updater: failed to allocate delegate");
                 return;
             }
 
             let controller: *mut Object = msg_send![controller_class, alloc];
             let controller: *mut Object = msg_send![controller,
-                initWithStartingUpdater: YES
+                initWithStartingUpdater: NO
                 updaterDelegate: delegate
                 userDriverDelegate: delegate
             ];
             if controller.is_null() {
+                set_status("Updates unavailable: could not initialize Sparkle controller");
                 log::error!("Sparkle updater: failed to create updater controller");
                 return;
             }
 
-            log::info!("Sparkle updater started (hourly checks, silent install on quit)");
+            let updater: *mut Object = msg_send![controller, updater];
+            let mut error: *mut Object = std::ptr::null_mut();
+            let started: BOOL = msg_send![updater, startUpdater: &mut error];
+            if started != YES {
+                set_status(format!(
+                    "Updates could not start: {}",
+                    error_description(error)
+                ));
+                return;
+            }
+            UPDATER.with(|slot| slot.set(updater));
+            let automatic: BOOL = msg_send![updater, automaticallyChecksForUpdates];
+            set_status(if automatic == YES {
+                "Automatic updates enabled · installs when you quit"
+            } else {
+                "Automatic checks are disabled · use Check for Updates"
+            });
+            // Run the initial check now rather than waiting another hour in
+            // a long-lived app. Sparkle owns all subsequent retry scheduling.
+            if automatic == YES {
+                let _: () = msg_send![updater, checkForUpdatesInBackground];
+            }
         }
     });
 }
@@ -157,6 +247,18 @@ unsafe fn sparkle_delegate_class() -> &'static Class {
     // synchronously, so no Rust reference escapes the call.
     unsafe {
         declaration.add_method(
+            sel!(updater:didAbortWithError:),
+            update_failed as extern "C" fn(&Object, Sel, *mut Object, *mut Object),
+        );
+        declaration.add_method(
+            sel!(updaterDidNotFindUpdate:),
+            no_update as extern "C" fn(&Object, Sel, *mut Object),
+        );
+        declaration.add_method(
+            sel!(updater:didFindValidUpdate:),
+            update_found as extern "C" fn(&Object, Sel, *mut Object, *mut Object),
+        );
+        declaration.add_method(
             sel!(updater:willInstallUpdateOnQuit:immediateInstallationBlock:),
             hold_update_until_quit
                 as extern "C" fn(&Object, Sel, *mut Object, *mut Object, *mut Object) -> BOOL,
@@ -186,13 +288,90 @@ extern "C" fn hold_update_until_quit(
     _this: &Object,
     _command: Sel,
     _updater: *mut Object,
-    _item: *mut Object,
+    item: *mut Object,
     _immediate_installation: *mut Object,
 ) -> BOOL {
-    // Returning YES takes responsibility for the immediate-install block.
-    // Deliberately never invoking that block suppresses impatient reminders;
-    // Sparkle still guarantees installation when the app terminates.
-    YES
+    set_status(format!(
+        "Update {} downloaded · quit PaneFlow to install",
+        item_version(item)
+    ));
+    // NO preserves future update cycles. YES transfers ownership of the
+    // installation handler and stalls checks until that handler is invoked.
+    NO
+}
+
+fn item_version(item: *mut Object) -> String {
+    if item.is_null() {
+        return String::new();
+    }
+    // SAFETY: Sparkle lends a live SUAppcastItem for the callback.
+    unsafe {
+        let value: *mut Object = msg_send![item, displayVersionString];
+        ns_string(value)
+    }
+}
+
+unsafe fn ns_string(value: *mut Object) -> String {
+    if value.is_null() {
+        return String::new();
+    }
+    // SAFETY: callers supply a live NSString; copy before the callback ends.
+    unsafe {
+        let utf8: *const libc::c_char = msg_send![value, UTF8String];
+        if utf8.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .chars()
+                .take(512)
+                .collect()
+        }
+    }
+}
+
+unsafe fn error_description(error: *mut Object) -> String {
+    if error.is_null() {
+        return "unknown Sparkle error".into();
+    }
+    // SAFETY: Sparkle supplies a live NSError.
+    unsafe {
+        let value: *mut Object = msg_send![error, localizedDescription];
+        ns_string(value)
+    }
+}
+
+extern "C" fn update_failed(_: &Object, _: Sel, _: *mut Object, error: *mut Object) {
+    if !error.is_null() {
+        // SAFETY: Sparkle lends an NSError. No-update is a normal outcome,
+        // even though Sparkle also reports it through its abort callback.
+        let (domain, code) = unsafe {
+            let domain: *mut Object = msg_send![error, domain];
+            let code: isize = msg_send![error, code];
+            (ns_string(domain), code)
+        };
+        if domain == "SUSparkleErrorDomain" && code == 1001 {
+            set_status("PaneFlow is up to date");
+            return;
+        }
+        if domain == "SUSparkleErrorDomain" && code == 4007 {
+            set_status("Update installation canceled · use Check for Updates to retry");
+            return;
+        }
+    }
+    // SAFETY: the callback parameter is a borrowed NSError.
+    set_status(format!(
+        "Update check failed: {} · use Check for Updates to retry",
+        unsafe { error_description(error) }
+    ));
+}
+
+extern "C" fn no_update(_: &Object, _: Sel, _: *mut Object) {
+    set_status("PaneFlow is up to date");
+}
+
+extern "C" fn update_found(_: &Object, _: Sel, _: *mut Object, item: *mut Object) {
+    set_status(format!("Update {} available", item_version(item)));
 }
 
 extern "C" fn prevent_relaunch(_this: &Object, _command: Sel, _updater: *mut Object) -> BOOL {
@@ -216,11 +395,13 @@ extern "C" fn suppress_scheduled_update_notification(
     _this: &Object,
     _command: Sel,
     _standard_driver_handles_update: BOOL,
-    _update: *mut Object,
+    update: *mut Object,
     _state: *mut Object,
 ) {
-    // PaneFlow deliberately owns gentle scheduled reminders and presents none.
-    // The downloaded update remains staged for Sparkle's install-on-quit path.
+    set_status(format!(
+        "Update {} available · choose Check for Updates",
+        item_version(update)
+    ));
 }
 
 #[cfg(test)]
@@ -262,7 +443,7 @@ mod tests {
                 ptr::null_mut(),
                 ptr::null_mut(),
             ),
-            YES
+            NO
         );
         assert_eq!(
             prevent_relaunch(object, sel!(description), ptr::null_mut()),
