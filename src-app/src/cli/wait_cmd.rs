@@ -590,6 +590,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wait_matches_a_carriage_return_redraw_with_unchanged_line_count() {
+        struct Redraw;
+        impl IpcTransport for Redraw {
+            fn call(&self, method: &str, _: Value) -> Result<Value, String> {
+                assert_eq!(method, "surface.read");
+                Ok(json!({"text": "DONE", "output_generation": 2, "total_lines": 4000}))
+            }
+        }
+        let baseline = ReadSnapshot {
+            text: "working".into(),
+            output_generation: Some(1),
+            total_lines: Some(4000),
+        };
+        let result =
+            read_matches_since(&Redraw, 1, &Regex::new("DONE").unwrap(), Some(&baseline)).unwrap();
+        assert!(matches!(result, PaneState::Matched(_)));
+    }
+
+    #[test]
     fn is_done_single_and_any_need_one_match() {
         assert!(!is_done(MatchMode::Single, 0, 1));
         assert!(is_done(MatchMode::Single, 1, 1));

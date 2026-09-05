@@ -399,11 +399,9 @@ fn is_jsonc(path: &Path) -> bool {
 }
 
 fn read_jsonc_source(path: &Path) -> Result<String> {
-    match std::fs::read_to_string(path) {
-        Ok(source) => Ok(source),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("{}\n".to_string()),
-        Err(error) => Err(error).with_context(|| format!("read {} failed", path.display())),
-    }
+    Ok(paneflow_agent_config::read_optional_text(path)
+        .with_context(|| format!("read {} failed", path.display()))?
+        .unwrap_or_else(|| "{}\n".to_string()))
 }
 
 // ---------------------------------------------------------------------------

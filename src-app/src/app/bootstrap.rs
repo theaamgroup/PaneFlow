@@ -575,7 +575,7 @@ impl PaneFlowApp {
                             // Workspace roots plus every bound tab's worktree
                             // (issue #347), deduplicated: two tabs on one
                             // worktree cost one subprocess per tick, not two.
-                            app.git_probe_cwds()
+                            app.git_probe_cwds(_cx)
                         })
                     });
                     let cwds = match cwds {
@@ -633,6 +633,59 @@ impl PaneFlowApp {
                     if apply.is_err() {
                         break;
                     }
+                }
+            },
+        )
+        .detach();
+
+        // Branch switches in linked worktrees and foreign repositories do
+        // not necessarily reach the workspace's non-recursive git watcher.
+        // Poll HEAD cheaply; diffstat subprocesses retain their 30s cadence.
+        cx.spawn(
+            async |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                loop {
+                    let cwds = cx.update(|cx| this.update(cx, |app, cx| app.git_probe_cwds(cx)));
+                    let Ok(cwds) = cwds else {
+                        break;
+                    };
+                    let results = smol::unblock(move || {
+                        cwds.into_iter()
+                            .map(|cwd| {
+                                let (branch, is_repo) = crate::workspace::detect_branch(&cwd);
+                                (cwd, branch, is_repo)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                    if cx
+                        .update(|cx| {
+                            this.update(cx, |app, cx| {
+                                let mut changed = false;
+                                for (cwd, branch, is_repo) in results {
+                                    let stats = app
+                                        .worktree_states
+                                        .checkout(&cwd)
+                                        .map(|git| git.stats.clone())
+                                        .unwrap_or_default();
+                                    changed |= app.worktree_states.set_checkout(
+                                        &cwd,
+                                        crate::app::tab_worktree::CheckoutGit {
+                                            branch,
+                                            is_repo,
+                                            stats,
+                                        },
+                                    );
+                                }
+                                if changed {
+                                    cx.notify();
+                                }
+                            })
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
                 }
             },
         )

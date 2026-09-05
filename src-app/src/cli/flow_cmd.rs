@@ -1079,6 +1079,24 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
+    fn ready_accepts_a_redrawn_marker_at_equal_retained_line_counts() {
+        let baseline = ReadSnapshot {
+            text: "working".into(),
+            output_generation: Some(1),
+            total_lines: Some(4000),
+        };
+        let current = ReadSnapshot {
+            text: "READY".into(),
+            output_generation: Some(2),
+            total_lines: Some(4000),
+        };
+        assert_eq!(
+            text_after_baseline(&baseline, &current),
+            Some("READY".into())
+        );
+    }
+
+    #[test]
     fn settle_fire_bails_at_max_and_fires_when_stable_past_floor() {
         // EP-004 US-014 AC2: output that never settles (stable stays 0) must
         // NOT fire before the max, and MUST bail out at the max regardless.

@@ -218,14 +218,18 @@ impl PaneFlowApp {
     /// Every checkout worth probing: each workspace root, plus the worktree of
     /// every bound tab. Deduplicated, so two tabs on one worktree cost one
     /// subprocess per tick rather than two.
-    pub(crate) fn git_probe_cwds(&self) -> Vec<String> {
+    pub(crate) fn git_probe_cwds(&self, cx: &gpui::App) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for ws in &self.workspaces {
             if !ws.cwd.is_empty() && seen.insert(ws.cwd.clone()) {
                 out.push(ws.cwd.clone());
             }
-            for cwd in ws.bound_tab_worktrees() {
+            for cwd in ws.bound_tab_worktrees().into_iter().chain(
+                ws.tabs()
+                    .iter()
+                    .flat_map(|tab| Self::tab_terminal_cwds(tab, cx)),
+            ) {
                 if seen.insert(cwd.clone()) {
                     out.push(cwd);
                 }
@@ -234,12 +238,28 @@ impl PaneFlowApp {
         out
     }
 
-    /// The git state a tab's row should show, or `None` for an unbound tab
-    /// (which has no identity of its own to report) or one whose first probe
-    /// has not landed yet.
+    /// Git state of a tab's explicitly bound checkout, for the diff dock
+    /// and pull-request lookup. Sidebar labels use live terminal CWDs instead.
     pub(crate) fn tab_checkout_git(&self, tab: &crate::workspace::Tab) -> Option<&CheckoutGit> {
         let path = tab.worktree.as_ref()?;
         self.worktree_states.checkout(&path.to_string_lossy())
+    }
+
+    /// The live directories of terminal panes, in layout order. A tab may
+    /// contain several terminals on different checkouts; report each once.
+    pub(crate) fn tab_terminal_cwds(tab: &crate::workspace::Tab, cx: &gpui::App) -> Vec<String> {
+        let mut cwds = Vec::new();
+        for pane in tab.collect_panes() {
+            for terminal in pane.read(cx).terminals() {
+                if let Some(cwd) = terminal.read(cx).terminal.current_cwd.as_ref()
+                    && !cwd.is_empty()
+                    && !cwds.contains(cwd)
+                {
+                    cwds.push(cwd.clone());
+                }
+            }
+        }
+        cwds
     }
 
     /// The checkout the active tab works in: its worktree when bound, the
@@ -530,9 +550,9 @@ impl PaneFlowApp {
     }
 
     /// Forget the state of every checkout no longer open.
-    pub(crate) fn prune_worktree_states(&mut self) {
+    pub(crate) fn prune_worktree_states(&mut self, cx: &gpui::App) {
         let live: std::collections::HashSet<String> = self
-            .git_probe_cwds()
+            .git_probe_cwds(cx)
             .into_iter()
             .chain(
                 self.workspaces
@@ -712,7 +732,7 @@ impl PaneFlowApp {
         for (ws_idx, tab_idx) in orphaned {
             self.set_tab_worktree(ws_idx, tab_idx, None, cx);
         }
-        self.prune_worktree_states();
+        self.prune_worktree_states(cx);
         let on_repo: Vec<usize> = self
             .workspaces
             .iter()
@@ -884,6 +904,38 @@ mod tests {
     use super::{CheckoutGit, WorktreeStates, binding_refusal, removal_refusal, remove_checkout};
     use crate::workspace::GitDiffStats;
     use std::path::{Path, PathBuf};
+
+    #[gpui::test]
+    fn sidebar_directories_follow_each_terminal_instead_of_the_tab_binding(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        terminal.update(cx, |view, _| {
+            view.terminal.current_cwd = Some("/repo/worktree-a/src".into())
+        });
+        let pane = cx.new(|cx| crate::pane::Pane::new(terminal.clone(), 1, cx));
+        let tab = crate::workspace::Tab::restored(
+            "terminal",
+            Some(crate::layout::LayoutTree::Leaf(pane)),
+            Some(PathBuf::from("/repo")),
+        );
+        cx.update(|cx| {
+            assert_eq!(
+                super::PaneFlowApp::tab_terminal_cwds(&tab, cx),
+                vec!["/repo/worktree-a/src"]
+            )
+        });
+        terminal.update(cx, |view, _| {
+            view.terminal.current_cwd = Some("/repo/worktree-b".into())
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                super::PaneFlowApp::tab_terminal_cwds(&tab, cx),
+                vec!["/repo/worktree-b"]
+            )
+        });
+    }
 
     #[test]
     fn a_probe_taken_elsewhere_is_not_filed_under_the_checkout_key() {

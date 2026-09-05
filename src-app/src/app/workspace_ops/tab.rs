@@ -361,7 +361,7 @@ impl PaneFlowApp {
         // The closed tab may have been the last reader of a worktree's git
         // state (issue #347). The checkout itself is left alone: tearing it
         // down is a separate, destructive decision.
-        self.prune_worktree_states();
+        self.prune_worktree_states(cx);
         if let Some(record) = record {
             self.push_closed_record(ClosedRecord::Tab(record), cx);
         }

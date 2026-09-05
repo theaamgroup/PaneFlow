@@ -105,20 +105,21 @@ pub(crate) fn write_if_changed_unlocked(path: &Path, contents: &[u8]) -> Result<
     // Only a missing file may proceed to the write; any other read failure
     // (permission, I/O, not a regular file) must not be mistaken for "the
     // bytes differ" and replace a config we could not inspect.
-    match std::fs::read(path) {
-        Ok(existing) => {
-            if existing == contents {
-                return Ok(false);
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).context(format!("read {} failed", path.display()));
-        }
+    let existing = paneflow_agent_config::read_optional_text(path)
+        .with_context(|| format!("read {} failed", path.display()))?;
+    if existing
+        .as_ref()
+        .is_some_and(|text| text.as_bytes() == contents)
+    {
+        return Ok(false);
     }
-    // Bytes differ (or the file is absent): back up the old contents first,
-    // then publish the new bytes atomically.
-    backup(path)?;
+    if let Some(existing) = existing {
+        // Back up the bounded bytes already inspected, without reopening a
+        // path that could have become a FIFO or grown since the read.
+        let mut bak = path.as_os_str().to_owned();
+        bak.push(".bak");
+        write_atomic(Path::new(&bak), existing.as_bytes())?;
+    }
     write_atomic(path, contents)?;
     Ok(true)
 }

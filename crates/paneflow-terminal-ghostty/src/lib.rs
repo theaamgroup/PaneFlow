@@ -80,7 +80,9 @@ pub use selection_gesture::{
     GestureState, PressOptions,
 };
 pub use sgr::{SgrAttribute, SgrParser, SgrSeparator};
-pub use snapshot_codec::{HistoryProgress, SnapshotDecoder, SnapshotRestore, TerminalScreen};
+pub use snapshot_codec::{
+    HistoryProgress, SnapshotDecoder, SnapshotRestore, SnapshotTerminal, TerminalScreen,
+};
 pub use style::Style;
 pub use sys::{
     DecodedImage, LogLevel, LogSink, PngDecoder, SecureRandom, alloc, free, set_log_sink,

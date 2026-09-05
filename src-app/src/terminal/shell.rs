@@ -31,7 +31,18 @@ else
     unset ZDOTDIR
 fi
 [[ -f "${ZDOTDIR:-$HOME}/.zshenv" ]] && source "${ZDOTDIR:-$HOME}/.zshenv"
-__paneflow_osc7() { printf '\e]7;file://%s%s\a' "${HOST}" "${PWD}"; }
+__paneflow_osc7() {
+    local LC_ALL=C
+    local encoded='' byte hex code i
+    for ((i=0; i<${#PWD}; i++)); do
+        byte="${PWD:$i:1}"
+        case "$byte" in
+            [a-zA-Z0-9/._~-]) encoded+="$byte" ;;
+            * ) printf -v code '%d' "'$byte"; printf -v hex '%%%02X' "$((code & 255))"; encoded+="$hex" ;;
+        esac
+    done
+    printf '\e]7;file://%s%s\a' "${HOST}" "$encoded"
+}
 __paneflow_path_prepend() {
     [[ -z "${PANEFLOW_BIN_DIR-}" ]] && return
     # Strip every existing occurrence then prepend, keeping our dir first
@@ -68,7 +79,18 @@ __paneflow_path_prepend
 /// before each prompt, after `.bashrc` has run.
 const BASH_OSC7: &str = r#"# PaneFlow shell integration - OSC 7 CWD reporting
 [[ -f ~/.bashrc ]] && source ~/.bashrc
-__paneflow_osc7() { printf '\e]7;file://%s%s\a' "${HOSTNAME}" "${PWD}"; }
+__paneflow_osc7() {
+    local LC_ALL=C
+    local encoded='' byte hex code i
+    for ((i=0; i<${#PWD}; i++)); do
+        byte="${PWD:$i:1}"
+        case "$byte" in
+            [a-zA-Z0-9/._~-]) encoded+="$byte" ;;
+            * ) printf -v code '%d' "'$byte"; printf -v hex '%%%02X' "$((code & 255))"; encoded+="$hex" ;;
+        esac
+    done
+    printf '\e]7;file://%s%s\a' "${HOSTNAME}" "$encoded"
+}
 __paneflow_path_prepend() {
     [[ -z "${PANEFLOW_BIN_DIR-}" ]] && return
     local p=":${PATH}:"
@@ -97,7 +119,8 @@ __paneflow_path_prepend
 /// of this file is also safe.
 const FISH_OSC7: &str = r#"# PaneFlow shell integration - OSC 7 CWD reporting
 function __paneflow_osc7 --on-variable PWD
-    printf '\e]7;file://%s%s\a' (hostname) "$PWD"
+    set -l encoded (string escape --style=url -- "$PWD" | string replace -ai '%2F' '/')
+    printf '\e]7;file://%s%s\a' (hostname) "$encoded"
 end
 __paneflow_osc7
 if set -q PANEFLOW_BIN_DIR; and test -n "$PANEFLOW_BIN_DIR"
@@ -468,6 +491,34 @@ mod tests {
     // resolves from a standard install dir (the macOS pwsh-under-Homebrew gap),
     // while a bogus name yields None. `/bin/sh` exists on every Unix target.
     #[cfg(unix)]
+    #[test]
+    fn osc7_emitters_encode_path_bytes_without_extra_frames() {
+        for (shell, source) in [
+            ("/bin/bash", super::BASH_OSC7),
+            ("/bin/zsh", super::ZSH_OSC7),
+        ] {
+            let start = source.find("__paneflow_osc7() {").unwrap();
+            let end = start + source[start..].find("\n}").unwrap() + 2;
+            let script = format!("{}\n__paneflow_osc7", &source[start..end]);
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().join("percent%20 space#?é\u{7}\u{1b}\n");
+            std::fs::create_dir(&cwd).unwrap();
+            let output = std::process::Command::new(shell)
+                .args(["-f", "-c", &script])
+                .current_dir(&cwd)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{shell}: {:?}", output.stderr);
+            let frame = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(frame.matches('\u{1b}').count(), 1, "{shell}: {frame:?}");
+            assert_eq!(frame.matches('\u{7}').count(), 1, "{shell}: {frame:?}");
+            assert!(
+                frame.ends_with("/percent%2520%20space%23%3F%C3%A9%07%1B%0A\u{7}"),
+                "{shell}: {frame:?}"
+            );
+        }
+    }
+
     #[test]
     fn tilde_default_shell_expands_to_home() {
         assert!(

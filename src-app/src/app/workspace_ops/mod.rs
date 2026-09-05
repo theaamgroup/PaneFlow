@@ -2305,7 +2305,7 @@ impl PaneFlowApp {
         self.workspaces.remove(idx);
         // Every checkout this workspace's tabs were bound to leaves with it
         // (issue #347): the cached git state goes, the checkout itself stays.
-        self.prune_worktree_states();
+        self.prune_worktree_states(cx);
         self.active_idx =
             active_idx_after_workspace_remove(self.active_idx, idx, self.workspaces.len());
         if let Some(window) = window {

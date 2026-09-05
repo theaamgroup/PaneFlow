@@ -47,6 +47,7 @@ impl From<Modes> for MouseModes {
 }
 
 pub struct DisplayTerminal {
+    pub(crate) tracked_epoch: Rc<std::cell::Cell<u64>>,
     pub(crate) mouse_event: OwnedHandle<sys::GhosttyMouseEvent>,
     pub(crate) mouse_encoder: OwnedHandle<sys::GhosttyMouseEncoder>,
     pub(crate) key_event: OwnedHandle<sys::GhosttyKeyEvent>,
@@ -107,6 +108,8 @@ impl DisplayTerminal {
     }
 
     pub fn reset(&mut self) {
+        self.tracked_epoch
+            .set(self.tracked_epoch.get().wrapping_add(1));
         unsafe { sys::ghostty_terminal_reset(self.terminal.raw()) };
         self.callbacks.reset_working_directory();
         self.snapshot_cache.invalidate();
@@ -131,6 +134,8 @@ impl DisplayTerminal {
             return Ok(false);
         }
         self.feed(CLEAR_SCREEN_AND_SCROLLBACK)?;
+        self.tracked_epoch
+            .set(self.tracked_epoch.get().wrapping_add(1));
         self.snapshot_cache.invalidate();
         Ok(true)
     }

@@ -3,7 +3,7 @@ use super::{
     refuse_symlink, with_last_lease, with_orphan_lease, HookInstall, HookInstallResult,
     HookInstallSkip, HookLease,
 };
-use paneflow_agent_config::{home_dir, with_config_lock, write_json_atomic, write_text_atomic};
+use paneflow_agent_config::{home_dir, read_optional_text, with_config_lock};
 use std::path::{Path, PathBuf};
 
 pub(crate) const PANEFLOW_TS_BASENAME: &str = "paneflow-status.ts";
@@ -20,7 +20,7 @@ impl PiExtensionGuard {
         let directory = home.join(".pi").join("agent").join("extensions");
         let path = directory.join(PANEFLOW_TS_BASENAME);
         if !paneflow_ipc_reachable() {
-            sweep_owned_file(&path);
+            sweep_owned_file(&path, PI_EXTENSION_SOURCE);
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
         Self::install_at(&directory).map(HookInstall::Installed)
@@ -32,11 +32,7 @@ impl PiExtensionGuard {
         let path = directory.join(PANEFLOW_TS_BASENAME);
         let mut lease = HookLease::acquire(&path)?;
         with_config_lock(&path, || {
-            let created_file = !path.exists();
-            write_text_atomic(&path, PI_EXTENSION_SOURCE)?;
-            if created_file {
-                lease.mark_created()?;
-            }
+            install_owned_file(&path, PI_EXTENSION_SOURCE, &mut lease)?;
             Ok(())
         })?;
         Ok(Self { path, lease })
@@ -45,7 +41,7 @@ impl PiExtensionGuard {
 
 impl Drop for PiExtensionGuard {
     fn drop(&mut self) {
-        cleanup_owned_file(&self.path, &mut self.lease);
+        cleanup_owned_file(&self.path, &mut self.lease, PI_EXTENSION_SOURCE);
     }
 }
 
@@ -59,6 +55,7 @@ const GROK_HOOK_EVENTS: &[&str] = &[
 
 pub(crate) struct GrokHookFileGuard {
     path: PathBuf,
+    source: String,
     lease: HookLease,
 }
 
@@ -68,7 +65,7 @@ impl GrokHookFileGuard {
         let directory = home.join(".grok").join("hooks");
         let path = directory.join("paneflow.json");
         if !paneflow_ipc_reachable() {
-            sweep_owned_file(&path);
+            sweep_owned_file(&path, &grok_source()?);
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
         Self::install_at(&directory).map(HookInstall::Installed)
@@ -79,32 +76,76 @@ impl GrokHookFileGuard {
         std::fs::create_dir_all(directory)?;
         let path = directory.join("paneflow.json");
         let mut lease = HookLease::acquire(&path)?;
-        let mut root = serde_json::json!({});
-        merge_strict_matcher_hooks_for_events(&mut root, GROK_HOOK_EVENTS)?;
-        with_config_lock(&path, || {
-            let created_file = !path.exists();
-            write_json_atomic(&path, &root)?;
-            if created_file {
-                lease.mark_created()?;
-            }
-            Ok(())
-        })?;
-        Ok(Self { path, lease })
+        let source = grok_source()?;
+        with_config_lock(&path, || install_owned_file(&path, &source, &mut lease))?;
+        Ok(Self {
+            path,
+            lease,
+            source,
+        })
     }
 }
 
 impl Drop for GrokHookFileGuard {
     fn drop(&mut self) {
-        cleanup_owned_file(&self.path, &mut self.lease);
+        cleanup_owned_file(&self.path, &mut self.lease, &self.source);
     }
 }
 
-fn sweep_owned_file(path: &Path) {
-    let _ = with_orphan_lease(path, path, |created| remove_created_file(path, created));
+fn grok_source() -> std::io::Result<String> {
+    let mut root = serde_json::json!({});
+    merge_strict_matcher_hooks_for_events(&mut root, GROK_HOOK_EVENTS)?;
+    Ok(serde_json::to_string_pretty(&root).map_err(std::io::Error::other)? + "\n")
 }
 
-fn cleanup_owned_file(path: &Path, lease: &mut HookLease) {
-    let _ = with_last_lease(path, lease, |created| remove_created_file(path, created));
+fn install_owned_file(path: &Path, source: &str, lease: &mut HookLease) -> std::io::Result<()> {
+    refuse_symlink(path, "managed hook")?;
+    match read_optional_text(path)? {
+        Some(existing) if existing == source => Ok(()),
+        Some(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} contains user changes; refusing to overwrite it",
+                path.display()
+            ),
+        )),
+        None => {
+            use std::io::Write;
+            let parent = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("hook path has no parent"))?;
+            let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            file.write_all(source.as_bytes())?;
+            file.as_file().sync_all()?;
+            // A user can create the destination after the read; an exclusive
+            // publish preserves their file even when they do not use our lock.
+            file.persist_noclobber(path).map_err(|error| error.error)?;
+            lease.mark_created()
+        }
+    }
+}
+
+fn remove_unchanged_file(path: &Path, created: bool, source: &str) -> std::io::Result<()> {
+    if !created {
+        return Ok(());
+    }
+    refuse_symlink(path, "managed hook")?;
+    if read_optional_text(path)?.as_deref() == Some(source) {
+        remove_created_file(path, true)?;
+    }
+    Ok(())
+}
+
+fn sweep_owned_file(path: &Path, source: &str) {
+    let _ = with_orphan_lease(path, path, |created| {
+        remove_unchanged_file(path, created, source)
+    });
+}
+
+fn cleanup_owned_file(path: &Path, lease: &mut HookLease, source: &str) {
+    let _ = with_last_lease(path, lease, |created| {
+        remove_unchanged_file(path, created, source)
+    });
 }
 
 /// Remove an owned file only when the lease's durable ownership bit says
@@ -146,13 +187,16 @@ mod tests {
         let path = directory.join(PANEFLOW_TS_BASENAME);
         std::fs::write(&path, "// user-managed copy\n").unwrap();
 
-        drop(PiExtensionGuard::install_at(&directory).unwrap());
+        assert!(PiExtensionGuard::install_at(&directory).is_err());
 
         assert!(
             path.exists(),
             "cleanup must not delete a file PaneFlow did not create"
         );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), PI_EXTENSION_SOURCE);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "// user-managed copy\n"
+        );
     }
 
     #[test]
@@ -163,7 +207,11 @@ mod tests {
         let path = directory.join("paneflow.json");
         std::fs::write(&path, "{\"user\": true}\n").unwrap();
 
-        drop(GrokHookFileGuard::install_at(&directory).unwrap());
+        assert!(GrokHookFileGuard::install_at(&directory).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"user\": true}\n"
+        );
 
         assert!(
             path.exists(),
@@ -193,12 +241,40 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_preserves_files_edited_during_a_session() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let pi = PiExtensionGuard::install_at(&temp.path().join("pi")).unwrap();
+        let grok = GrokHookFileGuard::install_at(&temp.path().join("grok")).unwrap();
+        let paths = [pi.path.clone(), grok.path.clone()];
+        for path in &paths {
+            std::fs::write(path, "user changes").unwrap();
+        }
+        drop(pi);
+        drop(grok);
+        for path in paths {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "user changes");
+        }
+    }
+
+    #[test]
+    fn orphan_sweep_preserves_modified_owned_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("hook");
+        std::fs::write(&path, "user changes").unwrap();
+        let mut lease = HookLease::acquire(&path).unwrap();
+        lease.mark_created().unwrap();
+        drop(lease);
+        sweep_owned_file(&path, "original managed content");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "user changes");
+    }
+
+    #[test]
     fn orphan_sweep_preserves_preexisting_file() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join("paneflow.json");
         std::fs::write(&path, "{}").unwrap();
 
-        sweep_owned_file(&path);
+        sweep_owned_file(&path, "{}");
 
         assert!(
             path.exists(),
@@ -215,7 +291,7 @@ mod tests {
         lease.mark_created().unwrap();
         drop(lease); // simulated crash: the lock releases, the marker persists
 
-        sweep_owned_file(&path);
+        sweep_owned_file(&path, "{}");
 
         assert!(
             !path.exists(),

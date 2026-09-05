@@ -9,6 +9,8 @@
 //! survive output arriving underneath it.
 
 use paneflow_libghostty_sys as sys;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use crate::engine::DisplayTerminal;
 use crate::handles::check;
@@ -21,15 +23,20 @@ use crate::{GhosttyError, Point, Result};
 /// having a value, which [`Self::is_live`] reports.
 pub struct TrackedRef {
     raw: sys::GhosttyTrackedGridRef,
+    epoch: RefCell<(Rc<Cell<u64>>, u64)>,
 }
 
 impl TrackedRef {
     /// Whether the reference still names a cell.
     ///
     /// Returns `false` once the row has scrolled out of the scrollback, or
-    /// once the terminal that created it has been dropped.
+    /// once its terminal has been explicitly cleared, reset, or dropped.
     #[must_use]
     pub fn is_live(&self) -> bool {
+        let epoch = self.epoch.borrow();
+        if epoch.0.get() != epoch.1 {
+            return false;
+        }
         // SAFETY: `raw` is a live tracked reference owned by `self`; the call
         // is defined even after its terminal is freed.
         unsafe { sys::ghostty_tracked_grid_ref_has_value(self.raw) }
@@ -42,6 +49,9 @@ impl TrackedRef {
     /// scrolling; use [`DisplayTerminal::tracked_point`] for a
     /// viewport-relative point.
     pub fn screen_point(&self) -> Result<Option<(u32, u16)>> {
+        if !self.is_live() {
+            return Ok(None);
+        }
         let mut coordinate = sys::GhosttyPointCoordinate { x: 0, y: 0 };
         // SAFETY: `raw` is live and `coordinate` is valid writable storage.
         let result = unsafe {
@@ -63,6 +73,9 @@ impl TrackedRef {
     /// The snapshot stops moving with the terminal, which is what the
     /// selection and grid APIs take.
     pub(crate) fn snapshot(&self) -> Result<Option<sys::GhosttyGridRef>> {
+        if !self.is_live() {
+            return Ok(None);
+        }
         // SAFETY: `GhosttyGridRef` is plain-old-data whose zeroed form is
         // valid; `size` is set immediately after.
         let mut reference: sys::GhosttyGridRef = unsafe { std::mem::zeroed() };
@@ -102,7 +115,10 @@ impl DisplayTerminal {
                 "terminal_grid_ref_track returned a null handle".into(),
             ));
         }
-        Ok(TrackedRef { raw })
+        Ok(TrackedRef {
+            raw,
+            epoch: RefCell::new((Rc::clone(&self.tracked_epoch), self.tracked_epoch.get())),
+        })
     }
 
     /// Move an existing tracked reference to `point`.
@@ -112,7 +128,9 @@ impl DisplayTerminal {
         // terminal's geometry.
         let result =
             unsafe { sys::ghostty_tracked_grid_ref_set(reference.raw, self.terminal.raw(), point) };
-        check("tracked_grid_ref_set", result)
+        check("tracked_grid_ref_set", result)?;
+        *reference.epoch.borrow_mut() = (Rc::clone(&self.tracked_epoch), self.tracked_epoch.get());
+        Ok(())
     }
 
     /// Where a tracked reference points, in viewport-relative coordinates.
@@ -230,16 +248,16 @@ mod tests {
             .clear_screen_and_scrollback()
             .expect("clear must succeed");
 
-        // libghostty-vt currently keeps `is_live` true after RIS/clear and
-        // reports screen (0, 0). Tightening this to `!is_live()` fails against
-        // the vendored archive; leave the original disjunct until a libghostty
-        // bump invalidates the ref.
-        assert!(
-            !anchor.is_live()
-                || terminal.tracked_point(&anchor).expect("point").is_none()
-                || anchor.screen_point().expect("screen point") == Some((0, 0)),
-            "a cleared scrollback must not leave the anchor pointing at live content"
-        );
+        assert!(!anchor.is_live());
+        assert_eq!(terminal.tracked_point(&anchor).expect("point"), None);
+        assert_eq!(anchor.screen_point().expect("screen point"), None);
+        // An invalidated allocation remains reusable via explicit retracking.
+        terminal
+            .retrack(&anchor, Point::new(0, 1))
+            .expect("retrack");
+        assert!(anchor.is_live());
+        terminal.reset();
+        assert!(!anchor.is_live());
     }
 
     #[test]
