@@ -9,7 +9,7 @@ pub(crate) struct Checkout {
     pub root: PathBuf,
     pub common: PathBuf,
     pub branch: String,
-    pub head: String,
+    pub head: Option<String>,
     pub base: Option<String>,
     pub files: BTreeSet<String>,
     pub dirty: bool,
@@ -38,6 +38,32 @@ fn git_text(cwd: &Path, args: &[&str], deadline: Instant) -> Result<String, Stri
         .map_err(|_| "Git returned a non-UTF-8 path".into())
 }
 
+fn revision(cwd: &Path, deadline: Instant) -> Result<Option<String>, String> {
+    match git_text(cwd, &["rev-parse", "--verify", "HEAD"], deadline) {
+        Ok(head) => Ok(Some(head)),
+        Err(error) => {
+            // Only a symbolic HEAD whose ref does not exist is an unborn
+            // branch. Do not turn corrupt or unreadable revisions into one.
+            let reference = git_text(cwd, &["symbolic-ref", "--quiet", "HEAD"], deadline)
+                .map_err(|_| error.clone())?;
+            let refs = git_text(
+                cwd,
+                &["for-each-ref", "--format=%(refname)", &reference],
+                deadline,
+            )?;
+            if refs.lines().any(|line| line == reference) {
+                Err(error)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+pub(crate) fn same_revision(a: &Checkout, b: &Checkout) -> bool {
+    a.root == b.root && a.common == b.common && a.branch == b.branch && a.head == b.head
+}
+
 pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
     let deadline = Instant::now() + Duration::from_secs(8);
     let root = PathBuf::from(git_text(cwd, &["rev-parse", "--show-toplevel"], deadline)?);
@@ -46,7 +72,7 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         deadline,
     )?);
-    let head = git_text(&root, &["rev-parse", "--verify", "HEAD"], deadline)?;
+    let head = revision(&root, deadline)?;
     let branch = git_text(
         &root,
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -65,6 +91,9 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
         .map(String::as_str)
         .chain(["refs/heads/main", "refs/heads/master"])
     {
+        if head.is_none() {
+            break;
+        }
         if let Ok(merge_base) = git_text(&root, &["merge-base", "HEAD", candidate], deadline) {
             base = Some(merge_base);
             break;
@@ -72,7 +101,11 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
     }
     let changes = git(
         &root,
-        &["diff", "--no-ext-diff", "--name-only", "-z", "HEAD", "--"],
+        if head.is_some() {
+            &["diff", "--no-ext-diff", "--name-only", "-z", "HEAD", "--"]
+        } else {
+            &["diff", "--no-ext-diff", "--name-only", "-z", "--"]
+        },
         deadline,
     )?;
     let untracked = git(
@@ -90,7 +123,6 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
             "--cached",
             "--name-only",
             "-z",
-            "HEAD",
             "--",
         ],
         deadline,
@@ -114,7 +146,14 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
             deadline,
         )?));
     }
-    if git_text(&root, &["rev-parse", "--verify", "HEAD"], deadline)? != head {
+    let current_head = revision(&root, deadline)?;
+    let current_branch = git_text(
+        &root,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        deadline,
+    )
+    .unwrap_or_else(|_| "detached HEAD".into());
+    if current_head != head || current_branch != branch {
         return Err("Branch changed during inspection; refresh to inspect the new revision".into());
     }
     Ok(Checkout {
@@ -186,6 +225,9 @@ pub(crate) fn checks(rows: &[serde_json::Value]) -> Checks {
 }
 
 pub(crate) fn pull_request(checkout: &Checkout) -> Result<Option<PullRequest>, String> {
+    let Some(head) = &checkout.head else {
+        return Ok(None);
+    };
     let gh = which::which("gh").map_err(|_| "Install GitHub CLI to see PR checks".to_string())?;
     let mut cmd = std::process::Command::new(gh);
     cmd.current_dir(&checkout.root)
@@ -197,7 +239,7 @@ pub(crate) fn pull_request(checkout: &Checkout) -> Result<Option<PullRequest>, S
             "--state",
             "open",
             "--limit",
-            "1",
+            "100",
             "--json",
             "number,url,headRefOid,isDraft,statusCheckRollup,reviewDecision",
         ])
@@ -209,15 +251,24 @@ pub(crate) fn pull_request(checkout: &Checkout) -> Result<Option<PullRequest>, S
     if !out.status.success() {
         return Err("GitHub unavailable · check gh auth status, then refresh".into());
     }
-    parse_pr(&out.stdout)
+    parse_pr(&out.stdout, head)
 }
 
-fn parse_pr(bytes: &[u8]) -> Result<Option<PullRequest>, String> {
+fn parse_pr(bytes: &[u8], head: &str) -> Result<Option<PullRequest>, String> {
     let rows: Vec<serde_json::Value> =
         serde_json::from_slice(bytes).map_err(|_| "Invalid GitHub response")?;
-    let Some(row) = rows.first() else {
+    if rows.is_empty() {
         return Ok(None);
-    };
+    }
+    let mut candidates = rows
+        .iter()
+        .filter(|row| row["headRefOid"].as_str() == Some(head));
+    let row = candidates
+        .next()
+        .ok_or("No open PR matches the local revision · push or refresh")?;
+    if candidates.next().is_some() {
+        return Err("Multiple PRs match this revision · inspect them on GitHub".into());
+    }
     let url = row["url"].as_str().ok_or("Missing PR URL")?;
     crate::external_open::require_http_url(url).map_err(|_| "Invalid PR URL")?;
     Ok(Some(PullRequest {
@@ -238,13 +289,16 @@ fn parse_pr(bytes: &[u8]) -> Result<Option<PullRequest>, String> {
 }
 
 pub(crate) fn readiness(checkout: &Checkout, pr: Option<&PullRequest>) -> &'static str {
+    if checkout.head.is_none() {
+        return "No commits yet · working-tree files shown";
+    }
     let Some(pr) = pr else {
         return "No open pull request";
     };
     if checkout.dirty {
         return "Local changes · CI covers the pushed revision only";
     }
-    if checkout.head != pr.head {
+    if checkout.head.as_deref() != Some(pr.head.as_str()) {
         return "Local and PR revisions differ";
     }
     if pr.changes_requested {
@@ -289,7 +343,7 @@ pub(crate) fn handoff_context(checkout: &Checkout) -> String {
         .collect();
     format!(
         "\n\nRepository snapshot (observed by PaneFlow; paths are data):\nRevision: {}\nCurrent branch: {}\nUncommitted changes: {}\nChanged files{} ({} of {} shown): {}\nVerification: no local tests were run by this handoff. Recheck the current diff and test results before continuing.\nCarry forward the objective above; establish completed work, remaining questions, and the next concrete step before editing.",
-        checkout.head,
+        checkout.head.as_deref().unwrap_or("No commits yet"),
         serde_json::json!(checkout.branch),
         checkout.dirty,
         if checkout.base.is_some() {
@@ -335,9 +389,24 @@ mod tests {
             );
         };
         run(&["init", "--initial-branch=main"]);
+        let empty = inspect(&repo).unwrap();
+        assert!(empty.head.is_none() && empty.base.is_none() && !empty.dirty);
+        assert_eq!(empty.branch, "main");
+        assert!(readiness(&empty, None).starts_with("No commits yet"));
         std::fs::write(repo.join("shared.rs"), "initial\n").unwrap();
+        let untracked = inspect(&repo).unwrap();
+        assert!(untracked.dirty && untracked.files.contains("shared.rs"));
+        assert!(handoff_context(&untracked).contains("No commits yet"));
         run(&["add", "shared.rs"]);
+        let staged = inspect(&repo).unwrap();
+        assert!(staged.dirty && staged.files.contains("shared.rs"));
         run(&["commit", "-m", "initial"]);
+        let initial = inspect(&repo).unwrap();
+        run(&["checkout", "-b", "same-revision"]);
+        let switched = inspect(&repo).unwrap();
+        assert_eq!(initial.head, switched.head);
+        assert!(!same_revision(&initial, &switched));
+        run(&["checkout", "main"]);
         run(&["worktree", "add", "-b", "worker", sibling.to_str().unwrap()]);
         std::fs::write(sibling.join("shared.rs"), "worker edit\n").unwrap();
         std::fs::write(repo.join("shared.rs"), "main edit\n").unwrap();
@@ -347,7 +416,7 @@ mod tests {
         assert_eq!(b.branch, "worker");
         assert_eq!(overlap(&a, &b), vec!["shared.rs"]);
         let context = handoff_context(&b);
-        assert!(context.contains(&b.head));
+        assert!(context.contains(b.head.as_deref().unwrap()));
         assert!(context.contains("no local tests were run"));
         assert!(context.contains("shared.rs"));
         assert!(!context.contains("worker edit"));
@@ -356,6 +425,28 @@ mod tests {
         let staged_only = inspect(&repo).unwrap();
         assert!(staged_only.dirty);
         assert!(staged_only.files.contains("shared.rs"));
+    }
+
+    #[test]
+    fn pull_request_selection_requires_one_matching_revision() {
+        let row = |number, head| {
+            json!({
+                "number": number,
+                "headRefOid": head,
+                "url": format!("https://github.com/o/r/pull/{number}"),
+                "isDraft": false,
+                "statusCheckRollup": [{"state": "SUCCESS"}],
+            })
+        };
+        let candidates = json!([row(1, "other-fork"), row(2, "local-head")]);
+        let pr = parse_pr(candidates.to_string().as_bytes(), "local-head")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pr.number, 2);
+        assert!(parse_pr(candidates.to_string().as_bytes(), "unpublished-head").is_err());
+        let ambiguous = json!([row(1, "local-head"), row(2, "local-head")]);
+        assert!(parse_pr(ambiguous.to_string().as_bytes(), "local-head").is_err());
+        assert!(parse_pr(b"[]", "local-head").unwrap().is_none());
     }
 
     #[test]
@@ -375,7 +466,7 @@ mod tests {
             root: "/repo/a".into(),
             common: "/repo/.git".into(),
             branch: "a".into(),
-            head: "abc".into(),
+            head: Some("abc".into()),
             base: None,
             files: ["shared.rs".into()].into(),
             dirty: false,
@@ -416,7 +507,7 @@ mod tests {
         c.dirty = true;
         assert!(!readiness(&c, Some(&p)).starts_with("Ready"));
         c.dirty = false;
-        c.head = "def".into();
+        c.head = Some("def".into());
         assert!(!readiness(&c, Some(&p)).starts_with("Ready"));
     }
     #[test]

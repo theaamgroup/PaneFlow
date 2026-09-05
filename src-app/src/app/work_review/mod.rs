@@ -113,7 +113,16 @@ impl PaneFlowApp {
                                 let pr = model::pull_request(&c);
                                 // Reinspect after the network wait: an agent may
                                 // have edited or committed while GitHub answered.
-                                (model::inspect(&c.root), pr)
+                                let refreshed = model::inspect(&c.root);
+                                let pr = if refreshed
+                                    .as_ref()
+                                    .is_ok_and(|new| model::same_revision(&c, new))
+                                {
+                                    pr
+                                } else {
+                                    Err("Checkout changed while checking GitHub · refresh".into())
+                                };
+                                (refreshed, pr)
                             }
                             Err(error) => (Err(error), Ok(None)),
                         }
@@ -159,6 +168,10 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if review && !self.cached_config.review_view_enabled() {
+            self.show_toast("Review is disabled in settings", cx);
+            return;
+        }
         let Some((tab_id, surface_id, checkout)) = self
             .work_review
             .as_ref()
@@ -298,11 +311,14 @@ impl PaneFlowApp {
                 Ok(c) => {
                     card = card
                         .child(div().text_color(ui.muted).child(format!(
-                            "{} · {} files changed · {}",
-                            crate::limits::clamp_untrusted_label(&c.branch),
-                            c.files.len(),
-                            &c.head[..c.head.len().min(8)]
-                        )))
+                                "{} · {} files changed · {}",
+                                crate::limits::clamp_untrusted_label(&c.branch),
+                                c.files.len(),
+                                c.head
+                                    .as_deref()
+                                    .map(|head| &head[..head.len().min(8)])
+                                    .unwrap_or("no commits")
+                            )))
                         .child(match &row.pr {
                             Ok(pr) => model::readiness(c, pr.as_ref()).to_string(),
                             Err(e) => e.clone(),
@@ -343,16 +359,20 @@ impl PaneFlowApp {
                                     cx.stop_propagation();
                                 })),
                         )
-                        .child(
-                            div()
-                                .id(("review-diff", index))
-                                .cursor_pointer()
-                                .child("Review diff")
-                                .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
-                                    app.visit_review_row(index, true, window, cx);
-                                    cx.stop_propagation();
-                                })),
-                        )
+                        .when(self.cached_config.review_view_enabled(), |actions| {
+                            actions.child(
+                                div()
+                                    .id(("review-diff", index))
+                                    .cursor_pointer()
+                                    .child("Review diff")
+                                    .on_click(cx.listener(
+                                        move |app, _: &ClickEvent, window, cx| {
+                                            app.visit_review_row(index, true, window, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    )),
+                            )
+                        })
                         .child(
                             div()
                                 .id(("review-context", index))

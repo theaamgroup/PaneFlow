@@ -436,6 +436,8 @@ packaged app before publishing. After publication it downloads the public
 latest feed and DMG without credentials, checks the advertised version and
 length, and verifies the signature against the repository's public key. The
 public probe retries briefly while GitHub's latest-release redirect propagates.
+If delivery verification still fails, the job returns the release to draft so
+it is withdrawn from the public update feed while the failure is investigated.
 
 Run the same check locally (substitute the published version):
 
