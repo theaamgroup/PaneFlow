@@ -95,7 +95,11 @@ following one's own moved pane does not grant access to its new workspace's peer
 
 Pane identity and task records use the existing debounced `session.json` save
 path. A successful write response means accepted in memory and queued for save,
-not fsynced to disk. Normal session restoration and undo-close preserve context;
+not fsynced to disk. Session writes share the reader's 64 MiB encoded-JSON limit.
+If the complete session exceeds it, saving fails and leaves the last readable
+snapshot intact; task data is never silently truncated. The quit path reports
+the save failure. New in-memory changes remain unsaved until the session fits.
+Normal session restoration and undo-close preserve context;
 terminal lifetime IDs change on reconstruction. Closing a pane permanently drops
 its task with the pane. There is no task archive or report history in this version.
 Old session files need no migration. Omit `surfaces[].agent_context` from reusable
