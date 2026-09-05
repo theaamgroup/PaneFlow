@@ -445,27 +445,51 @@ pub(crate) fn progress_lifecycle_event(busy: bool) -> AgentLifecycleEvent {
 /// The lifecycle event an OSC 9 / OSC 777 notification implies, or `None`
 /// when the notification says nothing about the agent's state.
 ///
-/// A desktop notification is a program asking for the user, which is what
-/// [`WaitingForInput`](crate::ai_types::AgentState::WaitingForInput) means -
-/// Claude Code sends exactly three ("Claude needs your permission", "Claude
-/// Code needs your input", "Claude is waiting for your input") and all three
-/// are the user's turn. The body is kept as the session's message so the
-/// sidebar and the attention queue say what is being asked.
+/// Only recognized input/approval requests imply `WaitingForInput`. Codex
+/// also sends completion notifications containing a preview of its answer;
+/// treating those as questions leaves a false attention border and bell
+/// across resumed turns (#390). Unknown notifications carry no lifecycle
+/// claim and still follow the normal desktop-notification path.
 ///
-/// Empty notifications are dropped: a bare bell carries no claim, and
-/// promoting it would let any `notify-send` in a pane running an agent light
-/// up the attention queue.
+/// Codex's request prefixes come from `Notification::display` in
+/// `codex-rs/tui/src/chatwidget/notifications.rs`. Match the detected agent
+/// as well as its notification vocabulary, never arbitrary question text.
 ///
 /// The text arrives already sanitized - `ghostty_session::sanitized_notification`
 /// strips bidi and zero-width controls and bounds the length at the engine
 /// boundary, before either the desktop notification or this ever sees it.
-pub(crate) fn notification_lifecycle_event(title: &str, body: &str) -> Option<AgentLifecycleEvent> {
+pub(crate) fn notification_lifecycle_event(
+    tool: TerminalAgent,
+    title: &str,
+    body: &str,
+) -> Option<AgentLifecycleEvent> {
     let message = if body.trim().is_empty() {
         title.trim()
     } else {
         body.trim()
     };
-    (!message.is_empty()).then(|| AgentLifecycleEvent::Notification {
+    let requests_input = match tool {
+        TerminalAgent::ClaudeCode => matches!(
+            message,
+            "Claude needs your permission"
+                | "Claude Code needs your input"
+                | "Claude is waiting for your input"
+        ),
+        TerminalAgent::Codex => [
+            "Approval requested: ",
+            "Codex wants to edit ",
+            "Approval requested by ",
+            "Plan mode prompt: ",
+        ]
+        .iter()
+        .any(|prefix| {
+            message
+                .strip_prefix(prefix)
+                .is_some_and(|detail| !detail.trim().is_empty())
+        }),
+        _ => false,
+    };
+    requests_input.then(|| AgentLifecycleEvent::Notification {
         message: Some(message.to_owned()),
     })
 }
@@ -530,7 +554,11 @@ mod tests {
     #[test]
     fn a_notification_becomes_the_question_the_sidebar_shows() {
         assert_eq!(
-            notification_lifecycle_event("Claude Code", "Claude needs your permission"),
+            notification_lifecycle_event(
+                TerminalAgent::ClaudeCode,
+                "Claude Code",
+                "Claude needs your permission",
+            ),
             Some(AgentLifecycleEvent::Notification {
                 message: Some("Claude needs your permission".into())
             })
@@ -538,7 +566,11 @@ mod tests {
         // OSC 9 carries a single string, which libghostty reports as the
         // title with an empty body.
         assert_eq!(
-            notification_lifecycle_event("Claude is waiting for your input", ""),
+            notification_lifecycle_event(
+                TerminalAgent::ClaudeCode,
+                "Claude is waiting for your input",
+                "",
+            ),
             Some(AgentLifecycleEvent::Notification {
                 message: Some("Claude is waiting for your input".into())
             })
@@ -547,7 +579,65 @@ mod tests {
 
     #[test]
     fn an_empty_notification_is_not_an_agent_asking_for_something() {
-        assert_eq!(notification_lifecycle_event("", ""), None);
-        assert_eq!(notification_lifecycle_event("   ", "\n\t"), None);
+        for tool in [TerminalAgent::ClaudeCode, TerminalAgent::Codex] {
+            assert_eq!(notification_lifecycle_event(tool, "", ""), None);
+            assert_eq!(notification_lifecycle_event(tool, "   ", "\n\t"), None);
+        }
+    }
+
+    #[test]
+    fn codex_completion_previews_do_not_request_input() {
+        for message in [
+            "Agent turn complete",
+            "Created and verified all three tasks in the project.",
+            "Would you like me to continue?",
+            "Build finished",
+        ] {
+            // OSC 9 supplies only a title; OSC 777 can supply a body.
+            for (title, body) in [(message, ""), ("Codex", message)] {
+                assert_eq!(
+                    notification_lifecycle_event(TerminalAgent::Codex, title, body),
+                    None,
+                    "completion/informational message must not become a question: {message}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_approval_and_input_notifications_preserve_the_request() {
+        for message in [
+            "Approval requested: cargo test",
+            "Codex wants to edit src/main.rs",
+            "Codex wants to edit 3 files",
+            "Approval requested by project-tools",
+            "Plan mode prompt: Choose a deployment target",
+        ] {
+            for (title, body) in [(message, ""), ("Codex", message)] {
+                assert_eq!(
+                    notification_lifecycle_event(TerminalAgent::Codex, title, body),
+                    Some(AgentLifecycleEvent::Notification {
+                        message: Some(message.into()),
+                    }),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn notification_requests_must_match_the_detected_agent() {
+        for (tool, message) in [
+            (TerminalAgent::ClaudeCode, "Approval requested: cargo test"),
+            (TerminalAgent::Codex, "Claude needs your permission"),
+            (TerminalAgent::ClaudeCode, "Build finished"),
+            (TerminalAgent::Codex, "Approval requested: "),
+            (
+                TerminalAgent::Codex,
+                "The output says Approval requested: cargo test",
+            ),
+            (TerminalAgent::Gemini, "Approval requested: cargo test"),
+        ] {
+            assert_eq!(notification_lifecycle_event(tool, message, ""), None);
+        }
     }
 }

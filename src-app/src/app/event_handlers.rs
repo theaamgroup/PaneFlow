@@ -1008,8 +1008,9 @@ impl PaneFlowApp {
                 );
             }
             terminal::TerminalEvent::AgentAttention { title, body } => {
-                if let Some(event) =
-                    crate::app::agent_status::notification_lifecycle_event(title, body)
+                if let Some(tool) = terminal.read(cx).terminal.detected_agent
+                    && let Some(event) =
+                        crate::app::agent_status::notification_lifecycle_event(tool, title, body)
                 {
                     self.apply_terminal_agent_observation(&terminal, event, cx);
                 }
