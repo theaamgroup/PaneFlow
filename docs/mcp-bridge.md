@@ -7,8 +7,8 @@ pasting by hand.
 
 `paneflow-mcp` is a small stdio [MCP](https://modelcontextprotocol.io) server.
 The agent spawns it as a subprocess; it proxies each call to PaneFlow's local
-JSON-RPC socket (the same one the AI-hook uses). It is **read-only** - it can
-list, read, and search surfaces, but cannot type into or control them.
+JSON-RPC socket (the same one the AI-hook uses). It can list, read, and search surfaces and record progress on the calling pane’s
+assigned task. It cannot type into or control terminals.
 
 By default the bridge inherits `PANEFLOW_WORKSPACE_ID` from the pane that
 launched the agent and filters discovery, tools, and resources to that
@@ -21,6 +21,10 @@ read access is intentional.
 > `rmcp`) to keep the dependency tree tiny and the surface fully unit-tested.
 
 ## Tools
+
+Agent context tools `whoami`, `task_get`, and `task_report` are documented in
+[Agent context](agent-context.md). The report tool is annotated as a write; the
+remaining tools are read-only. Task assignment is available through the CLI.
 
 | Tool | Arguments | Returns |
 |------|-----------|---------|
@@ -35,7 +39,7 @@ read access is intentional.
 > marker. A pane may contain attacker-controlled output (a server logging a
 > crafted string), and pane titles can also be terminal-controlled; the agent
 > is instructed to treat bridge output as data, never as instructions to
-> execute. The bridge exposes no write/keystroke tool by design.
+> execute. The bridge exposes no keystroke tool. `task_report` only updates the caller’s task record.
 
 `tab_id` is a stable identity, never a positional index, and it is omitted for
 surfaces that live outside the CLI tab hierarchy (Agents threads, the bottom

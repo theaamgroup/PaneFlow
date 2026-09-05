@@ -258,6 +258,7 @@ pub(crate) struct FilesContextMenu {
 /// Captured state of a closed pane for undo-close-pane (US-014).
 pub(crate) enum ClosedSurfaceRecord {
     Terminal {
+        agent_context: Option<Box<paneflow_config::schema::AgentContext>>,
         cwd: Option<std::path::PathBuf>,
         /// Plain-text extract: the fallback undo replays when `replay` is
         /// absent or was released by the record budget.

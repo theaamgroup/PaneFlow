@@ -85,7 +85,9 @@ carriage return can never be sent silently.
 Full command list: [docs/user/scripting.md](docs/user/scripting.md).
 
 **Let agents read each other.** `paneflow mcp install` registers a
-read-only MCP bridge (`list_panes`, `read_pane`, `search_pane`). It
+MCP bridge (`list_panes`, `read_pane`, `search_pane`). Agent context tools
+(`whoami`, `task_get`, `task_report`) read assignments and record progress in
+the calling pane’s task. [Agent context](docs/agent-context.md) describes setup. It
 cannot type into panes. Terminal output handed to an agent is marked
 untrusted, so the other agent should analyze it, not obey it. Details:
 [docs/mcp-bridge.md](docs/mcp-bridge.md).
@@ -126,7 +128,7 @@ the app switcher and never delivers it to the app.
 - [docs/user/index.md](docs/user/index.md) — using the app
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how it is put together
 - [docs/user/scripting.md](docs/user/scripting.md) — CLI and automation
-- [docs/mcp-bridge.md](docs/mcp-bridge.md) — read-only MCP bridge
+- [docs/mcp-bridge.md](docs/mcp-bridge.md) — MCP bridge
 
 ## License
 

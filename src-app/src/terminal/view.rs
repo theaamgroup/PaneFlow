@@ -233,6 +233,9 @@ pub(super) struct HoverLinkCache {
 
 pub struct TerminalView {
     pub terminal: TerminalState,
+    pub(crate) agent_context: paneflow_config::schema::AgentContext,
+    /// One terminal lifetime; regenerated when a persisted pane is restored.
+    pub(crate) terminal_session_id: String,
     focus_handle: FocusHandle,
     pub(super) cursor_visible: bool,
     /// Track mouse button state for drag selection
@@ -850,6 +853,11 @@ impl TerminalView {
 
         Self {
             terminal,
+            agent_context: paneflow_config::schema::AgentContext {
+                pane_id: uuid::Uuid::new_v4().to_string(),
+                task: None,
+            },
+            terminal_session_id: uuid::Uuid::new_v4().to_string(),
             focus_handle,
             cursor_visible: true,
             selecting: false,

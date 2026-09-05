@@ -587,6 +587,7 @@ pub(crate) fn capture_closed_pane_record(
                 ),
                 custom_name: tv_ref.terminal.custom_name.clone(),
                 font_size: tv_ref.terminal.font_size_override,
+                agent_context: Some(Box::new(tv_ref.agent_context.clone())),
             }
         }
         crate::pane::PaneSurface::Markdown(markdown) => ClosedSurfaceRecord::Markdown {
@@ -784,11 +785,13 @@ fn restore_closed_surface_record(
             replay,
             custom_name,
             font_size,
+            agent_context,
         } => {
             let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd.clone(), None, cx));
             terminal.update(cx, |view, _| {
                 view.terminal.custom_name = custom_name.clone();
                 view.terminal.font_size_override = *font_size;
+                super::agent_context::restore_context(view, agent_context.as_deref());
             });
             if let Some(replay) = replay {
                 terminal.read(cx).restore_replay(replay);
@@ -3156,6 +3159,7 @@ mod tests {
                 replay: None,
                 custom_name: None,
                 font_size: None,
+                agent_context: None,
             },
             workspace_id: 0,
         })
@@ -3171,6 +3175,7 @@ mod tests {
                 replay: None,
                 custom_name: None,
                 font_size: None,
+                agent_context: None,
             },
             workspace_id,
         })
@@ -4280,6 +4285,7 @@ mod tests {
                 replay: None,
                 custom_name: None,
                 font_size: None,
+                agent_context: None,
             },
             workspace_id: 7,
         });
@@ -4426,6 +4432,7 @@ mod tests {
                     replay: Some(vec![b'y'; replay]),
                     custom_name: None,
                     font_size: None,
+                    agent_context: None,
                 },
                 workspace_id: 0,
             })

@@ -26,7 +26,7 @@ pub fn tool_specs() -> Vec<Value> {
         "idempotentHint": true,
         "openWorldHint": false
     });
-    vec![
+    let mut specs = vec![
         json!({
             "name": "list_panes",
             "description": "List PaneFlow surfaces (terminal panes) with their human-readable name, title, cwd, foreground command, surface_id, and the id and title of the workspace tab that holds them. Use this first to discover which surface to read.",
@@ -70,7 +70,29 @@ pub fn tool_specs() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
-    ]
+    ];
+    specs.extend(agent_context_specs());
+    specs
+}
+
+fn agent_context_specs() -> Vec<Value> {
+    let list = json!({"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 512}});
+    let mut specs: Vec<Value> = [("whoami", "Resolve your inherited PaneFlow pane, workspace, terminal lifetime, observed agents, and current task ID. IDs are routing metadata, not credentials."),
+        ("task_get", "Read your pane's persisted task assignment, revision, and latest agent-reported result. A null task means no assignment; do not invent one.")]
+        .into_iter().map(|(name, description)| json!({"name": name, "description": description,
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}})).collect();
+    specs.push(json!({"name": "task_report",
+        "description": "Record progress for your assigned task. First call task_get; supply its task_id and revision. A stale revision is rejected. This replaces the previous report, increments revision, and schedules session persistence. Test and completion claims are self-reported, not verified. No terminal input is sent.",
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        "inputSchema": {"type": "object", "additionalProperties": false, "required": ["task_id", "revision", "report"],
+            "properties": {"task_id": {"type": "string"}, "revision": {"type": "integer", "minimum": 1},
+                "report": {"type": "object", "additionalProperties": false, "required": ["status", "summary"], "properties": {
+                    "status": {"type": "string", "enum": ["working", "blocked", "completed"]},
+                    "summary": {"type": "string", "minLength": 1, "maxLength": 4096},
+                    "changed_files": list, "commits": list, "tests": list, "unresolved_questions": list
+                }}}}}));
+    specs
 }
 
 #[derive(Deserialize)]
@@ -116,9 +138,24 @@ pub fn dispatch_call<T: IpcTransport + ?Sized>(
         "list_panes" => decode::<ListPanesArgs>(&call.arguments).and_then(|_| list_panes(bridge)),
         "read_pane" => decode(&call.arguments).and_then(|args| read_pane(args, bridge)),
         "search_pane" => decode(&call.arguments).and_then(|args| search_pane(args, bridge)),
+        "whoami" => decode::<ListPanesArgs>(&call.arguments)
+            .and_then(|_| context_result(bridge, "agent.whoami", json!({}))),
+        "task_get" => decode::<ListPanesArgs>(&call.arguments)
+            .and_then(|_| context_result(bridge, "task.get", json!({}))),
+        "task_report" => context_result(bridge, "task.report", call.arguments),
         other => return Err(format!("unknown tool: {other}")),
     };
     Ok(tool_result(outcome))
+}
+
+fn context_result<T: IpcTransport + ?Sized>(
+    bridge: &Bridge<'_, T>,
+    method: &'static str,
+    arguments: Value,
+) -> Result<String, String> {
+    let result = bridge.agent_context(method, arguments)?;
+    let body = serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?;
+    Ok(wrap_untrusted(&format!("source=\"{method}\""), &body))
 }
 
 fn list_panes<T: IpcTransport + ?Sized>(bridge: &Bridge<'_, T>) -> Result<String, String> {

@@ -23,7 +23,7 @@
 //!   client (US-005), shared with the `paneflow` CLI.
 //! - [`mcp`] - MCP stdio protocol loop (US-006)
 //! - [`bridge`] - typed, scope-aware Paneflow IPC adapter
-//! - [`tools`] - the three MCP tool adapters (US-006/007/008)
+//! - [`tools`] - terminal read and agent context tool adapters
 //! - [`resources`] - MCP resource convenience layer (US-014)
 //! - [`output`] - untrusted terminal-output fencing
 //! - [`resolve`] - name → surface_id resolution with disambiguation (US-009)

@@ -1074,6 +1074,10 @@ fn handle_connection(
                                     "surface.focus",
                                     "surface.status",
                                     "fleet.list",
+                                    "agent.whoami",
+                                    "task.get",
+                                    "task.assign",
+                                    "task.report",
                                     "events.subscribe",
                                 ];
                                 methods.extend_from_slice(paneflow_ipc_client::ai_hook::METHODS);

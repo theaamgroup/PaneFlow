@@ -144,11 +144,40 @@ pub struct SurfaceSearchResult {
 pub struct Bridge<'a, T: IpcTransport + ?Sized> {
     transport: &'a T,
     scope: BridgeScope,
+    identity: Result<Value, String>,
 }
 
 impl<'a, T: IpcTransport + ?Sized> Bridge<'a, T> {
     pub fn new(transport: &'a T, scope: BridgeScope) -> Self {
-        Self { transport, scope }
+        Self {
+            transport,
+            scope,
+            identity: paneflow_ipc_client::agent_context::identity_from_env(),
+        }
+    }
+
+    /// Agent tools have no target argument; the bridge owns caller routing.
+    pub(crate) fn agent_context(
+        &self,
+        method: &'static str,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        let mut params = self.identity.clone()?;
+        if self
+            .scope
+            .workspace_id()
+            .is_some_and(|expected| params["workspace_id"].as_u64() != Some(expected))
+        {
+            return Err("caller identity is outside the MCP workspace scope".into());
+        }
+        let fields = arguments.as_object().ok_or("arguments must be an object")?;
+        for (key, value) in fields {
+            if !matches!(key.as_str(), "task_id" | "revision" | "report") {
+                return Err(format!("unsupported agent context argument: {key}"));
+            }
+            params[key] = value.clone();
+        }
+        self.transport.call(method, params)
     }
 
     pub fn scope(&self) -> BridgeScope {
@@ -250,6 +279,67 @@ impl<'a, T: IpcTransport + ?Sized> Bridge<'a, T> {
 mod tests {
     use super::*;
     use crate::test_support::FakeTransport;
+
+    #[test]
+    fn agent_context_routes_to_the_inherited_pane_even_with_global_read_scope() {
+        let transport = FakeTransport::new().with("task.get", json!({"task": null}));
+        let bridge = Bridge {
+            transport: &transport,
+            scope: BridgeScope::All,
+            identity: Ok(json!({"surface_id": 7, "workspace_id": 2})),
+        };
+        assert_eq!(
+            bridge.agent_context("task.get", json!({})).expect("read"),
+            json!({"task": null})
+        );
+        assert_eq!(
+            transport.last_params("task.get"),
+            Some(json!({"surface_id": 7, "workspace_id": 2}))
+        );
+        assert!(bridge
+            .agent_context("task.report", json!({"surface_id": 8}))
+            .is_err());
+        assert!(bridge
+            .agent_context("task.report", json!({"workspace_id": 3}))
+            .is_err());
+        assert_eq!(transport.calls().len(), 1);
+    }
+
+    #[test]
+    fn missing_identity_and_scope_mismatch_never_contact_the_app() {
+        let transport = FakeTransport::new();
+        for identity in [
+            Err("missing identity".into()),
+            Ok(json!({"surface_id": 7, "workspace_id": 3})),
+        ] {
+            let bridge = Bridge {
+                transport: &transport,
+                scope: BridgeScope::Workspace(2),
+                identity,
+            };
+            assert!(bridge.agent_context("agent.whoami", json!({})).is_err());
+        }
+        assert!(transport.calls().is_empty());
+    }
+
+    #[test]
+    fn task_report_preserves_revision_and_returns_server_conflicts() {
+        let transport = FakeTransport::new().with_err("task.report", "task changed");
+        let bridge = Bridge {
+            transport: &transport,
+            scope: BridgeScope::Workspace(2),
+            identity: Ok(json!({"surface_id": 7, "workspace_id": 2})),
+        };
+        let args = json!({"task_id": "task-1", "revision": 3, "report": {"status": "blocked", "summary": "Need input"}});
+        assert_eq!(
+            bridge.agent_context("task.report", args.clone()),
+            Err("task changed".into())
+        );
+        let sent = transport.last_params("task.report").expect("request");
+        assert_eq!(sent["revision"], 3);
+        assert_eq!(sent["report"], args["report"]);
+        assert_eq!(sent["surface_id"], 7);
+    }
 
     fn surface(surface_id: u64, workspace_id: Option<u64>) -> Value {
         json!({

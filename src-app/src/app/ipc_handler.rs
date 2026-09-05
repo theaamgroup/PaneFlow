@@ -2123,7 +2123,7 @@ impl PaneFlowApp {
     /// identity in the same GPUI request. This keeps the MCP scope check in the
     /// canonical owner of workspace membership instead of doing a racy
     /// `surface.list` check followed by an unrestricted read in the bridge.
-    fn resolve_readable_surface(
+    pub(super) fn resolve_readable_surface(
         &self,
         params: &serde_json::Value,
         cx: &App,
@@ -3029,7 +3029,9 @@ impl PaneFlowApp {
         // moved verbatim into the handlers below; an unknown method inside a
         // known namespace falls into that handler's `_` arm, which produces
         // the same method-not-found envelope as the catch-all here.
-        if method.starts_with("workspace.") {
+        if method == "agent.whoami" || method.starts_with("task.") {
+            self.handle_agent_context_method(method, params, cx)
+        } else if method.starts_with("workspace.") {
             self.handle_workspace_method(method, params, cx)
         } else if method.starts_with("surface.") {
             self.handle_surface_method(method, params, caller_pid, responder, cx)
