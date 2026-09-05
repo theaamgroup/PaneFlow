@@ -57,6 +57,27 @@ pub(super) fn valid_context(context: &AgentContext) -> bool {
         })
 }
 
+fn mapped_agent_sessions(workspaces: &[Workspace], sid: u64, cx: &App) -> Vec<Value> {
+    if super::ipc_handler::find_pane_by_surface_id(workspaces, sid, cx).is_none() {
+        return Vec::new();
+    }
+    // Hook/session registries can still belong to the source workspace after
+    // a move. The mapped surface, not the registry's owner, identifies these rows.
+    workspaces
+        .iter()
+        .flat_map(|workspace| workspace.agent_sessions.iter())
+        .filter(|(_, session)| session.surface_id == Some(sid))
+        .map(|(pid, session)| {
+            json!({"process_key": pid, "tool": session.tool.tag(),
+                "state": session.state.wire_str(), "source": match session.source {
+                    crate::ai_types::AgentStateSource::Terminal => "terminal",
+                    crate::ai_types::AgentStateSource::SessionRegistry => "session_registry",
+                    crate::ai_types::AgentStateSource::Hook => "hook",
+                }, "last_activity_age_ms": session.last_activity.elapsed().as_millis()})
+        })
+        .collect()
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -201,19 +222,7 @@ impl PaneFlowApp {
             .find(|meta| meta.surface_id == sid)
             .ok_or_else(|| JsonRpcError::invalid_params("surface vanished"))?;
         let tab = ws.tabs().iter().find(|tab| Some(tab.id) == meta.tab_id);
-        let sessions: Vec<_> = ws
-            .agent_sessions
-            .iter()
-            .filter(|(_, session)| session.surface_id == Some(sid))
-            .map(|(pid, session)| {
-                json!({"process_key": pid, "tool": session.tool.tag(),
-                "state": session.state.wire_str(), "source": match session.source {
-                    crate::ai_types::AgentStateSource::Terminal => "terminal",
-                    crate::ai_types::AgentStateSource::SessionRegistry => "session_registry",
-                    crate::ai_types::AgentStateSource::Hook => "hook",
-                }, "last_activity_age_ms": session.last_activity.elapsed().as_millis()})
-            })
-            .collect();
+        let sessions = mapped_agent_sessions(&self.workspaces, sid, cx);
         let view = terminal.read(cx);
         Ok(json!({
             "identity_source": "inherited_environment",
@@ -234,6 +243,45 @@ impl PaneFlowApp {
 mod tests {
     use super::*;
     use gpui::AppContext;
+
+    #[gpui::test]
+    fn moved_pane_keeps_agent_evidence_held_in_the_source_workspace(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let sid = terminal.entity_id().as_u64();
+        let pane = cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx));
+        let mut source = Workspace::with_layout_and_id(
+            1,
+            "source",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(pane.clone()),
+        );
+        let mut session = crate::ai_types::AgentSession::new(
+            crate::agent_launcher::TerminalAgent::Codex,
+            crate::ai_types::AgentState::Thinking,
+        );
+        session.surface_id = Some(sid);
+        source.agent_sessions.insert(42, session.clone());
+        // An unrelated mapped agent and an unresolved row must not leak in.
+        session.surface_id = Some(sid + 1000);
+        source.agent_sessions.insert(43, session.clone());
+        session.surface_id = None;
+        source.agent_sessions.insert(44, session);
+        let mut destination =
+            Workspace::empty_with_cwd_and_id(2, "destination", std::path::PathBuf::new());
+        let tab = source.close_tab(0).expect("detach");
+        pane.update(cx, |pane, _| pane.workspace_id = 2);
+        assert!(destination.open_tab(tab));
+        let workspaces = vec![source, destination];
+        let rows = cx.update(|_, cx| mapped_agent_sessions(&workspaces, sid, cx));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["process_key"], 42);
+        assert_eq!(rows[0]["tool"], "codex");
+        assert_eq!(
+            rows[0]["state"],
+            crate::ai_types::AgentState::Thinking.wire_str()
+        );
+    }
 
     #[gpui::test]
     fn agent_context_follows_a_live_tab_move_with_unchanged_inherited_ids(
