@@ -559,6 +559,8 @@ impl PaneFlowApp {
         // Config hot-reload is now driven by ConfigWatcher (notify crate, 300ms debounce).
         // Changes are picked up in the 50ms IPC poll loop below via process_config_changes().
 
+        Self::poll_terminal_branches(cx);
+
         // Fallback: poll git metadata for all workspaces every 30s.
         // Primary detection is event-driven (US-003 notify watcher above).
         // This timer catches edge cases where file system events are missed.
@@ -823,6 +825,7 @@ impl PaneFlowApp {
             git_watcher,
             git_event_rx,
             git_watch_counts,
+            terminal_branches: Default::default(),
             settings_section: None,
             settings_scroll: gpui::ScrollHandle::new(),
             settings_drag: None,

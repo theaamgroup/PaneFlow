@@ -103,12 +103,12 @@
       "properties": {
         "branch": {
           "type": ["boolean", "null"],
-          "description": "Show the git branch: the workspace's on its folder row, and a bound tab's worktree branch on that tab's row. Default true.",
+          "description": "Show each terminal's current git branch beneath its name in the sidebar. Split tabs show a labeled branch line per terminal. Default true.",
           "default": true
         },
         "diffstat": {
           "type": ["boolean", "null"],
-          "description": "Show that same checkout's insertion and deletion counts, pinned right of the branch line and drawn only when the checkout has something to report. Default false.",
+          "description": "Show right-aligned insertion and deletion counts on the workspace row or a bound tab's metadata line, only when that checkout has something to report. Default false.",
           "default": false
         },
         "pr": {
