@@ -187,11 +187,22 @@ pub fn load() -> MarkdownState {
 }
 
 fn load_from_path(path: &Path) -> MarkdownState {
-    let meta = match std::fs::metadata(path) {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(_) => return MarkdownState::default(),
+    };
+    let meta = match file.metadata() {
         Ok(meta) => meta,
         Err(_) => return MarkdownState::default(),
     };
-    if !meta.is_file() {
+    if !meta.file_type().is_file() {
         log::warn!(
             "markdown_state.json: {} is not a regular file; resetting",
             path.display()
@@ -206,10 +217,19 @@ fn load_from_path(path: &Path) -> MarkdownState {
         );
         return MarkdownState::default();
     }
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return MarkdownState::default(),
-    };
+    let mut bytes = Vec::new();
+    let mut limited = file.take(MAX_MARKDOWN_STATE_SIZE_BYTES + 1);
+    if limited.read_to_end(&mut bytes).is_err() {
+        return MarkdownState::default();
+    }
+    if bytes.len() as u64 > MAX_MARKDOWN_STATE_SIZE_BYTES {
+        log::warn!(
+            "markdown_state.json: {} exceeds {} bytes; resetting",
+            path.display(),
+            MAX_MARKDOWN_STATE_SIZE_BYTES
+        );
+        return MarkdownState::default();
+    }
     match serde_json::from_slice::<MarkdownState>(&bytes) {
         Ok(state) => state,
         Err(e) => {
@@ -227,25 +247,49 @@ pub fn save(state: &MarkdownState) -> std::io::Result<()> {
     let Some(path) = state_file_path() else {
         return Ok(());
     };
+    write_state_file(&path, state)
+}
+
+fn write_state_file(path: &Path, state: &MarkdownState) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
     }
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = temp_path_for(&path);
-    if let Err(e) = std::fs::write(&tmp, &json) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+    let tmp = temp_path_for(path);
+    let write_result = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut temporary| {
+            temporary.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            temporary.write_all(json.as_bytes())
+        });
+    match write_result {
+        Ok(()) => {
+            if let Err(e) = std::fs::rename(&tmp, path) {
+                log::warn!(
+                    "markdown_state.json: rename failed ({}); leaving prior state",
+                    e
+                );
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        log::warn!(
-            "markdown_state.json: rename failed ({}); leaving prior state",
-            e
-        );
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 fn temp_path_for(path: &Path) -> PathBuf {
@@ -326,6 +370,50 @@ mod tests {
         // without poking the user's cache dir, so test the parser directly.
         let res: Result<MarkdownState, _> = serde_json::from_str("{ malformed");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn write_state_file_creates_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent = dir.path().join("cache");
+        let path = parent.join("markdown_state.json");
+        write_state_file(&path, &MarkdownState::default()).expect("write");
+        let file_mode = std::fs::metadata(&path)
+            .expect("written")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "markdown_state.json must be 0600, got {file_mode:o}"
+        );
+        let dir_mode = std::fs::metadata(&parent)
+            .expect("parent")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "cache parent must be 0700, got {dir_mode:o}"
+        );
+    }
+
+    #[test]
+    fn load_from_path_returns_default_on_fifo_without_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("markdown_state.json");
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let started = std::time::Instant::now();
+        let state = load_from_path(&path);
+        let elapsed = started.elapsed();
+        assert!(state.offsets.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "FIFO markdown_state.json must not block load_from_path: {elapsed:?}"
+        );
     }
 
     #[test]

@@ -122,6 +122,19 @@ fn merge_cursor_hooks_refuses_non_object_root() {
 }
 
 #[test]
+fn merge_cursor_hooks_refuses_non_array_event_value() {
+    let mut root = json!({
+        "hooks": {
+            "preToolUse": { "command": "x" }
+        }
+    });
+    let before = root.clone();
+    let error = merge_cursor_hooks(&mut root).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(root, before, "a non-array event must not be rewritten");
+}
+
+#[test]
 fn managed_guard_install_and_drop_roundtrip_in_clone_dir() {
     // End-to-end for the clone path: .codebuddy/settings.local.json is
     // created with Claude-format hooks, then fully cleaned up on drop
@@ -261,6 +274,21 @@ fn opencode_guard_preserves_user_config_and_refuses_unparseable() {
         std::fs::read_to_string(dir.join("opencode.json")).unwrap(),
         "{ definitely not json",
         "the user's file must be byte-identical after the refusal"
+    );
+}
+
+#[test]
+fn drop_leaves_plugin_file_when_opencode_json_is_unparseable() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join("opencode");
+    let guard = OpenCodePluginGuard::install_at(&dir).unwrap();
+    let plugin = dir.join("plugins").join(PANEFLOW_TS_BASENAME);
+    assert!(plugin.is_file());
+    std::fs::write(dir.join("opencode.json"), "{").unwrap();
+    drop(guard);
+    assert!(
+        plugin.exists(),
+        "drop must leave the plugin file when opencode.json does not parse"
     );
 }
 
@@ -622,6 +650,32 @@ fn enable_codex_feature_flag_abstains_on_commented_features_header() {
 }
 
 #[test]
+fn enable_codex_feature_flag_ignores_hooks_key_outside_features() {
+    let td = tempfile::TempDir::new().unwrap();
+    let path = td.path().join("config.toml");
+    std::fs::write(&path, "[mcp]\nhooks = true\n").unwrap();
+
+    let result = enable_codex_feature_flag(&path);
+    assert!(
+        result.unwrap(),
+        "hooks = true outside [features] must not skip the install"
+    );
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains(CODEX_TOML_MARKER));
+    assert!(content.contains("[features]"));
+    assert_eq!(
+        content.matches("hooks = true").count(),
+        2,
+        "mcp block keeps its hooks key and [features] must add one:\n{content}"
+    );
+    assert!(
+        content.contains("[features]\nhooks = true\n"),
+        "features block must still set hooks = true:\n{content}"
+    );
+}
+
+#[test]
 fn enable_codex_feature_flag_abstains_on_existing_features_section() {
     let td = tempfile::TempDir::new().unwrap();
     let path = td.path().join("config.toml");
@@ -637,6 +691,42 @@ fn enable_codex_feature_flag_abstains_on_existing_features_section() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(!content.contains(CODEX_TOML_MARKER));
     assert!(!content.contains("hooks = true"));
+}
+
+#[test]
+fn enable_codex_feature_flag_recognizes_equivalent_features_headers() {
+    for header in ["[ features ]", "[\"features\"]", "['features']"] {
+        let td = tempfile::TempDir::new().unwrap();
+        let with_hooks = td.path().join("with-hooks.toml");
+        std::fs::write(&with_hooks, format!("{header}\nhooks = true\n")).unwrap();
+        assert!(
+            !enable_codex_feature_flag(&with_hooks).unwrap(),
+            "{header} with hooks = true must skip install"
+        );
+        let with_hooks_content = std::fs::read_to_string(&with_hooks).unwrap();
+        assert!(
+            !with_hooks_content.contains(CODEX_TOML_MARKER),
+            "{header} with hooks must be left alone:\n{with_hooks_content}"
+        );
+        assert_eq!(
+            with_hooks_content.matches("[features]").count(),
+            0,
+            "{header} must not gain a second [features]:\n{with_hooks_content}"
+        );
+
+        let without_hooks = td.path().join("without-hooks.toml");
+        std::fs::write(&without_hooks, format!("{header}\nother_flag = false\n")).unwrap();
+        assert!(
+            enable_codex_feature_flag(&without_hooks).is_err(),
+            "{header} without hooks must abstain rather than append [features]"
+        );
+        let without_hooks_content = std::fs::read_to_string(&without_hooks).unwrap();
+        assert_eq!(
+            without_hooks_content,
+            format!("{header}\nother_flag = false\n"),
+            "{header} without hooks must be untouched"
+        );
+    }
 }
 
 #[test]

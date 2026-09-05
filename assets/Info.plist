@@ -52,6 +52,16 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>PaneFlow reads this folder to open the workspace and its git metadata.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>PaneFlow reads this folder to open the workspace and its git metadata.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>PaneFlow reads this folder to open the workspace and its git metadata.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>PaneFlow reads this volume to open the workspace and its git metadata.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>PaneFlow reads this volume to open the workspace and its git metadata.</string>
     <key>SUFeedURL</key>
     <string>https://github.com/theaamgroup/PaneFlow/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>

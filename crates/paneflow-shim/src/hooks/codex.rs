@@ -185,12 +185,21 @@ fn disable_codex_feature_flag_unlocked(path: &Path) -> std::io::Result<()> {
 }
 
 fn has_hooks_flag(content: &str) -> bool {
+    let mut in_features = false;
     content.lines().any(|line| {
         let line = line.trim_start();
         if line.starts_with('#') {
             return false;
         }
         let assignment = line.split_once('#').map_or(line, |(value, _)| value);
+        let trimmed = assignment.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_features = is_features_table_header(trimmed);
+            return false;
+        }
+        if !in_features {
+            return false;
+        }
         assignment.split_once('=').is_some_and(|(key, value)| {
             matches!(key.trim(), "hooks" | "codex_hooks") && value.trim() == "true"
         })
@@ -204,8 +213,33 @@ fn has_features_section(content: &str) -> bool {
             return false;
         }
         let header = line.split_once('#').map_or(line, |(value, _)| value);
-        header.trim() == "[features]"
+        is_features_table_header(header.trim())
     })
+}
+
+/// True for `[features]`, `[ features ]`, `["features"]`, and `['features']`.
+/// Nested (`[features.foo]`) and array-of-tables (`[[features]]`) headers
+/// are not the Codex features table.
+fn is_features_table_header(trimmed: &str) -> bool {
+    toml_bare_table_name(trimmed) == Some("features")
+}
+
+fn toml_bare_table_name(header: &str) -> Option<&str> {
+    let inner = header.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.starts_with('[') {
+        return None;
+    }
+    let inner = inner.trim();
+    if inner.len() >= 2
+        && ((inner.starts_with('"') && inner.ends_with('"'))
+            || (inner.starts_with('\'') && inner.ends_with('\'')))
+    {
+        Some(&inner[1..inner.len() - 1])
+    } else if inner.is_empty() {
+        None
+    } else {
+        Some(inner)
+    }
 }
 
 struct StrippedCodexFeatureBlock {

@@ -4,7 +4,7 @@
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, CursorStyle, Decorations, HitboxBehavior, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, ResizeEdge,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, ResizeEdge, Role,
     SharedString, Size, Styled, Tiling, Window, WindowButton, WindowButtonLayout,
     WindowControlArea, WindowControls, canvas, div, point, prelude::*, px, size, svg,
 };
@@ -336,9 +336,17 @@ pub(crate) fn render_window_button(
 
     let element_id = SharedString::from(format!("{id}-{side}"));
     let (button_width, button_height) = (TITLE_BAR_CONTROL_SIZE, TITLE_BAR_CONTROL_SIZE);
+    let aria_label = match (button, is_maximized) {
+        (WindowButton::Minimize, _) => "Minimize",
+        (WindowButton::Maximize, true) => "Restore",
+        (WindowButton::Maximize, false) => "Maximize",
+        (WindowButton::Close, _) => "Close",
+    };
 
     let btn = div()
         .id(element_id)
+        .role(Role::Button)
+        .aria_label(aria_label)
         .window_control_area(control_area)
         .flex()
         .items_center()

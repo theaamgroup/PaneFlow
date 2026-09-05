@@ -88,6 +88,33 @@ fn merge_flat_hooks(
             ),
         ));
     }
+    if let Some(hooks) = root.get("hooks") {
+        if !hooks.is_object() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "hooks config key `hooks` must be an object, not a {}",
+                    json_type_name(hooks)
+                ),
+            ));
+        }
+        if let Some(hooks) = hooks.as_object() {
+            for (foreign, _) in events {
+                if let Some(value) = hooks.get(*foreign) {
+                    if !value.is_array() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "hooks config key `{foreign}` must be an array, not a {}",
+                                json_type_name(value)
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     let Some(root) = root.as_object_mut() else {
         return Ok(());
     };
@@ -114,7 +141,10 @@ fn merge_flat_hooks(
             .entry(*foreign)
             .or_insert_with(|| serde_json::json!([]));
         let Some(entries) = entries.as_array_mut() else {
-            continue;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("hooks config key `{foreign}` must be an array"),
+            ));
         };
         entries.retain(|entry| !is_paneflow_flat_entry(entry));
         entries.push(serde_json::json!({

@@ -824,6 +824,7 @@ impl PaneFlowApp {
                 .text_size(px(15.))
                 .text_color(if disabled { ui.muted } else { ui.text })
                 .animated_hover_bg(ui.subtle, hover_bg)
+                .a11y_disabled(disabled)
                 .child(glyph)
         };
 

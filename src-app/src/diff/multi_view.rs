@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window, div, prelude::*, px,
+    ParentElement, Render, Role, SharedString, Styled, Window, div, prelude::*, px,
 };
 
 use super::DiffWorktree;
@@ -259,10 +259,19 @@ impl Render for MultiRepoDiffView {
                 )
             });
 
+        let mut tab_list = div()
+            .id("multi-diff-tablist")
+            .role(Role::TabList)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.))
+            .h_full();
+
         for (i, g) in self.groups.iter().enumerate() {
             let active = i == self.selected;
             let resting_bg = ui.subtle.opacity(0.0);
-            tabs = tabs.child(
+            tab_list = tab_list.child(
                 // Flat browser-style tab: accent underline + content-bg + bold
                 // when active; muted + transparent (border blends into the bar)
                 // otherwise. The 2px bottom border is always present so the row
@@ -270,6 +279,8 @@ impl Render for MultiRepoDiffView {
                 // icon, no worktree-count badge (kept deliberately minimal).
                 div()
                     .id(SharedString::from(format!("multi-diff-tab-{i}")))
+                    .role(Role::Tab)
+                    .aria_selected(active)
                     .flex_none()
                     .flex()
                     .flex_row()
@@ -296,6 +307,7 @@ impl Render for MultiRepoDiffView {
                     ),
             );
         }
+        tabs = tabs.child(tab_list);
 
         let body: AnyElement = self
             .groups
@@ -324,6 +336,13 @@ impl Render for MultiRepoDiffView {
             .flex_col()
             .bg(ui.base)
             .child(tabs)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .id("multi-diff-tabpanel")
+                    .flex_1()
+                    .min_h_0()
+                    .role(Role::TabPanel)
+                    .child(body),
+            )
     }
 }

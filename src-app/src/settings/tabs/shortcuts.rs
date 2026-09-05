@@ -61,7 +61,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, InteractiveElement, IntoElement, KeyDownEvent,
     ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels,
-    Point, Styled, div, list, prelude::*, px, svg,
+    Point, Role, Styled, div, list, prelude::*, px, svg,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -723,6 +723,10 @@ impl PaneFlowApp {
         let capture_toggle = squircle_skin(
             div()
                 .id("shortcut-capture-toggle")
+                .role(Role::Switch)
+                .aria_label("Find by key")
+                .aria_toggled(crate::settings::components::switch_toggled(capture_active))
+                .tab_index(0)
                 .flex()
                 .flex_row()
                 .items_center()

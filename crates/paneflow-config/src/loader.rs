@@ -27,6 +27,13 @@ pub const APP_SUBDIR: &str = if cfg!(debug_assertions) {
 /// above any plausible config.
 const MAX_CONFIG_SIZE_BYTES: u64 = 1 << 20;
 
+/// `O_NONBLOCK` as macOS `open(2)` expects it (`<sys/fcntl.h>`). Spelled out
+/// here because this crate deliberately carries no `libc` dependency, and the
+/// fork builds for `aarch64-apple-darwin` only.
+const fn libc_o_nonblock() -> i32 {
+    0x4
+}
+
 /// Errors that can occur when loading configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -105,7 +112,12 @@ pub fn migrate_session_from_cache(src: &Path, dest: &Path) -> std::io::Result<bo
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(src, dest)?;
+    let tmp = dest.with_extension("json.migrate-tmp");
+    std::fs::copy(src, &tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     if let Err(e) = std::fs::remove_file(src) {
         warn!(
             "migrated session to {} but could not remove {}: {e}",
@@ -188,7 +200,12 @@ pub fn read_config_string(path: &Path) -> Result<Option<String>, ConfigError> {
         }
     }
 
-    let file = match std::fs::File::open(path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nonblock())
+        .open(path);
+    let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {

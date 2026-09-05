@@ -744,6 +744,14 @@ mod tests {
         let at_ready = restored.snapshot().expect("ready snapshot").history_size;
         restored.feed(b"live").expect("live input between pages");
         restored.resize(size).expect("resize between pages");
+        let screen = restored
+            .extract_screen()
+            .expect("screen after live feed")
+            .unwrap_or_default();
+        assert!(
+            screen.contains("live"),
+            "live input between pages must be visible on the restored terminal, got {screen:?}"
+        );
         decoder
             .terminal()
             .expect("borrow terminal")
