@@ -287,11 +287,7 @@ jobs:
           version="${TAG#v}"
           dmg="paneflow-${version}-${ARCH}-apple-darwin.dmg"
           notes="release-assets/${dmg%.dmg}.md"
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" \
-            -f target_commitish="$GITHUB_SHA" \
-            --jq '.body' > "$notes"
+          bash scripts/release-notes.sh "$TAG" > "$notes"
 
           sparkle_dist="$(scripts/sparkle-dist.sh)"
           printf '%s' "$SPARKLE_PRIVATE_KEY" \
@@ -306,6 +302,11 @@ jobs:
                 -o "$PWD/release-assets/appcast.xml" \
                 "$PWD/release-assets"
           rm -f "$notes"
+
+          # Verify against the public key actually shipped in this app, not
+          # just against the CI private key (which could have drifted).
+          swift scripts/verify-update.swift dist/PaneFlow.app/Contents/Info.plist \
+            release-assets/appcast.xml "release-assets/$dmg"
 
           xmllint --noout release-assets/appcast.xml
           grep -Fq "<sparkle:version>${version}</sparkle:version>" release-assets/appcast.xml
@@ -402,6 +403,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
       - name: Download release artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -416,11 +421,16 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/release-notes.sh "$RELEASE_TAG" > release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: release-assets/*
-          generate_release_notes: true
+          body_path: release-notes.md
           # Keep the release hidden from /releases/latest until every
           # staged asset is attached and verified against the local set.
           draft: true
@@ -452,3 +462,15 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release edit "${RELEASE_TAG}" --draft=false
+
+      - name: Verify anonymous automatic-update delivery
+        id: verify_delivery
+        if: ${{ !contains(env.RELEASE_TAG, 'alpha') && !contains(env.RELEASE_TAG, 'beta') && !contains(env.RELEASE_TAG, 'rc') }}
+        run: python3 scripts/verify-update-feed.py --expected-version "${RELEASE_TAG#v}"
+
+      - name: Withdraw release if automatic-update delivery fails
+        if: ${{ failure() && steps.verify_delivery.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${RELEASE_TAG}" --draft=true

@@ -135,22 +135,28 @@ impl PaneFlowApp {
             return;
         }
         let ws_idx = self.handoff_workspace_index(cx);
-        let command = target.launch_command(&self.cached_config);
-        let Some(terminal) =
-            self.open_agent_tab_at_cwd(ws_idx, cwd, Some(command), Some(target), cx)
-        else {
-            return;
-        };
-        if ws_idx != self.active_idx {
-            self.activate_workspace_without_window(ws_idx, cx);
-        }
-        // The same normalization the composer and Launch Pad apply, then the
-        // existing settle-poll prefill: no carriage return follows the block.
-        let (prompt, _) =
-            crate::app::composer::normalize_composer_text(&handoff_prompt(&meta, target));
-        if !prompt.is_empty() {
-            Self::schedule_prompt_prefill(&terminal, prompt, usize::MAX, cx);
-        }
+        let ws_id = self.workspaces[ws_idx].id;
+        self.show_toast("Preparing repository handoff…", cx);
+        cx.spawn(async move |this, cx| {
+            let inspection_cwd = cwd.clone();
+            let evidence = cx.background_spawn(async move {
+                super::work_review::model::inspect(&inspection_cwd)
+                    .map(|c| super::work_review::model::handoff_context(&c))
+                    .unwrap_or_else(|_| "\n\nRepository snapshot unavailable. Inspect the current checkout and verification results before continuing.".into())
+            }).await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(ws_idx) = app.workspaces.iter().position(|w| w.id == ws_id) else {
+                    app.show_toast("Workspace closed while preparing handoff", cx);
+                    return;
+                };
+                let command = target.launch_command(&app.cached_config);
+                let Some(terminal) = app.open_agent_tab_at_cwd(ws_idx, cwd, Some(command), Some(target), cx) else { return; };
+                if ws_idx != app.active_idx { app.activate_workspace_without_window(ws_idx, cx); }
+                let block = format!("{}{}", handoff_prompt(&meta, target), evidence);
+                let (prompt, _) = crate::app::composer::normalize_composer_text(&block);
+                Self::schedule_prompt_prefill(&terminal, prompt, usize::MAX, cx);
+            });
+        }).detach();
     }
 
     /// Build the deferred row menu. Caller guards on

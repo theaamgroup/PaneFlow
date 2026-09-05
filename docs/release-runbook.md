@@ -105,11 +105,13 @@ all 1,399 commits and its ten findings were confirmed as false-positive
 `action_name` field literals. Do not make release assets private without first
 moving them and the appcast to an anonymous public mirror.
 
-Updater policy for the initial rollout:
+Updater policy:
 
-- No prompt, forced relaunch, release-notes window, Settings toggle, phased
-  rollout, or delta archives. A user who never quits intentionally remains on
-  the running version until the next ordinary quit/launch cycle.
+- Background checks download silently and never force a relaunch. PaneFlow
+  reports downloaded updates and failures, and its Check for Updates command
+  opens Sparkle's standard UI for a manual check or retry. A user who never
+  quits remains on the running version until the next ordinary quit/launch
+  cycle. There is no Settings toggle, phased rollout, or delta archive.
 - `PANEFLOW_DISABLE_SPARKLE=1` is an exact-value diagnostic escape hatch used
   by bundle render tests; it is not a `paneflow.json` product preference.
 - Roll back a bad release by pulling its appcast/release before more clients
@@ -290,7 +292,7 @@ The `build` job runs, in order:
    `codesign`, `stapler validate`, and `spctl` against the bundle mounted from
    the finished image. A `.sha256` sibling is staged next to it.
 11. Sparkle's `generate_appcast` signs the DMG with `SPARKLE_PRIVATE_KEY`,
-    embeds GitHub-generated release notes, and stages `appcast.xml`.
+    embeds the release notes, and stages `appcast.xml`.
 12. The `release` job (tag-push only) attaches all three assets, verifies the
     exact remote asset set while the release is still a draft, then publishes.
 
@@ -371,10 +373,11 @@ launches, `paneflow --version` reports the tagged version.
 
 ## Step 6 - Announce (about 2 min, manual judgement required)
 
-Write the release notes on the GitHub Release page. `release.yml` sets
-`generate_release_notes: true`, so GitHub has pre-filled the changelog from
-merged PRs since the previous tag. Your job is to polish that default, not write
-it from scratch.
+Before tagging, write short, feature-focused notes in
+`docs/releases/vX.Y.Z.md`. The release workflow uses this text at the top of
+the GitHub Release and inside Sparkle's update notes. Include a full-changelog
+link for detailed fixes. If no curated file exists, `scripts/release-notes.sh`
+falls back to GitHub-generated notes from the merged PRs.
 
 Suggested structure:
 
@@ -426,3 +429,42 @@ after a long break knows whether the runbook still reflects reality.
 
 Last validated on: _never. Update after the first release with tag, date,
 workflow run, and smoke-test evidence._
+
+## Verify automatic-update delivery
+
+The release job checks the appcast signature against `SUPublicEDKey` in the
+packaged app before publishing. After publication it downloads the public
+latest feed and DMG without credentials, checks the advertised version and
+length, and verifies the signature against the repository's public key. The
+public probe retries briefly while GitHub's latest-release redirect propagates.
+If delivery verification still fails, the job returns the release to draft so
+it is withdrawn from the public update feed while the failure is investigated.
+
+Run the same check locally (substitute the published version):
+
+```bash
+python3 scripts/verify-update-feed.py --expected-version 0.3.1
+swift scripts/verify-update.swift --self-test
+```
+
+To verify using an installed app's key, add
+`--info-plist /Applications/PaneFlow.app/Contents/Info.plist` to the Python
+command. These checks download artifacts but do not install them.
+
+`cargo build -p paneflow-app --example update_probe` builds a native Sparkle
+bootstrap probe. Run it only in an isolated temporary app bundle with a unique
+bundle identifier and a version higher than the current release. It uses the
+same updater module and an AppKit main run loop, opens no terminals, and
+requires a successful no-update result within 45 seconds.
+
+Run `python3 scripts/test-update-install.py` after building the example to
+exercise a complete DMG update on normal quit. It creates disposable app bundles,
+a loopback feed, and a throwaway Ed25519 key, then verifies the replacement
+version and code signature. It does not use production signing credentials.
+
+Delivery/signature checks and the native bootstrap probe do not prove an
+installed old version was replaced successfully. Verify that separately using
+two signed releases in a disposable app copy: let the older app stage the newer
+release, quit normally, and inspect the replacement bundle's version and
+signature before relaunching. Never terminate the daily-use instance to run
+that check.

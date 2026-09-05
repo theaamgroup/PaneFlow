@@ -1575,6 +1575,8 @@ struct PaneFlowApp {
     /// that closes while the overlay is open disappears at the next repaint.
     pane_overview: Option<app::pane_overview::PaneOverviewState>,
     pane_overview_focus: FocusHandle,
+    work_review: Option<app::work_review::ReviewState>,
+    work_review_focus: FocusHandle,
     /// EP-005 US-014 (cli-tab-hierarchy): « New pane » preset palette,
     /// `None` = closed. Opened by `New tab` and by the sidebar folder row's
     /// hover `+`.
@@ -2205,6 +2207,19 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(|this: &mut Self, _: &Quit, _window, cx| {
                 this.quit_after_session_save(cx);
             }))
+            .on_action(
+                cx.listener(|this: &mut Self, _: &CheckForUpdates, _window, cx| {
+                    if let Err(message) = crate::sparkle::check_for_updates() {
+                        this.show_toast(message, cx);
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|this: &mut Self, _: &OpenWorkReview, window, cx| {
+                    this.open_work_review(window, cx);
+                }),
+            )
             .on_action(cx.listener(|this: &mut Self, _: &About, window, cx| {
                 this.open_about_dialog(window, cx);
             }))
@@ -2601,6 +2616,9 @@ impl Render for PaneFlowApp {
             app_content = app_content.child(self.render_about_dialog(cx));
         }
 
+        if self.work_review.is_some() {
+            app_content = app_content.child(self.render_work_review(cx));
+        }
         if self.system_info_dialog.is_some() {
             app_content = app_content.child(self.render_system_info_dialog(cx));
         }

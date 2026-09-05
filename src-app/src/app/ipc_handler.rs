@@ -1784,6 +1784,9 @@ impl PaneFlowApp {
     /// Keeping this order in one method prevents the bootstrap closure from
     /// becoming the implicit event-loop contract.
     pub(crate) fn process_automation_tick(&mut self, cx: &mut Context<Self>) {
+        if let Some(notice) = crate::sparkle::take_notice() {
+            self.show_toast(notice, cx);
+        }
         self.process_ipc_requests(cx);
         self.broadcast_surface_changes(cx);
         self.process_config_changes(cx);

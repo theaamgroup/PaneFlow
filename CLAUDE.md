@@ -17,8 +17,8 @@ method rules this project has already paid for. Read it before planning a
 pass so you do not redo finished work or repeat a falsified finding. Open
 work lives on GitHub issues, not in that file.
 
-**Where this fork stands (2026-09-04):** product is PaneFlow (the PanesCLI
-rename was dropped). Version **0.3.1**. Origin `theaamgroup/paneflow` on
+**Where this fork stands (2026-09-05):** product is PaneFlow (the PanesCLI
+rename was dropped). Version **0.4.0**. Origin `theaamgroup/paneflow` on
 `main`. Upstream v0.11.0 is adopted (#341: the `PublishGate` with DEC 2026
 synchronized output, per-tab worktree binding with a Remove worktree row,
 the Customize Sidebar menu, the `gh` pull-request marker); the verified SKIP
@@ -28,8 +28,11 @@ automation, Fedora/Discord/CHANGELOG/AppStream) stays not-ported. Windows, Linux
 `CONTRIBUTING.md`) are gone. The Ghostty engine, deleted on 2026-08-25, is
 back as the **only** engine since #184 Phase 2 (2026-08-31): Alacritty is gone,
 every pane runs on `libghostty-vt`, and `TERM_PROGRAM` is `ghostty`. The old hand-rolled updater remains **deleted**;
-Sparkle 2 performs silent hourly checks and installs verified updates only when
-the user quits. First signed GitHub Release is **v0.1.0** (Developer ID
+Sparkle 2 checks on startup and hourly, downloads verified updates silently,
+and installs on quit. PaneFlow → Check for Updates opens Sparkle’s retry UI;
+About shows update status. Return NO from willInstallUpdateOnQuit so future
+checks continue. Verify delivery with `scripts/verify-update-feed.py` (see
+`docs/release-runbook.md`). First signed GitHub Release is **v0.1.0** (Developer ID
 signed, notarized, stapled; #11 closed with `spctl` evidence). #13 closed on
 2026-08-28 after an installed v0.1.1 signed/notarized live-app and notification
 hook smoke. #10 was closed by rebinding next-workspace to `Ctrl+Tab`; #14 and
@@ -44,7 +47,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.3.1
+./target/debug/paneflow --version          # paneflow 0.4.0
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 
@@ -205,7 +208,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 93 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 95 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -411,7 +414,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 93 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 

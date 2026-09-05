@@ -485,6 +485,11 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_pane_overview",
         context: None,
     },
+    DefaultBinding {
+        key: "secondary-shift-u",
+        action_name: "open_work_review",
+        context: None,
+    },
 ];
 
 /// Platform-specific default bindings layered on top of [`DEFAULTS`].

@@ -945,6 +945,8 @@ impl PaneFlowApp {
             // Issue #339: Pane Overview closed.
             pane_overview: None,
             pane_overview_focus: cx.focus_handle(),
+            work_review: None,
+            work_review_focus: cx.focus_handle(),
             pane_palette: None,
             pane_palette_focus: cx.focus_handle(),
             pending_palette_focus: false,
@@ -1081,6 +1083,7 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
     cx.set_menus(vec![
         Menu::new("PaneFlow").items(vec![
             MenuItem::action("About PaneFlow", About),
+            MenuItem::action("Check for Updates…", crate::CheckForUpdates),
             // Issue #105: Settings gets a first-class menu route. It sits
             // above the separator with About. No `Cmd+,`: a global default
             // on that chord would swallow the comma from every focused
@@ -1106,6 +1109,7 @@ pub(crate) fn install_macos_menu_bar(cx: &mut gpui::App) {
             // Issue #339: above the workspace group, fenced by its own
             // separator so the chrome / overview / workspaces split reads.
             MenuItem::action("Show All Panes", OpenPaneOverview),
+            MenuItem::action("Work Review…", crate::OpenWorkReview),
             MenuItem::separator(),
             MenuItem::action("Next Workspace", NextWorkspace),
             MenuItem::action("Close Workspace", CloseWorkspace),
@@ -1328,6 +1332,19 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
         with_active_paneflow_window(cx, |app, _window, cx| {
             app.quit_after_session_save(cx);
         });
+    });
+
+    cx.on_action(|_: &crate::CheckForUpdates, cx| {
+        with_active_paneflow_window(cx, |app, _window, cx| {
+            if let Err(message) = crate::sparkle::check_for_updates() {
+                app.show_toast(message, cx);
+            }
+            cx.notify();
+        });
+    });
+
+    cx.on_action(|_: &crate::OpenWorkReview, cx| {
+        with_active_paneflow_window(cx, |app, window, cx| app.open_work_review(window, cx));
     });
 
     cx.on_action(|_: &About, cx| {

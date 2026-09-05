@@ -351,7 +351,7 @@ impl PaneFlowApp {
             // Grown from 320 to seat the GitHub button between Version and
             // copyright. Fixed, not auto, to keep the dialog a constant size
             // like the rest of this chrome.
-            .h(px(362.))
+            .h(px(420.))
             .flex()
             .flex_col()
             .items_center()
@@ -377,6 +377,14 @@ impl PaneFlowApp {
                     .text_color(ui.muted)
                     .text_size(px(12.))
                     .child(format!("Version {version}")),
+            )
+            .child(
+                div()
+                    .mt(px(8.))
+                    .px(px(20.))
+                    .text_size(px(11.))
+                    .text_color(ui.muted)
+                    .child(crate::sparkle::status()),
             )
             .child(github_button)
             .child(

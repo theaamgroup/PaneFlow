@@ -78,6 +78,8 @@ actions!(
         // by the `.on_action(...)` handlers on the PaneFlowApp render root.
         Quit,
         About,
+        CheckForUpdates,
+        OpenWorkReview,
         Copy,
         Paste,
         SelectAll,
