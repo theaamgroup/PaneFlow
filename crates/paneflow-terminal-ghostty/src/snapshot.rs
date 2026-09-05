@@ -323,3 +323,106 @@ impl DisplayTerminal {
         Ok((history_size, display_offset))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TerminalAppearance, WindowSize};
+
+    fn terminal(cols: usize, rows: usize, scrollback: usize) -> DisplayTerminal {
+        let size = WindowSize::new(cols, rows, 8, 16).expect("valid terminal size");
+        DisplayTerminal::new(size, scrollback, TerminalAppearance::default())
+            .expect("terminal must initialize")
+    }
+
+    /// [`DisplayTerminal::snapshot`] remaps `set_selection`'s screen-space
+    /// selection into viewport space by subtracting the current
+    /// `display_offset` (snapshot.rs:100-121). The round trip
+    /// `viewport_line = screen_line + display_offset` must hold both at
+    /// `display_offset == 0` and after scrolling into history, or a wrong
+    /// mapping mis-paints the selection highlight after a scroll while every
+    /// other selection test (which never scrolls) stays green.
+    #[test]
+    fn snapshot_selection_matches_set_selection_including_scrolled_viewport() {
+        let mut terminal = terminal(20, 3, 200);
+
+        // display_offset == 0: select a range on the live, unscrolled top
+        // row and confirm the snapshot reports it back unchanged.
+        terminal.feed(b"hello world").expect("output must parse");
+        terminal
+            .set_selection(SelectionRange {
+                start: Point::new(0, 0),
+                end: Point::new(0, 4),
+                rectangle: false,
+            })
+            .expect("selection must install");
+        let content = terminal.snapshot().expect("snapshot");
+        assert_eq!(content.display_offset, 0);
+        let selection = content
+            .selection
+            .expect("selection must be present at display_offset 0");
+        assert_eq!(selection.start, Point::new(0, 0));
+        assert_eq!(selection.end, Point::new(0, 4));
+
+        // Push enough output through a 3-row viewport that real scrollback
+        // accumulates above it.
+        for index in 0..10 {
+            terminal
+                .feed(format!("line {index}\r\n").as_bytes())
+                .expect("output must parse");
+        }
+
+        // Scroll all the way to the top of the scrollback and read back the
+        // resulting display_offset, rather than assuming it.
+        terminal
+            .scroll_to_viewport_row(0)
+            .expect("scroll to top of scrollback");
+        let scrolled = terminal.snapshot().expect("snapshot after scroll");
+        let display_offset = scrolled.display_offset;
+        assert!(
+            display_offset > 0,
+            "expected scrolling to the top to produce a non-zero display_offset"
+        );
+
+        // Select the row that sits at the current top of the scrollback in
+        // screen space (screen space is anchored to the live area's top, so
+        // that row is `-display_offset`); it is the top row of the viewport
+        // once rendered at this exact scroll position.
+        let history_line = -i32::try_from(display_offset).expect("display_offset fits i32");
+        terminal
+            .set_selection(SelectionRange {
+                start: Point::new(history_line, 0),
+                end: Point::new(history_line, 4),
+                rectangle: false,
+            })
+            .expect("selection must install");
+
+        let content = terminal.snapshot().expect("snapshot with scrolled selection");
+        assert_eq!(content.display_offset, display_offset);
+        let selection = content
+            .selection
+            .expect("selection must be present after scrolling");
+        // `snapshot` must hand the selection back in the same screen-space
+        // coordinates `set_selection` was given, not the viewport-local row
+        // the render iterator used internally: display_offset is applied and
+        // then undone (`viewport_line = screen_line + display_offset`,
+        // `screen_line = viewport_line - display_offset`), so the round trip
+        // is the identity for any row that stays inside the viewport.
+        assert_eq!(selection.start, Point::new(history_line, 0));
+        assert_eq!(selection.end, Point::new(history_line, 4));
+
+        // A row just below the current viewport has no selection to report
+        // at all, confirming the mapping is viewport-relative rather than a
+        // blanket pass-through of whatever was last installed.
+        let out_of_view = history_line + i32::try_from(content.rows).expect("rows fits i32");
+        terminal
+            .set_selection(SelectionRange {
+                start: Point::new(out_of_view, 0),
+                end: Point::new(out_of_view, 4),
+                rectangle: false,
+            })
+            .expect("selection must install");
+        let content = terminal.snapshot().expect("snapshot with off-screen selection");
+        assert_eq!(content.selection, None);
+    }
+}
