@@ -793,6 +793,19 @@ impl DiffView {
         base: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut view = Self::build(repo_root, worktrees, base, cx);
+        view.bootstrap(cx);
+        view
+    }
+
+    /// Construct without starting repository reads or watchers, also allowing
+    /// deterministic GPUI fixtures to host a diff surface.
+    pub(crate) fn build(
+        repo_root: PathBuf,
+        worktrees: Vec<DiffWorktree>,
+        base: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let element_id = SharedString::from(format!("diff-view-{}", repo_root.display()));
         let columns: Vec<Column> = worktrees
             .into_iter()
@@ -807,7 +820,7 @@ impl DiffView {
         // TextInput only notifies itself otherwise.
         let base_filter = cx.new(|cx| TextInput::new("", "Filter branches…", cx));
         cx.observe(&base_filter, |_, _, cx| cx.notify()).detach();
-        let mut view = Self {
+        Self {
             repo_root,
             // Seeded base (multi-project shared base) or empty until `bootstrap`
             // resolves the default off-thread - the git subprocesses must not
@@ -841,9 +854,7 @@ impl DiffView {
             h_scroll_drag: None,
             close_removes: false,
             scope_slot: None,
-        };
-        view.bootstrap(cx);
-        view
+        }
     }
 
     /// Host opt-in: make the column-header `×` deselect the branch (emit

@@ -29,7 +29,9 @@ pub(crate) struct CardMeta {
     pub ws_title: String,
     pub tab_idx: usize,
     pub tab_title: String,
+    /// Position among terminal panes in the full split layout, independent of zoom.
     pub tab_pane_index: usize,
+    /// Terminal panes only; metadata filtering does not change this count.
     pub tab_pane_count: usize,
     /// Display name, already clamped through `limits::clamp_untrusted_label`.
     pub name: String,
@@ -152,9 +154,7 @@ pub(crate) fn filter_cards(cards: &[CardMeta], query: &str) -> Vec<CardMeta> {
         .collect()
 }
 
-/// Surface ids in visible order. This is the same stable order
-/// `jump_next_session_where` uses, so the overview and Cmd+Shift+J agree
-/// about what "next" means.
+/// Surface ids in grid order: workspace, tab, then full-layout traversal.
 pub(crate) fn flat_order(groups: &[WorkspaceGroup]) -> Vec<u64> {
     groups
         .iter()

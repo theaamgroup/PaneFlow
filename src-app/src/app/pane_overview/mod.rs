@@ -90,8 +90,8 @@ impl Default for PaneOverviewState {
 /// Fleet Search both visit only the active tab, and inheriting that here
 /// would hide most of what the overview exists to show. It also avoids
 /// `Workspace::collect_panes`, which dedupes with a linear `contains` per
-/// pane - `Tab::collect_panes` already dedupes `root` against
-/// `saved_layout`, so a zoomed tab yields each pane exactly once.
+/// pane. The saved layout is authoritative during zoom: walking it preserves
+/// split order instead of moving the zoomed pane to the front of the list.
 ///
 /// A free function over the workspace list (not a `PaneFlowApp` method) so a
 /// unit test can drive it without building the app.
@@ -125,7 +125,15 @@ pub(crate) fn collect_cards(
         };
         for (tab_idx, tab) in ws.tabs().iter().enumerate() {
             let tab_title = crate::app::sidebar::tab_row_title(tab, tab_idx, cx);
-            let panes = tab.collect_panes();
+            let panes: Vec<_> = tab
+                .saved_layout
+                .as_ref()
+                .or(tab.root.as_ref())
+                .map(|tree| tree.collect_leaves())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|pane| pane.read(cx).active_terminal_opt().is_some())
+                .collect();
             let tab_pane_count = panes.len();
             for (tab_pane_index, pane) in panes.into_iter().enumerate() {
                 let pane_ref = pane.read(cx);
@@ -772,6 +780,114 @@ fn pane_overview_status_visual(
 mod tests {
     use super::*;
     use crate::pane::Pane;
+
+    fn terminal_pane(cx: &mut gpui::VisualTestContext) -> (gpui::Entity<Pane>, u64) {
+        use gpui::AppContext;
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        let surface_id = terminal.entity_id().as_u64();
+        (cx.new(|cx| Pane::new(terminal, 1, cx)), surface_id)
+    }
+
+    #[gpui::test]
+    fn overview_numbering_stays_in_layout_order_while_zoomed(cx: &mut gpui::TestAppContext) {
+        use crate::layout::{LayoutTree, SplitDirection};
+        use gpui::Focusable;
+        let cx = cx.add_empty_window();
+        let (first, first_sid) = terminal_pane(cx);
+        let (second, second_sid) = terminal_pane(cx);
+        let tree =
+            LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![first, second.clone()])
+                .expect("split layout");
+        let mut workspaces = vec![Workspace::with_layout_and_id(
+            1,
+            "split",
+            std::path::PathBuf::new(),
+            tree,
+        )];
+        cx.update(|window, cx| second.read(cx).focus_handle(cx).focus(window, cx));
+        let collect = |workspaces: &[Workspace], cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| collect_cards(workspaces, 0, window, cx))
+                .into_iter()
+                .map(|card| {
+                    (
+                        card.surface_id,
+                        card.tab_pane_index,
+                        card.tab_pane_count,
+                        card.is_active,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = collect(&workspaces, cx);
+        assert_eq!(
+            before,
+            vec![(first_sid, 0, 2, false), (second_sid, 1, 2, true)]
+        );
+        let tab = workspaces[0].active_tab_mut();
+        tab.saved_layout = tab.root.take();
+        tab.root = Some(LayoutTree::Leaf(second));
+        assert_eq!(
+            collect(&workspaces, cx),
+            before,
+            "zoom must not reorder or renumber cards"
+        );
+        cx.update(|_, cx| {
+            workspaces[0].exit_zoom(cx);
+        });
+        assert_eq!(
+            collect(&workspaces, cx),
+            before,
+            "unzoom preserves the same identities"
+        );
+    }
+
+    #[gpui::test]
+    fn overview_numbering_ignores_nonterminal_surfaces(cx: &mut gpui::TestAppContext) {
+        use crate::layout::{LayoutTree, SplitDirection};
+        use crate::pane::PaneSurface;
+        use gpui::AppContext;
+        let cx = cx.add_empty_window();
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let path = dir.path().join("notes.md");
+        std::fs::write(&path, "# Notes").expect("markdown fixture");
+        let markdown = cx.new(|cx| crate::markdown::MarkdownView::build(path, cx));
+        let markdown = cx.new(|cx| Pane::new_with_surface(PaneSurface::Markdown(markdown), 1, cx));
+        let diff =
+            cx.new(|cx| crate::diff::DiffView::build(dir.path().to_path_buf(), vec![], None, cx));
+        let diff = cx.new(|cx| Pane::new_with_surface(PaneSurface::Diff(diff), 1, cx));
+        let (first, first_sid) = terminal_pane(cx);
+        let (second, second_sid) = terminal_pane(cx);
+        let tree = LayoutTree::from_panes_equal(
+            SplitDirection::Vertical,
+            vec![markdown.clone(), first, diff.clone(), second.clone()],
+        )
+        .expect("mixed layout");
+        let mut workspaces = vec![Workspace::with_layout_and_id(
+            1,
+            "mixed",
+            dir.path().to_path_buf(),
+            tree,
+        )];
+        let cards = cx.update(|window, cx| collect_cards(&workspaces, 0, window, cx));
+        let labels: Vec<_> = cards
+            .iter()
+            .map(|card| (card.surface_id, card.tab_pane_index, card.tab_pane_count))
+            .collect();
+        assert_eq!(labels, vec![(first_sid, 0, 2), (second_sid, 1, 2)]);
+        workspaces[0].active_tab_mut().root = LayoutTree::from_panes_equal(
+            SplitDirection::Vertical,
+            vec![markdown.clone(), diff.clone(), second],
+        );
+        let cards = cx.update(|window, cx| collect_cards(&workspaces, 0, window, cx));
+        assert_eq!(cards.len(), 1);
+        assert_eq!((cards[0].tab_pane_index, cards[0].tab_pane_count), (0, 1));
+        workspaces[0].active_tab_mut().root =
+            LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![markdown, diff]);
+        assert!(
+            cx.update(|window, cx| collect_cards(&workspaces, 0, window, cx))
+                .is_empty()
+        );
+    }
 
     #[gpui::test]
     fn compact_grid_fits_twenty_cards_and_scrolls_to_keyboard_selection(

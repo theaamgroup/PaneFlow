@@ -135,7 +135,7 @@ impl MarkdownView {
     /// Construct the entity and wire its find-bar input without spawning
     /// the disk load or scroll-persistence tasks. Split out of `open` so a
     /// deterministic GPUI test can host the view without background timers.
-    fn build(path: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn build(path: PathBuf, cx: &mut Context<Self>) -> Self {
         let element_id = make_element_id(&path);
         // US-022 - restore last-known scroll offset for this file (if any).
         // Goes through the shared state mutex so concurrent panes never
