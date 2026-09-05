@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::diff::{
     DiffSyntax, DisplayRow, FileDiff, FileRowCache, RowKind, SplitRow,
     build_display_rows_with_caches, build_file_row_caches, build_split_rows_with_caches,
-    compute_head_diff,
+    compute_head_diff, has_repository_marker,
 };
 use crate::workspace::GitDiffStats;
 
@@ -43,14 +43,10 @@ pub(super) fn build_diff_dock(
 ) -> Result<DiffDockBuilt, String> {
     // Ordinary workspace folders have no changes to show. Running `git diff`
     // there returns Git's usage text, which would otherwise fill the dock (#393).
-    // Resolve symlinked subfolders before walking parents for repository metadata.
-    let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
-    let diff = if resolved.is_dir()
-        && crate::workspace::find_git_dir(&resolved.to_string_lossy()).is_none()
-    {
-        Default::default()
-    } else {
+    let diff = if has_repository_marker(Path::new(cwd))? {
         compute_head_diff(Path::new(cwd))
+    } else {
+        Default::default()
     };
     if let Some(e) = diff.error {
         return Err(e);
@@ -223,6 +219,16 @@ mod tests {
         assert!(build(&dir.path().join("missing")).is_err());
         // An existing but broken repository is not a clean working tree.
         std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(build(dir.path()).is_err());
+        std::fs::remove_dir(dir.path().join(".git")).unwrap();
+        // A malformed worktree pointer still counts as repository metadata;
+        // Git must report the corruption instead of displaying a clean dock.
+        std::fs::write(dir.path().join(".git"), "not a gitdir pointer\n").unwrap();
+        assert!(build(dir.path()).is_err());
+        std::fs::write(dir.path().join(".git"), "gitdir: missing-metadata\n").unwrap();
+        assert!(build(dir.path()).is_err());
+        std::fs::remove_file(dir.path().join(".git")).unwrap();
+        std::os::unix::fs::symlink("missing-metadata", dir.path().join(".git")).unwrap();
         assert!(build(dir.path()).is_err());
     }
 }

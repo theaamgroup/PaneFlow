@@ -291,6 +291,40 @@ fn fs_within<T: Send + 'static>(
     })
 }
 
+/// Discover whether a workspace has a `.git` entry under a bounded filesystem
+/// probe. Only absence means an ordinary folder: malformed, unreadable, and
+/// dangling markers are left for Git to diagnose. Canonicalization keeps
+/// symlinked subfolders attached to their actual repository.
+pub(crate) fn has_repository_marker(worktree_dir: &Path) -> Result<bool, String> {
+    has_repository_marker_within(&GitBudget::for_column(), worktree_dir)
+}
+
+fn has_repository_marker_within(budget: &GitBudget, worktree_dir: &Path) -> Result<bool, String> {
+    let dir = worktree_dir.to_path_buf();
+    fs_within(
+        budget,
+        "repository discovery",
+        move || -> std::io::Result<bool> {
+            let resolved = std::fs::canonicalize(dir)?;
+            if !std::fs::metadata(&resolved)?.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "workspace path is not a directory",
+                ));
+            }
+            for parent in resolved.ancestors() {
+                match std::fs::symlink_metadata(parent.join(".git")) {
+                    Ok(_) => return Ok(true),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            Ok(false)
+        },
+    )?
+    .map_err(|err| format!("repository discovery failed: {err}"))
+}
+
 /// [`is_too_large`] charged against `budget` instead of blocking unbounded.
 fn is_too_large_within(
     budget: &GitBudget,
@@ -1482,6 +1516,31 @@ fn compute_file_stats_against_within(
 pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, Once};
+
+    #[test]
+    fn repository_discovery_fails_closed_on_exhausted_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let err = has_repository_marker_within(&budget, dir.path()).unwrap_err();
+        assert!(err.contains("deadline"), "got {err}");
+    }
+
+    #[test]
+    fn filesystem_probe_returns_before_a_blocked_operation_finishes() {
+        let budget = GitBudget {
+            deadline_at: Instant::now() + Duration::from_millis(50),
+        };
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let result = fs_within(&budget, "repository discovery", move || {
+            blocked.recv_timeout(Duration::from_secs(5))
+        });
+        // Release the helper thread even if the assertion below fails.
+        drop(release);
+        let err = result.unwrap_err();
+        assert!(err.contains("deadline"), "got {err}");
+    }
 
     struct TestLogger {
         records: Mutex<Vec<(log::Level, String)>>,
