@@ -138,7 +138,13 @@ Claude Code consumes MCP **tools** and resources.
 [mcp_servers.paneflow]
 command = "/absolute/path/to/paneflow-mcp"
 args = []
+env_vars = ["PANEFLOW_SOCKET_PATH", "PANEFLOW_WORKSPACE_ID", "PANEFLOW_SURFACE_ID"]
 ```
+
+Codex must forward all three variables from its pane to the bridge. Older
+PaneFlow installations that omit `PANEFLOW_SURFACE_ID` are marked **needs repair**;
+run `paneflow mcp install` with the updated build and restart the Codex session.
+Install preserves any custom `env_vars` entries.
 
 Codex consumes **tools only** - which is why the bridge exposes everything as
 tools, not MCP resources.
