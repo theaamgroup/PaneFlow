@@ -41,7 +41,17 @@ pub(super) fn build_diff_dock(
     theme: crate::theme::TerminalTheme,
     theme_generation: u64,
 ) -> Result<DiffDockBuilt, String> {
-    let diff = compute_head_diff(Path::new(cwd));
+    // Ordinary workspace folders have no changes to show. Running `git diff`
+    // there returns Git's usage text, which would otherwise fill the dock (#393).
+    // Resolve symlinked subfolders before walking parents for repository metadata.
+    let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
+    let diff = if resolved.is_dir()
+        && crate::workspace::find_git_dir(&resolved.to_string_lossy()).is_none()
+    {
+        Default::default()
+    } else {
+        compute_head_diff(Path::new(cwd))
+    };
     if let Some(e) = diff.error {
         return Err(e);
     }
@@ -82,7 +92,11 @@ pub(super) fn build_diff_dock(
         let (fa, fr) = f.line_counts();
         (a + fa, r + fr)
     });
-    let git_stats = GitDiffStats::from_cwd(cwd);
+    let git_stats = if diff.files.is_empty() {
+        GitDiffStats::default()
+    } else {
+        GitDiffStats::from_cwd(cwd)
+    };
     let (file_count, added, removed) = if git_stats.is_empty() && !diff.files.is_empty() {
         (diff.files.len(), hunk_added, hunk_removed)
     } else {
@@ -122,4 +136,93 @@ fn diff_dock_snapshot_fingerprint(files: &[FileDiff]) -> u64 {
         file.is_binary.hash(&mut h);
     }
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = crate::workspace::worktree::git_command()
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    fn build(cwd: &Path) -> Result<DiffDockBuilt, String> {
+        build_diff_dock(cwd.to_str().unwrap(), crate::theme::paneflow_dark(), 0)
+    }
+
+    fn assert_empty(cwd: &Path) {
+        let built = build(cwd).unwrap();
+        assert_eq!((built.file_count, built.added, built.removed), (0, 0, 0));
+        assert!(built.files_full.is_empty());
+        assert!(built.unified.is_empty());
+        assert!(built.split.is_empty());
+        assert!(built.paths.is_empty());
+    }
+
+    #[test]
+    fn changes_dock_is_empty_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        // A normal folder's files are not Git changes.
+        std::fs::write(dir.path().join("notes.txt"), "notes\n").unwrap();
+        assert_empty(dir.path());
+    }
+
+    #[test]
+    fn changes_dock_is_empty_before_first_commit_and_when_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        assert_empty(root);
+        std::fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        // The unborn-HEAD fallback must still show a first changeset.
+        let built = build(root).unwrap();
+        assert_eq!(built.paths, ["tracked.txt"]);
+        assert_eq!(built.added, 1);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        assert_empty(root);
+        // A nested workspace must still discover its repository's changes.
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        assert_empty(&nested);
+        std::fs::write(root.join("tracked.txt"), "modified\n").unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        let built = build(&nested).unwrap();
+        assert_eq!(built.paths.len(), 2);
+        assert!(built.paths.iter().any(|path| path == "tracked.txt"));
+        assert!(built.paths.iter().any(|path| path == "new.txt"));
+        let aliases = tempfile::tempdir().unwrap();
+        let alias = aliases.path().join("workspace");
+        std::os::unix::fs::symlink(&nested, &alias).unwrap();
+        assert_eq!(build(&alias).unwrap().paths, built.paths);
+        // Refreshing after the changes are removed must clear the rows again.
+        git(root, &["checkout", "--", "tracked.txt"]);
+        std::fs::remove_file(root.join("new.txt")).unwrap();
+        assert_empty(&nested);
+    }
+
+    #[test]
+    fn changes_dock_preserves_repository_and_missing_folder_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(build(&dir.path().join("missing")).is_err());
+        // An existing but broken repository is not a clean working tree.
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(build(dir.path()).is_err());
+    }
 }
