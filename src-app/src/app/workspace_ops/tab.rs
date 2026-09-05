@@ -355,8 +355,20 @@ impl PaneFlowApp {
         // at render - a background tab closes without moving the visible
         // session, so the dock's own reconcile never runs and the slot (and
         // the terminals in it) would outlive the session it belonged to.
+        //
+        // Issue #397: a dirty `DiffDockTab::File` holds edits that live only
+        // in `CodeView`'s buffer - `session.json` never journals them - so
+        // dropping the slot here would discard them for good, unlike the
+        // undo record above which can restore a terminal. `close_arms_first`
+        // already refuses to drop such a tab from the dock's own close
+        // button; mirror #396's quit-time guard rather than opening the same
+        // back door from a workspace-tab close.
         if let Some(tab_id) = closed_tab_id {
-            self.drop_diff_dock_for_tab(tab_id, cx);
+            if self.dock_file_dirty_for_tab(tab_id, cx) {
+                self.show_toast(unsaved_dock_file_close_tab_toast_message().to_string(), cx);
+            } else {
+                self.drop_diff_dock_for_tab(tab_id, cx);
+            }
         }
         // The closed tab may have been the last reader of a worktree's git
         // state (issue #347). The checkout itself is left alone: tearing it
@@ -722,6 +734,14 @@ impl PaneFlowApp {
     }
 }
 
+/// Shown when closing a tab would otherwise silently drop a dirty dock file
+/// tab (issue #397, mirroring #396's quit-time
+/// `unsaved_dock_file_quit_toast_message`): `session.json` never journals a
+/// `CodeView`'s in-memory edits.
+fn unsaved_dock_file_close_tab_toast_message() -> &'static str {
+    "Save your changes in this tab's open files before closing it."
+}
+
 /// Issue #347 binding for a tab opened at an arbitrary `cwd`: the worktree it
 /// belongs to, when `cwd` is (or lies under) a worktree some tab is already
 /// bound to, or a worktree the workspace manages. `None` leaves the tab
@@ -816,6 +836,52 @@ mod tests {
         assert!(
             !body.contains("active_tab_mut()") && !body.contains("active.root = Some("),
             "the helper must never fill the active tab: {body}"
+        );
+    }
+
+    /// Issue #397: `close_workspace_tab` used to call `drop_diff_dock_for_tab`
+    /// unconditionally, which drops the tab's `CodeView` entities and bypasses
+    /// `close_arms_first` - the only US-017 gate that refuses to drop a dirty
+    /// file tab. A `PaneFlowApp` cannot be constructed in a test (its
+    /// constructor binds a Unix socket and spawns PTYs, the same reason
+    /// `quit_after_session_save_refuses_to_discard_a_dirty_dock_file` in
+    /// `session.rs` asserts on the raw function body for #396), so this pins
+    /// the wiring the same way: the dirty check must run before the drop, and
+    /// the drop must sit behind it rather than run unconditionally alongside
+    /// it. `a_dirty_code_view_is_reported_by_the_dock_file_dirty_check` in
+    /// `diff_dock/code/view.rs` exercises the underlying predicate
+    /// (`any_file_tab_dirty`, which `dock_file_dirty_for_tab` reuses) against
+    /// a real, edited `CodeView`.
+    #[test]
+    fn close_workspace_tab_refuses_to_drop_a_dirty_dock_before_confirming() {
+        let src = include_str!("tab.rs");
+        let body = src
+            .split("pub(crate) fn close_workspace_tab(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn handle_close_tab(").next())
+            .expect("close_workspace_tab body");
+
+        let dirty_check_at = body
+            .find("self.dock_file_dirty_for_tab(tab_id, cx)")
+            .expect("close_workspace_tab must consult the dock dirty-file check");
+        let drop_at = body
+            .find("self.drop_diff_dock_for_tab(tab_id, cx);")
+            .expect("close_workspace_tab must still tear a clean dock down");
+        assert!(
+            dirty_check_at < drop_at,
+            "the dirty check must gate the drop, not follow it: {body}"
+        );
+
+        // The drop must live in the dirty check's `else` branch, not run
+        // unconditionally next to it.
+        let between = &body[dirty_check_at..drop_at];
+        assert!(
+            between.contains("} else {"),
+            "the drop must be gated behind an else branch of the dirty check: {between}"
+        );
+        assert!(
+            between.contains("self.show_toast("),
+            "a dirty dock file must be reported instead of silently kept or dropped: {between}"
         );
     }
 }

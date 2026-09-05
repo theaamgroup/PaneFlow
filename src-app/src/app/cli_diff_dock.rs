@@ -271,6 +271,25 @@ impl PaneFlowApp {
         ))
     }
 
+    /// Whether the dock owned by tab `tab_id` - the live dock when that tab
+    /// owns it, plus the tab's parked slot - holds a dirty `DiffDockTab::File`
+    /// (issue #397). `close_workspace_tab` must see this before it calls
+    /// [`Self::drop_diff_dock_for_tab`], the same way #396 made
+    /// `quit_after_session_save` see [`Self::any_dock_file_dirty`] before
+    /// `cx.quit()`: `session.json` never journals a `CodeView`'s in-memory
+    /// edits, so dropping the slot here would discard them for good.
+    pub(crate) fn dock_file_dirty_for_tab(&self, tab_id: u64, cx: &App) -> bool {
+        any_file_tab_dirty(
+            dock_tabs_for_session(
+                self.diff_dock.owner,
+                &self.diff_dock.diff_tabs,
+                &self.diff_dock.parked,
+                tab_id,
+            ),
+            cx,
+        )
+    }
+
     /// The dock terminals that die when workspace `workspace_id` closes: those
     /// of every tab it holds. Empty for a workspace that is already gone.
     pub(crate) fn diff_dock_terminals_for_workspace(
