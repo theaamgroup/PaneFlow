@@ -1,0 +1,15 @@
+{
+  "name": "task_get",
+  "description": "Read your pane's persisted task assignment, revision, and latest agent-reported result. A null task means no assignment; do not invent one.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

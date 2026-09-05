@@ -4,12 +4,14 @@ mod agent_panel;
 mod config;
 mod layout;
 mod session;
+mod task;
 mod terminal;
 
 pub use agent_panel::*;
 pub use config::*;
 pub use layout::*;
 pub use session::*;
+pub use task::*;
 pub use terminal::*;
 
 #[cfg(test)]
@@ -200,6 +202,10 @@ mod tests {
                 color: Some("007aff".to_string()),
                 layout: Some(LayoutNode::Pane {
                     surfaces: vec![SurfaceDefinition {
+                        agent_context: Some(AgentContext {
+                            pane_id: "example".into(),
+                            task: None,
+                        }),
                         surface_type: Some("terminal".to_string()),
                         name: Some("Claude".to_string()),
                         custom_name: Some("Agent".to_string()),

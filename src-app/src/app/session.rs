@@ -772,6 +772,9 @@ impl PaneFlowApp {
             t.read(cx).restore_scrollback(scrollback);
         }
         // US-013: re-apply the persisted custom name.
+        t.update(cx, |view, _| {
+            super::agent_context::restore_context(view, surface.agent_context.as_ref());
+        });
         if let Some(ref custom) = surface.custom_name {
             t.update(cx, |view, _cx| {
                 view.terminal.custom_name = Some(custom.clone());

@@ -591,6 +591,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "agent_context": {
+          "type": ["object", "null"],
+          "description": "Session-owned pane identity and current task. Omit from reusable templates; manage assignments through paneflow task assign."
+        },
         "surface_type": {
           "type": ["string", "null"],
           "description": "Surface kind. Currently only 'terminal' is rendered.",

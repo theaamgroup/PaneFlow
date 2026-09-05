@@ -127,6 +127,7 @@ impl LayoutTree {
                             };
                             SurfaceDefinition {
                                 surface_type: Some("terminal".to_string()),
+                                agent_context: Some(tv_ref.agent_context.clone()),
                                 name,
                                 custom_name: tv_ref.terminal.custom_name.clone(),
                                 command: None,
@@ -144,6 +145,7 @@ impl LayoutTree {
                             let path = markdown.read(cx).path.display().to_string();
                             SurfaceDefinition {
                                 surface_type: Some("markdown".to_string()),
+                                agent_context: None,
                                 name: None,
                                 custom_name: None,
                                 command: None,
@@ -159,6 +161,7 @@ impl LayoutTree {
                         }
                         crate::pane::PaneSurface::Diff(_) => SurfaceDefinition {
                             surface_type: Some("diff".to_string()),
+                            agent_context: None,
                             name: None,
                             custom_name: None,
                             command: None,
