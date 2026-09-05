@@ -108,6 +108,28 @@ where the evidence is:
   deleted. Pinned by
   `removal_is_refused_for_what_is_not_ours_open_or_reserved` and
   `a_clean_owned_checkout_is_removed_keeping_its_branch_and_a_dirty_one_is_refused`.
+- **Mark as read** (#408). A row at the top of the tab context menu
+  (`sidebar/context_menu.rs`, `tab-context-mark-read`) present only while
+  the tab has a badge to clear - a `WaitingForInput`, `Errored`, or
+  `Stalled` session bound to one of its own surfaces
+  (`agent_status::session_is_unread_on`, gated by `tab_has_unread`). It
+  sets `AgentSession::read` on those sessions and re-runs `sync_attention`,
+  so the bell, the pane ring and the peek overlay clear together; sibling
+  tabs and live `Thinking` work are untouched. The row is kept, not
+  deleted (PR #413 review): deleting it let the 400 ms registry sweep
+  reopen a hook-held wait, and let a queued Composer prompt flush into a
+  stalled pane. `state` stays the truth for the delivery gate, the stall
+  clock, and IPC; everything that asks for attention (sidebar summary,
+  `sync_attention`, Attention Queue, jump-to-waiting, workspace-select
+  focus, overview dot, work review label) reads `presented_state()`, and
+  the write choke point clears the mark on the next accepted frame. #390
+  had removed one false trigger (Codex completion notifications) but left
+  no manual clear. Pinned by
+  `mark_as_read_clears_only_the_badging_states_of_the_tabs_own_surfaces`,
+  `an_accepted_frame_raises_a_badge_the_user_marked_read`,
+  `sidebar_agent_summary_hides_a_session_marked_read`,
+  `a_badged_tab_menu_is_one_row_taller_for_mark_as_read`, and
+  `mark_as_read_is_offered_only_to_a_badged_tab_and_clears_it`.
 - **Customize Sidebar** (#349, commit `36ca19ad`;
   `sidebar/customize_menu.rs`). A "Show" submenu over `sidebar_show`
   (`crates/paneflow-config/src/schema/config.rs::SidebarShow`; defaults

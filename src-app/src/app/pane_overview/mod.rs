@@ -142,11 +142,12 @@ pub(crate) fn collect_cards(
                     continue;
                 };
                 let surface_id = terminal.entity_id().as_u64();
+                // A session marked read (#408) shows as idle here too.
                 let state = ws
                     .agent_sessions
                     .values()
                     .find(|s| s.surface_id == Some(surface_id))
-                    .map(|s| s.state.clone());
+                    .and_then(|s| s.presented_state().cloned());
                 let view = terminal.read(cx);
                 let metrics = view.terminal.session_backend().grid_metrics();
                 cards.push(CardMeta {

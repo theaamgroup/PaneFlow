@@ -126,7 +126,8 @@ impl PaneFlowApp {
             let matching: std::collections::HashSet<u64> = ws
                 .agent_sessions
                 .values()
-                .filter(|s| state_matches(&s.state))
+                // A session marked read (#408) presents no state to jump to.
+                .filter(|s| s.presented_state().is_some_and(&state_matches))
                 .filter_map(|s| s.surface_id)
                 .collect();
             if matching.is_empty() {
