@@ -14,6 +14,11 @@ fn issue_number(input: &str) -> Result<(u64, Option<String>), String> {
     let tail = input
         .strip_prefix("https://")
         .ok_or("Enter an issue number or HTTPS GitHub issue URL")?;
+    let tail = tail
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(tail)
+        .trim_end_matches('/');
     let parts: Vec<_> = tail.split('/').collect();
     if parts.len() != 5
         || parts[3] != "issues"
@@ -156,6 +161,16 @@ mod tests {
             issue_number("https://github.com/o/r/issues/42").unwrap(),
             (42, Some("https://github.com/o/r".into()))
         );
+        for url in [
+            "https://github.com/o/r/issues/42#issuecomment-456",
+            "https://github.com/o/r/issues/42?plain=1",
+            "https://github.com/o/r/issues/42/",
+        ] {
+            assert_eq!(
+                issue_number(url).unwrap(),
+                (42, Some("https://github.com/o/r".into()))
+            );
+        }
         for bad in [
             "--web",
             "0",

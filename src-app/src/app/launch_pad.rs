@@ -618,7 +618,10 @@ impl PaneFlowApp {
         };
         match key {
             "escape" => self.launch_pad_cancel(cx),
-            "enter" if lp.issue_input.read(cx).focus_handle.is_focused(window) => {
+            "enter"
+                if lp.issue_input.read(cx).focus_handle.is_focused(window)
+                    && !lp.issue_input.read(cx).value().trim().is_empty() =>
+            {
                 self.load_launch_pad_issue(cx)
             }
             "enter" => self.launch_pad_confirm(cx),
@@ -832,7 +835,7 @@ impl PaneFlowApp {
                 div()
                     .text_size(px(10.))
                     .text_color(ui.muted)
-                    .child("Enter creates · Tab switches fields · Esc cancels"),
+                    .child("Enter: load or create · Tab: fields · Esc: cancel"),
             )
             .child(
                 div()
