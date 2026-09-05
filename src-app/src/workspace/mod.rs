@@ -66,8 +66,6 @@ use crate::launch_cwd;
 use crate::layout::LayoutTree;
 use crate::pane::Pane;
 
-use self::git::parse_head;
-
 /// Monotonic workspace ID counter. Each workspace gets a unique ID at construction.
 static NEXT_WORKSPACE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -219,12 +217,16 @@ pub(crate) fn commands_are_idle(commands: &[Option<String>]) -> bool {
 
 impl Workspace {
     /// US-013: shared private factory for the three public constructors (kills
-    /// the verbatim triplication). Resolves the *cheap* git metadata - `.git`
-    /// dir, branch (`parse_head`), repo root - synchronously, since those are
-    /// direct `.git/HEAD` file reads, not subprocesses. `git_stats` is left at
-    /// its `default()` (0/0): the `git diff --shortstat` subprocess is the
-    /// blocking call, deferred off the render thread by
-    /// [`crate::PaneFlowApp::spawn_initial_git_stats`] right after creation.
+    /// the verbatim triplication). Resolves the `.git` dir and repo root
+    /// synchronously (cheap directory-existence checks and, for a worktree, a
+    /// small local file read). `git_branch` / `is_git_repo` are left at their
+    /// `default()` (empty / `false`), same as `git_stats` (0/0): reading
+    /// `.git/HEAD` (issue #400) is a filesystem read that can stall behind a
+    /// wedged network mount or a TCC prompt, so - like the `git diff
+    /// --shortstat` subprocess - it is deferred off the render thread by
+    /// [`crate::PaneFlowApp::spawn_initial_git_stats`] right after creation
+    /// (it resolves branch via `detect_branch` alongside `git_stats`, and
+    /// applies both through `apply_git_state_for_cwd`).
     fn build(id: u64, title: String, cwd: String, root: LayoutTree) -> Self {
         Self::build_with_tab(id, title, cwd, Tab::new(String::new(), Some(root)))
     }
@@ -234,10 +236,12 @@ impl Workspace {
     /// (`Tab::empty()`) without duplicating the git-metadata resolution.
     fn build_with_tab(id: u64, title: String, cwd: String, tab: Tab) -> Self {
         let git_dir = find_git_dir(&cwd);
-        let (git_branch, is_git_repo) = match &git_dir {
-            Some(dir) => parse_head(dir),
-            None => (String::new(), false),
-        };
+        // Issue #400: `parse_head` opens and reads `.git/HEAD`, which can
+        // stall on a wedged network volume or a TCC-protected folder. Leave
+        // `git_branch` / `is_git_repo` at their empty defaults here; they are
+        // resolved off the UI thread by `spawn_initial_git_stats`, the same
+        // deferral `git_stats` already uses.
+        let (git_branch, is_git_repo) = (String::new(), false);
         let (repo_root, is_worktree) = match &git_dir {
             Some(dir) => resolve_repo_root(dir),
             None => (None, false),
@@ -727,6 +731,39 @@ mod tests {
             );
         }
         ws
+    }
+
+    /// Issue #400: `Workspace::build_with_tab` used to resolve `git_branch` by
+    /// opening and reading `.git/HEAD` synchronously on the UI thread, which
+    /// can stall behind a wedged network mount or a TCC-protected folder. A
+    /// FIFO at `.git/HEAD` is a stand-in for "an open that would block a
+    /// naive blocking read": construction must never attempt that read at
+    /// all, so `git_branch` stays at its empty default and the call returns
+    /// immediately - branch resolution happens off-thread afterward via
+    /// `spawn_initial_git_stats`, the same deferral `git_stats` already uses.
+    #[test]
+    fn build_with_tab_does_not_open_git_head_and_returns_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        let head = git_dir.join("HEAD");
+        let c_path = std::ffi::CString::new(head.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let started = std::time::Instant::now();
+        let ws = Workspace::empty_with_cwd_and_id(1, "ws", dir.path().to_path_buf());
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "Workspace construction must not open .git/HEAD: {elapsed:?}"
+        );
+        assert_eq!(
+            ws.git_branch, "",
+            "git_branch must stay empty until spawn_initial_git_stats resolves it off-thread"
+        );
+        assert!(!ws.is_git_repo);
     }
 
     #[gpui::test]
