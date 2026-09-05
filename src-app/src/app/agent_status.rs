@@ -244,6 +244,58 @@ impl PaneFlowApp {
         .detach();
     }
 
+    /// Whether the sidebar tab at `ws_idx` / `tab_idx` carries a badge the
+    /// user can dismiss - see [`session_is_unread_on`]. This gates the tab
+    /// context menu's "Mark as read" row: a tab with nothing to clear does
+    /// not offer it.
+    pub(crate) fn tab_has_unread(&self, ws_idx: usize, tab_idx: usize, cx: &gpui::App) -> bool {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return false;
+        };
+        let Some(tab) = ws.tabs().get(tab_idx) else {
+            return false;
+        };
+        let surfaces = tab.surface_ids(cx);
+        ws.agent_sessions
+            .values()
+            .any(|session| session_is_unread_on(session, &surfaces))
+    }
+
+    /// "Mark as read" on a sidebar tab row: drop every waiting, errored, and
+    /// stalled session bound to that tab's surfaces, then push the cleared
+    /// state into the panes so the bell, the attention ring, and the peek
+    /// overlay go with it (`sync_attention` is the only thing that clears
+    /// those). Sibling tabs are untouched.
+    ///
+    /// Removal rather than a state transition, deliberately: every observer
+    /// keeps its own watermark (a hook frame's `emitted_at_ms`, the registry
+    /// sweep's `claude_registry_seen`, a terminal notification that fires
+    /// once), so an unchanged observation does not re-raise the badge, while
+    /// an agent that really does speak again re-registers on its next frame.
+    /// A forced transition would have to fight the held-`WaitingForInput`
+    /// rule at the write choke point (issue #196) to do the same thing.
+    pub(crate) fn mark_tab_read(&mut self, ws_idx: usize, tab_idx: usize, cx: &mut Context<Self>) {
+        let surfaces = match self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs().get(tab_idx))
+        {
+            Some(tab) => tab.surface_ids(cx),
+            None => return,
+        };
+        let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        let before = ws.agent_sessions.len();
+        ws.agent_sessions
+            .retain(|_, session| !session_is_unread_on(session, &surfaces));
+        if ws.agent_sessions.len() < before {
+            self.sync_attention(cx);
+            self.agent_sessions_changed(cx);
+            cx.notify();
+        }
+    }
+
     /// The workspace a surface belongs to, across every tab.
     fn workspace_id_for_surface(&self, surface_id: u64, cx: &gpui::App) -> Option<u64> {
         self.workspaces
@@ -400,6 +452,25 @@ impl PaneFlowApp {
     }
 }
 
+/// Whether `session` is something the user can mark read on a tab whose
+/// surfaces are `surfaces`: bound to one of them and waiting for input,
+/// errored, or stalled - the three states that badge a tab row and, for
+/// waiting, ring the pane. `Thinking` is live work, not a notification, and
+/// `Finished` never badges a tab row; an unbound session has no tab to be
+/// read from.
+pub(crate) fn session_is_unread_on(
+    session: &ai_types::AgentSession,
+    surfaces: &std::collections::HashSet<u64>,
+) -> bool {
+    session.surface_id.is_some_and(|id| surfaces.contains(&id))
+        && matches!(
+            session.state,
+            ai_types::AgentState::WaitingForInput
+                | ai_types::AgentState::Errored
+                | ai_types::AgentState::Stalled
+        )
+}
+
 /// Whether an observation may CREATE a session, as opposed to only updating
 /// one that already exists.
 ///
@@ -497,6 +568,51 @@ pub(crate) fn notification_lifecycle_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mark_as_read_clears_only_the_badging_states_of_the_tabs_own_surfaces() {
+        use ai_types::{AgentSession, AgentState};
+        let surfaces = std::collections::HashSet::from([7u64, 8u64]);
+        let bound = |state, surface| {
+            let mut session = AgentSession::new(TerminalAgent::ClaudeCode, state);
+            session.surface_id = surface;
+            session
+        };
+
+        // The bell, the error dot, and the stalled badge all go.
+        assert!(session_is_unread_on(
+            &bound(AgentState::WaitingForInput, Some(7)),
+            &surfaces
+        ));
+        assert!(session_is_unread_on(
+            &bound(AgentState::Errored, Some(8)),
+            &surfaces
+        ));
+        assert!(session_is_unread_on(
+            &bound(AgentState::Stalled, Some(7)),
+            &surfaces
+        ));
+        // Live work is not a notification, and a finished turn never badged
+        // the tab row in the first place.
+        assert!(!session_is_unread_on(
+            &bound(AgentState::Thinking, Some(7)),
+            &surfaces
+        ));
+        assert!(!session_is_unread_on(
+            &bound(AgentState::Finished, Some(7)),
+            &surfaces
+        ));
+        // A sibling tab's question is that tab's to read.
+        assert!(!session_is_unread_on(
+            &bound(AgentState::WaitingForInput, Some(9)),
+            &surfaces
+        ));
+        // An unbound session has no tab to be read from.
+        assert!(!session_is_unread_on(
+            &bound(AgentState::WaitingForInput, None),
+            &surfaces
+        ));
+    }
 
     #[test]
     fn a_turn_is_only_seen_when_its_own_pane_is_the_one_on_screen() {
