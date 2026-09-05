@@ -2,13 +2,13 @@
 //! The inherited IDs are routing metadata under the existing same-UID IPC
 //! boundary, not credentials or proof of an agent's process identity.
 
-use gpui::{Context, Entity};
+use gpui::{App, Context, Entity};
 use paneflow_config::schema::{AgentContext, AgentTask, TaskAssignment, TaskReport};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::ipc_handler::JsonRpcError;
-use crate::{PaneFlowApp, terminal::TerminalView};
+use crate::{PaneFlowApp, terminal::TerminalView, workspace::Workspace};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,6 +23,25 @@ struct ContextRequest {
     revision: Option<u64>,
     #[serde(default)]
     report: Option<TaskReport>,
+}
+
+fn context_workspace(
+    workspaces: &[Workspace],
+    request: &ContextRequest,
+    method: &str,
+    cx: &App,
+) -> Result<u64, JsonRpcError> {
+    let location = super::ipc_handler::find_pane_by_surface_id(workspaces, request.surface_id, cx)
+        .ok_or_else(|| JsonRpcError::invalid_params("surface not found"))?;
+    let workspace_id = workspaces[location.workspace_idx].id;
+    // A drag keeps the PTY and its inherited workspace ID alive. Own-pane
+    // operations follow the surface; explicit assignment stays scoped.
+    if method == "task.assign" && workspace_id != request.workspace_id {
+        return Err(JsonRpcError::invalid_params(
+            "surface is outside the requested workspace",
+        ));
+    }
+    Ok(workspace_id)
 }
 
 pub(super) fn valid_context(context: &AgentContext) -> bool {
@@ -82,9 +101,10 @@ impl PaneFlowApp {
         }
         let request: ContextRequest = serde_json::from_value(params.clone())
             .map_err(|error| JsonRpcError::invalid_params(error.to_string()))?;
+        let workspace_id = context_workspace(&self.workspaces, &request, method, cx)?;
         // Unlike surface.read, omission must never fall back to the active pane.
         let terminal = self.resolve_readable_surface(
-            &json!({"surface_id": request.surface_id, "workspace_id": request.workspace_id}),
+            &json!({"surface_id": request.surface_id, "workspace_id": workspace_id}),
             cx,
         )?;
         match method {
@@ -154,10 +174,12 @@ impl PaneFlowApp {
             _ => unreachable!(),
         }
         if method == "agent.whoami" {
-            self.agent_identity(&terminal, request.workspace_id, cx)
+            self.agent_identity(&terminal, workspace_id, cx)
         } else {
-            Ok(json!({"pane_id": terminal.read(cx).agent_context.pane_id,
-                "task": terminal.read(cx).agent_context.task}))
+            Ok(
+                json!({"pane_id": terminal.read(cx).agent_context.pane_id, "workspace_id": workspace_id,
+                "task": terminal.read(cx).agent_context.task}),
+            )
         }
     }
 
@@ -212,6 +234,61 @@ impl PaneFlowApp {
 mod tests {
     use super::*;
     use gpui::AppContext;
+
+    #[gpui::test]
+    fn agent_context_follows_a_live_tab_move_with_unchanged_inherited_ids(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let pane = cx.new(|cx| crate::pane::Pane::new(terminal.clone(), 1, cx));
+        let mut workspaces = vec![
+            Workspace::with_layout_and_id(
+                1,
+                "source",
+                std::path::PathBuf::new(),
+                crate::layout::LayoutTree::Leaf(pane.clone()),
+            ),
+            Workspace::empty_with_cwd_and_id(2, "destination", std::path::PathBuf::new()),
+        ];
+        let request: ContextRequest = serde_json::from_value(json!({
+            "surface_id": terminal.entity_id().as_u64(), "workspace_id": 1,
+        }))
+        .expect("inherited identity");
+        cx.update(|_, cx| {
+            assert_eq!(
+                context_workspace(&workspaces, &request, "agent.whoami", cx).expect("before move"),
+                1
+            )
+        });
+        // The production drag path transfers this tab and retains its PTY.
+        let tab = workspaces[0].close_tab(0).expect("detach tab");
+        pane.update(cx, |pane, _| pane.workspace_id = 2);
+        assert!(workspaces[1].open_tab(tab));
+        // Also cover a source workspace being closed after the move.
+        workspaces.remove(0);
+        cx.update(|_, cx| {
+            for method in ["agent.whoami", "task.get", "task.report"] {
+                assert_eq!(
+                    context_workspace(&workspaces, &request, method, cx).expect("moved context"),
+                    2
+                );
+            }
+            assert!(context_workspace(&workspaces, &request, "task.assign", cx).is_err());
+            assert_eq!(
+                super::super::ipc_handler::find_terminal_by_surface_id(
+                    &workspaces,
+                    request.surface_id,
+                    cx
+                ),
+                Some(terminal.clone())
+            );
+        });
+        workspaces[0].close_tab(0).expect("close moved tab");
+        cx.update(|_, cx| {
+            assert!(context_workspace(&workspaces, &request, "agent.whoami", cx).is_err())
+        });
+    }
 
     #[test]
     fn context_requests_require_both_ids_and_reject_target_overrides() {

@@ -77,16 +77,21 @@ not verification performed by PaneFlow.
 
 The CLI and MCP inherit `PANEFLOW_SURFACE_ID` and `PANEFLOW_WORKSPACE_ID` from the
 pane's environment. Both are required; neither client guesses from focus. Every
-IPC method requires numeric `surface_id` and `workspace_id`, and the app checks
-live membership together. A missing, closed, or moved-out-of-workspace pane is an
-error. Relaunch the agent/MCP bridge after moving its pane to another workspace
-so the inherited workspace identity is refreshed.
+IPC method requires numeric `surface_id` and `workspace_id`. Own-pane operations
+(`agent.whoami`, `task.get`, and `task.report`) resolve the surface's live workspace;
+their responses include that current `workspace_id`. A moved pane keeps its PTY
+and the old workspace ID in its shell environment, so these calls keep working
+without restarting the agent, even if the original workspace is closed. Missing
+or closed surfaces remain errors. Explicit `task.assign` still requires the
+surface to belong to the requested workspace.
 
 MCP context tools accept no target or workspace argument. Even with
 `PANEFLOW_MCP_SCOPE=all`, they address only the inherited caller pane. Raw IPC and
 the CLI's explicit assignment/inspection commands remain same-user operations;
 environment IDs are routing metadata, not authentication credentials. Nested
 agents in one pane share its task and must coordinate revisions.
+Peer discovery and terminal reads retain the bridge's original workspace scope;
+following one's own moved pane does not grant access to its new workspace's peers.
 
 Pane identity and task records use the existing debounced `session.json` save
 path. A successful write response means accepted in memory and queued for save,

@@ -281,6 +281,34 @@ mod tests {
     use crate::test_support::FakeTransport;
 
     #[test]
+    fn moved_pane_context_does_not_widen_peer_read_scope() {
+        let transport = FakeTransport::new()
+            .with("agent.whoami", json!({"surface_id": 7, "workspace_id": 3}))
+            .with("surface.list", json!({"surfaces": [surface(7, Some(3))]}));
+        let bridge = Bridge {
+            transport: &transport,
+            scope: BridgeScope::Workspace(2),
+            identity: Ok(json!({"surface_id": 7, "workspace_id": 2})),
+        };
+        let identity = bridge
+            .agent_context("agent.whoami", json!({}))
+            .expect("own moved pane");
+        assert_eq!(identity["workspace_id"], 3);
+        assert_eq!(
+            transport.last_params("agent.whoami"),
+            Some(json!({"surface_id": 7, "workspace_id": 2}))
+        );
+        assert!(
+            bridge.surfaces().is_err(),
+            "peer discovery must still enforce its original scope"
+        );
+        assert_eq!(
+            transport.last_params("surface.list"),
+            Some(json!({"workspace_id": 2}))
+        );
+    }
+
+    #[test]
     fn agent_context_routes_to_the_inherited_pane_even_with_global_read_scope() {
         let transport = FakeTransport::new().with("task.get", json!({"task": null}));
         let bridge = Bridge {
