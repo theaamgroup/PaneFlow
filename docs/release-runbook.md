@@ -292,7 +292,7 @@ The `build` job runs, in order:
    `codesign`, `stapler validate`, and `spctl` against the bundle mounted from
    the finished image. A `.sha256` sibling is staged next to it.
 11. Sparkle's `generate_appcast` signs the DMG with `SPARKLE_PRIVATE_KEY`,
-    embeds GitHub-generated release notes, and stages `appcast.xml`.
+    embeds the release notes, and stages `appcast.xml`.
 12. The `release` job (tag-push only) attaches all three assets, verifies the
     exact remote asset set while the release is still a draft, then publishes.
 
@@ -373,10 +373,11 @@ launches, `paneflow --version` reports the tagged version.
 
 ## Step 6 - Announce (about 2 min, manual judgement required)
 
-Write the release notes on the GitHub Release page. `release.yml` sets
-`generate_release_notes: true`, so GitHub has pre-filled the changelog from
-merged PRs since the previous tag. Your job is to polish that default, not write
-it from scratch.
+Before tagging, write short, feature-focused notes in
+`docs/releases/vX.Y.Z.md`. The release workflow uses this text at the top of
+the GitHub Release and inside Sparkle's update notes. Include a full-changelog
+link for detailed fixes. If no curated file exists, `scripts/release-notes.sh`
+falls back to GitHub-generated notes from the merged PRs.
 
 Suggested structure:
 

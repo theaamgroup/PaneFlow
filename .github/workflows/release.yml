@@ -287,11 +287,7 @@ jobs:
           version="${TAG#v}"
           dmg="paneflow-${version}-${ARCH}-apple-darwin.dmg"
           notes="release-assets/${dmg%.dmg}.md"
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" \
-            -f target_commitish="$GITHUB_SHA" \
-            --jq '.body' > "$notes"
+          bash scripts/release-notes.sh "$TAG" > "$notes"
 
           sparkle_dist="$(scripts/sparkle-dist.sh)"
           printf '%s' "$SPARKLE_PRIVATE_KEY" \
@@ -425,11 +421,16 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/release-notes.sh "$RELEASE_TAG" > release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: release-assets/*
-          generate_release_notes: true
+          body_path: release-notes.md
           # Keep the release hidden from /releases/latest until every
           # staged asset is attached and verified against the local set.
           draft: true
