@@ -43,7 +43,8 @@ pub(super) fn build_diff_dock(
 ) -> Result<DiffDockBuilt, String> {
     // Ordinary workspace folders have no changes to show. Running `git diff`
     // there returns Git's usage text, which would otherwise fill the dock (#393).
-    let diff = if has_repository_marker(Path::new(cwd))? {
+    let is_git_repo = has_repository_marker(Path::new(cwd))?;
+    let diff = if is_git_repo {
         compute_head_diff(Path::new(cwd))
     } else {
         Default::default()
@@ -88,10 +89,12 @@ pub(super) fn build_diff_dock(
         let (fa, fr) = f.line_counts();
         (a + fa, r + fr)
     });
-    let git_stats = if diff.files.is_empty() {
-        GitDiffStats::default()
-    } else {
+    // Git can count changes whose paths the renderer cannot decode. Only skip
+    // stats outside a repository, or opening the dock would clear those counts.
+    let git_stats = if is_git_repo {
         GitDiffStats::from_cwd(cwd)
+    } else {
+        GitDiffStats::default()
     };
     let (file_count, added, removed) = if git_stats.is_empty() && !diff.files.is_empty() {
         (diff.files.len(), hunk_added, hunk_removed)
@@ -138,13 +141,14 @@ fn diff_dock_snapshot_fingerprint(files: &[FileDiff]) -> u64 {
 mod tests {
     use super::*;
 
-    fn git(cwd: &Path, args: &[&str]) {
+    fn git(cwd: &Path, args: &[&str]) -> Vec<u8> {
         let output = crate::workspace::worktree::git_command()
             .args(args)
             .current_dir(cwd)
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
+        output.stdout
     }
 
     fn build(cwd: &Path) -> Result<DiffDockBuilt, String> {
@@ -230,5 +234,45 @@ mod tests {
         std::fs::remove_file(dir.path().join(".git")).unwrap();
         std::os::unix::fs::symlink("missing-metadata", dir.path().join(".git")).unwrap();
         assert!(build(dir.path()).is_err());
+    }
+
+    #[test]
+    fn changes_dock_keeps_stats_for_paths_the_renderer_cannot_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        let blob = String::from_utf8(git(root, &["hash-object", "-w", "--stdin"])).unwrap();
+        // A Git tree can contain non-UTF-8 paths even on a filesystem that
+        // cannot create them. The missing worktree file is a tracked deletion.
+        let mut entry = format!("100644 {}\t", blob.trim()).into_bytes();
+        entry.extend_from_slice(b"bad-\xff.txt\0");
+        let mut cmd = crate::workspace::worktree::git_command();
+        cmd.args(["update-index", "-z", "--index-info"])
+            .current_dir(root);
+        let output = paneflow_process::run_with_timeout_stdin(
+            cmd,
+            &entry,
+            std::time::Duration::from_secs(5),
+            1024,
+        )
+        .unwrap();
+        assert!(output.status.success());
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        let built = build(root).unwrap();
+        assert!(built.files_full.is_empty());
+        assert!(built.unified.is_empty());
+        assert!(built.split.is_empty());
+        assert_eq!(built.file_count, 1);
     }
 }
