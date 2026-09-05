@@ -29,6 +29,10 @@ pub(crate) struct CardMeta {
     pub ws_title: String,
     pub tab_idx: usize,
     pub tab_title: String,
+    /// Position among terminal panes in the full split layout, independent of zoom.
+    pub tab_pane_index: usize,
+    /// Terminal panes only; metadata filtering does not change this count.
+    pub tab_pane_count: usize,
     /// Display name, already clamped through `limits::clamp_untrusted_label`.
     pub name: String,
     pub cwd_label: Option<String>,
@@ -75,7 +79,6 @@ impl CardMeta {
 #[derive(Clone, Debug)]
 pub(crate) struct TabGroup {
     pub tab_idx: usize,
-    pub title: String,
     pub cards: Vec<CardMeta>,
 }
 
@@ -90,7 +93,7 @@ pub(crate) struct WorkspaceGroup {
     pub tabs: Vec<TabGroup>,
 }
 
-/// Group a flat card list into workspace sections and tab rows.
+/// Group a flat card list into workspace sections, preserving tab adjacency.
 ///
 /// Input order is the caller's traversal order (workspace index, then tab
 /// index, then layout traversal); grouping is stable and never re-sorts, so
@@ -123,7 +126,6 @@ pub(crate) fn group_cards(cards: Vec<CardMeta>) -> Vec<WorkspaceGroup> {
             None => {
                 tabs.push(TabGroup {
                     tab_idx: card.tab_idx,
-                    title: card.tab_title.clone(),
                     cards: Vec::new(),
                 });
                 tabs.len() - 1
@@ -152,9 +154,7 @@ pub(crate) fn filter_cards(cards: &[CardMeta], query: &str) -> Vec<CardMeta> {
         .collect()
 }
 
-/// Surface ids in visible order. This is the same stable order
-/// `jump_next_session_where` uses, so the overview and Cmd+Shift+J agree
-/// about what "next" means.
+/// Surface ids in grid order: workspace, tab, then full-layout traversal.
 pub(crate) fn flat_order(groups: &[WorkspaceGroup]) -> Vec<u64> {
     groups
         .iter()
@@ -162,6 +162,63 @@ pub(crate) fn flat_order(groups: &[WorkspaceGroup]) -> Vec<u64> {
         .flat_map(|tab| tab.cards.iter())
         .map(|card| card.surface_id)
         .collect()
+}
+
+/// Direct children of the scroll container. Tabs share rows within a workspace.
+pub(crate) enum GridRow<'a> {
+    Workspace(&'a WorkspaceGroup),
+    Cards(Vec<&'a CardMeta>),
+}
+
+pub(crate) fn grid_rows(groups: &[WorkspaceGroup], columns: usize) -> Vec<GridRow<'_>> {
+    let mut rows = Vec::new();
+    for group in groups {
+        rows.push(GridRow::Workspace(group));
+        let cards: Vec<_> = group.tabs.iter().flat_map(|tab| &tab.cards).collect();
+        rows.extend(
+            cards
+                .chunks(columns.max(1))
+                .map(|cards| GridRow::Cards(cards.to_vec())),
+        );
+    }
+    rows
+}
+
+/// The scroll child containing a card, including intervening workspace headers.
+pub(crate) fn selected_row(rows: &[GridRow<'_>], surface_id: u64) -> Option<usize> {
+    rows.iter().position(|row| {
+        matches!(row, GridRow::Cards(cards)
+        if cards.iter().any(|card| card.surface_id == surface_id))
+    })
+}
+
+/// Keep the visual column across workspace boundaries and partial rows.
+pub(crate) fn move_vertical(rows: &[GridRow<'_>], selected: usize, down: bool) -> usize {
+    let lengths: Vec<_> = rows
+        .iter()
+        .filter_map(|row| match row {
+            GridRow::Cards(cards) => Some(cards.len()),
+            GridRow::Workspace(_) => None,
+        })
+        .collect();
+    let mut start = 0;
+    for (row, &len) in lengths.iter().enumerate() {
+        if selected < start + len {
+            let column = selected - start;
+            return if down {
+                lengths
+                    .get(row + 1)
+                    .map_or(selected, |&next_len| start + len + column.min(next_len - 1))
+            } else if row > 0 {
+                let previous_len = lengths[row - 1];
+                start - previous_len + column.min(previous_len - 1)
+            } else {
+                selected
+            };
+        }
+        start += len;
+    }
+    start.saturating_sub(1)
 }
 
 /// Where the selection cursor starts when the overlay opens: on the current
@@ -212,6 +269,8 @@ mod tests {
             ws_title: format!("ws{ws}"),
             tab_idx: tab,
             tab_title: format!("tab{tab}"),
+            tab_pane_index: 0,
+            tab_pane_count: 1,
             name: name.to_string(),
             cwd_label: None,
             agent: None,
@@ -244,6 +303,78 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].tabs.len(), 1);
         assert_eq!(groups[0].tabs[0].cards.len(), 2);
+    }
+
+    fn packed_ids(rows: &[GridRow<'_>]) -> Vec<Vec<u64>> {
+        rows.iter()
+            .filter_map(|row| match row {
+                GridRow::Workspace(_) => None,
+                GridRow::Cards(cards) => Some(cards.iter().map(|card| card.surface_id).collect()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_pane_tabs_share_rows_and_split_panes_stay_adjacent() {
+        let groups = group_cards(vec![
+            card(1, 0, 0, "single"),
+            card(2, 0, 1, "single"),
+            card(3, 0, 2, "split a"),
+            card(4, 0, 2, "split b"),
+            card(5, 0, 3, "single"),
+            card(6, 1, 0, "other workspace"),
+        ]);
+        let rows = grid_rows(&groups, 4);
+        assert_eq!(packed_ids(&rows), vec![vec![1, 2, 3, 4], vec![5], vec![6]]);
+        assert_eq!(selected_row(&rows, 4), Some(1));
+        assert_eq!(selected_row(&rows, 6), Some(4));
+        assert_eq!(selected_row(&rows, 99), None);
+    }
+
+    #[test]
+    fn vertical_navigation_follows_partial_workspace_rows() {
+        let groups = group_cards(vec![
+            card(1, 0, 0, "a"),
+            card(2, 0, 1, "b"),
+            card(3, 0, 2, "c"),
+            card(4, 1, 0, "d"),
+            card(5, 1, 1, "e"),
+            card(6, 1, 2, "f"),
+            card(7, 1, 3, "g"),
+            card(8, 1, 4, "h"),
+        ]);
+        let rows = grid_rows(&groups, 4);
+        // Visual rows: [1,2,3], [4,5,6,7], [8]. Headers consume no column.
+        assert_eq!(move_vertical(&rows, 1, true), 4);
+        assert_eq!(move_vertical(&rows, 5, false), 2);
+        assert_eq!(move_vertical(&rows, 6, false), 2);
+        assert_eq!(move_vertical(&rows, 6, true), 7);
+        assert_eq!(move_vertical(&rows, 1, false), 1);
+        assert_eq!(move_vertical(&rows, 7, true), 7);
+        assert_eq!(move_vertical(&[], 0, true), 0);
+    }
+
+    #[test]
+    fn filtering_and_resizing_repack_without_empty_tab_rows() {
+        let groups = group_cards(filter_cards(
+            &[
+                card(1, 0, 0, "keep"),
+                card(2, 0, 1, "hide"),
+                card(3, 0, 2, "keep"),
+                card(4, 0, 3, "keep"),
+            ],
+            "keep",
+        ));
+        assert_eq!(packed_ids(&grid_rows(&groups, 3)), vec![vec![1, 3, 4]]);
+        assert_eq!(
+            packed_ids(&grid_rows(&groups, 2)),
+            vec![vec![1, 3], vec![4]]
+        );
+        assert_eq!(
+            packed_ids(&grid_rows(&groups, 0)),
+            vec![vec![1], vec![3], vec![4]]
+        );
+        assert!(grid_rows(&[], 3).is_empty());
     }
 
     /// Product decision (2026-09-03, spec §7.5): a workspace with no card -

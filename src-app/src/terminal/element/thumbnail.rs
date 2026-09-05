@@ -46,7 +46,7 @@ use crate::theme::TerminalTheme;
 /// count, and the tests pin that the derivation lands on this figure at the
 /// defaults.
 #[cfg(test)]
-pub(super) const THUMBNAIL_ROWS: usize = 12;
+pub(super) const THUMBNAIL_ROWS: usize = 8;
 
 /// Font size for a thumbnail, in pixels.
 ///
@@ -58,13 +58,13 @@ pub(super) const THUMBNAIL_ROWS: usize = 12;
 pub(crate) const THUMBNAIL_FONT_PX: f32 = 9.0;
 
 /// Thumbnail band size, in pixels. These are the DEFAULT-derived figure:
-/// 64 columns x 12 rows at 5x11 px cells. They stay hardcoded on purpose -
+/// 48 columns x 8 rows at 5x11 px cells. They stay hardcoded on purpose -
 /// the card box is sized to them - and a user with non-default
 /// `cell_width` / `line_height` gets a different number of cells in the same
 /// band, not a different band. `the_thumbnail_band_is_a_whole_number_of_cells`
 /// pins them against the defaults.
-pub(crate) const THUMBNAIL_BAND_W: f32 = 320.0;
-pub(crate) const THUMBNAIL_BAND_H: f32 = 132.0;
+pub(crate) const THUMBNAIL_BAND_W: f32 = 240.0;
+pub(crate) const THUMBNAIL_BAND_H: f32 = 88.0;
 
 /// Cell metrics for a thumbnail under `settings`: the same two multipliers
 /// the pane uses, applied to the thumbnail font size through the same
@@ -81,8 +81,8 @@ pub(super) fn thumbnail_cell_dimensions() -> CellDimensions {
 }
 
 /// How many viewport rows fit the fixed band at these cell metrics: at the
-/// 0.6 / 1.2 defaults exactly twelve (`THUMBNAIL_ROWS`); at `line_height = 2.5`
-/// (23 px rows) five. Never zero, so a card always shows the prompt row.
+/// 0.6 / 1.2 defaults exactly eight (`THUMBNAIL_ROWS`); at `line_height = 2.5`
+/// (23 px rows) three. Never zero, so a card always shows the prompt row.
 pub(super) fn thumbnail_rows_for(dims: &CellDimensions) -> usize {
     ((THUMBNAIL_BAND_H / f32::from(dims.line_height)).floor() as usize).max(1)
 }
@@ -335,7 +335,7 @@ mod tests {
     ///
     /// `TerminalElement::build_layout` calls `notify_window_size`, which
     /// SIGWINCHes the child process to the element's bounds. A card-sized
-    /// `TerminalElement` would resize every displayed pane to 320x132 px worth
+    /// `TerminalElement` would resize every displayed pane to 240x88 px worth
     /// of cells while the real pane resized it back, corrupting the layout of
     /// every pane the overlay showed. The thumbnail path must never touch the
     /// grid.
@@ -383,8 +383,8 @@ mod tests {
     }
 
     /// 9 px is above the quantization floor at the DEFAULT multipliers:
-    /// `round(9 * 0.6) = 5` and `round(9 * 1.2) = 11`, so a 320x132 band is
-    /// exactly 64 columns by 12 rows. Below ~4 px cell width the rounding
+    /// `round(9 * 0.6) = 5` and `round(9 * 1.2) = 11`, so a 240x88 band is
+    /// exactly 48 columns by 8 rows. Below ~4 px cell width the rounding
     /// dominates and columns drift, which is why the design crops rather than
     /// scaling the whole grid.
     ///
@@ -405,7 +405,7 @@ mod tests {
         let dims = thumbnail_cell_dimensions_for(&defaults);
         assert_eq!(f32::from(dims.cell_width), 5.0);
         assert_eq!(f32::from(dims.line_height), 11.0);
-        assert_eq!(THUMBNAIL_BAND_W / f32::from(dims.cell_width), 64.0);
+        assert_eq!(THUMBNAIL_BAND_W / f32::from(dims.cell_width), 48.0);
         assert_eq!(
             THUMBNAIL_BAND_H / f32::from(dims.line_height),
             THUMBNAIL_ROWS as f32
@@ -414,9 +414,9 @@ mod tests {
 
     #[test]
     fn a_taller_line_height_crops_fewer_rows_so_the_prompt_stays_in_the_band() {
-        // PR #354 review: the band is fixed at 132 px. At the default 1.2 the
-        // crop is the 12 rows the constant names; at the 2.5 ceiling a row is
-        // 23 px, so only five fit, and cropping five from the bottom keeps the
+        // PR #354 review: the band is fixed at 88 px. At the default 1.2 the
+        // crop is the 8 rows the constant names; at the 2.5 ceiling a row is
+        // 23 px, so only three fit, and cropping three from the bottom keeps the
         // prompt row and the cursor inside the band instead of below it.
         use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
 
@@ -433,7 +433,7 @@ mod tests {
         settings.line_height = 2.5;
         let dims = thumbnail_cell_dimensions_for(&settings);
         let rows = thumbnail_rows_for(&dims);
-        assert_eq!(rows, 5);
+        assert_eq!(rows, 3);
         assert!(
             rows as f32 * f32::from(dims.line_height) <= THUMBNAIL_BAND_H,
             "every cropped row fits the band"
