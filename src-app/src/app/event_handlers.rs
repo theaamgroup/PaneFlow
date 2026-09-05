@@ -1725,7 +1725,6 @@ impl PaneFlowApp {
         let ws_worktree_root = self.workspaces[ws_idx].worktree_root.clone();
 
         let new_cwd_owned = new_cwd.to_string();
-        let terminal = terminal.downgrade();
 
         // Run git probe off main thread
         cx.spawn({
@@ -1756,22 +1755,6 @@ impl PaneFlowApp {
 
                 let _ = cx.update(|cx| {
                     this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
-                        if terminal.upgrade().is_none_or(|terminal| {
-                            terminal.read(cx).terminal.current_cwd.as_deref()
-                                != Some(new_cwd.as_str())
-                        }) {
-                            return;
-                        }
-                        if app.worktree_states.set_checkout(
-                            &new_cwd,
-                            crate::app::tab_worktree::CheckoutGit {
-                                branch: branch.clone(),
-                                is_repo,
-                                stats: stats.clone(),
-                            },
-                        ) {
-                            cx.notify();
-                        }
                         // Re-resolve by identity: the workspace may have been
                         // closed or reordered during the await.
                         let Some(ws_idx) = app.workspaces.iter().position(|ws| ws.id == ws_id)

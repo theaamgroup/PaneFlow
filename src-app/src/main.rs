@@ -1309,6 +1309,8 @@ struct PaneFlowApp {
     git_event_rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
     /// Refcount for watched `.git` directories (multiple workspaces may share a repo).
     git_watch_counts: std::collections::HashMap<std::path::PathBuf, usize>,
+    /// Branches keyed by terminal CWD, refreshed off the UI thread.
+    terminal_branches: std::collections::HashMap<String, crate::app::sidebar::TerminalBranch>,
     /// Active settings section, or `None` if settings is closed.
     settings_section: Option<SettingsSection>,
     /// Scroll state for the inline settings page.

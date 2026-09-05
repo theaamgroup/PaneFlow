@@ -559,6 +559,8 @@ impl PaneFlowApp {
         // Config hot-reload is now driven by ConfigWatcher (notify crate, 300ms debounce).
         // Changes are picked up in the 50ms IPC poll loop below via process_config_changes().
 
+        Self::poll_terminal_branches(cx);
+
         // Fallback: poll git metadata for all workspaces every 30s.
         // Primary detection is event-driven (US-003 notify watcher above).
         // This timer catches edge cases where file system events are missed.
@@ -575,7 +577,7 @@ impl PaneFlowApp {
                             // Workspace roots plus every bound tab's worktree
                             // (issue #347), deduplicated: two tabs on one
                             // worktree cost one subprocess per tick, not two.
-                            app.git_probe_cwds(_cx)
+                            app.git_probe_cwds()
                         })
                     });
                     let cwds = match cwds {
@@ -633,59 +635,6 @@ impl PaneFlowApp {
                     if apply.is_err() {
                         break;
                     }
-                }
-            },
-        )
-        .detach();
-
-        // Branch switches in linked worktrees and foreign repositories do
-        // not necessarily reach the workspace's non-recursive git watcher.
-        // Poll HEAD cheaply; diffstat subprocesses retain their 30s cadence.
-        cx.spawn(
-            async |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                loop {
-                    let cwds = cx.update(|cx| this.update(cx, |app, cx| app.git_probe_cwds(cx)));
-                    let Ok(cwds) = cwds else {
-                        break;
-                    };
-                    let results = smol::unblock(move || {
-                        cwds.into_iter()
-                            .map(|cwd| {
-                                let (branch, is_repo) = crate::workspace::detect_branch(&cwd);
-                                (cwd, branch, is_repo)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await;
-                    if cx
-                        .update(|cx| {
-                            this.update(cx, |app, cx| {
-                                let mut changed = false;
-                                for (cwd, branch, is_repo) in results {
-                                    let stats = app
-                                        .worktree_states
-                                        .checkout(&cwd)
-                                        .map(|git| git.stats.clone())
-                                        .unwrap_or_default();
-                                    changed |= app.worktree_states.set_checkout(
-                                        &cwd,
-                                        crate::app::tab_worktree::CheckoutGit {
-                                            branch,
-                                            is_repo,
-                                            stats,
-                                        },
-                                    );
-                                }
-                                if changed {
-                                    cx.notify();
-                                }
-                            })
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
                 }
             },
         )
@@ -876,6 +825,7 @@ impl PaneFlowApp {
             git_watcher,
             git_event_rx,
             git_watch_counts,
+            terminal_branches: Default::default(),
             settings_section: None,
             settings_scroll: gpui::ScrollHandle::new(),
             settings_drag: None,

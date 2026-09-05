@@ -38,8 +38,9 @@ pub struct Tab {
     /// (issue #347, upstream discussion #41).
     ///
     /// This is the tab's git identity: bound, every pane opened in the tab
-    /// starts in this checkout. Sidebar branch labels are resolved separately
-    /// from each terminal's live current directory, including unbound tabs.
+    /// starts in this checkout, and the sidebar row names the branch it sits
+    /// on. Unbound, the tab behaves exactly as it always has and its row says
+    /// nothing extra - the line only appears where it tells two tabs apart.
     ///
     /// A path, not a branch name: a branch can only be checked out in one
     /// worktree at a time, the checkout directory is what a pane actually
