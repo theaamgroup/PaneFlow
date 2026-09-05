@@ -207,6 +207,7 @@ mod tests {
         assert_eq!(built.paths.len(), 2);
         assert!(built.paths.iter().any(|path| path == "tracked.txt"));
         assert!(built.paths.iter().any(|path| path == "new.txt"));
+        assert_eq!(built.file_count, 2);
         let aliases = tempfile::tempdir().unwrap();
         let alias = aliases.path().join("workspace");
         std::os::unix::fs::symlink(&nested, &alias).unwrap();
