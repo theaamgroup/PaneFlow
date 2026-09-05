@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::diff::{
     DiffSyntax, DisplayRow, FileDiff, FileRowCache, RowKind, SplitRow,
     build_display_rows_with_caches, build_file_row_caches, build_split_rows_with_caches,
-    compute_head_diff,
+    compute_head_diff, is_git_worktree,
 };
 use crate::workspace::GitDiffStats;
 
@@ -43,14 +43,11 @@ pub(super) fn build_diff_dock(
 ) -> Result<DiffDockBuilt, String> {
     // Ordinary workspace folders have no changes to show. Running `git diff`
     // there returns Git's usage text, which would otherwise fill the dock (#393).
-    // Resolve symlinked subfolders before walking parents for repository metadata.
-    let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
-    let diff = if resolved.is_dir()
-        && crate::workspace::find_git_dir(&resolved.to_string_lossy()).is_none()
-    {
-        Default::default()
-    } else {
+    let is_git_repo = is_git_worktree(Path::new(cwd))?;
+    let diff = if is_git_repo {
         compute_head_diff(Path::new(cwd))
+    } else {
+        Default::default()
     };
     if let Some(e) = diff.error {
         return Err(e);
@@ -92,10 +89,12 @@ pub(super) fn build_diff_dock(
         let (fa, fr) = f.line_counts();
         (a + fa, r + fr)
     });
-    let git_stats = if diff.files.is_empty() {
-        GitDiffStats::default()
-    } else {
+    // Git can count changes whose paths the renderer cannot decode. Only skip
+    // stats outside a repository, or opening the dock would clear those counts.
+    let git_stats = if is_git_repo {
         GitDiffStats::from_cwd(cwd)
+    } else {
+        GitDiffStats::default()
     };
     let (file_count, added, removed) = if git_stats.is_empty() && !diff.files.is_empty() {
         (diff.files.len(), hunk_added, hunk_removed)
@@ -142,13 +141,14 @@ fn diff_dock_snapshot_fingerprint(files: &[FileDiff]) -> u64 {
 mod tests {
     use super::*;
 
-    fn git(cwd: &Path, args: &[&str]) {
+    fn git(cwd: &Path, args: &[&str]) -> Vec<u8> {
         let output = crate::workspace::worktree::git_command()
             .args(args)
             .current_dir(cwd)
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
+        output.stdout
     }
 
     fn build(cwd: &Path) -> Result<DiffDockBuilt, String> {
@@ -222,8 +222,59 @@ mod tests {
     fn changes_dock_preserves_repository_and_missing_folder_errors() {
         let dir = tempfile::tempdir().unwrap();
         assert!(build(&dir.path().join("missing")).is_err());
-        // An existing but broken repository is not a clean working tree.
+        // An empty directory named .git is not a repository according to Git.
         std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert_empty(dir.path());
+        std::fs::remove_dir(dir.path().join(".git")).unwrap();
+        // A malformed worktree pointer still counts as repository metadata;
+        // Git must report the corruption instead of displaying a clean dock.
+        std::fs::write(dir.path().join(".git"), "not a gitdir pointer\n").unwrap();
         assert!(build(dir.path()).is_err());
+        std::fs::write(dir.path().join(".git"), "gitdir: missing-metadata\n").unwrap();
+        assert!(build(dir.path()).is_err());
+        std::fs::remove_file(dir.path().join(".git")).unwrap();
+        std::os::unix::fs::symlink("missing-metadata", dir.path().join(".git")).unwrap();
+        // Git ignores an unresolvable symlink, unlike a broken gitdir pointer.
+        assert_empty(dir.path());
+    }
+
+    #[test]
+    fn changes_dock_keeps_stats_for_paths_the_renderer_cannot_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        let blob = String::from_utf8(git(root, &["hash-object", "-w", "--stdin"])).unwrap();
+        // A Git tree can contain non-UTF-8 paths even on a filesystem that
+        // cannot create them. The missing worktree file is a tracked deletion.
+        let mut entry = format!("100644 {}\t", blob.trim()).into_bytes();
+        entry.extend_from_slice(b"bad-\xff.txt\0");
+        let mut cmd = crate::workspace::worktree::git_command();
+        cmd.args(["update-index", "-z", "--index-info"])
+            .current_dir(root);
+        let output = paneflow_process::run_with_timeout_stdin(
+            cmd,
+            &entry,
+            std::time::Duration::from_secs(5),
+            1024,
+        )
+        .unwrap();
+        assert!(output.status.success());
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        let built = build(root).unwrap();
+        assert!(built.files_full.is_empty());
+        assert!(built.unified.is_empty());
+        assert!(built.split.is_empty());
+        assert_eq!(built.file_count, 1);
     }
 }

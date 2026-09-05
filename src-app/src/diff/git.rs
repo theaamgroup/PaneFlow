@@ -291,6 +291,61 @@ fn fs_within<T: Send + 'static>(
     })
 }
 
+/// Let Git discover the worktree so filesystem boundaries, ceiling directories,
+/// symlinks, and discovery overrides match the subsequent diff commands exactly.
+/// Only Git's ordinary "not a repository" result means an empty dock; malformed
+/// gitfiles, missing paths, and other failures remain errors.
+pub(crate) fn is_git_worktree(worktree_dir: &Path) -> Result<bool, String> {
+    repository_discovery_within(
+        &GitBudget::for_column(),
+        repository_discovery_command(worktree_dir),
+    )
+}
+
+fn repository_discovery_command(worktree_dir: &Path) -> std::process::Command {
+    let mut cmd = crate::workspace::worktree::git_command();
+    cmd.args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(worktree_dir)
+        // Keep the two expected non-repository diagnostics locale-independent.
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C");
+    cmd
+}
+
+fn repository_discovery_within(
+    budget: &GitBudget,
+    cmd: std::process::Command,
+) -> Result<bool, String> {
+    let deadline = budget.remaining()?;
+    // Include process setup in the filesystem budget: entering an unavailable
+    // mount must not strand the caller even before Git begins executing.
+    fs_within(budget, "repository discovery", move || {
+        let output = paneflow_process::run_with_timeout(cmd, deadline, GIT_STDOUT_CAP)
+            .map_err(|err| format!("repository discovery failed: {err}"))?;
+        if output.status.code() == Some(128)
+            && is_non_repository_diagnostic(String::from_utf8_lossy(&output.stderr).trim())
+        {
+            return Ok(false);
+        }
+        let out = git_stdout(&["rev-parse"], output)?;
+        match out.as_slice().trim_ascii() {
+            b"true" => Ok(true),
+            b"false" => Ok(false),
+            _ => Err("unexpected Git repository discovery output".to_string()),
+        }
+    })?
+}
+
+fn is_non_repository_diagnostic(stderr: &str) -> bool {
+    // GIT_TRACE can precede the diagnostic with trace lines. Inspect the first
+    // fatal diagnostic so tracing does not turn an ordinary folder into an error.
+    let Some(fatal) = stderr.lines().find(|line| line.starts_with("fatal: ")) else {
+        return false;
+    };
+    fatal == "fatal: not a git repository (or any of the parent directories): .git"
+        || fatal.starts_with("fatal: not a git repository (or any parent up to mount point ")
+}
+
 /// [`is_too_large`] charged against `budget` instead of blocking unbounded.
 fn is_too_large_within(
     budget: &GitBudget,
@@ -1482,6 +1537,72 @@ fn compute_file_stats_against_within(
 pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, Once};
+
+    #[test]
+    fn repository_discovery_fails_closed_on_exhausted_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = GitBudget {
+            deadline_at: Instant::now(),
+        };
+        let err = repository_discovery_within(&budget, repository_discovery_command(dir.path()))
+            .unwrap_err();
+        assert!(err.contains("deadline"), "got {err}");
+    }
+
+    #[test]
+    fn repository_discovery_honors_git_ceiling_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(test_git(&root, &["init", "-q"]));
+        for (cwd, ceiling, expected) in [
+            (nested.as_path(), root.as_path(), false),
+            (root.as_path(), root.as_path(), true),
+            (nested.as_path(), dir.path(), true),
+        ] {
+            let mut cmd = repository_discovery_command(cwd);
+            cmd.env("GIT_CEILING_DIRECTORIES", ceiling)
+                .env("GIT_TRACE", "1");
+            assert_eq!(
+                repository_discovery_within(&GitBudget::for_column(), cmd).unwrap(),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn repository_discovery_recognizes_only_expected_non_repository_diagnostics() {
+        assert!(is_non_repository_diagnostic(
+            "fatal: not a git repository (or any of the parent directories): .git"
+        ));
+        assert!(is_non_repository_diagnostic(
+            "fatal: not a git repository (or any parent up to mount point /Volumes/data)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)."
+        ));
+        for error in [
+            "fatal: invalid gitfile format: /repo/.git",
+            "fatal: not a git repository: /missing-metadata",
+            "fatal: detected dubious ownership in repository at /repo",
+            "git diff exceeded its deadline",
+        ] {
+            assert!(!is_non_repository_diagnostic(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn filesystem_probe_returns_before_a_blocked_operation_finishes() {
+        let budget = GitBudget {
+            deadline_at: Instant::now() + Duration::from_millis(50),
+        };
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let result = fs_within(&budget, "repository discovery", move || {
+            blocked.recv_timeout(Duration::from_secs(5))
+        });
+        // Release the helper thread even if the assertion below fails.
+        drop(release);
+        let err = result.unwrap_err();
+        assert!(err.contains("deadline"), "got {err}");
+    }
 
     struct TestLogger {
         records: Mutex<Vec<(log::Level, String)>>,

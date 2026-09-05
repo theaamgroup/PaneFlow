@@ -48,7 +48,7 @@ pub use view::{
 // surface stays inside the binary.
 pub(crate) use element::{DiffBody, DiffElement};
 pub(crate) use git::FileDiff;
-pub(crate) use git::compute_head_diff;
+pub(crate) use git::{compute_head_diff, is_git_worktree};
 pub(crate) use highlighter::{
     Grammar, MAX_HIGHLIGHT_BYTES, grammar_for_ext, markdown_inline_grammar, resolve_runs,
 };
