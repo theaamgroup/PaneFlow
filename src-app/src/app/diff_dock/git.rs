@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::diff::{
     DiffSyntax, DisplayRow, FileDiff, FileRowCache, RowKind, SplitRow,
     build_display_rows_with_caches, build_file_row_caches, build_split_rows_with_caches,
-    compute_head_diff, has_repository_marker,
+    compute_head_diff, is_git_worktree,
 };
 use crate::workspace::GitDiffStats;
 
@@ -43,7 +43,7 @@ pub(super) fn build_diff_dock(
 ) -> Result<DiffDockBuilt, String> {
     // Ordinary workspace folders have no changes to show. Running `git diff`
     // there returns Git's usage text, which would otherwise fill the dock (#393).
-    let is_git_repo = has_repository_marker(Path::new(cwd))?;
+    let is_git_repo = is_git_worktree(Path::new(cwd))?;
     let diff = if is_git_repo {
         compute_head_diff(Path::new(cwd))
     } else {
@@ -222,9 +222,9 @@ mod tests {
     fn changes_dock_preserves_repository_and_missing_folder_errors() {
         let dir = tempfile::tempdir().unwrap();
         assert!(build(&dir.path().join("missing")).is_err());
-        // An existing but broken repository is not a clean working tree.
+        // An empty directory named .git is not a repository according to Git.
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        assert!(build(dir.path()).is_err());
+        assert_empty(dir.path());
         std::fs::remove_dir(dir.path().join(".git")).unwrap();
         // A malformed worktree pointer still counts as repository metadata;
         // Git must report the corruption instead of displaying a clean dock.
@@ -234,7 +234,8 @@ mod tests {
         assert!(build(dir.path()).is_err());
         std::fs::remove_file(dir.path().join(".git")).unwrap();
         std::os::unix::fs::symlink("missing-metadata", dir.path().join(".git")).unwrap();
-        assert!(build(dir.path()).is_err());
+        // Git ignores an unresolvable symlink, unlike a broken gitdir pointer.
+        assert_empty(dir.path());
     }
 
     #[test]
