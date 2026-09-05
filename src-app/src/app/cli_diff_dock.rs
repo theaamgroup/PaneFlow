@@ -209,6 +209,22 @@ fn dock_terminals<'a>(
     result
 }
 
+/// Whether any `DiffDockTab::File` among `tabs` holds unsaved edits
+/// (issue #396: quit must see this before it discards the buffer for good).
+///
+/// A free function rather than a `PaneFlowApp` method so it is directly
+/// testable against a real, dirtied `CodeView` - a live `PaneFlowApp` cannot
+/// be constructed in a test (its constructor binds a Unix socket and spawns
+/// PTYs), the same reason [`dock_terminals`] and its siblings above take
+/// their tabs by reference instead of `&self`.
+pub(crate) fn any_file_tab_dirty<'a>(
+    tabs: impl IntoIterator<Item = &'a DiffDockTab>,
+    cx: &App,
+) -> bool {
+    tabs.into_iter()
+        .any(|tab| matches!(tab, DiffDockTab::File(view) if view.read(cx).is_dirty()))
+}
+
 impl PaneFlowApp {
     /// Every dock terminal in the process: the live dock plus every parked
     /// slot. Feeds the worktree-teardown CWD gate, which must see every PTY.
@@ -222,6 +238,22 @@ impl PaneFlowApp {
                     .values()
                     .flat_map(|slot| slot.tabs.iter()),
             ),
+        )
+    }
+
+    /// Whether any dock file tab - the live dock plus every parked slot,
+    /// across every workspace - holds unsaved edits (issue #396). Unlike a
+    /// dropped dock terminal, a `CodeView` buffer that never reaches disk is
+    /// gone for good, so quit must see this before it tears the window down.
+    pub(crate) fn any_dock_file_dirty(&self, cx: &App) -> bool {
+        any_file_tab_dirty(
+            self.diff_dock.diff_tabs.iter().chain(
+                self.diff_dock
+                    .parked
+                    .values()
+                    .flat_map(|slot| slot.tabs.iter()),
+            ),
+            cx,
         )
     }
 
