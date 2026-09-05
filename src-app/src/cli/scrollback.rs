@@ -16,9 +16,6 @@ pub(crate) fn new_text_since_baseline(
     baseline_total_lines: Option<u64>,
     current_total_lines: Option<u64>,
 ) -> String {
-    if current == baseline {
-        return String::new();
-    }
     if let (Some(old_total), Some(new_total)) = (baseline_total_lines, current_total_lines) {
         if new_total < old_total {
             return current.to_string();
@@ -27,7 +24,8 @@ pub(crate) fn new_text_since_baseline(
             let added = (new_total - old_total) as usize;
             return suffix_line_window(current, added);
         }
-        return String::new();
+        // Retained line counts stop growing when history is pruned. They also
+        // stay equal for carriage-return and full-screen redraws.
     }
     if let Some(rest) = current.strip_prefix(baseline) {
         return rest.to_string();
@@ -43,7 +41,22 @@ pub(crate) fn new_text_since_baseline(
             break;
         }
     }
-    skip_lines(current, overlap).to_string()
+    if overlap > 0 {
+        return skip_lines(current, overlap).to_string();
+    }
+    // A terminal can rewrite rows without growing retained history. Exclude
+    // unchanged rows (including echoed prompts containing the sentinel), but
+    // retain each changed row in full so a match may span the edited portion.
+    let mut changed = String::new();
+    for (index, line) in current.split_inclusive('\n').enumerate() {
+        if old.get(index).copied() != Some(line.trim_end_matches('\n')) {
+            changed.push_str(line);
+        } else {
+            // Keep a line boundary between disjoint changes.
+            changed.push('\n');
+        }
+    }
+    changed
 }
 
 fn suffix_line_window(text: &str, n: usize) -> String {
@@ -118,10 +131,35 @@ mod tests {
     }
 
     #[test]
-    fn equal_totals_with_different_text_are_empty() {
+    fn equal_totals_with_different_text_report_redraw() {
         assert_eq!(
             new_text_since_baseline("old\n", "new\n", Some(10), Some(10)),
-            ""
+            "new\n"
+        );
+    }
+
+    #[test]
+    fn repeated_identical_window_is_new_when_total_advances() {
+        assert_eq!(
+            new_text_since_baseline("DONE\n", "DONE\n", Some(1), Some(2)),
+            "DONE\n"
+        );
+    }
+
+    #[test]
+    fn saturated_history_still_detects_new_lines_without_replaying_echo() {
+        assert_eq!(
+            new_text_since_baseline(
+                "old\nprint DONE\nworking\n",
+                "print DONE\nworking\nfinished\n",
+                Some(4000),
+                Some(4000)
+            ),
+            "finished\n"
+        );
+        assert_eq!(
+            new_text_since_baseline("working", "DONE", Some(1), Some(1)),
+            "DONE"
         );
     }
 
@@ -130,6 +168,46 @@ mod tests {
         assert_eq!(
             new_text_since_baseline("aaaa\nbbbb\n", "reset\n", Some(50), Some(1)),
             "reset\n"
+        );
+    }
+    #[test]
+    fn redraw_does_not_reintroduce_an_unchanged_echoed_sentinel() {
+        let fresh = new_text_since_baseline(
+            "prompt: print DONE\nworking\n",
+            "prompt: print DONE\nfinished\n",
+            Some(2),
+            Some(2),
+        );
+        assert!(!fresh.contains("DONE"));
+        assert!(fresh.contains("finished"));
+    }
+
+    #[test]
+    fn identical_window_is_new_when_position_advances() {
+        assert_eq!(
+            new_text_since_baseline("DONE\n", "DONE\n", Some(1), Some(2)),
+            "DONE\n"
+        );
+    }
+
+    #[test]
+    fn marker_appended_without_newline_is_detected() {
+        assert_eq!(
+            new_text_since_baseline("working ", "working DONE", Some(1), Some(1)),
+            "DONE"
+        );
+    }
+
+    #[test]
+    fn capped_history_slide_keeps_only_new_output() {
+        assert_eq!(
+            new_text_since_baseline(
+                "prompt DONE\nworking\n",
+                "working\nfinished\n",
+                Some(500),
+                Some(500)
+            ),
+            "finished\n"
         );
     }
 }

@@ -143,8 +143,15 @@ pub(crate) fn load_blocking(path: &Path) -> CodeLoad {
 /// A rename over the path after the open leaves the handle on the old inode
 /// and the stamp with it, and the next save then sees a different file and
 /// refuses rather than overwriting what landed.
-fn load_stamped(path: &Path) -> Result<(CodeDocument, Option<FileStamp>), CodeLoadError> {
-    let mut file = match std::fs::File::open(path) {
+pub(crate) fn load_stamped(
+    path: &Path,
+) -> Result<(CodeDocument, Option<FileStamp>), CodeLoadError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
         Ok(file) => file,
         Err(err) => return Err(io_error(&err)),
     };
@@ -164,7 +171,10 @@ fn load_stamped(path: &Path) -> Result<(CodeDocument, Option<FileStamp>), CodeLo
     }
 
     let mut bytes = Vec::with_capacity(len);
-    if let Err(err) = file.read_to_end(&mut bytes) {
+    if let Err(err) = (&mut file)
+        .take((MAX_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+    {
         return Err(io_error(&err));
     }
     // Stat the handle again after the read: the stamp has to describe the
@@ -720,5 +730,31 @@ mod tests {
             Err(err) => assert_eq!(err, CodeLoadError::Binary),
             Ok(_) => panic!("a binary file must not open"),
         }
+    }
+
+    #[test]
+    fn regression_fifo_load_refuses_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked.rs");
+        assert!(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        let worker = std::thread::spawn(move || tx.send(load_blocking(&probe).is_err()).unwrap());
+        let early = rx.recv_timeout(std::time::Duration::from_millis(300));
+        if early.is_err() {
+            let _writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        }
+        worker.join().unwrap();
+        assert!(
+            early.is_ok(),
+            "opening the FIFO blocked until a writer connected"
+        );
     }
 }

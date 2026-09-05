@@ -28,12 +28,11 @@ use paneflow_agent_config::jsonc;
 /// Read + parse a JSON config. Missing file → empty object skeleton.
 /// Present but unparseable → `Err` (caller must abort, never clobber).
 pub fn read_json_or_default(path: &Path) -> Result<serde_json::Value> {
-    match std::fs::read(path) {
-        Ok(bytes) => parse_json_or_jsonc(path, &bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(serde_json::Value::Object(serde_json::Map::new()))
-        }
-        Err(e) => Err(e).with_context(|| format!("read {} failed", path.display())),
+    match paneflow_agent_config::read_optional_text(path)
+        .with_context(|| format!("read {} failed", path.display()))?
+    {
+        Some(text) => parse_json_or_jsonc(path, text.as_bytes()),
+        None => Ok(serde_json::Value::Object(serde_json::Map::new())),
     }
 }
 
@@ -129,16 +128,17 @@ pub fn json_to_bytes(root: &serde_json::Value) -> Result<Vec<u8>, serde_json::Er
 /// Read + parse a TOML config. Missing file → empty document. Present but
 /// unparseable → `Err` (no-clobber).
 pub fn read_toml_or_default(path: &Path) -> Result<toml_edit::DocumentMut> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => text.parse::<toml_edit::DocumentMut>().with_context(|| {
+    match paneflow_agent_config::read_optional_text(path)
+        .with_context(|| format!("read {} failed", path.display()))?
+    {
+        Some(text) => text.parse::<toml_edit::DocumentMut>().with_context(|| {
             format!(
                 "{} is not valid TOML - refusing to overwrite it; \
                  fix or remove it, then re-run",
                 path.display()
             )
         }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml_edit::DocumentMut::new()),
-        Err(e) => Err(e).with_context(|| format!("read {} failed", path.display())),
+        None => Ok(toml_edit::DocumentMut::new()),
     }
 }
 
@@ -267,6 +267,51 @@ mod tests {
 
     fn paneflow_entry() -> serde_json::Value {
         json!({ "command": "/data/bin/paneflow-mcp", "args": [] })
+    }
+
+    #[test]
+    fn oversized_configs_are_refused_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        let bytes = vec![b' '; (1 << 20) + 1];
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read_json_or_default(&path).is_err());
+        assert!(read_toml_or_default(&path).is_err());
+        assert!(crate::io::write_if_changed(&path, b"{}").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!dir.path().join("config.bak").exists());
+    }
+
+    #[test]
+    fn mcp_fifo_is_refused_without_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked");
+        assert!(std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        let worker = std::thread::spawn(move || {
+            tx.send(read_json_or_default(&probe).is_err() && read_toml_or_default(&probe).is_err())
+                .unwrap()
+        });
+        let early = rx.recv_timeout(std::time::Duration::from_secs(1));
+        if early.is_err() {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Unblock a regressed reader so a failed assertion cannot strand it.
+            drop(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(4)
+                    .open(&path)
+                    .unwrap(),
+            );
+        }
+        assert!(early.unwrap());
+        worker.join().unwrap();
     }
 
     #[test]

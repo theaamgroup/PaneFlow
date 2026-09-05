@@ -178,6 +178,7 @@ impl DisplayTerminal {
             mouse_encoder_modes: None,
             mouse_encoder_size: None,
             gesture: None,
+            tracked_epoch: Default::default(),
             terminal,
             snapshot_cache: Default::default(),
             callbacks,

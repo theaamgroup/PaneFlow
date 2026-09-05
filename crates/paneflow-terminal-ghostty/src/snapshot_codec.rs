@@ -25,6 +25,39 @@ use crate::handles::{OwnedHandle, check};
 use crate::limits::MAX_SCROLLBACK_ROWS;
 use crate::{GhosttyError, Result, TerminalAppearance, WindowSize};
 
+/// A borrowed restored terminal whose native allocation stays owned by its decoder.
+/// Mutating operations are forwarded explicitly: exposing `&mut DisplayTerminal`
+/// would allow replacing and freeing the terminal still referenced by native paging.
+///
+/// ```compile_fail
+/// use paneflow_terminal_ghostty::{DisplayTerminal, SnapshotTerminal};
+/// fn replace(mut borrowed: SnapshotTerminal<'_>, replacement: DisplayTerminal) {
+///     std::mem::replace(&mut *borrowed, replacement);
+/// }
+/// ```
+pub struct SnapshotTerminal<'a> {
+    terminal: &'a mut DisplayTerminal,
+}
+
+impl std::ops::Deref for SnapshotTerminal<'_> {
+    type Target = DisplayTerminal;
+    fn deref(&self) -> &Self::Target {
+        self.terminal
+    }
+}
+
+impl SnapshotTerminal<'_> {
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<()> {
+        self.terminal.feed(bytes)
+    }
+    pub fn resize(&mut self, size: WindowSize) -> Result<()> {
+        self.terminal.resize(size)
+    }
+    pub fn snapshot(&mut self) -> Result<crate::Content> {
+        self.terminal.snapshot()
+    }
+}
+
 /// Ceiling on a single encoded snapshot, matching the caps the rest of the
 /// crate applies to unbounded terminal data.
 const MAX_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
@@ -319,7 +352,7 @@ impl<'src> SnapshotDecoder<'src> {
     ///
     /// The terminal is immediately usable, including for live pty input, while
     /// [`Self::next_page`] prepends the remaining scrollback.
-    pub fn ready(&mut self, restore: SnapshotRestore) -> Result<&mut DisplayTerminal> {
+    pub fn ready(&mut self, restore: SnapshotRestore) -> Result<SnapshotTerminal<'_>> {
         self.produce(
             restore,
             sys::ghostty_snapshot_decoder_ready,
@@ -328,7 +361,7 @@ impl<'src> SnapshotDecoder<'src> {
     }
 
     /// Restore the whole snapshot, history included, in one call.
-    pub fn decode(&mut self, restore: SnapshotRestore) -> Result<&mut DisplayTerminal> {
+    pub fn decode(&mut self, restore: SnapshotRestore) -> Result<SnapshotTerminal<'_>> {
         self.produce(
             restore,
             sys::ghostty_snapshot_decoder_decode,
@@ -344,7 +377,7 @@ impl<'src> SnapshotDecoder<'src> {
             *mut sys::GhosttyTerminal,
         ) -> sys::GhosttyResult,
         operation: &'static str,
-    ) -> Result<&mut DisplayTerminal> {
+    ) -> Result<SnapshotTerminal<'_>> {
         if self.terminal.is_some() {
             return Err(GhosttyError::AbiMismatch(format!(
                 "{operation} called on a decoder that already produced a terminal"
@@ -364,7 +397,9 @@ impl<'src> SnapshotDecoder<'src> {
         // SAFETY: the call succeeded, so this is a live terminal the caller
         // now owns, allocated with the decoder's (default) allocator.
         let terminal = unsafe { adopt(raw_terminal, restore) }?;
-        Ok(self.terminal.insert(terminal))
+        Ok(SnapshotTerminal {
+            terminal: self.terminal.insert(terminal),
+        })
     }
 
     /// Prepend one scrollback page, or `None` once FINISH validates.
@@ -420,8 +455,10 @@ impl<'src> SnapshotDecoder<'src> {
     }
 
     /// The terminal restored so far, if decoding has reached READY.
-    pub fn terminal(&mut self) -> Option<&mut DisplayTerminal> {
-        self.terminal.as_mut()
+    pub fn terminal(&mut self) -> Option<SnapshotTerminal<'_>> {
+        self.terminal
+            .as_mut()
+            .map(|terminal| SnapshotTerminal { terminal })
     }
 
     /// Take the restored terminal, ending the decode.
@@ -703,8 +740,15 @@ mod tests {
             ..restore()
         };
         let mut decoder = SnapshotDecoder::from_bytes(&encoded).expect("decoder must open");
-        let restored = decoder.ready(restore).expect("prefix must decode");
+        let mut restored = decoder.ready(restore).expect("prefix must decode");
         let at_ready = restored.snapshot().expect("ready snapshot").history_size;
+        restored.feed(b"live").expect("live input between pages");
+        restored.resize(size).expect("resize between pages");
+        decoder
+            .terminal()
+            .expect("borrow terminal")
+            .snapshot()
+            .expect("render between pages");
         assert!(
             at_ready < expected_history,
             "history must still be pending: {at_ready} of {expected_history}"

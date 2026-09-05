@@ -1562,7 +1562,7 @@ impl CodeView {
     /// write, so a file an agent touched between the last watcher tick and this
     /// keystroke is still caught. A conflict is reported *without writing*.
     fn save(&mut self, cx: &mut Context<Self>) {
-        if self.saving {
+        if self.saving || self.disk == DiskState::Conflict {
             return;
         }
         let Some(doc) = self.state.document() else {
@@ -1650,17 +1650,12 @@ impl CodeView {
         let generation = self.begin_disk_probe();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let probe = path.clone();
-            let (stamp, text) = cx
-                .background_spawn(async move {
-                    (
-                        FileStamp::read(&probe),
-                        std::fs::read_to_string(&probe).ok(),
-                    )
-                })
+            let loaded = cx
+                .background_spawn(async move { super::load::load_stamped(&probe) })
                 .await;
             cx.update(|cx| {
                 let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                    view.disk_changed(generation, stamp, text, cx);
+                    view.disk_loaded(generation, loaded, false, cx);
                 });
             });
         })
@@ -1751,17 +1746,12 @@ impl CodeView {
                     break;
                 };
                 let probe = path.clone();
-                let (stamp, text) = cx
-                    .background_spawn(async move {
-                        (
-                            FileStamp::read(&probe),
-                            std::fs::read_to_string(&probe).ok(),
-                        )
-                    })
+                let loaded = cx
+                    .background_spawn(async move { super::load::load_stamped(&probe) })
                     .await;
                 let updated = cx.update(|cx| {
                     this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                        view.disk_changed(generation, stamp, text, cx);
+                        view.disk_loaded(generation, loaded, false, cx);
                     })
                 });
                 // A closed tab is the loop's exit condition, not an error.
@@ -1773,7 +1763,51 @@ impl CodeView {
         .detach();
     }
 
-    /// React to what the watcher found on disk (US-016).
+    fn disk_loaded(
+        &mut self,
+        generation: u64,
+        loaded: Result<(CodeDocument, Option<FileStamp>), super::load::CodeLoadError>,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saving || generation != self.disk_generation {
+            return;
+        }
+        let (document, stamp) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.disk = if error == super::load::CodeLoadError::NotFound {
+                    DiskState::Deleted
+                } else {
+                    DiskState::Conflict
+                };
+                self.save_error = Some(error.message());
+                cx.notify();
+                return;
+            }
+        };
+        if !force {
+            if self.stamp == stamp && self.disk == DiskState::InSync {
+                return;
+            }
+            if self.is_dirty() || self.disk == DiskState::Conflict {
+                self.disk = DiskState::Conflict;
+                cx.notify();
+                return;
+            }
+        }
+        self.stamp = stamp;
+        self.disk = DiskState::InSync;
+        self.save_error = None;
+        self.adopt_disk_text(&document.to_disk_string(), cx);
+        if let Some(doc) = self.state.document_mut() {
+            doc.set_read_only(document.read_only_reason());
+        }
+        self.saved_mark = self.history.mark();
+        cx.notify();
+    }
+
+    #[cfg(test)]
     fn disk_changed(
         &mut self,
         generation: u64,
@@ -1781,34 +1815,16 @@ impl CodeView {
         text: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.saving || generation != self.disk_generation {
-            return;
-        }
-        match (stamp, text) {
-            (None, _) | (_, None) => {
-                if self.disk != DiskState::Deleted {
-                    self.disk = DiskState::Deleted;
-                    cx.notify();
-                }
-            }
-            (Some(stamp), Some(text)) => {
-                // Our own save comes back through the watcher too; the stamp we
-                // recorded when it landed is what tells the two apart.
-                if self.stamp == Some(stamp) && self.disk == DiskState::InSync {
-                    return;
-                }
-                self.stamp = Some(stamp);
-                if self.is_dirty() {
-                    // Nothing is overwritten either way until the user chooses.
-                    self.disk = DiskState::Conflict;
-                    cx.notify();
-                    return;
-                }
-                self.disk = DiskState::InSync;
-                self.adopt_disk_text(&text, cx);
-                self.saved_mark = self.history.mark();
-            }
-        }
+        let loaded = text
+            .filter(|_| stamp.is_some())
+            .map(|text| {
+                (
+                    super::load::build_document(self.path.clone(), &text, false),
+                    stamp,
+                )
+            })
+            .ok_or(super::load::CodeLoadError::NotFound);
+        self.disk_loaded(generation, loaded, false, cx);
     }
 
     /// Replace the buffer with `text`, keeping the viewport where the user left
@@ -1869,7 +1885,7 @@ impl CodeView {
     /// "Keep mine" (US-016): the in-memory text wins, and the on-disk stamp is
     /// adopted so the next Ctrl+S goes through instead of being refused again.
     fn resolve_keep_mine(&mut self, cx: &mut Context<Self>) {
-        self.disk = DiskState::InSync;
+        let generation = self.begin_disk_probe();
         let path = self.path.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let stamp = cx
@@ -1877,7 +1893,12 @@ impl CodeView {
                 .await;
             cx.update(|cx| {
                 let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
+                    if view.saving || generation != view.disk_generation {
+                        return;
+                    }
                     view.stamp = stamp;
+                    view.disk = DiskState::InSync;
+                    view.save_error = None;
                     cx.notify();
                 });
             });
@@ -1889,28 +1910,21 @@ impl CodeView {
     /// "Reload from disk" (US-016). Re-reads rather than trusting a snapshot
     /// taken when the banner appeared, which may already be stale.
     fn resolve_reload(&mut self, cx: &mut Context<Self>) {
+        let generation = self.begin_disk_probe();
+        let mark = self.history.mark();
         let path = self.path.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let probe = path.clone();
-            let (stamp, text) = cx
-                .background_spawn(async move {
-                    (
-                        FileStamp::read(&probe),
-                        std::fs::read_to_string(&probe).ok(),
-                    )
-                })
+            let loaded = cx
+                .background_spawn(async move { super::load::load_stamped(&probe) })
                 .await;
             cx.update(|cx| {
                 let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                    let Some(text) = text else {
-                        view.disk = DiskState::Deleted;
-                        cx.notify();
+                    // Do not discard edits typed while the reload was in flight.
+                    if view.history.mark() != mark {
                         return;
-                    };
-                    view.stamp = stamp;
-                    view.disk = DiskState::InSync;
-                    view.adopt_disk_text(&text, cx);
-                    view.saved_mark = view.history.mark();
+                    }
+                    view.disk_loaded(generation, loaded, true, cx);
                 });
             });
         })
@@ -2915,10 +2929,12 @@ mod tests {
         });
 
         std::fs::write(&path, "one\ntwo\nthree\n").expect("external write");
-        let stamp = FileStamp::read(&path);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let loaded = super::super::load::load_stamped(&path);
         view.update(cx, |view, cx| {
             let generation = view.begin_disk_probe();
-            view.disk_changed(generation, stamp, Some("one\ntwo\nthree\n".to_string()), cx);
+            view.disk_loaded(generation, loaded, false, cx);
             assert_eq!(text_of(view), "one\ntwo\nthree\n", "the reload landed");
             assert!(
                 !view.is_dirty(),
@@ -3378,6 +3394,110 @@ mod tests {
             // which the test scheduler reads as non-determinism.
             *bridge.lock().expect("bridge lock") = None;
             view._watcher = None;
+        });
+    }
+
+    #[gpui::test]
+    fn repeated_saves_without_a_watcher_cannot_bypass_conflict(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\n", false);
+        let path = dir.path().join("main.rs");
+        view.update_in(cx, |view, window, cx| {
+            view.replace_text_in_range(None, "mine", window, cx)
+        });
+        std::fs::write(&path, "external version\n").unwrap();
+        cx.executor().allow_parking();
+        for _ in 0..3 {
+            view.update_in(cx, |view, window, cx| view.save_action(&CeSave, window, cx));
+            cx.run_until_parked();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "external version\n"
+            );
+        }
+        view.update(cx, |view, cx| view.resolve_keep_mine(cx));
+        cx.run_until_parked();
+        std::fs::write(&path, "another external version\n").unwrap();
+        view.update_in(cx, |view, window, cx| view.save_action(&CeSave, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "another external version\n"
+        );
+    }
+
+    #[gpui::test]
+    fn reload_refusals_preserve_the_buffer_and_long_lines_are_read_only(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\n", false);
+        let path = dir.path().join("main.rs");
+        cx.executor().allow_parking();
+        for bytes in [
+            b"binary\0data".to_vec(),
+            vec![0xff],
+            vec![b'x'; super::super::load::MAX_FILE_BYTES + 1],
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            view.update(cx, |view, cx| view.resolve_reload(cx));
+            cx.run_until_parked();
+            view.update(cx, |view, _| {
+                assert_eq!(text_of(view), "one\n");
+                assert!(view.save_error.is_some());
+            });
+        }
+        std::fs::write(&path, "x".repeat(super::super::load::MAX_LINE_CHARS + 1)).unwrap();
+        view.update(cx, |view, cx| view.resolve_reload(cx));
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert!(view.document().unwrap().is_read_only())
+        });
+        std::fs::write(&path, "short\n").unwrap();
+        view.update(cx, |view, cx| view.resolve_reload(cx));
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert!(!view.document().unwrap().is_read_only())
+        });
+    }
+
+    #[gpui::test]
+    fn regression_save_without_conflict_resolution_preserves_external_edit(
+        cx: &mut TestAppContext,
+    ) {
+        let (dir, view, cx) = file_view(cx, "one\n", false);
+        let path = dir.path().join("main.rs");
+        view.update_in(cx, |view, window, cx| {
+            view.selection = CodeSelection::at(4);
+            view.replace_text_in_range(None, "mine\n", window, cx);
+        });
+        std::fs::write(&path, "theirs\n").unwrap();
+        let stamp = FileStamp::read(&path);
+        view.update(cx, |view, cx| {
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some("theirs\n".into()), cx);
+            assert!(view.has_conflict());
+        });
+        view.update_in(cx, |view, window, cx| view.save_action(&CeSave, window, cx));
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theirs\n",
+            "Save must require Keep mine before replacing the external edit"
+        );
+    }
+
+    #[gpui::test]
+    fn regression_reload_reapplies_long_line_guard(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\n", false);
+        let path = dir.path().join("main.rs");
+        let long = "x".repeat(super::super::load::MAX_LINE_CHARS + 1);
+        std::fs::write(&path, &long).unwrap();
+        let stamp = FileStamp::read(&path);
+        view.update(cx, |view, cx| {
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some(long), cx);
+            assert!(
+                view.document().unwrap().is_read_only(),
+                "reload bypassed the initial-load long-line guard"
+            );
         });
     }
 }

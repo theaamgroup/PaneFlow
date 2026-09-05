@@ -918,7 +918,12 @@ enum SessionRead {
 /// bound (the FIFO/device + TOCTOU class, mirroring `read_config_string`).
 fn read_session_capped(path: &Path) -> std::io::Result<SessionRead> {
     use std::io::Read;
-    let file = match std::fs::File::open(path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SessionRead::Missing),
         Err(e) => return Err(e),
@@ -1551,6 +1556,43 @@ mod tests {
             .ok()
             .and_then(|path| path.ancestors().last().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR.to_string()))
+    }
+
+    #[test]
+    fn session_fifo_is_refused_without_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked");
+        assert!(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        let worker = std::thread::spawn(move || {
+            tx.send(
+                read_session_capped(&probe)
+                    .is_ok_and(|value| matches!(value, SessionRead::Rejected("non_regular"))),
+            )
+            .unwrap()
+        });
+        let early = rx.recv_timeout(std::time::Duration::from_secs(1));
+        if early.is_err() {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Unblock a regressed reader so a failed assertion cannot strand it.
+            drop(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(4)
+                    .open(&path)
+                    .unwrap(),
+            );
+        }
+        assert!(early.unwrap());
+        worker.join().unwrap();
     }
 
     #[test]

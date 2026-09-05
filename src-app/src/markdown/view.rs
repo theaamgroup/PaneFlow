@@ -934,7 +934,7 @@ fn read_no_follow(path: &std::path::Path) -> ReadOutcome {
         use std::os::unix::fs::OpenOptionsExt;
         let file = match std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
         {
             Ok(f) => f,
@@ -943,6 +943,16 @@ fn read_no_follow(path: &std::path::Path) -> ReadOutcome {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ReadOutcome::NotFound,
             Err(e) => return ReadOutcome::Other(e),
         };
+        match file.metadata() {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => {
+                return ReadOutcome::Other(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "not a regular file",
+                ));
+            }
+            Err(error) => return ReadOutcome::Other(error),
+        }
         let mut bytes = Vec::with_capacity(MAX_INPUT_BYTES.min(64 * 1024));
         let mut limited = file.take((MAX_INPUT_BYTES + 1) as u64);
         match limited.read_to_end(&mut bytes) {
@@ -1373,6 +1383,40 @@ mod tests {
 
     /// U-050: a pathological table must be capped before it reaches grid_cols.
     /// A genuinely empty table still reports 0.
+    #[test]
+    fn markdown_fifo_is_refused_without_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked");
+        assert!(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        let worker = std::thread::spawn(move || {
+            tx.send(matches!(read_no_follow(&probe), ReadOutcome::Other(_)))
+                .unwrap()
+        });
+        let early = rx.recv_timeout(std::time::Duration::from_secs(1));
+        if early.is_err() {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Unblock a regressed reader so a failed assertion cannot strand it.
+            drop(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(4)
+                    .open(&path)
+                    .unwrap(),
+            );
+        }
+        assert!(early.unwrap());
+        worker.join().unwrap();
+    }
+
     #[test]
     fn table_col_count_caps_pathological_tables() {
         let huge: Vec<Vec<Span>> = vec![Vec::new(); u16::MAX as usize + 2];
