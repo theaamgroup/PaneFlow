@@ -15,36 +15,35 @@
 
 pub(crate) mod rows;
 
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ParentElement, SharedString, Styled, Window, canvas, deferred, div, prelude::*,
-    px, rgb,
+    MouseButton, ParentElement, ScrollHandle, SharedString, Styled, Window, deferred, div,
+    prelude::*, px, rgb,
 };
 
 use crate::PaneFlowApp;
 use crate::limits::clamp_untrusted_label;
 use crate::workspace::Workspace;
 use rows::{
-    CardMeta, MAX_LIVE_THUMBNAILS, cards_per_row, filter_cards, flat_order, group_cards,
-    initial_selection, live_thumbnail_ids,
+    CardMeta, GridRow, MAX_LIVE_THUMBNAILS, cards_per_row, filter_cards, flat_order, grid_rows,
+    group_cards, initial_selection, live_thumbnail_ids, selected_row,
 };
 
-/// Card box. The thumbnail band is 320x132 (`terminal/element/thumbnail.rs`);
-/// the rest is 4px padding, a 30px header (name + status) and a 26px footer
-/// (breadcrumb + grid size).
-const CARD_W: f32 = 328.0;
-const CARD_H: f32 = 196.0;
-const CARD_GAP: f32 = 12.0;
-const CARD_RADIUS: f32 = 10.0;
+/// Compact previews keep eight terminal rows at the existing readable font size.
+/// Include padding and borders in the card dimensions.
+const CARD_W: f32 = crate::terminal::element::THUMBNAIL_BAND_W + 10.0;
+const CARD_H: f32 = crate::terminal::element::THUMBNAIL_BAND_H + 66.0;
+const CARD_GAP: f32 = 10.0;
+const CARD_RADIUS: f32 = 8.0;
 const GRID_PADDING: f32 = 16.0;
+const OVERVIEW_MARGIN: f32 = 24.0;
 
 /// Per-card render flags, decided by `render_pane_overview` once per frame.
 #[derive(Clone, Copy)]
 struct CardFlags {
+    width: f32,
     /// Inside the `MAX_LIVE_THUMBNAILS` prefix: paint a live thumbnail.
     live: bool,
     /// Under the moving selection cursor.
@@ -63,12 +62,12 @@ pub(crate) struct PaneOverviewState {
     /// is up its own focus handle holds focus, so it cannot be re-derived on
     /// render. `None` when no terminal pane was focused.
     pub current: Option<u64>,
-    /// Cards per wrapped row, captured from the last render's real pixel
-    /// width by a `canvas()` prepaint. Up/Down move by this. Captured rather
-    /// than estimated for the same reason `Container::container_size` is:
-    /// the old hardcoded 800px container guess in `split.rs` was wrong at
-    /// every other window size.
-    pub cards_per_row: Rc<Cell<usize>>,
+    /// Derived from the same viewport width used to size the overlay.
+    pub cards_per_row: usize,
+    viewport_size: gpui::Size<gpui::Pixels>,
+    pub scroll: ScrollHandle,
+    /// Only follow keyboard movement/open/filter; ordinary scrolling stays put.
+    pub reveal_selection: bool,
 }
 
 impl Default for PaneOverviewState {
@@ -77,7 +76,10 @@ impl Default for PaneOverviewState {
             query: String::new(),
             selected: 0,
             current: None,
-            cards_per_row: Rc::new(Cell::new(1)),
+            cards_per_row: 1,
+            viewport_size: gpui::Size::default(),
+            scroll: ScrollHandle::new(),
+            reveal_selection: true,
         }
     }
 }
@@ -123,7 +125,9 @@ pub(crate) fn collect_cards(
         };
         for (tab_idx, tab) in ws.tabs().iter().enumerate() {
             let tab_title = crate::app::sidebar::tab_row_title(tab, tab_idx, cx);
-            for pane in tab.collect_panes() {
+            let panes = tab.collect_panes();
+            let tab_pane_count = panes.len();
+            for (tab_pane_index, pane) in panes.into_iter().enumerate() {
                 let pane_ref = pane.read(cx);
                 // Terminals only: markdown and diff panes are omitted.
                 let Some(terminal) = pane_ref.active_terminal_opt() else {
@@ -142,6 +146,8 @@ pub(crate) fn collect_cards(
                     ws_idx,
                     ws_title: clamp_untrusted_label(&ws.title),
                     tab_idx,
+                    tab_pane_index,
+                    tab_pane_count,
                     tab_title: clamp_untrusted_label(&tab_title),
                     name: clamp_untrusted_label(&crate::pane::Pane::surface_title(
                         &pane_ref.surface,
@@ -253,9 +259,11 @@ impl PaneFlowApp {
         let Some(state) = self.pane_overview.as_ref() else {
             return;
         };
-        let per_row = state.cards_per_row.get().max(1) as isize;
+        let per_row = state.cards_per_row.max(1);
         let cards = filter_cards(&self.collect_pane_overview_cards(window, cx), &state.query);
-        let order = flat_order(&group_cards(cards));
+        let groups = group_cards(cards);
+        let order = flat_order(&groups);
+        let visual_rows = grid_rows(&groups, per_row);
         let len = order.len();
         let selected = state.selected.min(len.saturating_sub(1));
 
@@ -272,13 +280,20 @@ impl PaneFlowApp {
             }
             "left" => -1,
             "right" => 1,
-            "up" => -per_row,
-            "down" => per_row,
+            "up" | "down" => {
+                if let Some(state) = self.pane_overview.as_mut() {
+                    state.selected = rows::move_vertical(&visual_rows, selected, key == "down");
+                    state.reveal_selection = true;
+                }
+                cx.notify();
+                return;
+            }
             "backspace" => {
                 if let Some(state) = self.pane_overview.as_mut()
                     && state.query.pop().is_some()
                 {
                     state.selected = 0;
+                    state.reveal_selection = true;
                     cx.notify();
                 }
                 return;
@@ -295,6 +310,7 @@ impl PaneFlowApp {
                 {
                     state.query.push_str(ch);
                     state.selected = 0;
+                    state.reveal_selection = true;
                     cx.notify();
                 }
                 return;
@@ -302,6 +318,7 @@ impl PaneFlowApp {
         };
         if let Some(state) = self.pane_overview.as_mut() {
             state.selected = rows::move_selection(selected, len, delta);
+            state.reveal_selection = true;
         }
         cx.notify();
     }
@@ -313,10 +330,22 @@ impl PaneFlowApp {
     ) -> AnyElement {
         let ui = crate::theme::ui_colors();
         let theme = Arc::new(crate::theme::active_theme());
-        let (query, per_row_capture) = match self.pane_overview.as_ref() {
-            Some(state) => (state.query.clone(), state.cards_per_row.clone()),
-            None => (String::new(), Rc::new(Cell::new(1))),
+        let viewport = window.viewport_size();
+        let overlay_width = (f32::from(viewport.width) - 2.0 * OVERVIEW_MARGIN).max(1.0);
+        let overlay_height = (f32::from(viewport.height) - 2.0 * OVERVIEW_MARGIN).max(1.0);
+        let grid_width = (overlay_width - 2.0 - 2.0 * GRID_PADDING).max(1.0);
+        let card_width = CARD_W.min(grid_width);
+        let columns = cards_per_row(grid_width, card_width, CARD_GAP);
+        let Some(state) = self.pane_overview.as_mut() else {
+            return div().into_any_element();
         };
+        if state.viewport_size != viewport {
+            state.reveal_selection = true;
+        }
+        state.viewport_size = viewport;
+        state.cards_per_row = columns;
+        let query = state.query.clone();
+        let scroll = state.scroll.clone();
         // Note: while the overlay is open its own focus handle holds focus,
         // so `is_active` is false for every card on re-render. That is fine -
         // the "current" marker is decided once, at open, and carried below.
@@ -331,25 +360,18 @@ impl PaneFlowApp {
         });
         let current_id = self.pane_overview.as_ref().and_then(|s| s.current);
 
-        let mut body = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .gap(px(18.))
-            .p(px(GRID_PADDING))
-            // Capture the real grid width each frame so Up/Down move by the
-            // number of cards that actually fit on a row.
-            .child(
-                canvas(
-                    move |bounds, _window, _cx| {
-                        let width = f32::from(bounds.size.width) - 2.0 * GRID_PADDING;
-                        per_row_capture.set(cards_per_row(width, CARD_W, CARD_GAP));
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            );
+        let visual_rows = grid_rows(&groups, columns);
+        if let Some(state) = self.pane_overview.as_mut()
+            && state.reveal_selection
+        {
+            if let Some(row) = selected_id.and_then(|sid| selected_row(&visual_rows, sid)) {
+                reveal_overview_row(&scroll, row, window);
+            } else {
+                scroll.set_offset(gpui::point(px(0.), px(0.)));
+            }
+            state.reveal_selection = false;
+        }
+        let mut body = overview_grid_body(&scroll);
 
         if order.is_empty() {
             body = body.child(
@@ -369,61 +391,65 @@ impl PaneFlowApp {
                     }),
             );
         } else {
-            for group in &groups {
-                // Section header: title, branch, active marker (spec §7.1).
-                let mut header = div().flex().flex_row().items_center().gap(px(8.)).child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(ui.text)
-                        .child(SharedString::from(group.title.clone())),
-                );
-                if !group.branch.is_empty() {
-                    header = header.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(ui.muted)
-                            .child(SharedString::from(group.branch.clone())),
-                    );
-                }
-                if group.is_active {
-                    header = header.child(
-                        div()
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(4.))
-                            .bg(ui.subtle)
-                            .text_size(px(10.))
-                            .text_color(ui.text)
-                            .child("active"),
-                    );
-                }
-                let mut section = div().flex().flex_col().gap(px(10.)).child(header);
-                for tab in &group.tabs {
-                    let mut row = div().flex().flex_col().gap(px(6.)).child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(ui.muted)
-                            .child(SharedString::from(tab.title.clone())),
-                    );
-                    let mut grid = div().flex().flex_row().flex_wrap().gap(px(CARD_GAP));
-                    for card in &tab.cards {
-                        grid = grid.child(self.render_pane_overview_card(
-                            card,
-                            CardFlags {
-                                live: live.contains(&card.surface_id),
-                                selected: selected_id == Some(card.surface_id),
-                                current: current_id == Some(card.surface_id),
-                            },
-                            ui,
-                            &theme,
-                            cx,
-                        ));
+            for row in visual_rows {
+                match row {
+                    GridRow::Workspace(group) => {
+                        // Section header: title, branch, active marker (spec §7.1).
+                        let mut header = div()
+                            .flex_none()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(ui.text)
+                                    .child(SharedString::from(group.title.clone())),
+                            );
+                        if !group.branch.is_empty() {
+                            header = header.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(ui.muted)
+                                    .child(SharedString::from(group.branch.clone())),
+                            );
+                        }
+                        if group.is_active {
+                            header = header.child(
+                                div()
+                                    .px(px(6.))
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(ui.subtle)
+                                    .text_size(px(10.))
+                                    .text_color(ui.text)
+                                    .child("active"),
+                            );
+                        }
+                        body = body.child(header);
                     }
-                    row = row.child(grid);
-                    section = section.child(row);
+                    GridRow::Cards(cards) => {
+                        let mut row = overview_grid_row();
+                        for card in cards {
+                            row = row.child(self.render_pane_overview_card(
+                                card,
+                                CardFlags {
+                                    width: card_width,
+                                    live: live.contains(&card.surface_id),
+                                    selected: selected_id == Some(card.surface_id),
+                                    current: current_id == Some(card.surface_id),
+                                },
+                                ui,
+                                &theme,
+                                cx,
+                            ));
+                        }
+                        body = body.child(row);
+                    }
                 }
-                body = body.child(section);
             }
         }
 
@@ -443,8 +469,8 @@ impl PaneFlowApp {
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .w(px(1080.))
-            .max_h(px(720.))
+            .w(px(overlay_width))
+            .h(px(overlay_height))
             .flex()
             .flex_col()
             .bg(ui.overlay)
@@ -455,6 +481,7 @@ impl PaneFlowApp {
             .overflow_hidden()
             .child(
                 div()
+                    .flex_none()
                     .px(px(16.))
                     .py(px(10.))
                     .border_b_1()
@@ -489,16 +516,10 @@ impl PaneFlowApp {
                             .child(SharedString::from(format!("{} panes", order.len()))),
                     ),
             )
+            .child(body)
             .child(
                 div()
-                    .id("pane-overview-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(body),
-            )
-            .child(
-                div()
+                    .flex_none()
                     .px(px(16.))
                     .py(px(8.))
                     .border_t_1()
@@ -522,7 +543,7 @@ impl PaneFlowApp {
                 .flex()
                 .items_start()
                 .justify_center()
-                .pt(px(64.))
+                .pt(px(OVERVIEW_MARGIN))
                 .bg(gpui::hsla(0., 0., 0., 0.4))
                 .child(card),
         )
@@ -539,6 +560,7 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let CardFlags {
+            width,
             live,
             selected,
             current,
@@ -566,7 +588,7 @@ impl PaneFlowApp {
         let mut shell = div()
             .id(SharedString::from(format!("pane-overview-card-{sid}")))
             .flex_none()
-            .w(px(CARD_W))
+            .w(px(width))
             .h(px(CARD_H))
             .flex()
             .flex_col()
@@ -613,7 +635,7 @@ impl PaneFlowApp {
 
         let band = div()
             .flex_none()
-            .w(px(crate::terminal::element::THUMBNAIL_BAND_W))
+            .w_full()
             .h(px(crate::terminal::element::THUMBNAIL_BAND_H))
             .overflow_hidden()
             .rounded(px(6.))
@@ -640,7 +662,6 @@ impl PaneFlowApp {
         };
         shell = shell.child(if card.exited { band.opacity(0.5) } else { band });
 
-        let breadcrumb = format!("{} \u{203a} {}", card.ws_title, card.tab_title);
         shell
             .child(
                 div()
@@ -659,8 +680,15 @@ impl PaneFlowApp {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(SharedString::from(breadcrumb)),
+                            .child(SharedString::from(card.tab_title.clone())),
                     )
+                    .children((card.tab_pane_count > 1).then(|| {
+                        div().flex_none().child(SharedString::from(format!(
+                            "pane {}/{}",
+                            card.tab_pane_index + 1,
+                            card.tab_pane_count
+                        )))
+                    }))
                     .child(div().flex_none().child(SharedString::from(format!(
                         "{}\u{d7}{}",
                         card.cols, card.rows
@@ -682,6 +710,33 @@ impl PaneFlowApp {
         let terminal = loc.pane.read(cx).active_terminal_opt()?.clone();
         Some(terminal.read(cx).terminal.session_backend())
     }
+}
+
+fn overview_grid_body(scroll: &ScrollHandle) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("pane-overview-scroll")
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap(px(CARD_GAP))
+        .p(px(GRID_PADDING))
+        .overflow_y_scroll()
+        .track_scroll(scroll)
+}
+
+fn overview_grid_row() -> gpui::Div {
+    div().flex_none().flex().flex_row().gap(px(CARD_GAP))
+}
+
+fn reveal_overview_row(scroll: &ScrollHandle, row: usize, window: &Window) {
+    // GPUI resolves scroll_to_item against the previous frame's viewport.
+    // Wait for layout so opening and resizing use the new scroll bounds.
+    let scroll = scroll.clone();
+    window.on_next_frame(move |window, _| {
+        scroll.scroll_to_item(row);
+        window.refresh();
+    });
 }
 
 /// Status dot, colour and label for one card.
@@ -717,6 +772,93 @@ fn pane_overview_status_visual(
 mod tests {
     use super::*;
     use crate::pane::Pane;
+
+    #[gpui::test]
+    fn compact_grid_fits_twenty_cards_and_scrolls_to_keyboard_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext, AvailableSpace, Render, point, size};
+        struct TestGrid {
+            scroll: ScrollHandle,
+            width: f32,
+            height: f32,
+            columns: usize,
+        }
+        impl Render for TestGrid {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let mut body = overview_grid_body(&self.scroll).child(div().flex_none().h(px(22.)));
+                for row_index in 0..4 {
+                    let mut row = overview_grid_row();
+                    for column in 0..self.columns {
+                        let index = row_index * self.columns + column;
+                        row = row.child(
+                            div()
+                                .flex_none()
+                                .w(px(CARD_W))
+                                .h(px(CARD_H))
+                                .debug_selector(move || format!("overview-test-card-{index}")),
+                        );
+                    }
+                    body = body.child(row);
+                }
+                div()
+                    .w(px(self.width))
+                    .h(px(self.height))
+                    .flex()
+                    .flex_col()
+                    .child(body)
+            }
+        }
+        let cx = cx.add_empty_window();
+        let scroll = ScrollHandle::new();
+        let width = 1440.0 - 2.0 * OVERVIEW_MARGIN - 2.0;
+        let columns = cards_per_row(width - 2.0 * GRID_PADDING, CARD_W, CARD_GAP);
+        assert_eq!(columns, 5);
+        let grid = cx.new(|_| TestGrid {
+            scroll: scroll.clone(),
+            width,
+            height: 750.0,
+            columns,
+        });
+        let draw = |height: f32, cx: &mut gpui::VisualTestContext| {
+            grid.update(cx, |grid, cx| {
+                grid.height = height;
+                cx.notify();
+            });
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(
+                    AvailableSpace::Definite(px(width)),
+                    AvailableSpace::Definite(px(height)),
+                ),
+                |_, _| grid.clone().into_any_element(),
+            );
+        };
+        // 750 px leaves 150 px of a 900 px window for margins and chrome.
+        draw(750.0, cx);
+        let first = cx.debug_bounds("overview-test-card-0").expect("first card");
+        let fifth = cx.debug_bounds("overview-test-card-4").expect("fifth card");
+        let last = cx.debug_bounds("overview-test-card-19").expect("last card");
+        assert_eq!(first.top(), fifth.top());
+        assert!(last.bottom() <= px(750.0));
+        assert!(last.right() <= px(width));
+        assert_eq!(first.size.height, px(CARD_H));
+        assert_eq!(scroll.offset().y, px(0.));
+        // A shorter window must scroll to the selected row without shrinking cards.
+        cx.update(|window, _| reveal_overview_row(&scroll, 4, window));
+        draw(360.0, cx);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(360.0, cx);
+        let last = cx
+            .debug_bounds("overview-test-card-19")
+            .expect("selected row");
+        assert!(scroll.offset().y < px(0.));
+        assert!(last.top() >= px(0.));
+        assert!(last.bottom() <= px(360.0));
+        assert_eq!(last.size.height, px(CARD_H));
+    }
 
     /// The walk pins §6 of the design: every tab, not just the active one.
     /// The Attention Queue and Fleet Search both visit only `ws.active_tab()`,
@@ -805,7 +947,11 @@ mod tests {
 
         let groups = group_cards(cards);
         assert_eq!(groups.len(), 2, "one section per workspace");
-        assert_eq!(groups[0].tabs.len(), 2, "one row per tab, hidden included");
+        assert_eq!(
+            groups[0].tabs.len(),
+            2,
+            "tab identity survives packing, hidden included"
+        );
         assert!(groups[0].is_active, "the header marks the active workspace");
         assert_eq!(groups[1].title, "beta");
         assert!(!groups[1].is_active);

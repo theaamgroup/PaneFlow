@@ -232,8 +232,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
 │   ├── pane_overview/                 ← Cmd+Shift+P expose: every terminal pane across every
-│                                         workspace/tab, grouped, each bottom-cropped to its last
-│                                         12 rows (rows.rs is the pure, GPUI-free row model)
+│                                         workspace in a compact grid; tabs stay adjacent with
+│                                         split-pane labels and eight-row previews (rows.rs: packing/navigation)
 │   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
 │   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
