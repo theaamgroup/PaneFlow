@@ -261,19 +261,26 @@ impl PaneFlowApp {
             .any(|session| session_is_unread_on(session, &surfaces))
     }
 
-    /// "Mark as read" on a sidebar tab row: drop every waiting, errored, and
-    /// stalled session bound to that tab's surfaces, then push the cleared
-    /// state into the panes so the bell, the attention ring, and the peek
-    /// overlay go with it (`sync_attention` is the only thing that clears
-    /// those). Sibling tabs are untouched.
+    /// "Mark as read" on a sidebar tab row (issue #408): flag every waiting,
+    /// errored, and stalled session bound to that tab's surfaces as read,
+    /// then push the presented state into the panes so the bell, the
+    /// attention ring, and the peek overlay go together (`sync_attention` is
+    /// the only thing that clears those). Sibling tabs are untouched.
     ///
-    /// Removal rather than a state transition, deliberately: every observer
-    /// keeps its own watermark (a hook frame's `emitted_at_ms`, the registry
-    /// sweep's `claude_registry_seen`, a terminal notification that fires
-    /// once), so an unchanged observation does not re-raise the badge, while
-    /// an agent that really does speak again re-registers on its next frame.
-    /// A forced transition would have to fight the held-`WaitingForInput`
-    /// rule at the write choke point (issue #196) to do the same thing.
+    /// The row stays in the map with its state, source, and watermark
+    /// intact, and that is the point (PR #413 review):
+    ///
+    /// - A hook-held wait that the registry sweep keeps re-observing is still
+    ///   refused by the source rule, because the row it defers to is still
+    ///   there. Deleting the row let the very next sweep (400 ms) open a
+    ///   fresh `WaitingForInput` and relight the bell.
+    /// - A stalled agent may still be mid-generation, and
+    ///   `broadcast::state_blocks_delivery` keeps a queued Composer prompt
+    ///   out of its PTY only while the `Stalled` row exists. Deleting it
+    ///   would have flushed that prompt into the pane.
+    ///
+    /// Nothing about delivery changes here, so `agent_sessions_changed` (the
+    /// prefill flush) is deliberately not called.
     pub(crate) fn mark_tab_read(&mut self, ws_idx: usize, tab_idx: usize, cx: &mut Context<Self>) {
         let surfaces = match self
             .workspaces
@@ -286,12 +293,15 @@ impl PaneFlowApp {
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             return;
         };
-        let before = ws.agent_sessions.len();
-        ws.agent_sessions
-            .retain(|_, session| !session_is_unread_on(session, &surfaces));
-        if ws.agent_sessions.len() < before {
+        let mut changed = false;
+        for session in ws.agent_sessions.values_mut() {
+            if session_is_unread_on(session, &surfaces) {
+                session.read = true;
+                changed = true;
+            }
+        }
+        if changed {
             self.sync_attention(cx);
-            self.agent_sessions_changed(cx);
             cx.notify();
         }
     }
@@ -453,21 +463,23 @@ impl PaneFlowApp {
 }
 
 /// Whether `session` is something the user can mark read on a tab whose
-/// surfaces are `surfaces`: bound to one of them and waiting for input,
-/// errored, or stalled - the three states that badge a tab row and, for
-/// waiting, ring the pane. `Thinking` is live work, not a notification, and
-/// `Finished` never badges a tab row; an unbound session has no tab to be
-/// read from.
+/// surfaces are `surfaces`: bound to one of them, not already read, and
+/// waiting for input, errored, or stalled - the three states that badge a
+/// tab row and, for waiting, ring the pane. `Thinking` is live work, not a
+/// notification, and `Finished` never badges a tab row; an unbound session
+/// has no tab to be read from.
 pub(crate) fn session_is_unread_on(
     session: &ai_types::AgentSession,
     surfaces: &std::collections::HashSet<u64>,
 ) -> bool {
     session.surface_id.is_some_and(|id| surfaces.contains(&id))
         && matches!(
-            session.state,
-            ai_types::AgentState::WaitingForInput
-                | ai_types::AgentState::Errored
-                | ai_types::AgentState::Stalled
+            session.presented_state(),
+            Some(
+                ai_types::AgentState::WaitingForInput
+                    | ai_types::AgentState::Errored
+                    | ai_types::AgentState::Stalled
+            )
         )
 }
 
@@ -612,6 +624,13 @@ mod tests {
             &bound(AgentState::WaitingForInput, None),
             &surfaces
         ));
+        // Once read there is nothing left to mark, so the menu row goes,
+        // while the state itself is untouched for the delivery gate.
+        let mut read = bound(AgentState::Stalled, Some(7));
+        read.read = true;
+        assert!(!session_is_unread_on(&read, &surfaces));
+        assert_eq!(read.state, AgentState::Stalled);
+        assert!(crate::app::broadcast::state_blocks_delivery(&read.state));
     }
 
     #[test]

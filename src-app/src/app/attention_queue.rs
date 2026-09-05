@@ -81,7 +81,8 @@ impl PaneFlowApp {
         let mut rows = Vec::new();
         for ws in &self.workspaces {
             for session in ws.agent_sessions.values() {
-                if session.state != AgentState::WaitingForInput {
+                // A wait the user marked read (#408) has left the queue.
+                if session.presented_state() != Some(&AgentState::WaitingForInput) {
                     continue;
                 }
                 let surface_id = match session.surface_id {
