@@ -11,11 +11,14 @@
 //!      unique display names, honoring user custom names (US-013).
 //!
 //! The base name comes from the best available signal, in priority order:
-//! foreground command → OSC-set title → `shell`. The foreground-command lookup
-//! itself (OS-specific, libproc on macOS) lives on `TerminalState`; this module
-//! only shapes strings, so it stays platform-agnostic and trivially testable.
+//! confirmed or still-declared agent binary → foreground command → OSC-set
+//! title → `shell`. A restored last-known `detected_agent` is not a naming
+//! signal. The foreground-command lookup itself (OS-specific, libproc on
+//! macOS) lives on `TerminalState`; this module only shapes strings, so it
+//! stays platform-agnostic and trivially testable.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// Separator between a base name and its cwd qualifier (`cargo-run@paneflow`).
 /// ASCII and shell-typeable so a copied reference round-trips cleanly through
@@ -48,8 +51,18 @@ const FALLBACK: &str = "shell";
 /// Derive the un-disambiguated base name for a single surface.
 ///
 /// `cmd` is the foreground command line (argv joined by spaces) when known;
-/// `title` is the OSC 0/2 title. Priority: cmd → title → [`FALLBACK`].
-pub fn derive_surface_base_name(cmd: Option<&str>, title: Option<&str>) -> String {
+/// `title` is the OSC 0/2 title; `agent` is the resolved agent binary
+/// (`claude`, `codex`, …) after [`agent_for_surface_name`]. Priority: agent →
+/// cmd → title → [`FALLBACK`]. A helper in the foreground (`caffeinate`,
+/// `codex-code-mode-host`) must not rename an agent pane.
+pub fn derive_surface_base_name(
+    cmd: Option<&str>,
+    title: Option<&str>,
+    agent: Option<&str>,
+) -> String {
+    if let Some(name) = agent.and_then(name_from_agent) {
+        return name;
+    }
     if let Some(name) = cmd.and_then(name_from_command) {
         return name;
     }
@@ -57,6 +70,34 @@ pub fn derive_surface_base_name(cmd: Option<&str>, title: Option<&str>) -> Strin
         return name;
     }
     FALLBACK.to_string()
+}
+
+/// Pass `agent` into [`derive_surface_base_name`] only when it is
+/// scan-confirmed or backed by a still-live launch declaration.
+///
+/// Session restore writes `detected_agent` with `agent_confirmed = false`
+/// and `agent_declared_until = None` (last-known identity until the first
+/// process scan). That value must not name the surface: a pane that ran
+/// Claude then restored as a shell would briefly show up as `claude` in
+/// `surface.list`. A live declaration still names the surface before the
+/// first scan, matching the launch-logo contract.
+pub fn agent_for_surface_name(
+    agent: Option<&str>,
+    confirmed: bool,
+    declared_until: Option<Instant>,
+    now: Instant,
+) -> Option<&str> {
+    if confirmed || declared_until.is_some_and(|until| now < until) {
+        agent
+    } else {
+        None
+    }
+}
+
+/// Slugified basename of a resolved agent binary (`claude`, `cursor-agent`).
+fn name_from_agent(agent: &str) -> Option<String> {
+    let slug = slugify(basename(agent));
+    (!slug.is_empty()).then_some(slug)
 }
 
 /// Whether a foreground command line is an interactive shell sitting at a
@@ -243,7 +284,7 @@ mod tests {
     #[test]
     fn command_simple_subcommand() {
         assert_eq!(
-            derive_surface_base_name(Some("cargo run"), None),
+            derive_surface_base_name(Some("cargo run"), None, None),
             "cargo-run"
         );
     }
@@ -251,7 +292,7 @@ mod tests {
     #[test]
     fn command_absolute_path_argv0() {
         assert_eq!(
-            derive_surface_base_name(Some("/usr/bin/node server.js"), None),
+            derive_surface_base_name(Some("/usr/bin/node server.js"), None, None),
             "node-server.js"
         );
     }
@@ -260,7 +301,7 @@ mod tests {
     fn command_skips_leading_flags_for_qualifier() {
         // "-m" is a flag; the first non-flag token becomes the qualifier.
         assert_eq!(
-            derive_surface_base_name(Some("python -m http.server"), None),
+            derive_surface_base_name(Some("python -m http.server"), None, None),
             "python-http.server"
         );
     }
@@ -268,11 +309,11 @@ mod tests {
     #[test]
     fn idle_shell_maps_to_shell() {
         assert_eq!(
-            derive_surface_base_name(Some("/usr/bin/zsh"), None),
+            derive_surface_base_name(Some("/usr/bin/zsh"), None, None),
             "shell"
         );
         assert_eq!(
-            derive_surface_base_name(Some("bash"), Some("~/dev")),
+            derive_surface_base_name(Some("bash"), Some("~/dev"), None),
             "shell"
         );
     }
@@ -280,16 +321,126 @@ mod tests {
     #[test]
     fn title_used_when_no_command() {
         assert_eq!(
-            derive_surface_base_name(None, Some("/home/arthur/dev/paneflow")),
+            derive_surface_base_name(None, Some("/home/arthur/dev/paneflow"), None),
             "paneflow"
         );
-        assert_eq!(derive_surface_base_name(None, Some("claude")), "claude");
+        assert_eq!(
+            derive_surface_base_name(None, Some("claude"), None),
+            "claude"
+        );
     }
 
     #[test]
     fn no_signal_falls_back_to_shell() {
-        assert_eq!(derive_surface_base_name(None, None), "shell");
-        assert_eq!(derive_surface_base_name(Some("   "), Some("   ")), "shell");
+        assert_eq!(derive_surface_base_name(None, None, None), "shell");
+        assert_eq!(
+            derive_surface_base_name(Some("   "), Some("   "), None),
+            "shell"
+        );
+    }
+
+    #[test]
+    fn resolved_agent_wins_over_helper_foreground_command() {
+        assert_eq!(
+            derive_surface_base_name(Some("caffeinate"), None, Some("claude")),
+            "claude"
+        );
+        assert_eq!(
+            derive_surface_base_name(Some("codex-code-mode-host"), None, Some("codex")),
+            "codex"
+        );
+        assert_eq!(
+            derive_surface_base_name(Some("/usr/bin/zsh"), Some("~/dev"), Some("claude")),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn no_agent_keeps_foreground_command_heuristic() {
+        assert_eq!(
+            derive_surface_base_name(Some("docker-desktop"), None, None),
+            "docker-desktop"
+        );
+        assert_eq!(
+            derive_surface_base_name(Some("cargo run"), None, Some("")),
+            "cargo-run"
+        );
+    }
+
+    fn named_with_gate(
+        cmd: Option<&str>,
+        title: Option<&str>,
+        agent: Option<&str>,
+        confirmed: bool,
+        declared_until: Option<Instant>,
+        now: Instant,
+    ) -> String {
+        derive_surface_base_name(
+            cmd,
+            title,
+            agent_for_surface_name(agent, confirmed, declared_until, now),
+        )
+    }
+
+    #[test]
+    fn confirmed_agent_is_used_for_naming() {
+        let now = Instant::now();
+        assert_eq!(
+            named_with_gate(Some("zsh"), None, Some("claude"), true, None, now),
+            "claude"
+        );
+        assert_eq!(
+            named_with_gate(
+                Some("caffeinate"),
+                None,
+                Some("codex"),
+                true,
+                Some(now - std::time::Duration::from_secs(1)),
+                now
+            ),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn live_declaration_is_used_for_naming() {
+        let now = Instant::now();
+        let until = now + std::time::Duration::from_secs(5);
+        assert_eq!(
+            named_with_gate(Some("zsh"), None, Some("codex"), false, Some(until), now),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn restored_unconfirmed_agent_is_not_used_for_naming() {
+        // Session restore: detected_agent set, agent_confirmed = false,
+        // agent_declared_until = None. Naming must fall back to cmd/title,
+        // not the previous run's agent.
+        let now = Instant::now();
+        assert_eq!(
+            named_with_gate(Some("zsh"), None, Some("claude"), false, None, now),
+            "shell"
+        );
+        assert_eq!(
+            named_with_gate(Some("cargo run"), None, Some("claude"), false, None, now),
+            "cargo-run"
+        );
+        assert_eq!(
+            named_with_gate(None, Some("~/dev"), Some("claude"), false, None, now),
+            "dev"
+        );
+        assert_eq!(
+            named_with_gate(
+                Some("zsh"),
+                None,
+                Some("claude"),
+                false,
+                Some(now - std::time::Duration::from_secs(1)),
+                now
+            ),
+            "shell"
+        );
     }
 
     /// Helper: an auto (non-custom) naming input.
@@ -401,11 +552,19 @@ mod tests {
         // `is_shell_command` accepts - that is the point of extracting it.
         for cmd in ["zsh", "/bin/zsh", "ZSH", "zsh -l", "fish"] {
             assert!(is_shell_command(cmd), "{cmd}");
-            assert_eq!(derive_surface_base_name(Some(cmd), None), "shell", "{cmd}");
+            assert_eq!(
+                derive_surface_base_name(Some(cmd), None, None),
+                "shell",
+                "{cmd}"
+            );
         }
         for cmd in ["vim", "cargo run"] {
             assert!(!is_shell_command(cmd), "{cmd}");
-            assert_ne!(derive_surface_base_name(Some(cmd), None), "shell", "{cmd}");
+            assert_ne!(
+                derive_surface_base_name(Some(cmd), None, None),
+                "shell",
+                "{cmd}"
+            );
         }
     }
 }
