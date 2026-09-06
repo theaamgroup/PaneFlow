@@ -529,6 +529,12 @@ pub(crate) struct CodeView {
     disk_generation: u64,
     /// A save is in flight; a second Ctrl+S is ignored rather than racing it.
     saving: bool,
+    /// A background longest-line scan is running. Further shrinks set
+    /// [`Self::longest_line_rescan_needed`] instead of launching another walk.
+    longest_line_scan_in_flight: bool,
+    /// Another shrink landed while a scan ran; refresh once more at the
+    /// latest revision when that scan completes.
+    longest_line_rescan_needed: bool,
     /// Parent-directory watcher (US-016). Held only to keep it alive: dropping
     /// it unregisters the watch. Tests hold a `NullWatcher` so the seed write
     /// cannot land on a live FSEvents thread and trip the GPUI scheduler.
@@ -588,6 +594,8 @@ impl CodeView {
             save_error: None,
             disk_generation: 0,
             saving: false,
+            longest_line_scan_in_flight: false,
+            longest_line_rescan_needed: false,
             _watcher: None,
             _watch_bridge: None,
         };
@@ -643,6 +651,8 @@ impl CodeView {
             save_error: None,
             disk_generation: 0,
             saving: false,
+            longest_line_scan_in_flight: false,
+            longest_line_rescan_needed: false,
             _watcher: None,
             _watch_bridge: None,
         }
@@ -696,6 +706,8 @@ impl CodeView {
         self.save_error = None;
         self.disk_generation = self.disk_generation.wrapping_add(1);
         self.saving = false;
+        self.longest_line_scan_in_flight = false;
+        self.longest_line_rescan_needed = false;
         self._watcher = None;
         self._watch_bridge = None;
         self.start_load(cx);
@@ -1567,6 +1579,10 @@ impl CodeView {
     /// `apply_longest_line_measurement`, so an edit that landed during the
     /// scan wins and the next keystroke's snapshot carries it.
     fn refresh_longest_line(&mut self, cx: &mut Context<Self>) {
+        if self.longest_line_scan_in_flight {
+            self.longest_line_rescan_needed = true;
+            return;
+        }
         let Some((text, revision)) = self
             .state
             .document()
@@ -1574,6 +1590,8 @@ impl CodeView {
         else {
             return;
         };
+        self.longest_line_scan_in_flight = true;
+        self.longest_line_rescan_needed = false;
         let load_generation = self.slot.current();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let longest = cx
@@ -1582,13 +1600,18 @@ impl CodeView {
             cx.update(|cx| {
                 let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
                     if !view.slot.accept(load_generation) {
+                        view.longest_line_scan_in_flight = false;
+                        view.longest_line_rescan_needed = false;
                         return;
                     }
-                    let Some(doc) = view.state.document_mut() else {
-                        return;
-                    };
-                    if doc.apply_longest_line_measurement(revision, longest) {
+                    if let Some(doc) = view.state.document_mut()
+                        && doc.apply_longest_line_measurement(revision, longest)
+                    {
                         cx.notify();
+                    }
+                    view.longest_line_scan_in_flight = false;
+                    if view.longest_line_rescan_needed {
+                        view.refresh_longest_line(cx);
                     }
                 });
             });
@@ -1994,12 +2017,17 @@ impl CodeView {
         let path = self.path.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let watched_parent = parent.clone();
+            let probe = path.clone();
             let outcome = cx
-                .background_spawn(async move { create_file_watcher(parent) })
+                .background_spawn(async move {
+                    let watched = create_file_watcher(parent);
+                    let stamp = FileStamp::read(&probe);
+                    (watched, stamp)
+                })
                 .await;
-            let (watcher, bridge, rx) = match outcome {
-                Ok(parts) => parts,
-                Err(err) => {
+            let (watcher, bridge, rx, disk_stamp) = match outcome {
+                (Ok((watcher, bridge, rx)), stamp) => (watcher, bridge, rx, stamp),
+                (Err(err), _) => {
                     log::warn!(
                         "could not watch {} for changes: {err}",
                         watched_parent.display()
@@ -2015,6 +2043,12 @@ impl CodeView {
                     view._watcher = Some(watcher);
                     view._watch_bridge = Some(bridge);
                     view.spawn_reload_loop(path, name, rx, cx);
+                    // Events between load and this registration never reach
+                    // the loop. One re-stat after the watch is live closes
+                    // that window; a later event still folds in through it.
+                    if view.stamp != disk_stamp {
+                        view.recheck_disk(cx);
+                    }
                 });
             });
         })
@@ -2921,6 +2955,8 @@ mod tests {
             save_error: None,
             disk_generation: 0,
             saving: false,
+            longest_line_scan_in_flight: false,
+            longest_line_rescan_needed: false,
             _watcher: None,
             _watch_bridge: None,
         })
@@ -3635,6 +3671,8 @@ mod tests {
             save_error: None,
             disk_generation: 0,
             saving: false,
+            longest_line_scan_in_flight: false,
+            longest_line_rescan_needed: false,
             _watcher: None,
             _watch_bridge: None,
         }
@@ -3785,6 +3823,8 @@ mod tests {
             save_error: None,
             disk_generation: 0,
             saving: false,
+            longest_line_scan_in_flight: false,
+            longest_line_rescan_needed: false,
             _watcher: None,
             _watch_bridge: None,
         });
@@ -4551,6 +4591,30 @@ mod tests {
         });
     }
 
+    /// A rewrite between load and watcher registration never produces an
+    /// event. The post-registration re-stat must still fold it in.
+    #[gpui::test]
+    fn a_rewrite_before_the_watcher_registers_is_still_folded_in(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "ONE!\nTWO!\n").expect("agent write");
+
+        view.update(cx, |view, cx| {
+            view.start_watcher(cx);
+        });
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+
+        view.update(cx, |view, _cx| {
+            assert_eq!(
+                text_of(view),
+                "ONE!\nTWO!\n",
+                "the gap between load and watch must not leave stale bytes"
+            );
+            assert!(!view.has_conflict());
+        });
+    }
+
     #[gpui::test]
     async fn a_reload_whose_tab_closed_ends_without_a_panic(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4841,6 +4905,48 @@ mod tests {
         // ...and the background measurement brings it down to the truth.
         view.update(cx, |view, _cx| {
             assert_eq!(view.document().expect("document").longest_line_chars(), 5);
+        });
+    }
+
+    #[gpui::test]
+    fn longest_line_rescans_coalesce_while_one_is_in_flight(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "the longest line\nshort\n");
+        view.update(cx, |view, cx| {
+            assert!(view.splice_all(
+                &[(0..16, "tiny".to_string())],
+                CodeSelection::at(4),
+                EditGroup::Atomic,
+                cx,
+            ));
+            assert!(
+                view.longest_line_scan_in_flight,
+                "the first shrink launches one scan"
+            );
+            assert!(!view.longest_line_rescan_needed);
+            assert!(view.splice_all(
+                &[(0..4, "x".to_string())],
+                CodeSelection::at(1),
+                EditGroup::Atomic,
+                cx,
+            ));
+            assert!(
+                view.longest_line_scan_in_flight,
+                "a second shrink must not launch another walk"
+            );
+            assert!(
+                view.longest_line_rescan_needed,
+                "the in-flight scan is asked to run once more at the latest revision"
+            );
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _cx| {
+            assert!(!view.longest_line_scan_in_flight);
+            assert!(!view.longest_line_rescan_needed);
+            assert_eq!(
+                view.document().expect("document").longest_line_chars(),
+                5,
+                "the coalesced rescan lands the true maximum"
+            );
         });
     }
 
