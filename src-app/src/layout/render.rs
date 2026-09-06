@@ -806,8 +806,10 @@ mod tests {
         /// Dirty-to-draw durations of the target window's traced frames.
         frames: Vec<Duration>,
         draws: usize,
-        /// Terminal snapshots taken while the trace ran: one per pane per
-        /// draw when every scroll frame repaints every terminal.
+        /// Terminal snapshots taken while the trace ran. Before issue #429
+        /// this read one per pane per draw, the witness that a scroll which
+        /// only moved the editor still repainted every terminal; with every
+        /// idle pane hosted behind `Entity::cached` it must read zero.
         lock_samples: usize,
         first_visible_row: usize,
         caret_row: usize,
@@ -1073,6 +1075,19 @@ mod tests {
                 format!("terminal_share_p95_panes_{panes}"),
                 serde_json::json!(share(configuration.p95_us(), reference.p95_us())),
             );
+            // Tracked without a threshold (issue #429): this harness runs on
+            // `NoopTextSystem`, which excludes the shaping the pane cache
+            // skips, so the ratio cannot see what the cache saves.
+            let ratio = |busy: u128, idle: u128| {
+                if idle == 0 {
+                    return 0.0;
+                }
+                busy as f64 / idle as f64
+            };
+            document.insert(
+                format!("scroll_frame_p95_ratio_panes_{panes}"),
+                serde_json::json!(ratio(configuration.p95_us(), reference.p95_us())),
+            );
         }
         println!("{}", serde_json::Value::Object(document));
 
@@ -1091,9 +1106,8 @@ mod tests {
                 configuration.frames.len()
             );
             assert_eq!(
-                configuration.lock_samples,
-                configuration.draws * configuration.panes,
-                "{} panes: every traced draw must snapshot each terminal exactly once",
+                configuration.lock_samples, 0,
+                "{} panes: issue #429 caches every idle terminal, so a scroll frame must snapshot none",
                 configuration.panes
             );
             assert!(
