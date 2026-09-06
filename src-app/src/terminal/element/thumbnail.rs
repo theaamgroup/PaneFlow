@@ -318,6 +318,10 @@ impl Element for TerminalThumbnail {
             // (#418), not from the text runs, so a card needs the pass too.
             paint::decorations::paint_decorations(&layout, &geom, window);
             paint::text::paint_text_runs(&layout, &geom, &base_font, font_size, window, cx);
+            // Nerd Font icons leave the text runs for `layout.symbols` (#420)
+            // and are constrained to their cells at paint time; without this
+            // pass every icon cell on a card is an empty hole.
+            paint::text::paint_symbols(&layout, &geom, font_size, window, cx);
             // The dim block cursor built in prepaint. Unconditional: there is
             // no blink phase here.
             paint::cursor::paint_cursor(&layout, &geom, &base_font, font_size, window, cx);
@@ -499,5 +503,77 @@ mod tests {
             lines.iter().all(|line| *line < snap.last_visible_row),
             "a run past the viewport reached the layout: {lines:?}"
         );
+    }
+
+    /// A Nerd Font icon on a card lives in `layout.symbols`, not in the text
+    /// runs (#420), so the card's paint pass has to draw that collection too.
+    /// The first half proves the layout puts the glyph there under the
+    /// thumbnail's own inputs; the second half is a source-slice probe on
+    /// this file's `paint` body, because a GPUI paint pass is not observable
+    /// in a headless test and every earlier miss of this kind (decorations
+    /// after #418, sprites after #419, symbols after #420) was exactly a
+    /// pass the live element gained and the card did not.
+    #[test]
+    fn a_card_paints_every_glyph_collection_the_layout_produces() {
+        let state = TerminalState::new_display_only(24, 80);
+        // U+F07B (Nerd Font folder) is a Private Use Area icon that only
+        // `paint_symbols` draws. The card crops to the bottom rows of the
+        // viewport, so push the icon down to the last row first.
+        state.write_output(&b"\r\n".repeat(23));
+        state.write_output("\u{f07b} icons".as_bytes());
+        let backend = state.session_backend();
+        let snap = thumbnail_snapshot(&backend);
+        let theme = crate::theme::active_theme();
+        let (base_font, _) = thumbnail_font();
+        let layout = layout_from_snapshot(LayoutInputs {
+            cells: snap.content.cells.clone(),
+            cursor: None,
+            selection_range: None,
+            copy_mode_cursor: None,
+            search_highlights: &[],
+            display_offset: snap.content.display_offset,
+            history_size: snap.content.history_size,
+            desired_cols: snap.content.cols.max(1),
+            desired_rows: snap.content.rows.max(1),
+            first_visible_row: snap.first_visible_row,
+            last_visible_row: snap.last_visible_row,
+            dims: thumbnail_cell_dimensions(),
+            base_font,
+            theme: &theme,
+            exited: None,
+            exit_signal: None,
+            integrated_glyphs_enabled: true,
+            color_emoji_enabled: false,
+        });
+        assert_eq!(
+            layout.symbols.len(),
+            1,
+            "the icon must reach layout.symbols under the card's inputs"
+        );
+        assert!(
+            !layout
+                .batched_runs
+                .iter()
+                .any(|run| run.text.contains('\u{f07b}')),
+            "the icon must not also be in a text run"
+        );
+
+        let source = include_str!("thumbnail.rs");
+        let start = source
+            .find("fn paint(")
+            .expect("thumbnail.rs defines the card paint");
+        let end = source[start..]
+            .find("// Deliberately not painted:")
+            .map(|i| start + i)
+            .expect("the paint body ends at the not-painted note");
+        let body = &source[start..end];
+        for pass in [
+            "paint::sprites::paint_sprites(",
+            "paint::decorations::paint_decorations(",
+            "paint::text::paint_text_runs(",
+            "paint::text::paint_symbols(",
+        ] {
+            assert!(body.contains(pass), "the card paint body must call {pass}");
+        }
     }
 }
