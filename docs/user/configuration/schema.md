@@ -25,6 +25,16 @@ Unknown top-level keys are ignored by the runtime. The schema uses
 `additionalProperties: false` so editors can flag typos before launch.
 That strictness is an editor-side aid only; it never affects loading.
 
+> **Upgrading a tuned `line_height` or `cell_width`:** since 0.4.x the
+> terminal grid is measured on the font (the cell is the face's widest
+> advance by its own line height, rounded to whole device pixels) and the two
+> keys are multipliers of that measured cell, defaulting to `1.0`. They used
+> to be multipliers of the point size (`1.2` and `0.6`). A value carried over
+> from an older config now means something else: a kept `1.2` is a grid 20%
+> taller than the face's design, and a kept `0.6` is below the new floor and
+> reverts to the default with a warning. Delete both keys to get the font's
+> own spacing, or re-tune them against the new meaning.
+
 ## Top-level keys
 
 | Key | Type | Default | Notes |
@@ -38,8 +48,8 @@ That strictness is an editor-side aid only; it never affects loading.
 | `font_fallbacks` | array of strings or null | none | Ordered glyph fallback families for symbols, Powerline, CJK, emoji, or Nerd Font glyphs. |
 | `font_size` | number or null | `13.0` | Points, range `8.0` to `32.0`. Out-of-range values fall back to default with a warning. |
 | `font_weight` | string or null | `normal` | `thin`, `extra_light`, `light`, `semi_light`, `normal`, `medium`, `semi_bold`, `bold`, `extra_bold`, `black`, `extra_black`. |
-| `line_height` | number or null | `1.2` | Multiplier, range `1.0` to `2.5`. Out-of-range values revert to the default with a warning; they are not clamped. |
-| `cell_width` | number or null | `0.6` | Multiplier, range `0.3` to `2.0`. Out-of-range values revert to the default with a warning; they are not clamped. |
+| `line_height` | number or null | `1.0` | Multiplier of the font's own line height (ascent, descent, and line gap), range `0.8` to `2.5`. The cell is rounded to whole device pixels. Out-of-range values revert to the default with a warning; they are not clamped. |
+| `cell_width` | number or null | `1.0` | Multiplier of the font's advance, range `0.8` to `2.0`. The cell is rounded to whole device pixels. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `unfocused_pane_opacity` | number or null | `0.7` | Opacity of panes without focus when a workspace has more than one pane, range `0.15` to `1.0`. `1.0` disables the dim. Values outside the range are clamped with a warning; non-finite values fall back to the default. |
 | `reduce_motion` | boolean or null | `false` | Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. |
 | `sidebar_show` | object or null | `branch` on, the rest off | What a rail row shows beyond its name, one switch per line: `branch` (boolean, default `true`) paints each terminal's current git branch beneath its name in the sidebar; split tabs show a labeled branch line per terminal; `diffstat` (boolean, default `false`) shows right-aligned insertion and deletion counts on the workspace row or a bound tab's own metadata line, drawn only when the checkout has something to report; `pr` (boolean, default `false`) turns the branch icon into a pull-request glyph colored by the request's state (open, draft, merged, closed) when the branch already has one, read through the `gh` CLI and cached per repository and branch; `indent_guide` (boolean, default `false`) draws a hairline under a workspace's folder icon down its tab rows. Branches follow each terminal's current directory and refresh every two seconds. Counts read the tab's bound worktree, or its workspace's checkout when the tab is unbound. `pr` **needs `gh`** installed and authenticated and answers for GitHub remotes only; without `gh` the rail is unchanged, and while the switch is off no `gh` process is ever spawned. An absent object is the rail as it shipped before the switches existed. Toggled from the rail header's Customize Sidebar menu, or hand-edited; hot-reloads. |
@@ -282,8 +292,8 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "font_fallbacks": [],
   "font_size": 13.0,
   "font_weight": "normal",
-  "line_height": 1.2,
-  "cell_width": 0.6,
+  "line_height": 1.0,
+  "cell_width": 1.0,
   "unfocused_pane_opacity": 0.7,
   "reduce_motion": false,
   "sidebar_show": {
