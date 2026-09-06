@@ -21,7 +21,11 @@ work lives on GitHub issues, not in that file.
 rename was dropped). Version **0.4.0**. Origin `theaamgroup/paneflow` on
 `main`. Upstream v0.11.0 is adopted (#341: the `PublishGate` with DEC 2026
 synchronized output, per-tab worktree binding with a Remove worktree row,
-the Customize Sidebar menu, the `gh` pull-request marker); the verified SKIP
+the Customize Sidebar menu, the `gh` pull-request marker), and the first
+v0.12.0 batch landed on 2026-09-06 (#417: the font-measured cell grid,
+sprite font and regular Nerd Font chain #418-#420, the Zed highlight
+queries #433, the editor benchmark harness #425; `docs/fork/STATE.md` has
+the entry and what is still open); the verified SKIP
 list (Windows shell, `timeBeginPeriod`, verbatim prefix, libghostty CI
 automation, Fedora/Discord/CHANGELOG/AppStream) stays not-ported. Windows, Linux, the telemetry crate, the published
 `windows_*_material` schema, and community files (`SECURITY.md`,
