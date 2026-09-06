@@ -397,6 +397,23 @@ impl PaneFlowApp {
             .and_then(|tab| capture_closed_tab_record(tab, tab_idx, ws.id, cx));
         let closed_tab_id = ws.tabs().get(tab_idx).map(|tab| tab.id);
 
+        // Issue #397: a dirty `DiffDockTab::File` holds edits that live only
+        // in `CodeView`'s buffer - `session.json` never journals them - and
+        // the dock slot is not on the undo record either (a restored tab gets
+        // a fresh id), so once the tab is gone nothing can bring the buffer
+        // back: the next `sync_diff_dock_session` prunes the slot as an
+        // orphan. Refuse the close BEFORE `close_tab` mutates the workspace,
+        // leaving the tab and its dock on screen so the user can still save.
+        // `close_arms_first` already refuses the same drop from the dock's
+        // own close button, and `quit_after_session_save` refuses to quit
+        // past one (#396); this is the same guard on the third route.
+        if let Some(tab_id) = closed_tab_id
+            && self.dock_file_dirty_for_tab(tab_id, cx)
+        {
+            self.show_toast(unsaved_dock_file_close_tab_toast_message().to_string(), cx);
+            return;
+        }
+
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             return;
         };
@@ -408,6 +425,8 @@ impl PaneFlowApp {
         // at render - a background tab closes without moving the visible
         // session, so the dock's own reconcile never runs and the slot (and
         // the terminals in it) would outlive the session it belonged to.
+        // The dirty-file guard above already returned, so this only ever
+        // drops a clean dock.
         if let Some(tab_id) = closed_tab_id {
             self.drop_diff_dock_for_tab(tab_id, cx);
         }
@@ -798,6 +817,14 @@ impl PaneFlowApp {
     }
 }
 
+/// Shown when closing a tab would otherwise silently drop a dirty dock file
+/// tab (issue #397, mirroring #396's quit-time
+/// `unsaved_dock_file_quit_toast_message`): `session.json` never journals a
+/// `CodeView`'s in-memory edits.
+fn unsaved_dock_file_close_tab_toast_message() -> &'static str {
+    "Save your changes in this tab's open files before closing it."
+}
+
 /// Issue #347 binding for a tab opened at an arbitrary `cwd`: the worktree it
 /// belongs to, when `cwd` is (or lies under) a worktree some tab is already
 /// bound to, or a worktree the workspace manages. `None` leaves the tab
@@ -945,6 +972,68 @@ mod tests {
         assert!(
             !body.contains("active_tab_mut()") && !body.contains("active.root = Some("),
             "the helper must never fill the active tab: {body}"
+        );
+    }
+
+    /// Issue #397: `close_workspace_tab` used to call `drop_diff_dock_for_tab`
+    /// unconditionally, which drops the tab's `CodeView` entities and bypasses
+    /// `close_arms_first` - the only US-017 gate that refuses to drop a dirty
+    /// file tab. A `PaneFlowApp` cannot be constructed in a test (its
+    /// constructor binds a Unix socket and spawns PTYs, the same reason
+    /// `quit_after_session_save_refuses_to_discard_a_dirty_dock_file` in
+    /// `session.rs` asserts on the raw function body for #396), so this pins
+    /// the wiring the same way: the dirty check must run before the drop, and
+    /// the drop must sit behind it rather than run unconditionally alongside
+    /// it. `a_dirty_code_view_is_reported_by_the_dock_file_dirty_check` in
+    /// `diff_dock/code/view.rs` exercises the underlying predicate
+    /// (`any_file_tab_dirty`, which `dock_file_dirty_for_tab` reuses) against
+    /// a real, edited `CodeView`.
+    #[test]
+    fn close_workspace_tab_refuses_to_drop_a_dirty_dock_before_confirming() {
+        let src = include_str!("tab.rs");
+        let body = src
+            .split("pub(crate) fn close_workspace_tab(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn handle_close_tab(").next())
+            .expect("close_workspace_tab body");
+
+        let dirty_check_at = body
+            .find("self.dock_file_dirty_for_tab(tab_id, cx)")
+            .expect("close_workspace_tab must consult the dock dirty-file check");
+        let close_at = body
+            .find("ws.close_tab(tab_idx)")
+            .expect("close_workspace_tab must still close a clean tab");
+        let drop_at = body
+            .find("self.drop_diff_dock_for_tab(tab_id, cx);")
+            .expect("close_workspace_tab must still tear a clean dock down");
+
+        // PR #416 review: checking AFTER `close_tab` is too late - the tab is
+        // already gone, the toast has nothing left to save through, and the
+        // next dock reconcile prunes the orphaned slot anyway. The check must
+        // run before the workspace is mutated at all.
+        assert!(
+            dirty_check_at < close_at,
+            "the dirty check must run before close_tab removes the tab: {body}"
+        );
+        assert!(
+            close_at < drop_at,
+            "the dock drop belongs after the tab close, on the clean path only: {body}"
+        );
+
+        // The dirty branch must toast and bail out without reaching the
+        // close, so the tab (and the dock holding the edits) stays on screen.
+        let dirty_branch = &body[dirty_check_at..close_at];
+        assert!(
+            dirty_branch.contains("self.show_toast("),
+            "a dirty dock file must be reported instead of silently kept or dropped: {dirty_branch}"
+        );
+        let after_toast = dirty_branch
+            .split("self.show_toast(")
+            .nth(1)
+            .expect("toast call in the dirty branch");
+        assert!(
+            after_toast.contains("return;"),
+            "the dirty branch must return before close_tab runs: {dirty_branch}"
         );
     }
 }

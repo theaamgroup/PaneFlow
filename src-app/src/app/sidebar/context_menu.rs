@@ -53,7 +53,15 @@ const SELECT_MENU_MAX_HEIGHT: f32 = 320.;
 /// its own), all capped at the surface's own ceiling. The on-screen clamp
 /// has to measure what is painted: sizing a forty-branch list at its
 /// uncapped height pinned the menu at `y = 0` (issue #347).
-pub(crate) fn tab_context_menu_height(branch_rows: usize, remove_row: bool) -> Pixels {
+///
+/// `mark_read_row` is the "Mark as read" row a tab with a dismissable badge
+/// carries at the top, with the divider that separates it from the tab
+/// management rows below; like the removal row it is a row and a rule.
+pub(crate) fn tab_context_menu_height(
+    branch_rows: usize,
+    remove_row: bool,
+    mark_read_row: bool,
+) -> Pixels {
     let branch_rows = if branch_rows > 0 {
         1. + branch_rows as f32
     } else {
@@ -64,7 +72,12 @@ pub(crate) fn tab_context_menu_height(branch_rows: usize, remove_row: bool) -> P
     } else {
         0.
     };
-    px((8. + (2. + branch_rows) * 28. + remove).min(SELECT_MENU_MAX_HEIGHT))
+    let mark_read = if mark_read_row {
+        28. + CONTEXT_MENU_DIVIDER_PX
+    } else {
+        0.
+    };
+    px((8. + (2. + branch_rows) * 28. + remove + mark_read).min(SELECT_MENU_MAX_HEIGHT))
 }
 
 /// Painted height of [`context_menu_divider`]: the 1 px rule plus its 4 px
@@ -479,12 +492,32 @@ impl PaneFlowApp {
             .get(ws_idx)
             .and_then(|ws| ws.tabs().get(tab_idx))
             .is_some_and(|tab| tab.worktree.is_some());
-        let menu_height =
-            tab_context_menu_height(if show_branches { branches.len() } else { 0 }, is_bound);
+        // "Mark as read" exists only while this tab has a badge to clear - a
+        // waiting, errored, or stalled session on one of its own surfaces. A
+        // tab with nothing to mark does not offer it.
+        let has_unread = self.tab_has_unread(ws_idx, tab_idx, cx);
+        let menu_height = tab_context_menu_height(
+            if show_branches { branches.len() } else { 0 },
+            is_bound,
+            has_unread,
+        );
         let menu_pos = clamped_context_menu_position(position, px(248.), menu_height, window);
         let close_shortcut = self
             .shortcut_for_action("close_tab")
             .map(|key| SharedString::from(key.to_string()));
+        let mark_read_item = has_unread.then(|| {
+            self.render_select_menu_item(
+                "tab-context-mark-read".into(),
+                "Mark as read",
+                None,
+                ui,
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.tab_menu_open = None;
+                    this.mark_tab_read(ws_idx, tab_idx, cx);
+                    cx.stop_propagation();
+                }),
+            )
+        });
         let remove_worktree_item = is_bound.then(|| {
             self.render_select_menu_item(
                 "tab-context-remove-worktree".into(),
@@ -510,6 +543,9 @@ impl PaneFlowApp {
                 cx.notify();
             }))
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .when_some(mark_read_item, |menu, item| {
+                menu.child(item).child(context_menu_divider(ui))
+            })
             .child(self.render_select_menu_item(
                 "tab-context-rename".into(),
                 "Rename",
@@ -866,17 +902,17 @@ mod tests {
         // clamp counted every branch row, while `select_menu` caps the
         // surface at 320 px, so a long branch list pinned the menu at y = 0.
         assert_eq!(
-            tab_context_menu_height(0, false),
+            tab_context_menu_height(0, false, false),
             px(64.),
             "chrome + two rows"
         );
         assert_eq!(
-            tab_context_menu_height(2, false),
+            tab_context_menu_height(2, false, false),
             px(8. + (2. + 3.) * 28.),
             "the section header and one row per branch, under the cap"
         );
-        assert_eq!(tab_context_menu_height(40, false), px(320.));
-        assert_eq!(tab_context_menu_height(400, false), px(320.));
+        assert_eq!(tab_context_menu_height(40, false, false), px(320.));
+        assert_eq!(tab_context_menu_height(400, false, false), px(320.));
     }
 
     #[test]
@@ -885,16 +921,55 @@ mod tests {
         // and the clamp must measure it, divider included, or the menu
         // overshoots the window bottom by the row and its rule.
         assert_eq!(
-            tab_context_menu_height(0, true),
+            tab_context_menu_height(0, true, false),
             px(8. + 3. * 28. + 9.),
             "chrome, two rows, the divider, and the removal row"
         );
         assert_eq!(
-            tab_context_menu_height(2, true),
+            tab_context_menu_height(2, true, false),
             px(8. + (2. + 3. + 1.) * 28. + 9.),
             "the removal row and its divider sit under the Branch section"
         );
-        assert_eq!(tab_context_menu_height(40, true), px(320.));
+        assert_eq!(tab_context_menu_height(40, true, false), px(320.));
+    }
+
+    #[test]
+    fn a_badged_tab_menu_is_one_row_taller_for_mark_as_read() {
+        // The "Mark as read" row exists only for a tab with a badge to
+        // clear, and the clamp must measure it and its divider, exactly as
+        // the removal row taught (issue #348).
+        assert_eq!(
+            tab_context_menu_height(0, false, true),
+            px(8. + 3. * 28. + 9.),
+            "chrome, the mark-read row, its divider, and two rows"
+        );
+        assert_eq!(
+            tab_context_menu_height(2, true, true),
+            px(8. + (2. + 3. + 2.) * 28. + 2. * 9.),
+            "both optional rows stack with the Branch section between them"
+        );
+        assert_eq!(tab_context_menu_height(40, true, true), px(320.));
+    }
+
+    #[test]
+    fn mark_as_read_is_offered_only_to_a_badged_tab_and_clears_it() {
+        // The row is gated on `tab_has_unread` and routes through
+        // `mark_tab_read`; a tab with nothing to mark never sees it.
+        let src = include_str!("context_menu.rs");
+        let start = src
+            .find("let mark_read_item = has_unread.then(|| {")
+            .expect("the mark-read row is built behind has_unread");
+        let end = start + src[start..].find("});").expect("row builder ends") + 3;
+        let row = &src[start..end];
+        assert!(
+            row.contains("\"tab-context-mark-read\".into()")
+                && row.contains("this.mark_tab_read(ws_idx, tab_idx, cx)"),
+            "the mark-read row must clear through mark_tab_read: {row}"
+        );
+        assert!(
+            src.contains("let has_unread = self.tab_has_unread(ws_idx, tab_idx, cx);"),
+            "the gate must read the tab's own badge state"
+        );
     }
 
     #[test]

@@ -8,8 +8,17 @@
 //!     ├── claude                  ← copy of paneflow-shim
 //!     ├── codex                   ← copy of paneflow-shim
 //!     ├── …one per TerminalAgent binary (gemini, cursor-agent, …)
-//!     └── paneflow-ai-hook        ← copy of paneflow-ai-hook
+//!     ├── paneflow-ai-hook        ← copy of paneflow-ai-hook
+//!     └── paneflow                ← symlink to the running app executable (#440)
 //! ```
+//!
+//! The `paneflow` entry is what lets an agent inside a pane run `paneflow
+//! whoami`, `paneflow task get`, or `paneflow mcp install` without the user
+//! ever symlinking the bundle binary onto their login PATH. It is a symlink,
+//! not a copy: the app executable is tens of megabytes, and a link keeps
+//! following the bundle Sparkle swaps in at quit. It is re-pointed on every
+//! launch whose `current_exe()` differs from the link target, so a moved
+//! bundle heals itself the next time a pane opens.
 //!
 //! Why two shim copies instead of a hardlink: `std::fs::hard_link` is
 //! cross-filesystem-fragile on macOS (APFS ↔ tmpfs).
@@ -79,6 +88,72 @@ fn extract_plan() -> Vec<(&'static str, &'static str)> {
     plan
 }
 
+/// Basename of the CLI link staged beside the wrappers (#440). Resolves to
+/// the running app's executable so `paneflow …` inside a pane is always the
+/// CLI that matches the GUI it talks to, ahead of any older copy the user
+/// symlinked into `/usr/local/bin`.
+pub(crate) const CLI_LINK_NAME: &str = "paneflow";
+
+/// Point `<dir>/paneflow` at `exe`, replacing whatever is there.
+///
+/// Idempotent: an existing symlink that already targets `exe` is left
+/// untouched (no mtime churn). A stale link, a dangling link, or a regular
+/// file at that name is replaced atomically: the new symlink is created
+/// under a temporary name in the same directory and `rename(2)`d over the
+/// old entry, so a PATH scanner never observes a missing `paneflow`.
+///
+/// A directory at that path is not removed; the rename fails and the error
+/// surfaces like every other IO error in this module.
+pub(crate) fn link_cli_into(dir: &Path, exe: &Path) -> Result<()> {
+    let link = dir.join(CLI_LINK_NAME);
+    match std::fs::read_link(&link) {
+        Ok(target) if target == exe => return Ok(()),
+        // Stale link: fall through and replace.
+        Ok(_) => {}
+        // Missing, or present but not a symlink (`EINVAL` → InvalidInput):
+        // fall through and replace.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+            ) => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("#440: read_link {} failed", link.display()));
+        }
+    }
+
+    let tmp = dir.join(format!(".{CLI_LINK_NAME}.{}.tmp", std::process::id()));
+    // A leftover from an interrupted earlier attempt by a process that
+    // reused this PID; harmless to clear.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("#440: clearing {} failed", tmp.display()));
+        }
+    }
+    std::os::unix::fs::symlink(exe, &tmp).with_context(|| {
+        format!(
+            "#440: symlink {} -> {} failed",
+            tmp.display(),
+            exe.display()
+        )
+    })?;
+    if let Err(e) = std::fs::rename(&tmp, &link) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(e)).with_context(|| {
+            format!(
+                "#440: publishing {} over {} failed",
+                tmp.display(),
+                link.display()
+            )
+        });
+    }
+    Ok(())
+}
+
 /// Pull the raw bytes of `name` out of the `Bins` rust-embed archive.
 /// `name` is the unsuffixed basename staged by build.rs; the embed key
 /// is `bin/{triple}/{name}`.
@@ -106,10 +181,38 @@ static VERIFIED_BIN_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// while the app is running; a stale memo would otherwise prepend a
 /// missing directory to every new pane's PATH for the rest of the process.
 fn wrappers_present(dir: &Path) -> bool {
+    std::env::current_exe().is_ok_and(|exe| wrappers_present_for(dir, &exe))
+}
+
+/// [`wrappers_present`] against an explicit executable: the `paneflow` link
+/// must exist, resolve, and point at `exe` (#440). Requiring the exact
+/// target, not just a resolving link, matters when two same-version
+/// processes share the cache (`PANEFLOW_ALLOW_MULTIPLE=1`, or a debug app
+/// running while its test binary extracts): the other process may have
+/// re-pointed the link at itself, and this process must re-stage on its
+/// next spawn rather than hand its panes a CLI belonging to someone else.
+fn wrappers_present_for(dir: &Path, exe: &Path) -> bool {
     dir.is_dir()
         && extract_plan()
             .iter()
             .all(|(out_name, _)| dir.join(out_name).is_file())
+        && cli_link_targets(dir, exe)
+}
+
+/// `true` iff `<dir>/paneflow` is a symlink to `exe` that resolves.
+/// `is_file` follows the link, so a dangling one (bundle moved or deleted)
+/// reads as absent.
+fn cli_link_targets(dir: &Path, exe: &Path) -> bool {
+    let link = dir.join(CLI_LINK_NAME);
+    std::fs::read_link(&link).is_ok_and(|target| target == exe) && link.is_file()
+}
+
+/// The version-pinned wrapper directory under `cache_root`.
+fn versioned_bin_dir(cache_root: &Path) -> PathBuf {
+    cache_root
+        .join(crate::runtime_paths::APP_SUBDIR)
+        .join("bin")
+        .join(VERSION)
 }
 
 fn memoized_verified_path(
@@ -141,8 +244,11 @@ fn memoized_verified_path(
 /// - Atomic per-file: writes to a temp file in the same dir, then
 ///   renames into place.
 /// - Unix: sets mode `0o755` on every extracted file.
-/// - Idempotent: if every file already exists with a matching SHA256,
-///   returns the target dir without writing.
+/// - Stages a `paneflow` symlink to the running executable beside the
+///   wrappers (#440; see [`link_cli_into`]).
+/// - Idempotent: if every file already exists with a matching SHA256 and
+///   the link already targets this executable, returns the target dir
+///   without writing.
 /// - Process-memoized: after one successful verification, later terminal
 ///   spawns reuse the verified path without hashing all wrappers again,
 ///   as long as the directory and its wrappers still exist on disk.
@@ -158,13 +264,21 @@ pub fn ensure_binaries_extracted() -> Result<PathBuf> {
 }
 
 fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
+    let cache_root = dirs::cache_dir()
+        .ok_or_else(|| anyhow!("US-008: dirs::cache_dir() returned None; cannot extract"))?;
+    let exe = std::env::current_exe().context("#440: current_exe() unresolvable")?;
+    ensure_binaries_extracted_into(&cache_root, &exe)
+}
+
+/// The extraction proper, with the cache root and the executable the CLI
+/// link should target injected. Tests drive this against a `TempDir` so
+/// they never touch the real per-user cache: an end-to-end run against
+/// `~/Library/Caches/paneflow-dev` would leave `paneflow` pointing at the
+/// libtest harness, and any debug PaneFlow instance with panes open would
+/// resolve `paneflow` to that harness until its next extraction.
+fn ensure_binaries_extracted_into(cache_root: &Path, exe: &Path) -> Result<PathBuf> {
     {
-        let cache_root = dirs::cache_dir()
-            .ok_or_else(|| anyhow!("US-008: dirs::cache_dir() returned None; cannot extract"))?;
-        let target_dir = cache_root
-            .join(crate::runtime_paths::APP_SUBDIR)
-            .join("bin")
-            .join(VERSION);
+        let target_dir = versioned_bin_dir(cache_root);
 
         let plan = extract_plan();
         let mut buffers: Vec<(String, std::borrow::Cow<'static, [u8]>)> =
@@ -183,6 +297,7 @@ fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
             .collect();
 
         extract_into(&entries, &target_dir)?;
+        link_cli_into(&target_dir, exe)?;
         Ok(target_dir)
     }
 }
@@ -626,16 +741,23 @@ mod tests {
         for (out_name, _) in extract_plan() {
             std::fs::write(dir.path().join(out_name), b"x").unwrap();
         }
-        assert!(wrappers_present(dir.path()));
+        // #440: the CLI link is part of the staged set too.
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        link_cli_into(dir.path(), &exe).unwrap();
+        assert!(wrappers_present_for(dir.path(), &exe));
 
         std::fs::remove_file(dir.path().join("claude")).unwrap();
         assert!(
-            !wrappers_present(dir.path()),
+            !wrappers_present_for(dir.path(), &exe),
             "a missing wrapper must invalidate the memo"
         );
 
         let gone = dir.path().join("missing");
-        assert!(!wrappers_present(&gone), "a missing directory is not live");
+        assert!(
+            !wrappers_present_for(&gone, &exe),
+            "a missing directory is not live"
+        );
     }
 
     #[test]
@@ -719,19 +841,16 @@ mod tests {
 
     #[test]
     fn ensure_binaries_extracted_produces_all_agent_wrappers() {
-        // End-to-end smoke: calls the public entry point against the
-        // real cache dir and asserts every TerminalAgent wrapper plus the
-        // ai-hook callback lands. The cache dir is per-user and
-        // persistent, so this test is deliberately idempotent - safe to
-        // run repeatedly. Skip when `dirs::cache_dir()` is unresolvable
-        // (ephemeral CI containers with no `$HOME` set) so the test
-        // becomes a no-op rather than a false failure in those
-        // environments.
-        if dirs::cache_dir().is_none() {
-            eprintln!("skip: dirs::cache_dir() unresolvable in this environment");
-            return;
-        }
-        let dir = ensure_binaries_extracted().unwrap();
+        // End-to-end smoke through the real `Bins` embed, against a
+        // throwaway cache root: every TerminalAgent wrapper plus the
+        // ai-hook callback lands, and the CLI link targets the injected
+        // executable. Never the real per-user cache (see
+        // `ensure_binaries_extracted_into`).
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let dir = ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+        assert_eq!(dir, versioned_bin_dir(cache_root.path()));
         let mut expected: Vec<String> = crate::agent_launcher::TerminalAgent::ALL
             .iter()
             .map(|a| a.binary().to_string())
@@ -745,6 +864,146 @@ mod tests {
                 p.display()
             );
         }
+        // #440: the CLI of the running executable is reachable from a pane.
+        let cli = dir.join(CLI_LINK_NAME);
+        assert_eq!(
+            std::fs::read_link(&cli).unwrap(),
+            exe,
+            "#440: {} must be a symlink to the running executable",
+            cli.display()
+        );
+        assert!(cli.is_file(), "#440: the CLI link must resolve");
+        assert!(wrappers_present_for(&dir, &exe));
+    }
+
+    #[test]
+    fn link_cli_into_creates_a_symlink_to_the_executable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("app-bundle-exe");
+        std::fs::write(&exe, b"not really an executable").unwrap();
+
+        link_cli_into(dir.path(), &exe).unwrap();
+
+        let link = dir.path().join(CLI_LINK_NAME);
+        assert_eq!(std::fs::read_link(&link).unwrap(), exe);
+        assert!(
+            link.is_file(),
+            "the link must resolve through to the target"
+        );
+    }
+
+    #[test]
+    fn link_cli_into_is_a_noop_when_the_link_already_matches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        link_cli_into(dir.path(), &exe).unwrap();
+        let link = dir.path().join(CLI_LINK_NAME);
+        let before = std::fs::symlink_metadata(&link)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        link_cli_into(dir.path(), &exe).unwrap();
+
+        let after = std::fs::symlink_metadata(&link)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after, "an up-to-date link must not be rewritten");
+        assert_eq!(std::fs::read_link(&link).unwrap(), exe);
+    }
+
+    #[test]
+    fn link_cli_into_repoints_a_stale_or_dangling_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let old = dir.path().join("Old.app-exe");
+        let new = dir.path().join("New.app-exe");
+        std::fs::write(&new, b"x").unwrap();
+        // `old` never exists: the link starts out dangling, the shape of a
+        // bundle that was moved or deleted after the last launch.
+        std::os::unix::fs::symlink(&old, dir.path().join(CLI_LINK_NAME)).unwrap();
+        assert!(!dir.path().join(CLI_LINK_NAME).is_file());
+
+        link_cli_into(dir.path(), &new).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(dir.path().join(CLI_LINK_NAME)).unwrap(),
+            new
+        );
+        assert!(dir.path().join(CLI_LINK_NAME).is_file());
+    }
+
+    #[test]
+    fn link_cli_into_replaces_a_regular_file_and_leaves_no_temp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let link = dir.path().join(CLI_LINK_NAME);
+        std::fs::write(&link, b"a stray regular file").unwrap();
+
+        link_cli_into(dir.path(), &exe).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), exe);
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.ends_with(".tmp")),
+            "no temporary link may be left behind: {names:?}"
+        );
+    }
+
+    #[test]
+    fn wrappers_present_requires_the_cli_link_to_resolve() {
+        // The memo must drop when the link dangles, or every new pane for
+        // the rest of the process would inherit a PATH whose `paneflow`
+        // points at nothing.
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, _) in extract_plan() {
+            std::fs::write(dir.path().join(name), b"wrapper").unwrap();
+        }
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        assert!(!wrappers_present_for(dir.path(), &exe), "no link at all");
+
+        std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join(CLI_LINK_NAME))
+            .unwrap();
+        assert!(!wrappers_present_for(dir.path(), &exe), "dangling link");
+
+        link_cli_into(dir.path(), &exe).unwrap();
+        assert!(wrappers_present_for(dir.path(), &exe), "resolving link");
+    }
+
+    #[test]
+    fn wrappers_present_rejects_a_link_owned_by_another_process() {
+        // Two same-version processes share one cache dir. If the other one
+        // re-pointed `paneflow` at itself, this process must not keep
+        // serving the memoized dir: its next spawn has to re-stage.
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, _) in extract_plan() {
+            std::fs::write(dir.path().join(name), b"wrapper").unwrap();
+        }
+        let mine = dir.path().join("mine");
+        let theirs = dir.path().join("theirs");
+        std::fs::write(&mine, b"x").unwrap();
+        std::fs::write(&theirs, b"x").unwrap();
+
+        link_cli_into(dir.path(), &theirs).unwrap();
+        assert!(
+            !wrappers_present_for(dir.path(), &mine),
+            "a resolving link to another executable is not ours"
+        );
+
+        link_cli_into(dir.path(), &mine).unwrap();
+        assert!(wrappers_present_for(dir.path(), &mine));
     }
 
     #[test]
@@ -820,8 +1079,10 @@ mod tests {
             !bridge_str.contains(version),
             "EP-001 US-003: bridge path {bridge_str} must NOT embed the version {version}"
         );
-        // Distinct from the versioned helper cache dir.
-        if let Ok(cache) = ensure_binaries_extracted() {
+        // Distinct from the versioned helper cache dir. Computed, not
+        // extracted: this test must not write into the real per-user cache.
+        if let Some(cache_root) = dirs::cache_dir() {
+            let cache = versioned_bin_dir(&cache_root);
             assert_ne!(
                 bridge.parent(),
                 Some(cache.as_path()),

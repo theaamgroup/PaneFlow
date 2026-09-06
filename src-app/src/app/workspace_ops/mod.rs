@@ -186,7 +186,8 @@ fn waiting_pane_in_workspace(
     let waiting: std::collections::HashSet<u64> = ws
         .agent_sessions
         .values()
-        .filter(|s| s.state == crate::ai_types::AgentState::WaitingForInput)
+        // A wait the user marked read (#408) no longer pulls focus.
+        .filter(|s| s.presented_state() == Some(&crate::ai_types::AgentState::WaitingForInput))
         .filter_map(|s| s.surface_id)
         .collect();
     if waiting.is_empty() {

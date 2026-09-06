@@ -2804,6 +2804,38 @@ mod tests {
         });
     }
 
+    /// Issue #396: quitting must see a dock file tab's unsaved edits.
+    /// `any_file_tab_dirty` is what `quit_after_session_save` consults before
+    /// `cx.quit()`, so this exercises it against a real, edited `CodeView`
+    /// rather than a stand-in boolean.
+    #[gpui::test]
+    fn a_dirty_code_view_is_reported_by_the_dock_file_dirty_check(cx: &mut TestAppContext) {
+        use crate::app::cli_diff_dock::any_file_tab_dirty;
+        use crate::app::diff_dock::DiffDockTab;
+
+        let (view, cx) = view(cx, "hello world\n");
+        let tab = DiffDockTab::File(view.clone());
+
+        cx.cx.update(|cx| {
+            assert!(
+                !any_file_tab_dirty([&tab], cx),
+                "a freshly opened file tab is clean"
+            );
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            view.selection = CodeSelection { anchor: 0, head: 5 };
+            view.replace_text_in_range(None, "bye", window, cx);
+        });
+
+        cx.cx.update(|cx| {
+            assert!(
+                any_file_tab_dirty([&tab], cx),
+                "an edited buffer must not be silently discarded"
+            );
+        });
+    }
+
     /// US-012 AC: Backspace removes a full grapheme, so a composed emoji goes in
     /// one press instead of shedding its skin-tone modifier first.
     #[gpui::test]

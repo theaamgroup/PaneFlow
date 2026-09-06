@@ -156,6 +156,13 @@ profile and prints the comparison table `bench/README.md` documents. Do not
 ship a perf number you did not measure, and do not publish a run that
 printed `PANEFLOW_BENCH_WARNING` (another workload was competing).
 
+Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
+holds the 16 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
+running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
+whoami` / `paneflow mcp install` work inside a pane without the user linking the
+bundle binary onto their login PATH. The link is re-pointed at launch when
+`current_exe()` moves.
+
 Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`):
 config, data, cache, and the default IPC socket (`paneflow-dev.sock`). A
 `cargo run` debug instance should not share those with
@@ -222,7 +229,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     and a drag pinned at the render ceiling leaves a wider preference alone
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
 │   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
-│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348),
+│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348;
+│   │                                     Mark as read row, #408, only on a tab with a waiting/errored/stalled session),
 │   │                                     Customize Sidebar menu (`customize_menu.rs`: `sidebar_show` toggles,
 │   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)

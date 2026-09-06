@@ -2989,11 +2989,13 @@ impl PaneFlowApp {
                 let Some(sid) = session.surface_id else {
                     continue;
                 };
-                match session.state {
-                    ai_types::AgentState::WaitingForInput => {
+                // A session marked read (#408) presents nothing: the ring,
+                // the header dot, and the peek overlay all go with the badge.
+                match session.presented_state() {
+                    Some(ai_types::AgentState::WaitingForInput) => {
                         waiting.insert(sid, session.message.clone());
                     }
-                    ai_types::AgentState::Errored => {
+                    Some(ai_types::AgentState::Errored) => {
                         errored.insert(sid);
                     }
                     _ => {}
@@ -4755,6 +4757,9 @@ fn upsert_session_state_with_start(
             // one already established.
             s.last_event_at_ms = emitted_at_ms.or(s.last_event_at_ms);
             s.source = source;
+            // A frame this choke point accepts is the agent speaking again,
+            // so a badge the user marked read (#408) is raised afresh.
+            s.read = false;
             if s.proc_start.is_none() {
                 s.proc_start = current_start;
             }
@@ -6776,6 +6781,86 @@ mod tests {
         assert!(
             key >= super::SYNTHETIC_SESSION_PID_BASE,
             "synthetic key lands in the reserved band"
+        );
+    }
+
+    #[test]
+    fn an_accepted_frame_raises_a_badge_the_user_marked_read() {
+        // Issue #408: "Mark as read" hides the badge without moving the
+        // state; the next frame the choke point accepts is the agent
+        // speaking again, and the badge comes back with it. A frame the
+        // choke point refuses (stale watermark, weaker source over a held
+        // wait) leaves the read mark alone.
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{
+            AgentLifecycleEvent, AgentSession, AgentState, reduce_lifecycle_event,
+        };
+        let mut sessions: std::collections::HashMap<u32, AgentSession> =
+            std::collections::HashMap::new();
+        super::upsert_session_state(
+            &mut sessions,
+            Some(4242),
+            TerminalAgent::ClaudeCode,
+            reduce_lifecycle_event(AgentLifecycleEvent::Notification {
+                message: Some("Approve edit?".into()),
+            }),
+            Some(1_000),
+            ai_types::AgentStateSource::Hook,
+        )
+        .expect("a first frame is never stale");
+        sessions.get_mut(&4242).expect("session exists").read = true;
+        assert!(sessions[&4242].presented_state().is_none());
+        assert_eq!(sessions[&4242].state, AgentState::WaitingForInput);
+
+        // The registry re-observing the same wait is refused by the source
+        // rule and must not un-read the badge.
+        assert!(
+            super::upsert_session_state(
+                &mut sessions,
+                Some(4242),
+                TerminalAgent::ClaudeCode,
+                reduce_lifecycle_event(AgentLifecycleEvent::Notification {
+                    message: Some("Approve edit?".into()),
+                }),
+                Some(1_050),
+                ai_types::AgentStateSource::SessionRegistry,
+            )
+            .is_none()
+        );
+        assert!(sessions[&4242].read, "a refused frame leaves the read mark");
+
+        // A stale hook frame is refused by the watermark, same outcome.
+        assert!(
+            super::upsert_session_state(
+                &mut sessions,
+                Some(4242),
+                TerminalAgent::ClaudeCode,
+                reduce_lifecycle_event(AgentLifecycleEvent::Notification {
+                    message: Some("Approve edit?".into()),
+                }),
+                Some(900),
+                ai_types::AgentStateSource::Hook,
+            )
+            .is_none()
+        );
+        assert!(sessions[&4242].read);
+
+        // The agent speaking again raises the badge afresh.
+        super::upsert_session_state(
+            &mut sessions,
+            Some(4242),
+            TerminalAgent::ClaudeCode,
+            reduce_lifecycle_event(AgentLifecycleEvent::Notification {
+                message: Some("Approve rm -rf?".into()),
+            }),
+            Some(1_100),
+            ai_types::AgentStateSource::Hook,
+        )
+        .expect("a forward frame applies");
+        assert!(!sessions[&4242].read);
+        assert_eq!(
+            sessions[&4242].presented_state(),
+            Some(&AgentState::WaitingForInput)
         );
     }
 

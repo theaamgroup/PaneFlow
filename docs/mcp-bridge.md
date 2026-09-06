@@ -57,7 +57,9 @@ PaneFlow extracts it to a stable, non-versioned path
 (`~/Library/Application Support/paneflow/bin/paneflow-mcp`) that survives
 updates.
 
-To register the bridge with every CLI agent installed on your machine:
+To register the bridge with every CLI agent installed on your machine, run
+this from any PaneFlow pane (`paneflow` is on every pane's `PATH`) or from a
+shell where you have linked the bundle binary:
 
 ```bash
 paneflow mcp install
