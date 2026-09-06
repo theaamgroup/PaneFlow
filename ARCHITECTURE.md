@@ -77,6 +77,42 @@ own crate and never links GPUI.
   scanning a monorepo on the render thread is how you get a "not responding"
   window, so the codebase treats the main thread as render-only.
 
+## Editor and diff syntax highlighting
+
+The editor's `CodeHighlighter` and the diff view's `highlight_lines` share
+`diff/highlighter.rs`: grammar selection and capture resolution use one path.
+Fifteen Zed highlighting queries are compiled with `include_str!` from
+`diff/queries/` (issue #433). TOML, HTML, Java and Ruby keep their grammar's
+stock queries. JavaScript uses the JavaScript query on the existing TSX
+grammar. Markdown runs block and inline passes; fenced code does not inject
+another language.
+
+Captures are ordered by byte start, preserving query order at equal starts.
+Each styled capture goes onto a stack. The last active capture paints until
+its end or the next capture, including when it is wider than an earlier one.
+Captures without a palette role do not enter the stack. Each row caps input
+at 4,096 captures. Theme changes rebuild color tables without querying or
+reparsing the retained trees. Variables and namespaces use the editor's text
+color; constructors share the function role. `diff/parity_tests.rs` holds the
+independent byte oracle, the token expectations per language and the frozen
+`fixtures/stock-priority-audit.txt` of every byte the stock-to-Zed switch
+recolored on the corpus.
+
+`diff/queries/MANIFEST.toml` records the upstream commit, source paths, SHA-256
+hashes, license evidence and the JavaScript grammar deviation; a unit test
+verifies every hash against the vendored bytes. `NOTICE` attributes Zed
+Industries and ships in the bundle as `ThirdPartyLicenses/zed-queries.txt`.
+Git preserves LF bytes for these imports.
+
+Set `ZED_DIR` to a local Zed checkout, then run
+`scripts/sync-zed-queries.sh --check`. Check mode compares every query and the
+manifest byte for byte with the pinned Git objects, checks the provenance
+notice and lists any drift. Omit the check option to restore those bytes,
+including the notice's revision. To resync, pass `--commit <revision>`, then
+review the upstream license evidence, compile the queries and run the parity
+tests. The script resolves revisions to an immutable full SHA. No source
+checkout files or runtime configuration are read by the app.
+
 ## Keystroke → pixel
 
 The full input/output pipeline, end to end:
