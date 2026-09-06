@@ -323,3 +323,190 @@ impl DisplayTerminal {
         Ok((history_size, display_offset))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TerminalAppearance, WindowSize};
+
+    fn terminal(cols: usize, rows: usize, scrollback: usize) -> DisplayTerminal {
+        let size = WindowSize::new(cols, rows, 8, 16).expect("valid terminal size");
+        DisplayTerminal::new(size, scrollback, TerminalAppearance::default())
+            .expect("terminal must initialize")
+    }
+
+    /// [`DisplayTerminal::snapshot`] remaps `set_selection`'s screen-space
+    /// selection into viewport space by subtracting the current
+    /// `display_offset` (snapshot.rs:100-121). The round trip
+    /// `viewport_line = screen_line + display_offset` must hold both at
+    /// `display_offset == 0` and after scrolling into history, or a wrong
+    /// mapping mis-paints the selection highlight after a scroll while every
+    /// other selection test (which never scrolls) stays green.
+    #[test]
+    fn snapshot_selection_matches_set_selection_including_scrolled_viewport() {
+        let mut terminal = terminal(20, 3, 200);
+
+        // display_offset == 0: select a range on the live, unscrolled top
+        // row and confirm the snapshot reports it back unchanged.
+        terminal.feed(b"hello world").expect("output must parse");
+        terminal
+            .set_selection(SelectionRange {
+                start: Point::new(0, 0),
+                end: Point::new(0, 4),
+                rectangle: false,
+            })
+            .expect("selection must install");
+        let content = terminal.snapshot().expect("snapshot");
+        assert_eq!(content.display_offset, 0);
+        let selection = content
+            .selection
+            .expect("selection must be present at display_offset 0");
+        assert_eq!(selection.start, Point::new(0, 0));
+        assert_eq!(selection.end, Point::new(0, 4));
+
+        // Push enough output through a 3-row viewport that real scrollback
+        // accumulates above it.
+        for index in 0..10 {
+            terminal
+                .feed(format!("line {index}\r\n").as_bytes())
+                .expect("output must parse");
+        }
+
+        // Scroll all the way to the top of the scrollback and read back the
+        // resulting display_offset, rather than assuming it.
+        terminal
+            .scroll_to_viewport_row(0)
+            .expect("scroll to top of scrollback");
+        let scrolled = terminal.snapshot().expect("snapshot after scroll");
+        let display_offset = scrolled.display_offset;
+        assert!(
+            display_offset > 0,
+            "expected scrolling to the top to produce a non-zero display_offset"
+        );
+
+        // Select the row that sits at the current top of the scrollback in
+        // screen space (screen space is anchored to the live area's top, so
+        // that row is `-display_offset`); it is the top row of the viewport
+        // once rendered at this exact scroll position.
+        let history_line = -i32::try_from(display_offset).expect("display_offset fits i32");
+        terminal
+            .set_selection(SelectionRange {
+                start: Point::new(history_line, 0),
+                end: Point::new(history_line, 4),
+                rectangle: false,
+            })
+            .expect("selection must install");
+
+        let content = terminal
+            .snapshot()
+            .expect("snapshot with scrolled selection");
+        assert_eq!(content.display_offset, display_offset);
+        let selection = content
+            .selection
+            .expect("selection must be present after scrolling");
+        // `snapshot` must hand the selection back in the same screen-space
+        // coordinates `set_selection` was given, not the viewport-local row
+        // the render iterator used internally: display_offset is applied and
+        // then undone (`viewport_line = screen_line + display_offset`,
+        // `screen_line = viewport_line - display_offset`), so the round trip
+        // is the identity for any row that stays inside the viewport.
+        assert_eq!(selection.start, Point::new(history_line, 0));
+        assert_eq!(selection.end, Point::new(history_line, 4));
+
+        // A row just below the current viewport has no selection to report
+        // at all, confirming the mapping is viewport-relative rather than a
+        // blanket pass-through of whatever was last installed.
+        let out_of_view = history_line + i32::try_from(content.rows).expect("rows fits i32");
+        terminal
+            .set_selection(SelectionRange {
+                start: Point::new(out_of_view, 0),
+                end: Point::new(out_of_view, 4),
+                rectangle: false,
+            })
+            .expect("selection must install");
+        let content = terminal
+            .snapshot()
+            .expect("snapshot with off-screen selection");
+        assert_eq!(content.selection, None);
+    }
+
+    /// `CellMirror` (`src-app/src/terminal/ghostty_session.rs:4249`) trusts
+    /// `Content::dirty_rows` completely: on the incremental path it only
+    /// re-converts rows this crate flags dirty, and keeps the rest of its
+    /// cached grid untouched. `refresh_snapshot_cache`'s in-place partial
+    /// path (above) is the sole place that promise is kept, and a
+    /// self-referential comparison (deriving the "expected" value from the
+    /// very same snapshot under test) can't catch it slipping: a stale cell
+    /// with a matching dirty flag still agrees with itself. This test
+    /// instead reads the live grid independently through
+    /// [`DisplayTerminal::render_cell`], which jumps straight to a cell
+    /// through the FFI row iterator rather than going through
+    /// `snapshot_cache` at all.
+    #[test]
+    fn snapshot_partial_refresh_cells_and_dirty_rows_match_the_live_grid() {
+        let mut terminal = terminal(20, 4, 100);
+
+        // Write four distinct rows, then park the cursor back on the row
+        // that is about to be rewritten so the second write does not force
+        // any other row dirty just because the cursor vacated it.
+        terminal
+            .feed(b"\x1b[1;1Hrow0\x1b[2;1Hrow1\x1b[3;1Hrow2\x1b[4;1Hrow3\x1b[3;1H")
+            .expect("output must parse");
+        let first = terminal
+            .snapshot()
+            .expect("first snapshot primes the cache");
+        assert_eq!(first.dirty_rows.len(), 4);
+
+        // Overwrite only row 2, in place, with different text.
+        terminal.feed(b"XXXX").expect("output must parse");
+        let second = terminal
+            .snapshot()
+            .expect("second snapshot takes the incremental path");
+
+        // Exactly the rewritten row comes back dirty.
+        assert_eq!(
+            second.dirty_rows.as_ref(),
+            &[false, false, true, false],
+            "expected only row 2 dirty, got {:?}",
+            second.dirty_rows
+        );
+
+        // The row the cache marked dirty must actually hold the new
+        // content, verified against a read that bypasses the snapshot
+        // cache entirely. A regression that flags a row dirty without
+        // refreshing its cells (or that refreshes the wrong cells) leaves
+        // `second.cells` holding stale data while `dirty_rows` still
+        // (correctly) reports the row as dirty.
+        let expected_row2 = "XXXX                "; // 4 written + 16 blanks = 20 cols
+        assert_eq!(expected_row2.len(), second.cols);
+        for (column, expected_char) in expected_row2.chars().enumerate() {
+            let live = terminal
+                .render_cell(2, u16::try_from(column).expect("column fits u16"))
+                .expect("independent point read of the live grid");
+            let cached = &second.cells[2 * second.cols + column];
+            assert_eq!(
+                live.character, expected_char,
+                "column {column}: live grid does not hold the new text"
+            );
+            assert_eq!(
+                cached.character, expected_char,
+                "column {column}: cached snapshot does not hold the new text"
+            );
+            assert_eq!(
+                live, *cached,
+                "column {column}: cached snapshot cell drifted from the live grid"
+            );
+        }
+
+        // Untouched rows keep their original content in the cache.
+        for (row, expected) in [(0usize, "row0"), (1, "row1"), (3, "row3")] {
+            for (column, expected_char) in expected.chars().enumerate() {
+                let cached = &second.cells[row * second.cols + column];
+                assert_eq!(
+                    cached.character, expected_char,
+                    "row {row} column {column} changed but was never written to"
+                );
+            }
+        }
+    }
+}

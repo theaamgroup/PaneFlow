@@ -307,6 +307,15 @@ impl PaneFlowApp {
     /// Persist then quit. A failed write is toasted and quit is delayed so
     /// the message is visible instead of racing the process exit.
     pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
+        // Issue #396: `session.json` only journals the layout, not a dock
+        // file tab's in-memory edits. File-tab close already refuses to drop
+        // those silently (`close_arms_first`); quitting must not be the back
+        // door that does. Arm a toast instead of quitting so the buffer stays
+        // put until the user saves or explicitly closes it.
+        if self.any_dock_file_dirty(cx) {
+            self.show_toast(unsaved_dock_file_quit_toast_message().to_string(), cx);
+            return;
+        }
         // Keep the on-disk session from the previous launch rather than
         // clobbering it with a partial in-memory restore, then quit.
         if self.session_restore.is_some() {
@@ -1424,6 +1433,13 @@ fn session_corruption_toast_message(info: &SessionCorruptionInfo) -> String {
 
 fn session_save_failure_toast_message() -> &'static str {
     "Could not save session. Your layout may be lost on next launch."
+}
+
+/// Shown instead of quitting when a dock file tab has unsaved edits
+/// (issue #396): `session.json` only journals the layout, so a discarded
+/// buffer here is gone for good, unlike a closed pane's scrollback.
+fn unsaved_dock_file_quit_toast_message() -> &'static str {
+    "Save your changes in the dock's open files before quitting."
 }
 
 fn session_tmp_path(path: &Path) -> PathBuf {
@@ -2703,6 +2719,49 @@ mod tests {
         assert!(
             !failure.contains("teardown_all"),
             "an older session may still restore the cwd after a failed final save: {failure}"
+        );
+    }
+
+    /// Issue #396: a dock file tab's edits live only in `CodeView`'s buffer -
+    /// `session.json` never journals them - so quitting past a dirty one would
+    /// discard it silently. The guard has to run before every quit path
+    /// (staged restore, a durable save, and a failed one), which is why this
+    /// asserts on the raw function body rather than one branch: a real
+    /// `PaneFlowApp` cannot be built in a test (its constructor binds a Unix
+    /// socket and spawns PTYs), the same reason
+    /// `graceful_quit_retires_closed_worktrees_only_after_a_durable_save`
+    /// above takes this approach. A sibling test in
+    /// `diff_dock/code/view.rs` (`a_dirty_code_view_is_reported_by_the_dock_file_dirty_check`)
+    /// exercises the predicate itself against a real, edited `CodeView`.
+    #[test]
+    fn quit_after_session_save_refuses_to_discard_a_dirty_dock_file() {
+        let src = include_str!("session.rs");
+        let quit = src
+            .split("pub(crate) fn quit_after_session_save(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Restore a saved session").next())
+            .expect("quit_after_session_save body");
+
+        // The dirty check must be the very first thing the function does,
+        // ahead of the staged-restore and blocking-save branches - otherwise
+        // one of those `cx.quit()` calls would run first.
+        let before_dirty_check = quit
+            .split("if self.any_dock_file_dirty(cx) {")
+            .next()
+            .expect("text before the dirty-dock check");
+        assert!(
+            !before_dirty_check.contains("cx.quit()"),
+            "nothing may quit before the dirty-dock-file check runs: {before_dirty_check}"
+        );
+
+        let dirty_branch = quit
+            .split("if self.any_dock_file_dirty(cx) {")
+            .nth(1)
+            .and_then(|rest| rest.split("return;").next())
+            .expect("dirty-dock-file branch");
+        assert!(
+            !dirty_branch.contains("cx.quit()"),
+            "a dirty dock file tab must never reach cx.quit(): {dirty_branch}"
         );
     }
 
