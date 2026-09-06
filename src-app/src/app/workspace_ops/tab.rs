@@ -354,11 +354,11 @@ impl PaneFlowApp {
         // `close_arms_first` already refuses the same drop from the dock's
         // own close button, and `quit_after_session_save` refuses to quit
         // past one (#396); this is the same guard on the third route.
-        if let Some(tab_id) = closed_tab_id {
-            if self.dock_file_dirty_for_tab(tab_id, cx) {
-                self.show_toast(unsaved_dock_file_close_tab_toast_message().to_string(), cx);
-                return;
-            }
+        if let Some(tab_id) = closed_tab_id
+            && self.dock_file_dirty_for_tab(tab_id, cx)
+        {
+            self.show_toast(unsaved_dock_file_close_tab_toast_message().to_string(), cx);
+            return;
         }
 
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {

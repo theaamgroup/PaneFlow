@@ -778,12 +778,14 @@ mod crash_reporting_tests {
             .clone()
             .expect("crash_reporting_options must install a before_send hook");
 
-        let mut event = sentry::protocol::Event::default();
-        event.message = Some(
-            "panicked at src-app/src/foo.rs:42: /Users/alice/Projects/paneflow/paneflow.json \
-             not found"
-                .to_string(),
-        );
+        let mut event = sentry::protocol::Event {
+            message: Some(
+                "panicked at src-app/src/foo.rs:42: /Users/alice/Projects/paneflow/paneflow.json \
+                 not found"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
         event.exception.values.push(sentry::protocol::Exception {
             ty: "panic".to_string(),
             value: Some(
