@@ -552,6 +552,36 @@ impl TerminalView {
         }
     }
 
+    /// Push a reloaded `paneflow.json` into the view: the render toggles it
+    /// owns, then an unconditional repaint. The font block (`font_family`,
+    /// `font_size`, weight, ligatures) is read from a process-wide cache at
+    /// render time and reaches no entity, so without this notify an idle
+    /// pane hosted behind `Entity::cached` (#429) would keep its old glyphs
+    /// and its old PTY grid until its next output.
+    pub(crate) fn apply_render_config(
+        &mut self,
+        config: &paneflow_config::schema::PaneFlowConfig,
+        cx: &mut Context<Self>,
+    ) {
+        let integrated_glyphs_enabled = config
+            .terminal
+            .as_ref()
+            .is_none_or(|terminal| terminal.resolved_integrated_glyphs());
+        let color_emoji_enabled = config
+            .terminal
+            .as_ref()
+            .is_none_or(|terminal| terminal.resolved_color_emoji());
+        let cursor_color_override = config
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.cursor_color.as_deref())
+            .and_then(hsla_from_hex_color);
+        self.set_integrated_glyphs_enabled(integrated_glyphs_enabled, cx);
+        self.set_color_emoji_enabled(color_emoji_enabled, cx);
+        self.set_cursor_color_override(cursor_color_override, cx);
+        cx.notify();
+    }
+
     /// Issue #299: arm or disarm swap-mode Escape interception on this view.
     pub(crate) fn set_swap_mode_armed(&mut self, armed: bool, cx: &mut Context<Self>) {
         if self.swap_mode_armed != armed {
@@ -2772,6 +2802,25 @@ mod tests {
         assert!(
             probe.hits() > 0,
             "theme change: the terminal view must notify itself"
+        );
+    }
+
+    #[gpui::test]
+    fn a_config_reload_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        // A reload whose render toggles are already current: only the font
+        // block could have moved, and that block reaches no entity, so the
+        // view has to repaint on the reload itself.
+        let config = paneflow_config::schema::PaneFlowConfig::default();
+        terminal.update(cx, |view, cx| view.apply_render_config(&config, cx));
+        cx.run_until_parked();
+
+        assert!(
+            probe.hits() > 0,
+            "config reload: the terminal view must notify itself"
         );
     }
 

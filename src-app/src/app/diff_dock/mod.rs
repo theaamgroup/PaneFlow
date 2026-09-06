@@ -115,6 +115,7 @@ impl PaneFlowApp {
         self.clear_diff_dock_snapshot_state();
         self.diff_dock.resize = None;
         self.diff_dock.h_scroll_drag = None;
+        self.diff_dock.vertical_scrollbar.cancel_drag();
         cx.notify();
     }
 
@@ -315,6 +316,7 @@ impl PaneFlowApp {
         }
         self.diff_dock.split = split;
         self.diff_dock.h_scroll_drag = None;
+        self.diff_dock.vertical_scrollbar.cancel_drag();
         cx.notify();
     }
 

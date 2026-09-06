@@ -72,12 +72,15 @@ impl PaneFlowApp {
             return None;
         }
         let status = self.mcp_status.as_deref()?;
+        let dismissed = &self.cached_config.mcp_bridge_prompt_dismissed;
+        // The pane walk runs every frame the footer renders; skip it unless
+        // some report could raise the callout at all.
+        if !crate::app::sidebar::mcp_callout::any_offerable(status, dismissed) {
+            return None;
+        }
         let live = self.live_mcp_agent_ids(cx);
-        let pending = crate::app::sidebar::mcp_callout::pending_mcp_agent(
-            status,
-            &live,
-            &self.cached_config.mcp_bridge_prompt_dismissed,
-        )?;
+        let pending =
+            crate::app::sidebar::mcp_callout::pending_mcp_agent(status, &live, dismissed)?;
         let agent_id = pending.id.clone();
         let label = pending.label.clone();
         let ui = crate::theme::ui_colors();

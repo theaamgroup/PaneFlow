@@ -790,24 +790,7 @@ impl Pane {
         config: &paneflow_config::schema::PaneFlowConfig,
         cx: &mut Context<Self>,
     ) {
-        let integrated_glyphs_enabled = config
-            .terminal
-            .as_ref()
-            .is_none_or(|terminal| terminal.resolved_integrated_glyphs());
-        let color_emoji_enabled = config
-            .terminal
-            .as_ref()
-            .is_none_or(|terminal| terminal.resolved_color_emoji());
-        let cursor_color_override = config
-            .terminal
-            .as_ref()
-            .and_then(|terminal| terminal.cursor_color.as_deref())
-            .and_then(crate::terminal::view::hsla_from_hex_color);
-        terminal.update(cx, |terminal, cx| {
-            terminal.set_integrated_glyphs_enabled(integrated_glyphs_enabled, cx);
-            terminal.set_color_emoji_enabled(color_emoji_enabled, cx);
-            terminal.set_cursor_color_override(cursor_color_override, cx);
-        });
+        terminal.update(cx, |terminal, cx| terminal.apply_render_config(config, cx));
     }
 
     /// True when `terminal` is this pane's surface.
@@ -1975,9 +1958,18 @@ fn cached_surface_style() -> StyleRefinement {
 }
 
 impl Render for Pane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.surface {
-            PaneSurface::Terminal(t) => t.clone().cached(cached_surface_style()).into_any_element(),
+            PaneSurface::Terminal(t) => {
+                // A cache hit replays last frame's scene without rebuilding
+                // the accessibility tree, so an assistive client gets the
+                // uncached element and its status / search nodes stay put.
+                if window.is_a11y_active() {
+                    t.clone().into_any_element()
+                } else {
+                    t.clone().cached(cached_surface_style()).into_any_element()
+                }
+            }
             PaneSurface::Markdown(m) => m.clone().into_any_element(),
             PaneSurface::Diff(d) => d.clone().into_any_element(),
         };

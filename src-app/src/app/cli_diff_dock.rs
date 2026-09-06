@@ -572,6 +572,7 @@ impl PaneFlowApp {
             // is dropped, or it would resume on the dock's return.
             self.diff_dock.resize = None;
             self.diff_dock.h_scroll_drag = None;
+            self.diff_dock.vertical_scrollbar.cancel_drag();
             return body;
         };
         let ui = crate::theme::ui_colors();

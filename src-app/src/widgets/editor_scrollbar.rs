@@ -66,6 +66,14 @@ pub(crate) struct EditorScrollbar {
 }
 
 impl EditorScrollbar {
+    /// Drop a drag in progress. The state outlives the frame that started
+    /// it, so the dock close and tab switch paths call this: otherwise the
+    /// capture-phase move listener keeps scrolling the next dock from the
+    /// old anchor for as long as the button stays down.
+    pub(crate) fn cancel_drag(&self) {
+        self.drag.set(None);
+    }
+
     /// The gutter element. Place it as the flex-row sibling of the
     /// `overflow_y_scroll` div that `scroll` tracks (give that div
     /// `min_w_0()` so the gutter is never squeezed out).

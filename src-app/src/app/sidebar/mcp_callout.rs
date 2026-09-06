@@ -41,6 +41,15 @@ pub(crate) fn pending_mcp_agent<'a>(
         .min_by(|a, b| a.id.cmp(&b.id))
 }
 
+/// Whether any report could raise the callout at all (not installed and
+/// not dismissed), before the per-frame pane walk that decides which one.
+pub(crate) fn any_offerable(status: &[StatusReport], dismissed: &[String]) -> bool {
+    status.iter().any(|report| {
+        matches!(report.kind, StatusKind::NotInstalled)
+            && !dismissed.iter().any(|d| d == &report.id)
+    })
+}
+
 /// `existing` plus `id`, recorded once: dismissing the same agent twice
 /// (two windows, a race with the config watcher) must not grow the list.
 pub(crate) fn with_dismissed_id(existing: &[String], id: &str) -> Vec<String> {
@@ -75,9 +84,10 @@ pub(crate) fn status_cache_is_stale_for(
 
 impl PaneFlowApp {
     /// MCP-install ids of every agent some pane is running right now, across
-    /// every workspace and tab. Reads each terminal's `detected_agent`, the
-    /// value the PID scan writes, so a pane that merely typed `claude` into
-    /// a shell counts only once the scan confirms it.
+    /// every workspace and tab. Reads each terminal's `detected_agent` only
+    /// once the PID scan has confirmed it (`agent_confirmed`), so a restored
+    /// tab whose launch command declared an agent that never came back, or a
+    /// pane that merely typed `claude` into a shell, raises nothing.
     pub(crate) fn live_mcp_agent_ids(&self, cx: &App) -> BTreeSet<&'static str> {
         self.workspaces
             .iter()
@@ -85,7 +95,13 @@ impl PaneFlowApp {
             .flat_map(|pane| {
                 pane.read(cx)
                     .terminals()
-                    .filter_map(|terminal| terminal.read(cx).terminal.detected_agent)
+                    .filter_map(|terminal| {
+                        let state = &terminal.read(cx).terminal;
+                        state
+                            .agent_confirmed
+                            .then_some(state.detected_agent)
+                            .flatten()
+                    })
                     .collect::<Vec<_>>()
             })
             .filter_map(|agent| agent.mcp_install_id())
@@ -97,7 +113,7 @@ impl PaneFlowApp {
     /// the main thread and never while an install is in flight. Not a poll:
     /// the scan only reports an agent here when a pane newly resolved it.
     pub(crate) fn refresh_mcp_status_for_resolved_agents(
-        &self,
+        &mut self,
         resolved: &BTreeSet<&'static str>,
         cx: &mut Context<Self>,
     ) {
@@ -198,6 +214,21 @@ mod tests {
         // Dismissing the first moves on to the next, not to nothing.
         let pending = pending_mcp_agent(&status, &all, &["claude-code".to_string()]);
         assert_eq!(pending.map(|r| r.id.as_str()), Some("gemini"));
+    }
+
+    #[test]
+    fn any_offerable_gates_the_pane_walk_on_an_undismissed_not_installed_report() {
+        assert!(!any_offerable(&[], &[]));
+        let installed = vec![report(
+            "codex",
+            StatusKind::Installed {
+                path: "/bridge".to_string(),
+            },
+        )];
+        assert!(!any_offerable(&installed, &[]));
+        let not_installed = vec![report("codex", StatusKind::NotInstalled)];
+        assert!(any_offerable(&not_installed, &[]));
+        assert!(!any_offerable(&not_installed, &["codex".to_string()]));
     }
 
     #[test]

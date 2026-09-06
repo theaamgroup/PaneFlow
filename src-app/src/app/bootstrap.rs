@@ -849,6 +849,7 @@ impl PaneFlowApp {
             mcp_status: None,
             mcp_install: None,
             mcp_busy: false,
+            mcp_probe_generation: 0,
             sidebar_scroll: gpui::ScrollHandle::new(),
             effective_shortcuts,
             recording_shortcut_idx: None,

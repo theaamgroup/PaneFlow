@@ -1433,6 +1433,11 @@ struct PaneFlowApp {
     mcp_install: Option<Result<Vec<paneflow_mcp_install::InstallReport>, String>>,
     /// Codex settings: an MCP-bridge install is running.
     mcp_busy: bool,
+    /// Monotonic token for MCP status probes: a probe whose token is stale
+    /// when it lands (a newer probe, or an install started after it) is
+    /// discarded, so a pre-install read can never overwrite the install's
+    /// own status.
+    mcp_probe_generation: u64,
     /// Scroll state for the persistent sidebar workspace list.
     /// Driven by GPUI's `overflow_y_scroll + track_scroll`; the
     /// visible scroll bar has been removed but the handle is still

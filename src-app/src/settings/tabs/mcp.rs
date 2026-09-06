@@ -41,6 +41,30 @@ pub(crate) fn mcp_button_text_color(ui: crate::theme::UiColors, enabled: bool) -
     }
 }
 
+/// One line for a toast when an install did not fully succeed: the
+/// wholesale refusal, or every agent whose write failed. `None` when every
+/// agent installed, updated, was current, or was absent.
+fn install_failure_summary(
+    install: &Result<Vec<paneflow_mcp_install::InstallReport>, String>,
+) -> Option<String> {
+    match install {
+        Err(message) => Some(format!("MCP bridge install failed: {message}")),
+        Ok(reports) => {
+            let failed: Vec<String> = reports
+                .iter()
+                .filter_map(|report| match &report.kind {
+                    paneflow_mcp_install::InstallKind::Error(reason) => {
+                        Some(format!("{}: {reason}", report.label))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (!failed.is_empty())
+                .then(|| format!("MCP bridge install failed for {}", failed.join("; ")))
+        }
+    }
+}
+
 impl PaneFlowApp {
     pub(crate) fn render_mcp_servers_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = crate::theme::ui_colors();
@@ -206,7 +230,15 @@ impl PaneFlowApp {
     /// Refresh the cached MCP bridge status off the main thread. Reads each
     /// agent's config (no writes), then stores the snapshot + repaints. Called
     /// when the settings page opens and when the MCP page is selected.
-    pub(crate) fn refresh_mcp_status(&self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_mcp_status(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_busy {
+            // The install's completion stores its own fresh probe; one
+            // started now would read pre-install config and could land
+            // after it.
+            return;
+        }
+        self.mcp_probe_generation += 1;
+        let generation = self.mcp_probe_generation;
         cx.spawn(async move |this, cx| {
             let status = smol::unblock(|| {
                 let bridge = crate::runtime_paths::bridge_binary_path();
@@ -214,6 +246,9 @@ impl PaneFlowApp {
             })
             .await;
             let _ = this.update(cx, |this, cx| {
+                if this.mcp_probe_generation != generation {
+                    return;
+                }
                 this.mcp_status = Some(status);
                 cx.notify();
             });
@@ -236,6 +271,8 @@ impl PaneFlowApp {
             return;
         }
         self.mcp_busy = true;
+        // Any probe still in flight read pre-install config: retire it.
+        self.mcp_probe_generation += 1;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (install, status) = smol::unblock(|| {
@@ -255,6 +292,11 @@ impl PaneFlowApp {
             .await;
             let _ = this.update(cx, |this, cx| {
                 this.mcp_busy = false;
+                // The sidebar callout (#443) shows no result line of its
+                // own, so a failure has to surface somewhere the user is.
+                if let Some(message) = install_failure_summary(&install) {
+                    this.show_toast(message, cx);
+                }
                 this.mcp_install = Some(install);
                 this.mcp_status = Some(status);
                 cx.notify();
@@ -275,6 +317,37 @@ fn danger_color() -> gpui::Hsla {
 mod tests {
     use super::*;
     use crate::terminal::element::apca_contrast;
+
+    #[test]
+    fn install_failure_summary_names_the_refusal_or_every_failed_agent() {
+        use paneflow_mcp_install::{InstallKind, InstallReport};
+        let report = |id: &str, kind: InstallKind| InstallReport {
+            id: id.to_string(),
+            label: format!("Label {id}"),
+            kind,
+        };
+        assert_eq!(
+            install_failure_summary(&Err("no bridge".to_string())).as_deref(),
+            Some("MCP bridge install failed: no bridge")
+        );
+        let all_good = vec![
+            report("codex", InstallKind::Installed),
+            report("gemini", InstallKind::AlreadyCurrent),
+            report("opencode", InstallKind::SkippedAbsent),
+        ];
+        assert_eq!(install_failure_summary(&Ok(all_good)), None);
+        let mixed = vec![
+            report("codex", InstallKind::Updated),
+            report("claude-code", InstallKind::Error("read-only".to_string())),
+            report("gemini", InstallKind::Error("bad json".to_string())),
+        ];
+        assert_eq!(
+            install_failure_summary(&Ok(mixed)).as_deref(),
+            Some(
+                "MCP bridge install failed for Label claude-code: read-only; Label gemini: bad json"
+            )
+        );
+    }
 
     #[test]
     fn enabled_mcp_button_label_is_readable_on_every_bundled_theme() {
