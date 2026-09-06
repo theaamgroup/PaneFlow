@@ -276,35 +276,62 @@ pub(super) fn read_capped(path: &std::path::Path, limit: u64) -> std::io::Result
 /// own timeout. Matches the session-restore and IPC cwd probe bounds.
 const GIT_DIR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// CWDs whose helper thread has not finished. A timeout abandons the caller
-/// but leaves the waiter here so the 2 s `probe_branches` tick cannot spawn
-/// another one on the same hung mount.
-static GIT_DIR_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+/// One in-flight `.git` walk per cwd, shared with overlapping callers so a
+/// healthy repo is not reported as missing for one tick.
+struct GitDirSharedProbe {
+    result: std::sync::Mutex<Option<Option<std::path::PathBuf>>>,
+    cond: std::sync::Condvar,
+    started: std::time::Instant,
+}
+
+type GitDirProbeMap = std::collections::HashMap<String, std::sync::Arc<GitDirSharedProbe>>;
+
+static GIT_DIR_PROBES: std::sync::LazyLock<std::sync::Mutex<GitDirProbeMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(GitDirProbeMap::new()));
 
 #[cfg(test)]
 static GIT_DIR_PROBE_SPAWNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-fn git_dir_in_flight() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
-    GIT_DIR_IN_FLIGHT
+fn git_dir_probes() -> std::sync::MutexGuard<'static, GitDirProbeMap> {
+    GIT_DIR_PROBES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn claim_git_dir_probe(cwd: &str) -> bool {
-    git_dir_in_flight().insert(cwd.to_string())
-}
-
-fn release_git_dir_probe(cwd: &str) {
-    git_dir_in_flight().remove(cwd);
-}
-
-struct GitDirProbeGuard(String);
-
-impl Drop for GitDirProbeGuard {
-    fn drop(&mut self) {
-        release_git_dir_probe(&self.0);
+fn wait_git_dir_probe(probe: &GitDirSharedProbe) -> Option<std::path::PathBuf> {
+    let remaining = GIT_DIR_PROBE_TIMEOUT.saturating_sub(probe.started.elapsed());
+    let slot = probe
+        .result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(result) = slot.as_ref() {
+        return result.clone();
     }
+    if remaining.is_zero() {
+        return None;
+    }
+    let (slot, timed_out) = probe
+        .cond
+        .wait_timeout(slot, remaining)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if timed_out.timed_out() {
+        log::warn!(
+            "git: cwd probe did not answer stat within {GIT_DIR_PROBE_TIMEOUT:?}; treating it as not a repo"
+        );
+    }
+    slot.as_ref().cloned().flatten()
+}
+
+fn publish_git_dir_probe(probe: &GitDirSharedProbe, cwd: &str, result: Option<std::path::PathBuf>) {
+    {
+        let mut slot = probe
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(result);
+    }
+    probe.cond.notify_all();
+    git_dir_probes().remove(cwd);
 }
 
 /// Find the `.git` directory for a working directory.
@@ -316,23 +343,37 @@ impl Drop for GitDirProbeGuard {
 /// Issue #403: `Path::exists` has no deadline, and `stat` on an unmounted
 /// SMB/NFS/iCloud volume can block for tens of seconds. The walk therefore
 /// runs on a helper thread bounded by [`GIT_DIR_PROBE_TIMEOUT`]; a late
-/// answer counts as "no repo". The stalled thread is left to unwind on its
-/// own, and a second call for the same cwd reuses that in-flight waiter
-/// instead of spawning another (the sidebar poll is every 2 s).
+/// answer counts as "no repo". A second call for the same cwd does not spawn
+/// another waiter: it shares the in-flight result up to the remaining budget.
 pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
-    if !claim_git_dir_probe(cwd) {
-        return None;
+    let (probe, spawned_here) = {
+        let mut map = git_dir_probes();
+        if let Some(existing) = map.get(cwd).cloned() {
+            (existing, false)
+        } else {
+            let probe = std::sync::Arc::new(GitDirSharedProbe {
+                result: std::sync::Mutex::new(None),
+                cond: std::sync::Condvar::new(),
+                started: std::time::Instant::now(),
+            });
+            map.insert(cwd.to_string(), std::sync::Arc::clone(&probe));
+            (probe, true)
+        }
+    };
+    if !spawned_here {
+        return wait_git_dir_probe(&probe);
     }
-    let (tx, rx) = std::sync::mpsc::channel();
+
     let owned = cwd.to_string();
+    let worker = std::sync::Arc::clone(&probe);
     let spawned = std::thread::Builder::new()
         .name("git-dir-probe".to_string())
         .spawn(move || {
-            let _release = GitDirProbeGuard(owned.clone());
-            let _ = tx.send(find_git_dir_blocking(&owned));
+            let result = find_git_dir_blocking(&owned);
+            publish_git_dir_probe(&worker, &owned, result);
         });
     if let Err(err) = spawned {
-        release_git_dir_probe(cwd);
+        publish_git_dir_probe(&probe, cwd, None);
         log::warn!("git: could not spawn .git probe for {cwd}: {err}; treating it as not a repo");
         return None;
     }
@@ -343,20 +384,7 @@ pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(cwd.to_string());
     }
-    match rx.recv_timeout(GIT_DIR_PROBE_TIMEOUT) {
-        Ok(result) => {
-            // Close the success-path race against `probe_branches`' second
-            // call: the worker's Drop also releases, but only after send.
-            release_git_dir_probe(cwd);
-            result
-        }
-        Err(_) => {
-            log::warn!(
-                "git: cwd {cwd} did not answer stat within {GIT_DIR_PROBE_TIMEOUT:?}; treating it as not a repo"
-            );
-            None
-        }
-    }
+    wait_git_dir_probe(&probe)
 }
 
 /// Test-only stand-in for a dead network mount: probing `.git` inside any
@@ -369,20 +397,38 @@ static STALLED_GIT_PROBE_DIRS: std::sync::Mutex<Vec<std::path::PathBuf>> =
 #[cfg(test)]
 const STALLED_GIT_PROBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Test-only pause that still answers truthfully, so two overlapping callers
+/// can share one in-flight walk of a real repo.
+#[cfg(test)]
+static SLOW_GIT_PROBE_DIRS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+const SLOW_GIT_PROBE_DELAY: std::time::Duration = std::time::Duration::from_millis(80);
+
 /// `Path::exists` on a `.git` candidate as the walk sees it. Under test a
 /// candidate whose parent is registered in [`STALLED_GIT_PROBE_DIRS`]
 /// behaves like an entry on an unmounted volume.
 fn git_entry_exists(candidate: &std::path::Path) -> bool {
     #[cfg(test)]
     {
+        let parent = candidate.parent();
         let stalled = STALLED_GIT_PROBE_DIRS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .any(|dir| Some(dir.as_path()) == candidate.parent());
+            .any(|dir| Some(dir.as_path()) == parent);
         if stalled {
             std::thread::sleep(STALLED_GIT_PROBE_DELAY);
             return false;
+        }
+        let slow = SLOW_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|dir| Some(dir.as_path()) == parent);
+        if slow {
+            std::thread::sleep(SLOW_GIT_PROBE_DELAY);
         }
     }
     candidate.exists()
@@ -845,6 +891,39 @@ mod tests {
         assert_eq!(
             spawned_after_second, 1,
             "a second call while the first is blocked must not spawn another waiter"
+        );
+    }
+
+    #[test]
+    fn find_git_dir_shares_an_in_flight_result_with_a_second_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        SLOW_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(dir.path().to_path_buf());
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let cwd_b = cwd.clone();
+        let expected = git_dir.clone();
+
+        let first = std::thread::spawn(move || find_git_dir(&cwd));
+        std::thread::sleep(SLOW_GIT_PROBE_DELAY / 4);
+        let second = std::thread::spawn(move || find_git_dir(&cwd_b));
+        let first = first.join().expect("first probe");
+        let second = second.join().expect("second probe");
+
+        SLOW_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|path| path != dir.path());
+
+        assert_eq!(first, Some(expected.clone()));
+        assert_eq!(second, Some(expected));
+        assert_eq!(
+            git_dir_probe_spawn_count(dir.path().to_str().unwrap()),
+            1,
+            "overlapping callers must share one waiter"
         );
     }
 
