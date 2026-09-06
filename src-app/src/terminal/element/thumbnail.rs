@@ -409,7 +409,7 @@ mod tests {
         use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
 
         let defaults = FontSettings {
-            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            font: gpui::font("JetBrainsMono Nerd Font"),
             size: 13.0,
             line_height: DEFAULT_LINE_HEIGHT,
             cell_width: DEFAULT_CELL_WIDTH,
@@ -433,7 +433,7 @@ mod tests {
         use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
 
         let mut settings = FontSettings {
-            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            font: gpui::font("JetBrainsMono Nerd Font"),
             size: 13.0,
             line_height: DEFAULT_LINE_HEIGHT,
             cell_width: DEFAULT_CELL_WIDTH,

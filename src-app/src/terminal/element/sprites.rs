@@ -228,12 +228,8 @@ pub(super) fn sprite_for(c: char) -> Option<Sprite> {
 }
 
 /// Private Use Area codepoints, where Nerd Fonts put their icons. These get
-/// the icon constraint (`paint/text.rs`) instead of the font's raw placement.
-///
-/// Ported ahead of its caller: the icon constraint (#420) is what reads it
-/// from the layout pass. Until that lands the test module is its only user,
-/// hence the gate; lift it when the constraint is wired.
-#[cfg(test)]
+/// the icon constraint (`paint/text.rs`, #420) instead of the font's raw
+/// placement.
 pub(super) fn is_private_use(c: char) -> bool {
     matches!(c as u32, 0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd)
 }

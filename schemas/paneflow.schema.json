@@ -48,7 +48,7 @@
     },
     "font_family": {
       "type": ["string", "null"],
-      "description": "Font family. Default: bundled JetBrainsMono Nerd Font Mono. Accepts the aliases '.PaneflowMono' and 'JetBrainsMono NFM' for that default, '.PaneflowSans' for bundled Geist, the concrete embedded names ('JetBrainsMono Nerd Font Mono', 'Geist Mono', 'Geist', 'Lilex', 'IBM Plex Mono', 'IBM Plex Sans'), or any installed system monospace family. Unknown families fall back to the default with a warning."
+      "description": "Font family. Default: bundled JetBrainsMono Nerd Font. Accepts the aliases '.PaneflowMono', 'JetBrainsMono NF', 'JetBrainsMono NFM', and the legacy 'JetBrainsMono Nerd Font Mono' for that default, '.PaneflowSans' for bundled Geist, the concrete embedded names ('JetBrainsMono Nerd Font', 'Geist Mono', 'Geist', 'Lilex', 'IBM Plex Mono', 'IBM Plex Sans'), or any installed system monospace family. Unknown families fall back to the default with a warning."
     },
     "font_fallbacks": {
       "type": ["array", "null"],
