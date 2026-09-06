@@ -296,31 +296,51 @@ fn ensure_binaries_extracted_into(cache_root: &Path, exe: &Path) -> Result<PathB
             })
             .collect();
 
+        // Lease first so a concurrent prune of `bin/<version>/` sees a live
+        // holder before the wrappers exist (#442).
+        write_version_lock(&target_dir);
         extract_into(&entries, &target_dir)?;
         link_cli_into(&target_dir, exe)?;
-        write_version_lock(&target_dir);
         prune_stale_version_dirs(&target_dir);
         Ok(target_dir)
     }
 }
 
-/// Lease file written into `bin/<version>/` so a concurrent older process
-/// (`PANEFLOW_ALLOW_MULTIPLE`) can keep its wrappers on PATH. Hidden so it
-/// is never mistaken for a shim.
-const VERSION_LOCK_NAME: &str = ".paneflow-live";
+/// Per-process lease prefix inside `bin/<version>/`. Hidden so it is never
+/// mistaken for a shim. The pid is in the filename so two same-version
+/// instances (`PANEFLOW_ALLOW_MULTIPLE`) do not overwrite each other.
+const VERSION_LOCK_PREFIX: &str = ".paneflow-live.";
+/// Single-file lease written by the first #442 landing. Still honored so a
+/// process that has not restarted keeps its dir.
+const VERSION_LOCK_LEGACY: &str = ".paneflow-live";
 
 struct VersionLock {
     pid: u32,
     start: Option<u64>,
 }
 
+fn version_lock_name(pid: u32) -> String {
+    format!("{VERSION_LOCK_PREFIX}{pid}")
+}
+
 fn write_version_lock(dir: &Path) {
     let pid = std::process::id();
-    let body = match process_start_time(pid) {
+    write_version_lock_for(dir, pid, process_start_time(pid));
+}
+
+fn write_version_lock_for(dir: &Path, pid: u32, start: Option<u64>) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::debug!(
+            "#442: could not create {} for live lock: {e}",
+            dir.display()
+        );
+        return;
+    }
+    let body = match start {
         Some(start) => format!("pid={pid}\nstart={start}\n"),
         None => format!("pid={pid}\n"),
     };
-    let path = dir.join(VERSION_LOCK_NAME);
+    let path = dir.join(version_lock_name(pid));
     if let Err(e) = std::fs::write(&path, body) {
         log::debug!("#442: could not write live lock {}: {e}", path.display());
     }
@@ -337,6 +357,19 @@ fn parse_version_lock(body: &str) -> Option<VersionLock> {
         }
     }
     Some(VersionLock { pid: pid?, start })
+}
+
+fn parse_lease_file(name: &std::ffi::OsStr, body: &str) -> Option<VersionLock> {
+    let name = name.to_str()?;
+    if name == VERSION_LOCK_LEGACY {
+        return parse_version_lock(body);
+    }
+    let rest = name.strip_prefix(VERSION_LOCK_PREFIX)?;
+    let pid: u32 = rest.parse().ok()?;
+    let start = body
+        .lines()
+        .find_map(|line| line.strip_prefix("start=")?.trim().parse().ok());
+    Some(VersionLock { pid, start })
 }
 
 fn process_start_time(pid: u32) -> Option<u64> {
@@ -379,14 +412,36 @@ fn lock_holder_is_live(pid: u32, pinned_start: Option<u64>) -> bool {
 }
 
 fn version_dir_in_use(dir: &Path) -> bool {
-    let path = dir.join(VERSION_LOCK_NAME);
-    match std::fs::read_to_string(&path) {
-        Ok(body) => {
-            parse_version_lock(&body).is_some_and(|lock| lock_holder_is_live(lock.pid, lock.start))
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return true,
+        };
+        let name = entry.file_name();
+        if name != std::ffi::OsStr::new(VERSION_LOCK_LEGACY)
+            && !name
+                .to_str()
+                .is_some_and(|n| n.starts_with(VERSION_LOCK_PREFIX))
+        {
+            continue;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => true,
+        let body = match std::fs::read_to_string(entry.path()) {
+            Ok(body) => body,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return true,
+        };
+        if parse_lease_file(&name, &body)
+            .is_some_and(|lock| lock_holder_is_live(lock.pid, lock.start))
+        {
+            return true;
+        }
     }
+    false
 }
 
 /// #442: remove sibling `bin/<other-version>/` directories once this
@@ -395,10 +450,10 @@ fn version_dir_in_use(dir: &Path) -> bool {
 /// rewritten for every new pane, and the bridge and hook binaries live at
 /// stable non-versioned paths under `data_dir()`.
 ///
-/// A sibling whose `.paneflow-live` lock still names a live process
-/// (pid + start time, the `pid_resolve` reuse check) is left alone so two
-/// PaneFlow versions can run concurrently. This process's own `VERSION`
-/// directory is never a prune target.
+/// A sibling is kept if **any** per-process `.paneflow-live.<pid>` lease
+/// (or a legacy `.paneflow-live`) still names a live process. Prune only
+/// when every lease is dead (pid gone or start-time mismatch). This
+/// process's own `VERSION` directory is never a prune target.
 ///
 /// Best-effort and never fatal: extraction has already succeeded. The
 /// sweep is all-or-nothing and confined to `bin/`: if any entry beside
@@ -1115,13 +1170,70 @@ mod tests {
         let stale = bin.join("0.1.1");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("claude"), b"old shim").unwrap();
-        std::fs::write(stale.join(VERSION_LOCK_NAME), "pid=1999999999\nstart=1\n").unwrap();
+        write_version_lock_for(&stale, 1_999_999_999, Some(1));
 
         ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
 
         assert!(
             !stale.exists(),
             "#442: a stale lock (dead pid) may be pruned"
+        );
+    }
+
+    #[test]
+    fn extraction_keeps_a_dir_when_one_of_two_leases_is_still_live() {
+        // Two same-version instances each write `.paneflow-live.<pid>`.
+        // Killing one must not let a newer extract prune the dir.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let live = bin.join("0.1.1");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("claude"), b"old shim").unwrap();
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let child_pid = child.id();
+        write_version_lock_for(&live, child_pid, process_start_time(child_pid));
+        write_version_lock(&live);
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(
+            live.is_dir(),
+            "#442: one dead sibling lease must not prune a dir this process still holds"
+        );
+    }
+
+    #[test]
+    fn extraction_prunes_a_dir_when_every_lease_is_dead() {
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale = bin.join("0.1.1");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("claude"), b"old shim").unwrap();
+        write_version_lock_for(&stale, 1_999_999_998, Some(1));
+        write_version_lock_for(&stale, 1_999_999_999, Some(2));
+
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(
+            !stale.exists(),
+            "#442: a dir whose every lease is dead may be pruned"
         );
     }
 
