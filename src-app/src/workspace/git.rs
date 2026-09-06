@@ -268,16 +268,83 @@ pub(super) fn read_capped(path: &std::path::Path, limit: u64) -> std::io::Result
     Ok(content)
 }
 
+/// Longest [`find_git_dir`] may hold its caller. A local directory answers
+/// in microseconds; only a dead network or cloud mount runs this out, and
+/// such a cwd is reported as "not a repo" rather than letting `stat` pin the
+/// caller (the 2 s sidebar branch poll, or the GPUI thread) for the mount's
+/// own timeout. Matches the session-restore and IPC cwd probe bounds.
+const GIT_DIR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Find the `.git` directory for a working directory.
 ///
 /// Walks up from `cwd` to find the nearest `.git` entry. For worktrees (`.git`
 /// is a file), follows the `gitdir:` pointer to return the actual git metadata
 /// directory where `HEAD` and `index` reside.
+///
+/// Issue #403: `Path::exists` has no deadline, and `stat` on an unmounted
+/// SMB/NFS/iCloud volume can block for tens of seconds. The walk therefore
+/// runs on a helper thread bounded by [`GIT_DIR_PROBE_TIMEOUT`]; a late
+/// answer counts as "no repo", and the stalled thread is left to unwind on
+/// its own once the filesystem finally answers.
 pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = cwd.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("git-dir-probe".to_string())
+        .spawn(move || {
+            let _ = tx.send(find_git_dir_blocking(&owned));
+        });
+    if let Err(err) = spawned {
+        log::warn!("git: could not spawn .git probe for {cwd}: {err}; treating it as not a repo");
+        return None;
+    }
+    match rx.recv_timeout(GIT_DIR_PROBE_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => {
+            log::warn!(
+                "git: cwd {cwd} did not answer stat within {GIT_DIR_PROBE_TIMEOUT:?}; treating it as not a repo"
+            );
+            None
+        }
+    }
+}
+
+/// Test-only stand-in for a dead network mount: probing `.git` inside any
+/// directory listed here stalls for [`STALLED_GIT_PROBE_DELAY`] before
+/// answering "absent".
+#[cfg(test)]
+static STALLED_GIT_PROBE_DIRS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+const STALLED_GIT_PROBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `Path::exists` on a `.git` candidate as the walk sees it. Under test a
+/// candidate whose parent is registered in [`STALLED_GIT_PROBE_DIRS`]
+/// behaves like an entry on an unmounted volume.
+fn git_entry_exists(candidate: &std::path::Path) -> bool {
+    #[cfg(test)]
+    {
+        let stalled = STALLED_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|dir| Some(dir.as_path()) == candidate.parent());
+        if stalled {
+            std::thread::sleep(STALLED_GIT_PROBE_DELAY);
+            return false;
+        }
+    }
+    candidate.exists()
+}
+
+/// The blocking half of [`find_git_dir`]: every `stat` in the walk happens
+/// here.
+fn find_git_dir_blocking(cwd: &str) -> Option<std::path::PathBuf> {
     let mut search_dir = std::path::Path::new(cwd);
     let git_path = loop {
         let candidate = search_dir.join(".git");
-        if candidate.exists() {
+        if git_entry_exists(&candidate) {
             break candidate;
         }
         search_dir = search_dir.parent()?;
@@ -667,6 +734,36 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "FIFO HEAD must not block parse_head: {elapsed:?}"
         );
+    }
+
+    /// Issue #403: a cwd on a dead network mount can stall `stat` for tens
+    /// of seconds, and `probe_branches` calls this every two seconds, so the
+    /// walk must answer within a bounded window instead of holding the
+    /// caller for the mount's own timeout.
+    #[test]
+    fn find_git_dir_returns_within_bound_when_stat_stalls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stalled = tmp.path().join("unmounted-volume");
+        STALLED_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(stalled.clone());
+        let bound = STALLED_GIT_PROBE_DELAY / 2;
+
+        let started = std::time::Instant::now();
+        let result = find_git_dir(stalled.to_str().unwrap());
+        let elapsed = started.elapsed();
+
+        STALLED_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|dir| dir != &stalled);
+
+        assert!(
+            elapsed < bound,
+            "find_git_dir blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+        assert_eq!(result, None, "a stalled cwd must not be trusted");
     }
 
     #[test]
