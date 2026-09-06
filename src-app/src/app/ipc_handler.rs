@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, BackgroundExecutor, Context, Entity, Focusable};
 use paneflow_config::schema::{LayoutNode, PaneFlowConfig, TerminalSurfaceProfile};
@@ -1153,8 +1153,8 @@ struct SurfaceEntry {
     title: String,
     cwd: Option<String>,
     cmd: Option<String>,
-    /// Resolved agent binary (`claude`, `codex`, …) when the pane already
-    /// has one from the shim identity or process scan.
+    /// Agent binary used for naming when scan-confirmed or still-declared.
+    /// Restored last-known identities are omitted.
     agent: Option<String>,
     /// Positional index of the workspace this surface lives in.
     workspace_idx: usize,
@@ -1199,7 +1199,13 @@ fn surface_entry_for(
             exported_surface_title(&ts.title),
             ts.current_cwd.clone(),
             ts.foreground_command(),
-            ts.detected_agent.map(|a| a.binary().to_string()),
+            crate::workspace::surface_naming::agent_for_surface_name(
+                ts.detected_agent.map(|a| a.binary()),
+                ts.agent_confirmed,
+                ts.agent_declared_until,
+                Instant::now(),
+            )
+            .map(str::to_string),
         )
     };
     SurfaceEntry {
