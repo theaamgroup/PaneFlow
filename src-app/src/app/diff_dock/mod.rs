@@ -162,6 +162,10 @@ impl PaneFlowApp {
         self.diff_dock.collapsed.clear();
         self.diff_dock.expanded_folds.clear();
         self.diff_dock.scroll = ScrollHandle::new();
+        // The vertical scrollbar's drag anchor and units-per-pixel were
+        // measured against the handle just replaced; a thumb still held
+        // would otherwise scroll the new document from the old anchor.
+        self.diff_dock.vertical_scrollbar.cancel_drag();
         self.diff_dock.h_offsets = std::rc::Rc::new(Vec::new());
     }
 

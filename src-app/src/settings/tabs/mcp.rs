@@ -313,6 +313,12 @@ impl PaneFlowApp {
                 }
                 this.mcp_install = Some(install);
                 this.mcp_status = Some(status);
+                // An agent a pane resolved while the install ran was not in
+                // the `known_present` this task captured, and its scan event
+                // was dropped by the busy guard; re-probe now if the fresh
+                // status has no verdict for a live agent.
+                let live = this.live_mcp_agent_ids(cx);
+                this.refresh_mcp_status_for_resolved_agents(&live, cx);
                 cx.notify();
             });
         })
