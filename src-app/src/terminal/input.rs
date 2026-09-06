@@ -343,8 +343,14 @@ impl TerminalView {
             None
         };
 
-        // Reset cursor blink on keystroke
-        self.cursor_visible = true;
+        // Reset cursor blink on keystroke. A key that reveals a hidden
+        // cursor is a visual change of its own: the pane is hosted behind
+        // `Entity::cached` (#429), so it has to notify even when the key
+        // ends up writing to the PTY without any other repaint.
+        if !self.cursor_visible {
+            self.cursor_visible = true;
+            cx.notify();
+        }
 
         let keystroke = &event.keystroke;
 

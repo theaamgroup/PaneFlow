@@ -239,10 +239,17 @@ impl PaneFlowApp {
         }
         self.mcp_probe_generation += 1;
         let generation = self.mcp_probe_generation;
+        // Agents the pane scan has seen running count as present even when
+        // this process's PATH lacks their binary (a Finder launch) and they
+        // have no config file yet.
+        let known_present: Vec<&'static str> = self.live_mcp_agent_ids(cx).into_iter().collect();
         cx.spawn(async move |this, cx| {
-            let status = smol::unblock(|| {
+            let status = smol::unblock(move || {
                 let bridge = crate::runtime_paths::bridge_binary_path();
-                paneflow_mcp_install::status_all(bridge.as_deref())
+                paneflow_mcp_install::status_all_with_known_present(
+                    bridge.as_deref(),
+                    &known_present,
+                )
             })
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -274,8 +281,9 @@ impl PaneFlowApp {
         // Any probe still in flight read pre-install config: retire it.
         self.mcp_probe_generation += 1;
         cx.notify();
+        let known_present: Vec<&'static str> = self.live_mcp_agent_ids(cx).into_iter().collect();
         cx.spawn(async move |this, cx| {
-            let (install, status) = smol::unblock(|| {
+            let (install, status) = smol::unblock(move || {
                 let bridge = match crate::ai_hooks::extract::ensure_bridge_extracted() {
                     Ok(p) => Some(p),
                     Err(e) => {
@@ -285,8 +293,14 @@ impl PaneFlowApp {
                         crate::runtime_paths::bridge_binary_path()
                     }
                 };
-                let install = paneflow_mcp_install::install_all(bridge.as_deref());
-                let status = paneflow_mcp_install::status_all(bridge.as_deref());
+                let install = paneflow_mcp_install::install_all_with_known_present(
+                    bridge.as_deref(),
+                    &known_present,
+                );
+                let status = paneflow_mcp_install::status_all_with_known_present(
+                    bridge.as_deref(),
+                    &known_present,
+                );
                 (install, status)
             })
             .await;

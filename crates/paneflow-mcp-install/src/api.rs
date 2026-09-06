@@ -89,16 +89,43 @@ pub fn install_all(bridge: Option<&Path>) -> Result<Vec<AgentResult<InstallKind>
     install_with(bridge, &agents::default_writers())
 }
 
+/// [`install_all`], treating every agent whose id is in `known_present` as
+/// present whatever the PATH scan says. The GUI passes the agents its pane
+/// process scan has seen running: a launcher started from Finder can carry
+/// a `PATH` without the agent's binary while a login shell in a pane still
+/// runs it, and that agent may have no config file yet.
+pub fn install_all_with_known_present(
+    bridge: Option<&Path>,
+    known_present: &[&str],
+) -> Result<Vec<AgentResult<InstallKind>>, String> {
+    install_with_known_present(bridge, &agents::default_writers(), known_present)
+}
+
 pub(crate) fn install_with(
     bridge: Option<&Path>,
     writers: &[Box<dyn AgentConfigWriter>],
+) -> Result<Vec<AgentResult<InstallKind>>, String> {
+    install_with_known_present(bridge, writers, &[])
+}
+
+fn writer_is_present(w: &dyn AgentConfigWriter, known_present: &[&str]) -> bool {
+    known_present.contains(&w.id()) || w.presence().is_present()
+}
+
+pub(crate) fn install_with_known_present(
+    bridge: Option<&Path>,
+    writers: &[Box<dyn AgentConfigWriter>],
+    known_present: &[&str],
 ) -> Result<Vec<AgentResult<InstallKind>>, String> {
     // US-038: resolve each writer's presence EXACTLY ONCE. `presence()` does a
     // PATH scan (via `which::which`, heavier on Windows `PATH × PATHEXT`); the
     // old code called it twice per writer - both wasteful and a benign TOCTOU
     // (the two non-atomic reads could disagree within one pass). Compute up
     // front, derive `any_present`, and iterate the cached booleans.
-    let presences: Vec<bool> = writers.iter().map(|w| w.presence().is_present()).collect();
+    let presences: Vec<bool> = writers
+        .iter()
+        .map(|w| writer_is_present(w.as_ref(), known_present))
+        .collect();
     let any_present = presences.iter().any(|&p| p);
     // Only require the bridge binary when there is at least one agent to
     // write to - a machine with no agents is "nothing to do", not an error.
@@ -155,14 +182,33 @@ pub fn status_all(bridge: Option<&Path>) -> Vec<AgentResult<StatusKind>> {
     status_with(bridge, &agents::default_writers())
 }
 
+/// [`status_all`], treating every agent whose id is in `known_present` as
+/// present whatever the PATH scan says (see
+/// [`install_all_with_known_present`]).
+#[must_use]
+pub fn status_all_with_known_present(
+    bridge: Option<&Path>,
+    known_present: &[&str],
+) -> Vec<AgentResult<StatusKind>> {
+    status_with_known_present(bridge, &agents::default_writers(), known_present)
+}
+
 pub(crate) fn status_with(
     bridge: Option<&Path>,
     writers: &[Box<dyn AgentConfigWriter>],
 ) -> Vec<AgentResult<StatusKind>> {
+    status_with_known_present(bridge, writers, &[])
+}
+
+pub(crate) fn status_with_known_present(
+    bridge: Option<&Path>,
+    writers: &[Box<dyn AgentConfigWriter>],
+    known_present: &[&str],
+) -> Vec<AgentResult<StatusKind>> {
     writers
         .iter()
         .map(|w| {
-            let kind = if w.presence().is_present() {
+            let kind = if writer_is_present(w.as_ref(), known_present) {
                 match w.status(bridge) {
                     Ok(StatusOutcome::Installed { path }) => StatusKind::Installed { path },
                     Ok(StatusOutcome::StalePath { found, expected }) => {
@@ -284,6 +330,30 @@ mod tests {
         assert_eq!(res[0].kind, InstallKind::Installed);
         assert_eq!(res[1].kind, InstallKind::AlreadyCurrent);
         assert_eq!(res[2].kind, InstallKind::SkippedAbsent);
+    }
+
+    #[test]
+    fn a_known_present_agent_is_probed_and_installed_despite_an_absent_path_scan() {
+        // The pane process scan saw the agent running; the launcher's PATH
+        // does not carry it and it has no config file yet.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bridge = dir.path().join("paneflow-mcp");
+        std::fs::write(&bridge, b"x").unwrap();
+        let writers = vec![boxed(Mock::absent("codex")), boxed(Mock::absent("gemini"))];
+
+        let status = status_with_known_present(Some(&bridge), &writers, &["codex"]);
+        assert!(matches!(status[0].kind, StatusKind::Installed { .. }));
+        assert_eq!(status[1].kind, StatusKind::NotDetected);
+
+        let res = install_with_known_present(Some(&bridge), &writers, &["codex"]).unwrap();
+        assert_eq!(res[0].kind, InstallKind::Installed);
+        assert_eq!(res[1].kind, InstallKind::SkippedAbsent);
+
+        // Without the proof, the PATH scan still rules.
+        assert_eq!(
+            status_with(Some(&bridge), &writers)[0].kind,
+            StatusKind::NotDetected
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ use color::convert_color;
 /// The benchmark resolves the base font the way the renderer does per frame.
 #[cfg(test)]
 pub(crate) use font::base_font;
+pub(crate) use font::refresh_font_config;
 pub(crate) use font::{
     DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, normalize_font_weight_key,
 };
