@@ -332,12 +332,13 @@ impl PaneFlowApp {
                     this.show_toast(message, cx);
                 }
                 // The Settings recap prefers `mcp_install` over the status
-                // snapshot; a scoped (sidebar) install carries one agent's
+                // snapshot. A scoped (sidebar) install carries one agent's
                 // row, so storing it would drop every other agent from that
-                // page. The fresh status below already reflects the write.
-                if !scoped {
-                    this.mcp_install = Some(install);
-                }
+                // page, and keeping an older all-agent recap would show the
+                // pre-install verdicts instead: clear it, so the fresh
+                // status below (which already reflects the write) is what
+                // Settings renders.
+                this.mcp_install = if scoped { None } else { Some(install) };
                 this.mcp_status = Some(status);
                 // An agent a pane resolved while the install ran was not in
                 // the `known_present` this task captured, and its scan event
