@@ -11,9 +11,10 @@
 //!      unique display names, honoring user custom names (US-013).
 //!
 //! The base name comes from the best available signal, in priority order:
-//! foreground command → OSC-set title → `shell`. The foreground-command lookup
-//! itself (OS-specific, libproc on macOS) lives on `TerminalState`; this module
-//! only shapes strings, so it stays platform-agnostic and trivially testable.
+//! resolved agent binary → foreground command → OSC-set title → `shell`.
+//! The foreground-command lookup itself (OS-specific, libproc on macOS) lives
+//! on `TerminalState`; this module only shapes strings, so it stays
+//! platform-agnostic and trivially testable.
 
 use std::collections::HashMap;
 
@@ -48,8 +49,18 @@ const FALLBACK: &str = "shell";
 /// Derive the un-disambiguated base name for a single surface.
 ///
 /// `cmd` is the foreground command line (argv joined by spaces) when known;
-/// `title` is the OSC 0/2 title. Priority: cmd → title → [`FALLBACK`].
-pub fn derive_surface_base_name(cmd: Option<&str>, title: Option<&str>) -> String {
+/// `title` is the OSC 0/2 title; `agent` is the resolved agent binary
+/// (`claude`, `codex`, …) when the pane already has one. Priority: agent →
+/// cmd → title → [`FALLBACK`]. A helper in the foreground (`caffeinate`,
+/// `codex-code-mode-host`) must not rename an agent pane.
+pub fn derive_surface_base_name(
+    cmd: Option<&str>,
+    title: Option<&str>,
+    agent: Option<&str>,
+) -> String {
+    if let Some(name) = agent.and_then(name_from_agent) {
+        return name;
+    }
     if let Some(name) = cmd.and_then(name_from_command) {
         return name;
     }
@@ -57,6 +68,12 @@ pub fn derive_surface_base_name(cmd: Option<&str>, title: Option<&str>) -> Strin
         return name;
     }
     FALLBACK.to_string()
+}
+
+/// Slugified basename of a resolved agent binary (`claude`, `cursor-agent`).
+fn name_from_agent(agent: &str) -> Option<String> {
+    let slug = slugify(basename(agent));
+    (!slug.is_empty()).then_some(slug)
 }
 
 /// Whether a foreground command line is an interactive shell sitting at a
@@ -243,7 +260,7 @@ mod tests {
     #[test]
     fn command_simple_subcommand() {
         assert_eq!(
-            derive_surface_base_name(Some("cargo run"), None),
+            derive_surface_base_name(Some("cargo run"), None, None),
             "cargo-run"
         );
     }
@@ -251,7 +268,7 @@ mod tests {
     #[test]
     fn command_absolute_path_argv0() {
         assert_eq!(
-            derive_surface_base_name(Some("/usr/bin/node server.js"), None),
+            derive_surface_base_name(Some("/usr/bin/node server.js"), None, None),
             "node-server.js"
         );
     }
@@ -260,7 +277,7 @@ mod tests {
     fn command_skips_leading_flags_for_qualifier() {
         // "-m" is a flag; the first non-flag token becomes the qualifier.
         assert_eq!(
-            derive_surface_base_name(Some("python -m http.server"), None),
+            derive_surface_base_name(Some("python -m http.server"), None, None),
             "python-http.server"
         );
     }
@@ -268,11 +285,11 @@ mod tests {
     #[test]
     fn idle_shell_maps_to_shell() {
         assert_eq!(
-            derive_surface_base_name(Some("/usr/bin/zsh"), None),
+            derive_surface_base_name(Some("/usr/bin/zsh"), None, None),
             "shell"
         );
         assert_eq!(
-            derive_surface_base_name(Some("bash"), Some("~/dev")),
+            derive_surface_base_name(Some("bash"), Some("~/dev"), None),
             "shell"
         );
     }
@@ -280,16 +297,50 @@ mod tests {
     #[test]
     fn title_used_when_no_command() {
         assert_eq!(
-            derive_surface_base_name(None, Some("/home/arthur/dev/paneflow")),
+            derive_surface_base_name(None, Some("/home/arthur/dev/paneflow"), None),
             "paneflow"
         );
-        assert_eq!(derive_surface_base_name(None, Some("claude")), "claude");
+        assert_eq!(
+            derive_surface_base_name(None, Some("claude"), None),
+            "claude"
+        );
     }
 
     #[test]
     fn no_signal_falls_back_to_shell() {
-        assert_eq!(derive_surface_base_name(None, None), "shell");
-        assert_eq!(derive_surface_base_name(Some("   "), Some("   ")), "shell");
+        assert_eq!(derive_surface_base_name(None, None, None), "shell");
+        assert_eq!(
+            derive_surface_base_name(Some("   "), Some("   "), None),
+            "shell"
+        );
+    }
+
+    #[test]
+    fn resolved_agent_wins_over_helper_foreground_command() {
+        assert_eq!(
+            derive_surface_base_name(Some("caffeinate"), None, Some("claude")),
+            "claude"
+        );
+        assert_eq!(
+            derive_surface_base_name(Some("codex-code-mode-host"), None, Some("codex")),
+            "codex"
+        );
+        assert_eq!(
+            derive_surface_base_name(Some("/usr/bin/zsh"), Some("~/dev"), Some("claude")),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn no_agent_keeps_foreground_command_heuristic() {
+        assert_eq!(
+            derive_surface_base_name(Some("docker-desktop"), None, None),
+            "docker-desktop"
+        );
+        assert_eq!(
+            derive_surface_base_name(Some("cargo run"), None, Some("")),
+            "cargo-run"
+        );
     }
 
     /// Helper: an auto (non-custom) naming input.
@@ -401,11 +452,19 @@ mod tests {
         // `is_shell_command` accepts - that is the point of extracting it.
         for cmd in ["zsh", "/bin/zsh", "ZSH", "zsh -l", "fish"] {
             assert!(is_shell_command(cmd), "{cmd}");
-            assert_eq!(derive_surface_base_name(Some(cmd), None), "shell", "{cmd}");
+            assert_eq!(
+                derive_surface_base_name(Some(cmd), None, None),
+                "shell",
+                "{cmd}"
+            );
         }
         for cmd in ["vim", "cargo run"] {
             assert!(!is_shell_command(cmd), "{cmd}");
-            assert_ne!(derive_surface_base_name(Some(cmd), None), "shell", "{cmd}");
+            assert_ne!(
+                derive_surface_base_name(Some(cmd), None, None),
+                "shell",
+                "{cmd}"
+            );
         }
     }
 }

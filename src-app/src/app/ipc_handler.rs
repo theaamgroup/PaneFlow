@@ -1153,6 +1153,9 @@ struct SurfaceEntry {
     title: String,
     cwd: Option<String>,
     cmd: Option<String>,
+    /// Resolved agent binary (`claude`, `codex`, …) when the pane already
+    /// has one from the shim identity or process scan.
+    agent: Option<String>,
     /// Positional index of the workspace this surface lives in.
     workspace_idx: usize,
     /// US-019: the owning workspace tab.
@@ -1188,7 +1191,7 @@ fn surface_entry_for(
     tab: Option<(u64, String)>,
     cx: &App,
 ) -> SurfaceEntry {
-    let (custom_name, title, cwd, cmd) = {
+    let (custom_name, title, cwd, cmd, agent) = {
         let view = entity.read(cx);
         let ts = &view.terminal;
         (
@@ -1196,6 +1199,7 @@ fn surface_entry_for(
             exported_surface_title(&ts.title),
             ts.current_cwd.clone(),
             ts.foreground_command(),
+            ts.detected_agent.map(|a| a.binary().to_string()),
         )
     };
     SurfaceEntry {
@@ -1204,6 +1208,7 @@ fn surface_entry_for(
         title,
         cwd,
         cmd,
+        agent,
         workspace_idx,
         tab,
     }
@@ -2042,6 +2047,7 @@ impl PaneFlowApp {
                 let base = crate::workspace::surface_naming::derive_surface_base_name(
                     m.cmd.as_deref(),
                     Some(m.title.as_str()).filter(|t| !t.is_empty()),
+                    entry.agent.as_deref(),
                 );
                 (entry.custom_name.clone(), base, m.cwd.clone())
             })
