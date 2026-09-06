@@ -181,13 +181,38 @@ static VERIFIED_BIN_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// while the app is running; a stale memo would otherwise prepend a
 /// missing directory to every new pane's PATH for the rest of the process.
 fn wrappers_present(dir: &Path) -> bool {
+    std::env::current_exe().is_ok_and(|exe| wrappers_present_for(dir, &exe))
+}
+
+/// [`wrappers_present`] against an explicit executable: the `paneflow` link
+/// must exist, resolve, and point at `exe` (#440). Requiring the exact
+/// target, not just a resolving link, matters when two same-version
+/// processes share the cache (`PANEFLOW_ALLOW_MULTIPLE=1`, or a debug app
+/// running while its test binary extracts): the other process may have
+/// re-pointed the link at itself, and this process must re-stage on its
+/// next spawn rather than hand its panes a CLI belonging to someone else.
+fn wrappers_present_for(dir: &Path, exe: &Path) -> bool {
     dir.is_dir()
         && extract_plan()
             .iter()
             .all(|(out_name, _)| dir.join(out_name).is_file())
-        // `is_file` follows the link: a dangling `paneflow` (bundle moved or
-        // deleted) drops the memo so the next spawn re-points it (#440).
-        && dir.join(CLI_LINK_NAME).is_file()
+        && cli_link_targets(dir, exe)
+}
+
+/// `true` iff `<dir>/paneflow` is a symlink to `exe` that resolves.
+/// `is_file` follows the link, so a dangling one (bundle moved or deleted)
+/// reads as absent.
+fn cli_link_targets(dir: &Path, exe: &Path) -> bool {
+    let link = dir.join(CLI_LINK_NAME);
+    std::fs::read_link(&link).is_ok_and(|target| target == exe) && link.is_file()
+}
+
+/// The version-pinned wrapper directory under `cache_root`.
+fn versioned_bin_dir(cache_root: &Path) -> PathBuf {
+    cache_root
+        .join(crate::runtime_paths::APP_SUBDIR)
+        .join("bin")
+        .join(VERSION)
 }
 
 fn memoized_verified_path(
@@ -239,13 +264,21 @@ pub fn ensure_binaries_extracted() -> Result<PathBuf> {
 }
 
 fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
+    let cache_root = dirs::cache_dir()
+        .ok_or_else(|| anyhow!("US-008: dirs::cache_dir() returned None; cannot extract"))?;
+    let exe = std::env::current_exe().context("#440: current_exe() unresolvable")?;
+    ensure_binaries_extracted_into(&cache_root, &exe)
+}
+
+/// The extraction proper, with the cache root and the executable the CLI
+/// link should target injected. Tests drive this against a `TempDir` so
+/// they never touch the real per-user cache: an end-to-end run against
+/// `~/Library/Caches/paneflow-dev` would leave `paneflow` pointing at the
+/// libtest harness, and any debug PaneFlow instance with panes open would
+/// resolve `paneflow` to that harness until its next extraction.
+fn ensure_binaries_extracted_into(cache_root: &Path, exe: &Path) -> Result<PathBuf> {
     {
-        let cache_root = dirs::cache_dir()
-            .ok_or_else(|| anyhow!("US-008: dirs::cache_dir() returned None; cannot extract"))?;
-        let target_dir = cache_root
-            .join(crate::runtime_paths::APP_SUBDIR)
-            .join("bin")
-            .join(VERSION);
+        let target_dir = versioned_bin_dir(cache_root);
 
         let plan = extract_plan();
         let mut buffers: Vec<(String, std::borrow::Cow<'static, [u8]>)> =
@@ -264,9 +297,7 @@ fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
             .collect();
 
         extract_into(&entries, &target_dir)?;
-
-        let exe = std::env::current_exe().context("#440: current_exe() unresolvable")?;
-        link_cli_into(&target_dir, &exe)?;
+        link_cli_into(&target_dir, exe)?;
         Ok(target_dir)
     }
 }
@@ -714,16 +745,19 @@ mod tests {
         let exe = dir.path().join("exe");
         std::fs::write(&exe, b"x").unwrap();
         link_cli_into(dir.path(), &exe).unwrap();
-        assert!(wrappers_present(dir.path()));
+        assert!(wrappers_present_for(dir.path(), &exe));
 
         std::fs::remove_file(dir.path().join("claude")).unwrap();
         assert!(
-            !wrappers_present(dir.path()),
+            !wrappers_present_for(dir.path(), &exe),
             "a missing wrapper must invalidate the memo"
         );
 
         let gone = dir.path().join("missing");
-        assert!(!wrappers_present(&gone), "a missing directory is not live");
+        assert!(
+            !wrappers_present_for(&gone, &exe),
+            "a missing directory is not live"
+        );
     }
 
     #[test]
@@ -807,19 +841,16 @@ mod tests {
 
     #[test]
     fn ensure_binaries_extracted_produces_all_agent_wrappers() {
-        // End-to-end smoke: calls the public entry point against the
-        // real cache dir and asserts every TerminalAgent wrapper plus the
-        // ai-hook callback lands. The cache dir is per-user and
-        // persistent, so this test is deliberately idempotent - safe to
-        // run repeatedly. Skip when `dirs::cache_dir()` is unresolvable
-        // (ephemeral CI containers with no `$HOME` set) so the test
-        // becomes a no-op rather than a false failure in those
-        // environments.
-        if dirs::cache_dir().is_none() {
-            eprintln!("skip: dirs::cache_dir() unresolvable in this environment");
-            return;
-        }
-        let dir = ensure_binaries_extracted().unwrap();
+        // End-to-end smoke through the real `Bins` embed, against a
+        // throwaway cache root: every TerminalAgent wrapper plus the
+        // ai-hook callback lands, and the CLI link targets the injected
+        // executable. Never the real per-user cache (see
+        // `ensure_binaries_extracted_into`).
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let dir = ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+        assert_eq!(dir, versioned_bin_dir(cache_root.path()));
         let mut expected: Vec<String> = crate::agent_launcher::TerminalAgent::ALL
             .iter()
             .map(|a| a.binary().to_string())
@@ -837,11 +868,12 @@ mod tests {
         let cli = dir.join(CLI_LINK_NAME);
         assert_eq!(
             std::fs::read_link(&cli).unwrap(),
-            std::env::current_exe().unwrap(),
+            exe,
             "#440: {} must be a symlink to the running executable",
             cli.display()
         );
         assert!(cli.is_file(), "#440: the CLI link must resolve");
+        assert!(wrappers_present_for(&dir, &exe));
     }
 
     #[test]
@@ -938,16 +970,40 @@ mod tests {
         for (name, _) in extract_plan() {
             std::fs::write(dir.path().join(name), b"wrapper").unwrap();
         }
-        assert!(!wrappers_present(dir.path()), "no link at all");
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        assert!(!wrappers_present_for(dir.path(), &exe), "no link at all");
 
         std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join(CLI_LINK_NAME))
             .unwrap();
-        assert!(!wrappers_present(dir.path()), "dangling link");
+        assert!(!wrappers_present_for(dir.path(), &exe), "dangling link");
 
-        let exe = dir.path().join("exe");
-        std::fs::write(&exe, b"x").unwrap();
         link_cli_into(dir.path(), &exe).unwrap();
-        assert!(wrappers_present(dir.path()), "resolving link");
+        assert!(wrappers_present_for(dir.path(), &exe), "resolving link");
+    }
+
+    #[test]
+    fn wrappers_present_rejects_a_link_owned_by_another_process() {
+        // Two same-version processes share one cache dir. If the other one
+        // re-pointed `paneflow` at itself, this process must not keep
+        // serving the memoized dir: its next spawn has to re-stage.
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, _) in extract_plan() {
+            std::fs::write(dir.path().join(name), b"wrapper").unwrap();
+        }
+        let mine = dir.path().join("mine");
+        let theirs = dir.path().join("theirs");
+        std::fs::write(&mine, b"x").unwrap();
+        std::fs::write(&theirs, b"x").unwrap();
+
+        link_cli_into(dir.path(), &theirs).unwrap();
+        assert!(
+            !wrappers_present_for(dir.path(), &mine),
+            "a resolving link to another executable is not ours"
+        );
+
+        link_cli_into(dir.path(), &mine).unwrap();
+        assert!(wrappers_present_for(dir.path(), &mine));
     }
 
     #[test]
@@ -1023,8 +1079,10 @@ mod tests {
             !bridge_str.contains(version),
             "EP-001 US-003: bridge path {bridge_str} must NOT embed the version {version}"
         );
-        // Distinct from the versioned helper cache dir.
-        if let Ok(cache) = ensure_binaries_extracted() {
+        // Distinct from the versioned helper cache dir. Computed, not
+        // extracted: this test must not write into the real per-user cache.
+        if let Some(cache_root) = dirs::cache_dir() {
+            let cache = versioned_bin_dir(&cache_root);
             assert_ne!(
                 bridge.parent(),
                 Some(cache.as_path()),
