@@ -1019,9 +1019,16 @@ impl TerminalView {
     }
 
     /// Commit composed text to the PTY.
-    pub fn commit_text(&mut self, text: &str, _cx: &mut Context<Self>) {
+    pub fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let was_composing = !self.ime_marked_text.is_empty();
         self.ime_marked_text.clear();
+        if was_composing {
+            // The preedit overlay is painted from `ime_marked_text`; a
+            // program that does not echo the committed text (a password
+            // prompt, a TUI with echo off) would otherwise leave it on the
+            // cached scene (#429) until some unrelated repaint.
+            cx.notify();
+        }
         {
             let pending = if was_composing {
                 self.ghostty_pending_text_key.take();
