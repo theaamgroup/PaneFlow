@@ -21,7 +21,11 @@ work lives on GitHub issues, not in that file.
 rename was dropped). Version **0.4.0**. Origin `theaamgroup/paneflow` on
 `main`. Upstream v0.11.0 is adopted (#341: the `PublishGate` with DEC 2026
 synchronized output, per-tab worktree binding with a Remove worktree row,
-the Customize Sidebar menu, the `gh` pull-request marker); the verified SKIP
+the Customize Sidebar menu, the `gh` pull-request marker), and the first
+v0.12.0 batch landed on 2026-09-06 (#417: the font-measured cell grid,
+sprite font and regular Nerd Font chain #418-#420, the Zed highlight
+queries #433, the editor benchmark harness #425; `docs/fork/STATE.md` has
+the entry and what is still open); the verified SKIP
 list (Windows shell, `timeBeginPeriod`, verbatim prefix, libghostty CI
 automation, Fedora/Discord/CHANGELOG/AppStream) stays not-ported. Windows, Linux, the telemetry crate, the published
 `windows_*_material` schema, and community files (`SECURITY.md`,
@@ -147,14 +151,24 @@ cargo fmt --check
 scripts/bench-terminal.sh                # terminal pipeline benchmark: writes bench/results/<stamp>-<sha>.json,
                                          # prints a Markdown comparison against bench/baseline.json when it exists
 scripts/bench-terminal.sh --set-baseline # same run, then make it the baseline
+scripts/bench-editor.sh                  # code editor benchmark: writes bench/results/editor-<stamp>-<sha>.json,
+                                         # compares against bench/editor-baseline.json (plain results table without one)
+scripts/bench-editor.sh --set-baseline   # same run, then make it the baseline; refused when cpu_share < 0.90
+cargo test -p paneflow-app --release -- --ignored layout::render --test-threads=1
+                                         # editor scroll frame beside 0/2/6 terminal panes (scroll_frame_p95_us_panes_N)
 ```
 
-Performance claims about the terminal pipeline need evidence from that
-suite: the ignored `terminal_pipeline_benchmark` in
-`src-app/src/terminal/perf_bench.rs` measures it GPU-free under the release
-profile and prints the comparison table `bench/README.md` documents. Do not
-ship a perf number you did not measure, and do not publish a run that
-printed `PANEFLOW_BENCH_WARNING` (another workload was competing).
+Performance claims about the terminal pipeline or the code editor need
+evidence from those suites: the ignored `terminal_pipeline_benchmark` in
+`src-app/src/terminal/perf_bench.rs` and `editor_pipeline_benchmark` in
+`src-app/src/app/diff_dock/code/perf_bench.rs` measure them GPU-free under
+the release profile through the shared `src-app/src/bench_harness.rs` and
+print the comparison table `bench/README.md` documents; the ignored
+`layout::render::tests::editor_scroll_frame_by_pane_count` measures one
+wheel notch on the editor with terminal panes in the frame. Do not ship a
+perf number you did not measure, and do not publish a run that printed
+`PANEFLOW_BENCH_WARNING` (another workload was competing); `--set-baseline`
+refuses such a run for the editor suite.
 
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
 holds the 16 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
@@ -221,7 +235,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
-│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs); parked per TAB
+│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs; `code/perf_bench.rs` +
+│   │                                     `code/bench_corpus.rs` are the editor bench, scripts/bench-editor.sh); parked per TAB
 │   │                                     (`cli_diff_dock.rs` keys slots by `Tab::id`, never by workspace);
 │   │                                     rendered width = min(stored, main-panel remainder), and the dock is
 │   │                                     not rendered at all below the floor (remainder < 360 px dock +
@@ -273,13 +288,15 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── search.rs / marks.rs           ← find-in-buffer, shell-integration prompt marks
 │   ├── service_detector.rs / shell.rs ← dev-server detection, shell resolution
 │   ├── blink.rs / types.rs            ← cursor blink, shared terminal types
-│   ├── bench_corpus.rs / ghostty_stress.rs ← corpus data + counters, runtime stress (#[ignore])
+│   ├── bench_corpus.rs / perf_bench.rs ← deterministic VT corpus, terminal bench (#[ignore], scripts/bench-terminal.sh)
+│   ├── ghostty_stress.rs / test_allocator.rs ← runtime stress (#[ignore]); the test binary's one #[global_allocator]
 │   └── element/                       ← low-level GPUI Element rendering
 │       ├── mod.rs                     ← TerminalElement: layout → prepaint → paint
 │       ├── color.rs                   ← ANSI→Hsla, APCA contrast
 │       ├── font.rs / geometry.rs      ← font resolution + cell geometry
 │       ├── hyperlink.rs               ← OSC 8 + URL scanning
-│       ├── paint/                     ← background, text, cursor, selection, scrollbar, box-drawing
+│       ├── sprites.rs                 ← glyphs the renderer draws itself: box drawing, shades, braille, Powerline
+│       ├── paint/                     ← background, text, cursor, selection, scrollbar, sprites
 │       ├── thumbnail.rs               ← read-only cropped pane preview; NEVER routes through
 │                                          TerminalElement (its build_layout resizes the PTY)
 │       └── golden/ pixel_probe.rs     ← golden-image + pixel assertions
@@ -319,6 +336,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── window_state.rs / editor.rs / external_open.rs
 ├── sidebar_title.rs                   ← sidebar label cleanup
 ├── system_info.rs                     ← Help ▸ System Info… collection: sysctl, Metal devices, install format, libghostty identity
+├── bench_harness.rs                   ← cfg(test): Metric, measure, comparison table, publish(), libproc counters shared by both benches
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
@@ -479,7 +497,7 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
   "default_shell": "/bin/zsh",
   "theme": "PaneFlow Dark",
   "window_decorations": "client",
-  "font_family": "JetBrainsMono Nerd Font Mono",
+  "font_family": "JetBrainsMono Nerd Font",
   "font_size": 13.0,
   "option_as_meta": false,
   "shortcuts": {},
@@ -525,7 +543,7 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **All styling is inline** via GPUI's Tailwind-like builder API: `.bg(rgb(0x181825)).px_3().rounded_md()`
 - **Sidebar/titlebar colors are hardcoded** dark hex values unless the active theme supplies a `UiColors` block. Legacy themes derive chrome colors from light/dark defaults; the bundled custom themes opt into exact UI tokens so the theme affects the whole app, not just ANSI colors.
 - **Terminal colors** come from `TerminalTheme` (36 `Hsla` slots plus optional `ui: UiColors` and a `syntax: SyntaxPalette`, `theme/model.rs:11`) resolved via `active_theme()`. `selection_foreground` is computed at theme-load time so `apca_contrast(selection_foreground, selection) >= 45.0` holds at every observation point; if you construct a theme by hand, call `recompute_selection_foreground()`.
-- **Font**: defaults to the embedded `JetBrainsMono Nerd Font Mono` at **13.0 pt** (`terminal/element/font.rs:24`, `:43`), range clamped to 8.0-32.0. Embedded families are always resolvable because `Assets::load_fonts` registers them with GPUI at boot. A configured `font_family` that is not an installed monospace family (checked against Core Text via `fonts.rs::load_mono_fonts`) logs a warning and falls back to the default.
+- **Font**: defaults to the embedded `JetBrainsMono Nerd Font` at **13.0 pt** (`terminal/element/font.rs:24`, `:50`), range clamped to 8.0-32.0. The regular (non-Mono) Nerd Font variant is bundled since #420 (upstream `73e51a01`): its icons keep their designed size and the renderer constrains them instead (Ghostty's `Glyph.zig` `fit_cover1` / `center1`, `paint/text.rs::constrain_icon`): a Private Use Area glyph is laid out as a `SymbolGlyph { span }`, scaled to cover one cell, or left at its designed size over two cells when the cell after it is empty, it does not follow another icon, and it is not the last column; ink bounds come from the embedded face's `glyf` table (`face_tables.rs::embedded_glyph_ink`). The legacy names `JetBrainsMono Nerd Font Mono` and `JetBrainsMono NFM` (and `JetBrainsMono NF`) keep resolving to the bundled family with no warning. The cell grid is measured on the face (#418, upstream `7706b771`): `terminal/element/face_tables.rs` reads the embedded faces' `hhea` / `post` / `OS/2` tables through `ttf-parser`, `font.rs::cell_metrics_from_face` ports Ghostty's `Metrics.calc` (widest ASCII advance by the face's own line height, each rounded to whole **device** pixels, baseline on a pixel row), and `CellGeometry` carries the resulting `CellMetrics` so every paint pass computes edges as `floor(origin) + col * cell`. `line_height` / `cell_width` are multipliers of that measured cell and default to **`1.0`** (ranges 0.8-2.5 / 0.8-2.0); at 13 pt JetBrains Mono the cell is 10x23 px. Underlines and strikethroughs (`paint/decorations.rs`: single, double, dotted, dashed, curly, all from the font tables) and the bar / underline / hollow cursors (`paint/cursor.rs`, `CellMetrics::cursor_thickness`) are sized from those metrics too. The Pane Overview thumbnail measures the same way without a `Window` (`font.rs::cell_metrics_without_window`). Embedded families are always resolvable because `Assets::load_fonts` registers them with GPUI at boot. A configured `font_family` that is not an installed monospace family (checked against Core Text via `fonts.rs::load_mono_fonts`) logs a warning and falls back to the default.
 
 ## Gotchas
 
@@ -543,7 +561,7 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **The binary-size budget is Mach-O now.** `src-app/build.rs` measures the three embedded helpers under `--profile release-min` on `aarch64-apple-darwin`: shim 472_368 + ai-hook 336_464 + mcp **403_008** B = **1_211_840 B** (J8 deferred; measured 2026-08-27). Cap is `EMBED_SIZE_LIMIT_BYTES = 1_400_000`, which is total + 15.5% (slack 188_160 B = 13.4% of the cap), quoted from `src-app/build.rs`; a `--release` build prints the measured total as a `cargo:warning`. Nested staging always uses `release-min`, so a debug outer build still embeds those sizes. Per-binary caps were dropped with the CI matrix (issue #3); do not re-derive a Linux ELF number.
 - **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
 - **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
-- **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`terminal/bench_corpus.rs`).
+- **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`bench_harness.rs`, moved there from `terminal/bench_corpus.rs` in #425; its two live-process tests moved with it).
 - **`scripts/create-dmg.sh` is allowed to fail `codesign --verify --deep --strict` on an unsigned smoke.** The script writes the `.dmg` first, then the strict check exits 1 because the enclosed binary is adhoc/linker-signed. That check is for a signed+notarized release. Local artifact: `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (~30M), `CFBundleIdentifier=com.theaamgroup.paneflow`. Gatekeeper will quarantine a copied copy.
 - **Comments still mention Windows and Linux.** `runtime_paths.rs` still documents a named-pipe fallback. That is leftover copy. Do not re-implement from a comment. Ghostty identifiers in `terminal/view.rs` and `pty_session.rs` are the opposite: they are the live engine (#184) and must not be pruned.
 - **Never bind `secondary-tab`.** It is Cmd+Tab on macOS and the app switcher eats it. Next-workspace moved to `ctrl-tab` (issue #10) and `next_workspace_is_bound_to_ctrl_tab_and_nothing_binds_cmd_tab` guards the table.

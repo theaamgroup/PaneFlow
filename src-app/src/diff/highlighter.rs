@@ -12,11 +12,16 @@
 //! parse failures do the same.
 //!
 //! Grammars bridge through `tree-sitter-language` 0.1 (`LANGUAGE: LanguageFn`);
-//! core `tree-sitter` 0.26 is already a transitive workspace dep via the Zed
-//! fork. Markdown runs TWO passes over the same text - the block grammar
-//! (`HIGHLIGHT_QUERY_BLOCK`: headings / fences / list markers) and the inline
-//! grammar (`HIGHLIGHT_QUERY_INLINE`: emphasis / links / inline code) - merged
-//! by `resolve_runs` so nested inline captures keep their specific colors.
+//! core `tree-sitter` 0.27 is a direct dependency (#223). Fifteen grammars
+//! (issue #433, upstream `1f5fde23`) compile Zed's own `highlights.scm`,
+//! vendored byte for byte under `queries/<lang>/` and pinned by
+//! `queries/MANIFEST.toml` (Zed revision + one sha256 per file, verified by
+//! `manifest_hashes_match_the_vendored_queries`); TOML, HTML, Java and Ruby
+//! keep their crate's stock query. JavaScript runs Zed's JavaScript query on
+//! the TSX grammar. Markdown runs TWO passes over the same text - the block
+//! query (headings / fences / list markers) and the inline query (emphasis /
+//! links / inline code) - merged by `resolve_runs`, which follows Zed's
+//! last-active-capture rule so nested inline captures keep their colors.
 //!
 //! **Reuse contract (prd-file-editor-2026-Q3, US-004).** The file editor's
 //! incremental driver (`app/diff_dock/code/highlight.rs`) must color a file
@@ -42,6 +47,11 @@ use super::syntax::DiffSyntax;
 /// Full-file tree-sitter parsing above this size is more likely to hurt Review
 /// responsiveness than help readability. The diff still renders normally.
 pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 300_000;
+
+/// Upper bound on the captures one row feeds into [`resolve_runs`]; anything
+/// past it is dropped in capture order. A pathological minified line cannot
+/// turn the stack walk into an unbounded amount of work per frame.
+pub(crate) const MAX_CAPTURES_PER_ROW: usize = 4_096;
 
 /// A resolved grammar: its `Language` + parsed highlights `Query`, interned
 /// once per process (`Query::new` is not cheap).
@@ -69,32 +79,46 @@ pub(crate) fn grammar_for_ext(ext: &str) -> Option<&'static Grammar> {
         "rs" => grammar!(
             RUST,
             tree_sitter_rust::LANGUAGE,
-            tree_sitter_rust::HIGHLIGHTS_QUERY
+            include_str!("queries/rust/highlights.scm")
         ),
-        "json" | "jsonc" => grammar!(
+        // Zed keeps separate JSON and JSONC queries (the latter adds comments),
+        // so the two extensions intern distinct grammars over one language.
+        "json" => grammar!(
             JSON,
             tree_sitter_json::LANGUAGE,
-            tree_sitter_json::HIGHLIGHTS_QUERY
+            include_str!("queries/json/highlights.scm")
+        ),
+        "jsonc" => grammar!(
+            JSONC,
+            tree_sitter_json::LANGUAGE,
+            include_str!("queries/jsonc/highlights.scm")
         ),
         "sh" | "bash" | "zsh" => grammar!(
             BASH,
             tree_sitter_bash::LANGUAGE,
-            tree_sitter_bash::HIGHLIGHT_QUERY
+            include_str!("queries/bash/highlights.scm")
         ),
         "py" | "pyi" => grammar!(
             PY,
             tree_sitter_python::LANGUAGE,
-            tree_sitter_python::HIGHLIGHTS_QUERY
+            include_str!("queries/python/highlights.scm")
         ),
         "ts" | "mts" | "cts" => grammar!(
             TS,
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY
+            include_str!("queries/typescript/highlights.scm")
         ),
-        "tsx" | "jsx" | "js" | "mjs" | "cjs" => grammar!(
+        "tsx" => grammar!(
             TSX,
             tree_sitter_typescript::LANGUAGE_TSX,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY
+            include_str!("queries/tsx/highlights.scm")
+        ),
+        // No tree-sitter-javascript crate: Zed's JavaScript query runs on the
+        // TSX grammar (recorded as a deviation in `queries/MANIFEST.toml`).
+        "jsx" | "js" | "mjs" | "cjs" => grammar!(
+            JS,
+            tree_sitter_typescript::LANGUAGE_TSX,
+            include_str!("queries/javascript/highlights.scm")
         ),
         "toml" => grammar!(
             TOML,
@@ -104,45 +128,45 @@ pub(crate) fn grammar_for_ext(ext: &str) -> Option<&'static Grammar> {
         "md" | "markdown" | "mdx" => grammar!(
             MD,
             tree_sitter_md::LANGUAGE,
-            tree_sitter_md::HIGHLIGHT_QUERY_BLOCK
+            include_str!("queries/markdown/highlights.scm")
         ),
-        // EP-002 / US-003 (P1): Go, YAML, CSS, HTML.
+        // EP-002 / US-003 (P1): Go, YAML, CSS, HTML. HTML stays on the crate's
+        // stock query (no Zed import, see `fixtures/README.md`).
         "go" => grammar!(
             GO,
             tree_sitter_go::LANGUAGE,
-            tree_sitter_go::HIGHLIGHTS_QUERY
+            include_str!("queries/go/highlights.scm")
         ),
         "yaml" | "yml" => grammar!(
             YAML,
             tree_sitter_yaml::LANGUAGE,
-            tree_sitter_yaml::HIGHLIGHTS_QUERY
+            include_str!("queries/yaml/highlights.scm")
         ),
         "css" => grammar!(
             CSS,
             tree_sitter_css::LANGUAGE,
-            tree_sitter_css::HIGHLIGHTS_QUERY
+            include_str!("queries/css/highlights.scm")
         ),
         "html" | "htm" => grammar!(
             HTML,
             tree_sitter_html::LANGUAGE,
             tree_sitter_html::HIGHLIGHTS_QUERY
         ),
-        // EP-002 / US-005 (P2): C, C++, Java, Ruby. NOTE: tree-sitter-c and
-        // tree-sitter-cpp expose `HIGHLIGHT_QUERY` (singular), unlike every
-        // other grammar's `HIGHLIGHTS_QUERY`.
-        "c" | "h" => grammar!(C, tree_sitter_c::LANGUAGE, tree_sitter_c::HIGHLIGHT_QUERY),
-        // tree-sitter-cpp ships a thin overlay query (`; inherits: c`) that
-        // colors only C++-specific constructs; the C++ grammar is a superset
-        // of C, so we layer the C base highlights underneath it (concatenation
-        // = the `inherits` semantics) for full keyword/type/fn/string coverage.
+        // EP-002 / US-005 (P2): C, C++, Java, Ruby. Java and Ruby keep their
+        // crate's stock query (`HIGHLIGHTS_QUERY`).
+        "c" | "h" => grammar!(
+            C,
+            tree_sitter_c::LANGUAGE,
+            include_str!("queries/c/highlights.scm")
+        ),
+        // Zed's C++ query is self-contained (no `; inherits: c` overlay to
+        // layer under), and it names the module-syntax nodes that only exist
+        // past the crates.io 0.23.4 grammar - hence the git pin in Cargo.toml.
+        // The stock overlay survives as test data in `fixtures/`.
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => grammar!(
             CPP,
             tree_sitter_cpp::LANGUAGE,
-            &format!(
-                "{}\n{}",
-                tree_sitter_c::HIGHLIGHT_QUERY,
-                tree_sitter_cpp::HIGHLIGHT_QUERY
-            )
+            include_str!("queries/cpp/highlights.scm")
         ),
         "java" => grammar!(
             JAVA,
@@ -167,7 +191,11 @@ pub(crate) fn markdown_inline_grammar() -> Option<&'static Grammar> {
     MD_INLINE
         .get_or_init(|| {
             let language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
-            let query = Query::new(&language, tree_sitter_md::HIGHLIGHT_QUERY_INLINE).ok()?;
+            let query = Query::new(
+                &language,
+                include_str!("queries/markdown-inline/highlights.scm"),
+            )
+            .ok()?;
             Some(Grammar { language, query })
         })
         .as_ref()
@@ -203,8 +231,8 @@ pub fn highlight_lines(
     apply_grammar(grammar, text, syntax, &line_ranges, &mut out);
 
     // US-004: Markdown gets a second inline pass merged into the same runs.
-    // `resolve_runs` (below) collapses block/inline overlaps while preserving
-    // more specific nested ranges.
+    // `resolve_runs` (below) collapses block/inline overlaps: the inline
+    // captures come later in capture order, so they paint over the block ones.
     if matches!(ext, "md" | "markdown" | "mdx")
         && let Some(inline) = markdown_inline_grammar()
     {
@@ -284,62 +312,58 @@ fn bucket_capture(
 }
 
 /// Sort + de-overlap one line's runs into the ascending, non-overlapping list
-/// `element.rs::text_runs` expects. Smaller ranges are treated as more specific:
-/// they keep their bytes, and wider overlapping captures keep only uncovered
-/// fragments. This is also what merges the Markdown block + inline passes.
-pub(crate) fn resolve_runs(runs: &mut Vec<(Range<usize>, Hsla)>) {
-    if runs.len() < 2 {
-        return;
-    }
-    let mut candidates: Vec<_> = runs
+/// `element.rs::text_runs` expects, following Zed's last-active-capture rule
+/// (issue #433, upstream `1f5fde23`; `zed:crates/language/src/syntax_map.rs`).
+/// Captures are ordered by byte start, preserving capture order at equal
+/// starts, and pushed onto a stack as the offset reaches them; the capture on
+/// top paints until its own end or the next capture's start, even when it is
+/// wider than one pushed earlier. Empty ranges are dropped, input is capped at
+/// [`MAX_CAPTURES_PER_ROW`], and adjacent bytes owned by one capture merge
+/// into a single run. This is also what merges the Markdown block + inline
+/// passes; `parity_tests.rs` holds the independent byte oracle.
+pub(crate) fn resolve_runs<T: Copy>(runs: &mut Vec<(Range<usize>, T)>) {
+    let mut captures: Vec<_> = runs
         .drain(..)
-        .enumerate()
-        .map(|(order, (range, color))| (range, color, order))
+        .take(MAX_CAPTURES_PER_ROW)
+        .filter(|(range, _)| range.start < range.end)
         .collect();
-    candidates.sort_by(|a, b| {
-        let a_len = a.0.end.saturating_sub(a.0.start);
-        let b_len = b.0.end.saturating_sub(b.0.start);
-        a_len
-            .cmp(&b_len)
-            .then(a.0.start.cmp(&b.0.start))
-            .then(a.0.end.cmp(&b.0.end))
-            .then(a.2.cmp(&b.2))
-    });
-
-    let mut kept: Vec<(Range<usize>, Hsla)> = Vec::with_capacity(candidates.len());
-    let mut covered: Vec<Range<usize>> = Vec::with_capacity(candidates.len());
-    for (range, color, _) in candidates {
-        if range.start >= range.end {
-            continue;
+    // Stable: captures starting together keep their query order, so the later
+    // one lands on top of the stack.
+    captures.sort_by_key(|(range, _)| range.start);
+    let mut stack: Vec<usize> = Vec::with_capacity(captures.len());
+    let mut next = 0;
+    let mut offset = captures.first().map_or(0, |(range, _)| range.start);
+    let mut last_capture = None;
+    while next < captures.len() || !stack.is_empty() {
+        while stack
+            .last()
+            .is_some_and(|&index| captures[index].0.end <= offset)
+        {
+            stack.pop();
         }
-        let mut fragments = vec![range];
-        for cover in &covered {
-            let mut next = Vec::new();
-            for fragment in fragments {
-                if cover.end <= fragment.start || cover.start >= fragment.end {
-                    next.push(fragment);
-                    continue;
-                }
-                if fragment.start < cover.start {
-                    next.push(fragment.start..cover.start);
-                }
-                if cover.end < fragment.end {
-                    next.push(cover.end..fragment.end);
-                }
+        while next < captures.len() && captures[next].0.start <= offset {
+            stack.push(next);
+            next += 1;
+        }
+        let next_start = captures
+            .get(next)
+            .map_or(usize::MAX, |(range, _)| range.start);
+        if let Some(&index) = stack.last() {
+            let end = captures[index].0.end.min(next_start);
+            if last_capture == Some(index)
+                && let Some((range, _)) = runs.last_mut()
+            {
+                range.end = end;
+            } else {
+                runs.push((offset..end, captures[index].1));
             }
-            fragments = next;
-            if fragments.is_empty() {
-                break;
-            }
+            last_capture = Some(index);
+            offset = end;
+        } else {
+            offset = next_start;
+            last_capture = None;
         }
-        for fragment in fragments {
-            covered.push(fragment.clone());
-            kept.push((fragment, color));
-        }
-        covered.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
     }
-    kept.sort_by(|a, b| a.0.start.cmp(&b.0.start).then(a.0.end.cmp(&b.0.end)));
-    *runs = kept;
 }
 
 #[cfg(test)]
@@ -482,6 +506,28 @@ mod tests {
         assert_eq!(ranges, vec![0..2, 2..5, 5..7, 7..9, 9..10]);
         assert_eq!(runs[1].1, palette.emphasis_strong);
         assert_eq!(runs[3].1, palette.link_text);
+    }
+
+    #[test]
+    fn resolve_runs_uses_capture_order_even_when_the_last_capture_is_wider() {
+        // Zed's rule: the later capture paints, wider or not, and the earlier
+        // one resumes once it ends (the old narrowest-wins rule gave 0..3 to 1).
+        let mut runs = vec![(0..3, 1), (0..8, 2), (2..5, 3), (2..5, 4)];
+        resolve_runs(&mut runs);
+        assert_eq!(runs, vec![(0..2, 2), (2..5, 4), (5..8, 2)]);
+    }
+
+    #[test]
+    fn resolve_runs_caps_a_row_at_the_capture_budget() {
+        let mut runs: Vec<_> = (0..MAX_CAPTURES_PER_ROW + 512)
+            .map(|index| (index * 2..index * 2 + 1, index))
+            .collect();
+        resolve_runs(&mut runs);
+        assert_eq!(runs.len(), MAX_CAPTURES_PER_ROW);
+        assert_eq!(
+            runs.last().map(|(_, index)| *index),
+            Some(MAX_CAPTURES_PER_ROW - 1)
+        );
     }
 
     #[test]

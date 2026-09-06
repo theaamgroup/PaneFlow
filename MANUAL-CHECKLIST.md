@@ -103,7 +103,7 @@ Done at the start of this run, 2026-08-25, against HEAD `35af5bb`:
   tab strip shows `paneflow`; terminal prompt
   `dayers@Davids-MacBook-Pro paneflow %` renders as real glyphs, not
   empty boxes.
-- Log: `font: resolved family='JetBrainsMono Nerd Font Mono'`;
+- Log: `font: resolved family='JetBrainsMono Nerd Font'` (was `JetBrainsMono Nerd Font Mono` before #420);
   `Terminal backend selected: … effective=alacritty`;
   `Assets::load_fonts: registered 36 embedded font file(s)`.
 - Historical (HEAD `35af5bb`, before leftover-removal deleted the

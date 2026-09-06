@@ -44,7 +44,7 @@ use crate::diff::{ROW_HEIGHT, RowPalette};
 /// (`rows.rs:22`).
 pub(crate) const CODE_ROW_HEIGHT: f32 = ROW_HEIGHT;
 /// Same size the diff shapes its code at.
-const CODE_FONT_SIZE: f32 = 12.0;
+pub(crate) const CODE_FONT_SIZE: f32 = 12.0;
 /// Right padding inside the gutter (number to code gap). Same value as the
 /// diff's `NUM_GAP` (`diff/element.rs:44`), as US-006 requires.
 const NUM_GAP: f32 = 6.0;
