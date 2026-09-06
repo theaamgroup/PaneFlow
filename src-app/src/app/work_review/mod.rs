@@ -299,13 +299,15 @@ impl PaneFlowApp {
                     }
                 }))
                 .child(crate::limits::clamp_untrusted_label(&row.title));
-            if let Some(session) = self
+            if let Some((session, state)) = self
                 .workspaces
                 .iter()
                 .flat_map(|ws| ws.agent_sessions.values())
                 .find(|session| row.surface_id.is_some() && session.surface_id == row.surface_id)
+                // A session marked read (#408) carries no call to action.
+                .and_then(|session| session.presented_state().map(|state| (session, state)))
             {
-                let label = match session.state {
+                let label = match state {
                     crate::ai_types::AgentState::Thinking => "Working",
                     crate::ai_types::AgentState::WaitingForInput => "Needs your input",
                     crate::ai_types::AgentState::Finished => "Agent finished",

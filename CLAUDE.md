@@ -222,7 +222,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     and a drag pinned at the render ceiling leaves a wider preference alone
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
 │   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
-│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348),
+│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348;
+│   │                                     Mark as read row, #408, only on a tab with a waiting/errored/stalled session),
 │   │                                     Customize Sidebar menu (`customize_menu.rs`: `sidebar_show` toggles,
 │   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)

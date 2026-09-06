@@ -608,7 +608,11 @@ where
 {
     let mut counts = [0usize; 4];
     for session in sessions {
-        let index = match session.state {
+        // A session marked read (#408) presents nothing, like a finished one.
+        let Some(state) = session.presented_state() else {
+            continue;
+        };
+        let index = match state {
             ai_types::AgentState::WaitingForInput => 0,
             ai_types::AgentState::Errored => 1,
             ai_types::AgentState::Stalled => 2,
@@ -1583,10 +1587,9 @@ impl PaneFlowApp {
         // folder badge's filtered session set: when the folder is expanded,
         // an attributed waiting session moves to its tab badge but must still
         // prevent a contradictory dim on the folder title.
-        let is_waiting_for_input = ws
-            .agent_sessions
-            .values()
-            .any(|session| session.state == ai_types::AgentState::WaitingForInput);
+        let is_waiting_for_input = ws.agent_sessions.values().any(|session| {
+            session.presented_state() == Some(&ai_types::AgentState::WaitingForInput)
+        });
         let tone =
             sidebar_workspace_tone(i == self.active_idx, ws.is_idle(cx), is_waiting_for_input);
         let title_el = if self.renaming_idx == Some(i) {
@@ -3413,6 +3416,33 @@ mod tests {
             Some(SidebarAgentSummary {
                 state: SidebarAgentState::Finished,
                 count: 1
+            })
+        );
+    }
+
+    #[test]
+    fn sidebar_agent_summary_hides_a_session_marked_read() {
+        // Issue #408: "Mark as read" hides the bell, the error dot, and the
+        // stalled badge without moving the state, and does not demote the
+        // row to a spinner either - a read session is simply quiet.
+        for state in [
+            AgentState::WaitingForInput,
+            AgentState::Errored,
+            AgentState::Stalled,
+        ] {
+            let mut read = session(state);
+            read.read = true;
+            assert!(sidebar_agent_summary([&read], false).is_none());
+        }
+        // A read session beside a live question does not hide the question.
+        let mut read = session(AgentState::WaitingForInput);
+        read.read = true;
+        let live = session(AgentState::WaitingForInput);
+        assert_eq!(
+            sidebar_agent_summary([&read, &live], false),
+            Some(SidebarAgentSummary {
+                state: SidebarAgentState::NeedsInput,
+                count: 1,
             })
         );
     }
