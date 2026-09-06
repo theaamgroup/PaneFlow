@@ -313,12 +313,7 @@ impl Element for TerminalThumbnail {
                 window,
             );
             paint::background::paint_block_quads(&layout, &cell_x_bounds, &cell_y_bounds, window);
-            paint::box_drawing::paint_box_drawing_glyphs(
-                &layout,
-                &cell_x_bounds,
-                &cell_y_bounds,
-                window,
-            );
+            paint::sprites::paint_sprites(&layout, &geom, window);
             // Underlines and strikethroughs come from the cell metrics now
             // (#418), not from the text runs, so a card needs the pass too.
             paint::decorations::paint_decorations(&layout, &geom, window);

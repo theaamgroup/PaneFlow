@@ -279,7 +279,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │       ├── color.rs                   ← ANSI→Hsla, APCA contrast
 │       ├── font.rs / geometry.rs      ← font resolution + cell geometry
 │       ├── hyperlink.rs               ← OSC 8 + URL scanning
-│       ├── paint/                     ← background, text, cursor, selection, scrollbar, box-drawing
+│       ├── sprites.rs                 ← glyphs the renderer draws itself: box drawing, shades, braille, Powerline
+│       ├── paint/                     ← background, text, cursor, selection, scrollbar, sprites
 │       ├── thumbnail.rs               ← read-only cropped pane preview; NEVER routes through
 │                                          TerminalElement (its build_layout resizes the PTY)
 │       └── golden/ pixel_probe.rs     ← golden-image + pixel assertions
