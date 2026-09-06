@@ -617,6 +617,7 @@ impl PaneFlowApp {
         // shifts the file under the cursor. A body click toggles a file's collapse.
         let mut element = div()
             .id("diff-dock-scroll")
+            .min_w_0()
             .flex_1()
             .min_h_0()
             .w_full()
@@ -642,6 +643,9 @@ impl PaneFlowApp {
         // refinement directly, the same raw mutation Zed uses.
         element.style().restrict_scroll_to_axis = Some(true);
 
+        // The permanent editor-style scrollbar (#434) sits in its own 15 px
+        // gutter beside the scroll host, not over it: `min_w_0` on the host
+        // lets the flex row shrink it so the gutter is never squeezed out.
         div()
             .id("diff-dock-body")
             .flex_1()
@@ -649,7 +653,14 @@ impl PaneFlowApp {
             .w_full()
             .flex()
             .flex_col()
-            .child(element)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(element)
+                    .child(self.diff_dock.vertical_scrollbar.render(&scroll, cx)),
+            )
             .into_any_element()
     }
 

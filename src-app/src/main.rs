@@ -1294,6 +1294,9 @@ struct DiffDockState {
     pub(crate) resize: Option<(f32, f32)>,
     /// Live horizontal-scrollbar drag inside the dock's shared diff body.
     pub(crate) h_scroll_drag: Option<crate::app::diff_dock::DiffDockHScrollDrag>,
+    /// The permanent editor-style vertical scrollbar beside the Changes body
+    /// (#434). Shares `scroll` with the host; holds only hover/drag state.
+    pub(crate) vertical_scrollbar: crate::widgets::editor_scrollbar::EditorScrollbar,
     /// Per-file horizontal scroll offsets (px) for the diff dock, indexed by
     /// stable file position. Driven by Shift+wheel / trackpad horizontal gestures
     /// (`apply_diff_dock_hwheel`) and applied per file by `DiffElement`; lazily
