@@ -294,6 +294,7 @@ impl PaneFlowApp {
         self.mcp_probe_generation += 1;
         cx.notify();
         let known_present: Vec<&'static str> = self.live_mcp_agent_ids(cx).into_iter().collect();
+        let scoped = only.is_some();
         cx.spawn(async move |this, cx| {
             let (install, status) = smol::unblock(move || {
                 let bridge = match crate::ai_hooks::extract::ensure_bridge_extracted() {
@@ -330,7 +331,13 @@ impl PaneFlowApp {
                 if let Some(message) = install_failure_summary(&install) {
                     this.show_toast(message, cx);
                 }
-                this.mcp_install = Some(install);
+                // The Settings recap prefers `mcp_install` over the status
+                // snapshot; a scoped (sidebar) install carries one agent's
+                // row, so storing it would drop every other agent from that
+                // page. The fresh status below already reflects the write.
+                if !scoped {
+                    this.mcp_install = Some(install);
+                }
                 this.mcp_status = Some(status);
                 // An agent a pane resolved while the install ran was not in
                 // the `known_present` this task captured, and its scan event
