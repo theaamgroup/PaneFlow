@@ -397,7 +397,9 @@ mod tests {
             })
             .expect("selection must install");
 
-        let content = terminal.snapshot().expect("snapshot with scrolled selection");
+        let content = terminal
+            .snapshot()
+            .expect("snapshot with scrolled selection");
         assert_eq!(content.display_offset, display_offset);
         let selection = content
             .selection
@@ -422,7 +424,9 @@ mod tests {
                 rectangle: false,
             })
             .expect("selection must install");
-        let content = terminal.snapshot().expect("snapshot with off-screen selection");
+        let content = terminal
+            .snapshot()
+            .expect("snapshot with off-screen selection");
         assert_eq!(content.selection, None);
     }
 
@@ -448,7 +452,9 @@ mod tests {
         terminal
             .feed(b"\x1b[1;1Hrow0\x1b[2;1Hrow1\x1b[3;1Hrow2\x1b[4;1Hrow3\x1b[3;1H")
             .expect("output must parse");
-        let first = terminal.snapshot().expect("first snapshot primes the cache");
+        let first = terminal
+            .snapshot()
+            .expect("first snapshot primes the cache");
         assert_eq!(first.dirty_rows.len(), 4);
 
         // Overwrite only row 2, in place, with different text.
