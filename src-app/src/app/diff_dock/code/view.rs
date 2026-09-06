@@ -7,25 +7,35 @@
 //! through a single `Rc<Cell<CodeGeometry>>` the element writes during
 //! `prepaint` and the wheel / scrollbar handlers read.
 //!
-//! ## The two-axis scroll recipe
+//! ## The editor owns its scroll (EP-008)
 //!
-//! Verbatim from `CLAUDE.md` ("GPUI scroll & wheel"), and load-bearing in all
-//! three of its parts:
+//! This view does **not** use the two-axis recipe (`overflow_y_scroll` plus
+//! `track_scroll` plus `restrict_scroll_to_axis`) the diff dock documents in
+//! `CLAUDE.md` ("GPUI scroll & wheel"). It did until EP-008, and dropping the recipe
+//! without replacing every part of it yields a frozen viewport, so the parts
+//! are listed here with what replaced them:
 //!
-//! - `overflow_y_scroll()` is what actually moves the element. GPUI only pushes
-//!   the scroll offset onto the element-offset stack when the host's overflow
-//!   axis is `Scroll`; under `overflow_hidden` a custom element that positions
-//!   content off its own `bounds.origin` never moves at all.
-//! - `track_scroll()` keeps `offset()` / `bounds()` / `max_offset()` live, which
-//!   is where the vertical scrollbar's geometry comes from.
-//! - `restrict_scroll_to_axis = Some(true)` stops the native Y handler
-//!   back-filling `delta_y` from `delta.x`. Without it, a Shift+wheel gesture
-//!   scrolls the file vertically instead of horizontally.
+//! - The host div is `overflow_hidden()`: GPUI translates nothing. The
+//!   position lives in [`CodeScroll`] as a fractional **row** (`f64`), shared
+//!   with the element by `Rc`; the element fills the viewport and places every
+//!   row at `origin.y + (row - scroll_rows) * CODE_ROW_HEIGHT`, rounded to the
+//!   device pixel. A pixel offset would stop resolving single pixels somewhere
+//!   past 200 000 lines; a row never does.
+//! - The scrollbar reads the same number through [`ScrollableHandle`], so the
+//!   painted thumb, the dragged thumb, [`CodeView::reveal_cursor`],
+//!   [`CodeView::page_rows`] and the drag autoscroll cannot diverge.
+//! - The wheel is converted here, by [`wheel_pixels`]: a `Lines` notch is
+//!   exactly three `CODE_ROW_HEIGHT` rows vertically (never the host's
+//!   inherited line height) and whole columns horizontally; a trackpad's
+//!   `Pixels` delta passes through unrounded. A document shorter than the
+//!   viewport absorbs a notch without a repaint.
+//! - `CodeScroll::set_rows` refuses to move while the viewport is 0 px tall,
+//!   so a frame laid out at zero height (a collapsed dock, a tab mid-switch)
+//!   cannot rewind the file to row 0.
 //!
-//! Horizontal is fully custom and always reads `delta.x`. X11, Wayland and
-//! Windows all swap Shift+wheel onto the X axis at the platform layer and zero
-//! `delta.y`, and macOS delivers horizontal natively, so branching on
-//! `modifiers.shift` would read a zero on every platform.
+//! Horizontal always reads `delta.x`: macOS delivers horizontal natively, and
+//! Shift+wheel arrives already swapped onto the X axis with `delta.y` zeroed,
+//! so branching on `modifiers.shift` would read a zero.
 //!
 //! ## Caret and selection (EP-003)
 //!
@@ -62,6 +72,23 @@
 //!   Both keep the render thread free; only the former is driven by the test
 //!   scheduler, which is what lets `Ctrl+S` and the conflict refusal be proven
 //!   from the action rather than from `super::save` alone.
+//!
+//! ## Reloads (EP-004, EP-009)
+//!
+//! An external write is folded in as a batch of line hunks, not a whole-file
+//! replacement: [`reload_from_disk`] snapshots the rope and its revision on
+//! the main thread, runs [`edit::disk_splices`] on the background executor,
+//! and delivers `(revision, splices)` back. A delivery whose revision is stale
+//! (the user typed meanwhile) recomputes once ([`RELOAD_DIFF_ATTEMPTS`]); a
+//! second miss, or a document that is dirty when the diff settles, becomes a
+//! conflict and the user's text stays - unless the reload was forced by the
+//! banner's "Reload from disk". The hunks reach [`CodeView::splice_all`] as
+//! one batch, so the highlighter sees one generation and the history one
+//! transaction: a 10-line agent rewrite of a 9 000-line file is a 10-line
+//! undo step, the caret keeps its place, and the undo stack is bounded by
+//! bytes ([`edit::MAX_UNDO_BYTES`]) as well as by count. `disk_generation`
+//! still orders probes against saves; `revision` orders the diff against
+//! edits.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -77,10 +104,11 @@ use gpui::{
     AnyElement, App, AppContext, AsyncApp, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
     EntityInputHandler, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled,
     UTF16Selection, WeakEntity, Window, actions, div, px, size,
 };
 use notify::{RecursiveMode, Watcher};
+use ropey::Rope;
 
 /// The one link between the notify backend thread and the reload task.
 ///
@@ -101,18 +129,40 @@ use super::cursor::{self, CodeSelection};
 use super::document::{CodeDocument, LineEnding, ReadOnlyReason, normalize_newlines};
 use super::edit::{self, EditGroup, IndentUnit};
 use super::element::{
-    CODE_ROW_HEIGHT, CodeCaret, CodeColors, CodeElement, CodeGeometry, CodeHitMap, GutterMemo,
-    autoscroll_step, reveal_h_offset, reveal_offset,
+    CODE_ROW_HEIGHT, CodeCaret, CodeColors, CodeElement, CodeGeometry, CodeHitMap, CodeScroll,
+    GutterMemo, autoscroll_step, reveal_h_offset, reveal_rows,
 };
-use super::highlight::{CodeHighlighter, DeferredParse, HighlightOutcome, spawn_deferred_parse};
-use super::load::{CodeLoadSlot, CodeLoadState, CodeOpen, spawn_code_load};
+use super::highlight::{
+    CodeHighlighter, DeferredParse, HighlightOutcome, SYNC_PARSE_BUDGET, spawn_deferred_parse,
+};
+use super::load::{CodeLoadError, CodeLoadSlot, CodeLoadState, CodeOpen, spawn_code_load};
 use super::save::{self, FileStamp};
 use crate::diff::{DiffSyntax, palette};
 use crate::terminal::blink::{BlinkPhaseGlobal, CURSOR_BLINK_INTERVAL};
-use crate::widgets::scrollbar::{self, SCROLLBAR_GUTTER, ScrollDragState};
+use crate::widgets::scrollbar::{self, SCROLLBAR_GUTTER, ScrollDragState, ScrollableHandle};
 
 /// Key context the editor's bindings are scoped to (US-009).
 pub(crate) const CODE_KEY_CONTEXT: &str = "CodeEditor";
+
+/// Whether a batch of splices can reach the highlighter as one call: every
+/// hunk strictly above the one before it by row, in the document the batch is
+/// about to be applied to. The order [`edit::disk_splices`] and the indent
+/// commands emit.
+fn ops_descend_by_row(doc: &CodeDocument, ops: &[(Range<usize>, String)]) -> bool {
+    ops.windows(2)
+        .all(|pair| doc.byte_to_line(pair[1].0.end) < doc.byte_to_line(pair[0].0.start))
+}
+
+/// A wheel delta in editor pixels (US-023). A `Lines` notch is one editor row
+/// per line vertically - never the host div's inherited line height - and one
+/// column per line horizontally; a trackpad's `Pixels` delta passes through
+/// unrounded.
+fn wheel_pixels(delta: &ScrollDelta, char_w: f32) -> Point<f32> {
+    match delta {
+        ScrollDelta::Pixels(pixels) => Point::new(f32::from(pixels.x), f32::from(pixels.y)),
+        ScrollDelta::Lines(lines) => Point::new(lines.x * char_w, lines.y * CODE_ROW_HEIGHT),
+    }
+}
 
 /// Two presses closer together than this, and within [`MULTI_CLICK_RADIUS`],
 /// chain into a double then a triple click. Same values as
@@ -135,6 +185,11 @@ const READ_ONLY_FLASH: Duration = Duration::from_millis(600);
 /// re-read (US-016). Same value, same reasoning as `markdown/view.rs`: an
 /// editor writing through a temp file emits several events per save.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// How many times a reload's background diff may be computed before a document
+/// that keeps changing underneath it is left to the user as a conflict
+/// (EP-009): the first attempt plus one recomputation.
+const RELOAD_DIFF_ATTEMPTS: usize = 2;
 
 actions!(
     paneflow_code_editor,
@@ -314,6 +369,92 @@ enum DiskState {
     Deleted,
 }
 
+/// What a reload's background diff runs against: a snapshot of the rope
+/// (cheap, ropey shares chunks) and the revision it was taken at, so the
+/// splices can be refused if an edit landed while the diff ran.
+struct DiskDiff {
+    rope: Rope,
+    revision: u64,
+}
+
+impl DiskDiff {
+    fn of(doc: &CodeDocument) -> Self {
+        Self {
+            rope: doc.text().clone(),
+            revision: doc.revision(),
+        }
+    }
+}
+
+/// What the background diff delivers: the hunks that turn the snapshot into
+/// the incoming text, stamped with the revision the snapshot was taken at.
+struct DiskSplices {
+    revision: u64,
+    splices: Vec<(Range<usize>, String)>,
+}
+
+/// What a probe read off disk: the document built from the bytes and the
+/// stamp of those bytes, or the written refusal.
+type DiskLoad = Result<(CodeDocument, Option<FileStamp>), CodeLoadError>;
+
+/// Fold a disk probe into the view: the guards and the rope snapshot on the
+/// main thread, the line diff on the background executor, the splices back
+/// on the main thread (EP-009). Returns `false` once the view is gone, which
+/// is the watcher loop's exit condition.
+///
+/// `generation` orders this probe against saves and newer probes exactly as
+/// before; the document revision inside [`DiskDiff`] orders the diff against
+/// edits typed while it ran. A stale revision buys one recomputation
+/// ([`RELOAD_DIFF_ATTEMPTS`]); after that the document is a conflict.
+async fn reload_from_disk(
+    this: &WeakEntity<CodeView>,
+    cx: &mut AsyncApp,
+    generation: u64,
+    loaded: DiskLoad,
+    force: bool,
+) -> bool {
+    let begun = cx.update(|cx| {
+        this.update(cx, |view: &mut CodeView, cx: &mut Context<CodeView>| {
+            view.begin_disk_reload(generation, loaded, force, cx)
+        })
+    });
+    let Ok(begun) = begun else {
+        return false;
+    };
+    let Some((mut diff, incoming)) = begun else {
+        return true;
+    };
+    let incoming = Arc::new(incoming);
+    for attempt in 0..RELOAD_DIFF_ATTEMPTS {
+        let DiskDiff { rope, revision } = diff;
+        let source = Arc::clone(&incoming);
+        let splices = cx
+            .background_spawn(async move { edit::disk_splices(&rope, &source.text().to_string()) })
+            .await;
+        let retry = attempt + 1 < RELOAD_DIFF_ATTEMPTS;
+        let finished = cx.update(|cx| {
+            this.update(cx, |view: &mut CodeView, cx: &mut Context<CodeView>| {
+                view.finish_disk_reload(
+                    generation,
+                    DiskSplices { revision, splices },
+                    &incoming,
+                    retry,
+                    force,
+                    cx,
+                )
+            })
+        });
+        let Ok(next) = finished else {
+            return false;
+        };
+        match next {
+            Some(again) => diff = again,
+            None => return true,
+        }
+    }
+    true
+}
+
 /// One open file inside the diff dock.
 pub(crate) struct CodeView {
     path: PathBuf,
@@ -325,8 +466,9 @@ pub(crate) struct CodeView {
     /// [`CODE_KEY_CONTEXT`] bindings to this widget, and what tells the element
     /// whether to paint a caret at all.
     focus: FocusHandle,
-    /// Vertical scroll, owned by the host div's native handler.
-    scroll: ScrollHandle,
+    /// Vertical scroll position, owned here as a fractional row and shared
+    /// with the element by `Rc` (US-024). See the module docs.
+    scroll: CodeScroll,
     /// Live vertical-scrollbar drag, if any (US-007).
     v_drag: Option<ScrollDragState>,
     /// Live horizontal offset in pixels, always `>= 0` (US-008).
@@ -417,7 +559,7 @@ impl CodeView {
             state: CodeLoadState::Loading,
             slot: CodeLoadSlot::new(),
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            scroll: CodeScroll::new(),
             v_drag: None,
             h_offset: 0.0,
             selection: CodeSelection::default(),
@@ -550,7 +692,7 @@ impl CodeView {
         self.gutter_memo.set(GutterMemo::default());
         self.geometry.set(CodeGeometry::default());
         *self.hits.borrow_mut() = CodeHitMap::default();
-        self.scroll.set_offset(Point::new(px(0.), px(0.)));
+        self.scroll.reset_rows();
         self.history.clear();
         self.saved_mark = edit::HistoryMark::default();
         self.marked = None;
@@ -620,6 +762,52 @@ impl CodeView {
 
     pub(crate) fn highlighter(&self) -> Option<&CodeHighlighter> {
         self.state.highlighter()
+    }
+
+    /// The rows the element shapes for the current position and viewport.
+    #[cfg(test)]
+    pub(crate) fn visible_row_range(&self) -> Range<usize> {
+        let Some(line_count) = self.state.document().map(CodeDocument::line_count) else {
+            return 0..0;
+        };
+        super::element::visible_rows_at(
+            self.scroll.rows(),
+            self.scroll.viewport_height(),
+            line_count,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scroll_rows(&self) -> f64 {
+        self.scroll.rows()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scroll_offset_y(&self) -> f32 {
+        self.scroll.content_top()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_lines(&self) -> usize {
+        self.hits.borrow().materialized_lines
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_numbers(&self) -> usize {
+        self.hits.borrow().materialized_numbers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn row_width(&self, row: usize) -> Option<f32> {
+        let hits = self.hits.borrow();
+        let index = row.checked_sub(hits.first_row)?;
+        Some(f32::from(hits.lines.get(index)?.as_ref()?.width()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn row_top(&self, row: usize) -> f32 {
+        let hits = self.hits.borrow();
+        hits.top_y + row.saturating_sub(hits.first_row) as f32 * CODE_ROW_HEIGHT
     }
 
     /// The caret's byte offset (US-009).
@@ -759,15 +947,23 @@ impl CodeView {
 
     /// Rows a Page key travels, derived from the live viewport.
     fn page_rows(&self) -> usize {
-        cursor::page_rows(f32::from(self.scroll.bounds().size.height), CODE_ROW_HEIGHT)
+        cursor::page_rows(self.scroll.viewport_height(), CODE_ROW_HEIGHT)
+    }
+
+    /// Hand the document's current line count to the scroll state, so a move
+    /// made between two frames clamps against the document as it stands now
+    /// rather than as the last `prepaint` saw it.
+    fn sync_scroll_line_count(&self) {
+        if let Some(doc) = self.state.document() {
+            self.scroll.set_line_count(doc.line_count());
+        }
     }
 
     /// Scroll so the caret sits inside the viewport with the mandated margin,
     /// on both axes. A no-op when it is already comfortably visible.
     pub(crate) fn reveal_cursor(&mut self) {
-        let viewport_h = f32::from(self.scroll.bounds().size.height);
+        let viewport_h = self.scroll.viewport_height();
         let geometry = self.geometry.get();
-        let current = f32::from(self.scroll.offset().y);
         let h_offset = self.h_offset;
         let Some(doc) = self.state.document() else {
             return;
@@ -775,12 +971,10 @@ impl CodeView {
         let offset = self.selection.cursor();
         let row = doc.byte_to_line(offset);
         let column = cursor::goal_column(doc, offset);
-        let content_h = doc.line_count() as f32 * CODE_ROW_HEIGHT;
+        self.scroll.set_line_count(doc.line_count());
 
-        let target = reveal_offset(row, viewport_h, content_h, current);
-        if (target - current).abs() > f32::EPSILON {
-            self.scroll.set_offset(Point::new(px(0.), px(target)));
-        }
+        let target = reveal_rows(row, viewport_h, self.scroll.max_rows(), self.scroll.rows());
+        self.scroll.set_rows(target);
         // The horizontal reveal uses the monospace advance rather than a shaped
         // x: the caret's row may not have been shaped this frame (it can be off
         // screen entirely), and the editor's font is mono by construction.
@@ -811,25 +1005,30 @@ impl CodeView {
         }
     }
 
-    /// Horizontal wheel (US-008). Vertical is the host's native handler; doing
-    /// it here as well would double-scroll the file.
-    fn apply_wheel(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let dx = f32::from(ev.delta.pixel_delta(window.line_height()).x);
-        if dx == 0.0 {
-            // Notifying on a bare vertical tick would render the frame twice:
-            // the native handler already requested one.
-            return;
-        }
+    /// Both wheel axes (US-008, US-023). The delta is converted here through
+    /// [`wheel_pixels`], so a notch is three editor rows and a trackpad
+    /// gesture is its exact pixels; nothing else scrolls the host.
+    fn apply_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let bounds = self.scroll.bounds();
         if !bounds.contains(&ev.position) {
             return;
         }
-        // GPUI deltas go negative toward the end of the axis; subtract so our
-        // positive offset grows and reveals the right of the line.
-        let max = self.geometry.get().max_h_offset;
-        let next = (self.h_offset - dx).clamp(0.0, max);
-        if next != self.h_offset {
-            self.h_offset = next;
+        let geometry = self.geometry.get();
+        let delta = wheel_pixels(&ev.delta, geometry.char_w);
+        self.sync_scroll_line_count();
+        // GPUI deltas go negative toward the end of the axis; subtract so the
+        // position grows toward the end of the file and the right of the line.
+        let mut moved = self.scroll.scroll_by_pixels(-delta.y);
+        if delta.x != 0.0 {
+            let next = (self.h_offset - delta.x).clamp(0.0, geometry.max_h_offset);
+            if next != self.h_offset {
+                self.h_offset = next;
+                moved = true;
+            }
+        }
+        // A notch the document absorbs (shorter than the viewport, or already
+        // at the end) must not repaint.
+        if moved {
             cx.notify();
         }
     }
@@ -1036,15 +1235,8 @@ impl CodeView {
             DRAG_SCROLL_ROWS * CODE_ROW_HEIGHT,
         );
         if dy != 0.0 {
-            let max = f32::from(self.scroll.max_offset().y);
-            // GPUI's live offset is `<= 0` while `max_offset()` is non-negative
-            // (`widgets/scrollbar.rs`), so scrolling down goes more negative.
-            let current = -f32::from(self.scroll.offset().y);
-            let next = (current + dy).clamp(0.0, max);
-            if next != current {
-                self.scroll.set_offset(Point::new(px(0.), px(-next)));
-                moved = true;
-            }
+            self.sync_scroll_line_count();
+            moved = self.scroll.scroll_by_pixels(dy);
         }
 
         let dx = autoscroll_step(
@@ -1287,7 +1479,9 @@ impl CodeView {
     /// places must order them back to front for its own offsets to stay valid.
     /// Every `CodeEdit` the splices produce is handed to the highlighter, which
     /// is what keeps the reparse incremental, and the whole batch lands as one
-    /// undo transaction.
+    /// undo transaction. A batch that descends by row (a reload's hunks, an
+    /// indent) reaches the highlighter as **one** call (EP-009): one
+    /// generation, one interpolation, at most one deferred parse.
     ///
     /// Returns `false` when nothing changed - a read-only document (refused
     /// visibly), or a batch that turned out to be a no-op.
@@ -1304,7 +1498,14 @@ impl CodeView {
         }
         let before = self.selection;
         let now = Instant::now();
+        // Decided against the document the ops were computed for, before any
+        // of them lands.
+        let batched = self
+            .state
+            .document()
+            .is_some_and(|doc| ops_descend_by_row(doc, ops));
         let mut records = Vec::with_capacity(ops.len());
+        let mut edits = Vec::with_capacity(ops.len());
         let mut deferred: Option<DeferredParse> = None;
         // The highlighter and the document come out of one borrow, and
         // `spawn_deferred_parse` needs `&mut self`, so the deferred parse is
@@ -1314,12 +1515,18 @@ impl CodeView {
                 let Some(applied) = edit::splice(doc, range.clone(), text) else {
                     continue;
                 };
-                for change in &applied.edits {
-                    if let HighlightOutcome::Deferred(parse) = hl.edit(doc, change) {
-                        deferred = Some(parse);
-                    }
+                if batched {
+                    edits.push(applied.edit);
+                } else if let HighlightOutcome::Deferred(parse) = hl.edit(doc, &applied.edit) {
+                    deferred = Some(parse);
                 }
                 records.push(applied.record);
+            }
+            if batched
+                && let Ok(HighlightOutcome::Deferred(parse)) =
+                    hl.edit_batch(doc, &edits, SYNC_PARSE_BUDGET)
+            {
+                deferred = Some(parse);
             }
         }
         if records.is_empty() {
@@ -1757,11 +1964,7 @@ impl CodeView {
             let loaded = cx
                 .background_spawn(async move { super::load::load_stamped(&probe) })
                 .await;
-            cx.update(|cx| {
-                let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                    view.disk_loaded(generation, loaded, false, cx);
-                });
-            });
+            reload_from_disk(&this, cx, generation, loaded, false).await;
         })
         .detach();
     }
@@ -1867,13 +2070,8 @@ impl CodeView {
                 let loaded = cx
                     .background_spawn(async move { super::load::load_stamped(&probe) })
                     .await;
-                let updated = cx.update(|cx| {
-                    this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                        view.disk_loaded(generation, loaded, false, cx);
-                    })
-                });
                 // A closed tab is the loop's exit condition, not an error.
-                if updated.is_err() {
+                if !reload_from_disk(&this, cx, generation, loaded, false).await {
                     break;
                 }
             }
@@ -1881,122 +2079,141 @@ impl CodeView {
         .detach();
     }
 
-    fn disk_loaded(
+    /// The main-thread half of a reload that runs before the diff: the
+    /// ordering guards, the conflict decision, the stamp, and the rope
+    /// snapshot the background diff runs against. `None` means there is
+    /// nothing to diff - the probe was stale, the file is gone, the bytes are
+    /// the ones already adopted, or the document is dirty and now conflicted.
+    fn begin_disk_reload(
         &mut self,
         generation: u64,
-        loaded: Result<(CodeDocument, Option<FileStamp>), super::load::CodeLoadError>,
+        loaded: DiskLoad,
         force: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<(DiskDiff, CodeDocument)> {
         if self.saving || generation != self.disk_generation {
-            return;
+            return None;
         }
         let (document, stamp) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
-                self.disk = if error == super::load::CodeLoadError::NotFound {
+                self.disk = if error == CodeLoadError::NotFound {
                     DiskState::Deleted
                 } else {
                     DiskState::Conflict
                 };
                 self.save_error = Some(error.message());
                 cx.notify();
-                return;
+                return None;
             }
         };
         if !force {
             if self.stamp == stamp && self.disk == DiskState::InSync {
-                return;
+                return None;
             }
             if self.is_dirty() || self.disk == DiskState::Conflict {
                 self.disk = DiskState::Conflict;
                 cx.notify();
-                return;
+                return None;
             }
         }
         self.stamp = stamp;
         self.disk = DiskState::InSync;
         self.save_error = None;
-        self.adopt_disk_text(&document.to_disk_string(), cx);
-        if let Some(doc) = self.state.document_mut() {
-            doc.set_read_only(document.read_only_reason());
-        }
-        self.saved_mark = self.history.mark();
-        cx.notify();
+        let doc = self.state.document()?;
+        Some((DiskDiff::of(doc), document))
     }
 
-    #[cfg(test)]
-    fn disk_changed(
+    /// The main-thread half after the diff. `Some` hands back a fresh
+    /// snapshot to diff again: the document's revision moved while the diff
+    /// ran and `retry` still allows one more attempt. Otherwise the splices
+    /// land as one transaction - or the document is left to the user as a
+    /// conflict, when it moved once too often or is dirty by now and the
+    /// reload was not forced.
+    fn finish_disk_reload(
         &mut self,
         generation: u64,
-        stamp: Option<FileStamp>,
-        text: Option<String>,
+        batch: DiskSplices,
+        incoming: &CodeDocument,
+        retry: bool,
+        force: bool,
         cx: &mut Context<Self>,
-    ) {
-        let loaded = text
-            .filter(|_| stamp.is_some())
-            .map(|text| {
-                (
-                    super::load::build_document(self.path.clone(), &text, false),
-                    stamp,
-                )
-            })
-            .ok_or(super::load::CodeLoadError::NotFound);
-        self.disk_loaded(generation, loaded, false, cx);
+    ) -> Option<DiskDiff> {
+        if self.saving || generation != self.disk_generation {
+            return None;
+        }
+        let DiskSplices { revision, splices } = batch;
+        let doc = self.state.document()?;
+        if doc.revision() != revision {
+            if retry {
+                return Some(DiskDiff::of(doc));
+            }
+            self.disk = DiskState::Conflict;
+            cx.notify();
+            return None;
+        }
+        if !force && self.is_dirty() {
+            self.disk = DiskState::Conflict;
+            cx.notify();
+            return None;
+        }
+        self.apply_disk_splices(
+            &splices,
+            incoming.line_ending(),
+            incoming.read_only_reason(),
+            cx,
+        );
+        self.saved_mark = self.history.mark();
+        cx.notify();
+        None
     }
 
-    /// Replace the buffer with `text`, keeping the viewport where the user left
-    /// it.
+    /// Land a reload's hunks, keeping the viewport where the user left it and
+    /// carrying the caret across the hunks.
     ///
     /// Applied as a normal transaction rather than a reload, so Ctrl+Z brings
     /// the previous state back - the recovery US-016 asks for when the reload
-    /// was not what the user wanted. The caret is only preserved when the line
-    /// count is unchanged: past that, a byte offset is a guess.
-    fn adopt_disk_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// was not what the user wanted. The disk's own rules are re-applied
+    /// afterwards whatever the hunks were: `read_only` is what the loader
+    /// decided for the bytes now on disk (the giant-line guard, the mode
+    /// bits), and `line_ending` is the terminator those bytes used, which the
+    /// diff normalized away - without it a rewrite that only changed LF to
+    /// CRLF would be reverted on the next save (#271).
+    fn apply_disk_splices(
+        &mut self,
+        ops: &[(Range<usize>, String)],
+        line_ending: LineEnding,
+        read_only: Option<ReadOnlyReason>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(doc) = self.state.document() else {
             return;
         };
-        let previous_lines = doc.line_count();
-        let len = doc.len_bytes();
-        let scroll = self.scroll.offset();
-        let caret = self.selection;
+        let scroll_rows = self.scroll.rows();
+        let after = edit::shift_selection_for_splices(self.selection, ops);
         // `edit::splice` refuses a read-only document, and a file can be
         // read-only on disk and still change underneath us. The flag is lifted
         // for the duration of the reload and put straight back.
         let reason = doc.read_only_reason();
-        if reason.is_some()
-            && let Some(doc) = self.state.document_mut()
-        {
-            doc.set_read_only(None);
-        }
-        let replaced = self.splice_all(
-            &[(0..len, text.to_string())],
-            CodeSelection::at(0),
-            EditGroup::Atomic,
-            cx,
-        );
-        if let Some(reason) = reason
-            && let Some(doc) = self.state.document_mut()
-        {
-            doc.set_read_only(Some(reason));
-        }
-        // The splice normalizes the terminators away, so the disk's line
-        // ending has to be re-detected here or a rewrite that only changed
-        // LF to CRLF is adopted as text and reverted on the next save.
+        let replaced = if ops.is_empty() {
+            false
+        } else {
+            if reason.is_some()
+                && let Some(doc) = self.state.document_mut()
+            {
+                doc.set_read_only(None);
+            }
+            self.splice_all(ops, after, EditGroup::Atomic, cx)
+        };
         if let Some(doc) = self.state.document_mut() {
-            doc.set_line_ending(LineEnding::detect(text));
+            doc.set_read_only(read_only);
+            doc.set_line_ending(line_ending);
         }
         if !replaced {
             return;
         }
-        let same_shape = self
-            .state
-            .document()
-            .is_some_and(|doc| doc.line_count() == previous_lines);
-        if same_shape {
-            self.selection = caret;
-        }
-        self.scroll.set_offset(scroll);
+        self.sync_scroll_line_count();
+        self.scroll.set_rows(scroll_rows);
         cx.notify();
     }
 
@@ -2036,15 +2253,16 @@ impl CodeView {
             let loaded = cx
                 .background_spawn(async move { super::load::load_stamped(&probe) })
                 .await;
-            cx.update(|cx| {
-                let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                    // Do not discard edits typed while the reload was in flight.
-                    if view.history.mark() != mark {
-                        return;
-                    }
-                    view.disk_loaded(generation, loaded, true, cx);
-                });
+            // Do not discard edits typed while the read was in flight. Edits
+            // typed while the diff runs are caught by the revision check.
+            let moved_on = cx.update(|cx| {
+                this.update(cx, |view: &mut Self, _| view.history.mark() != mark)
+                    .unwrap_or(true)
             });
+            if moved_on {
+                return;
+            }
+            reload_from_disk(&this, cx, generation, loaded, true).await;
         })
         .detach();
     }
@@ -2447,7 +2665,7 @@ impl Render for CodeView {
             };
         };
 
-        let line_count = doc.line_count();
+        self.scroll.set_line_count(doc.line_count());
         let banners = self.banners(ui, cx);
         let theme = crate::theme::active_theme();
         let focused = self.focus.is_focused(window);
@@ -2469,19 +2687,22 @@ impl Render for CodeView {
                 visible: self.blink_visible,
                 marked: self.marked.clone().unwrap_or(0..0),
             },
-            line_count,
             self.geometry.clone(),
             self.gutter_memo.clone(),
             self.hits.clone(),
         );
 
-        let mut host = div()
+        // `overflow_hidden`, not `overflow_y_scroll`: the element owns the
+        // position and places its rows itself (see the module docs). The row
+        // height is pinned on the host so nothing inherited can leak into a
+        // text metric the element reads.
+        let host = div()
             .id(self.element_id.clone())
             .flex_1()
             .min_h_0()
             .w_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
+            .overflow_hidden()
+            .line_height(px(CODE_ROW_HEIGHT))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
@@ -2492,13 +2713,10 @@ impl Render for CodeView {
                     }
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
-                this.apply_wheel(ev, window, cx);
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+                this.apply_wheel(ev, cx);
             }))
             .child(element);
-        // Not a builder method on the pinned fork - set on the style refinement
-        // directly, the same raw mutation Zed uses.
-        host.style().restrict_scroll_to_axis = Some(true);
 
         div()
             .id("code-view-body")
@@ -2566,9 +2784,71 @@ impl Render for CodeView {
     }
 }
 
+/// Synchronous spellings of the reload pipeline, for tests that want the
+/// outcome of a probe without driving the background diff.
+#[cfg(test)]
+impl CodeView {
+    /// A probe's outcome folded in end to end on the calling thread: what
+    /// [`reload_from_disk`] does, minus the executor hop and the retry.
+    fn disk_loaded(
+        &mut self,
+        generation: u64,
+        loaded: DiskLoad,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((diff, incoming)) = self.begin_disk_reload(generation, loaded, force, cx) else {
+            return;
+        };
+        let splices = edit::disk_splices(&diff.rope, &incoming.text().to_string());
+        self.finish_disk_reload(
+            generation,
+            DiskSplices {
+                revision: diff.revision,
+                splices,
+            },
+            &incoming,
+            false,
+            force,
+            cx,
+        );
+    }
+
+    /// A probe that read `text` with `stamp` (`None` for a missing file).
+    fn disk_changed(
+        &mut self,
+        generation: u64,
+        stamp: Option<FileStamp>,
+        text: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let loaded = text
+            .filter(|_| stamp.is_some())
+            .map(|text| {
+                (
+                    super::load::build_document(self.path.clone(), &text, false),
+                    stamp,
+                )
+            })
+            .ok_or(CodeLoadError::NotFound);
+        self.disk_loaded(generation, loaded, false, cx);
+    }
+
+    /// Replace the buffer with `text` as a reload would, guards aside: the
+    /// document's own read-only rule stays, the line ending is the text's.
+    fn adopt_disk_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(doc) = self.state.document() else {
+            return;
+        };
+        let splices = edit::disk_splices(doc.text(), text);
+        let read_only = doc.read_only_reason();
+        self.apply_disk_splices(&splices, LineEnding::detect(text), read_only, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
+    use gpui::{Entity, Modifiers, TestAppContext, TouchPhase, VisualTestContext, point};
 
     use super::super::highlight::CodeHighlighter;
     use super::super::load::{LoadedCode, build_document, open_blocking};
@@ -2586,7 +2866,17 @@ mod tests {
         cx: &'a mut TestAppContext,
         text: &str,
     ) -> (Entity<CodeView>, &'a mut VisualTestContext) {
-        let path = PathBuf::from("/nonexistent/paneflow-code.rs");
+        view_named(cx, "/nonexistent/paneflow-code.rs", text)
+    }
+
+    /// [`view`] over a path of the caller's choosing: the extension decides
+    /// whether the file is syntax-colored, which the shaping tests care about.
+    fn view_named<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+    ) -> (Entity<CodeView>, &'a mut VisualTestContext) {
+        let path = PathBuf::from(name);
         let state = if text.is_empty() {
             CodeLoadState::Loading
         } else {
@@ -2608,7 +2898,7 @@ mod tests {
             state,
             slot: CodeLoadSlot::new(),
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            scroll: CodeScroll::new(),
             v_drag: None,
             h_offset: 0.0,
             selection: CodeSelection::default(),
@@ -2852,6 +3142,404 @@ mod tests {
         });
     }
 
+    fn rows_of_code(rows: usize) -> String {
+        (0..rows).map(|row| format!("fn f{row}() {{}}\n")).collect()
+    }
+
+    // --------------------------------------------------------------- EP-008
+
+    const VIEWPORT: Point<Pixels> = Point {
+        x: px(800.),
+        y: px(360.),
+    };
+
+    /// A view laid out in an 800 x 360 window with the pointer over it, so a
+    /// wheel event lands on the host and the element has a real viewport.
+    fn scrolled<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+    ) -> (Entity<CodeView>, &'a mut VisualTestContext) {
+        let (view, cx) = view_named(cx, name, text);
+        cx.simulate_resize(size(VIEWPORT.x, VIEWPORT.y));
+        cx.run_until_parked();
+        let centre = point(VIEWPORT.x / 2., VIEWPORT.y / 2.);
+        cx.simulate_mouse_move(centre, None, Modifiers::default());
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    fn wheel(delta: ScrollDelta) -> ScrollWheelEvent {
+        ScrollWheelEvent {
+            position: point(VIEWPORT.x / 2., VIEWPORT.y / 2.),
+            delta,
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        }
+    }
+
+    fn notification_counter(
+        view: &Entity<CodeView>,
+        cx: &mut VisualTestContext,
+    ) -> (Rc<Cell<usize>>, gpui::Subscription) {
+        let count = Rc::new(Cell::new(0usize));
+        let seen = count.clone();
+        let subscription =
+            cx.update(|_, cx| cx.observe(view, move |_, _| seen.set(seen.get() + 1)));
+        (count, subscription)
+    }
+
+    /// US-023: a wheel notch moves exactly three editor rows, not three of the
+    /// host div's inherited line height.
+    #[gpui::test]
+    fn a_wheel_notch_scrolls_three_rows(cx: &mut TestAppContext) {
+        let (view, cx) = scrolled(cx, "/nonexistent/wheel.rs", &rows_of_code(500));
+
+        cx.simulate_event(wheel(ScrollDelta::Lines(point(0.0, -3.0))));
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.scroll_offset_y()),
+            3.0 * CODE_ROW_HEIGHT,
+            "a notch must move exactly three rows"
+        );
+        assert_eq!(view.read_with(cx, |view, _| view.scroll_rows()), 3.0);
+    }
+
+    /// US-023: a macOS trackpad delivers pixels, and they pass through
+    /// unrounded.
+    #[gpui::test]
+    fn a_trackpad_delta_scrolls_its_exact_pixels(cx: &mut TestAppContext) {
+        let (view, cx) = scrolled(cx, "/nonexistent/trackpad.rs", &rows_of_code(500));
+
+        cx.simulate_event(wheel(ScrollDelta::Pixels(point(px(0.), px(-7.5)))));
+        cx.run_until_parked();
+
+        assert_eq!(view.read_with(cx, |view, _| view.scroll_offset_y()), 7.5);
+    }
+
+    #[gpui::test]
+    fn a_horizontal_notch_moves_whole_columns(cx: &mut TestAppContext) {
+        let mut text = "x".repeat(400);
+        text.push('\n');
+        text.push_str(&rows_of_code(200));
+        let (view, cx) = scrolled(cx, "/nonexistent/wide.rs", &text);
+
+        let char_w = view.read_with(cx, |view, _| view.geometry.get().char_w);
+        assert!(char_w > 0.0, "the test text system must measure a column");
+
+        cx.simulate_event(wheel(ScrollDelta::Lines(point(-1.0, 0.0))));
+        cx.run_until_parked();
+
+        let (h_offset, rows) = view.read_with(cx, |view, _| (view.h_offset, view.scroll_rows()));
+        assert_eq!(h_offset, char_w, "one notch is one column, not one line");
+        assert_eq!(rows, 0.0, "a horizontal notch must not scroll vertically");
+
+        cx.simulate_event(wheel(ScrollDelta::Lines(point(-2.0, 0.0))));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, _| view.h_offset), 3.0 * char_w);
+    }
+
+    #[gpui::test]
+    fn a_document_shorter_than_the_viewport_absorbs_the_notch(cx: &mut TestAppContext) {
+        let (view, cx) = scrolled(cx, "/nonexistent/short.rs", &rows_of_code(3));
+        let (notifications, _subscription) = notification_counter(&view, cx);
+
+        cx.simulate_event(wheel(ScrollDelta::Lines(point(0.0, -3.0))));
+        cx.run_until_parked();
+
+        assert_eq!(view.read_with(cx, |view, _| view.scroll_offset_y()), 0.0);
+        assert_eq!(
+            notifications.get(),
+            0,
+            "an absorbed notch must not repaint the editor"
+        );
+    }
+
+    #[gpui::test]
+    fn notches_in_one_frame_coalesce_into_a_single_notification(cx: &mut TestAppContext) {
+        let (view, cx) = scrolled(cx, "/nonexistent/coalesce.rs", &rows_of_code(500));
+        let (notifications, _subscription) = notification_counter(&view, cx);
+
+        cx.update(|window, cx| {
+            for _ in 0..3 {
+                window.dispatch_event(
+                    gpui::PlatformInput::ScrollWheel(wheel(ScrollDelta::Lines(point(0.0, -3.0)))),
+                    cx,
+                );
+            }
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.scroll_rows()),
+            9.0,
+            "the three deltas must all land"
+        );
+        assert_eq!(
+            notifications.get(),
+            1,
+            "three notches inside one frame are one repaint"
+        );
+    }
+
+    /// US-024: at 300 000 lines the last row sits on the viewport floor,
+    /// stays there across two identical frames, and moves by exactly one row
+    /// height per scrolled row.
+    #[gpui::test]
+    fn the_last_row_of_a_huge_file_lands_on_the_viewport_floor(cx: &mut TestAppContext) {
+        let line_count = 300_000usize;
+        let text = rows_of_code(line_count);
+        let (view, cx) = scrolled(cx, "/nonexistent/huge.rs", &text);
+
+        view.update(cx, |view, cx| {
+            view.scroll.set_rows(view.scroll.max_rows());
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let (last, first, floor) = view.read_with(cx, |view, _| {
+            let last = view.document().expect("a loaded document").line_count() - 1;
+            (
+                last,
+                view.row_top(last),
+                f32::from(view.scroll.bounds().bottom()),
+            )
+        });
+        assert!(last >= line_count, "{last} must reach past {line_count}");
+        assert!(
+            (first + CODE_ROW_HEIGHT - floor).abs() < 1.0,
+            "the last row must sit on the viewport floor, got {first} for a floor at {floor}"
+        );
+
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.row_top(last)),
+            first,
+            "two identical frames must place the last row identically"
+        );
+
+        view.update(cx, |view, cx| {
+            view.scroll.set_rows(view.scroll.rows() - 1.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.row_top(last)),
+            first + CODE_ROW_HEIGHT,
+            "one scrolled row must move the last row by exactly one row height"
+        );
+    }
+
+    #[gpui::test]
+    fn the_scrollbar_drives_the_owned_position(cx: &mut TestAppContext) {
+        let (view, cx) = scrolled(cx, "/nonexistent/bar.rs", &rows_of_code(2_000));
+
+        let thumb_h = view.update(cx, |view, cx| {
+            let metrics = scrollbar::metrics(&view.scroll).expect("an overflowing document");
+            let bar_x = view.scroll.bounds().right() - px(3.);
+            let below_thumb = view.scroll.bounds().origin.y + px(metrics.thumb_h + 40.0);
+            assert!(view.on_scrollbar_down(
+                &MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(bar_x, below_thumb),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                cx,
+            ));
+            metrics.thumb_h
+        });
+        let after_click = view.read_with(cx, |view, _| view.scroll_rows());
+        assert!(after_click > 0.0, "a track click must move the position");
+
+        view.update(cx, |view, cx| {
+            let metrics = scrollbar::metrics(&view.scroll).expect("an overflowing document");
+            let bar_x = view.scroll.bounds().right() - px(3.);
+            let thumb_y = view.scroll.bounds().origin.y + px(metrics.thumb_top + thumb_h / 2.0);
+            view.on_scrollbar_down(
+                &MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(bar_x, thumb_y),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                cx,
+            );
+            view.on_scrollbar_move(
+                &MouseMoveEvent {
+                    position: point(bar_x, thumb_y + px(60.)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                },
+                cx,
+            );
+        });
+        let after_drag = view.read_with(cx, |view, _| view.scroll_rows());
+        assert!(
+            after_drag > after_click,
+            "dragging the thumb down must advance the position, {after_click} -> {after_drag}"
+        );
+    }
+
+    #[gpui::test]
+    fn an_external_reload_that_drops_lines_rebinds_the_position(cx: &mut TestAppContext) {
+        let (view, cx) = scrolled(cx, "/nonexistent/reload.rs", &rows_of_code(500));
+
+        view.update(cx, |view, cx| {
+            view.scroll.set_rows(view.scroll.max_rows());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.scroll_rows()) > 400.0);
+
+        view.update(cx, |view, cx| {
+            view.adopt_disk_text(&rows_of_code(25), cx);
+        });
+        cx.run_until_parked();
+
+        let (rows, max_rows, viewport_h) = view.read_with(cx, |view, _| {
+            (
+                view.scroll_rows(),
+                view.scroll.max_rows(),
+                view.scroll.viewport_height(),
+            )
+        });
+        let line_count = view.read_with(cx, |view, _| {
+            view.document().expect("a loaded document").line_count()
+        });
+        assert_eq!(
+            max_rows,
+            line_count as f64 - f64::from(viewport_h) / f64::from(CODE_ROW_HEIGHT)
+        );
+        assert_eq!(rows, max_rows, "the position must stop at the new end");
+    }
+
+    fn frame(view: &Entity<CodeView>, cx: &mut VisualTestContext) {
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    }
+
+    fn scroll_to(view: &Entity<CodeView>, cx: &mut VisualTestContext, rows: f64) {
+        view.update(cx, |view, cx| {
+            view.scroll.set_rows(rows);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// US-025: a frame whose rows are all in the layout cache builds no
+    /// `String` at all, for the code or for the gutter.
+    #[gpui::test]
+    fn a_warm_frame_shapes_nothing_it_already_shaped(cx: &mut TestAppContext) {
+        let text: String = (0..400)
+            .map(|row| format!("row {row} of plain text\n"))
+            .collect();
+        let (view, cx) = scrolled(cx, "/nonexistent/warm.txt", &text);
+
+        frame(&view, cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.materialized_lines()),
+            0,
+            "a warm frame must not build a single line string"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.materialized_numbers()),
+            0,
+            "a warm frame must not build a single number string"
+        );
+
+        scroll_to(&view, cx, 200.0);
+        frame(&view, cx);
+        scroll_to(&view, cx, 0.0);
+        assert!(
+            view.read_with(cx, |view, _| view.materialized_lines()) > 0,
+            "rows the layout cache dropped must be shaped again"
+        );
+    }
+
+    #[gpui::test]
+    fn an_edit_only_reshapes_the_row_it_touched(cx: &mut TestAppContext) {
+        let rows = 100;
+        let text: String = (0..rows)
+            .map(|row| format!("row {row} of plain text\n"))
+            .collect();
+        let (view, cx) = scrolled(cx, "/nonexistent/edit.txt", &text);
+
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, _| view.materialized_lines()), 0);
+
+        view.update_in(cx, |view, window, cx| {
+            view.selection = CodeSelection { anchor: 0, head: 0 };
+            view.replace_text_in_range(None, "z", window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.materialized_lines()),
+            1,
+            "only the edited row may miss the layout cache"
+        );
+    }
+
+    #[gpui::test]
+    fn identical_rows_share_one_shaped_line(cx: &mut TestAppContext) {
+        let text: String = (0..400)
+            .map(|row| {
+                if row % 2 == 0 {
+                    "same line\n"
+                } else {
+                    "other line\n"
+                }
+            })
+            .collect();
+        let (view, cx) = scrolled(cx, "/nonexistent/twins.txt", &text);
+
+        let (even, odd, twin) = view.read_with(cx, |view, _| {
+            (view.row_width(0), view.row_width(1), view.row_width(2))
+        });
+        assert_eq!(even, twin, "identical rows must carry identical layouts");
+        assert_ne!(even, odd, "the probe needs two measurably different texts");
+
+        frame(&view, cx);
+        scroll_to(&view, cx, 200.0);
+
+        let visible = view.read_with(cx, |view, _| view.visible_row_range().len());
+        assert!(visible > 4, "the probe needs more rows than distinct texts");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.materialized_lines()),
+            0,
+            "{visible} rows of already shaped texts must all hit at their new indices"
+        );
+    }
+
+    #[gpui::test]
+    fn the_ime_reads_the_caret_from_the_painted_rows(cx: &mut TestAppContext) {
+        let (view, cx) = scrolled(cx, "/nonexistent/ime.rs", "let alpha = 1;\nlet beta = 2;\n");
+
+        let (caret, index) = view.update_in(cx, |view, window, cx| {
+            let element_bounds = view.scroll.bounds();
+            let caret = view
+                .bounds_for_range(4..9, element_bounds, window, cx)
+                .expect("a laid out row");
+            let index = view
+                .character_index_for_point(caret.origin, window, cx)
+                .expect("a laid out row");
+            (caret, index)
+        });
+        assert_eq!(index, 4, "the IME round trips the caret it was given");
+        assert_eq!(f32::from(caret.size.height), CODE_ROW_HEIGHT);
+        assert_eq!(
+            f32::from(caret.origin.y),
+            view.read_with(cx, |view, _| view.row_top(0)),
+            "the IME caret sits on the painted row"
+        );
+    }
+
     // --------------------------------------------------------------- EP-004
 
     /// Build a view over a file that really exists, so the save and conflict
@@ -2872,9 +3560,39 @@ mod tests {
         Entity<CodeView>,
         &'a mut VisualTestContext,
     ) {
+        file_view_named(cx, "main.rs", text, watch)
+    }
+
+    fn file_view_named<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+        watch: bool,
+    ) -> (
+        tempfile::TempDir,
+        Entity<CodeView>,
+        &'a mut VisualTestContext,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("main.rs");
+        let path = dir.path().join(name);
         std::fs::write(&path, text).expect("seed");
+        let seeded = seeded_view(path, text);
+        let (view, cx) = cx.add_window_view(move |_window, cx| {
+            let mut view = seeded(cx);
+            if watch {
+                view.start_watcher(cx);
+            }
+            view
+        });
+        (dir, view, cx)
+    }
+
+    /// The constructor `file_view_named` hands to the window: a view over the
+    /// file at `path`, already loaded with `text` and stamped.
+    fn seeded_view(
+        path: PathBuf,
+        text: &str,
+    ) -> impl FnOnce(&mut Context<CodeView>) -> CodeView + use<> {
         let document = build_document(path.clone(), text, false);
         let highlighter = CodeHighlighter::new(
             &document,
@@ -2887,48 +3605,38 @@ mod tests {
             indent: IndentUnit::Spaces(4),
             stamp,
         }));
-        let (view, cx) = {
-            let path = path.clone();
-            cx.add_window_view(move |_window, cx| {
-                let mut view = CodeView {
-                    element_id: "code-view:test".into(),
-                    path,
-                    state,
-                    slot: CodeLoadSlot::new(),
-                    focus: cx.focus_handle(),
-                    scroll: ScrollHandle::new(),
-                    v_drag: None,
-                    h_offset: 0.0,
-                    selection: CodeSelection::default(),
-                    goal_column: 0,
-                    text_drag: None,
-                    click_chain: None,
-                    last_motion: Instant::now(),
-                    blink_visible: true,
-                    theme_generation: 0,
-                    geometry: Rc::new(Cell::new(CodeGeometry::default())),
-                    gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
-                    hits: Rc::new(RefCell::new(CodeHitMap::default())),
-                    history: edit::UndoHistory::default(),
-                    saved_mark: edit::HistoryMark::default(),
-                    indent: IndentUnit::Spaces(4),
-                    marked: None,
-                    read_only_flash: None,
-                    stamp,
-                    disk: DiskState::default(),
-                    save_error: None,
-                    disk_generation: 0,
-                    saving: false,
-                    _watcher: None,
-                    _watch_bridge: None,
-                };
-                if watch {
-                    view.start_watcher(cx);
-                }
-                view
-            })
-        };
-        (dir, view, cx)
+        move |cx: &mut Context<CodeView>| CodeView {
+            element_id: "code-view:test".into(),
+            path,
+            state,
+            slot: CodeLoadSlot::new(),
+            focus: cx.focus_handle(),
+            scroll: CodeScroll::new(),
+            v_drag: None,
+            h_offset: 0.0,
+            selection: CodeSelection::default(),
+            goal_column: 0,
+            text_drag: None,
+            click_chain: None,
+            last_motion: Instant::now(),
+            blink_visible: true,
+            theme_generation: 0,
+            geometry: Rc::new(Cell::new(CodeGeometry::default())),
+            gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
+            hits: Rc::new(RefCell::new(CodeHitMap::default())),
+            history: edit::UndoHistory::default(),
+            saved_mark: edit::HistoryMark::default(),
+            indent: IndentUnit::Spaces(4),
+            marked: None,
+            read_only_flash: None,
+            stamp,
+            disk: DiskState::default(),
+            save_error: None,
+            disk_generation: 0,
+            saving: false,
+            _watcher: None,
+            _watch_bridge: None,
+        }
     }
 
     /// Current buffer text.
@@ -3052,7 +3760,7 @@ mod tests {
             state,
             slot: CodeLoadSlot::new(),
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            scroll: CodeScroll::new(),
             v_drag: None,
             h_offset: 0.0,
             selection: CodeSelection::default(),
@@ -3475,6 +4183,365 @@ mod tests {
                 text_of(view),
                 "one\ntwo\n",
                 "Ctrl+Z recovers what was replaced"
+            );
+        });
+    }
+
+    /// EP-004: an agent's rewrite of a few lines is a few-line transaction. A
+    /// caret far from every hunk keeps its place, and one Ctrl+Z reverts the
+    /// whole reload.
+    #[gpui::test]
+    fn an_external_write_keeps_a_distant_caret_and_undoes_all_hunks_once(cx: &mut TestAppContext) {
+        let original = (0..30)
+            .map(|row| format!("line {row:03}\n"))
+            .collect::<String>();
+        let mut incoming_lines = original.lines().map(str::to_string).collect::<Vec<_>>();
+        for (row, line) in incoming_lines.iter_mut().enumerate().take(8).skip(5) {
+            *line = format!("agent changed line {row:03}");
+        }
+        incoming_lines[15] = "second distant hunk".to_string();
+        let incoming = incoming_lines.join("\n") + "\n";
+        let (dir, view, cx) = file_view_named(cx, "main.txt", &original, false);
+        let path = dir.path().join("main.txt");
+        std::fs::write(&path, &incoming).expect("agent write");
+        let stamp = FileStamp::read(&path);
+        let caret = original.find("line 025").expect("caret line") + 5;
+        let expected = incoming.find("line 025").expect("shifted caret line") + 5;
+
+        view.update(cx, |view, cx| {
+            view.selection = CodeSelection::at(caret);
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some(incoming.clone()), cx);
+            assert_eq!(view.cursor(), expected);
+            assert_eq!(text_of(view), incoming);
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            view.undo(&CeUndo, window, cx);
+            assert_eq!(text_of(view), original, "every hunk shares one transaction");
+            assert_eq!(view.cursor(), caret);
+        });
+    }
+
+    #[gpui::test]
+    fn an_identical_external_reload_pushes_no_transaction(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        view.update(cx, |view, cx| {
+            let before = view.history.mark();
+            view.adopt_disk_text("one\r\ntwo\r\n", cx);
+            assert_eq!(view.history.mark(), before);
+            assert_eq!(text_of(view), "one\ntwo\n");
+        });
+    }
+
+    #[gpui::test]
+    fn a_crlf_reload_preserves_the_document_line_ending(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = file_view(cx, "one\r\ntwo\r\n", false);
+        view.update(cx, |view, cx| {
+            view.adopt_disk_text("one\r\nTWO\r\n", cx);
+            let doc = view.document().expect("document");
+            assert_eq!(doc.to_disk_string(), "one\r\nTWO\r\n");
+        });
+    }
+
+    #[gpui::test]
+    fn a_read_only_reload_temporarily_unlocks_and_restores_the_document(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = file_view(cx, "old\n", false);
+        view.update(cx, |view, cx| {
+            view.state
+                .document_mut()
+                .expect("document")
+                .set_read_only(Some(ReadOnlyReason::Permissions));
+            view.adopt_disk_text("new content\n", cx);
+            assert_eq!(text_of(view), "new content\n");
+            assert_eq!(
+                view.document().and_then(CodeDocument::read_only_reason),
+                Some(ReadOnlyReason::Permissions)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_whole_document_reload_remeasures_the_longest_line(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = file_view(cx, "this line starts longest\nx\n", false);
+        view.update(cx, |view, cx| {
+            view.adopt_disk_text("a\na much longer replacement line\n", cx);
+        });
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        view.update(cx, |view, _cx| {
+            assert_eq!(
+                view.document().expect("document").longest_line_chars(),
+                "a much longer replacement line".len()
+            );
+        });
+    }
+
+    // --------------------------------------------------------------- EP-009
+
+    /// A probe of `text` for the view's own file, built the way the loader
+    /// builds one.
+    fn probe(view: &CodeView, text: &str, stamp: Option<FileStamp>) -> DiskLoad {
+        Ok((
+            build_document(view.path().to_path_buf(), text, false),
+            stamp,
+        ))
+    }
+
+    #[gpui::test]
+    fn a_reload_that_races_an_edit_recomputes_once_then_conflicts(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "ONE!\nTWO!\n").expect("agent write");
+        let stamp = FileStamp::read(&path);
+
+        view.update_in(cx, |view, window, cx| {
+            let generation = view.begin_disk_probe();
+            let loaded = probe(view, "ONE!\nTWO!\n", stamp);
+            let (diff, incoming) = view
+                .begin_disk_reload(generation, loaded, false, cx)
+                .expect("a clean document starts a diff");
+            let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
+            view.selection = CodeSelection::at(0);
+            view.replace_text_in_range(None, "x", window, cx);
+
+            let again = view
+                .finish_disk_reload(
+                    generation,
+                    DiskSplices {
+                        revision: diff.revision,
+                        splices,
+                    },
+                    &incoming,
+                    true,
+                    false,
+                    cx,
+                )
+                .expect("a stale revision buys exactly one recomputation");
+            assert_eq!(
+                text_of(view),
+                "xone\ntwo\n",
+                "splices computed against an older revision are refused"
+            );
+            assert!(!view.has_conflict(), "the first miss is not a conflict yet");
+
+            let splices = edit::disk_splices(&again.rope, "ONE!\nTWO!\n");
+            view.replace_text_in_range(None, "y", window, cx);
+            assert!(
+                view.finish_disk_reload(
+                    generation,
+                    DiskSplices {
+                        revision: again.revision,
+                        splices
+                    },
+                    &incoming,
+                    false,
+                    false,
+                    cx
+                )
+                .is_none(),
+                "the second stale delivery gives up"
+            );
+            assert!(
+                view.has_conflict(),
+                "a document that keeps moving is left to the user"
+            );
+            assert_eq!(text_of(view), "xyone\ntwo\n", "the user edits survived");
+        });
+    }
+
+    #[gpui::test]
+    fn a_reload_that_settles_on_a_dirty_document_keeps_the_user_text(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "ONE!\nTWO!\n").expect("agent write");
+        let stamp = FileStamp::read(&path);
+
+        view.update_in(cx, |view, window, cx| {
+            let generation = view.begin_disk_probe();
+            let loaded = probe(view, "ONE!\nTWO!\n", stamp);
+            let (diff, incoming) = view
+                .begin_disk_reload(generation, loaded, false, cx)
+                .expect("a clean document starts a diff");
+            let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
+            view.selection = CodeSelection::at(0);
+            view.replace_text_in_range(None, "x", window, cx);
+
+            let again = view
+                .finish_disk_reload(
+                    generation,
+                    DiskSplices {
+                        revision: diff.revision,
+                        splices,
+                    },
+                    &incoming,
+                    true,
+                    false,
+                    cx,
+                )
+                .expect("a stale revision buys exactly one recomputation");
+            let splices = edit::disk_splices(&again.rope, "ONE!\nTWO!\n");
+            assert!(
+                view.finish_disk_reload(
+                    generation,
+                    DiskSplices {
+                        revision: again.revision,
+                        splices
+                    },
+                    &incoming,
+                    false,
+                    false,
+                    cx
+                )
+                .is_none(),
+                "the recomputed diff reaches a document that stopped moving"
+            );
+            assert_eq!(
+                text_of(view),
+                "xone\ntwo\n",
+                "a document the user touched during the diff is never overwritten"
+            );
+            assert!(view.is_dirty(), "the unsaved edit is still unsaved");
+            assert!(
+                view.has_conflict(),
+                "the user resolves it like any other conflict"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_forced_reload_still_overwrites_the_document_the_user_edited(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "ONE!\nTWO!\n").expect("agent write");
+        let stamp = FileStamp::read(&path);
+
+        view.update_in(cx, |view, window, cx| {
+            view.selection = CodeSelection::at(0);
+            view.replace_text_in_range(None, "x", window, cx);
+            assert!(view.is_dirty(), "the fixture starts dirty");
+
+            let generation = view.begin_disk_probe();
+            let loaded = probe(view, "ONE!\nTWO!\n", stamp);
+            let (diff, incoming) = view
+                .begin_disk_reload(generation, loaded, true, cx)
+                .expect("a forced reload ignores the dirty mark");
+            let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
+            assert!(
+                view.finish_disk_reload(
+                    generation,
+                    DiskSplices {
+                        revision: diff.revision,
+                        splices
+                    },
+                    &incoming,
+                    false,
+                    true,
+                    cx
+                )
+                .is_none()
+            );
+            assert_eq!(
+                text_of(view),
+                "ONE!\nTWO!\n",
+                "discarding my changes is what the user asked for"
+            );
+            assert!(!view.is_dirty(), "and the reload is the new saved state");
+            assert!(!view.has_conflict());
+        });
+    }
+
+    /// A probe that lands after a save began is stale even once the diff has
+    /// run: the save's generation wins, and the splices are dropped.
+    #[gpui::test]
+    fn a_diff_that_outlives_its_probe_generation_is_dropped(cx: &mut TestAppContext) {
+        let (dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "ONE!\nTWO!\n").expect("agent write");
+        let stamp = FileStamp::read(&path);
+
+        view.update(cx, |view, cx| {
+            let generation = view.begin_disk_probe();
+            let loaded = probe(view, "ONE!\nTWO!\n", stamp);
+            let (diff, incoming) = view
+                .begin_disk_reload(generation, loaded, false, cx)
+                .expect("a clean document starts a diff");
+            let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
+            let _newer = view.begin_disk_probe();
+            assert!(
+                view.finish_disk_reload(
+                    generation,
+                    DiskSplices {
+                        revision: diff.revision,
+                        splices
+                    },
+                    &incoming,
+                    true,
+                    false,
+                    cx
+                )
+                .is_none(),
+                "a superseded probe never asks for a recomputation"
+            );
+            assert_eq!(text_of(view), "one\ntwo\n", "its splices never land");
+            assert!(!view.has_conflict());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_reload_whose_tab_closed_ends_without_a_panic(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "one\ntwo\n").expect("seed");
+        let stamp = FileStamp::read(&path);
+        let loaded: DiskLoad = Ok((build_document(path.clone(), "one\ntwo\n", false), stamp));
+        let seeded = seeded_view(path, "one\n");
+        let weak = cx.update(|cx| {
+            let view = cx.new(seeded);
+            let weak = view.downgrade();
+            drop(view);
+            weak
+        });
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none(), "the tab is gone");
+
+        let carried = cx
+            .spawn(|mut cx| async move { reload_from_disk(&weak, &mut cx, 1, loaded, false).await })
+            .await;
+        assert!(
+            !carried,
+            "a reload delivered to a closed tab stops its loop instead of panicking"
+        );
+    }
+
+    #[gpui::test]
+    fn a_multi_hunk_reload_reaches_the_highlighter_as_one_batch(cx: &mut TestAppContext) {
+        let original = (0..40)
+            .map(|row| format!("fn f{row:03}() {{}}\n"))
+            .collect::<String>();
+        let mut lines = original.lines().map(str::to_string).collect::<Vec<_>>();
+        lines[5] = "fn agent_a() {}".to_string();
+        lines[25] = "fn agent_b() {}".to_string();
+        let incoming = lines.join("\n") + "\n";
+        let (dir, view, cx) = file_view(cx, &original, false);
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, &incoming).expect("agent write");
+        let stamp = FileStamp::read(&path);
+
+        let before = view.update(cx, |view, _cx| {
+            let highlighter = view.highlighter().expect("highlighter");
+            assert!(highlighter.is_enabled(), "the fixture must be colored");
+            highlighter.generation()
+        });
+
+        view.update(cx, |view, cx| {
+            let generation = view.begin_disk_probe();
+            view.disk_changed(generation, stamp, Some(incoming.clone()), cx);
+            assert_eq!(text_of(view), incoming, "both hunks landed");
+            assert_eq!(
+                view.highlighter().expect("highlighter").generation(),
+                before + 1,
+                "two hunks reach the highlighter as a single batched edit"
             );
         });
     }

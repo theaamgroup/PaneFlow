@@ -30,6 +30,11 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use imara_diff::intern::InternedInput;
+use imara_diff::sources::lines_with_terminator;
+use imara_diff::{Algorithm, Sink};
+use ropey::Rope;
+
 use super::cursor::CodeSelection;
 use super::document::{CodeDocument, CodeEdit, normalize_newlines};
 
@@ -39,6 +44,12 @@ pub(crate) const UNDO_GROUP_INTERVAL: Duration = Duration::from_millis(300);
 
 /// Transactions kept before the oldest is dropped (US-013).
 pub(crate) const MAX_UNDO_TRANSACTIONS: usize = 1000;
+
+/// Bytes of removed plus inserted text the undo stack may retain before its
+/// oldest transactions are evicted (EP-004). A count cap alone let 200
+/// external reloads of a 2 MB file pin 800 MB: every reload used to record the
+/// whole old and new text.
+pub(crate) const MAX_UNDO_BYTES: usize = 32 * 1024 * 1024;
 
 /// Indent widths the detector will accept. Anything outside this is noise
 /// (a wrapped argument list, an ASCII-art comment) rather than a unit.
@@ -75,10 +86,14 @@ impl AppliedEdit {
     }
 }
 
-/// What [`splice`] produced: the document edits to feed the highlighter, and
-/// the record to hand the history.
+/// What [`splice`] produced: the one document edit to feed the highlighter,
+/// and the record to hand the history.
+///
+/// One replacement edit rather than a delete-plus-insert pair (EP-009): the
+/// highlighter interpolates and `Tree::edit`s once per hunk, and a batch of
+/// hunks stays one entry per hunk so it can be validated as descending.
 pub(crate) struct Splice {
-    pub(crate) edits: Vec<CodeEdit>,
+    pub(crate) edit: CodeEdit,
     pub(crate) record: AppliedEdit,
 }
 
@@ -100,25 +115,185 @@ pub(crate) fn splice(doc: &mut CodeDocument, range: Range<usize>, text: &str) ->
     if removed.is_empty() && inserted.is_empty() {
         return None;
     }
-    let mut edits = Vec::with_capacity(2);
-    if end > start
-        && let Some(edit) = doc.remove(start..end)
-    {
-        edits.push(edit);
-    }
-    if !inserted.is_empty()
-        && let Some(edit) = doc.insert(start, &inserted)
-    {
-        edits.push(edit);
-    }
+    let removal = (end > start).then(|| doc.remove(start..end)).flatten();
+    let insertion = (!inserted.is_empty())
+        .then(|| doc.insert(start, &inserted))
+        .flatten();
+    let edit = replacement_edit(removal, insertion)?;
     Some(Splice {
-        edits,
+        edit,
         record: AppliedEdit {
             start,
             removed,
             inserted,
         },
     })
+}
+
+/// Fold a removal and the insertion at the same offset into the single
+/// `InputEdit`-shaped replacement tree-sitter accepts: the old span comes from
+/// the removal, the new span from the insertion.
+fn replacement_edit(removal: Option<CodeEdit>, insertion: Option<CodeEdit>) -> Option<CodeEdit> {
+    match (removal, insertion) {
+        (Some(removal), Some(insertion)) => Some(CodeEdit {
+            start_byte: removal.start_byte,
+            old_end_byte: removal.old_end_byte,
+            new_end_byte: insertion.new_end_byte,
+            start_point: removal.start_point,
+            old_end_point: removal.old_end_point,
+            new_end_point: insertion.new_end_point,
+        }),
+        (Some(edit), None) | (None, Some(edit)) => Some(edit),
+        (None, None) => None,
+    }
+}
+
+/// Collects the line hunks `imara_diff` reports, in document order.
+#[derive(Default)]
+struct DiskHunkCollector {
+    hunks: Vec<(Range<u32>, Range<u32>)>,
+}
+
+impl Sink for DiskHunkCollector {
+    type Out = Vec<(Range<u32>, Range<u32>)>;
+
+    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
+        self.hunks.push((before, after));
+    }
+
+    fn finish(self) -> Self::Out {
+        self.hunks
+    }
+}
+
+/// The splices that turn `current` into `incoming`, one per changed line
+/// hunk, **ordered back to front** so they can be applied in sequence without
+/// shifting each other (EP-004, EP-009).
+///
+/// The common prefix and suffix are compared line by line against the rope, so
+/// only the diverging middle is ever materialized; the Histogram diff then runs
+/// over that middle alone. `incoming` is normalized to LF first, exactly as
+/// [`splice`] would, so an LF-to-CRLF rewrite is no change at all. Runs on the
+/// background executor: nothing here touches GPUI.
+pub(crate) fn disk_splices(current: &Rope, incoming: &str) -> Vec<(Range<usize>, String)> {
+    let incoming = normalize_newlines(incoming);
+    let incoming_lines: Vec<&str> = lines_with_terminator(&incoming).collect();
+    let current_lines = terminated_line_count(current);
+
+    let mut prefix = 0usize;
+    while prefix < current_lines
+        && prefix < incoming_lines.len()
+        && current.line(prefix) == incoming_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < current_lines.saturating_sub(prefix)
+        && suffix < incoming_lines.len().saturating_sub(prefix)
+        && current.line(current_lines - suffix - 1)
+            == incoming_lines[incoming_lines.len() - suffix - 1]
+    {
+        suffix += 1;
+    }
+
+    let current_start = current.line_to_byte(prefix);
+    let current_end = current.line_to_byte(current_lines - suffix);
+    let incoming_start = incoming_lines[..prefix]
+        .iter()
+        .map(|line| line.len())
+        .sum::<usize>();
+    let incoming_end = incoming.len()
+        - incoming_lines[incoming_lines.len() - suffix..]
+            .iter()
+            .map(|line| line.len())
+            .sum::<usize>();
+    if current_start == current_end && incoming_start == incoming_end {
+        return Vec::new();
+    }
+    let current_middle = current
+        .byte_slice(current_start..current_end)
+        .chunks()
+        .collect::<String>();
+    let current_middle = current_middle.as_str();
+    let incoming_middle = &incoming[incoming_start..incoming_end];
+    let current_offsets = line_offsets(current_middle);
+    let incoming_offsets = line_offsets(incoming_middle);
+    let input = InternedInput::new(
+        lines_with_terminator(current_middle),
+        lines_with_terminator(incoming_middle),
+    );
+    let hunks = imara_diff::diff(Algorithm::Histogram, &input, DiskHunkCollector::default());
+    let mut splices = Vec::with_capacity(hunks.len());
+    for (before, after) in hunks {
+        let before_start = current_start + current_offsets[before.start as usize];
+        let before_end = current_start + current_offsets[before.end as usize];
+        let after_start = incoming_offsets[after.start as usize];
+        let after_end = incoming_offsets[after.end as usize];
+        splices.push((
+            before_start..before_end,
+            incoming_middle[after_start..after_end].to_string(),
+        ));
+    }
+    splices.reverse();
+    splices
+}
+
+/// Carry a selection across a back-to-front batch of splices, so a caret far
+/// from every hunk keeps its place and one inside a hunk lands at the
+/// corresponding offset of the replacement.
+pub(crate) fn shift_selection_for_splices(
+    selection: CodeSelection,
+    splices_descending: &[(Range<usize>, String)],
+) -> CodeSelection {
+    CodeSelection {
+        anchor: shift_offset_for_splices(selection.anchor, splices_descending),
+        head: shift_offset_for_splices(selection.head, splices_descending),
+    }
+}
+
+/// Lines the way [`lines_with_terminator`] counts them: the empty line a
+/// trailing `\n` implies is not a line.
+fn terminated_line_count(text: &Rope) -> usize {
+    let lines = text.len_lines();
+    match lines.checked_sub(1) {
+        Some(last) if text.line(last).len_bytes() == 0 => last,
+        _ => lines,
+    }
+}
+
+/// Byte offset of every line start in `text`, plus its total length.
+fn line_offsets(text: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    offsets.push(0);
+    let mut total = 0usize;
+    for line in lines_with_terminator(text) {
+        total += line.len();
+        offsets.push(total);
+    }
+    offsets
+}
+
+fn shift_offset_for_splices(offset: usize, splices_descending: &[(Range<usize>, String)]) -> usize {
+    let mut delta = 0isize;
+    for (range, inserted) in splices_descending.iter().rev() {
+        if range.is_empty() {
+            if offset >= range.start {
+                delta += inserted.len() as isize;
+            }
+            continue;
+        }
+        if offset <= range.start {
+            break;
+        }
+        if offset >= range.end {
+            delta += inserted.len() as isize - range.len() as isize;
+            continue;
+        }
+        return (range.start as isize + delta + (offset - range.start).min(inserted.len()) as isize)
+            .max(0) as usize;
+    }
+    (offset as isize + delta).max(0) as usize
 }
 
 /// Replay `record` in the direction it was originally applied.
@@ -184,6 +359,16 @@ struct Transaction {
     after: CodeSelection,
 }
 
+impl Transaction {
+    /// Text this transaction retains: removed plus inserted bytes over every
+    /// record, which is what the [`MAX_UNDO_BYTES`] budget counts.
+    fn bytes(&self) -> usize {
+        self.edits.iter().fold(0usize, |total, edit| {
+            total.saturating_add(edit.removed.len().saturating_add(edit.inserted.len()))
+        })
+    }
+}
+
 /// What an undo or a redo produced, for the caller to route onward.
 pub(crate) struct HistoryStep {
     /// Document edits, in the order they were applied, to feed `Tree::edit`.
@@ -192,16 +377,43 @@ pub(crate) struct HistoryStep {
     pub(crate) selection: CodeSelection,
 }
 
-/// Bounded undo / redo stack (US-013).
-#[derive(Default)]
+/// Bounded undo / redo stack (US-013), capped by count and by retained bytes
+/// (EP-004).
 pub(crate) struct UndoHistory {
     undo: VecDeque<Transaction>,
     redo: Vec<Transaction>,
+    /// Bytes retained by `undo`, maintained incrementally.
+    undo_bytes: usize,
+    /// Bytes retained by `redo`.
+    redo_bytes: usize,
+    /// What [`Self::mark`] reports for an empty undo stack. Starts at
+    /// `Baseline`; once an eviction drops a transaction it becomes that
+    /// transaction's mark, so a saved mark that was evicted is still reached
+    /// after every newer transaction has been undone.
+    base_mark: HistoryMark,
     next_id: u64,
     /// Whether the newest undo entry still accepts more keystrokes.
     open: bool,
     /// When the newest entry last grew.
     last_edit_at: Option<Instant>,
+    /// The byte budget; [`MAX_UNDO_BYTES`] outside tests.
+    max_bytes: usize,
+}
+
+impl Default for UndoHistory {
+    fn default() -> Self {
+        Self {
+            undo: VecDeque::new(),
+            redo: Vec::new(),
+            undo_bytes: 0,
+            redo_bytes: 0,
+            base_mark: HistoryMark::Baseline,
+            next_id: 0,
+            open: false,
+            last_edit_at: None,
+            max_bytes: MAX_UNDO_BYTES,
+        }
+    }
 }
 
 impl UndoHistory {
@@ -221,6 +433,7 @@ impl UndoHistory {
         // Any new edit abandons the redo branch: the future it described no
         // longer starts from this document.
         self.redo.clear();
+        self.redo_bytes = 0;
 
         let joinable = group == EditGroup::Typing
             && self.open
@@ -228,23 +441,28 @@ impl UndoHistory {
                 .last_edit_at
                 .is_some_and(|last| now.saturating_duration_since(last) <= UNDO_GROUP_INTERVAL);
         if joinable && let Some(top) = self.undo.back_mut() {
+            let added_bytes = edits.iter().fold(0usize, |total, edit| {
+                total.saturating_add(edit.removed.len().saturating_add(edit.inserted.len()))
+            });
             top.edits.extend(edits);
             top.after = after;
+            self.undo_bytes = self.undo_bytes.saturating_add(added_bytes);
+            self.trim_undo();
             self.last_edit_at = Some(now);
             return;
         }
 
         let id = self.next_id;
         self.next_id += 1;
-        self.undo.push_back(Transaction {
+        let transaction = Transaction {
             id,
             edits,
             before,
             after,
-        });
-        if self.undo.len() > MAX_UNDO_TRANSACTIONS {
-            self.undo.pop_front();
-        }
+        };
+        self.undo_bytes = self.undo_bytes.saturating_add(transaction.bytes());
+        self.undo.push_back(transaction);
+        self.trim_undo();
         self.open = group == EditGroup::Typing;
         self.last_edit_at = Some(now);
     }
@@ -260,12 +478,15 @@ impl UndoHistory {
     pub(crate) fn undo(&mut self, doc: &mut CodeDocument) -> Option<HistoryStep> {
         self.open = false;
         let transaction = self.undo.pop_back()?;
+        let bytes = transaction.bytes();
+        self.undo_bytes = self.undo_bytes.saturating_sub(bytes);
         let mut edits = Vec::new();
         for record in transaction.edits.iter().rev() {
             edits.extend(apply_reverse(doc, record));
         }
         let selection = transaction.before;
         self.redo.push(transaction);
+        self.redo_bytes = self.redo_bytes.saturating_add(bytes);
         Some(HistoryStep { edits, selection })
     }
 
@@ -273,12 +494,15 @@ impl UndoHistory {
     pub(crate) fn redo(&mut self, doc: &mut CodeDocument) -> Option<HistoryStep> {
         self.open = false;
         let transaction = self.redo.pop()?;
+        let bytes = transaction.bytes();
+        self.redo_bytes = self.redo_bytes.saturating_sub(bytes);
         let mut edits = Vec::new();
         for record in &transaction.edits {
             edits.extend(apply_forward(doc, record));
         }
         let selection = transaction.after;
         self.undo.push_back(transaction);
+        self.undo_bytes = self.undo_bytes.saturating_add(bytes);
         Some(HistoryStep { edits, selection })
     }
 
@@ -286,7 +510,22 @@ impl UndoHistory {
     pub(crate) fn mark(&self) -> HistoryMark {
         match self.undo.back() {
             Some(transaction) => HistoryMark::Transaction(transaction.id),
-            None => HistoryMark::Baseline,
+            None => self.base_mark,
+        }
+    }
+
+    /// Evict from the front until both caps hold. The byte cap always leaves
+    /// the newest transaction in place: a single reload larger than the whole
+    /// budget must still be undoable until the next push replaces it.
+    fn trim_undo(&mut self) {
+        while self.undo.len() > MAX_UNDO_TRANSACTIONS
+            || (self.undo_bytes > self.max_bytes && self.undo.len() > 1)
+        {
+            let Some(evicted) = self.undo.pop_front() else {
+                break;
+            };
+            self.undo_bytes = self.undo_bytes.saturating_sub(evicted.bytes());
+            self.base_mark = HistoryMark::Transaction(evicted.id);
         }
     }
 
@@ -294,6 +533,9 @@ impl UndoHistory {
     pub(crate) fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.undo_bytes = 0;
+        self.redo_bytes = 0;
+        self.base_mark = HistoryMark::Baseline;
         self.open = false;
         self.last_edit_at = None;
     }
@@ -306,6 +548,19 @@ impl UndoHistory {
     #[cfg(test)]
     fn redo_len(&self) -> usize {
         self.redo.len()
+    }
+
+    #[cfg(test)]
+    fn with_max_bytes(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> usize {
+        self.undo_bytes.saturating_add(self.redo_bytes)
     }
 }
 
@@ -589,6 +844,160 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(history.redo_len(), 0, "a new edit clears the redo branch");
+    }
+
+    /// EP-009: a replacement is one `CodeEdit` spanning the removed and the
+    /// inserted text, so the highlighter sees one hunk per splice.
+    #[test]
+    fn a_replacement_is_one_edit_from_the_old_span_to_the_new_one() {
+        let mut d = doc("hello world");
+        let edit = splice(&mut d, 6..11, "there!").expect("splice").edit;
+        assert_eq!(edit.start_byte, 6);
+        assert_eq!(edit.old_end_byte, 11);
+        assert_eq!(edit.new_end_byte, 12);
+        assert_eq!(edit.old_end_point.column, 11);
+        assert_eq!(edit.new_end_point.column, 12);
+    }
+
+    #[test]
+    fn disk_splices_apply_disjoint_line_hunks_in_one_plan() {
+        let current = "keep\none\nmiddle\ntwo\ntail\n";
+        let incoming = "keep\nONE!\nmiddle\nTWO!\ntail\n";
+        let ops = disk_splices(&Rope::from_str(current), incoming);
+        assert_eq!(ops.len(), 2, "one operation per disjoint hunk");
+        assert!(ops[0].0.start > ops[1].0.start, "offsets descend");
+
+        let mut d = doc(current);
+        for (range, inserted) in ops {
+            splice(&mut d, range, &inserted).expect("disk hunk applies");
+        }
+        assert_eq!(d.text().to_string(), incoming);
+    }
+
+    #[test]
+    fn disk_splices_normalize_crlf_and_skip_identical_text() {
+        let current = Rope::from_str("one\ntwo\n");
+        assert!(disk_splices(&current, "one\r\ntwo\r\n").is_empty());
+        let ops = disk_splices(&current, "one\r\nTWO\r\n");
+        assert_eq!(ops, vec![(4..8, "TWO\n".to_string())]);
+    }
+
+    #[test]
+    fn disk_splices_limit_a_ten_line_reload_to_ten_lines() {
+        let current = (0..9_000)
+            .map(|row| format!("line {row:04}\n"))
+            .collect::<String>();
+        let mut incoming_lines = lines_with_terminator(&current)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for (row, line) in incoming_lines
+            .iter_mut()
+            .enumerate()
+            .take(4_010)
+            .skip(4_000)
+        {
+            *line = format!("changed {row:04}\n");
+        }
+        let incoming = incoming_lines.concat();
+        let ops = disk_splices(&Rope::from_str(&current), &incoming);
+        assert_eq!(ops.len(), 1);
+        let changed = &current[ops[0].0.clone()];
+        assert_eq!(lines_with_terminator(changed).count(), 10);
+
+        let caret = current.find("line 8000").expect("caret line") + 5;
+        let shifted = shift_selection_for_splices(CodeSelection::at(caret), &ops);
+        assert_eq!(
+            shifted.cursor(),
+            incoming.find("line 8000").expect("shifted caret line") + 5
+        );
+    }
+
+    /// The prefix and suffix scans must stop at the rope's real line count: a
+    /// file without a trailing newline and one with it differ only in that
+    /// phantom last line.
+    #[test]
+    fn disk_splices_handle_a_missing_trailing_newline_at_either_end() {
+        let with = Rope::from_str("one\ntwo\n");
+        let ops = disk_splices(&with, "one\ntwo");
+        let mut d = doc("one\ntwo\n");
+        for (range, inserted) in ops {
+            splice(&mut d, range, &inserted).expect("applies");
+        }
+        assert_eq!(d.text().to_string(), "one\ntwo");
+
+        let without = Rope::from_str("one\ntwo");
+        let ops = disk_splices(&without, "one\ntwo\n");
+        let mut d = doc("one\ntwo");
+        for (range, inserted) in ops {
+            splice(&mut d, range, &inserted).expect("applies");
+        }
+        assert_eq!(d.text().to_string(), "one\ntwo\n");
+        assert!(disk_splices(&without, "one\ntwo").is_empty());
+        assert!(disk_splices(&Rope::from_str(""), "").is_empty());
+    }
+
+    #[test]
+    fn a_single_oversized_transaction_survives_until_the_next_push() {
+        let mut d = doc("");
+        let mut history = UndoHistory::with_max_bytes(8);
+        let sel = CodeSelection::at(0);
+        let large = splice(&mut d, 0..0, "0123456789")
+            .expect("large insert")
+            .record;
+        history.push(vec![large], sel, sel, EditGroup::Atomic, Instant::now());
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.retained_bytes(), 10);
+
+        let end = d.len_bytes();
+        let next = splice(&mut d, end..end, "x").expect("next insert").record;
+        history.push(vec![next], sel, sel, EditGroup::Atomic, Instant::now());
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.retained_bytes(), 1);
+    }
+
+    #[test]
+    fn an_evicted_saved_mark_is_reached_after_newer_edits_are_undone() {
+        let mut d = doc("");
+        let mut history = UndoHistory::with_max_bytes(4);
+        let sel = CodeSelection::at(0);
+        let saved_edit = splice(&mut d, 0..0, "save").expect("saved insert").record;
+        history.push(
+            vec![saved_edit],
+            sel,
+            sel,
+            EditGroup::Atomic,
+            Instant::now(),
+        );
+        let saved_mark = history.mark();
+        let newer = splice(&mut d, 4..4, "!").expect("newer insert").record;
+        history.push(vec![newer], sel, sel, EditGroup::Atomic, Instant::now());
+        assert_ne!(history.mark(), saved_mark);
+        assert_eq!(history.len(), 1, "the saved transaction was evicted");
+
+        history.undo(&mut d).expect("newer edit is undoable");
+        assert_eq!(d.text().to_string(), "save");
+        assert_eq!(history.mark(), saved_mark);
+    }
+
+    #[test]
+    fn a_new_transaction_drops_redo_bytes_before_enforcing_the_budget() {
+        let mut d = doc("");
+        let mut history = UndoHistory::with_max_bytes(16);
+        let sel = CodeSelection::at(0);
+        for text in ["aaaa", "bbbb"] {
+            let end = d.len_bytes();
+            let record = splice(&mut d, end..end, text).expect("insert").record;
+            history.push(vec![record], sel, sel, EditGroup::Atomic, Instant::now());
+        }
+        history.undo(&mut d).expect("undo");
+        assert_eq!(history.retained_bytes(), 8);
+        assert_eq!(history.redo_len(), 1);
+
+        let end = d.len_bytes();
+        let record = splice(&mut d, end..end, "c").expect("branch insert").record;
+        history.push(vec![record], sel, sel, EditGroup::Atomic, Instant::now());
+        assert_eq!(history.redo_len(), 0);
+        assert_eq!(history.retained_bytes(), 5);
     }
 
     /// US-013 AC: the history is capped, and undoing back to the mark a save

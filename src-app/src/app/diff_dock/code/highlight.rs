@@ -83,6 +83,11 @@ pub(crate) enum HighlightOutcome {
     Deferred(DeferredParse),
 }
 
+/// A batch handed to [`CodeHighlighter::edit_batch`] whose hunks do not
+/// descend by row without overlapping. Nothing was applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnorderedBatch;
+
 /// A reparse that has to happen off the render thread. Owns everything it
 /// needs: a snapshot of the rope (cheap - ropey clones share their chunks) and
 /// the already-edited trees to reuse.
@@ -233,42 +238,76 @@ impl CodeHighlighter {
         edit: &CodeEdit,
         budget: Duration,
     ) -> HighlightOutcome {
+        // A single edit is trivially ordered, so the refusal arm is unreachable.
+        self.edit_batch(doc, std::slice::from_ref(edit), budget)
+            .unwrap_or(HighlightOutcome::Synced)
+    }
+
+    /// Fold a batch of applied edits in as **one** step (EP-009): one
+    /// generation, one interpolation pass, one budgeted parse and at most one
+    /// deferred parse, however many hunks an external reload produced. `doc`
+    /// must already reflect every edit.
+    ///
+    /// The batch has to descend - each hunk strictly above the previous one by
+    /// row, with no byte overlap - which is the order [`super::edit::disk_splices`]
+    /// emits and the order in which the hunks were spliced. Interpolating them
+    /// in that sequence is exact: a hunk never moves the rows of the hunks that
+    /// follow it. A batch that does not descend is refused untouched.
+    pub(crate) fn edit_batch(
+        &mut self,
+        doc: &CodeDocument,
+        edits: &[CodeEdit],
+        budget: Duration,
+    ) -> Result<HighlightOutcome, UnorderedBatch> {
+        if !descends_without_overlap(edits) {
+            return Err(UnorderedBatch);
+        }
+        if edits.is_empty() {
+            return Ok(HighlightOutcome::Synced);
+        }
         self.generation = self.generation.wrapping_add(1);
-        self.interpolate(doc, edit);
+        for (edit, line_count) in edits.iter().zip(intermediate_line_counts(doc, edits)) {
+            self.interpolate(line_count, edit);
+        }
         if !self.enabled {
-            return HighlightOutcome::Synced;
+            return Ok(HighlightOutcome::Synced);
         }
 
-        let input = InputEdit {
-            start_byte: edit.start_byte,
-            old_end_byte: edit.old_end_byte,
-            new_end_byte: edit.new_end_byte,
-            start_position: point(edit.start_point.row, edit.start_point.column),
-            old_end_position: point(edit.old_end_point.row, edit.old_end_point.column),
-            new_end_position: point(edit.new_end_point.row, edit.new_end_point.column),
-        };
-        for pass in &mut self.passes {
-            if let Some(tree) = pass.tree.as_mut() {
-                tree.edit(&input);
+        for edit in edits {
+            let input = InputEdit {
+                start_byte: edit.start_byte,
+                old_end_byte: edit.old_end_byte,
+                new_end_byte: edit.new_end_byte,
+                start_position: point(edit.start_point.row, edit.start_point.column),
+                old_end_position: point(edit.old_end_point.row, edit.old_end_point.column),
+                new_end_position: point(edit.new_end_point.row, edit.new_end_point.column),
+            };
+            for pass in &mut self.passes {
+                if let Some(tree) = pass.tree.as_mut() {
+                    tree.edit(&input);
+                }
             }
         }
 
-        // One budget for the whole keystroke, not one per pass: Markdown must
-        // not get twice the stall budget of every other file type.
+        // One budget for the whole batch, not one per pass: Markdown must not
+        // get twice the stall budget of every other file type.
         let deadline = Instant::now() + budget;
-        let mut dirty = edit.start_byte..edit.new_end_byte.max(edit.start_byte);
+        let mut dirty: Vec<Range<usize>> = edits
+            .iter()
+            .map(|edit| edit.start_byte..edit.new_end_byte.max(edit.start_byte))
+            .collect();
+        let mut without_old_tree = false;
         let mut deferred = false;
         for pass in &mut self.passes {
             let old = pass.tree.clone();
             match parse_rope(&mut pass.parser, doc.text(), old.as_ref(), Some(deadline)) {
                 Some(new_tree) => {
-                    if let Some(old) = old.as_ref() {
-                        for range in old.changed_ranges(&new_tree) {
-                            dirty.start = dirty.start.min(range.start_byte);
-                            dirty.end = dirty.end.max(range.end_byte);
-                        }
-                    } else {
-                        dirty = 0..doc.len_bytes();
+                    match old.as_ref() {
+                        Some(old) => dirty.extend(
+                            old.changed_ranges(&new_tree)
+                                .map(|range| range.start_byte..range.end_byte),
+                        ),
+                        None => without_old_tree = true,
                     }
                     pass.tree = Some(new_tree);
                 }
@@ -283,7 +322,7 @@ impl CodeHighlighter {
         }
 
         if deferred {
-            return HighlightOutcome::Deferred(DeferredParse {
+            return Ok(HighlightOutcome::Deferred(DeferredParse {
                 generation: self.generation,
                 rope: doc.text().clone(),
                 passes: self
@@ -291,12 +330,18 @@ impl CodeHighlighter {
                     .iter()
                     .map(|p| (p.grammar, p.tree.clone()))
                     .collect(),
-            });
+            }));
         }
 
-        let rows = self.dirty_rows(doc, &dirty);
-        self.requery_rows(doc, rows);
-        HighlightOutcome::Synced
+        if without_old_tree {
+            self.requery_rows(doc, 0..doc.line_count());
+        } else {
+            for range in &dirty {
+                let rows = self.dirty_rows(doc, range);
+                self.requery_rows(doc, rows);
+            }
+        }
+        Ok(HighlightOutcome::Synced)
     }
 
     /// Install an off-thread reparse. Returns `false` - changing nothing, so
@@ -324,12 +369,16 @@ impl CodeHighlighter {
     /// the edit added or removed are spliced in or out. Any run the edit
     /// straddles is truncated rather than guessed at - a missing color for one
     /// frame reads better than a wrong one.
-    fn interpolate(&mut self, doc: &CodeDocument, edit: &CodeEdit) {
+    ///
+    /// `line_count` is the document's line count *right after this edit*: for
+    /// a batch that is an intermediate count, not the final one, or the tail
+    /// rows would be truncated or padded before the lower hunks shift them.
+    fn interpolate(&mut self, line_count: usize, edit: &CodeEdit) {
         let start_row = edit.start_point.row;
         let old_end_row = edit.old_end_point.row;
         let new_end_row = edit.new_end_point.row;
         if start_row >= self.rows.len() {
-            self.rows.resize(doc.line_count(), Vec::new());
+            self.rows.resize(line_count, Vec::new());
             return;
         }
 
@@ -372,7 +421,7 @@ impl CodeHighlighter {
 
         let removed_end = (old_end_row + 1).min(self.rows.len());
         self.rows.splice(start_row..removed_end, replacement);
-        self.rows.resize(doc.line_count(), Vec::new());
+        self.rows.resize(line_count, Vec::new());
     }
 
     /// Rows overlapping `bytes`, clamped to the document.
@@ -453,6 +502,30 @@ impl CodeHighlighter {
             })
             .unwrap_or_default()
     }
+}
+
+/// Whether a batch is applicable in sequence: every hunk strictly above the
+/// one before it by row, and never overlapping it by byte. Two hunks on one
+/// row are refused too, since the second would read the first's shifted
+/// columns.
+fn descends_without_overlap(edits: &[CodeEdit]) -> bool {
+    edits.windows(2).all(|pair| {
+        pair[1].old_end_point.row < pair[0].start_point.row
+            && pair[1].old_end_byte <= pair[0].start_byte
+    })
+}
+
+/// The document's line count after each edit of a descending batch, given
+/// that `doc` already holds the result of all of them: the count after
+/// `edits[i]` is the final count minus the rows every later hunk added.
+fn intermediate_line_counts(doc: &CodeDocument, edits: &[CodeEdit]) -> Vec<usize> {
+    let mut counts = vec![0usize; edits.len()];
+    let mut count = doc.line_count() as isize;
+    for (index, edit) in edits.iter().enumerate().rev() {
+        counts[index] = count.max(0) as usize;
+        count -= edit.new_end_point.row as isize - edit.old_end_point.row as isize;
+    }
+    counts
 }
 
 /// Split one capture across the rows it covers, pushing line-relative runs.
@@ -811,6 +884,132 @@ mod tests {
         let expected = expected_rows(&after, "rs", d.line_count());
         for (row, want) in expected.iter().enumerate() {
             assert_eq!(h.runs(row), want.as_slice(), "row {row}");
+        }
+    }
+
+    fn rows_of_code(rows: usize) -> String {
+        (0..rows).map(|row| format!("fn f{row}() {{}}\n")).collect()
+    }
+
+    /// EP-009: ten hunks reach the highlighter as one batch - one generation,
+    /// one deferred parse - and the deferred result restores exact parity.
+    #[test]
+    fn a_batch_of_hunks_advances_one_generation_and_defers_one_parse() {
+        let mut d = doc("batch.rs", &rows_of_code(400));
+        let mut h = CodeHighlighter::new(&d, syntax());
+        let before = h.generation();
+
+        let mut edits = Vec::with_capacity(10);
+        for hunk in (0..10).rev() {
+            let at = d.line_to_byte(hunk * 30 + 5);
+            edits.push(d.insert(at, "// agent\n").expect("insert"));
+        }
+
+        let HighlightOutcome::Deferred(deferred) = h
+            .edit_batch(&d, &edits, Duration::ZERO)
+            .expect("descending hunks are a valid batch")
+        else {
+            panic!("a zero budget must defer");
+        };
+        assert_eq!(
+            h.generation(),
+            before + 1,
+            "ten hunks are one batch, so one generation"
+        );
+        assert_eq!(deferred.generation(), h.generation());
+        assert!(h.apply_parsed(&d, deferred.run()));
+        let expected = expected_rows(&d.to_disk_string(), d.ext(), d.line_count());
+        for (row, want) in expected.iter().enumerate() {
+            assert_eq!(h.runs(row), want.as_slice(), "row {row} after a batch");
+        }
+    }
+
+    #[test]
+    fn edit_batch_refuses_hunks_that_do_not_descend() {
+        let mut d = doc("batch.rs", &rows_of_code(40));
+        let mut h = CodeHighlighter::new(&d, syntax());
+        let generation = h.generation();
+        let low = d.insert(d.line_to_byte(5), "// a\n").expect("insert");
+        let high = d.insert(d.line_to_byte(20), "// b\n").expect("insert");
+        let snapshot: Vec<_> = (0..d.line_count()).map(|r| h.runs(r).to_vec()).collect();
+
+        assert!(
+            h.edit_batch(&d, &[low, high], Duration::from_secs(1))
+                .is_err(),
+            "an ascending batch is refused"
+        );
+        assert_eq!(
+            h.generation(),
+            generation,
+            "a refused batch changes nothing"
+        );
+        let after: Vec<_> = (0..d.line_count()).map(|r| h.runs(r).to_vec()).collect();
+        assert_eq!(snapshot, after);
+    }
+
+    #[test]
+    fn edit_batch_refuses_hunks_that_share_a_row() {
+        let mut d = doc("batch.rs", &rows_of_code(40));
+        let mut h = CodeHighlighter::new(&d, syntax());
+        let generation = h.generation();
+        let second = d.insert(d.line_to_byte(10), "// b\n").expect("insert");
+        let first = d.insert(d.line_to_byte(10), "// a\n").expect("insert");
+
+        assert!(
+            h.edit_batch(&d, &[second, first], Duration::from_secs(1))
+                .is_err(),
+            "two hunks on one row overlap and are refused"
+        );
+        assert_eq!(
+            h.generation(),
+            generation,
+            "a refused batch changes nothing"
+        );
+    }
+
+    /// The interpolation of a batch shifts the rows between and after its
+    /// hunks intact: a row two hunks straddle keeps its runs, and so does the
+    /// last row of the file even though the lower hunk moved it.
+    #[test]
+    fn a_batch_leaves_the_rows_between_its_hunks_alone() {
+        let mut d = doc("batch.rs", &rows_of_code(200));
+        let mut h = CodeHighlighter::new(&d, syntax());
+        let quiet = h.runs(100).to_vec();
+        let last = h.runs(199).to_vec();
+        assert!(!quiet.is_empty(), "the untouched row starts colored");
+        assert!(!last.is_empty(), "the last row starts colored");
+
+        let high = d.insert(d.line_to_byte(150), "// b\n").expect("insert");
+        let low = d.insert(d.line_to_byte(50), "// a\n").expect("insert");
+        let HighlightOutcome::Deferred(deferred) = h
+            .edit_batch(&d, &[high, low], Duration::ZERO)
+            .expect("descending hunks are a valid batch")
+        else {
+            panic!("a zero budget must defer");
+        };
+
+        assert!(h.runs(50).is_empty(), "the lower inserted row is plain");
+        assert!(h.runs(151).is_empty(), "the upper inserted row is plain");
+        assert_eq!(
+            h.runs(101),
+            quiet.as_slice(),
+            "a row between two hunks kept the runs it had, one row down"
+        );
+        assert_eq!(
+            h.runs(201),
+            last.as_slice(),
+            "the last row kept its runs across both shifts"
+        );
+        assert_eq!(
+            h.runs(199),
+            quiet.as_slice(),
+            "rows past the upper hunk shifted twice"
+        );
+
+        assert!(h.apply_parsed(&d, deferred.run()));
+        let expected = expected_rows(&d.to_disk_string(), d.ext(), d.line_count());
+        for (row, want) in expected.iter().enumerate() {
+            assert_eq!(h.runs(row), want.as_slice(), "row {row} after the parse");
         }
     }
 

@@ -196,6 +196,13 @@ impl CodeDocument {
         self.text.len_bytes()
     }
 
+    /// Mutation counter, bumped by every insert and remove. A background diff
+    /// carries the revision it was computed against so a batch of splices from
+    /// before a later edit is refused instead of landing on shifted offsets.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Number of lines, editor-style: an empty file is one empty line, and a
     /// file whose last byte is `\n` carries a final empty line (which is what
     /// the trailing newline means). A file with no trailing newline gains no
