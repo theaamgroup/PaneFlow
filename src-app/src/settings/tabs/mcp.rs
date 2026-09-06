@@ -267,6 +267,18 @@ impl PaneFlowApp {
     /// Extracts the bridge binary first (so the registered path exists), then
     /// runs the install + a fresh status probe, and stores both.
     pub(crate) fn start_mcp_install(&mut self, cx: &mut Context<Self>) {
+        self.start_mcp_install_scoped(None, cx);
+    }
+
+    /// Install the bridge into exactly one agent (`only`), for the sidebar
+    /// callout that names it: the consent the user gave is for that agent,
+    /// so no other present agent's config is written. `None` is the
+    /// Settings page's every-agent install.
+    pub(crate) fn start_mcp_install_scoped(
+        &mut self,
+        only: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.mcp_busy {
             return;
         }
@@ -293,10 +305,17 @@ impl PaneFlowApp {
                         crate::runtime_paths::bridge_binary_path()
                     }
                 };
-                let install = paneflow_mcp_install::install_all_with_known_present(
-                    bridge.as_deref(),
-                    &known_present,
-                );
+                let install = match only.as_deref() {
+                    Some(agent_id) => paneflow_mcp_install::install_agent_with_known_present(
+                        bridge.as_deref(),
+                        agent_id,
+                        &known_present,
+                    ),
+                    None => paneflow_mcp_install::install_all_with_known_present(
+                        bridge.as_deref(),
+                        &known_present,
+                    ),
+                };
                 let status = paneflow_mcp_install::status_all_with_known_present(
                     bridge.as_deref(),
                     &known_present,

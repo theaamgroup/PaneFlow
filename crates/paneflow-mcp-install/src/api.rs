@@ -101,6 +101,23 @@ pub fn install_all_with_known_present(
     install_with_known_present(bridge, &agents::default_writers(), known_present)
 }
 
+/// Register the bridge with ONE agent, `agent_id`, and no other: the
+/// sidebar callout names a single agent, and the consent it shows must
+/// not widen into every present agent's config. `known_present` is as in
+/// [`install_all_with_known_present`]. An unknown id yields `Ok(vec![])`,
+/// which writes nothing.
+pub fn install_agent_with_known_present(
+    bridge: Option<&Path>,
+    agent_id: &str,
+    known_present: &[&str],
+) -> Result<Vec<AgentResult<InstallKind>>, String> {
+    let writers: Vec<Box<dyn AgentConfigWriter>> = agents::default_writers()
+        .into_iter()
+        .filter(|w| w.id() == agent_id)
+        .collect();
+    install_with_known_present(bridge, &writers, known_present)
+}
+
 pub(crate) fn install_with(
     bridge: Option<&Path>,
     writers: &[Box<dyn AgentConfigWriter>],
@@ -353,6 +370,32 @@ mod tests {
         assert_eq!(
             status_with(Some(&bridge), &writers)[0].kind,
             StatusKind::NotDetected
+        );
+    }
+
+    #[test]
+    fn an_agent_scoped_install_walks_only_that_agents_writer() {
+        // The public fn filters `default_writers()` by id; the filter it
+        // applies is the same `writers` slice narrowing exercised here, so
+        // a second present agent is never visited, let alone written.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bridge = dir.path().join("paneflow-mcp");
+        std::fs::write(&bridge, b"x").unwrap();
+        let all: Vec<Box<dyn AgentConfigWriter>> = vec![
+            boxed(Mock::present("codex")),
+            boxed(Mock::present("gemini").with_install(Err(anyhow::anyhow!("must not run")))),
+        ];
+        let only_codex: Vec<Box<dyn AgentConfigWriter>> =
+            all.into_iter().filter(|w| w.id() == "codex").collect();
+        let res = install_with_known_present(Some(&bridge), &only_codex, &[]).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].id, "codex");
+        assert_eq!(res[0].kind, InstallKind::Installed);
+        // An id no writer carries installs nothing and refuses nothing.
+        assert!(
+            install_agent_with_known_present(Some(&bridge), "no-such-agent", &[])
+                .unwrap()
+                .is_empty()
         );
     }
 

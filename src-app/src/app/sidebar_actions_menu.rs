@@ -82,6 +82,7 @@ impl PaneFlowApp {
         let pending =
             crate::app::sidebar::mcp_callout::pending_mcp_agent(status, &live, dismissed)?;
         let agent_id = pending.id.clone();
+        let install_id = agent_id.clone();
         let label = pending.label.clone();
         let ui = crate::theme::ui_colors();
         let dismiss_hover = crate::app::constants::sidebar_tab_active_background();
@@ -107,8 +108,10 @@ impl PaneFlowApp {
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .child("Install MCP bridge")
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.start_mcp_install(cx);
+                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    // Scoped to the agent the callout names: the consent
+                    // shown here is per agent, never "every agent".
+                    this.start_mcp_install_scoped(Some(install_id.clone()), cx);
                 }))
                 .into_any_element()
         };
@@ -322,7 +325,7 @@ mod tests {
             "\"sidebar-mcp-callout\"",
             "\"sidebar-mcp-install\"",
             "\"sidebar-mcp-dismiss\"",
-            "this.start_mcp_install(cx)",
+            "this.start_mcp_install_scoped(Some(install_id.clone()), cx)",
             "this.dismiss_mcp_callout(",
             "durable_agent_install_allowed()",
             "mcp_callout::pending_mcp_agent(",
