@@ -81,12 +81,12 @@ pub fn derive_surface_base_name(
 /// Claude then restored as a shell would briefly show up as `claude` in
 /// `surface.list`. A live declaration still names the surface before the
 /// first scan, matching the launch-logo contract.
-pub fn agent_for_surface_name<'a>(
-    agent: Option<&'a str>,
+pub fn agent_for_surface_name(
+    agent: Option<&str>,
     confirmed: bool,
     declared_until: Option<Instant>,
     now: Instant,
-) -> Option<&'a str> {
+) -> Option<&str> {
     if confirmed || declared_until.is_some_and(|until| now < until) {
         agent
     } else {
