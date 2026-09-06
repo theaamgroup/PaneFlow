@@ -40,7 +40,14 @@ dist/PaneFlow.app/Contents/MacOS/paneflow --version
 
 ## Put the CLI on your PATH
 
-The app bundle does not add `paneflow` to `PATH`. Symlink it once:
+Inside a PaneFlow pane, `paneflow` is already on `PATH`: every pane's
+`PANEFLOW_BIN_DIR` carries a `paneflow` symlink to the running app's
+executable next to the agent shims, so `paneflow ls`, `paneflow whoami`, and
+`paneflow mcp install` work in a pane with no setup. The link is re-pointed
+on launch if the bundle moves.
+
+Outside PaneFlow (Terminal.app, an SSH session, a script), the app bundle
+does not add `paneflow` to `PATH`. Symlink it once:
 
 ```bash
 sudo ln -sf /Applications/PaneFlow.app/Contents/MacOS/paneflow /usr/local/bin/paneflow

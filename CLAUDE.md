@@ -156,6 +156,13 @@ profile and prints the comparison table `bench/README.md` documents. Do not
 ship a perf number you did not measure, and do not publish a run that
 printed `PANEFLOW_BENCH_WARNING` (another workload was competing).
 
+Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
+holds the 16 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
+running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
+whoami` / `paneflow mcp install` work inside a pane without the user linking the
+bundle binary onto their login PATH. The link is re-pointed at launch when
+`current_exe()` moves.
+
 Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`):
 config, data, cache, and the default IPC socket (`paneflow-dev.sock`). A
 `cargo run` debug instance should not share those with
