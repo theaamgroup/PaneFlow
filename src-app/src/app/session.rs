@@ -781,6 +781,9 @@ impl PaneFlowApp {
             t.read(cx).restore_scrollback(scrollback);
         }
         // US-013: re-apply the persisted custom name.
+        t.update(cx, |view, _| {
+            super::agent_context::restore_context(view, surface.agent_context.as_ref());
+        });
         if let Some(ref custom) = surface.custom_name {
             t.update(cx, |view, _cx| {
                 view.terminal.custom_name = Some(custom.clone());
@@ -1342,6 +1345,42 @@ fn session_write_target(path: &Path) -> Result<PathBuf, std::io::Error> {
     }
 }
 
+/// Count the encoded bytes (including escaping and indentation), stopping at
+/// the read cap before allocating or publishing an unreadable session file.
+fn serialize_session_capped(
+    state: &paneflow_config::schema::SessionState,
+    limit: usize,
+) -> Result<Vec<u8>, serde_json::Error> {
+    struct Buffer {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+                return Err(std::io::Error::other(format!(
+                    "session exceeds the {}-byte read/write cap; previous saved session retained",
+                    self.limit
+                )));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut buffer = Buffer {
+        bytes: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer_pretty(&mut buffer, state)?;
+    Ok(buffer.bytes)
+}
+
 fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::SessionState) -> bool {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
     // A dotfiles-managed session.json is a symlink into another store. Publish
@@ -1377,7 +1416,7 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
             }
         }
     }
-    match serde_json::to_string_pretty(state) {
+    match serialize_session_capped(state, MAX_SESSION_SIZE_BYTES as usize) {
         Ok(json) => {
             let tmp_path = session_tmp_path(path);
             let write_result = std::fs::OpenOptions::new()
@@ -1390,7 +1429,7 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
                     // `mode` is ignored for a path that already exists, so pin
                     // the temp file 0600 before it is renamed into place.
                     temporary.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-                    std::io::Write::write_all(&mut temporary, json.as_bytes())?;
+                    std::io::Write::write_all(&mut temporary, &json)?;
                     temporary.sync_all()
                 });
             match write_result {
@@ -2468,6 +2507,88 @@ mod tests {
             diff_scope: None,
             primary_sidebar_collapsed: false,
         }
+    }
+
+    #[test]
+    fn session_serialization_cap_counts_escaped_bytes_and_accepts_the_exact_boundary() {
+        let mut state = empty_session_state();
+        // Exercise multi-byte UTF-8 plus JSON expansion of control characters.
+        state.diff_scope = Some("é\n\u{0001}".repeat(100));
+        let expected = serde_json::to_vec_pretty(&state).expect("reference serialization");
+        assert_eq!(
+            serialize_session_capped(&state, expected.len()).expect("exact boundary"),
+            expected
+        );
+        assert!(serialize_session_capped(&state, expected.len() - 1).is_err());
+    }
+
+    #[test]
+    fn aggregate_task_data_cannot_replace_a_readable_session_with_an_oversized_one() {
+        use paneflow_config::schema::{
+            AgentContext, AgentTask, LayoutNode, SurfaceDefinition, TabSession, TaskAssignment,
+            TaskReport, TaskStatus, WorkspaceSession,
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.json");
+        let mut state = empty_session_state();
+        assert!(write_session_json(&path, &state));
+        let original = std::fs::read(&path).expect("original session");
+        let assignment = TaskAssignment {
+            objective: "a".repeat(4096),
+            acceptance_criteria: vec!["a".repeat(512); 32],
+            owned_files: vec!["a".repeat(512); 32],
+        };
+        let report = TaskReport {
+            status: TaskStatus::Working,
+            summary: "a".repeat(4096),
+            changed_files: vec!["a".repeat(512); 32],
+            commits: vec!["a".repeat(512); 32],
+            tests: vec!["a".repeat(512); 32],
+            unresolved_questions: vec!["a".repeat(512); 32],
+        };
+        assignment.validate().expect("valid assignment");
+        report.validate().expect("valid report");
+        let surface = SurfaceDefinition {
+            agent_context: Some(AgentContext {
+                pane_id: uuid::Uuid::new_v4().to_string(),
+                task: Some(AgentTask {
+                    task_id: uuid::Uuid::new_v4().to_string(),
+                    revision: 1,
+                    assignment,
+                    report: Some(report),
+                    updated_at_ms: 1,
+                }),
+            }),
+            ..Default::default()
+        };
+        let layout = LayoutNode::Split {
+            direction: "horizontal".into(),
+            ratio: None,
+            ratios: None,
+            children: vec![
+                LayoutNode::Pane {
+                    surfaces: vec![surface]
+                };
+                32
+            ],
+        };
+        let mut workspace: WorkspaceSession = serde_json::from_value(
+            serde_json::json!({"title": "large", "cwd": "/tmp", "tabs": []}),
+        )
+        .expect("workspace");
+        workspace.tabs = vec![TabSession::with_layout(layout); 20];
+        state.workspaces.push(workspace);
+        assert!(
+            !write_session_json(&path, &state),
+            "must refuse a file the reader will reject"
+        );
+        assert_eq!(std::fs::read(&path).expect("preserved session"), original);
+        let seq = AtomicU64::new(1);
+        assert!(!write_session_json_if_current(&path, &state, &seq, 1));
+        assert_eq!(
+            std::fs::read(&path).expect("preserved after deferred save"),
+            original
+        );
     }
 
     #[test]

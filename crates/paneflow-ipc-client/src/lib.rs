@@ -21,6 +21,7 @@
 //! Shared crate (no GPUI / `src-app` dependency): consumed both by the MCP
 //! bridge (`paneflow-mcp`) and the `paneflow` CLI subcommands.
 
+pub mod agent_context;
 pub mod ai_hook;
 
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -172,6 +173,8 @@ fn method_is_safe_to_retry_after_timeout(method: &str) -> bool {
             | "surface.search"
             | "surface.status"
             | "fleet.list"
+            | "agent.whoami"
+            | "task.get"
     )
 }
 

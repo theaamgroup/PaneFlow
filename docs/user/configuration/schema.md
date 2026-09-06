@@ -352,3 +352,7 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "openclaw_button_visible": null
 }
 ```
+
+`agent_context` on a surface stores the session-owned pane UUID and current agent task.
+Omit it from reusable templates. Assign tasks through `paneflow task assign`;
+see [Agent context](../../agent-context.md) for the API and persistence contract.

@@ -1,0 +1,87 @@
+{
+  "name": "task_report",
+  "description": "Record progress for your assigned task. First call task_get; supply its task_id and revision. A stale revision is rejected. This replaces the previous report, increments revision, and schedules session persistence. Test and completion claims are self-reported, not verified. No terminal input is sent.",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "task_id",
+      "revision",
+      "report"
+    ],
+    "properties": {
+      "task_id": {
+        "type": "string"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "report": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "summary"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "working",
+              "blocked",
+              "completed"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "changed_files": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "commits": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "tests": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "unresolved_questions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        }
+      }
+    }
+  }
+}

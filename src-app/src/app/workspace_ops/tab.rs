@@ -20,6 +20,59 @@ use crate::{CloseTab, ClosedRecord, NewTab, NextTab, PaneFlowApp, PreviousTab, T
 
 use super::capture_closed_tab_record;
 
+/// Carry the `agent_sessions` rows of the surfaces that just left
+/// `src_ws_idx` into `dest_ws_idx`'s registry (PR #410 review). The rows are
+/// keyed by the pane's workspace, and a pane move used to leave them behind:
+/// closing the source workspace then dropped a live agent's state, and the
+/// sidebar kept the badge on the workspace the pane had left. Returns how
+/// many rows moved. A key already present in the destination (a synthetic
+/// band key, or a recycled PID) keeps the destination's row and drops the
+/// mover, which the next hook frame recreates in place.
+pub(crate) fn migrate_agent_sessions(
+    workspaces: &mut [crate::workspace::Workspace],
+    src_ws_idx: usize,
+    dest_ws_idx: usize,
+    surface_ids: &std::collections::HashSet<u64>,
+) -> usize {
+    if src_ws_idx == dest_ws_idx
+        || surface_ids.is_empty()
+        || src_ws_idx >= workspaces.len()
+        || dest_ws_idx >= workspaces.len()
+    {
+        return 0;
+    }
+    let source = &mut workspaces[src_ws_idx].agent_sessions;
+    let keys: Vec<u32> = source
+        .iter()
+        .filter(|(_, session)| {
+            session
+                .surface_id
+                .is_some_and(|sid| surface_ids.contains(&sid))
+        })
+        .map(|(key, _)| *key)
+        .collect();
+    let moved: Vec<_> = keys
+        .into_iter()
+        .filter_map(|key| source.remove(&key).map(|session| (key, session)))
+        .collect();
+    let destination = &mut workspaces[dest_ws_idx].agent_sessions;
+    let mut count = 0;
+    for (key, session) in moved {
+        match destination.entry(key) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(session);
+                count += 1;
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                log::warn!(
+                    "pane move: agent session key {key} already present in the destination workspace; dropping the moved row"
+                );
+            }
+        }
+    }
+    count
+}
+
 impl PaneFlowApp {
     /// US-008: toggle the sidebar folder row for `ws_idx`.
     ///
@@ -551,12 +604,22 @@ impl PaneFlowApp {
         // by the pane's workspace id. The terminal's own cwd is untouched - a
         // tab dropped on a workspace with a different cwd keeps running where
         // it was started.
+        let moved_surfaces = tab.surface_ids(cx);
         for pane in tab.collect_panes() {
             pane.update(cx, |pane, cx| {
                 pane.workspace_id = dest_id;
                 cx.notify();
             });
         }
+        // The registry rows of the moved panes' agents go with them, so the
+        // sidebar badge, the attention queue and `whoami` follow the pane and
+        // closing the source workspace no longer discards a live session.
+        migrate_agent_sessions(
+            &mut self.workspaces,
+            source_ws_idx,
+            dest_ws_idx,
+            &moved_surfaces,
+        );
         if !self.workspaces[dest_ws_idx].open_tab(tab) {
             // Unreachable: the cap was checked above and nothing else can have
             // opened a tab in between. Kept as a fail-safe rather than a panic.
@@ -694,6 +757,19 @@ impl PaneFlowApp {
             pane.workspace_id = dest_id;
             cx.notify();
         });
+        // Same contract as `move_tab_to_workspace`: the agent's registry row
+        // moves with its pane (no-op when the move stays in one workspace).
+        let moved_surfaces: std::collections::HashSet<u64> = pane
+            .read(cx)
+            .terminals()
+            .map(|terminal| terminal.entity_id().as_u64())
+            .collect();
+        migrate_agent_sessions(
+            &mut self.workspaces,
+            src_ws_idx,
+            dest_ws_idx,
+            &moved_surfaces,
+        );
 
         if !self.open_pane_in_new_workspace_tab(dest_ws_idx, pane.clone(), cx) {
             // Unreachable: the cap was checked above and the detach can only
@@ -767,8 +843,61 @@ pub(crate) fn worktree_binding_for_cwd(
 
 #[cfg(test)]
 mod tests {
-    use super::worktree_binding_for_cwd;
+    use super::{migrate_agent_sessions, worktree_binding_for_cwd};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_pane_move_carries_its_agent_session_rows_to_the_destination() {
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{AgentSession, AgentState};
+        use crate::workspace::Workspace;
+        let row = |sid: Option<u64>| {
+            let mut session = AgentSession::new(TerminalAgent::Codex, AgentState::Thinking);
+            session.surface_id = sid;
+            session
+        };
+        let mut source = Workspace::empty_with_cwd_and_id(1, "source", PathBuf::new());
+        let mut destination = Workspace::empty_with_cwd_and_id(2, "destination", PathBuf::new());
+        source.agent_sessions.insert(42, row(Some(7)));
+        // A different surface and an unresolved row stay where they are.
+        source.agent_sessions.insert(43, row(Some(8)));
+        source.agent_sessions.insert(44, row(None));
+        destination.agent_sessions.insert(45, row(Some(9)));
+        let mut workspaces = vec![source, destination];
+        let moved_surfaces: std::collections::HashSet<u64> = [7].into_iter().collect();
+
+        assert_eq!(
+            migrate_agent_sessions(&mut workspaces, 0, 1, &moved_surfaces),
+            1
+        );
+        assert!(!workspaces[0].agent_sessions.contains_key(&42));
+        assert!(workspaces[0].agent_sessions.contains_key(&43));
+        assert!(workspaces[0].agent_sessions.contains_key(&44));
+        assert_eq!(workspaces[1].agent_sessions[&42].surface_id, Some(7));
+        assert!(workspaces[1].agent_sessions.contains_key(&45));
+
+        // Same workspace, an empty set, or an out-of-range index is a no-op.
+        assert_eq!(
+            migrate_agent_sessions(&mut workspaces, 1, 1, &moved_surfaces),
+            0
+        );
+        let none = std::collections::HashSet::new();
+        assert_eq!(migrate_agent_sessions(&mut workspaces, 1, 0, &none), 0);
+        assert_eq!(
+            migrate_agent_sessions(&mut workspaces, 1, 5, &moved_surfaces),
+            0
+        );
+        assert!(workspaces[1].agent_sessions.contains_key(&42));
+
+        // A key collision keeps the destination's row rather than overwriting it.
+        workspaces[0].agent_sessions.insert(42, row(Some(7)));
+        assert_eq!(
+            migrate_agent_sessions(&mut workspaces, 0, 1, &moved_surfaces),
+            0
+        );
+        assert!(!workspaces[0].agent_sessions.contains_key(&42));
+        assert!(workspaces[1].agent_sessions.contains_key(&42));
+    }
 
     #[test]
     fn worktree_binding_binds_a_bound_or_managed_checkout_and_nothing_else() {

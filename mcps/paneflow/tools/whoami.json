@@ -1,0 +1,15 @@
+{
+  "name": "whoami",
+  "description": "Resolve your inherited PaneFlow pane, workspace, terminal lifetime, observed agents, and current task ID. IDs are routing metadata, not credentials.",
+  "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

@@ -219,6 +219,62 @@ mod tests {
         assert!(env_vars
             .iter()
             .any(|value| value.as_str() == Some("PANEFLOW_WORKSPACE_ID")));
+        assert!(env_vars
+            .iter()
+            .any(|value| value.as_str() == Some("PANEFLOW_SURFACE_ID")));
+    }
+
+    #[test]
+    fn install_repairs_legacy_env_forwarding_for_agent_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "# keep my settings\n[mcp_servers.other]\ncommand = \"other-mcp\"\n\n\
+             [mcp_servers.paneflow]\ncommand = \"/data/paneflow-mcp\"\nargs = []\n\
+             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"CUSTOM_VAR\"]\n\
+             startup_timeout_sec = 20\n",
+        )
+        .unwrap();
+        let w = test_writer(p.clone());
+        let bridge = Path::new("/data/paneflow-mcp");
+        assert!(matches!(
+            w.status(Some(bridge)).unwrap(),
+            StatusOutcome::NeedsRepair { .. }
+        ));
+        assert_eq!(w.install(bridge).unwrap(), InstallOutcome::Updated);
+        let repaired = std::fs::read_to_string(&p).unwrap();
+        let doc = repaired.parse::<toml_edit::DocumentMut>().unwrap();
+        let forwarded: Vec<_> = doc["mcp_servers"]["paneflow"]["env_vars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            forwarded,
+            [
+                "PANEFLOW_SOCKET_PATH",
+                "PANEFLOW_WORKSPACE_ID",
+                "CUSTOM_VAR",
+                "PANEFLOW_SURFACE_ID"
+            ]
+        );
+        assert!(repaired.contains("# keep my settings"));
+        assert_eq!(
+            doc["mcp_servers"]["other"]["command"].as_str(),
+            Some("other-mcp")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["paneflow"]["startup_timeout_sec"].as_integer(),
+            Some(20)
+        );
+        assert!(matches!(
+            w.status(Some(bridge)).unwrap(),
+            StatusOutcome::Installed { .. }
+        ));
+        assert_eq!(w.install(bridge).unwrap(), InstallOutcome::AlreadyCurrent);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), repaired);
     }
 
     #[test]
@@ -280,7 +336,7 @@ mod tests {
         let p = dir.path().join("config.toml");
         std::fs::write(
             &p,
-            "[mcp_servers.paneflow]\ncommand = \"/data/paneflow-mcp\"\nargs = []\nenv_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"]\nenabled = false\n",
+            "[mcp_servers.paneflow]\ncommand = \"/data/paneflow-mcp\"\nargs = []\nenv_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"]\nenabled = false\n",
         )
         .unwrap();
         let w = test_writer(p.clone());
@@ -338,6 +394,7 @@ mod tests {
             "CUSTOM_VAR",
             "PANEFLOW_SOCKET_PATH",
             "PANEFLOW_WORKSPACE_ID",
+            "PANEFLOW_SURFACE_ID",
         ] {
             assert!(
                 env_vars
@@ -411,7 +468,19 @@ mod tests {
         );
         assert!(doc["mcp_servers"]["paneflow"]["env_vars"]
             .as_array()
-            .is_some_and(|env_vars| env_vars.len() == 2));
+            .is_some_and(|env_vars| {
+                [
+                    "PANEFLOW_SOCKET_PATH",
+                    "PANEFLOW_WORKSPACE_ID",
+                    "PANEFLOW_SURFACE_ID",
+                ]
+                .iter()
+                .all(|expected| {
+                    env_vars
+                        .iter()
+                        .any(|value| value.as_str() == Some(*expected))
+                })
+            }));
     }
 
     #[test]

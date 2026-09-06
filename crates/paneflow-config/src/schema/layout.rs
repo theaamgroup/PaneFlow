@@ -412,6 +412,9 @@ pub(crate) fn default_layout_pane() -> LayoutNode {
 /// A surface within a pane (terminal, browser, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SurfaceDefinition {
+    /// Stable pane identity and current task; absent in older sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<super::AgentContext>,
     /// Surface type identifier: "terminal", "browser", etc.
     pub surface_type: Option<String>,
     /// Display name for this surface.
@@ -461,6 +464,7 @@ impl Default for SurfaceDefinition {
     fn default() -> Self {
         Self {
             surface_type: Some("terminal".to_string()),
+            agent_context: None,
             name: None,
             custom_name: None,
             command: None,

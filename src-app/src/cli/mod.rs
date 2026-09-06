@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use paneflow_ipc_client::IpcClient;
 use serde_json::Value;
 
+mod context_cmds;
 mod control_cmds;
 mod flow_cmd;
 mod flow_spec;
@@ -46,6 +47,8 @@ pub const EXIT_TIMEOUT: i32 = 4;
 /// the tool name reaches the matching verb instead of tripping the GUI
 /// single-instance guard. This list only gates the `main.rs` intercept.
 pub(crate) const VERBS: &[&str] = &[
+    "whoami",
+    "task",
     "ls",
     "read",
     "search",
@@ -69,6 +72,8 @@ pub(crate) const VERBS: &[&str] = &[
 /// Canonical verbs shown in `paneflow --help`. MCP-tool aliases stay in
 /// [`VERBS`] (so they still intercept) but off this index to keep help short.
 pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
+    ("whoami", "Read your pane and agent context"),
+    ("task", "Assign, read, or report a pane task"),
     ("ls", "List terminal surfaces"),
     ("read", "Print a pane's scrollback"),
     ("search", "Search a pane's scrollback"),
@@ -147,6 +152,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Read the identity inherited from the pane running this command.
+    Whoami,
+    /// Manage the task attached to a terminal pane.
+    Task {
+        #[command(subcommand)]
+        command: context_cmds::TaskCommand,
+    },
     /// List terminal surfaces.
     // EP-005 US-011: `list_panes` is the MCP tool name; accept it as a hidden
     // alias so a conductor can type either.
@@ -465,6 +477,8 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
             max,
             human,
         } => read_cmds::search(client, &target, &pattern, max, human),
+        Commands::Whoami => context_cmds::whoami(client),
+        Commands::Task { command } => context_cmds::run(client, command),
         Commands::Ps { json } => read_cmds::ps(client, json),
         Commands::Status { target, json } => read_cmds::status(client, &target, json),
         Commands::New { name, cwd } => {

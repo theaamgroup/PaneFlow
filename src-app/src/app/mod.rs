@@ -4,6 +4,7 @@
 
 pub mod about_dialog;
 pub mod actions;
+pub(crate) mod agent_context;
 pub(crate) mod agent_status;
 pub mod attention_queue;
 pub mod bootstrap;

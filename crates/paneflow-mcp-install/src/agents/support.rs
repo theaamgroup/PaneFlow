@@ -412,9 +412,13 @@ fn read_jsonc_source(path: &Path) -> Result<String> {
 pub(crate) const CODEX_TABLE: &str = "mcp_servers";
 
 /// Paneflow pane identity that Codex must explicitly forward to stdio MCP
-/// servers. Codex otherwise launches the bridge without the workspace scope
-/// and socket selected by the Paneflow PTY.
-pub(crate) const CODEX_ENV_VARS: &[&str] = &["PANEFLOW_SOCKET_PATH", "PANEFLOW_WORKSPACE_ID"];
+/// servers. The surface ID is required by agent context tools; workspace and
+/// socket identify the scope and instance selected by the PaneFlow PTY.
+pub(crate) const CODEX_ENV_VARS: &[&str] = &[
+    "PANEFLOW_SOCKET_PATH",
+    "PANEFLOW_WORKSPACE_ID",
+    "PANEFLOW_SURFACE_ID",
+];
 
 fn ensure_codex_env_vars(doc: &mut toml_edit::DocumentMut) -> Result<()> {
     use toml_edit::{value, Array, Item, Value};
@@ -1030,7 +1034,7 @@ mod tests {
             "[mcp_servers.paneflow]\n\
              command = \"/cur\"\n\
              args = []\n\
-             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"]\n\
+             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"]\n\
              enabled = false\n",
         )
         .unwrap();
@@ -1061,7 +1065,7 @@ mod tests {
         let p = dir.path().join("config.toml");
         std::fs::write(
             &p,
-            "[mcp_servers]\npaneflow = { command = \"/cur\", args = [], env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"], enabled = false }\n",
+            "[mcp_servers]\npaneflow = { command = \"/cur\", args = [], env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"], enabled = false }\n",
         )
         .unwrap();
 
@@ -1096,7 +1100,7 @@ mod tests {
             "[mcp_servers.paneflow]\n\
              command = \"/cur\"\n\
              args = []\n\
-             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\"]\n\
+             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"]\n\
              enabled = true\n",
         )
         .unwrap();
