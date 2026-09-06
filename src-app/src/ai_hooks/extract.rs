@@ -8,8 +8,17 @@
 //!     ├── claude                  ← copy of paneflow-shim
 //!     ├── codex                   ← copy of paneflow-shim
 //!     ├── …one per TerminalAgent binary (gemini, cursor-agent, …)
-//!     └── paneflow-ai-hook        ← copy of paneflow-ai-hook
+//!     ├── paneflow-ai-hook        ← copy of paneflow-ai-hook
+//!     └── paneflow                ← symlink to the running app executable (#440)
 //! ```
+//!
+//! The `paneflow` entry is what lets an agent inside a pane run `paneflow
+//! whoami`, `paneflow task get`, or `paneflow mcp install` without the user
+//! ever symlinking the bundle binary onto their login PATH. It is a symlink,
+//! not a copy: the app executable is tens of megabytes, and a link keeps
+//! following the bundle Sparkle swaps in at quit. It is re-pointed on every
+//! launch whose `current_exe()` differs from the link target, so a moved
+//! bundle heals itself the next time a pane opens.
 //!
 //! Why two shim copies instead of a hardlink: `std::fs::hard_link` is
 //! cross-filesystem-fragile on macOS (APFS ↔ tmpfs).
@@ -79,6 +88,72 @@ fn extract_plan() -> Vec<(&'static str, &'static str)> {
     plan
 }
 
+/// Basename of the CLI link staged beside the wrappers (#440). Resolves to
+/// the running app's executable so `paneflow …` inside a pane is always the
+/// CLI that matches the GUI it talks to, ahead of any older copy the user
+/// symlinked into `/usr/local/bin`.
+pub(crate) const CLI_LINK_NAME: &str = "paneflow";
+
+/// Point `<dir>/paneflow` at `exe`, replacing whatever is there.
+///
+/// Idempotent: an existing symlink that already targets `exe` is left
+/// untouched (no mtime churn). A stale link, a dangling link, or a regular
+/// file at that name is replaced atomically: the new symlink is created
+/// under a temporary name in the same directory and `rename(2)`d over the
+/// old entry, so a PATH scanner never observes a missing `paneflow`.
+///
+/// A directory at that path is not removed; the rename fails and the error
+/// surfaces like every other IO error in this module.
+pub(crate) fn link_cli_into(dir: &Path, exe: &Path) -> Result<()> {
+    let link = dir.join(CLI_LINK_NAME);
+    match std::fs::read_link(&link) {
+        Ok(target) if target == exe => return Ok(()),
+        // Stale link: fall through and replace.
+        Ok(_) => {}
+        // Missing, or present but not a symlink (`EINVAL` → InvalidInput):
+        // fall through and replace.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+            ) => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("#440: read_link {} failed", link.display()));
+        }
+    }
+
+    let tmp = dir.join(format!(".{CLI_LINK_NAME}.{}.tmp", std::process::id()));
+    // A leftover from an interrupted earlier attempt by a process that
+    // reused this PID; harmless to clear.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("#440: clearing {} failed", tmp.display()));
+        }
+    }
+    std::os::unix::fs::symlink(exe, &tmp).with_context(|| {
+        format!(
+            "#440: symlink {} -> {} failed",
+            tmp.display(),
+            exe.display()
+        )
+    })?;
+    if let Err(e) = std::fs::rename(&tmp, &link) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(e)).with_context(|| {
+            format!(
+                "#440: publishing {} over {} failed",
+                tmp.display(),
+                link.display()
+            )
+        });
+    }
+    Ok(())
+}
+
 /// Pull the raw bytes of `name` out of the `Bins` rust-embed archive.
 /// `name` is the unsuffixed basename staged by build.rs; the embed key
 /// is `bin/{triple}/{name}`.
@@ -110,6 +185,9 @@ fn wrappers_present(dir: &Path) -> bool {
         && extract_plan()
             .iter()
             .all(|(out_name, _)| dir.join(out_name).is_file())
+        // `is_file` follows the link: a dangling `paneflow` (bundle moved or
+        // deleted) drops the memo so the next spawn re-points it (#440).
+        && dir.join(CLI_LINK_NAME).is_file()
 }
 
 fn memoized_verified_path(
@@ -141,8 +219,11 @@ fn memoized_verified_path(
 /// - Atomic per-file: writes to a temp file in the same dir, then
 ///   renames into place.
 /// - Unix: sets mode `0o755` on every extracted file.
-/// - Idempotent: if every file already exists with a matching SHA256,
-///   returns the target dir without writing.
+/// - Stages a `paneflow` symlink to the running executable beside the
+///   wrappers (#440; see [`link_cli_into`]).
+/// - Idempotent: if every file already exists with a matching SHA256 and
+///   the link already targets this executable, returns the target dir
+///   without writing.
 /// - Process-memoized: after one successful verification, later terminal
 ///   spawns reuse the verified path without hashing all wrappers again,
 ///   as long as the directory and its wrappers still exist on disk.
@@ -183,6 +264,9 @@ fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
             .collect();
 
         extract_into(&entries, &target_dir)?;
+
+        let exe = std::env::current_exe().context("#440: current_exe() unresolvable")?;
+        link_cli_into(&target_dir, &exe)?;
         Ok(target_dir)
     }
 }
@@ -626,6 +710,10 @@ mod tests {
         for (out_name, _) in extract_plan() {
             std::fs::write(dir.path().join(out_name), b"x").unwrap();
         }
+        // #440: the CLI link is part of the staged set too.
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        link_cli_into(dir.path(), &exe).unwrap();
         assert!(wrappers_present(dir.path()));
 
         std::fs::remove_file(dir.path().join("claude")).unwrap();
@@ -745,6 +833,121 @@ mod tests {
                 p.display()
             );
         }
+        // #440: the CLI of the running executable is reachable from a pane.
+        let cli = dir.join(CLI_LINK_NAME);
+        assert_eq!(
+            std::fs::read_link(&cli).unwrap(),
+            std::env::current_exe().unwrap(),
+            "#440: {} must be a symlink to the running executable",
+            cli.display()
+        );
+        assert!(cli.is_file(), "#440: the CLI link must resolve");
+    }
+
+    #[test]
+    fn link_cli_into_creates_a_symlink_to_the_executable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("app-bundle-exe");
+        std::fs::write(&exe, b"not really an executable").unwrap();
+
+        link_cli_into(dir.path(), &exe).unwrap();
+
+        let link = dir.path().join(CLI_LINK_NAME);
+        assert_eq!(std::fs::read_link(&link).unwrap(), exe);
+        assert!(
+            link.is_file(),
+            "the link must resolve through to the target"
+        );
+    }
+
+    #[test]
+    fn link_cli_into_is_a_noop_when_the_link_already_matches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        link_cli_into(dir.path(), &exe).unwrap();
+        let link = dir.path().join(CLI_LINK_NAME);
+        let before = std::fs::symlink_metadata(&link)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        link_cli_into(dir.path(), &exe).unwrap();
+
+        let after = std::fs::symlink_metadata(&link)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after, "an up-to-date link must not be rewritten");
+        assert_eq!(std::fs::read_link(&link).unwrap(), exe);
+    }
+
+    #[test]
+    fn link_cli_into_repoints_a_stale_or_dangling_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let old = dir.path().join("Old.app-exe");
+        let new = dir.path().join("New.app-exe");
+        std::fs::write(&new, b"x").unwrap();
+        // `old` never exists: the link starts out dangling, the shape of a
+        // bundle that was moved or deleted after the last launch.
+        std::os::unix::fs::symlink(&old, dir.path().join(CLI_LINK_NAME)).unwrap();
+        assert!(!dir.path().join(CLI_LINK_NAME).is_file());
+
+        link_cli_into(dir.path(), &new).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(dir.path().join(CLI_LINK_NAME)).unwrap(),
+            new
+        );
+        assert!(dir.path().join(CLI_LINK_NAME).is_file());
+    }
+
+    #[test]
+    fn link_cli_into_replaces_a_regular_file_and_leaves_no_temp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let link = dir.path().join(CLI_LINK_NAME);
+        std::fs::write(&link, b"a stray regular file").unwrap();
+
+        link_cli_into(dir.path(), &exe).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), exe);
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.ends_with(".tmp")),
+            "no temporary link may be left behind: {names:?}"
+        );
+    }
+
+    #[test]
+    fn wrappers_present_requires_the_cli_link_to_resolve() {
+        // The memo must drop when the link dangles, or every new pane for
+        // the rest of the process would inherit a PATH whose `paneflow`
+        // points at nothing.
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, _) in extract_plan() {
+            std::fs::write(dir.path().join(name), b"wrapper").unwrap();
+        }
+        assert!(!wrappers_present(dir.path()), "no link at all");
+
+        std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join(CLI_LINK_NAME))
+            .unwrap();
+        assert!(!wrappers_present(dir.path()), "dangling link");
+
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, b"x").unwrap();
+        link_cli_into(dir.path(), &exe).unwrap();
+        assert!(wrappers_present(dir.path()), "resolving link");
     }
 
     #[test]
