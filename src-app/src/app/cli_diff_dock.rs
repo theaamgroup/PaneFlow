@@ -563,6 +563,10 @@ impl PaneFlowApp {
         // open has to be swapped in to *become* visible.
         self.sync_diff_dock_session(cx);
         if !self.diff_dock_visible() {
+            // The gutter is unmounted (Settings, Review) and cannot see the
+            // button release; a thumb drag held across the switch must not
+            // resume from its old anchor when the dock comes back.
+            self.diff_dock.vertical_scrollbar.cancel_drag();
             return body;
         }
         let Some((width, max_width)) = diff_dock_fit(self.diff_dock.width, available_width) else {
@@ -572,6 +576,7 @@ impl PaneFlowApp {
             // is dropped, or it would resume on the dock's return.
             self.diff_dock.resize = None;
             self.diff_dock.h_scroll_drag = None;
+            self.diff_dock.vertical_scrollbar.cancel_drag();
             return body;
         };
         let ui = crate::theme::ui_colors();

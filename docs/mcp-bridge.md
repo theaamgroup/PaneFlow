@@ -86,6 +86,18 @@ paneflow mcp status      # report state per agent (read-only)
 paneflow mcp uninstall   # remove only the `paneflow` entry, everywhere
 ```
 
+PaneFlow also offers the install from the sidebar. When a pane runs Claude
+Code, Codex, Gemini CLI, or opencode and that agent's MCP config has no
+`paneflow` entry, a one-time "Let <agent> see other panes - Install MCP bridge"
+callout appears in the sidebar footer, beside the IPC notice. Its button runs
+the same off-thread installer as Settings → MCP Servers and the callout goes
+away once `status` reports the agent installed. The `×` dismisses it for that
+agent only, remembered in `paneflow.json` as `mcp_bridge_prompt_dismissed` (a
+list of agent ids: `claude-code`, `codex`, `gemini`, `opencode`); remove an id
+from that list to see the offer again. Debug builds do not show the callout
+unless `PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1`, the same gate the installer
+itself honours.
+
 `status` distinguishes five states per agent: *not detected*, *installed*,
 *detected but not installed*, *stale path*, and *needs repair* when a
 `paneflow` entry exists but is disabled or no longer matches PaneFlow's managed

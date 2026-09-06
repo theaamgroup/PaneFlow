@@ -6,6 +6,9 @@
 //! popover-style menus). This module provides a thin overlay built from
 //! plain divs, plus the math + listener helpers each call site needs.
 //!
+//! `geometry` (the 15 px track / 25 px thumb math) is shared with the
+//! editor-style `widgets::editor_scrollbar` gutter used by the Changes dock.
+//!
 //! ## Usage
 //!
 //! ```ignore
@@ -66,6 +69,8 @@
 //! scrolled to the bottom). Earlier code in this repo treated `max_offset`
 //! as negative and silently broke the moment real bounds replaced the
 //! first-frame fallback estimate.
+
+pub(crate) mod geometry;
 
 use gpui::{
     AnyElement, App, Bounds, ElementId, InteractiveElement, IntoElement, ListState, MouseButton,

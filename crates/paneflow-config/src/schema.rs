@@ -149,6 +149,7 @@ mod tests {
                 notify_when_agent_waiting: Some(NotifyWhenAgentWaiting::PrimaryScreen),
             }),
             tool_permissions: permissions,
+            mcp_bridge_prompt_dismissed: vec!["codex".to_string()],
         };
 
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

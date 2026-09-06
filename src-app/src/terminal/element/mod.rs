@@ -33,6 +33,7 @@ use color::convert_color;
 /// The benchmark resolves the base font the way the renderer does per frame.
 #[cfg(test)]
 pub(crate) use font::base_font;
+pub(crate) use font::refresh_font_config;
 pub use font::{
     CellMetrics, MAX_FONT_SIZE, MIN_FONT_SIZE, global_font_size, resolve_font_family,
     resolve_frame_metrics, sanitize_font_override,

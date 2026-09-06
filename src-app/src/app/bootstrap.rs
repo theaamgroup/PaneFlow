@@ -66,6 +66,9 @@ impl PaneFlowApp {
         // `smol::Timer` loops with a single ticker for the whole app.
         let blink_phase = cx.new(|_| BlinkPhase::default());
         cx.set_global(BlinkPhaseGlobal(blink_phase.clone()));
+        // Issue #429: the theme signal every `TerminalView` observes so a
+        // cached pane repaints on a theme switch. Must precede the first view.
+        crate::theme::install_theme_signal(cx);
         cx.spawn(
             async |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 loop {
@@ -846,6 +849,7 @@ impl PaneFlowApp {
             mcp_status: None,
             mcp_install: None,
             mcp_busy: false,
+            mcp_probe_generation: 0,
             sidebar_scroll: gpui::ScrollHandle::new(),
             effective_shortcuts,
             recording_shortcut_idx: None,
@@ -1007,6 +1011,7 @@ impl PaneFlowApp {
                 width: crate::app::diff_dock::DIFF_DOCK_PANEL_WIDTH,
                 resize: None,
                 h_scroll_drag: None,
+                vertical_scrollbar: Default::default(),
                 h_offsets: std::rc::Rc::new(Vec::new()),
             },
             sidebar_order_cache: std::cell::RefCell::new(Default::default()),
@@ -1025,6 +1030,13 @@ impl PaneFlowApp {
         // Hydrate the motion switch from the config: it gates the
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
+
+        // Issue #443: the sidebar's "Install MCP bridge" callout reads the
+        // same status cache Settings does, so warm it once here instead of
+        // waiting for the Settings page to open. One off-thread probe; the
+        // pane scan re-probes when a pane resolves an agent the cache does
+        // not know about.
+        app.refresh_mcp_status(cx);
 
         app
     }

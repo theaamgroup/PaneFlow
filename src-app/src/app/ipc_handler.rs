@@ -1978,6 +1978,10 @@ impl PaneFlowApp {
             if default_shell_changed {
                 self.handle_default_shell_changed(cx);
             }
+            // The render thread's font cache re-reads the file only every
+            // 500 ms; resolve the reloaded block now so the repaint the
+            // propagation below triggers measures the new font (#429).
+            crate::terminal::element::refresh_font_config(&self.cached_config);
             // US-015: push the refreshed config to every pane's tab-bar cache.
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
@@ -1999,6 +2003,11 @@ impl PaneFlowApp {
         {
             cx.notify();
         }
+
+        // Issue #429: a cached terminal pane only repaints on a theme change
+        // when its observed signal moves; `cx.notify()` above reaches the
+        // application entity alone.
+        crate::theme::publish_theme_generation(cx);
     }
 
     /// Walk every mounted terminal surface and build per-surface metadata with

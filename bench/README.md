@@ -154,9 +154,16 @@ idle, places the caret at the top and scrolls away from it, then dispatches 120
 0, 2 and 6 terminal panes and prints one JSON line carrying
 `scroll_frame_p50_us_panes_N` and `scroll_frame_p95_us_panes_N` for each N,
 computed from GPUI's `dirty_to_draw_duration` over at least 100 frames per
-configuration. `render_content_lock_samples_panes_N` counts one terminal
-snapshot per pane per traced frame, which is the witness that every terminal is
-repainted by a scroll that only moved the editor. A configuration that cannot
+configuration. `render_content_lock_samples_panes_N` counts the terminal grid
+snapshots taken across those frames. Before issue #429 it read one snapshot per
+pane per frame, the witness that a scroll which only moved the editor still
+repainted every terminal. Issue #429 hosts each `TerminalView` behind
+`Entity::cached`, so an idle pane now takes none and the measurement asserts
+zero. `scroll_frame_p95_ratio_panes_N` is that configuration's p95 divided by
+the zero-pane p95, tracked with no threshold attached: this harness runs on
+`NoopTextSystem`, which excludes the shaping the cache skips, so it cannot see
+what the cache saves (upstream's control run moved the six-pane p95 from 1432 to
+1426 us while the snapshots went from 720 to 0). A configuration that cannot
 build its panes is reported with `scroll_frame_available_panes_N: false` and the
 others still run.
 

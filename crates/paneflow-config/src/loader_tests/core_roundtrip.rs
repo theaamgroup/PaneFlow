@@ -70,6 +70,7 @@ fn test_serialization_roundtrip() {
         agent_panel: None,
         external_editor: None,
         tool_permissions: HashMap::new(),
+        mcp_bridge_prompt_dismissed: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&config).unwrap();

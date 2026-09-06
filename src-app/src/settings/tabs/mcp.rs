@@ -30,11 +30,38 @@ use crate::ui_primitives::AnimatedHoverExt;
 /// `accent` and `text` are independent theme tokens (Vercel Dark's accent is
 /// #ffffff), so a fixed white label can vanish on the fill. Lift the label
 /// off the fill with the same APCA pass the Shortcuts page uses.
-fn mcp_button_text_color(ui: crate::theme::UiColors, enabled: bool) -> gpui::Hsla {
+///
+/// Shared with the sidebar's "Install MCP bridge" callout (issue #443), which
+/// paints its button on the same accent.
+pub(crate) fn mcp_button_text_color(ui: crate::theme::UiColors, enabled: bool) -> gpui::Hsla {
     if enabled {
         ensure_minimum_contrast(ui.text, ui.accent, MIN_APCA_CONTRAST)
     } else {
         ui.muted
+    }
+}
+
+/// One line for a toast when an install did not fully succeed: the
+/// wholesale refusal, or every agent whose write failed. `None` when every
+/// agent installed, updated, was current, or was absent.
+fn install_failure_summary(
+    install: &Result<Vec<paneflow_mcp_install::InstallReport>, String>,
+) -> Option<String> {
+    match install {
+        Err(message) => Some(format!("MCP bridge install failed: {message}")),
+        Ok(reports) => {
+            let failed: Vec<String> = reports
+                .iter()
+                .filter_map(|report| match &report.kind {
+                    paneflow_mcp_install::InstallKind::Error(reason) => {
+                        Some(format!("{}: {reason}", report.label))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (!failed.is_empty())
+                .then(|| format!("MCP bridge install failed for {}", failed.join("; ")))
+        }
     }
 }
 
@@ -203,14 +230,32 @@ impl PaneFlowApp {
     /// Refresh the cached MCP bridge status off the main thread. Reads each
     /// agent's config (no writes), then stores the snapshot + repaints. Called
     /// when the settings page opens and when the MCP page is selected.
-    pub(crate) fn refresh_mcp_status(&self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_mcp_status(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_busy {
+            // The install's completion stores its own fresh probe; one
+            // started now would read pre-install config and could land
+            // after it.
+            return;
+        }
+        self.mcp_probe_generation += 1;
+        let generation = self.mcp_probe_generation;
+        // Agents the pane scan has seen running count as present even when
+        // this process's PATH lacks their binary (a Finder launch) and they
+        // have no config file yet.
+        let known_present: Vec<&'static str> = self.live_mcp_agent_ids(cx).into_iter().collect();
         cx.spawn(async move |this, cx| {
-            let status = smol::unblock(|| {
+            let status = smol::unblock(move || {
                 let bridge = crate::runtime_paths::bridge_binary_path();
-                paneflow_mcp_install::status_all(bridge.as_deref())
+                paneflow_mcp_install::status_all_with_known_present(
+                    bridge.as_deref(),
+                    &known_present,
+                )
             })
             .await;
             let _ = this.update(cx, |this, cx| {
+                if this.mcp_probe_generation != generation {
+                    return;
+                }
                 this.mcp_status = Some(status);
                 cx.notify();
             });
@@ -221,7 +266,19 @@ impl PaneFlowApp {
     /// Install the bridge into every detected agent, off the main thread.
     /// Extracts the bridge binary first (so the registered path exists), then
     /// runs the install + a fresh status probe, and stores both.
-    fn start_mcp_install(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_mcp_install(&mut self, cx: &mut Context<Self>) {
+        self.start_mcp_install_scoped(None, cx);
+    }
+
+    /// Install the bridge into exactly one agent (`only`), for the sidebar
+    /// callout that names it: the consent the user gave is for that agent,
+    /// so no other present agent's config is written. `None` is the
+    /// Settings page's every-agent install.
+    pub(crate) fn start_mcp_install_scoped(
+        &mut self,
+        only: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.mcp_busy {
             return;
         }
@@ -233,9 +290,13 @@ impl PaneFlowApp {
             return;
         }
         self.mcp_busy = true;
+        // Any probe still in flight read pre-install config: retire it.
+        self.mcp_probe_generation += 1;
         cx.notify();
+        let known_present: Vec<&'static str> = self.live_mcp_agent_ids(cx).into_iter().collect();
+        let scoped = only.is_some();
         cx.spawn(async move |this, cx| {
-            let (install, status) = smol::unblock(|| {
+            let (install, status) = smol::unblock(move || {
                 let bridge = match crate::ai_hooks::extract::ensure_bridge_extracted() {
                     Ok(p) => Some(p),
                     Err(e) => {
@@ -245,15 +306,46 @@ impl PaneFlowApp {
                         crate::runtime_paths::bridge_binary_path()
                     }
                 };
-                let install = paneflow_mcp_install::install_all(bridge.as_deref());
-                let status = paneflow_mcp_install::status_all(bridge.as_deref());
+                let install = match only.as_deref() {
+                    Some(agent_id) => paneflow_mcp_install::install_agent_with_known_present(
+                        bridge.as_deref(),
+                        agent_id,
+                        &known_present,
+                    ),
+                    None => paneflow_mcp_install::install_all_with_known_present(
+                        bridge.as_deref(),
+                        &known_present,
+                    ),
+                };
+                let status = paneflow_mcp_install::status_all_with_known_present(
+                    bridge.as_deref(),
+                    &known_present,
+                );
                 (install, status)
             })
             .await;
             let _ = this.update(cx, |this, cx| {
                 this.mcp_busy = false;
-                this.mcp_install = Some(install);
+                // The sidebar callout (#443) shows no result line of its
+                // own, so a failure has to surface somewhere the user is.
+                if let Some(message) = install_failure_summary(&install) {
+                    this.show_toast(message, cx);
+                }
+                // The Settings recap prefers `mcp_install` over the status
+                // snapshot. A scoped (sidebar) install carries one agent's
+                // row, so storing it would drop every other agent from that
+                // page, and keeping an older all-agent recap would show the
+                // pre-install verdicts instead: clear it, so the fresh
+                // status below (which already reflects the write) is what
+                // Settings renders.
+                this.mcp_install = if scoped { None } else { Some(install) };
                 this.mcp_status = Some(status);
+                // An agent a pane resolved while the install ran was not in
+                // the `known_present` this task captured, and its scan event
+                // was dropped by the busy guard; re-probe now if the fresh
+                // status has no verdict for a live agent.
+                let live = this.live_mcp_agent_ids(cx);
+                this.refresh_mcp_status_for_resolved_agents(&live, cx);
                 cx.notify();
             });
         })
@@ -272,6 +364,37 @@ fn danger_color() -> gpui::Hsla {
 mod tests {
     use super::*;
     use crate::terminal::element::apca_contrast;
+
+    #[test]
+    fn install_failure_summary_names_the_refusal_or_every_failed_agent() {
+        use paneflow_mcp_install::{InstallKind, InstallReport};
+        let report = |id: &str, kind: InstallKind| InstallReport {
+            id: id.to_string(),
+            label: format!("Label {id}"),
+            kind,
+        };
+        assert_eq!(
+            install_failure_summary(&Err("no bridge".to_string())).as_deref(),
+            Some("MCP bridge install failed: no bridge")
+        );
+        let all_good = vec![
+            report("codex", InstallKind::Installed),
+            report("gemini", InstallKind::AlreadyCurrent),
+            report("opencode", InstallKind::SkippedAbsent),
+        ];
+        assert_eq!(install_failure_summary(&Ok(all_good)), None);
+        let mixed = vec![
+            report("codex", InstallKind::Updated),
+            report("claude-code", InstallKind::Error("read-only".to_string())),
+            report("gemini", InstallKind::Error("bad json".to_string())),
+        ];
+        assert_eq!(
+            install_failure_summary(&Ok(mixed)).as_deref(),
+            Some(
+                "MCP bridge install failed for Label claude-code: read-only; Label gemini: bad json"
+            )
+        );
+    }
 
     #[test]
     fn enabled_mcp_button_label_is_readable_on_every_bundled_theme() {

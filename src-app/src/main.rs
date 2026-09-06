@@ -1296,6 +1296,9 @@ struct DiffDockState {
     pub(crate) resize: Option<(f32, f32)>,
     /// Live horizontal-scrollbar drag inside the dock's shared diff body.
     pub(crate) h_scroll_drag: Option<crate::app::diff_dock::DiffDockHScrollDrag>,
+    /// The permanent editor-style vertical scrollbar beside the Changes body
+    /// (#434). Shares `scroll` with the host; holds only hover/drag state.
+    pub(crate) vertical_scrollbar: crate::widgets::editor_scrollbar::EditorScrollbar,
     /// Per-file horizontal scroll offsets (px) for the diff dock, indexed by
     /// stable file position. Driven by Shift+wheel / trackpad horizontal gestures
     /// (`apply_diff_dock_hwheel`) and applied per file by `DiffElement`; lazily
@@ -1432,6 +1435,11 @@ struct PaneFlowApp {
     mcp_install: Option<Result<Vec<paneflow_mcp_install::InstallReport>, String>>,
     /// Codex settings: an MCP-bridge install is running.
     mcp_busy: bool,
+    /// Monotonic token for MCP status probes: a probe whose token is stale
+    /// when it lands (a newer probe, or an install started after it) is
+    /// discarded, so a pre-install read can never overwrite the install's
+    /// own status.
+    mcp_probe_generation: u64,
     /// Scroll state for the persistent sidebar workspace list.
     /// Driven by GPUI's `overflow_y_scroll + track_scroll`; the
     /// visible scroll bar has been removed but the handle is still

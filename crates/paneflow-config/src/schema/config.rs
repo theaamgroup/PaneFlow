@@ -337,6 +337,18 @@ pub struct PaneFlowConfig {
         deserialize_with = "lenient_value_or_default"
     )]
     pub tool_permissions: HashMap<String, ToolPermissionsEntry>,
+    /// MCP-install agent ids (`"claude-code"`, `"codex"`, `"gemini"`,
+    /// `"opencode"`) whose sidebar "Install MCP bridge" callout the user
+    /// dismissed (issue #443). The callout offers the bridge once per agent
+    /// when a pane runs that agent without a `paneflow` MCP entry; an id
+    /// listed here never shows it again. A malformed value loads as the
+    /// empty list.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "lenient_value_or_default"
+    )]
+    pub mcp_bridge_prompt_dismissed: Vec<String>,
 }
 
 /// What the workspaces rail shows beyond a row's name and its activity.
@@ -532,6 +544,12 @@ impl PaneFlowConfig {
     /// Agent sessions sidebar. Absent means off.
     pub fn new_pane_shows_sessions(&self) -> bool {
         self.new_pane_shows_sessions.unwrap_or(false)
+    }
+
+    /// Whether the sidebar's "Install MCP bridge" callout was dismissed for
+    /// the agent with this MCP-install id (issue #443).
+    pub fn mcp_bridge_prompt_dismissed_for(&self, id: &str) -> bool {
+        self.mcp_bridge_prompt_dismissed.iter().any(|d| d == id)
     }
 
     /// EP-003 US-011: resolve `review_prefill_delay_ms`: default 2000, clamped to

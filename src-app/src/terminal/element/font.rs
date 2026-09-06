@@ -325,6 +325,30 @@ pub(super) fn cached_font_config() -> FontSettings {
     // by the next check instead of being masked by a newer stamp.
     let mtime = crate::theme::config_mtime();
     let config = paneflow_config::loader::load_config();
+    store_font_config(&mut cache, &config, mtime)
+}
+
+/// Replace the cached font settings with the ones `config` resolves to,
+/// right now, from the in-memory config the app already applied. The
+/// Settings page persists cache-first and writes `paneflow.json` off the
+/// GPUI thread, and the render-thread cache above only re-reads the file
+/// every 500 ms, so without this a font change reaches the next cached
+/// terminal frame (#429) as the *old* size. The next mtime check re-reads
+/// the file once the write lands and finds the same values.
+pub(crate) fn refresh_font_config(config: &paneflow_config::schema::PaneFlowConfig) {
+    let mut cache = FONT_CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mtime = crate::theme::config_mtime();
+    store_font_config(&mut cache, config, mtime);
+}
+
+/// Resolve `config`'s font block into [`FontSettings`], store it in `cache`
+/// stamped with `mtime`, and return it.
+fn store_font_config(
+    cache: &mut Option<CachedFontConfig>,
+    config: &paneflow_config::schema::PaneFlowConfig,
+    mtime: Option<std::time::SystemTime>,
+) -> FontSettings {
+    use std::time::Instant;
 
     let family = resolve_font_family(config.font_family.as_deref());
 
@@ -938,6 +962,31 @@ fn cell_metrics_for(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn store_font_config_resolves_the_given_config_not_the_disk() {
+        // A Settings font change lands in the render cache before the
+        // off-thread write reaches `paneflow.json` (#429 follow-up).
+        let mut cache = None;
+        let config = paneflow_config::schema::PaneFlowConfig {
+            font_size: Some(20.0),
+            line_height: Some(1.5),
+            ..Default::default()
+        };
+        let settings = super::store_font_config(&mut cache, &config, None);
+        assert_eq!(settings.size, 20.0);
+        assert_eq!(settings.line_height, 1.5);
+        let cached = cache.expect("the resolved settings are cached");
+        assert_eq!(cached.settings.size, 20.0);
+        // Out-of-range values fall back, as the disk path does.
+        let config = paneflow_config::schema::PaneFlowConfig {
+            font_size: Some(99.0),
+            ..Default::default()
+        };
+        let mut cache = None;
+        let settings = super::store_font_config(&mut cache, &config, None);
+        assert_eq!(settings.size, super::DEFAULT_FONT_SIZE);
+    }
+
     use super::*;
 
     #[test]

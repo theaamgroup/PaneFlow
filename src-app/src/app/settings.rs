@@ -41,6 +41,24 @@ impl Drop for ConfigPersistInFlight {
     }
 }
 
+/// Config keys whose value the terminal renderer reads through the font
+/// cache (`terminal/element/font.rs`): a change to any of them has to
+/// refresh that cache and repaint every terminal, not only the chrome.
+pub(crate) fn is_font_block_key(nested: bool, key: &str) -> bool {
+    match nested {
+        false => matches!(
+            key,
+            "font_family"
+                | "font_size"
+                | "font_weight"
+                | "font_fallbacks"
+                | "line_height"
+                | "cell_width"
+        ),
+        true => key == "ligatures",
+    }
+}
+
 impl PaneFlowApp {
     /// Open the embedded settings (Codex-style). The Settings button and the
     /// title-bar / macOS menu route here; it sets `settings_section`, and
@@ -216,6 +234,17 @@ impl PaneFlowApp {
             }
         }
         if nested && matches!(key, "integrated_glyphs" | "color_emoji" | "cursor_color") {
+            for ws in &self.workspaces {
+                ws.propagate_config(&self.cached_config, cx);
+            }
+        }
+        if is_font_block_key(nested, key) {
+            // The font block is read by the render thread from a 500 ms
+            // disk-backed cache, and every terminal is hosted behind
+            // `Entity::cached` (#429): resolve the new block from the
+            // in-memory config now, then notify every view so idle panes
+            // re-shape instead of replaying their old glyphs.
+            crate::terminal::element::refresh_font_config(&self.cached_config);
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
             }
@@ -604,6 +633,24 @@ pub(crate) fn recorded_shortcut_key(keystroke: &Keystroke) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_font_cache_key_is_a_font_block_key() {
+        for key in [
+            "font_family",
+            "font_size",
+            "font_weight",
+            "font_fallbacks",
+            "line_height",
+            "cell_width",
+        ] {
+            assert!(super::is_font_block_key(false, key), "{key}");
+        }
+        assert!(super::is_font_block_key(true, "ligatures"));
+        assert!(!super::is_font_block_key(false, "ligatures"));
+        assert!(!super::is_font_block_key(true, "font_size"));
+        assert!(!super::is_font_block_key(false, "theme"));
+    }
+
     use super::{ShortcutKeyRoute, recorded_shortcut_key, route_shortcut_keystroke};
     use gpui::Keystroke;
 
