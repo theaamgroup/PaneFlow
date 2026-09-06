@@ -71,6 +71,20 @@ impl FileStamp {
         })
     }
 
+    /// Whether a save that last agreed with `expected` may land over a file
+    /// that currently stats as `current` (US-016).
+    ///
+    /// `expected` is `None` for a file that was not on disk when it was last
+    /// stamped, which is the "deleted, save recreates it" path: anything
+    /// present now is someone else's file.
+    pub(crate) fn conflicts(expected: Option<Self>, current: Option<Self>) -> bool {
+        match (expected, current) {
+            (Some(expected), Some(current)) => expected.differs(&current),
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
+
     /// Whether `other` describes a different file state than `self`.
     ///
     /// A missing mtime on either side falls back to the length alone: some
@@ -87,16 +101,60 @@ impl FileStamp {
     }
 }
 
+/// Why a save did not land.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SaveError {
+    /// The file on disk no longer matches the stamp the editor last agreed
+    /// with (US-016). Nothing was written; the other writer's bytes stand.
+    Conflict,
+    /// The write itself failed. A written sentence, in the same register as
+    /// [`super::load::CodeLoadError::message`]: nothing here surfaces a
+    /// debug-formatted `io::Error` to the user.
+    Write(String),
+}
+
+impl From<String> for SaveError {
+    fn from(message: String) -> Self {
+        Self::Write(message)
+    }
+}
+
 /// Write `contents` to `path` atomically, preserving the file's permissions,
 /// and return the stamp of what landed.
 ///
-/// **Blocking.** The error is already a written sentence, in the same register
-/// as [`super::load::CodeLoadError::message`]: nothing here surfaces a
-/// debug-formatted `io::Error` to the user.
-pub(crate) fn save_blocking(path: &Path, contents: &str) -> Result<FileStamp, String> {
+/// `expected` is the stamp the editor last agreed with. The file is compared
+/// against it before the temp file is written and again immediately before
+/// the rename, so an agent write that lands while the temp file is being
+/// written is refused with [`SaveError::Conflict`] instead of being renamed
+/// over (issue #402). The window between that last stat and the rename is as
+/// small as this can be made without a lock; it is no longer the whole write.
+///
+/// **Blocking.**
+pub(crate) fn save_blocking(
+    path: &Path,
+    contents: &str,
+    expected: Option<FileStamp>,
+) -> Result<FileStamp, SaveError> {
+    save_blocking_with(path, contents, expected, || {})
+}
+
+/// [`save_blocking`] with a seam between the temp write and the rename, so a
+/// test can land an agent write in exactly the window issue #402 describes.
+fn save_blocking_with(
+    path: &Path,
+    contents: &str,
+    expected: Option<FileStamp>,
+    before_persist: impl FnOnce(),
+) -> Result<FileStamp, SaveError> {
     let path = &write_target(path)?;
     let parent = parent_dir(path);
     let existing = std::fs::metadata(path).ok();
+    if FileStamp::conflicts(
+        expected,
+        existing.as_ref().and_then(FileStamp::from_metadata),
+    ) {
+        return Err(SaveError::Conflict);
+    }
 
     let mut temp = NamedTempFile::new_in(&parent).map_err(|err| write_error(&err))?;
     temp.write_all(contents.as_bytes())
@@ -124,9 +182,19 @@ pub(crate) fn save_blocking(path: &Path, contents: &str) -> Result<FileStamp, St
         }
     }
 
+    before_persist();
+    // Re-stat right before the swap: the check at the top only covers the
+    // moment before the temp file was written. An agent rewrite that landed
+    // while the bytes were being written and synced would otherwise be
+    // renamed over without a conflict banner (issue #402). Dropping `temp`
+    // unlinks it.
+    if FileStamp::conflicts(expected, FileStamp::read(path)) {
+        return Err(SaveError::Conflict);
+    }
     temp.persist(path).map_err(|err| write_error(&err.error))?;
-    FileStamp::read(path)
-        .ok_or_else(|| "The file was written but could not be read back.".to_string())
+    FileStamp::read(path).ok_or_else(|| {
+        SaveError::Write("The file was written but could not be read back.".to_string())
+    })
 }
 
 /// Where the bytes actually go. Load follows a symlink (`std::fs::read`), so
@@ -185,7 +253,7 @@ mod tests {
         let path = dir.path().join("main.rs");
         std::fs::write(&path, "old\n").expect("seed");
 
-        let stamp = save_blocking(&path, "new contents\n").expect("save");
+        let stamp = save_blocking(&path, "new contents\n", FileStamp::read(&path)).expect("save");
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
             "new contents\n"
@@ -212,7 +280,7 @@ mod tests {
         let path = dir.path().join("gone.rs");
         assert!(FileStamp::read(&path).is_none());
 
-        save_blocking(&path, "back\n").expect("save");
+        save_blocking(&path, "back\n", None).expect("save");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), "back\n");
         assert!(FileStamp::read(&path).is_some());
     }
@@ -223,7 +291,10 @@ mod tests {
     fn a_failed_write_reports_a_written_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("missing-folder").join("file.rs");
-        let err = save_blocking(&path, "x").expect_err("no such directory");
+        let SaveError::Write(err) = save_blocking(&path, "x", None).expect_err("no such directory")
+        else {
+            panic!("a missing folder is a write failure, not a conflict");
+        };
         assert!(!err.is_empty());
         assert!(err.ends_with('.'), "a sentence, not a debug dump: {err}");
     }
@@ -259,7 +330,7 @@ mod tests {
         let link = dir.path().join("main.rs");
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
 
-        let stamp = save_blocking(&link, "new contents\n").expect("save");
+        let stamp = save_blocking(&link, "new contents\n", FileStamp::read(&link)).expect("save");
         assert_eq!(
             std::fs::read_to_string(&target).expect("read target"),
             "new contents\n",
@@ -290,7 +361,10 @@ mod tests {
         let link = dir.path().join("main.rs");
         std::os::unix::fs::symlink(dir.path().join("gone.rs"), &link).expect("symlink");
 
-        let err = save_blocking(&link, "x").expect_err("dangling link");
+        let SaveError::Write(err) = save_blocking(&link, "x", None).expect_err("dangling link")
+        else {
+            panic!("a dangling link is a write failure, not a conflict");
+        };
         assert!(err.ends_with('.'), "a sentence, not a debug dump: {err}");
         assert!(
             std::fs::symlink_metadata(&link)
@@ -311,6 +385,56 @@ mod tests {
         assert_eq!(entries.len(), 1, "no temp file was left: {entries:?}");
     }
 
+    /// Issue #402: an agent write that lands after the pre-write stamp check
+    /// and before the rename is refused, and the agent's bytes stay on disk.
+    #[test]
+    fn a_write_racing_the_save_is_refused_before_the_rename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "one\n").expect("seed");
+        let expected = FileStamp::read(&path);
+
+        let agent = path.clone();
+        let err = save_blocking_with(&path, "mine\n", expected, move || {
+            // Lands in the window between the temp write and the rename. The
+            // length changes, so this does not depend on mtime granularity.
+            std::fs::write(&agent, "written by someone else\n").expect("agent write");
+        })
+        .expect_err("the racing write is a conflict");
+        assert_eq!(err, SaveError::Conflict);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "written by someone else\n",
+            "the agent's bytes stand"
+        );
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "no temp file was left: {entries:?}");
+    }
+
+    /// US-016: a file that changed before the save even started is refused
+    /// without a temp file ever being written.
+    #[test]
+    fn a_save_is_refused_when_the_stamp_no_longer_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "one\n").expect("seed");
+        let expected = FileStamp::read(&path);
+        std::fs::write(&path, "written by someone else\n").expect("agent write");
+
+        assert_eq!(
+            save_blocking(&path, "mine\n", expected).expect_err("conflict"),
+            SaveError::Conflict
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "written by someone else\n"
+        );
+    }
+
     /// US-015 AC: the original permissions survive the swap.
     #[cfg(unix)]
     #[test]
@@ -322,7 +446,7 @@ mod tests {
         std::fs::write(&path, "#!/bin/sh\n").expect("seed");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
-        save_blocking(&path, "#!/bin/sh\necho hi\n").expect("save");
+        save_blocking(&path, "#!/bin/sh\necho hi\n", FileStamp::read(&path)).expect("save");
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
         assert_eq!(
             mode & 0o777,

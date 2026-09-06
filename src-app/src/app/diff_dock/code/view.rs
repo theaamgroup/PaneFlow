@@ -1655,20 +1655,13 @@ impl CodeView {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let outcome = cx
                 .background_spawn(async move {
-                    let current = FileStamp::read(&path);
-                    // `expected` is `None` for a file that was not on disk
-                    // when it was last stamped, which is the "deleted, save
-                    // recreates it" path: anything present now is someone
-                    // else's file.
-                    let conflict = match (expected, current) {
-                        (Some(expected), Some(current)) => expected.differs(&current),
-                        (None, Some(_)) => true,
-                        _ => false,
-                    };
-                    if conflict {
-                        return Err(None);
-                    }
-                    save::save_blocking(&path, &contents).map_err(Some)
+                    // The stamp comparison lives in `save_blocking`, which
+                    // checks it before the temp write and again right before
+                    // the rename (issue #402).
+                    save::save_blocking(&path, &contents, expected).map_err(|err| match err {
+                        save::SaveError::Conflict => None,
+                        save::SaveError::Write(message) => Some(message),
+                    })
                 })
                 .await;
             cx.update(|cx| {
