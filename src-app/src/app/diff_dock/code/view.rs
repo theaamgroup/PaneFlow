@@ -421,7 +421,7 @@ async fn reload_from_disk(
     let Ok(begun) = begun else {
         return false;
     };
-    let Some((mut diff, incoming, stamp)) = begun else {
+    let Some((mut diff, incoming)) = begun else {
         return true;
     };
     let incoming = Arc::new(incoming);
@@ -438,7 +438,6 @@ async fn reload_from_disk(
                     generation,
                     DiskSplices { revision, splices },
                     &incoming,
-                    stamp,
                     retry,
                     force,
                     cx,
@@ -515,6 +514,11 @@ pub(crate) struct CodeView {
     /// What the file looked like on disk when it was last read or written
     /// (US-016). `None` means it is not there.
     stamp: Option<FileStamp>,
+    /// Incoming stamp from [`Self::begin_disk_reload`], adopted in
+    /// [`Self::finish_disk_reload`] only after splices land. Held here so
+    /// `finish_disk_reload` stays inside the clippy argument cap; a save in
+    /// the window still copies `stamp`, not this.
+    pending_stamp: Option<FileStamp>,
     /// Whether an agent got to the file first (US-016).
     disk: DiskState,
     /// Written explanation of the last failed save (US-015).
@@ -579,6 +583,7 @@ impl CodeView {
             marked: None,
             read_only_flash: None,
             stamp: None,
+            pending_stamp: None,
             disk: DiskState::default(),
             save_error: None,
             disk_generation: 0,
@@ -633,6 +638,7 @@ impl CodeView {
             marked: None,
             read_only_flash: None,
             stamp: None,
+            pending_stamp: None,
             disk: DiskState::default(),
             save_error: None,
             disk_generation: 0,
@@ -685,6 +691,7 @@ impl CodeView {
         self.marked = None;
         self.read_only_flash = None;
         self.stamp = None;
+        self.pending_stamp = None;
         self.disk = DiskState::default();
         self.save_error = None;
         self.disk_generation = self.disk_generation.wrapping_add(1);
@@ -2068,19 +2075,19 @@ impl CodeView {
 
     /// The main-thread half of a reload that runs before the diff: the
     /// ordering guards, the conflict decision, and the rope snapshot the
-    /// background diff runs against. The incoming stamp is returned, not
-    /// adopted: a Cmd+S in this window must still carry the pre-agent stamp
-    /// so [`save::save_blocking`] refuses rather than overwriting the rewrite
-    /// (#402, #428). `None` means there is nothing to diff - the probe was
-    /// stale, the file is gone, the bytes are the ones already adopted, or
-    /// the document is dirty and now conflicted.
+    /// background diff runs against. The incoming stamp is stashed on
+    /// `pending_stamp`, not adopted: a Cmd+S in this window must still carry
+    /// the pre-agent stamp so [`save::save_blocking`] refuses rather than
+    /// overwriting the rewrite (#402, #428). `None` means there is nothing
+    /// to diff - the probe was stale, the file is gone, the bytes are the
+    /// ones already adopted, or the document is dirty and now conflicted.
     fn begin_disk_reload(
         &mut self,
         generation: u64,
         loaded: DiskLoad,
         force: bool,
         cx: &mut Context<Self>,
-    ) -> Option<(DiskDiff, CodeDocument, Option<FileStamp>)> {
+    ) -> Option<(DiskDiff, CodeDocument)> {
         if self.saving || generation != self.disk_generation {
             return None;
         }
@@ -2108,7 +2115,8 @@ impl CodeView {
             }
         }
         let doc = self.state.document()?;
-        Some((DiskDiff::of(doc), document, stamp))
+        self.pending_stamp = stamp;
+        Some((DiskDiff::of(doc), document))
     }
 
     /// The main-thread half after the diff. `Some` hands back a fresh
@@ -2123,7 +2131,6 @@ impl CodeView {
         generation: u64,
         batch: DiskSplices,
         incoming: &CodeDocument,
-        stamp: Option<FileStamp>,
         retry: bool,
         force: bool,
         cx: &mut Context<Self>,
@@ -2152,7 +2159,7 @@ impl CodeView {
             incoming.read_only_reason(),
             cx,
         );
-        self.stamp = stamp;
+        self.stamp = self.pending_stamp;
         self.disk = DiskState::InSync;
         self.save_error = None;
         self.saved_mark = self.history.mark();
@@ -2789,8 +2796,7 @@ impl CodeView {
         force: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some((diff, incoming, stamp)) = self.begin_disk_reload(generation, loaded, force, cx)
-        else {
+        let Some((diff, incoming)) = self.begin_disk_reload(generation, loaded, force, cx) else {
             return;
         };
         let splices = edit::disk_splices(&diff.rope, &incoming.text().to_string());
@@ -2801,7 +2807,6 @@ impl CodeView {
                 splices,
             },
             &incoming,
-            stamp,
             false,
             force,
             cx,
@@ -2911,6 +2916,7 @@ mod tests {
             marked: None,
             read_only_flash: None,
             stamp: None,
+            pending_stamp: None,
             disk: DiskState::default(),
             save_error: None,
             disk_generation: 0,
@@ -3624,6 +3630,7 @@ mod tests {
             marked: None,
             read_only_flash: None,
             stamp,
+            pending_stamp: None,
             disk: DiskState::default(),
             save_error: None,
             disk_generation: 0,
@@ -3773,6 +3780,7 @@ mod tests {
             marked: None,
             read_only_flash: None,
             stamp: None,
+            pending_stamp: None,
             disk: DiskState::default(),
             save_error: None,
             disk_generation: 0,
@@ -4292,7 +4300,7 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming, stamp) = view
+            let (diff, incoming) = view
                 .begin_disk_reload(generation, loaded, false, cx)
                 .expect("a clean document starts a diff");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4307,7 +4315,6 @@ mod tests {
                         splices,
                     },
                     &incoming,
-                    stamp,
                     true,
                     false,
                     cx,
@@ -4330,7 +4337,6 @@ mod tests {
                         splices
                     },
                     &incoming,
-                    stamp,
                     false,
                     false,
                     cx
@@ -4356,7 +4362,7 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming, stamp) = view
+            let (diff, incoming) = view
                 .begin_disk_reload(generation, loaded, false, cx)
                 .expect("a clean document starts a diff");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4371,7 +4377,6 @@ mod tests {
                         splices,
                     },
                     &incoming,
-                    stamp,
                     true,
                     false,
                     cx,
@@ -4386,7 +4391,6 @@ mod tests {
                         splices
                     },
                     &incoming,
-                    stamp,
                     false,
                     false,
                     cx
@@ -4421,7 +4425,7 @@ mod tests {
 
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming, stamp) = view
+            let (diff, incoming) = view
                 .begin_disk_reload(generation, loaded, true, cx)
                 .expect("a forced reload ignores the dirty mark");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4433,7 +4437,6 @@ mod tests {
                         splices
                     },
                     &incoming,
-                    stamp,
                     false,
                     true,
                     cx
@@ -4462,7 +4465,7 @@ mod tests {
         view.update(cx, |view, cx| {
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming, stamp) = view
+            let (diff, incoming) = view
                 .begin_disk_reload(generation, loaded, false, cx)
                 .expect("a clean document starts a diff");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4475,7 +4478,6 @@ mod tests {
                         splices
                     },
                     &incoming,
-                    stamp,
                     true,
                     false,
                     cx
@@ -4510,10 +4512,10 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (_diff, _incoming, incoming_stamp) = view
+            let (_diff, _incoming) = view
                 .begin_disk_reload(generation, loaded, false, cx)
                 .expect("a clean document starts a diff");
-            assert_eq!(incoming_stamp, stamp);
+            assert_eq!(view.pending_stamp, stamp);
             assert_eq!(
                 view.stamp, original_stamp,
                 "the incoming stamp is not adopted until splices land"
