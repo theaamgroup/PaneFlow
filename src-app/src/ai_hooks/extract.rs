@@ -298,7 +298,66 @@ fn ensure_binaries_extracted_into(cache_root: &Path, exe: &Path) -> Result<PathB
 
         extract_into(&entries, &target_dir)?;
         link_cli_into(&target_dir, exe)?;
+        prune_stale_version_dirs(&target_dir);
         Ok(target_dir)
+    }
+}
+
+/// #442: remove sibling `bin/<other-version>/` directories once this
+/// version's wrappers are in place. Nothing references an old version
+/// directory after the app that staged it is gone: `PANEFLOW_BIN_DIR` is
+/// rewritten for every new pane, and the bridge and hook binaries live at
+/// stable non-versioned paths under `data_dir()`.
+///
+/// Best-effort and never fatal: extraction has already succeeded. The
+/// sweep is all-or-nothing and confined to `bin/`: if any entry beside
+/// `current` is not a plain directory (a file, a symlink), the layout is
+/// not ours to reason about and nothing is removed.
+fn prune_stale_version_dirs(current: &Path) {
+    let Some(bin) = current.parent() else {
+        return;
+    };
+    let entries = match std::fs::read_dir(bin) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::debug!("#442: not pruning {}: {e}", bin.display());
+            return;
+        }
+    };
+    let mut stale = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log::debug!("#442: not pruning {}: {e}", bin.display());
+                return;
+            }
+        };
+        let path = entry.path();
+        if path == current {
+            continue;
+        }
+        // `symlink_metadata` so a symlink to a directory is not a plain
+        // directory: the sweep must never follow one outside `bin/`.
+        let is_plain_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir());
+        if !is_plain_dir {
+            log::debug!(
+                "#442: not pruning {}: {} is not a plain directory",
+                bin.display(),
+                path.display()
+            );
+            return;
+        }
+        stale.push(path);
+    }
+    for path in stale {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => log::info!("#442: removed stale wrapper dir {}", path.display()),
+            Err(e) => log::warn!(
+                "#442: failed to remove stale wrapper dir {}: {e}",
+                path.display()
+            ),
+        }
     }
 }
 
@@ -874,6 +933,106 @@ mod tests {
         );
         assert!(cli.is_file(), "#440: the CLI link must resolve");
         assert!(wrappers_present_for(&dir, &exe));
+    }
+
+    #[test]
+    fn extraction_prunes_stale_version_directories() {
+        // #442: sibling `bin/<other-version>/` directories left behind by
+        // earlier releases are removed once this version has extracted.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale_a = bin.join("0.1.1");
+        let stale_b = bin.join("0.2.1");
+        for stale in [&stale_a, &stale_b] {
+            std::fs::create_dir_all(stale).unwrap();
+            std::fs::write(stale.join("claude"), b"old shim").unwrap();
+        }
+        // A sibling outside `bin/` is never a pruning target.
+        let outside = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("0.1.1");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let dir = ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(dir.is_dir(), "#442: the current version dir must survive");
+        assert!(
+            !stale_a.exists() && !stale_b.exists(),
+            "#442: stale version dirs must be pruned after a successful extraction"
+        );
+        assert!(
+            outside.is_dir(),
+            "#442: nothing outside bin/ may be touched"
+        );
+        assert!(wrappers_present_for(&dir, &exe));
+    }
+
+    #[test]
+    fn extraction_skips_the_prune_when_bin_holds_a_non_directory() {
+        // #442: the sweep is all-or-nothing - a stray file or symlink under
+        // `bin/` means the layout is not ours to reason about, so nothing
+        // is removed.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale = bin.join("0.1.1");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("claude"), b"old shim").unwrap();
+        std::fs::write(bin.join("stray-file"), b"not a version dir").unwrap();
+
+        let dir = ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(dir.is_dir());
+        assert!(
+            stale.is_dir(),
+            "#442: a non-directory entry under bin/ must skip the whole sweep"
+        );
+        assert!(bin.join("stray-file").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_skips_the_prune_when_bin_holds_a_symlinked_directory() {
+        // #442: a symlink to a directory is not a plain directory; the
+        // sweep must not follow or remove it, and skips entirely.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale = bin.join("0.1.1");
+        std::fs::create_dir_all(&stale).unwrap();
+        let elsewhere = cache_root.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), b"precious").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, bin.join("0.3.0")).unwrap();
+
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(
+            stale.is_dir(),
+            "#442: a symlink under bin/ must skip the sweep"
+        );
+        assert!(
+            bin.join("0.3.0").symlink_metadata().is_ok(),
+            "#442: the symlink itself must survive"
+        );
+        assert!(
+            elsewhere.join("keep").is_file(),
+            "#442: the symlink target must never be swept"
+        );
     }
 
     #[test]
