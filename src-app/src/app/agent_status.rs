@@ -534,6 +534,12 @@ pub(crate) fn progress_lifecycle_event(busy: bool) -> AgentLifecycleEvent {
 /// across resumed turns (#390). Unknown notifications carry no lifecycle
 /// claim and still follow the normal desktop-notification path.
 ///
+/// Claude Code's `"Claude is waiting for your input"` is its `idle_prompt`,
+/// sent a fixed delay after the turn already ended - it is not the agent
+/// asking a question, so it reads as [`AgentLifecycleEvent::Idle`] (the
+/// completion dot) rather than a request (upstream b0c14ba9). The other two
+/// exact Claude Code strings, and Codex's prefixes, still imply a request.
+///
 /// Codex's request prefixes come from `Notification::display` in
 /// `codex-rs/tui/src/chatwidget/notifications.rs`. Match the detected agent
 /// as well as its notification vocabulary, never arbitrary question text.
@@ -551,13 +557,16 @@ pub(crate) fn notification_lifecycle_event(
     } else {
         body.trim()
     };
-    let requests_input = match tool {
-        TerminalAgent::ClaudeCode => matches!(
-            message,
-            "Claude needs your permission"
-                | "Claude Code needs your input"
-                | "Claude is waiting for your input"
-        ),
+    match tool {
+        TerminalAgent::ClaudeCode => match message {
+            "Claude needs your permission" | "Claude Code needs your input" => {
+                Some(AgentLifecycleEvent::Notification {
+                    message: Some(message.to_owned()),
+                })
+            }
+            "Claude is waiting for your input" => Some(AgentLifecycleEvent::Idle),
+            _ => None,
+        },
         TerminalAgent::Codex => [
             "Approval requested: ",
             "Codex wants to edit ",
@@ -569,12 +578,12 @@ pub(crate) fn notification_lifecycle_event(
             message
                 .strip_prefix(prefix)
                 .is_some_and(|detail| !detail.trim().is_empty())
+        })
+        .then(|| AgentLifecycleEvent::Notification {
+            message: Some(message.to_owned()),
         }),
-        _ => false,
-    };
-    requests_input.then(|| AgentLifecycleEvent::Notification {
-        message: Some(message.to_owned()),
-    })
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -699,17 +708,51 @@ mod tests {
             })
         );
         // OSC 9 carries a single string, which libghostty reports as the
-        // title with an empty body.
+        // title with an empty body. This one is Claude Code's idle_prompt,
+        // sent after the turn already ended, so it is not a question.
         assert_eq!(
             notification_lifecycle_event(
                 TerminalAgent::ClaudeCode,
                 "Claude is waiting for your input",
                 "",
             ),
-            Some(AgentLifecycleEvent::Notification {
-                message: Some("Claude is waiting for your input".into())
-            })
+            Some(AgentLifecycleEvent::Idle)
         );
+    }
+
+    #[test]
+    fn the_idle_prompt_is_a_turn_that_ended_not_a_question() {
+        // OSC 9 supplies only a title.
+        assert_eq!(
+            notification_lifecycle_event(
+                TerminalAgent::ClaudeCode,
+                "Claude is waiting for your input",
+                "",
+            ),
+            Some(AgentLifecycleEvent::Idle)
+        );
+        // OSC 777 can supply a title plus a body.
+        assert_eq!(
+            notification_lifecycle_event(
+                TerminalAgent::ClaudeCode,
+                "Claude Code",
+                "Claude is waiting for your input",
+            ),
+            Some(AgentLifecycleEvent::Idle)
+        );
+    }
+
+    #[test]
+    fn a_notification_that_asks_for_nothing_says_nothing() {
+        for tool in [TerminalAgent::ClaudeCode, TerminalAgent::Codex] {
+            for (title, body) in [("Build finished", ""), ("notify-send", "Build finished")] {
+                assert_eq!(
+                    notification_lifecycle_event(tool, title, body),
+                    None,
+                    "{tool:?}: {title:?}/{body:?} must not become a lifecycle event"
+                );
+            }
+        }
     }
 
     #[test]
