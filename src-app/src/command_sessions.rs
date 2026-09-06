@@ -10,13 +10,15 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
 use crate::agent_sessions::{SessionAgent, SessionMeta, clean_session_label};
 
-const COMMAND_DEADLINE: Duration = Duration::from_secs(15);
+/// Per-invocation ceiling for one vendor list command. A caller-owned budget
+/// (`budget_until`) can shorten it but never extend it (issue #401).
+pub(crate) const COMMAND_DEADLINE: Duration = Duration::from_secs(15);
 const COMMAND_STDOUT_CAP: u64 = 4 * 1024 * 1024;
 const STDERR_LOG_CAP: usize = 200;
 
@@ -38,7 +40,10 @@ struct CommandSessionConfig {
     scope: CommandScope,
 }
 
-pub(crate) fn read_gemini_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usize) {
+pub(crate) fn read_gemini_sessions_for_cwd(
+    cwd: &str,
+    budget_until: Instant,
+) -> (Vec<SessionMeta>, usize) {
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Gemini,
@@ -48,10 +53,14 @@ pub(crate) fn read_gemini_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usiz
             scope: CommandScope::CurrentDirectory,
         },
         cwd,
+        budget_until,
     )
 }
 
-pub(crate) fn read_cursor_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usize) {
+pub(crate) fn read_cursor_sessions_for_cwd(
+    cwd: &str,
+    budget_until: Instant,
+) -> (Vec<SessionMeta>, usize) {
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Cursor,
@@ -61,10 +70,14 @@ pub(crate) fn read_cursor_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usiz
             scope: CommandScope::CurrentDirectory,
         },
         cwd,
+        budget_until,
     )
 }
 
-pub(crate) fn read_kiro_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usize) {
+pub(crate) fn read_kiro_sessions_for_cwd(
+    cwd: &str,
+    budget_until: Instant,
+) -> (Vec<SessionMeta>, usize) {
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Kiro,
@@ -74,10 +87,14 @@ pub(crate) fn read_kiro_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usize)
             scope: CommandScope::CurrentDirectory,
         },
         cwd,
+        budget_until,
     )
 }
 
-pub(crate) fn read_grok_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usize) {
+pub(crate) fn read_grok_sessions_for_cwd(
+    cwd: &str,
+    budget_until: Instant,
+) -> (Vec<SessionMeta>, usize) {
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Grok,
@@ -87,10 +104,14 @@ pub(crate) fn read_grok_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usize)
             scope: CommandScope::CurrentDirectory,
         },
         cwd,
+        budget_until,
     )
 }
 
-pub(crate) fn read_hermes_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usize) {
+pub(crate) fn read_hermes_sessions_for_cwd(
+    cwd: &str,
+    budget_until: Instant,
+) -> (Vec<SessionMeta>, usize) {
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Hermes,
@@ -100,14 +121,24 @@ pub(crate) fn read_hermes_sessions_for_cwd(cwd: &str) -> (Vec<SessionMeta>, usiz
             scope: CommandScope::LineMustMentionCwd,
         },
         cwd,
+        budget_until,
     )
 }
 
-fn read_command_sessions(config: CommandSessionConfig, cwd: &str) -> (Vec<SessionMeta>, usize) {
+/// Run one agent's list command against a caller-owned wall-clock budget
+/// (issue #401). The subprocess deadline is whatever is left of `budget_until`,
+/// capped at [`COMMAND_DEADLINE`], so N enabled command agents on one blocking
+/// worker cannot stack N independent deadlines; an exhausted budget spawns
+/// nothing at all.
+fn read_command_sessions(
+    config: CommandSessionConfig,
+    cwd: &str,
+    budget_until: Instant,
+) -> (Vec<SessionMeta>, usize) {
     if !Path::new(cwd).is_dir() {
         return (Vec::new(), 0);
     }
-    let Some(stdout) = run_list_command(&config, cwd) else {
+    let Some(stdout) = run_list_command(&config, cwd, budget_until) else {
         return (Vec::new(), 0);
     };
     parse_command_sessions(
@@ -119,15 +150,29 @@ fn read_command_sessions(config: CommandSessionConfig, cwd: &str) -> (Vec<Sessio
     )
 }
 
-fn run_list_command(config: &CommandSessionConfig, cwd: &str) -> Option<Vec<u8>> {
+fn run_list_command(
+    config: &CommandSessionConfig,
+    cwd: &str,
+    budget_until: Instant,
+) -> Option<Vec<u8>> {
+    let deadline = budget_until
+        .saturating_duration_since(Instant::now())
+        .min(COMMAND_DEADLINE);
+    if deadline.is_zero() {
+        log::warn!(
+            "session list budget exhausted before {} ran; {:?} sessions will be empty",
+            config.program,
+            config.agent
+        );
+        return None;
+    }
     let mut cmd = Command::new(config.program);
     cmd.args(config.args);
     if matches!(config.scope, CommandScope::CurrentDirectory) {
         cmd.current_dir(cwd);
     }
 
-    let output = match paneflow_process::run_with_timeout(cmd, COMMAND_DEADLINE, COMMAND_STDOUT_CAP)
-    {
+    let output = match paneflow_process::run_with_timeout(cmd, deadline, COMMAND_STDOUT_CAP) {
         Ok(out) => out,
         Err(paneflow_process::ProcError::Spawn(err)) if err.kind() == io::ErrorKind::NotFound => {
             log::info!(
@@ -464,6 +509,55 @@ fn sanitized_stderr(stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #401: `attribution_for_column` runs every enabled command agent on one
+    /// blocking worker. Each list command used to take a fresh 15 s
+    /// COMMAND_DEADLINE, so N hung CLIs pinned that worker for N x 15 s. With a
+    /// shared budget the first hung command is cut at the budget and the next
+    /// command agent spawns nothing at all.
+    #[test]
+    fn second_hanging_command_agent_is_not_waited_out_once_the_shared_budget_is_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hang-list");
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program: &'static str =
+            Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let config = |agent| CommandSessionConfig {
+            agent,
+            program,
+            args: &[],
+            allow_numeric_ids: false,
+            scope: CommandScope::CurrentDirectory,
+        };
+
+        let budget = Duration::from_millis(500);
+        let budget_until = Instant::now() + budget;
+        let started = Instant::now();
+        let first = read_command_sessions(config(SessionAgent::Gemini), &cwd, budget_until);
+        let first_elapsed = started.elapsed();
+        assert!(first.0.is_empty(), "a hung list command yields no rows");
+        assert!(
+            first_elapsed >= budget && first_elapsed < COMMAND_DEADLINE,
+            "first hung command must stop at the shared budget, took {first_elapsed:?}"
+        );
+
+        let second_started = Instant::now();
+        let second = read_command_sessions(config(SessionAgent::Cursor), &cwd, budget_until);
+        let second_elapsed = second_started.elapsed();
+        assert!(second.0.is_empty());
+        assert!(
+            second_elapsed < Duration::from_secs(1),
+            "second command agent must not be waited out once the budget is spent, took {second_elapsed:?}"
+        );
+        assert!(
+            started.elapsed() < COMMAND_DEADLINE,
+            "two hung list CLIs must not stack, took {:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn parse_command_sessions_extracts_uuid_from_cursorish_line() {
