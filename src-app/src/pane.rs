@@ -24,8 +24,8 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity,
     EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString, Size, Styled, Window,
-    deferred, div, ease_out_quint, img, prelude::*, px, rgb, svg,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString, Size, StyleRefinement,
+    Styled, Window, deferred, div, ease_out_quint, img, prelude::*, px, rgb, svg,
 };
 
 use crate::settings::components::with_alpha;
@@ -1965,10 +1965,19 @@ impl Focusable for Pane {
     }
 }
 
+/// Issue #429: the terminal body is hosted behind `Entity::cached`, so a
+/// frame that only repainted the editor or the chrome replays last frame's
+/// glyph scene instead of re-shaping every pane. The cache is bypassed on
+/// the view's own `cx.notify()` (output, selection, search, focus, blink,
+/// the theme signal), so nothing a `TerminalView` paints can go stale.
+fn cached_surface_style() -> StyleRefinement {
+    StyleRefinement::default().size_full()
+}
+
 impl Render for Pane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.surface {
-            PaneSurface::Terminal(t) => t.clone().into_any_element(),
+            PaneSurface::Terminal(t) => t.clone().cached(cached_surface_style()).into_any_element(),
             PaneSurface::Markdown(m) => m.clone().into_any_element(),
             PaneSurface::Diff(d) => d.clone().into_any_element(),
         };

@@ -1999,6 +1999,11 @@ impl PaneFlowApp {
         {
             cx.notify();
         }
+
+        // Issue #429: a cached terminal pane only repaints on a theme change
+        // when its observed signal moves; `cx.notify()` above reaches the
+        // application entity alone.
+        crate::theme::publish_theme_generation(cx);
     }
 
     /// Walk every mounted terminal surface and build per-surface metadata with

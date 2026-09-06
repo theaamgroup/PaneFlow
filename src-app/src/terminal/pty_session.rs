@@ -110,6 +110,21 @@ impl TerminalBackendEvent {
     pub(crate) fn is_wakeup(&self) -> bool {
         self.0.is_wakeup()
     }
+
+    /// An OSC 9;4 report as the runtime would publish it, for the view tests
+    /// that drive `apply_backend_batch` without a runtime thread.
+    #[cfg(test)]
+    pub(crate) fn progress_for_test(report: paneflow_terminal_ghostty::ProgressReport) -> Self {
+        Self(GhosttyUiEvent::Progress(
+            super::ghostty_session::UiEventState::with_progress_for_test(report),
+        ))
+    }
+
+    /// A child exit as the runtime would publish it (same purpose).
+    #[cfg(test)]
+    pub(crate) fn child_exited_for_test(code: i32) -> Self {
+        Self(GhosttyUiEvent::ChildExited { code, signal: None })
+    }
 }
 
 /// The event stream a view polls, taken once from [`TerminalState`].
@@ -148,29 +163,26 @@ pub(crate) struct PendingTerminalBackend {
     pub(super) ghostty: GhosttyRuntimePending,
 }
 
+// Thread local, not a process-wide static: a non-ignored test that counts
+// snapshots would otherwise see the frames of every other test sharing the
+// process (issue #429).
 #[cfg(test)]
-static RENDER_CONTENT_TIMING_ENABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-static RENDER_CONTENT_LOCK_DURATIONS: std::sync::Mutex<Vec<std::time::Duration>> =
-    std::sync::Mutex::new(Vec::new());
+thread_local! {
+    static RENDER_CONTENT_TIMING_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RENDER_CONTENT_LOCK_DURATIONS: std::cell::RefCell<Vec<std::time::Duration>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 #[cfg(test)]
 pub(crate) fn start_render_content_timing_probe() {
-    let mut durations = RENDER_CONTENT_LOCK_DURATIONS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    durations.clear();
-    RENDER_CONTENT_TIMING_ENABLED.store(true, std::sync::atomic::Ordering::Release);
+    RENDER_CONTENT_LOCK_DURATIONS.with(|durations| durations.borrow_mut().clear());
+    RENDER_CONTENT_TIMING_ENABLED.with(|enabled| enabled.set(true));
 }
 
 #[cfg(test)]
 pub(crate) fn take_render_content_lock_durations() -> Vec<std::time::Duration> {
-    RENDER_CONTENT_TIMING_ENABLED.store(false, std::sync::atomic::Ordering::Release);
-    let mut durations = RENDER_CONTENT_LOCK_DURATIONS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::mem::take(&mut *durations)
+    RENDER_CONTENT_TIMING_ENABLED.with(|enabled| enabled.set(false));
+    RENDER_CONTENT_LOCK_DURATIONS.with(|durations| std::mem::take(&mut *durations.borrow_mut()))
 }
 
 impl TerminalSessionBackend {
@@ -192,7 +204,7 @@ impl TerminalSessionBackend {
         // eight-pane performance gate keeps a lock-contention signal.
         #[cfg(test)]
         let snapshot_started_at = RENDER_CONTENT_TIMING_ENABLED
-            .load(std::sync::atomic::Ordering::Acquire)
+            .with(|enabled| enabled.get())
             .then(std::time::Instant::now);
         let rendered = self.ghostty.render_content(
             window_size,
@@ -203,9 +215,7 @@ impl TerminalSessionBackend {
         #[cfg(test)]
         if let Some(snapshot_started_at) = snapshot_started_at {
             RENDER_CONTENT_LOCK_DURATIONS
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(snapshot_started_at.elapsed());
+                .with(|durations| durations.borrow_mut().push(snapshot_started_at.elapsed()));
         }
         rendered
     }

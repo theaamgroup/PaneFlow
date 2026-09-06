@@ -94,6 +94,7 @@ impl PaneFlowApp {
         self.cached_config.theme = Some(name.to_string());
         config_writer::publish_config_snapshot(cx, &self.cached_config);
         crate::theme::invalidate_theme_cache();
+        crate::theme::publish_theme_generation(cx);
         cx.notify();
         true
     }
@@ -133,6 +134,7 @@ impl PaneFlowApp {
         self.cached_config.theme = None;
         config_writer::publish_config_snapshot(cx, &self.cached_config);
         crate::theme::invalidate_theme_cache();
+        crate::theme::publish_theme_generation(cx);
         cx.notify();
     }
 

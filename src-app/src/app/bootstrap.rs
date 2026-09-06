@@ -66,6 +66,9 @@ impl PaneFlowApp {
         // `smol::Timer` loops with a single ticker for the whole app.
         let blink_phase = cx.new(|_| BlinkPhase::default());
         cx.set_global(BlinkPhaseGlobal(blink_phase.clone()));
+        // Issue #429: the theme signal every `TerminalView` observes so a
+        // cached pane repaints on a theme switch. Must precede the first view.
+        crate::theme::install_theme_signal(cx);
         cx.spawn(
             async |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 loop {

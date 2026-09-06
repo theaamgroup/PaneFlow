@@ -19,7 +19,8 @@ use paneflow_config::schema::{TerminalConfig, TerminalSurfaceProfile};
 use super::TerminalState;
 use super::element::TerminalElement;
 use super::pty_session::{
-    TerminalBackendFailureDiagnostics, TerminalBackendFailurePhase, raw_os_error_from_anyhow,
+    TerminalBackendEvent, TerminalBackendFailureDiagnostics, TerminalBackendFailurePhase,
+    raw_os_error_from_anyhow,
 };
 use super::service_detector::ServiceInfo;
 use super::types::{
@@ -369,6 +370,124 @@ impl TerminalView {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Fold one engine wakeup into the view, the way the coalescing task's
+    /// batch does for a real runtime. This fork has no immediate-burst path
+    /// outside that task, so only the tests that stand in for the runtime
+    /// thread call it.
+    #[cfg(test)]
+    pub(crate) fn apply_backend_wakeup(&mut self, cx: &mut Context<Self>) {
+        self.terminal.process_backend_wakeup();
+        self.process_dirty_terminal(cx);
+    }
+
+    /// Fold one coalesced batch of engine events into the view. This is the
+    /// Phase 3 body of the constructor's coalescing task, lifted out so the
+    /// fork-only visuals that ride on an event rather than a wakeup (the
+    /// OSC 9;4 progress chip, the #325 exit overlay) can be driven directly
+    /// by a test and shown to notify.
+    pub(crate) fn apply_backend_batch(
+        &mut self,
+        had_wakeup: bool,
+        batch: Vec<TerminalBackendEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self;
+        let old_title = view.terminal.title.clone();
+        let old_cwd = view.terminal.current_cwd.clone();
+        // `progress` is `None` for OSC 9;4 "remove" and
+        // `Some` for every live state, so its presence is
+        // the busy bit. Sampled around the whole batch so
+        // a burst that starts and ends busy emits nothing.
+        let old_progress = view.terminal.progress;
+        let was_busy = old_progress.is_some();
+        view.terminal.sync_channels();
+        if had_wakeup {
+            view.terminal.process_backend_wakeup();
+        }
+        for event in batch {
+            view.terminal.process_backend_event(event);
+        }
+        if let Some((point, link)) = view.terminal.take_resolved_hover_link() {
+            view.apply_resolved_hover_link(point, link, cx);
+        }
+
+        // Execute deferred clipboard operations (OSC 52)
+        let clipboard_ops = std::mem::take(&mut view.terminal.pending_clipboard_ops);
+        for text in clipboard_ops {
+            // U-023: sanitize untrusted PTY output before it reaches
+            // the system clipboard, so an embedded CR/ESC cannot commit
+            // a hidden command when the user later pastes it.
+            cx.write_to_clipboard(ClipboardItem::new_string(sanitize_osc52(&text)));
+        }
+
+        // Desktop notifications the program asked for
+        // with OSC 9 or OSC 777.
+        let notifications = std::mem::take(&mut view.terminal.pending_notifications);
+        if !notifications.is_empty() {
+            let pane_title = view.terminal.title.clone();
+            for notification in notifications {
+                cx.emit(TerminalEvent::AgentAttention {
+                    title: notification.title.clone(),
+                    body: notification.body.clone(),
+                });
+                crate::agents::notifications::fire_program_notification(
+                    crate::agents::notifications::program_notification(
+                        notification.title,
+                        notification.body,
+                        &pane_title,
+                    ),
+                    cx.background_executor().clone(),
+                );
+            }
+        }
+
+        // OSC 10/11/12 color queries are now handled
+        // synchronously inside `process_event` (matches
+        // Zed's pattern at crates/terminal/src/terminal.rs:997).
+        // Deferring them here used to lose the response
+        // window for crossterm-based clients like the
+        // OpenAI Codex CLI, which then dropped its
+        // input-bar background tint silently.
+
+        // Ahead of the exit check below on purpose: a
+        // dying child clears its progress, and reporting
+        // that as a turn boundary after the pane has
+        // already been torn down would re-create the
+        // session the teardown just purged.
+        let is_busy = view.terminal.progress.is_some();
+        if is_busy != was_busy && view.terminal.exited.is_none() {
+            cx.emit(TerminalEvent::AgentProgressChanged { busy: is_busy });
+        }
+        // Issue #429: the pane header's OSC 9;4 chip reads `progress` off
+        // this view, and a report that only moves the percentage arrives
+        // without a grid change, so it must repaint on its own.
+        if view.terminal.progress != old_progress {
+            cx.notify();
+        }
+
+        // US-002: close only on a user-initiated or clean
+        // exit. A non-zero exit with no prior user input is
+        // a spawn/launch failure (bad shell, missing agent
+        // binary) - keep the pane open so the exit overlay
+        // renders the code instead of vanishing silently.
+        if view.terminal.exited.is_some() && view.terminal.should_close_on_exit() {
+            cx.emit(TerminalEvent::ChildExited);
+        }
+        if view.terminal.title != old_title {
+            cx.emit(TerminalEvent::TitleChanged);
+        }
+        if view.terminal.current_cwd != old_cwd
+            && let Some(ref cwd) = view.terminal.current_cwd
+        {
+            cx.emit(TerminalEvent::CwdChanged(cwd.clone()));
+        }
+        if view.terminal.take_shell_prompt_ready() {
+            cx.emit(TerminalEvent::ShellPromptReady);
+        }
+
+        view.process_dirty_terminal(cx);
+    }
+
     fn process_dirty_terminal(&mut self, cx: &mut Context<Self>) {
         if !self.terminal.dirty {
             return;
@@ -682,99 +801,7 @@ impl TerminalView {
                     // Phase 3: Process the batch in a single entity update
                     let result = cx.update(|cx| {
                         this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                            let old_title = view.terminal.title.clone();
-                            let old_cwd = view.terminal.current_cwd.clone();
-                            // `progress` is `None` for OSC 9;4 "remove" and
-                            // `Some` for every live state, so its presence is
-                            // the busy bit. Sampled around the whole batch so
-                            // a burst that starts and ends busy emits nothing.
-                            let was_busy = view.terminal.progress.is_some();
-                            view.terminal.sync_channels();
-                            if had_wakeup {
-                                view.terminal.process_backend_wakeup();
-                            }
-                            for event in batch {
-                                view.terminal.process_backend_event(event);
-                            }
-                            if let Some((point, link)) = view.terminal.take_resolved_hover_link() {
-                                view.apply_resolved_hover_link(point, link, cx);
-                            }
-
-                            // Execute deferred clipboard operations (OSC 52)
-                            let clipboard_ops =
-                                std::mem::take(&mut view.terminal.pending_clipboard_ops);
-                            for text in clipboard_ops {
-                                // U-023: sanitize untrusted PTY output before it reaches
-                                // the system clipboard, so an embedded CR/ESC cannot commit
-                                // a hidden command when the user later pastes it.
-                                cx.write_to_clipboard(ClipboardItem::new_string(sanitize_osc52(
-                                    &text,
-                                )));
-                            }
-
-                            // Desktop notifications the program asked for
-                            // with OSC 9 or OSC 777.
-                            let notifications =
-                                std::mem::take(&mut view.terminal.pending_notifications);
-                            if !notifications.is_empty() {
-                                let pane_title = view.terminal.title.clone();
-                                for notification in notifications {
-                                    cx.emit(TerminalEvent::AgentAttention {
-                                        title: notification.title.clone(),
-                                        body: notification.body.clone(),
-                                    });
-                                    crate::agents::notifications::fire_program_notification(
-                                        crate::agents::notifications::program_notification(
-                                            notification.title,
-                                            notification.body,
-                                            &pane_title,
-                                        ),
-                                        cx.background_executor().clone(),
-                                    );
-                                }
-                            }
-
-                            // OSC 10/11/12 color queries are now handled
-                            // synchronously inside `process_event` (matches
-                            // Zed's pattern at crates/terminal/src/terminal.rs:997).
-                            // Deferring them here used to lose the response
-                            // window for crossterm-based clients like the
-                            // OpenAI Codex CLI, which then dropped its
-                            // input-bar background tint silently.
-
-                            // Ahead of the exit check below on purpose: a
-                            // dying child clears its progress, and reporting
-                            // that as a turn boundary after the pane has
-                            // already been torn down would re-create the
-                            // session the teardown just purged.
-                            let is_busy = view.terminal.progress.is_some();
-                            if is_busy != was_busy && view.terminal.exited.is_none() {
-                                cx.emit(TerminalEvent::AgentProgressChanged { busy: is_busy });
-                            }
-
-                            // US-002: close only on a user-initiated or clean
-                            // exit. A non-zero exit with no prior user input is
-                            // a spawn/launch failure (bad shell, missing agent
-                            // binary) - keep the pane open so the exit overlay
-                            // renders the code instead of vanishing silently.
-                            if view.terminal.exited.is_some()
-                                && view.terminal.should_close_on_exit()
-                            {
-                                cx.emit(TerminalEvent::ChildExited);
-                            }
-                            if view.terminal.title != old_title {
-                                cx.emit(TerminalEvent::TitleChanged);
-                            }
-                            if view.terminal.current_cwd != old_cwd
-                                && let Some(ref cwd) = view.terminal.current_cwd
-                            {
-                                cx.emit(TerminalEvent::CwdChanged(cwd.clone()));
-                            }
-                            if view.terminal.take_shell_prompt_ready() {
-                                cx.emit(TerminalEvent::ShellPromptReady);
-                            }
-
-                            view.process_dirty_terminal(cx);
+                            view.apply_backend_batch(had_wakeup, batch, cx);
                         })
                     });
                     if result.is_err() {
@@ -829,6 +856,26 @@ impl TerminalView {
         } else {
             log::warn!(
                 "BlinkPhaseGlobal not installed - cursor will not blink for this TerminalView"
+            );
+        }
+
+        // Issue #429: `Pane::render` hosts this view behind `Entity::cached`,
+        // so a theme switch has to reach it as a notification of its own.
+        // `invalidate_theme_cache` only touches the application entity; the
+        // picker and the config reload publish the new generation through
+        // the app-scoped `ThemeSignal`, and this observer turns that into the
+        // repaint that re-resolves the palette in `render`.
+        if let Some(signal) = crate::theme::theme_signal(cx) {
+            cx.observe(
+                &signal,
+                |_view: &mut Self, _signal, cx: &mut Context<Self>| {
+                    cx.notify();
+                },
+            )
+            .detach();
+        } else {
+            log::warn!(
+                "ThemeSignalGlobal not installed - this TerminalView will not repaint on a theme change"
             );
         }
 
@@ -1925,6 +1972,8 @@ fn search_icon_button(
 
 #[cfg(test)]
 mod tests {
+    use gpui::Entity;
+
     use super::*;
     use crate::terminal::pty_session::strip_partial_ansi_tail;
 
@@ -2292,6 +2341,508 @@ mod tests {
         let mut s = "prompt\x1b]7;file://host/dir".to_string();
         strip_partial_ansi_tail(&mut s);
         assert_eq!(s, "prompt");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #429: `Pane::render` hosts this view behind `Entity::cached`, so
+    // every visual mutation has to reach the cache as the view's own
+    // `cx.notify()`. One named test per mutation; the theme change is the one
+    // that did not notify before the `ThemeSignal` and would have left a
+    // cached pane in its old colours.
+    // -----------------------------------------------------------------------
+
+    const HOST_WINDOW_W: f32 = 800.0;
+    const HOST_WINDOW_H: f32 = 600.0;
+
+    struct TerminalHost {
+        terminal: Option<Entity<TerminalView>>,
+    }
+
+    impl Render for TerminalHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mut root = div().size_full();
+            if let Some(terminal) = self.terminal.clone() {
+                root = root.child(terminal);
+            }
+            root
+        }
+    }
+
+    struct NotifyProbe {
+        hits: std::rc::Rc<std::cell::Cell<usize>>,
+        _subscription: gpui::Subscription,
+    }
+
+    impl NotifyProbe {
+        fn hits(&self) -> usize {
+            self.hits.get()
+        }
+
+        fn reset(&self) {
+            self.hits.set(0);
+        }
+    }
+
+    fn install_blink_phase(
+        cx: &mut gpui::TestAppContext,
+    ) -> Entity<crate::terminal::blink::BlinkPhase> {
+        cx.update(|cx| {
+            let phase = cx.new(|_| crate::terminal::blink::BlinkPhase::default());
+            cx.set_global(crate::terminal::blink::BlinkPhaseGlobal(phase.clone()));
+            phase
+        })
+    }
+
+    fn hosted_terminal(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<TerminalView>,
+        Entity<TerminalHost>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = captured.clone();
+        let (host, cx) = cx.add_window_view(move |_window, cx| {
+            let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+            *sink.borrow_mut() = Some(terminal.clone());
+            TerminalHost {
+                terminal: Some(terminal),
+            }
+        });
+        cx.update(|window, _cx| window.activate_window());
+        cx.simulate_resize(gpui::size(gpui::px(HOST_WINDOW_W), gpui::px(HOST_WINDOW_H)));
+        cx.run_until_parked();
+        let terminal = captured
+            .borrow()
+            .clone()
+            .expect("the host must build its terminal view");
+        (terminal, host, cx)
+    }
+
+    fn watch_notifications(
+        view: &Entity<TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> NotifyProbe {
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let sink = hits.clone();
+        let subscription = cx.update(|_window, cx| {
+            cx.observe(view, move |_view, _cx| {
+                sink.set(sink.get() + 1);
+            })
+        });
+        NotifyProbe {
+            hits,
+            _subscription: subscription,
+        }
+    }
+
+    fn focus_terminal(view: &Entity<TerminalView>, cx: &mut gpui::VisualTestContext) {
+        let handle = view.read_with(cx, |view, _| view.focus_handle.clone());
+        cx.update(|window, cx| handle.focus(window, cx));
+        cx.run_until_parked();
+    }
+
+    /// The open-link modifier is Cmd on this macOS-only fork.
+    fn link_modifiers() -> gpui::Modifiers {
+        gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn pty_output_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| {
+            view.terminal.write_output(b"paneflow output\n");
+            view.apply_backend_wakeup(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.hits() > 0,
+            "pty output: the terminal view must notify itself"
+        );
+    }
+
+    #[gpui::test]
+    fn a_kitty_image_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| {
+            view.terminal
+                .write_output(b"\x1b_Gf=24,s=1,v=1,a=T;AAAA\x1b\\");
+            view.apply_backend_wakeup(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.hits() > 0,
+            "kitty image: the terminal view must notify itself"
+        );
+    }
+
+    #[gpui::test]
+    fn a_resize_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| {
+            view.terminal
+                .notify_window_size(TerminalWindowSize::new(120, 40, 8, 16));
+            view.apply_backend_wakeup(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.hits() > 0,
+            "resize: the terminal view must notify itself"
+        );
+    }
+
+    #[gpui::test]
+    fn the_process_exit_banner_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| {
+            view.terminal.exited = Some(0);
+            view.apply_backend_wakeup(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.hits() > 0,
+            "process exit banner: the terminal view must notify itself"
+        );
+    }
+
+    /// Fork-only (#325): the exit overlay is painted from `exited`, which the
+    /// engine sets through a `ChildExited` event rather than a wakeup. A
+    /// non-zero exit with no prior input keeps the pane open, so the overlay
+    /// is the only thing the user sees and it must reach a cached pane.
+    #[gpui::test]
+    fn a_child_exit_event_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| {
+            view.apply_backend_batch(
+                false,
+                vec![TerminalBackendEvent::child_exited_for_test(127)],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.terminal.exited),
+            Some(127),
+            "child exit: the event must record the exit code the overlay paints"
+        );
+        assert!(
+            probe.hits() > 0,
+            "child exit: the terminal view must notify itself for the #325 overlay"
+        );
+    }
+
+    /// Fork-only: the pane header's OSC 9;4 chip reads `progress` off this
+    /// view. A report that only moves the percentage changes no grid cell and
+    /// flips no busy bit, so the view has to notify on the report itself.
+    #[gpui::test]
+    fn a_progress_report_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        use paneflow_terminal_ghostty::{ProgressReport, ProgressState};
+
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        let report = |percent| ProgressReport {
+            state: ProgressState::Set,
+            percent: Some(percent),
+        };
+        terminal.update(cx, |view, cx| {
+            view.apply_backend_batch(
+                false,
+                vec![TerminalBackendEvent::progress_for_test(report(42))],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.terminal.progress),
+            Some(report(42)),
+            "progress: the report must land on the view"
+        );
+        assert!(
+            probe.hits() > 0,
+            "progress: the first report must notify the terminal view"
+        );
+
+        probe.reset();
+        terminal.update(cx, |view, cx| {
+            view.apply_backend_batch(
+                false,
+                vec![TerminalBackendEvent::progress_for_test(report(43))],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.terminal.progress),
+            Some(report(43)),
+            "progress: a percentage-only report must land on the view"
+        );
+        assert!(
+            probe.hits() > 0,
+            "progress: a percentage-only report flips no busy bit and must still notify"
+        );
+    }
+
+    #[gpui::test]
+    fn a_mouse_selection_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        cx.simulate_mouse_down(
+            gpui::point(gpui::px(120.0), gpui::px(120.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        assert!(
+            terminal.read_with(cx, |view, _| view.selecting),
+            "mouse selection: the press must arm a selection"
+        );
+        assert!(
+            probe.hits() > 0,
+            "mouse selection: the terminal view must notify itself"
+        );
+    }
+
+    #[gpui::test]
+    fn a_hovered_link_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        focus_terminal(&terminal, cx);
+        cx.simulate_mouse_move(
+            gpui::point(gpui::px(120.0), gpui::px(120.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        cx.simulate_modifiers_change(link_modifiers());
+        cx.run_until_parked();
+
+        assert!(
+            terminal.read_with(cx, |view, _| view.link_modifier_held),
+            "hovered link: the open-link modifier must be recorded"
+        );
+        assert!(
+            probe.hits() > 0,
+            "hovered link: the terminal view must notify itself"
+        );
+    }
+
+    fn two_search_matches() -> Vec<crate::search::SearchMatch> {
+        vec![
+            crate::search::SearchMatch {
+                start: Point::new(0, 0),
+                end: Point::new(0, 7),
+            },
+            crate::search::SearchMatch {
+                start: Point::new(1, 0),
+                end: Point::new(1, 7),
+            },
+        ]
+    }
+
+    #[gpui::test]
+    fn search_highlighting_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        terminal.update(cx, |view, _cx| {
+            view.search_active = true;
+            view.search_query = "paneflow".into();
+            view.search_matches = two_search_matches();
+            view.search_current = 0;
+        });
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| view.search_next(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.search_current),
+            1,
+            "search highlighting: the active match must advance"
+        );
+        assert!(
+            probe.hits() > 0,
+            "search highlighting: the terminal view must notify itself"
+        );
+    }
+
+    /// Fork-only (#326): the search-hit wash is painted from `search_matches`,
+    /// so the frame that removes it must be a notified one or a cached pane
+    /// keeps the wash after the find bar is gone.
+    #[gpui::test]
+    fn dismissing_the_search_wash_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        terminal.update(cx, |view, _cx| {
+            view.search_active = true;
+            view.search_query = "paneflow".into();
+            view.search_matches = two_search_matches();
+            view.search_current = 1;
+        });
+        cx.run_until_parked();
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| view.dismiss_search(cx));
+        cx.run_until_parked();
+
+        assert!(
+            terminal.read_with(cx, |view, _| {
+                !view.search_active && view.search_matches.is_empty()
+            }),
+            "search wash: dismissing the find bar must clear the matches"
+        );
+        assert!(
+            probe.hits() > 0,
+            "search wash: the terminal view must notify itself when the wash goes"
+        );
+    }
+
+    #[gpui::test]
+    fn a_caret_phase_change_notifies_the_focused_terminal_view(cx: &mut gpui::TestAppContext) {
+        let phase = install_blink_phase(cx);
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        focus_terminal(&terminal, cx);
+        terminal.update(cx, |view, _cx| {
+            view.cursor_blink_mode = paneflow_config::schema::CursorBlinkConfig::On;
+            view.cursor_visible = true;
+        });
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        cx.update(|_window, cx| {
+            phase.update(cx, |phase, cx| {
+                phase.visible = false;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !terminal.read_with(cx, |view, _| view.cursor_visible),
+            "caret phase: the focused view must follow the blink phase"
+        );
+        assert!(
+            probe.hits() > 0,
+            "caret phase: the terminal view must notify itself"
+        );
+    }
+
+    #[gpui::test]
+    fn a_theme_change_notifies_the_terminal_view(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::theme::install_theme_signal);
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        cx.update(|_window, cx| {
+            crate::theme::invalidate_theme_cache();
+            crate::theme::publish_theme_generation(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.hits() > 0,
+            "theme change: the terminal view must notify itself"
+        );
+    }
+
+    #[gpui::test]
+    fn an_idle_unfocused_terminal_stays_silent_across_sixty_frames(cx: &mut gpui::TestAppContext) {
+        let phase = install_blink_phase(cx);
+        let (terminal, _host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        for frame in 0..60 {
+            cx.update(|_window, cx| {
+                phase.update(cx, |phase, cx| {
+                    phase.visible = frame % 2 == 0;
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+        }
+
+        assert!(
+            !terminal.read_with(cx, |view, _| view.was_focused),
+            "idle terminal: the view must stay unfocused"
+        );
+        assert_eq!(
+            probe.hits(),
+            0,
+            "idle terminal: an unfocused terminal without output or hover must not notify"
+        );
+    }
+
+    #[gpui::test]
+    fn a_closed_pane_stops_notifying_after_its_exit_banner(cx: &mut gpui::TestAppContext) {
+        let (terminal, host, cx) = hosted_terminal(cx);
+        let probe = watch_notifications(&terminal, cx);
+        probe.reset();
+
+        terminal.update(cx, |view, cx| {
+            view.terminal.exited = Some(0);
+            view.apply_backend_wakeup(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            probe.hits() > 0,
+            "closed pane: the exit banner must notify before the pane closes"
+        );
+
+        let weak = terminal.downgrade();
+        drop(terminal);
+        host.update(cx, |host, cx| {
+            host.terminal = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        probe.reset();
+
+        let outcome = cx.update(|_window, cx| {
+            weak.update(cx, |view, cx| {
+                view.apply_backend_wakeup(cx);
+            })
+        });
+
+        assert!(
+            outcome.is_err(),
+            "closed pane: the released view must not be updatable"
+        );
+        assert_eq!(
+            probe.hits(),
+            0,
+            "closed pane: a released terminal view must not notify"
+        );
     }
 
     #[test]

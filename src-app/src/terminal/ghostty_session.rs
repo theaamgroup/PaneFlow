@@ -228,6 +228,15 @@ pub(crate) struct UiEventState {
 }
 
 impl UiEventState {
+    /// A slot set holding one queued progress report, for the view tests
+    /// that feed `TerminalView::apply_backend_batch` by hand.
+    #[cfg(test)]
+    pub(super) fn with_progress_for_test(report: ghostty::ProgressReport) -> Arc<Self> {
+        let state = Self::default();
+        Self::store(&state.progress, report);
+        Arc::new(state)
+    }
+
     fn store<T>(slot: &Mutex<CoalescedSlot<T>>, value: T) -> bool {
         let mut slot = slot
             .lock()
