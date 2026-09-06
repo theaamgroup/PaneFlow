@@ -421,7 +421,7 @@ async fn reload_from_disk(
     let Ok(begun) = begun else {
         return false;
     };
-    let Some((mut diff, incoming)) = begun else {
+    let Some((mut diff, incoming, stamp)) = begun else {
         return true;
     };
     let incoming = Arc::new(incoming);
@@ -438,6 +438,7 @@ async fn reload_from_disk(
                     generation,
                     DiskSplices { revision, splices },
                     &incoming,
+                    stamp,
                     retry,
                     force,
                     cx,
@@ -608,11 +609,12 @@ impl CodeView {
             state: CodeLoadState::Ready(Box::new(super::load::LoadedCode {
                 document,
                 highlighter,
+                indent: IndentUnit::Spaces(4),
                 stamp: None,
             })),
             slot: CodeLoadSlot::new(),
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            scroll: CodeScroll::new(),
             v_drag: None,
             h_offset: 0.0,
             selection: CodeSelection::default(),
@@ -638,21 +640,6 @@ impl CodeView {
             _watcher: None,
             _watch_bridge: None,
         }
-    }
-
-    /// The rows the last frame showed, from the host's live scroll handle:
-    /// empty until the view has been laid out.
-    #[cfg(test)]
-    pub(crate) fn visible_row_range(&self) -> Range<usize> {
-        let Some(line_count) = self.state.document().map(CodeDocument::line_count) else {
-            return 0..0;
-        };
-        let viewport_h = f32::from(self.scroll.bounds().size.height);
-        if viewport_h <= 0.0 {
-            return 0..0;
-        }
-        let content_top = f32::from(-self.scroll.offset().y).max(0.0);
-        super::element::visible_rows(content_top, viewport_h, line_count)
     }
 
     /// Mirror the app-wide cursor blink (US-009). `try_global` rather than
@@ -2080,17 +2067,20 @@ impl CodeView {
     }
 
     /// The main-thread half of a reload that runs before the diff: the
-    /// ordering guards, the conflict decision, the stamp, and the rope
-    /// snapshot the background diff runs against. `None` means there is
-    /// nothing to diff - the probe was stale, the file is gone, the bytes are
-    /// the ones already adopted, or the document is dirty and now conflicted.
+    /// ordering guards, the conflict decision, and the rope snapshot the
+    /// background diff runs against. The incoming stamp is returned, not
+    /// adopted: a Cmd+S in this window must still carry the pre-agent stamp
+    /// so [`save::save_blocking`] refuses rather than overwriting the rewrite
+    /// (#402, #428). `None` means there is nothing to diff - the probe was
+    /// stale, the file is gone, the bytes are the ones already adopted, or
+    /// the document is dirty and now conflicted.
     fn begin_disk_reload(
         &mut self,
         generation: u64,
         loaded: DiskLoad,
         force: bool,
         cx: &mut Context<Self>,
-    ) -> Option<(DiskDiff, CodeDocument)> {
+    ) -> Option<(DiskDiff, CodeDocument, Option<FileStamp>)> {
         if self.saving || generation != self.disk_generation {
             return None;
         }
@@ -2117,24 +2107,23 @@ impl CodeView {
                 return None;
             }
         }
-        self.stamp = stamp;
-        self.disk = DiskState::InSync;
-        self.save_error = None;
         let doc = self.state.document()?;
-        Some((DiskDiff::of(doc), document))
+        Some((DiskDiff::of(doc), document, stamp))
     }
 
     /// The main-thread half after the diff. `Some` hands back a fresh
     /// snapshot to diff again: the document's revision moved while the diff
     /// ran and `retry` still allows one more attempt. Otherwise the splices
-    /// land as one transaction - or the document is left to the user as a
-    /// conflict, when it moved once too often or is dirty by now and the
-    /// reload was not forced.
+    /// land as one transaction and the incoming stamp is adopted - or the
+    /// document is left to the user as a conflict, when it moved once too
+    /// often or is dirty by now and the reload was not forced. A save that
+    /// ran in the window still holds the pre-agent stamp.
     fn finish_disk_reload(
         &mut self,
         generation: u64,
         batch: DiskSplices,
         incoming: &CodeDocument,
+        stamp: Option<FileStamp>,
         retry: bool,
         force: bool,
         cx: &mut Context<Self>,
@@ -2163,6 +2152,9 @@ impl CodeView {
             incoming.read_only_reason(),
             cx,
         );
+        self.stamp = stamp;
+        self.disk = DiskState::InSync;
+        self.save_error = None;
         self.saved_mark = self.history.mark();
         cx.notify();
         None
@@ -2797,7 +2789,8 @@ impl CodeView {
         force: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some((diff, incoming)) = self.begin_disk_reload(generation, loaded, force, cx) else {
+        let Some((diff, incoming, stamp)) = self.begin_disk_reload(generation, loaded, force, cx)
+        else {
             return;
         };
         let splices = edit::disk_splices(&diff.rope, &incoming.text().to_string());
@@ -2808,6 +2801,7 @@ impl CodeView {
                 splices,
             },
             &incoming,
+            stamp,
             false,
             force,
             cx,
@@ -4298,7 +4292,7 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming) = view
+            let (diff, incoming, stamp) = view
                 .begin_disk_reload(generation, loaded, false, cx)
                 .expect("a clean document starts a diff");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4313,6 +4307,7 @@ mod tests {
                         splices,
                     },
                     &incoming,
+                    stamp,
                     true,
                     false,
                     cx,
@@ -4335,6 +4330,7 @@ mod tests {
                         splices
                     },
                     &incoming,
+                    stamp,
                     false,
                     false,
                     cx
@@ -4360,7 +4356,7 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming) = view
+            let (diff, incoming, stamp) = view
                 .begin_disk_reload(generation, loaded, false, cx)
                 .expect("a clean document starts a diff");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4375,6 +4371,7 @@ mod tests {
                         splices,
                     },
                     &incoming,
+                    stamp,
                     true,
                     false,
                     cx,
@@ -4389,6 +4386,7 @@ mod tests {
                         splices
                     },
                     &incoming,
+                    stamp,
                     false,
                     false,
                     cx
@@ -4423,7 +4421,7 @@ mod tests {
 
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming) = view
+            let (diff, incoming, stamp) = view
                 .begin_disk_reload(generation, loaded, true, cx)
                 .expect("a forced reload ignores the dirty mark");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4435,6 +4433,7 @@ mod tests {
                         splices
                     },
                     &incoming,
+                    stamp,
                     false,
                     true,
                     cx
@@ -4463,7 +4462,7 @@ mod tests {
         view.update(cx, |view, cx| {
             let generation = view.begin_disk_probe();
             let loaded = probe(view, "ONE!\nTWO!\n", stamp);
-            let (diff, incoming) = view
+            let (diff, incoming, stamp) = view
                 .begin_disk_reload(generation, loaded, false, cx)
                 .expect("a clean document starts a diff");
             let splices = edit::disk_splices(&diff.rope, "ONE!\nTWO!\n");
@@ -4476,6 +4475,7 @@ mod tests {
                         splices
                     },
                     &incoming,
+                    stamp,
                     true,
                     false,
                     cx
@@ -4485,6 +4485,67 @@ mod tests {
             );
             assert_eq!(text_of(view), "one\ntwo\n", "its splices never land");
             assert!(!view.has_conflict());
+        });
+    }
+
+    /// Adopting the agent's stamp in `begin_disk_reload` lets Cmd+S copy it as
+    /// `expected`, so `save_blocking` sees a match and overwrites the rewrite
+    /// with the old buffer. The stamp must stay the pre-agent one until splices
+    /// land (#402, #428).
+    #[gpui::test]
+    fn a_save_during_an_in_flight_reload_does_not_overwrite_the_agent_bytes(
+        cx: &mut TestAppContext,
+    ) {
+        let (dir, view, cx) = file_view(cx, "one\ntwo\n", false);
+        let path = dir.path().join("main.rs");
+        let original_stamp = view.update(cx, |view, _cx| view.stamp);
+
+        std::fs::write(&path, "ONE!\nTWO!\n").expect("agent write");
+        let stamp = FileStamp::read(&path);
+        assert_ne!(
+            stamp, original_stamp,
+            "the agent rewrite must change the stamp"
+        );
+
+        view.update_in(cx, |view, window, cx| {
+            let generation = view.begin_disk_probe();
+            let loaded = probe(view, "ONE!\nTWO!\n", stamp);
+            let (_diff, _incoming, incoming_stamp) = view
+                .begin_disk_reload(generation, loaded, false, cx)
+                .expect("a clean document starts a diff");
+            assert_eq!(incoming_stamp, stamp);
+            assert_eq!(
+                view.stamp, original_stamp,
+                "the incoming stamp is not adopted until splices land"
+            );
+            assert_eq!(
+                text_of(view),
+                "one\ntwo\n",
+                "the buffer is still the old text"
+            );
+
+            view.selection = CodeSelection::at(0);
+            view.replace_text_in_range(None, "x", window, cx);
+            view.save_action(&CeSave, window, cx);
+        });
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "ONE!\nTWO!\n",
+            "the agent's rewrite must still be on disk"
+        );
+        view.update(cx, |view, _cx| {
+            assert!(
+                view.has_conflict(),
+                "the save must refuse rather than clobber"
+            );
+            assert_eq!(text_of(view), "xone\ntwo\n");
+            assert_eq!(
+                view.stamp, original_stamp,
+                "a refused save must not adopt the agent's stamp"
+            );
         });
     }
 

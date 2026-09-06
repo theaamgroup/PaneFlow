@@ -113,10 +113,8 @@ fn apply_ui_edit(
         return;
     };
     let mut deferred = None;
-    for change in &applied.edits {
-        if let HighlightOutcome::Deferred(parse) = timer.time(|| highlighter.edit(doc, change)) {
-            deferred = Some(parse);
-        }
+    if let HighlightOutcome::Deferred(parse) = timer.time(|| highlighter.edit(doc, &applied.edit)) {
+        deferred = Some(parse);
     }
     if let Some(parse) = deferred {
         let parsed = parse.run();
@@ -414,11 +412,9 @@ fn reload_scenario(metrics: &mut Vec<Metric>, corpora: &Corpora) {
         let Some(applied) = splice(&mut doc, 0..len, &text) else {
             continue;
         };
-        for change in &applied.edits {
-            if let HighlightOutcome::Deferred(parse) = highlighter.edit(&doc, change) {
-                let parsed = parse.run();
-                highlighter.apply_parsed(&doc, parsed);
-            }
+        if let HighlightOutcome::Deferred(parse) = highlighter.edit(&doc, &applied.edit) {
+            let parsed = parse.run();
+            highlighter.apply_parsed(&doc, parsed);
         }
         history.push(
             vec![applied.record],
