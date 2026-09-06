@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use gpui::{AsyncApp, Context, WeakEntity};
 
 use super::document::{CodeDocument, ReadOnlyReason};
+use super::edit::IndentUnit;
 use super::highlight::CodeHighlighter;
 use super::save::FileStamp;
 use crate::diff::DiffSyntax;
@@ -105,10 +106,13 @@ impl CodeLoadError {
 pub(crate) type CodeLoad = Result<CodeDocument, CodeLoadError>;
 
 /// A document plus the highlighter built from it, both produced by the same
-/// off-thread pass.
+/// off-thread pass, with the indent unit and the disk stamp that pass also
+/// took so the render thread adopts them rather than deriving them.
 pub(crate) struct LoadedCode {
     pub(crate) document: CodeDocument,
     pub(crate) highlighter: CodeHighlighter,
+    /// The indentation the file uses, detected over its lines off-thread.
+    pub(crate) indent: IndentUnit,
     /// What the bytes in `document` looked like on disk, stat'd from the
     /// handle they were read through. `None` when the handle no longer
     /// describes a regular file. The view adopts this rather than re-stat'ing
@@ -235,10 +239,12 @@ pub(crate) fn build_document(path: PathBuf, text: &str, read_only_on_disk: bool)
 /// would hand back the stall the off-thread load was there to remove.
 pub(crate) fn open_blocking(path: &Path, syntax: DiffSyntax) -> CodeOpen {
     let (document, stamp) = load_stamped(path)?;
+    let indent = IndentUnit::detect(&document);
     let highlighter = CodeHighlighter::new(&document, syntax);
     Ok(LoadedCode {
         document,
         highlighter,
+        indent,
         stamp,
     })
 }
@@ -289,7 +295,8 @@ impl CodeLoadSlot {
         self.generation
     }
 
-    #[allow(dead_code)] // EP-001 accessor: the generation guard is checked through `accept`; no caller reads the counter yet.
+    /// The live generation, for a task started after the load landed (a
+    /// watcher registration, a longest-line rescan) to guard itself with.
     pub(crate) fn current(&self) -> u64 {
         self.generation
     }
@@ -347,7 +354,9 @@ pub(crate) enum CodeLoadState {
 }
 
 impl CodeLoadState {
-    /// Fold a guarded open outcome into the state a tab renders.
+    /// Fold a guarded open outcome into the state a tab renders. The view
+    /// unpacks the outcome itself so it can adopt the indent and stamp first.
+    #[cfg(test)]
     pub(crate) fn from_outcome(outcome: CodeOpen) -> Self {
         match outcome {
             Ok(loaded) => Self::Ready(Box::new(loaded)),
@@ -670,10 +679,12 @@ mod tests {
 
     fn loaded(path: &str, text: &str) -> LoadedCode {
         let document = CodeDocument::new(PathBuf::from(path), text);
+        let indent = IndentUnit::detect(&document);
         let highlighter = CodeHighlighter::new(&document, syntax());
         LoadedCode {
             document,
             highlighter,
+            indent,
             stamp: None,
         }
     }
@@ -700,19 +711,25 @@ mod tests {
         );
     }
 
-    /// US-002: the read, the rope and the initial parse are one blocking unit,
-    /// so `smol::unblock` carries all three off the render thread. Proven by
-    /// the highlighter coming back already colored, without any main-thread
-    /// parse call in between.
+    /// US-002: the read, the rope, the initial parse, the indent detection and
+    /// the stamp are one blocking unit, so `smol::unblock` carries all of them
+    /// off the render thread. Proven by the highlighter coming back already
+    /// colored, without any main-thread parse call in between.
     #[test]
     fn opening_a_file_parses_it_in_the_same_blocking_pass_as_the_read() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(&dir, "main.rs", b"fn main() {\n    let x = 1;\n}\n");
+        let path = write(
+            &dir,
+            "main.rs",
+            b"fn main() {\n\tlet x = 1;\n\tlet y = 2;\n}\n",
+        );
 
         let opened = open_blocking(&path, syntax()).expect("open");
 
-        assert_eq!(opened.document.line_count(), 4);
+        assert_eq!(opened.document.line_count(), 5);
         assert!(opened.highlighter.is_enabled());
+        assert_eq!(opened.indent, IndentUnit::Tab);
+        assert_eq!(opened.stamp, FileStamp::read(&path));
         assert!(
             !opened.highlighter.runs(0).is_empty(),
             "the initial parse ran inside open_blocking, not later on the render thread"

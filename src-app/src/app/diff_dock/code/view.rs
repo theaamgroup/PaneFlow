@@ -87,6 +87,8 @@ use notify::{RecursiveMode, Watcher};
 /// See [`CodeView::_watch_bridge`] for why the sender lives behind a lock
 /// rather than inside the watcher callback.
 type WatchBridge = Arc<Mutex<Option<mpsc::UnboundedSender<notify::Result<notify::Event>>>>>;
+/// The receiving end of that bridge, polled by the reload task.
+type WatchEvents = mpsc::UnboundedReceiver<notify::Result<notify::Event>>;
 
 /// OS watcher in production; `NullWatcher` under `cfg(test)` so GPUI's
 /// scheduler never sees the notify-rs fsevents thread.
@@ -586,18 +588,24 @@ impl CodeView {
             return;
         }
         // The indent unit and the disk stamp are both properties of the file
-        // that just landed, so they are taken here rather than at the first
-        // Tab or the first save, when the file may already have moved on. The
-        // stamp is the one the loader took from the handle it read, never a
-        // fresh stat of the path: by now an agent may have rewritten the file,
-        // and a stamp of that rewrite would let the next save clobber it
-        // without a conflict.
-        let stamp = outcome.as_ref().ok().and_then(|loaded| loaded.stamp);
-        self.state = CodeLoadState::from_outcome(outcome);
-        if let Some(doc) = self.state.document() {
-            self.indent = IndentUnit::detect(doc);
+        // that just landed, so they are adopted here rather than derived at
+        // the first Tab or the first save, when the file may already have
+        // moved on. Both come off the loader: the indent was detected over
+        // the lines off-thread, and the stamp is the one taken from the
+        // handle the bytes were read through, never a fresh stat of the path
+        // - by now an agent may have rewritten the file, and a stamp of that
+        // rewrite would let the next save clobber it without a conflict.
+        match outcome {
+            Ok(loaded) => {
+                self.indent = loaded.indent;
+                self.stamp = loaded.stamp;
+                self.state = CodeLoadState::Ready(Box::new(loaded));
+            }
+            Err(err) => {
+                self.stamp = None;
+                self.state = CodeLoadState::Failed(err);
+            }
         }
-        self.stamp = stamp;
         self.start_watcher(cx);
         cx.notify();
     }
@@ -1346,7 +1354,45 @@ impl CodeView {
                 }
             });
         }
+        self.refresh_longest_line(cx);
         self.after_motion(cx);
+    }
+
+    /// Hand a stale longest-line maximum to a background rescan, so the
+    /// horizontal extent shrinks after the widest line is cut without an
+    /// O(lines) walk on the render thread. Guarded twice on the way back: by
+    /// the load generation, so a tab that moved on to another file drops the
+    /// result, and by the document revision inside
+    /// `apply_longest_line_measurement`, so an edit that landed during the
+    /// scan wins and the next keystroke's snapshot carries it.
+    fn refresh_longest_line(&mut self, cx: &mut Context<Self>) {
+        let Some((text, revision)) = self
+            .state
+            .document()
+            .and_then(CodeDocument::longest_line_snapshot)
+        else {
+            return;
+        };
+        let load_generation = self.slot.current();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let longest = cx
+                .background_spawn(async move { CodeDocument::measure_longest_line(&text) })
+                .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
+                    if !view.slot.accept(load_generation) {
+                        return;
+                    }
+                    let Some(doc) = view.state.document_mut() else {
+                        return;
+                    };
+                    if doc.apply_longest_line_measurement(revision, longest) {
+                        cx.notify();
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     /// Light the read-only banner up for [`READ_ONLY_FLASH`] (US-012).
@@ -1732,6 +1778,12 @@ impl CodeView {
     /// watch registered on the old inode. Non-recursive, so a deep tree costs
     /// one watch descriptor - the inotify-exhaustion lesson from
     /// `reference_gpui_recursive_watcher_main_thread_hang`.
+    ///
+    /// Registration (a stat of the parent plus the OS watch call) runs on the
+    /// background executor and is adopted under the load generation, so ten
+    /// files opened in quick succession leave exactly one watcher behind -
+    /// the newest one's - and the others are dropped, unregistered, as they
+    /// arrive.
     fn start_watcher(&mut self, cx: &mut Context<Self>) {
         self._watcher = None;
         self._watch_bridge = None;
@@ -1741,39 +1793,47 @@ impl CodeView {
         let Some(name) = self.path.file_name().map(|name| name.to_os_string()) else {
             return;
         };
-        if !parent.is_dir() {
-            return;
-        }
-        // Unbounded on purpose: events fired between registration and the first
-        // poll below have to queue, not be dropped.
-        let (tx, mut rx) = mpsc::unbounded::<notify::Result<notify::Event>>();
-        let bridge: WatchBridge = Arc::new(Mutex::new(Some(tx)));
-        let notify_side = Arc::clone(&bridge);
-        let watcher = ConflictWatcher::new(
-            move |res| {
-                if let Ok(guard) = notify_side.lock()
-                    && let Some(tx) = guard.as_ref()
-                {
-                    let _ = tx.unbounded_send(res);
-                }
-            },
-            notify::Config::default(),
-        );
-        let mut watcher = match watcher {
-            Ok(watcher) => watcher,
-            Err(err) => {
-                log::warn!("could not watch {} for changes: {err}", parent.display());
-                return;
-            }
-        };
-        if let Err(err) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
-            log::warn!("could not watch {} for changes: {err}", parent.display());
-            return;
-        }
-        self._watcher = Some(watcher);
-        self._watch_bridge = Some(bridge);
-
+        let generation = self.slot.current();
         let path = self.path.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let watched_parent = parent.clone();
+            let outcome = cx
+                .background_spawn(async move { create_file_watcher(parent) })
+                .await;
+            let (watcher, bridge, rx) = match outcome {
+                Ok(parts) => parts,
+                Err(err) => {
+                    log::warn!(
+                        "could not watch {} for changes: {err}",
+                        watched_parent.display()
+                    );
+                    return;
+                }
+            };
+            cx.update(|cx| {
+                let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
+                    if !view.slot.accept(generation) {
+                        return;
+                    }
+                    view._watcher = Some(watcher);
+                    view._watch_bridge = Some(bridge);
+                    view.spawn_reload_loop(path, name, rx, cx);
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// The reload task behind a registered watcher: debounce a burst of
+    /// directory events, then re-read the file off-thread and fold it in
+    /// through `disk_loaded`.
+    fn spawn_reload_loop(
+        &mut self,
+        path: PathBuf,
+        name: std::ffi::OsString,
+        mut rx: WatchEvents,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             while let Some(first) = rx.next().await {
                 if !event_is_relevant(&first, &name) {
@@ -2134,6 +2194,38 @@ fn shift_offset(offset: usize, deltas: &[(usize, isize)]) -> usize {
         }
     }
     out.max(0) as usize
+}
+
+/// Register a non-recursive watch on `parent`. Blocking (a stat plus the OS
+/// registration), so it runs on the background executor. The sender side of
+/// the bridge is handed back to the view, which is what lets the callback be
+/// severed from the owning thread before the watcher goes away.
+fn create_file_watcher(
+    parent: PathBuf,
+) -> Result<(ConflictWatcher, WatchBridge, WatchEvents), String> {
+    if !parent.is_dir() {
+        return Err("the parent directory no longer exists".to_string());
+    }
+    // Unbounded on purpose: events fired between registration and the first
+    // poll of the reload loop have to queue, not be dropped.
+    let (tx, rx) = mpsc::unbounded::<notify::Result<notify::Event>>();
+    let bridge: WatchBridge = Arc::new(Mutex::new(Some(tx)));
+    let notify_side = Arc::clone(&bridge);
+    let mut watcher = ConflictWatcher::new(
+        move |result| {
+            if let Ok(guard) = notify_side.lock()
+                && let Some(tx) = guard.as_ref()
+            {
+                let _ = tx.unbounded_send(result);
+            }
+        },
+        notify::Config::default(),
+    )
+    .map_err(|err| err.to_string())?;
+    watcher
+        .watch(&parent, RecursiveMode::NonRecursive)
+        .map_err(|err| err.to_string())?;
+    Ok((watcher, bridge, rx))
 }
 
 /// Whether a filesystem event concerns the open file.
@@ -2506,6 +2598,7 @@ mod tests {
             CodeLoadState::Ready(Box::new(LoadedCode {
                 document,
                 highlighter,
+                indent: IndentUnit::Spaces(4),
                 stamp: None,
             }))
         };
@@ -2791,6 +2884,7 @@ mod tests {
         let state = CodeLoadState::Ready(Box::new(LoadedCode {
             document,
             highlighter,
+            indent: IndentUnit::Spaces(4),
             stamp,
         }));
         let (view, cx) = {
@@ -2949,6 +3043,7 @@ mod tests {
         let state = CodeLoadState::Ready(Box::new(LoadedCode {
             document,
             highlighter,
+            indent: IndentUnit::Spaces(4),
             stamp: None,
         }));
         let (view, cx) = cx.add_window_view(move |_window, cx| CodeView {
@@ -3472,6 +3567,9 @@ mod tests {
     #[gpui::test]
     fn opening_a_real_file_registers_the_conflict_watcher(cx: &mut TestAppContext) {
         let (_dir, view, cx) = file_view(cx, "one\n", true);
+        // Registration runs on the background executor now; drive it.
+        cx.executor().allow_parking();
+        cx.run_until_parked();
         view.update(cx, |view, _cx| {
             assert!(view._watcher.is_some(), "the parent directory is watched");
             let bridge = view
@@ -3589,5 +3687,86 @@ mod tests {
                 "reload bypassed the initial-load long-line guard"
             );
         });
+    }
+
+    /// US-005: cutting the widest line marks the maximum stale; the rescan
+    /// runs on the background executor and the exact value lands afterwards,
+    /// so the horizontal extent shrinks instead of staying grow-only.
+    #[gpui::test]
+    fn shortening_the_longest_line_refreshes_horizontal_extent_off_thread(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "the longest line\nshort\n");
+
+        view.update(cx, |view, cx| {
+            assert!(view.splice_all(
+                &[(0..16, "tiny".to_string())],
+                CodeSelection::at(4),
+                EditGroup::Atomic,
+                cx,
+            ));
+            // On the render thread the value is the over-estimate...
+            assert_eq!(view.document().expect("document").longest_line_chars(), 16);
+        });
+        cx.run_until_parked();
+
+        // ...and the background measurement brings it down to the truth.
+        view.update(cx, |view, _cx| {
+            assert_eq!(view.document().expect("document").longest_line_chars(), 5);
+        });
+    }
+
+    /// US-006: watcher registration is guarded by the load generation, so of
+    /// two files opened back to back only the newest keeps a watcher.
+    #[gpui::test]
+    async fn only_the_latest_rapid_open_keeps_its_watcher(cx: &mut TestAppContext) {
+        let first = tempfile::tempdir().expect("first tempdir");
+        let second = tempfile::tempdir().expect("second tempdir");
+        let first_path = first.path().join("first.rs");
+        let second_path = second.path().join("second.rs");
+        std::fs::write(&first_path, "first\n").expect("first fixture");
+        std::fs::write(&second_path, "second\n").expect("second fixture");
+        let (view, cx) = view(cx, "seed\n");
+        // `open` reads through `smol::unblock`, outside the test scheduler.
+        cx.executor().allow_parking();
+
+        view.update(cx, |view, cx| {
+            view.open(first_path, cx);
+            view.open(second_path.clone(), cx);
+        });
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if view.update(cx, |view, _cx| {
+                view.document()
+                    .and_then(|doc| doc.line_string(0))
+                    .as_deref()
+                    == Some("second")
+                    && view._watcher.is_some()
+            }) {
+                break;
+            }
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+
+        view.update(cx, |view, _cx| {
+            assert_eq!(view.path(), second_path);
+            assert_eq!(
+                view.document()
+                    .and_then(|doc| doc.line_string(0))
+                    .as_deref(),
+                Some("second")
+            );
+            assert!(view._watcher.is_some());
+            if let Some(bridge) = view._watch_bridge.take() {
+                *bridge.lock().expect("bridge lock") = None;
+            }
+            view._watcher = None;
+        });
+    }
+
+    #[test]
+    fn a_removed_parent_refuses_watcher_creation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent = dir.path().to_path_buf();
+        drop(dir);
+        assert!(create_file_watcher(parent).is_err());
     }
 }
