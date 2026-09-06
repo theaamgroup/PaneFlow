@@ -81,8 +81,12 @@ IPC method requires numeric `surface_id` and `workspace_id`. Own-pane operations
 (`agent.whoami`, `task.get`, and `task.report`) resolve the surface's live workspace;
 their responses include that current `workspace_id`. A moved pane keeps its PTY
 and the old workspace ID in its shell environment, so these calls keep working
-without restarting the agent, even if the original workspace is closed. Missing
-or closed surfaces remain errors. Explicit `task.assign` still requires the
+without restarting the agent, even if the original workspace is closed. The
+agent's sidebar state moves with it: a tab or pane drag carries the pane's
+session rows to the destination workspace, and `ai.*` hook frames that still
+carry the inherited workspace ID are routed to the surface's live workspace
+whenever the frame names a surface that exists. Missing or closed surfaces
+remain errors. Explicit `task.assign` still requires the
 surface to belong to the requested workspace.
 
 MCP context tools accept no target or workspace argument. Even with

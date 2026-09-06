@@ -1054,6 +1054,25 @@ pub(crate) struct SurfaceLocation {
 /// what `surface.focus` (focus + tab activation) and the targeted
 /// `surface.split` (split at that leaf) need (US-001/US-002,
 /// prd-orchestration-v2).
+/// The workspace an `ai.*` hook frame belongs to. The frame carries the
+/// `PANEFLOW_WORKSPACE_ID` its pane inherited at spawn, which a tab or pane
+/// drag leaves stale: the PTY and its environment survive the move. When the
+/// frame also names a surface that still exists, that surface's live
+/// workspace wins, so the session row follows the pane and a frame arriving
+/// after the source workspace closed still has a home (PR #410 review).
+/// Without a resolvable surface the inherited id is used as before.
+pub(crate) fn frame_workspace_id(
+    workspaces: &[Workspace],
+    params: &serde_json::Value,
+    cx: &App,
+) -> Option<u64> {
+    let inherited = params.get("workspace_id").and_then(|v| v.as_u64())?;
+    let live = read_frame_surface_id(params)
+        .and_then(|sid| find_pane_by_surface_id(workspaces, sid, cx))
+        .map(|location| workspaces[location.workspace_idx].id);
+    Some(live.unwrap_or(inherited))
+}
+
 pub(crate) fn find_pane_by_surface_id(
     workspaces: &[Workspace],
     surface_id: u64,
@@ -4040,7 +4059,7 @@ impl PaneFlowApp {
             // AI hook lifecycle methods (from paneflow-hook via IPC socket)
             // -----------------------------------------------------------------
             METHOD_SESSION_START => {
-                let Some(workspace_id) = params.get("workspace_id").and_then(|v| v.as_u64()) else {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
                     return serde_json::json!({"error": "Missing workspace_id"});
                 };
                 let Some(pid) = read_session_pid(params) else {
@@ -4065,7 +4084,7 @@ impl PaneFlowApp {
                 }
             }
             METHOD_PROMPT_SUBMIT => {
-                let Some(workspace_id) = params.get("workspace_id").and_then(|v| v.as_u64()) else {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
                     return serde_json::json!({"error": "Missing workspace_id"});
                 };
                 let pid = read_session_pid(params);
@@ -4107,7 +4126,7 @@ impl PaneFlowApp {
                 }
             }
             METHOD_TOOL_USE => {
-                let Some(workspace_id) = params.get("workspace_id").and_then(|v| v.as_u64()) else {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
                     return serde_json::json!({"error": "Missing workspace_id"});
                 };
                 let hook = params.get("hook_payload");
@@ -4154,7 +4173,7 @@ impl PaneFlowApp {
                 }
             }
             METHOD_NOTIFICATION => {
-                let Some(workspace_id) = params.get("workspace_id").and_then(|v| v.as_u64()) else {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
                     return serde_json::json!({"error": "Missing workspace_id"});
                 };
                 let pid = read_session_pid(params);
@@ -4208,7 +4227,7 @@ impl PaneFlowApp {
                 }
             }
             METHOD_STOP => {
-                let Some(workspace_id) = params.get("workspace_id").and_then(|v| v.as_u64()) else {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
                     return serde_json::json!({"error": "Missing workspace_id"});
                 };
                 let pid = read_session_pid(params);
@@ -4338,7 +4357,7 @@ impl PaneFlowApp {
             // emitted BEFORE the shim's `ai.session_end`, both blocking - see
             // `paneflow-shim::main` for the ordering contract.
             METHOD_EXIT => {
-                let Some(workspace_id) = params.get("workspace_id").and_then(|v| v.as_u64()) else {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
                     return serde_json::json!({"error": "Missing workspace_id"});
                 };
                 let Some(exit_code) = params
@@ -4413,7 +4432,7 @@ impl PaneFlowApp {
                 }
             }
             METHOD_SESSION_END => {
-                let Some(workspace_id) = params.get("workspace_id").and_then(|v| v.as_u64()) else {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
                     return serde_json::json!({"error": "Missing workspace_id"});
                 };
                 let tool_name = match AiToolName::from_wire_params(params) {

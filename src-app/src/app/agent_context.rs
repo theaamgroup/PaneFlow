@@ -284,6 +284,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn hook_frames_follow_the_surface_to_its_live_workspace(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+        let sid = terminal.entity_id().as_u64();
+        let pane = cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx));
+        let mut source = Workspace::with_layout_and_id(
+            1,
+            "source",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(pane.clone()),
+        );
+        let mut destination =
+            Workspace::empty_with_cwd_and_id(2, "destination", std::path::PathBuf::new());
+        let tab = source.close_tab(0).expect("detach");
+        pane.update(cx, |pane, _| pane.workspace_id = 2);
+        assert!(destination.open_tab(tab));
+        let workspaces = vec![source, destination];
+        let mut frame = |params: serde_json::Value| {
+            cx.update(|_, cx| {
+                super::super::ipc_handler::frame_workspace_id(&workspaces, &params, cx)
+            })
+        };
+        // The inherited id is stale after the move; the surface's workspace wins.
+        assert_eq!(
+            frame(json!({"workspace_id": 1, "surface_id": sid})),
+            Some(2)
+        );
+        // No surface, or one that no longer exists: the inherited id as before.
+        assert_eq!(frame(json!({"workspace_id": 1})), Some(1));
+        assert_eq!(
+            frame(json!({"workspace_id": 1, "surface_id": sid + 1000})),
+            Some(1)
+        );
+        assert_eq!(frame(json!({"surface_id": sid})), None);
+    }
+
+    #[gpui::test]
     fn agent_context_follows_a_live_tab_move_with_unchanged_inherited_ids(
         cx: &mut gpui::TestAppContext,
     ) {
