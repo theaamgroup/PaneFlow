@@ -285,6 +285,33 @@ fn test_malformed_command_entry_does_not_drop_valid_siblings_or_config() {
 }
 
 #[test]
+fn a_malformed_mcp_bridge_prompt_dismissed_value_loads_as_empty() {
+    // Issue #443: the dismissal list is written by the sidebar callout, but a
+    // hand edit can leave a string or a number there. Either must load as
+    // "nothing dismissed" without discarding the valid siblings.
+    for bad in [r#""codex""#, "7", "true", r#"{"codex": true}"#] {
+        let json = format!(r#"{{"theme": "One Dark", "mcp_bridge_prompt_dismissed": {bad}}}"#);
+        let config = parse_and_validate(&json);
+        assert!(
+            config.mcp_bridge_prompt_dismissed.is_empty(),
+            "{bad} must load as the empty list"
+        );
+        assert!(!config.mcp_bridge_prompt_dismissed_for("codex"));
+        assert_eq!(config.theme.as_deref(), Some("One Dark"));
+    }
+
+    let config = parse_and_validate(r#"{"mcp_bridge_prompt_dismissed": ["codex", "claude-code"]}"#);
+    assert_eq!(config.mcp_bridge_prompt_dismissed, ["codex", "claude-code"]);
+    assert!(config.mcp_bridge_prompt_dismissed_for("codex"));
+    assert!(!config.mcp_bridge_prompt_dismissed_for("gemini"));
+
+    // An absent key serializes as no key at all, so a config that never
+    // dismissed anything does not grow an empty array on every save.
+    let json = serde_json::to_string(&PaneFlowConfig::default()).unwrap();
+    assert!(!json.contains("mcp_bridge_prompt_dismissed"));
+}
+
+#[test]
 fn test_command_requires_exactly_one_payload() {
     let config = parse_and_validate(
         r#"{

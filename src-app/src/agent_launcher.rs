@@ -321,6 +321,31 @@ impl TerminalAgent {
         }
     }
 
+    /// The `paneflow mcp install` writer id for an agent the embedded MCP
+    /// bridge can be registered with (issue #443), `None` for every agent
+    /// the installer does not support. Ids match
+    /// `paneflow_mcp_install::agents::default_writers()`.
+    pub fn mcp_install_id(self) -> Option<&'static str> {
+        match self {
+            TerminalAgent::ClaudeCode => Some("claude-code"),
+            TerminalAgent::Codex => Some("codex"),
+            TerminalAgent::Gemini => Some("gemini"),
+            TerminalAgent::OpenCode => Some("opencode"),
+            TerminalAgent::Pi
+            | TerminalAgent::Hermes
+            | TerminalAgent::Grok
+            | TerminalAgent::Amp
+            | TerminalAgent::Cursor
+            | TerminalAgent::Kiro
+            | TerminalAgent::Antigravity
+            | TerminalAgent::Copilot
+            | TerminalAgent::CodeBuddy
+            | TerminalAgent::Factory
+            | TerminalAgent::Qoder
+            | TerminalAgent::Openclaw => None,
+        }
+    }
+
     /// The CLI executable looked up on `PATH` to decide default visibility;
     /// also the leading token of [`Self::launch_command`].
     pub fn binary(self) -> &'static str {
@@ -722,6 +747,29 @@ mod tests {
     // Every agent's own launch command must declare that agent - otherwise a
     // pane launched from the palette shows no logo until the process scan
     // lands, which is exactly the latency this declaration removes.
+    /// Issue #443: the sidebar's "Install MCP bridge" callout matches a
+    /// pane's agent against `paneflow mcp status` reports by id, so every id
+    /// this table hands out must be one the install crate's writers use, and
+    /// every writer must be reachable from some agent.
+    #[test]
+    fn mcp_install_id_matches_the_install_crate_writer_ids() {
+        let writer_ids: std::collections::BTreeSet<&'static str> =
+            paneflow_mcp_install::agents::default_writers()
+                .iter()
+                .map(|w| w.id())
+                .collect();
+        let mapped: std::collections::BTreeSet<&'static str> = TerminalAgent::ALL
+            .iter()
+            .filter_map(|a| a.mcp_install_id())
+            .collect();
+        assert_eq!(mapped, writer_ids);
+        assert_eq!(
+            TerminalAgent::ClaudeCode.mcp_install_id(),
+            Some("claude-code")
+        );
+        assert_eq!(TerminalAgent::Pi.mcp_install_id(), None);
+    }
+
     #[test]
     fn launch_command_declares_its_own_agent() {
         let config = PaneFlowConfig::default();

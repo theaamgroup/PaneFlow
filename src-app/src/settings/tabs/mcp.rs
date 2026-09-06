@@ -30,7 +30,10 @@ use crate::ui_primitives::AnimatedHoverExt;
 /// `accent` and `text` are independent theme tokens (Vercel Dark's accent is
 /// #ffffff), so a fixed white label can vanish on the fill. Lift the label
 /// off the fill with the same APCA pass the Shortcuts page uses.
-fn mcp_button_text_color(ui: crate::theme::UiColors, enabled: bool) -> gpui::Hsla {
+///
+/// Shared with the sidebar's "Install MCP bridge" callout (issue #443), which
+/// paints its button on the same accent.
+pub(crate) fn mcp_button_text_color(ui: crate::theme::UiColors, enabled: bool) -> gpui::Hsla {
     if enabled {
         ensure_minimum_contrast(ui.text, ui.accent, MIN_APCA_CONTRAST)
     } else {
@@ -221,7 +224,7 @@ impl PaneFlowApp {
     /// Install the bridge into every detected agent, off the main thread.
     /// Extracts the bridge binary first (so the registered path exists), then
     /// runs the install + a fresh status probe, and stores both.
-    fn start_mcp_install(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_mcp_install(&mut self, cx: &mut Context<Self>) {
         if self.mcp_busy {
             return;
         }

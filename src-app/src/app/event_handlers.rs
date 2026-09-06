@@ -1575,6 +1575,10 @@ impl PaneFlowApp {
         }
 
         let mut cached_shells = Vec::new();
+        // Issue #443: agents a pane newly resolved this scan whose MCP config
+        // the sidebar callout may need to look at.
+        let mut resolved_mcp_ids: std::collections::BTreeSet<&'static str> =
+            std::collections::BTreeSet::new();
         for pane in &leaves {
             let terminals: Vec<gpui::Entity<crate::terminal::TerminalView>> =
                 pane.read(cx).terminals().cloned().collect();
@@ -1617,6 +1621,9 @@ impl PaneFlowApp {
                             t.detected_agent = agent;
                             t.agent_confirmed = true;
                             pane_changed = true;
+                            if let Some(id) = agent.and_then(|a| a.mcp_install_id()) {
+                                resolved_mcp_ids.insert(id);
+                            }
                         }
                     }
                     let ports_with_links: Vec<(u16, Option<String>)> = s
@@ -1666,6 +1673,7 @@ impl PaneFlowApp {
         if changed {
             cx.notify();
         }
+        self.refresh_mcp_status_for_resolved_agents(&resolved_mcp_ids, cx);
         for (surface_id, command) in cached_shells {
             self.reap_sessions_at_cached_shell(surface_id, &command, cx);
         }

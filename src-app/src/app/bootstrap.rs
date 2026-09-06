@@ -1027,6 +1027,13 @@ impl PaneFlowApp {
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
 
+        // Issue #443: the sidebar's "Install MCP bridge" callout reads the
+        // same status cache Settings does, so warm it once here instead of
+        // waiting for the Settings page to open. One off-thread probe; the
+        // pane scan re-probes when a pane resolves an agent the cache does
+        // not know about.
+        app.refresh_mcp_status(cx);
+
         app
     }
 }
