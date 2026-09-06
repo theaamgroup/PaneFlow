@@ -386,7 +386,7 @@ impl CodeHighlighter {
     /// Re-run every grammar's query over `rows` only and rebuild their runs.
     /// The query is bounded with `QueryCursor::set_byte_range`, so its cost
     /// follows the edited region, not the file.
-    fn requery_rows(&mut self, doc: &CodeDocument, rows: Range<usize>) {
+    pub(crate) fn requery_rows(&mut self, doc: &CodeDocument, rows: Range<usize>) {
         let lines = doc.line_count();
         if self.rows.len() != lines {
             self.rows.resize(lines, Vec::new());

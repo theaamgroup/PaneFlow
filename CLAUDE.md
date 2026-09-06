@@ -147,14 +147,24 @@ cargo fmt --check
 scripts/bench-terminal.sh                # terminal pipeline benchmark: writes bench/results/<stamp>-<sha>.json,
                                          # prints a Markdown comparison against bench/baseline.json when it exists
 scripts/bench-terminal.sh --set-baseline # same run, then make it the baseline
+scripts/bench-editor.sh                  # code editor benchmark: writes bench/results/editor-<stamp>-<sha>.json,
+                                         # compares against bench/editor-baseline.json (plain results table without one)
+scripts/bench-editor.sh --set-baseline   # same run, then make it the baseline; refused when cpu_share < 0.90
+cargo test -p paneflow-app --release -- --ignored layout::render --test-threads=1
+                                         # editor scroll frame beside 0/2/6 terminal panes (scroll_frame_p95_us_panes_N)
 ```
 
-Performance claims about the terminal pipeline need evidence from that
-suite: the ignored `terminal_pipeline_benchmark` in
-`src-app/src/terminal/perf_bench.rs` measures it GPU-free under the release
-profile and prints the comparison table `bench/README.md` documents. Do not
-ship a perf number you did not measure, and do not publish a run that
-printed `PANEFLOW_BENCH_WARNING` (another workload was competing).
+Performance claims about the terminal pipeline or the code editor need
+evidence from those suites: the ignored `terminal_pipeline_benchmark` in
+`src-app/src/terminal/perf_bench.rs` and `editor_pipeline_benchmark` in
+`src-app/src/app/diff_dock/code/perf_bench.rs` measure them GPU-free under
+the release profile through the shared `src-app/src/bench_harness.rs` and
+print the comparison table `bench/README.md` documents; the ignored
+`layout::render::tests::editor_scroll_frame_by_pane_count` measures one
+wheel notch on the editor with terminal panes in the frame. Do not ship a
+perf number you did not measure, and do not publish a run that printed
+`PANEFLOW_BENCH_WARNING` (another workload was competing); `--set-baseline`
+refuses such a run for the editor suite.
 
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
 holds the 16 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
@@ -221,7 +231,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
-│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs); parked per TAB
+│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs; `code/perf_bench.rs` +
+│   │                                     `code/bench_corpus.rs` are the editor bench, scripts/bench-editor.sh); parked per TAB
 │   │                                     (`cli_diff_dock.rs` keys slots by `Tab::id`, never by workspace);
 │   │                                     rendered width = min(stored, main-panel remainder), and the dock is
 │   │                                     not rendered at all below the floor (remainder < 360 px dock +
@@ -273,7 +284,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── search.rs / marks.rs           ← find-in-buffer, shell-integration prompt marks
 │   ├── service_detector.rs / shell.rs ← dev-server detection, shell resolution
 │   ├── blink.rs / types.rs            ← cursor blink, shared terminal types
-│   ├── bench_corpus.rs / ghostty_stress.rs ← corpus data + counters, runtime stress (#[ignore])
+│   ├── bench_corpus.rs / perf_bench.rs ← deterministic VT corpus, terminal bench (#[ignore], scripts/bench-terminal.sh)
+│   ├── ghostty_stress.rs / test_allocator.rs ← runtime stress (#[ignore]); the test binary's one #[global_allocator]
 │   └── element/                       ← low-level GPUI Element rendering
 │       ├── mod.rs                     ← TerminalElement: layout → prepaint → paint
 │       ├── color.rs                   ← ANSI→Hsla, APCA contrast
@@ -320,6 +332,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── window_state.rs / editor.rs / external_open.rs
 ├── sidebar_title.rs                   ← sidebar label cleanup
 ├── system_info.rs                     ← Help ▸ System Info… collection: sysctl, Metal devices, install format, libghostty identity
+├── bench_harness.rs                   ← cfg(test): Metric, measure, comparison table, publish(), libproc counters shared by both benches
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
@@ -544,7 +557,7 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 - **The binary-size budget is Mach-O now.** `src-app/build.rs` measures the three embedded helpers under `--profile release-min` on `aarch64-apple-darwin`: shim 472_368 + ai-hook 336_464 + mcp **403_008** B = **1_211_840 B** (J8 deferred; measured 2026-08-27). Cap is `EMBED_SIZE_LIMIT_BYTES = 1_400_000`, which is total + 15.5% (slack 188_160 B = 13.4% of the cap), quoted from `src-app/build.rs`; a `--release` build prints the measured total as a `cargo:warning`. Nested staging always uses `release-min`, so a debug outer build still embeds those sizes. Per-binary caps were dropped with the CI matrix (issue #3); do not re-derive a Linux ELF number.
 - **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
 - **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
-- **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`terminal/bench_corpus.rs`).
+- **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`bench_harness.rs`, moved there from `terminal/bench_corpus.rs` in #425; its two live-process tests moved with it).
 - **`scripts/create-dmg.sh` is allowed to fail `codesign --verify --deep --strict` on an unsigned smoke.** The script writes the `.dmg` first, then the strict check exits 1 because the enclosed binary is adhoc/linker-signed. That check is for a signed+notarized release. Local artifact: `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (~30M), `CFBundleIdentifier=com.theaamgroup.paneflow`. Gatekeeper will quarantine a copied copy.
 - **Comments still mention Windows and Linux.** `runtime_paths.rs` still documents a named-pipe fallback. That is leftover copy. Do not re-implement from a comment. Ghostty identifiers in `terminal/view.rs` and `pty_session.rs` are the opposite: they are the live engine (#184) and must not be pruned.
 - **Never bind `secondary-tab`.** It is Cmd+Tab on macOS and the app switcher eats it. Next-workspace moved to `ctrl-tab` (issue #10) and `next_workspace_is_bound_to_ctrl_tab_and_nothing_binds_cmd_tab` guards the table.

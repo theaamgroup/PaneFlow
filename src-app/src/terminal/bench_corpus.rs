@@ -1,11 +1,11 @@
-//! Deterministic VT streams and process counters for the terminal benchmarks.
+//! Deterministic VT streams for the terminal benchmarks.
 //!
 //! The streams are generated, never recorded, so a benchmark run is
 //! reproducible from `CORPUS_SEED` alone and no fixture file has to be kept in
 //! sync with the engine. Nothing here touches a terminal backend: the same
 //! bytes feed the Ghostty stress scenarios and the GPUI input-to-frame probe.
-
-use std::time::Duration;
+//! The percentile and process-counter helpers that used to sit beside the
+//! corpus live in `crate::bench_harness`, shared with the editor bench.
 
 pub(crate) const CORPUS_SEED: u64 = 0x5041_4e45_464c_4f57;
 const CORPUS_FAMILIES: usize = 27;
@@ -88,87 +88,4 @@ pub(crate) fn deterministic_streams() -> Vec<Vec<u8>> {
         streams.push(bytes);
     }
     streams
-}
-
-pub(crate) fn percentile_duration(values: &[Duration], percentile: usize) -> Duration {
-    let index = values.len().saturating_sub(1).saturating_mul(percentile) / 100;
-    values.get(index).copied().unwrap_or_default()
-}
-
-pub(crate) fn percentile_us(values: &[Duration], percentile: usize) -> u128 {
-    percentile_duration(values, percentile).as_micros()
-}
-
-fn task_all_info() -> Option<libproc::libproc::task_info::TaskAllInfo> {
-    use libproc::libproc::proc_pid::pidinfo;
-    use libproc::libproc::task_info::TaskAllInfo;
-    pidinfo::<TaskAllInfo>(std::process::id() as i32, 0).ok()
-}
-
-pub(crate) fn resident_set_bytes() -> u64 {
-    task_all_info()
-        .map(|info| info.ptinfo.pti_resident_size)
-        .unwrap_or(0)
-}
-
-pub(crate) fn process_cpu_time() -> Duration {
-    task_all_info()
-        .map(|info| {
-            duration_from_mach_ticks(
-                info.ptinfo
-                    .pti_total_user
-                    .saturating_add(info.ptinfo.pti_total_system),
-            )
-        })
-        .unwrap_or_default()
-}
-
-/// `pti_total_user` / `pti_total_system` are Mach absolute-time ticks, not
-/// nanoseconds. Convert with the kernel timebase (observed 125/3 on arm64).
-fn duration_from_mach_ticks(ticks: u64) -> Duration {
-    #[repr(C)]
-    struct MachTimebaseInfo {
-        numer: u32,
-        denom: u32,
-    }
-
-    unsafe extern "C" {
-        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
-    }
-
-    let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-    // SAFETY: `info` is a local C-layout struct; the syscall only writes it.
-    let kr = unsafe { mach_timebase_info(&mut info) };
-    if kr != 0 || info.denom == 0 {
-        return Duration::ZERO;
-    }
-    let nanos = u64::try_from(u128::from(ticks) * u128::from(info.numer) / u128::from(info.denom))
-        .unwrap_or(u64::MAX);
-    Duration::from_nanos(nanos)
-}
-
-pub(crate) fn cpu_model() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
-}
-
-#[test]
-fn resident_set_bytes_samples_the_live_process() {
-    assert!(
-        resident_set_bytes() > 0,
-        "live process RSS must be greater than zero"
-    );
-}
-
-#[test]
-fn process_cpu_time_samples_the_live_process() {
-    // Burn a little user time so a freshly spawned test process is not at zero.
-    let mut acc = 0u64;
-    for i in 0..50_000u64 {
-        acc = acc.wrapping_add(i);
-    }
-    std::hint::black_box(acc);
-    assert!(
-        process_cpu_time() > Duration::ZERO,
-        "live process CPU time must be greater than zero"
-    );
 }

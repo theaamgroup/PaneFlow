@@ -4,13 +4,16 @@
 //! needs to observe allocations shares this wrapper. It forwards each call to
 //! the system allocator unchanged and records two things around it: the
 //! largest single allocation the current thread has requested (the Kitty
-//! decoder test proves a refused PNG never reached its pixel buffer), and the
-//! process-wide bytes and call counts (`perf_bench` reports them per
-//! iteration, and they are exact where timings are not).
+//! decoder test proves a refused PNG never reached its pixel buffer), the
+//! process-wide bytes and call counts (the benchmarks report them per
+//! iteration, and they are exact where timings are not), and the live bytes
+//! (allocations minus deallocations), which is what lets a retained-memory
+//! metric such as the editor bench's `reload_200_retained_bytes` be reported
+//! at all.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 thread_local! {
     /// Largest single allocation the current thread has requested since the
@@ -20,16 +23,22 @@ thread_local! {
 
 static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 static ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Bytes currently allocated: every allocation adds its size, every
+/// deallocation subtracts it, a reallocation applies the difference. Signed
+/// because a thread can free memory another thread allocated before the
+/// counter was read.
+static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
 
-/// Test-only allocator: records each thread's largest allocation and counts
-/// every allocation in the process.
+/// Test-only allocator: records each thread's largest allocation, counts
+/// every allocation in the process, and tracks the live bytes.
 struct RecordingAllocator;
 
 impl RecordingAllocator {
-    fn record(size: usize, growth: usize) {
+    fn record(size: usize, growth: usize, live_delta: i64) {
         let _ = LARGEST_ALLOCATION.try_with(|largest| largest.set(largest.get().max(size)));
         ALLOCATED_BYTES.fetch_add(growth as u64, Ordering::Relaxed);
         ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
+        LIVE_BYTES.fetch_add(live_delta, Ordering::Relaxed);
     }
 }
 
@@ -37,24 +46,29 @@ impl RecordingAllocator {
 // touches a thread-local `Cell` and two relaxed atomics, which never allocate.
 unsafe impl GlobalAlloc for RecordingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        Self::record(layout.size(), layout.size());
+        Self::record(layout.size(), layout.size(), layout.size() as i64);
         // SAFETY: the caller's obligations are forwarded unchanged.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        Self::record(layout.size(), layout.size());
+        Self::record(layout.size(), layout.size(), layout.size() as i64);
         // SAFETY: the caller's obligations are forwarded unchanged.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
         // SAFETY: the caller's obligations are forwarded unchanged.
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        Self::record(new_size, new_size.saturating_sub(layout.size()));
+        Self::record(
+            new_size,
+            new_size.saturating_sub(layout.size()),
+            new_size as i64 - layout.size() as i64,
+        );
         // SAFETY: the caller's obligations are forwarded unchanged.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -84,6 +98,12 @@ pub(crate) fn allocation_counters() -> (u64, u64) {
         ALLOCATED_BYTES.load(Ordering::Relaxed),
         ALLOCATION_CALLS.load(Ordering::Relaxed),
     )
+}
+
+/// Process-wide bytes currently allocated. The difference between two reads
+/// is what the code in between still holds.
+pub(crate) fn live_bytes() -> i64 {
+    LIVE_BYTES.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
