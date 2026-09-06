@@ -128,6 +128,12 @@ LIBGHOSTTY_NOTICE="$REPO_ROOT/native/libghostty/THIRD_PARTY_NOTICES.md"
 [ -f "$LIBGHOSTTY_NOTICE" ] || die "libghostty THIRD_PARTY_NOTICES.md not found at $LIBGHOSTTY_NOTICE"
 install -m 0644 "$LIBGHOSTTY_NOTICE" "$RESOURCES_DIR/ThirdPartyLicenses/libghostty.txt"
 
+# Zed's highlight queries are compiled into the binary (issue #433); their
+# GPL-3.0-or-later attribution ships beside the other notices.
+ZED_QUERIES_NOTICE="$REPO_ROOT/src-app/src/diff/queries/NOTICE"
+[ -f "$ZED_QUERIES_NOTICE" ] || die "Zed queries NOTICE not found at $ZED_QUERIES_NOTICE"
+install -m 0644 "$ZED_QUERIES_NOTICE" "$RESOURCES_DIR/ThirdPartyLicenses/zed-queries.txt"
+
 # Substitute @VERSION@ in the Info.plist template. `sed -e` keeps the
 # command BSD-sed safe (macOS ships BSD sed).
 sed \

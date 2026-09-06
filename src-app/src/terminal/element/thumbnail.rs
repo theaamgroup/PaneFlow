@@ -24,6 +24,7 @@ use gpui::{
     IntoElement, LayoutId, Pixels, Point, Style, Window, px, relative,
 };
 
+use super::font::CellMetrics;
 use super::geometry::CellGeometry;
 use super::{
     CellDimensions, LayoutInputs, LayoutState, cursor_from_content, layout_from_snapshot, paint,
@@ -50,12 +51,14 @@ pub(super) const THUMBNAIL_ROWS: usize = 8;
 
 /// Font size for a thumbnail, in pixels.
 ///
-/// Cell geometry is a pure function of this scalar and the two configured
-/// multipliers - `font::cell_dimensions` computes
-/// `cell_width = round(size * settings.cell_width)` and
-/// `line_height = round(size * settings.line_height)`, with no glyph
-/// measurement. At the 0.6 / 1.2 defaults 9 px yields exactly 5x11 px cells.
-pub(crate) const THUMBNAIL_FONT_PX: f32 = 9.0;
+/// Cell geometry is a pure function of this scalar, the bundled face's tables,
+/// and the two configured multipliers - `font::cell_metrics_without_window`
+/// rounds `advance * size * settings.cell_width` and
+/// `line_height * size * settings.line_height` to whole pixels (#418), with no
+/// `Window`. JetBrains Mono is 0.6 em wide and 1.32 em tall, so 25/3 px at the
+/// 1.0 / 1.0 defaults yields exactly 5x11 px cells: the grid the band below
+/// was designed for, and an advance that tiles the cell with no overlap.
+pub(crate) const THUMBNAIL_FONT_PX: f32 = 25.0 / 3.0;
 
 /// Thumbnail band size, in pixels. These are the DEFAULT-derived figure:
 /// 48 columns x 8 rows at 5x11 px cells. They stay hardcoded on purpose -
@@ -68,21 +71,36 @@ pub(crate) const THUMBNAIL_BAND_H: f32 = 88.0;
 
 /// Cell metrics for a thumbnail under `settings`: the same two multipliers
 /// the pane uses, applied to the thumbnail font size through the same
-/// rounding as the pane (`font::cell_dimensions`).
-pub(super) fn thumbnail_cell_dimensions_for(
-    settings: &super::font::FontSettings,
-) -> CellDimensions {
-    super::font::cell_dimensions(settings, px(THUMBNAIL_FONT_PX))
+/// face measurement and rounding as the pane
+/// (`font::cell_metrics_without_window`, at scale 1.0: a logical-pixel grid).
+pub(super) fn thumbnail_cell_metrics_for(settings: &super::font::FontSettings) -> CellMetrics {
+    super::font::cell_metrics_without_window(settings, px(THUMBNAIL_FONT_PX))
 }
 
 /// Cell metrics for a thumbnail under the live config.
+pub(super) fn thumbnail_cell_metrics() -> CellMetrics {
+    thumbnail_cell_metrics_for(&super::font::cached_font_config())
+}
+
+/// The logical-pixel strides of [`thumbnail_cell_metrics_for`].
+pub(super) fn thumbnail_cell_dimensions_for(
+    settings: &super::font::FontSettings,
+) -> CellDimensions {
+    let metrics = thumbnail_cell_metrics_for(settings);
+    CellDimensions {
+        cell_width: metrics.cell_width_px(),
+        line_height: metrics.cell_height_px(),
+    }
+}
+
+/// The logical-pixel strides of a thumbnail under the live config.
 pub(super) fn thumbnail_cell_dimensions() -> CellDimensions {
     thumbnail_cell_dimensions_for(&super::font::cached_font_config())
 }
 
 /// How many viewport rows fit the fixed band at these cell metrics: at the
-/// 0.6 / 1.2 defaults exactly eight (`THUMBNAIL_ROWS`); at `line_height = 2.5`
-/// (23 px rows) three. Never zero, so a card always shows the prompt row.
+/// 1.0 / 1.0 defaults exactly eight (`THUMBNAIL_ROWS`); at `line_height = 2.5`
+/// (27 px rows) three. Never zero, so a card always shows the prompt row.
 pub(super) fn thumbnail_rows_for(dims: &CellDimensions) -> usize {
     ((THUMBNAIL_BAND_H / f32::from(dims.line_height)).floor() as usize).max(1)
 }
@@ -266,18 +284,14 @@ impl Element for TerminalThumbnail {
         let Some(layout) = prepaint.take() else {
             return;
         };
-        let dims = thumbnail_cell_dimensions();
+        let metrics = thumbnail_cell_metrics();
         // Cells keep their absolute line numbers, so lift the origin by the
         // cropped-away rows to land the band at the top of the card.
         let origin = Point {
             x: bounds.origin.x,
-            y: bounds.origin.y - dims.line_height * (self.first_visible_row as f32),
+            y: bounds.origin.y - metrics.cell_height_px() * (self.first_visible_row as f32),
         };
-        let geom = CellGeometry {
-            origin,
-            cell_width: dims.cell_width,
-            line_height: dims.line_height,
-        };
+        let geom = CellGeometry::new(origin, metrics);
         let (cell_x_bounds, cell_y_bounds) = if layout.desired_cols == 0 || layout.desired_rows == 0
         {
             (Vec::new(), Vec::new())
@@ -299,13 +313,15 @@ impl Element for TerminalThumbnail {
                 window,
             );
             paint::background::paint_block_quads(&layout, &cell_x_bounds, &cell_y_bounds, window);
-            paint::box_drawing::paint_box_drawing_glyphs(
-                &layout,
-                &cell_x_bounds,
-                &cell_y_bounds,
-                window,
-            );
+            paint::sprites::paint_sprites(&layout, &geom, window);
+            // Underlines and strikethroughs come from the cell metrics now
+            // (#418), not from the text runs, so a card needs the pass too.
+            paint::decorations::paint_decorations(&layout, &geom, window);
             paint::text::paint_text_runs(&layout, &geom, &base_font, font_size, window, cx);
+            // Nerd Font icons leave the text runs for `layout.symbols` (#420)
+            // and are constrained to their cells at paint time; without this
+            // pass every icon cell on a card is an empty hole.
+            paint::text::paint_symbols(&layout, &geom, font_size, window, cx);
             // The dim block cursor built in prepaint. Unconditional: there is
             // no blink phase here.
             paint::cursor::paint_cursor(&layout, &geom, &base_font, font_size, window, cx);
@@ -382,11 +398,11 @@ mod tests {
         assert_eq!(snap.last_visible_row, snap.content.rows as i32);
     }
 
-    /// 9 px is above the quantization floor at the DEFAULT multipliers:
-    /// `round(9 * 0.6) = 5` and `round(9 * 1.2) = 11`, so a 240x88 band is
-    /// exactly 48 columns by 8 rows. Below ~4 px cell width the rounding
-    /// dominates and columns drift, which is why the design crops rather than
-    /// scaling the whole grid.
+    /// 25/3 px is above the quantization floor at the DEFAULT multipliers on
+    /// the bundled face: `round(25/3 * 0.6) = 5` and `round(25/3 * 1.32) = 11`,
+    /// so a 240x88 band is exactly 48 columns by 8 rows. Below ~4 px cell
+    /// width the rounding dominates and columns drift, which is why the
+    /// design crops rather than scaling the whole grid.
     ///
     /// The multipliers are config-driven (`settings.cell_width` /
     /// `settings.line_height`), so this test pins the band against the
@@ -397,7 +413,7 @@ mod tests {
         use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
 
         let defaults = FontSettings {
-            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            font: gpui::font("JetBrainsMono Nerd Font"),
             size: 13.0,
             line_height: DEFAULT_LINE_HEIGHT,
             cell_width: DEFAULT_CELL_WIDTH,
@@ -414,14 +430,14 @@ mod tests {
 
     #[test]
     fn a_taller_line_height_crops_fewer_rows_so_the_prompt_stays_in_the_band() {
-        // PR #354 review: the band is fixed at 88 px. At the default 1.2 the
+        // PR #354 review: the band is fixed at 88 px. At the default 1.0 the
         // crop is the 8 rows the constant names; at the 2.5 ceiling a row is
-        // 23 px, so only three fit, and cropping three from the bottom keeps the
+        // 27 px, so only three fit, and cropping three from the bottom keeps the
         // prompt row and the cursor inside the band instead of below it.
         use super::super::font::{DEFAULT_CELL_WIDTH, DEFAULT_LINE_HEIGHT, FontSettings};
 
         let mut settings = FontSettings {
-            font: gpui::font("JetBrainsMono Nerd Font Mono"),
+            font: gpui::font("JetBrainsMono Nerd Font"),
             size: 13.0,
             line_height: DEFAULT_LINE_HEIGHT,
             cell_width: DEFAULT_CELL_WIDTH,
@@ -487,5 +503,77 @@ mod tests {
             lines.iter().all(|line| *line < snap.last_visible_row),
             "a run past the viewport reached the layout: {lines:?}"
         );
+    }
+
+    /// A Nerd Font icon on a card lives in `layout.symbols`, not in the text
+    /// runs (#420), so the card's paint pass has to draw that collection too.
+    /// The first half proves the layout puts the glyph there under the
+    /// thumbnail's own inputs; the second half is a source-slice probe on
+    /// this file's `paint` body, because a GPUI paint pass is not observable
+    /// in a headless test and every earlier miss of this kind (decorations
+    /// after #418, sprites after #419, symbols after #420) was exactly a
+    /// pass the live element gained and the card did not.
+    #[test]
+    fn a_card_paints_every_glyph_collection_the_layout_produces() {
+        let state = TerminalState::new_display_only(24, 80);
+        // U+F07B (Nerd Font folder) is a Private Use Area icon that only
+        // `paint_symbols` draws. The card crops to the bottom rows of the
+        // viewport, so push the icon down to the last row first.
+        state.write_output(&b"\r\n".repeat(23));
+        state.write_output("\u{f07b} icons".as_bytes());
+        let backend = state.session_backend();
+        let snap = thumbnail_snapshot(&backend);
+        let theme = crate::theme::active_theme();
+        let (base_font, _) = thumbnail_font();
+        let layout = layout_from_snapshot(LayoutInputs {
+            cells: snap.content.cells.clone(),
+            cursor: None,
+            selection_range: None,
+            copy_mode_cursor: None,
+            search_highlights: &[],
+            display_offset: snap.content.display_offset,
+            history_size: snap.content.history_size,
+            desired_cols: snap.content.cols.max(1),
+            desired_rows: snap.content.rows.max(1),
+            first_visible_row: snap.first_visible_row,
+            last_visible_row: snap.last_visible_row,
+            dims: thumbnail_cell_dimensions(),
+            base_font,
+            theme: &theme,
+            exited: None,
+            exit_signal: None,
+            integrated_glyphs_enabled: true,
+            color_emoji_enabled: false,
+        });
+        assert_eq!(
+            layout.symbols.len(),
+            1,
+            "the icon must reach layout.symbols under the card's inputs"
+        );
+        assert!(
+            !layout
+                .batched_runs
+                .iter()
+                .any(|run| run.text.contains('\u{f07b}')),
+            "the icon must not also be in a text run"
+        );
+
+        let source = include_str!("thumbnail.rs");
+        let start = source
+            .find("fn paint(")
+            .expect("thumbnail.rs defines the card paint");
+        let end = source[start..]
+            .find("// Deliberately not painted:")
+            .map(|i| start + i)
+            .expect("the paint body ends at the not-painted note");
+        let body = &source[start..end];
+        for pass in [
+            "paint::sprites::paint_sprites(",
+            "paint::decorations::paint_decorations(",
+            "paint::text::paint_text_runs(",
+            "paint::text::paint_symbols(",
+        ] {
+            assert!(body.contains(pass), "the card paint body must call {pass}");
+        }
     }
 }

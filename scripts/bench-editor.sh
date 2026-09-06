@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Run the editor performance benchmark and archive its result.
+#
+# Usage:
+#   scripts/bench-editor.sh                 # run, compare against bench/editor-baseline.json (when present)
+#   scripts/bench-editor.sh --set-baseline  # run, then make this run the baseline (refused from a contended run)
+#   scripts/bench-editor.sh --help
+#
+# The benchmark is the ignored test `editor_pipeline_benchmark` in
+# src-app/src/app/diff_dock/code/perf_bench.rs, built under the release
+# profile. Each run writes bench/results/editor-<stamp>-<sha>.json; the table
+# printed between the PANEFLOW_BENCH_TABLE markers is the shareable artifact:
+# a comparison when the baseline exists, the plain results otherwise. See
+# bench/README.md.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/bench-editor.sh [--set-baseline] [--help]
+
+Runs the paneflow-editor-bench suite under the release profile and writes
+bench/results/editor-<stamp>-<sha>.json, then prints a Markdown table between
+the PANEFLOW_BENCH_TABLE_BEGIN and PANEFLOW_BENCH_TABLE_END markers.
+
+Options:
+  --set-baseline  Copy the fresh result over bench/editor-baseline.json. Refused
+                  when the run reports a cpu_share below 0.90, because a
+                  contended run inflates every timing it would freeze.
+  --help          Print this message and exit.
+
+Environment:
+  PANEFLOW_BENCH_OUT         Result file the suite writes. Set by this script.
+  PANEFLOW_BENCH_BASELINE    Baseline the table compares against. Set by this
+                             script when bench/editor-baseline.json exists;
+                             without it the table drops its comparison columns.
+  PANEFLOW_BENCH_SHA         Short commit the result records. Set by this script.
+  PANEFLOW_BENCH_DIRTY       Whether the tracked worktree is dirty.
+  PANEFLOW_BENCH_STAMP       UTC stamp the result records.
+  PANEFLOW_BENCH_ALLOW_DEBUG Allow a debug-profile run, which the suite refuses.
+  PANEFLOW_BENCH_SKIP_SHAPE  Skip the platform shaping probe.
+USAGE
+}
+
+cd "$(dirname "$0")/.."
+
+mode="run"
+case "${1:-}" in
+  --help | -h)
+    usage
+    exit 0
+    ;;
+  --set-baseline)
+    mode="set-baseline"
+    ;;
+  "") ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+
+sha=$(git rev-parse --short=12 HEAD)
+dirty=false
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  dirty=true
+fi
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p bench/results
+# Absolute paths: cargo runs the test binary from the package directory.
+root=$(pwd)
+out="$root/bench/results/editor-${stamp}-${sha}.json"
+
+export PANEFLOW_BENCH_OUT="$out"
+export PANEFLOW_BENCH_SHA="$sha"
+export PANEFLOW_BENCH_DIRTY="$dirty"
+export PANEFLOW_BENCH_STAMP="$stamp"
+if [ -f bench/editor-baseline.json ]; then
+  export PANEFLOW_BENCH_BASELINE="$root/bench/editor-baseline.json"
+else
+  echo "no baseline yet: bench/editor-baseline.json is absent, the table carries no comparison columns"
+  unset PANEFLOW_BENCH_BASELINE
+fi
+
+cargo test --release --locked -p paneflow-app --bin paneflow \
+  app::diff_dock::code::perf_bench::editor_pipeline_benchmark \
+  -- --ignored --exact --nocapture --test-threads=1
+
+if [ ! -f "$out" ]; then
+  echo "benchmark produced no result file: $out" >&2
+  exit 1
+fi
+echo "result: $out"
+if [ "$mode" = "set-baseline" ]; then
+  # A run that got less than 90% of a core printed PANEFLOW_BENCH_WARNING and
+  # must not become the reference every later run is compared against.
+  cpu_share=$(sed -n 's/^[[:space:]]*"cpu_share":[[:space:]]*\([0-9.eE+-]*\).*/\1/p' "$out" | head -n 1)
+  if [ -z "$cpu_share" ]; then
+    echo "the result carries no cpu_share, refusing to record a baseline from it: $out" >&2
+    exit 1
+  fi
+  if awk "BEGIN { exit !($cpu_share < 0.9) }"; then
+    echo "cpu_share $cpu_share is below 0.90: this run got less than 90% of a core, so its timings are inflated and every later comparison against them would read as a false improvement. Close the competing workload and run again." >&2
+    exit 1
+  fi
+  cp "$out" bench/editor-baseline.json
+  echo "baseline: bench/editor-baseline.json now points at $sha"
+fi

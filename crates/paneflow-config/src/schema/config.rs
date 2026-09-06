@@ -84,13 +84,15 @@ pub struct PaneFlowConfig {
     /// CLI is installed. This affects menu chrome only, not the global keybinding.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub workspace_windsurf_menu_visible: Option<bool>,
-    /// Terminal line height multiplier (default: 1.2, valid range: 1.0-2.5).
+    /// Terminal line height, as a multiplier of the font's own line height
+    /// (default: 1.0, valid range: 0.8-2.5).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub line_height: Option<f32>,
-    /// Terminal cell width multiplier (default: 0.6, valid range: 0.3-2.0).
+    /// Terminal cell width, as a multiplier of the font's advance
+    /// (default: 1.0, valid range: 0.8-2.0).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub cell_width: Option<f32>,
-    /// Terminal font family (default: bundled JetBrainsMono Nerd Font Mono).
+    /// Terminal font family (default: bundled JetBrainsMono Nerd Font).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub font_family: Option<String>,
     /// Ordered fallback font families, consulted in order for glyphs the

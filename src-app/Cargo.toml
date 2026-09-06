@@ -63,6 +63,13 @@ paneflow-terminal-ghostty = { path = "../crates/paneflow-terminal-ghostty" }
 # Kitty graphics: PNG decoding for placements the engine reports (terminal/kitty.rs).
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Font tables GPUI does not expose: line gap, `post` underline metrics, and
+# per-glyph ink bounds. The terminal renderer reads them from the embedded
+# faces to size the cell grid (Ghostty's `Metrics.calc`) and to constrain
+# Nerd Font icons to their cells. Already in the tree through cosmic-text's
+# fontdb, so this adds no new transitive dependency.
+ttf-parser = "0.25"
+
 # Internal crates
 paneflow-config = { path = "../crates/paneflow-config" }
 # EP-002 (prd-mcp-bridge-distribution): GPU-free install engine behind
@@ -157,7 +164,11 @@ tree-sitter-yaml = "0.7"  # US-003: P1
 tree-sitter-css = "0.25"  # US-003: P1
 tree-sitter-html = "0.23" # US-003: P1
 tree-sitter-c = "0.24"    # US-005: P2
-tree-sitter-cpp = "0.23"  # US-005: P2
+# US-005: P2. Pinned past crates.io 0.23.4 because Zed's vendored C++ query
+# (src-app/src/diff/queries/cpp, issue #433) names the module-syntax nodes
+# only the newer grammar defines; the lock still reads 0.23.4, the source
+# flips to git. deny.toml `allow-git` carries the matching repository.
+tree-sitter-cpp = { git = "https://github.com/tree-sitter/tree-sitter-cpp", rev = "5cb9b693cfd7bfacab1d9ff4acac1a4150700609" }
 tree-sitter-java = "0.23" # US-005: P2
 tree-sitter-ruby = "0.23" # US-005: P2
 # QueryCursor::captures returns a StreamingIterator (tree-sitter >= 0.25), not

@@ -1,11 +1,88 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-04, through the deep-review sweep of
-that day (PRs #372 and #373, issues #357-#371) and the 0.3.1 cut. The prior
-entry covered #341 (upstream v0.11.0 adopted: the `PublishGate`, per-tab
-worktree binding, the Customize Sidebar menu, the pull-request marker, and
-the 0.3.0 cut); before that, #184 Phase 4 and its audit plus the About /
-app-menu GitHub links (#226, #227, #228).
+Living handoff record. Updated 2026-09-06, through the first v0.12.0 port
+batch (#417: the terminal rendering chain #418 / #419 / #420, the Zed
+highlight queries #433, and the editor benchmark harness #425). The prior
+entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
+#357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
+adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
+menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-06 #417, first batch: upstream v0.12.0 terminal chain, Zed
+queries, editor bench.** Upstream tagged v0.12.0 at `0ce6fd35`; the survey
+taken at `fbfefd25` stands (the two commits between them are README/ABOUT
+copy and the version bump, both on the SKIP list). Five of the twenty
+sub-issues landed on one `issues-fix` branch, one commit each, every commit
+green on its own:
+
+- **Font-measured cell grid** (#418, upstream `7706b771` + `6c00ae77`).
+  `terminal/element/face_tables.rs` reads the embedded faces' `hhea` /
+  `post` / `OS/2` tables through a direct `ttf-parser = "0.25"` dep
+  (`RUSTSEC-2026-0192` ignored in `deny.toml` with the "only ever parses the
+  bundled TTFs" rationale); `CellMetrics` (whole device pixels, integer
+  baseline) rides on `CellGeometry`; `paint/decorations.rs` draws single /
+  double / dotted / dashed / curly underlines and strikethroughs under the
+  glyphs; the cursors take `cursor_thickness`. **Config semantics changed:**
+  `line_height` and `cell_width` are multipliers of the measured cell,
+  default `1.0` (ranges 0.8-2.5 / 0.8-2.0) in the loader, JSON schema, docs
+  and the Settings steppers; a carried-over `1.2` now means 20% taller than
+  the face's design (`docs/user/configuration/schema.md` says so). The
+  fork-only Pane Overview thumbnail measures the same way without a Window
+  (`font.rs::cell_metrics_without_window`). Sixteen upstream tests carried
+  by name; goldens reblessed, `golden/decorations.txt` added.
+- **Sprite font** (#419, `b6bf46d0`). `element/sprites.rs` +
+  `paint/sprites.rs` draw the whole U+2500-257F block, `░▒▓`, all 256
+  braille patterns and the Powerline geometry on the device grid at the
+  font's underline thickness; `paint/box_drawing.rs` is gone,
+  `BoxDrawingGlyph` is `SpriteGlyph`, the `integrated_glyphs_enabled` gate
+  stays, the thumbnail paints sprites. Seven upstream tests; goldens gain
+  `sprites[N]:`.
+- **Regular Nerd Font + icon constraint** (#420, `73e51a01`). The eight
+  `JetBrainsMonoNerdFontMono-*.ttf` faces are replaced by the regular
+  `JetBrainsMonoNerdFont-*.ttf` variant (+1,328,724 B of embedded assets;
+  no `build.rs` gate measures fonts, open question). PUA glyphs are laid out
+  as `SymbolGlyph` and constrained with Ghostty's rule (cover one cell; keep
+  the designed size over two cells only before an empty cell), ink bounds
+  from `face_tables.rs::embedded_glyph_ink`. Default `font_family` is now
+  `JetBrainsMono Nerd Font`; the old `JetBrainsMono Nerd Font Mono`,
+  `JetBrainsMono NFM` and the new `JetBrainsMono NF` alias all resolve to
+  the bundled family. Six upstream tests; `golden/icons.txt`.
+- **Zed highlight queries** (#433, `1f5fde23`). `src-app/src/diff/queries/`
+  vendors Zed's `highlights.scm` for 15 grammars, hash-pinned by
+  `MANIFEST.toml` (verified by
+  `manifest_hashes_match_the_vendored_queries`; `scripts/sync-zed-queries.sh
+  --check` needs a `ZED_DIR` checkout and was not run). `resolve_runs` is
+  Zed's last-active-capture stack (self-contained; #426's sweep line has not
+  landed) with `MAX_CAPTURES_PER_ROW = 4_096`; `tree-sitter-cpp` is pinned
+  to the module-syntax grammar by git rev (`deny.toml` `allow-git`);
+  `queries/NOTICE` ships as `ThirdPartyLicenses/zed-queries.txt`
+  (`scripts/bundle-macos.sh`). No vendored query needed editing for
+  tree-sitter 0.27. `parity_tests.rs` is the oracle (byte oracle, 10k
+  overlap inputs, 15 `_query_compiles`).
+- **Editor benchmark harness** (#425, `d0674b4c` + `5ca9776b` +
+  `330793e3`). `src-app/src/bench_harness.rs` is shared by the terminal and
+  editor benches, built around the fork's macOS libproc +
+  `mach_timebase_info` counters and `live_bytes()` on the fork's one
+  `#[global_allocator]`; `scripts/bench-editor.sh`, `code/perf_bench.rs`,
+  `code/bench_corpus.rs`, and the ignored
+  `layout::render::tests::editor_scroll_frame_by_pane_count` (p95 261 / 543
+  / 1016 us at 0 / 2 / 6 panes on this machine). `bench/editor-baseline.json`
+  is fork-measured on Apple Silicon (cpu share 0.999, no warning) but
+  carries `git_dirty: true` because it measured the patched worktree at
+  `78a4cb75`; re-record with `--set-baseline` at a clean sha when convenient.
+  `--set-baseline` refuses a contended run (upstream `b64c5c2a`'s rule).
+
+Method notes from the run: the nine recurring test failures under build
+load (eight `paneflow-ai-hook` 7 s subprocess timeouts and
+`opencode_sessions::…retention_limit`) have one root cause, the first exec
+of a newly written executable on this Mac taking 12-20 s (a Gatekeeper /
+XProtect first-launch scan); they pass alone and are judged by test name,
+never by the `test result:` summary line. Chaining #418 → #419 → #420
+without waiting for the lead's verify worked by scratch-committing each
+handed-off port (detached, never pushed) in its worker worktree and
+dispatching the next link there. Still open from the survey: #421, #422
+(both were gated on #410, now merged), #424, #426-#432, #434-#439, with the
+Review rework #438 the decision that shapes #435-#437 and #439.
 
 **2026-09-04 deep review: 33 findings landed, 0.3.1 cut.** A `/deep-review`
 pass at `e5b01e4` over ten lenses found 36 problems and split them: 18 it

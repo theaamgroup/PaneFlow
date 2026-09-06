@@ -446,6 +446,71 @@ impl CodeView {
         view
     }
 
+    /// A view that is already `Ready` on `text`, built on the caller's thread
+    /// with no load task, no blink observer and no watcher: what the
+    /// scroll-frame measurement in `layout/render.rs` docks beside its
+    /// terminal panes (#425). Lists every field so a new one has to be
+    /// placed here deliberately.
+    #[cfg(test)]
+    pub(crate) fn ready_for_test(path: PathBuf, text: &str, cx: &mut Context<Self>) -> Self {
+        let document = super::load::build_document(path.clone(), text, false);
+        let highlighter = CodeHighlighter::new(
+            &document,
+            DiffSyntax::from_theme(&crate::theme::active_theme()),
+        );
+        Self {
+            element_id: format!("code-view:{}", path.display()).into(),
+            path,
+            state: CodeLoadState::Ready(Box::new(super::load::LoadedCode {
+                document,
+                highlighter,
+                stamp: None,
+            })),
+            slot: CodeLoadSlot::new(),
+            focus: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
+            v_drag: None,
+            h_offset: 0.0,
+            selection: CodeSelection::default(),
+            goal_column: 0,
+            text_drag: None,
+            click_chain: None,
+            last_motion: Instant::now(),
+            blink_visible: true,
+            theme_generation: crate::theme::theme_generation(),
+            geometry: Rc::new(Cell::new(CodeGeometry::default())),
+            gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
+            hits: Rc::new(RefCell::new(CodeHitMap::default())),
+            history: edit::UndoHistory::default(),
+            saved_mark: edit::HistoryMark::default(),
+            indent: IndentUnit::Spaces(4),
+            marked: None,
+            read_only_flash: None,
+            stamp: None,
+            disk: DiskState::default(),
+            save_error: None,
+            disk_generation: 0,
+            saving: false,
+            _watcher: None,
+            _watch_bridge: None,
+        }
+    }
+
+    /// The rows the last frame showed, from the host's live scroll handle:
+    /// empty until the view has been laid out.
+    #[cfg(test)]
+    pub(crate) fn visible_row_range(&self) -> Range<usize> {
+        let Some(line_count) = self.state.document().map(CodeDocument::line_count) else {
+            return 0..0;
+        };
+        let viewport_h = f32::from(self.scroll.bounds().size.height);
+        if viewport_h <= 0.0 {
+            return 0..0;
+        }
+        let content_top = f32::from(-self.scroll.offset().y).max(0.0);
+        super::element::visible_rows(content_top, viewport_h, line_count)
+    }
+
     /// Mirror the app-wide cursor blink (US-009). `try_global` rather than
     /// `global` so a headless or test-built view degrades to a solid caret
     /// instead of panicking, the same fallback `terminal/view.rs` takes.

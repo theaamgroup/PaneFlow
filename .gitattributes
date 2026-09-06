@@ -1,2 +1,8 @@
 # Git patches are applied verbatim.
 *.patch text eol=lf
+# Zed's vendored highlight queries are hash-pinned by
+# src-app/src/diff/queries/MANIFEST.toml and byte-compared by
+# scripts/sync-zed-queries.sh --check; a CRLF conversion would break both.
+src-app/src/diff/queries/** text eol=lf
+src-app/src/diff/fixtures/*.scm text eol=lf
+scripts/sync-zed-queries.sh text eol=lf

@@ -213,9 +213,9 @@ impl PaneFlowApp {
             .child(self.settings_stepper_row(
                 "term-line-height",
                 "Line height",
-                "Terminal line-height multiplier (1.0-2.5). Hot-reloads.",
+                "Terminal line-height multiplier of the font's own line height (0.8-2.5). Hot-reloads.",
                 line_height,
-                1.0,
+                0.8,
                 2.5,
                 0.1,
                 1,
@@ -227,9 +227,9 @@ impl PaneFlowApp {
             .child(self.settings_stepper_row(
                 "term-cell-width",
                 "Cell width",
-                "Terminal cell-width multiplier (0.3-2.0). Hot-reloads.",
+                "Terminal cell-width multiplier of the font's advance (0.8-2.0). Hot-reloads.",
                 cell_width,
-                0.3,
+                0.8,
                 2.0,
                 0.1,
                 1,

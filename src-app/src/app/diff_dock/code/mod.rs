@@ -22,11 +22,15 @@
 //! Files sidebar routes through `PaneFlowApp::open_file_in_diff_dock` into
 //! `PaneFlowApp::open_diff_file_tab` and constructs a [`view::CodeView`] here.
 
+#[cfg(test)]
+pub(crate) mod bench_corpus;
 pub(crate) mod cursor;
 pub(crate) mod document;
 pub(crate) mod edit;
 pub(crate) mod element;
 pub(crate) mod highlight;
 pub(crate) mod load;
+#[cfg(test)]
+mod perf_bench;
 pub(crate) mod save;
 pub(crate) mod view;
