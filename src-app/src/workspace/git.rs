@@ -1,7 +1,8 @@
 //! Git-metadata probing for workspace CWDs: branch detection, diff stats, and
-//! worktree-aware `.git` lookup. All functions are pure (no shared mutable
-//! state) and cross-platform - git subprocesses are bounded and non-interactive,
-//! while branch detection reads `.git/HEAD` directly.
+//! worktree-aware `.git` lookup. Branch and stats helpers are pure. [`find_git_dir`]
+//! keeps a process-wide in-flight set so a hung `stat` cannot spawn a new waiter
+//! every sidebar tick. Git subprocesses are bounded and non-interactive; branch
+//! detection reads `.git/HEAD` directly.
 //!
 //! Extracted from `workspace.rs` per US-030 of the src-app refactor PRD.
 
@@ -275,6 +276,37 @@ pub(super) fn read_capped(path: &std::path::Path, limit: u64) -> std::io::Result
 /// own timeout. Matches the session-restore and IPC cwd probe bounds.
 const GIT_DIR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// CWDs whose helper thread has not finished. A timeout abandons the caller
+/// but leaves the waiter here so the 2 s `probe_branches` tick cannot spawn
+/// another one on the same hung mount.
+static GIT_DIR_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(test)]
+static GIT_DIR_PROBE_SPAWNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn git_dir_in_flight() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    GIT_DIR_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn claim_git_dir_probe(cwd: &str) -> bool {
+    git_dir_in_flight().insert(cwd.to_string())
+}
+
+fn release_git_dir_probe(cwd: &str) {
+    git_dir_in_flight().remove(cwd);
+}
+
+struct GitDirProbeGuard(String);
+
+impl Drop for GitDirProbeGuard {
+    fn drop(&mut self) {
+        release_git_dir_probe(&self.0);
+    }
+}
+
 /// Find the `.git` directory for a working directory.
 ///
 /// Walks up from `cwd` to find the nearest `.git` entry. For worktrees (`.git`
@@ -284,22 +316,40 @@ const GIT_DIR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mil
 /// Issue #403: `Path::exists` has no deadline, and `stat` on an unmounted
 /// SMB/NFS/iCloud volume can block for tens of seconds. The walk therefore
 /// runs on a helper thread bounded by [`GIT_DIR_PROBE_TIMEOUT`]; a late
-/// answer counts as "no repo", and the stalled thread is left to unwind on
-/// its own once the filesystem finally answers.
+/// answer counts as "no repo". The stalled thread is left to unwind on its
+/// own, and a second call for the same cwd reuses that in-flight waiter
+/// instead of spawning another (the sidebar poll is every 2 s).
 pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
+    if !claim_git_dir_probe(cwd) {
+        return None;
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let owned = cwd.to_string();
     let spawned = std::thread::Builder::new()
         .name("git-dir-probe".to_string())
         .spawn(move || {
+            let _release = GitDirProbeGuard(owned.clone());
             let _ = tx.send(find_git_dir_blocking(&owned));
         });
     if let Err(err) = spawned {
+        release_git_dir_probe(cwd);
         log::warn!("git: could not spawn .git probe for {cwd}: {err}; treating it as not a repo");
         return None;
     }
+    #[cfg(test)]
+    {
+        GIT_DIR_PROBE_SPAWNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(cwd.to_string());
+    }
     match rx.recv_timeout(GIT_DIR_PROBE_TIMEOUT) {
-        Ok(result) => result,
+        Ok(result) => {
+            // Close the success-path race against `probe_branches`' second
+            // call: the worker's Drop also releases, but only after send.
+            release_git_dir_probe(cwd);
+            result
+        }
         Err(_) => {
             log::warn!(
                 "git: cwd {cwd} did not answer stat within {GIT_DIR_PROBE_TIMEOUT:?}; treating it as not a repo"
@@ -764,6 +814,47 @@ mod tests {
             "find_git_dir blocked the caller for {elapsed:?} (bound {bound:?})"
         );
         assert_eq!(result, None, "a stalled cwd must not be trusted");
+    }
+
+    /// Issue #403: `probe_branches` calls `detect_branch` then `find_git_dir`
+    /// every 2 s. Abandoning a hung waiter is fine; spawning a new one each
+    /// tick is not.
+    #[test]
+    fn find_git_dir_does_not_spawn_a_second_probe_while_one_is_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stalled = tmp.path().join("unmounted-volume");
+        STALLED_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(stalled.clone());
+        let cwd = stalled.to_str().unwrap().to_string();
+
+        let first = find_git_dir(&cwd);
+        let spawned_after_first = git_dir_probe_spawn_count(&cwd);
+        let second = find_git_dir(&cwd);
+        let spawned_after_second = git_dir_probe_spawn_count(&cwd);
+
+        STALLED_GIT_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|dir| dir != &stalled);
+
+        assert_eq!(first, None);
+        assert_eq!(second, None);
+        assert_eq!(spawned_after_first, 1, "the stalled cwd starts one waiter");
+        assert_eq!(
+            spawned_after_second, 1,
+            "a second call while the first is blocked must not spawn another waiter"
+        );
+    }
+
+    fn git_dir_probe_spawn_count(cwd: &str) -> usize {
+        GIT_DIR_PROBE_SPAWNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|spawned| spawned.as_str() == cwd)
+            .count()
     }
 
     #[test]
