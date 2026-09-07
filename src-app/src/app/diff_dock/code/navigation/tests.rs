@@ -53,7 +53,8 @@ fn minimap_drag_tracks_document_progress_on_large_files() {
         ..Default::default()
     });
     let mut horizontal = 0.0;
-    let start = track.thumb.expect("overflow").center();
+    let thumb = track.thumb.expect("overflow");
+    let start = thumb.center();
     assert!(navigation.mouse_down(start, &scroll, &mut horizontal, 0.0));
     navigation.mouse_move(
         point(start.x, start.y + px(100.)),
@@ -62,7 +63,29 @@ fn minimap_drag_tracks_document_progress_on_large_files() {
         &mut horizontal,
         0.0,
     );
-    assert!((scroll.rows() - 10_000.0 / 6.0).abs() < 0.01);
+    let travel = f32::from(bounds.size.height - thumb.size.height).max(1.0);
+    let expected = scroll.max_rows() * (100.0 / f64::from(travel));
+    assert!(
+        (scroll.rows() - expected).abs() < 0.5,
+        "100 px of thumb travel should scale by max_rows/travel, got {} want {expected}",
+        scroll.rows()
+    );
+
+    scroll.set_rows(0.0);
+    let top = point(thumb.center().x, thumb.origin.y);
+    assert!(navigation.mouse_down(top, &scroll, &mut horizontal, 0.0));
+    navigation.mouse_move(
+        point(top.x, bounds.bottom() - thumb.size.height / 2.0),
+        true,
+        &scroll,
+        &mut horizontal,
+        0.0,
+    );
+    assert!(
+        (scroll.rows() - scroll.max_rows()).abs() < 1.0,
+        "dragging the thumb to the bottom of the track must reach max_rows, got {}",
+        scroll.rows()
+    );
 }
 
 #[test]

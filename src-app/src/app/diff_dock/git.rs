@@ -34,6 +34,7 @@ pub(super) struct DiffDockBuilt {
     pub(super) theme_generation: u64,
     pub(super) fingerprint: u64,
     pub(super) toplevel: Option<PathBuf>,
+    pub(super) head_sha: Option<String>,
     pub(super) stamps: HashMap<String, FileStamp>,
 }
 
@@ -110,6 +111,7 @@ pub(super) fn build_diff_dock(
         )
     };
     let toplevel = diff.toplevel.clone();
+    let head_sha = diff.head_sha.clone();
     let mut stamps = HashMap::new();
     if let Some(top) = &toplevel {
         for file in &diff.files {
@@ -132,6 +134,7 @@ pub(super) fn build_diff_dock(
         theme_generation,
         fingerprint,
         toplevel,
+        head_sha,
         stamps,
     })
 }

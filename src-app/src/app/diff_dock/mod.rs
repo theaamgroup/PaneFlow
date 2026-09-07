@@ -159,6 +159,14 @@ impl PaneFlowApp {
         self.spawn_diff_dock_build(cwd, generation, cx);
     }
 
+    fn reload_file_tab_bases(&mut self, cx: &mut Context<Self>) {
+        for tab in self.diff_dock.diff_tabs.clone() {
+            if let DiffDockTab::File(view) = tab {
+                view.update(cx, |view, cx| view.reload_base(cx));
+            }
+        }
+    }
+
     fn clear_diff_dock_snapshot_state(&mut self) {
         self.diff_dock.collapsed.clear();
         self.diff_dock.expanded_folds.clear();
@@ -244,8 +252,18 @@ impl PaneFlowApp {
                                 } else {
                                     expanded
                                 };
+                                let head_changed = app
+                                    .diff_dock
+                                    .data
+                                    .as_ref()
+                                    .filter(|data| data.has_rows())
+                                    .is_some_and(|data| data.head_sha != built.head_sha);
                                 if let Some(data) = app.diff_dock.data.as_mut() {
                                     data.apply_built(built, &collapsed, &expanded);
+                                }
+                                app.diff_dock.hover = None;
+                                if head_changed {
+                                    app.reload_file_tab_bases(cx);
                                 }
                             }
                             Err(err) => {
@@ -943,9 +961,10 @@ impl PaneFlowApp {
     /// file's collapse. Mirrors the Review view's header-collapse path (the dock
     /// has no click-to-ask, so a non-header click is a no-op).
     fn handle_diff_dock_body_click(&mut self, ev: &ClickEvent, cx: &mut Context<Self>) {
-        if self.handle_diff_dock_revert_click(ev.position(), cx) {
-            return;
-        }
+        // Revert is handled on mouse-down. `stop_propagation` there does not
+        // cancel this `on_click`, and a second revert would write twice then
+        // toast STALE_FILE_MESSAGE against the stamp the first write just
+        // replaced.
         let split = self.diff_dock.split;
         if self.handle_diff_dock_h_scrollbar_click(ev.position(), split, cx) {
             return;

@@ -2608,6 +2608,14 @@ pub(crate) fn base_block_text(base_lines: &[&str], range: &Range<u32>) -> String
     let mut text = base_lines[start..end].join("\n");
     if end > start && end < base_lines.len() {
         text.push('\n');
+    } else if end > start
+        && end == base_lines.len()
+        && start + 1 == end
+        && base_lines.last() == Some(&"")
+    {
+        // `split_lines("a\n")` is `["a", ""]`. The trailing empty slot is the
+        // final newline; joining it alone yields "" and must still emit `\n`.
+        text.push('\n');
     }
     text
 }
@@ -2686,6 +2694,13 @@ pub(crate) fn popup_anchor(
 }
 
 impl CodeView {
+    pub(crate) fn reload_base(&mut self, cx: &mut Context<Self>) {
+        if self.state.document().is_none() {
+            return;
+        }
+        self.start_base_load(cx);
+    }
+
     fn start_base_load(&mut self, cx: &mut Context<Self>) {
         let generation = self.slot.current();
         spawn_base_load(
@@ -2900,7 +2915,17 @@ impl CodeView {
             return;
         };
         cx.notify();
-        self.revert_block(popup.block.lines.start as usize, cx);
+        // `popup.block.lines` is the range at open time. Keystrokes shift the
+        // live tracker; `base_lines` is the stable HEAD identity, so look the
+        // block up there instead of restoring whatever now sits at the old row.
+        let line = self
+            .tracker
+            .blocks()
+            .iter()
+            .find(|block| block.base_lines == popup.block.base_lines)
+            .map(|block| block.lines.start as usize)
+            .unwrap_or(popup.block.lines.start as usize);
+        self.revert_block(line, cx);
     }
 
     pub(crate) fn revert_block(&mut self, line: usize, cx: &mut Context<Self>) -> bool {
@@ -6021,6 +6046,29 @@ mod tests {
     }
 
     #[gpui::test]
+    fn revert_from_popup_follows_the_block_after_an_insert_above(cx: &mut TestAppContext) {
+        let (view, cx) = tracked_view(cx, "a\nb\nc\n", "a\nB\nc\n");
+        view.update(cx, |view, cx| {
+            view.open_marker_popup(0, cx);
+            assert!(
+                view.splice_all(
+                    &[(0..0, "HEAD\n".into())],
+                    CodeSelection::at(0),
+                    EditGroup::Atomic,
+                    cx,
+                ),
+                "insert above the open popup"
+            );
+            view.revert_from_popup(cx);
+            assert_eq!(
+                text_of(view),
+                "HEAD\na\nb\nc\n",
+                "Revert must restore the HEAD block at its shifted row, not the new top line"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn escape_closes_the_popup_and_hover_alone_never_opens_it(cx: &mut TestAppContext) {
         let (view, cx) = tracked_view(cx, "a\nb\nc\n", "a\nB\nc\n");
         view.update_in(cx, |view, window, cx| {
@@ -6102,6 +6150,12 @@ mod tests {
         assert_eq!(base_block_text(&base, &(1..3)), "b\nc\n");
         assert_eq!(base_block_text(&base, &(2..4)), "c\n");
         assert_eq!(base_block_text(&base, &(1..1)), "");
+        assert_eq!(
+            base_block_text(&base, &(3..4)),
+            "\n",
+            "the trailing empty slot of a terminated file is a newline"
+        );
+        assert_eq!(base_block_text(&[""], &(0..1)), "\n");
         let unterminated = ["a", "b"];
         assert_eq!(base_block_text(&unterminated, &(1..2)), "b");
 

@@ -102,6 +102,10 @@ pub struct WorktreeDiff {
     /// [`compute_head_diff`] so the Changes-tab revert path can join
     /// relative file paths without re-probing git.
     pub toplevel: Option<PathBuf>,
+    /// `HEAD`'s object name when the worktree has a commit. `None` for an
+    /// unborn HEAD. The dock uses this to re-probe open file tabs when the
+    /// revision moves.
+    pub head_sha: Option<String>,
 }
 
 /// Git-native per-file diffstat for one file.
@@ -1344,6 +1348,9 @@ pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
     };
     let mut diff = compute_diff_against(worktree_dir, &base);
     diff.toplevel = Some(toplevel);
+    if base != EMPTY_TREE_SHA {
+        diff.head_sha = Some(base);
+    }
     diff
 }
 

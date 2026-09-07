@@ -130,6 +130,7 @@ pub(crate) struct DiffDockData {
     pub(super) theme_generation: u64,
     pub(super) fingerprint: u64,
     pub(crate) toplevel: Option<PathBuf>,
+    pub(crate) head_sha: Option<String>,
     pub(crate) stamps: Rc<HashMap<String, FileStamp>>,
 }
 
@@ -164,8 +165,13 @@ impl DiffDockData {
             theme_generation: crate::theme::theme_generation(),
             fingerprint: 0,
             toplevel: None,
+            head_sha: None,
             stamps: Rc::new(HashMap::new()),
         }
+    }
+
+    pub(super) fn has_rows(&self) -> bool {
+        self.unified_loaded || self.split_loaded
     }
 
     pub(super) fn message(cwd: String, error: String) -> Self {
@@ -211,6 +217,7 @@ impl DiffDockData {
         self.theme_generation = built.theme_generation;
         self.fingerprint = built.fingerprint;
         self.toplevel = built.toplevel;
+        self.head_sha = built.head_sha;
         self.stamps = Rc::new(built.stamps);
         self.files_full = Rc::new(built.files_full);
         self.row_caches = Rc::new(built.row_caches);

@@ -69,14 +69,10 @@ impl NavigationState {
                 scroll.max_rows(),
             )
         };
-        let units_per_pixel = if part == NavigationPart::Minimap {
-            let total_rows = scroll.max_rows() + scroll.visible_rows();
-            1.0 / (f64::from(f32::from(track_length)) / total_rows)
-                .min(f64::from(MINIMAP_LINE_HEIGHT))
-                .max(f64::EPSILON)
-        } else {
-            max / f64::from(f32::from(track_length - thumb_length).max(1.0))
-        };
+        // Thumb travel, not the full track: a long document's minimap thumb
+        // is MIN_THUMB tall, so mapping through track_length/total_rows
+        // cannot reach max_rows before the pointer leaves the gutter.
+        let units_per_pixel = max / f64::from(f32::from(track_length - thumb_length).max(1.0));
         let mut offset = (if horizontal {
             f64::from(*h_offset)
         } else {
