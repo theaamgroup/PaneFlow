@@ -1,66 +1,67 @@
 # Review
 
-PaneFlow's Diff view puts your branch diff and the agents reviewing it
-in the same workspace. Read every change, send it to one or several CLI
-agents, and compare their feedback without switching windows or
-branches.
+Review lets you read changes from several Git checkouts in one window.
+Open a Git-backed workspace and select **Review** in the sidebar footer,
+or press `Cmd+Shift+G` to switch between Agents and Review.
 
-It works for projects that live inside a Git repository. Open a project
-and select **Diff** in the sidebar to get started.
+## Workspaces, changes, and diff panes
 
-## What the Diff view shows
+The **Workspaces** rail groups your open repositories and their checkouts,
+including worktrees bound to tabs and sibling worktrees. Expand a repository
+and click a checkout to show it in the active diff pane. If that checkout is
+already open in another pane, PaneFlow focuses that pane instead.
 
-The Diff view reflects the state of your Git branch, not just what an
-agent edited. It shows every file changed since the branch diverged from
-its base, uncommitted work included:
+The **Changes** rail follows the active diff pane. Filter its files, switch
+between a flat list and a tree, and click a file to jump to its diff. The
+**vs …** control chooses the comparison's base branch or Git ref for that
+pane. The diff includes branch changes since the merge base and uncommitted
+work in that checkout, regardless of who made the edits.
 
-* Changes made by an agent
-* Changes you made yourself
-* Any other uncommitted changes in the repo
+Each diff pane shows one checkout. File headers stay pinned while scrolling,
+and Tree-sitter provides syntax highlighting. Header controls refresh the
+diff, toggle unified or side-by-side display, and expand or collapse all
+files. You can also switch the display mode by right-clicking inside the diff.
 
-File headers stay pinned while you scroll, and syntax highlighting runs
-on Tree-sitter.
+## Arrange comparisons
 
-## Open and navigate the Diff view
+Review supports up to six diff panes:
 
-Open the Diff view from the sidebar or with `Cmd+Shift+G`. Once
-it's open:
+* Drag a checkout from Workspaces onto a pane's edge to split the space
+  and open another diff. Drop it in the center to replace that pane's checkout.
+* Use the pane header's split controls to duplicate its checkout into a
+  neighboring pane, then choose another checkout or base to compare.
+* Drag a pane header to move it within the grid, and drag dividers to resize.
+* Zoom a pane for a closer look, then unzoom before adding another split.
+  Close panes from their headers when finished.
 
-* Scroll through hunks to compare additions and deletions.
-* Toggle between a unified view and side by side.
-* Pinned file headers keep your place while you scroll a long diff.
+Each pane has its own base and display mode. The Workspaces rail marks
+checkouts already in the grid, while Changes always follows the active pane.
 
-## Compare branches without switching worktrees
+PaneFlow saves the grid's checkouts, split directions and sizes, and collapsed
+repository groups with your session. On restart it restores checkouts that
+still exist and belong to an open repository. Base selections and unified or
+side-by-side choices are not saved with the grid.
 
-You don't have to check branches out one at a time to read them:
+## Ask an agent to review
 
-* **Project view** shows the diff for your current task.
-* **Multi-project mode** gathers your open repos into tabs.
-* **Worktree mode** lines sibling branches up side by side, so you can
-  read each one's progress at a glance.
+Choose **Review with agent** in a diff pane's header and select the installed
+agents you want to use: Claude Code, Codex, OpenCode, or Pi. PaneFlow opens
+an ordinary workspace tab for each agent in that checkout's directory and
+switches to Agents. Additional agents get a second-opinion prompt. The diff
+remains available when you return to Review.
 
-## Ask agents to review the diff
+PaneFlow prefills a review prompt after a short delay. Read or edit it, then
+press **Enter** yourself to submit it. The first review prompt is also copied to your
+clipboard, so you can paste it if the agent was not ready for the prefill.
+The `review_prefill_delay_ms` configuration setting adjusts that delay.
 
-Every branch column has a **Review** button. Pick Claude Code, Codex,
-OpenCode, or Pi, and PaneFlow opens that agent in a real terminal
-directly under the diff, already in the right directory.
+## Turn Review off
 
-* PaneFlow **stages the review prompt but never sends it without your
-  approval**: you read it before pressing Enter. Implementation is a
-  delayed `send_text` with no carriage return
-  (`src-app/src/diff/view/review.rs`).
-* The prompt is also copied to the clipboard as a fallback, and a
-  "Prompt ready" pill appears with a paste hint, in case the delayed
-  write missed the CLI's input box.
-* The agent works through the diff and returns findings tied to specific
-  files and lines.
-* Launch a second agent and it gets a more skeptical framing, so you get
-  a genuine second opinion instead of a near-identical echo of the first.
-* Target a specific line or hunk and send it straight to an agent with a
-  focused question.
+Disable Review in Settings to hide the entire Agents/Review mode strip.
+While disabled, `Cmd+Shift+G` has no effect.
 
 ## See also
 
-* [Features](features.md) - the full tour, including projects, worktrees, and per-thread agents.
-* [index](index.md) - the overview, and [INSTALL.md](../../INSTALL.md) to build it.
-* [Keybindings](keybindings.md) - the default keymap and how to remap any action.
+* [Features](features.md) — projects, worktrees, and agents.
+* [Keybindings](keybindings.md) — default shortcuts and remapping.
+* [Configuration](configuration/schema.md) — available settings.

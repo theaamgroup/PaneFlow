@@ -5,18 +5,8 @@
 //! PRE-FILLS its input with a compact review prompt (the user submits). No
 //! headless ACP session - you see exactly what the agent does, in a real
 //! terminal. See [[feedback-human-in-loop-no-headless]]. This module owns the
-//! embedded terminal entity, CLI table, prompt builder, and shell-aware launch
-//! request used by `DiffView`.
-
-use gpui::{Entity, SharedString};
-
-/// A review CLI running in a real terminal embedded under a diff column.
-pub(crate) struct ReviewTerminal {
-    pub(crate) label: SharedString,
-    pub(crate) terminal: Entity<crate::terminal::TerminalView>,
-    pub(crate) prompt_ready: bool,
-    pub(crate) prompt: Option<String>,
-}
+//! CLI table, prompt builder, and shell-aware launch request. The pane header
+//! dispatches reviews into ordinary workspace agent tabs (`app::review::agent`).
 
 /// A CLI coding agent Paneflow can launch in a terminal for a review. This
 /// focused picker exposes the four review integrations supported by this view.

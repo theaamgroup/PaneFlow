@@ -853,8 +853,19 @@ mod tests {
         std::fs::write(&path, "# Notes").expect("markdown fixture");
         let markdown = cx.new(|cx| crate::markdown::MarkdownView::build(path, cx));
         let markdown = cx.new(|cx| Pane::new_with_surface(PaneSurface::Markdown(markdown), 1, cx));
-        let diff =
-            cx.new(|cx| crate::diff::DiffView::build(dir.path().to_path_buf(), vec![], None, cx));
+        let diff = cx.new(|cx| {
+            crate::diff::DiffView::for_test(
+                crate::diff::ReviewSubject {
+                    repo_root: dir.path().to_path_buf(),
+                    worktree: crate::diff::DiffWorktree {
+                        path: dir.path().to_path_buf(),
+                        branch: "main".into(),
+                        workspace_id: None,
+                    },
+                },
+                cx,
+            )
+        });
         let diff = cx.new(|cx| Pane::new_with_surface(PaneSurface::Diff(diff), 1, cx));
         let (first, first_sid) = terminal_pane(cx);
         let (second, second_sid) = terminal_pane(cx);

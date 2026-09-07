@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{App, AppContext, Context, Entity, Window};
+use gpui::{App, AppContext, Context, Entity, Focusable, Window};
 use paneflow_config::schema::LayoutNode;
 
 use crate::PaneFlowApp;
@@ -49,6 +49,11 @@ pub(crate) struct PendingSessionRestore {
     active_workspace: usize,
     mode: paneflow_config::schema::AppMode,
     worktree_owners: std::collections::HashMap<PathBuf, usize>,
+    /// Issue #438: the saved Review grid and the folded Workspaces rows.
+    /// Carried through the staged restore because the grid's panes can only
+    /// be built once every workspace exists.
+    review_layout: Option<paneflow_config::schema::LayoutNode>,
+    review_collapsed: Vec<String>,
 }
 
 impl PendingSessionRestore {
@@ -72,6 +77,8 @@ impl PendingSessionRestore {
             active_workspace: session.active_workspace,
             mode: session.mode,
             worktree_owners: std::collections::HashMap::new(),
+            review_layout: session.review_layout,
+            review_collapsed: session.review_collapsed,
         })
     }
 }
@@ -206,9 +213,11 @@ impl PaneFlowApp {
             // Persist the live UI mode so the restore branch reopens
             // Paneflow in the same screen the user left.
             mode: self.mode,
-            // US-015 (prd-git-diff-mode-2026-Q3.md): persist the diff scope so
-            // a session that quit in Diff mode reopens on the same scope.
-            diff_scope: Some(self.diff_mode.diff_scope.as_persisted().to_string()),
+            // Issue #438: persist the Review pane grid and the folded
+            // Workspaces rows, so a session that quit in Review reopens on the
+            // same panes rather than on a re-derived default.
+            review_layout: self.serialize_review_layout(cx),
+            review_collapsed: self.serialize_review_collapsed(),
             // Issue #106: persist the rail as the user left it. The flag is
             // the *intent*, never the rendered width - Settings force-shows
             // the rail without touching it - so quitting from Settings still
@@ -576,43 +585,71 @@ impl PaneFlowApp {
         }
         spawn_restored_worktree_prune(&self.workspaces, cx);
         if let Some(pending) = pending {
-            self.apply_restored_diff_mode(pending.mode, cx);
+            self.apply_restored_diff_mode(
+                pending.mode,
+                pending.review_layout,
+                &pending.review_collapsed,
+                cx,
+            );
         }
         self.resume_pending_worktree_teardowns(cx);
         self.focus_restored_session(window, cx);
         cx.notify();
     }
 
+    /// Restore the Review grid, then the mode it belongs to.
+    ///
+    /// The folded Workspaces rows are restored unconditionally - they are
+    /// cheap, and a user who returns to Review later still wants the folds
+    /// they left. The grid itself is only rebuilt when Review is reachable.
     pub(crate) fn apply_restored_diff_mode(
         &mut self,
         restored_mode: paneflow_config::schema::AppMode,
+        review_layout: Option<paneflow_config::schema::LayoutNode>,
+        review_collapsed: &[String],
         cx: &mut Context<Self>,
     ) {
+        self.restore_review_collapsed(review_collapsed);
+        // Issue #438: `restore_review_layout` prunes subjects whose repo is no
+        // longer open and whose worktree is gone, so a grid that survives is
+        // one every pane can actually load.
+        if self.cached_config.review_view_enabled()
+            && let Some(node) = review_layout.as_ref()
+        {
+            self.restore_review_layout(node, cx);
+        }
         self.mode = restored_mode;
         if !matches!(self.mode, paneflow_config::schema::AppMode::Diff) {
+            self.review_suspend_all(cx);
             return;
         }
-        // US-015: restore Diff mode only when it is reconstructable. A session
-        // saved before Review was switched off is the one path that can reach
-        // Diff mode without going through `enter_diff_mode`'s gate.
-        let viable = self.cached_config.review_view_enabled()
-            && match self.diff_mode.diff_scope {
-                crate::diff::DiffScope::MultiProject => {
-                    self.workspaces.iter().any(|ws| ws.repo_root.is_some())
-                }
-                _ => self
-                    .workspaces
-                    .get(self.active_idx)
-                    .is_some_and(|ws| ws.repo_root.is_some()),
-            };
-        if viable {
-            self.rebuild_diff_view(cx);
-        } else {
+        // US-015, carried onto the grid: restore Review only when it is
+        // reconstructable. A session saved before Review was switched off is
+        // the one path that can reach Diff mode without passing
+        // `enter_diff_mode`'s `review_enabled` gate.
+        //
+        // "Reconstructable" is now "a grid survived the prune, or a default
+        // subject exists to open one", not "the active workspace has a repo":
+        // a restored grid can name repositories the active workspace does not.
+        let viable = self.review_is_viable();
+        if !viable {
             self.mode = paneflow_config::schema::AppMode::Cli;
+            return;
+        }
+        if self.review.layout.is_none()
+            && let Some(subject) = self.review_default_subject()
+        {
+            self.review_show_subject(subject, cx);
         }
     }
 
     pub(crate) fn focus_restored_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == paneflow_config::schema::AppMode::Diff
+            && let Some(pane) = self.review_active_pane()
+        {
+            pane.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
         let focused = match self.workspaces.get(self.active_idx) {
             Some(ws) => ws.focus_first(window, cx),
             None => false,
@@ -2504,7 +2541,8 @@ mod tests {
             workspaces: Vec::new(),
             pending_worktree_teardowns: Vec::new(),
             mode: Default::default(),
-            diff_scope: None,
+            review_layout: None,
+            review_collapsed: Vec::new(),
             primary_sidebar_collapsed: false,
         }
     }
@@ -2513,7 +2551,7 @@ mod tests {
     fn session_serialization_cap_counts_escaped_bytes_and_accepts_the_exact_boundary() {
         let mut state = empty_session_state();
         // Exercise multi-byte UTF-8 plus JSON expansion of control characters.
-        state.diff_scope = Some("é\n\u{0001}".repeat(100));
+        state.review_collapsed = vec!["é\n\u{0001}".repeat(100)];
         let expected = serde_json::to_vec_pretty(&state).expect("reference serialization");
         assert_eq!(
             serialize_session_capped(&state, expected.len()).expect("exact boundary"),

@@ -40,7 +40,7 @@ fn pid_is_alive(pid: u32) -> bool {
     }
 }
 
-fn split_pane_at_edge(
+pub(crate) fn split_pane_at_edge(
     root: &mut LayoutTree,
     target: &Entity<Pane>,
     edge: DropEdge,
@@ -499,6 +499,13 @@ impl PaneFlowApp {
     /// that sibling, while a close routed through here lands on the tab's
     /// first pane.
     pub(crate) fn remove_pane_from_tree(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
+        // Review owns a separate grid, including a parked zoom layout. Shared
+        // close gestures (such as the pane menu) must resolve that owner before
+        // looking through ordinary workspace tabs.
+        if self.review_contains_pane(pane) {
+            self.review_close_pane(pane.clone(), cx);
+            return;
+        }
         // Find the workspace that owns this pane (not necessarily the
         // active one - shells can exit in background workspaces).
         // US-003: also resolve *which* tab owns it - a shell can exit
@@ -565,7 +572,21 @@ impl PaneFlowApp {
         event: &pane::PaneEvent,
         cx: &mut Context<Self>,
     ) {
+        if let pane::PaneEvent::ReviewWithAgent {
+            subject,
+            base,
+            picks,
+        } = event
+        {
+            self.launch_review_agents(subject, base, picks, cx);
+            return;
+        }
+        if self.review_contains_pane(&pane) {
+            self.handle_review_pane_event(pane, event, cx);
+            return;
+        }
         match event {
+            pane::PaneEvent::DropSubjectSplit { .. } | pane::PaneEvent::ReviewWithAgent { .. } => {}
             pane::PaneEvent::Remove => {
                 // The pane is going away for a reason the user cannot undo -
                 // its child process exited on its own (`TerminalEvent::

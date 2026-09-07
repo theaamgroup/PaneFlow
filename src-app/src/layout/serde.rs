@@ -159,23 +159,10 @@ impl LayoutTree {
                                 font_size: None,
                             }
                         }
-                        crate::pane::PaneSurface::Diff(_) => SurfaceDefinition {
-                            surface_type: Some("diff".to_string()),
-                            agent_context: None,
-                            name: None,
-                            custom_name: None,
-                            command: None,
-                            prompt: None,
-                            cwd: None,
-                            path: None,
-                            env: None,
-                            focus: None,
-                            scrollback: None,
-                            agent: None,
-                            font_size: None,
-                        },
+                        crate::pane::PaneSurface::Diff(diff) => {
+                            crate::app::review::surface_for_subject(&diff.read(cx).subject())
+                        }
                     })
-                    .filter(|surface| surface.surface_type.as_deref() != Some("diff"))
                     .collect();
                 LayoutNode::Pane { surfaces }
             }
@@ -395,6 +382,74 @@ mod tests {
                 assert_eq!(surfaces[0].custom_name.as_deref(), Some("right"));
             }
             LayoutNode::Split { .. } => panic!("the leftover spawn is the second pane"),
+        }
+    }
+
+    #[gpui::test]
+    fn serialized_review_grid_preserves_each_panes_subject(cx: &mut TestAppContext) {
+        use crate::diff::{DiffView, DiffWorktree, ReviewSubject};
+        use crate::pane::PaneSurface;
+
+        let cx = cx.add_empty_window();
+        let subjects = [
+            ReviewSubject {
+                repo_root: "/repo".into(),
+                worktree: DiffWorktree {
+                    path: "/repo/.worktrees/feature".into(),
+                    branch: "feature".into(),
+                    workspace_id: Some(1),
+                },
+            },
+            ReviewSubject {
+                repo_root: "/other".into(),
+                worktree: DiffWorktree {
+                    path: "/other".into(),
+                    branch: "main".into(),
+                    workspace_id: Some(2),
+                },
+            },
+        ];
+        let panes: Vec<_> = subjects
+            .iter()
+            .map(|subject| {
+                let view = cx.new(|cx| DiffView::for_test(subject.clone(), cx));
+                cx.new(|cx| {
+                    Pane::new_with_surface(
+                        PaneSurface::Diff(view),
+                        subject.worktree.workspace_id.unwrap(),
+                        cx,
+                    )
+                })
+            })
+            .collect();
+        let tree = LayoutTree::from_panes_equal(SplitDirection::Vertical, panes).unwrap();
+
+        // Exercise the actual tree serializer in both session and undo modes.
+        // A helper-only roundtrip misses a Diff match arm that emits no surface.
+        let serialized =
+            cx.update(|_, cx| [tree.serialize_without_scrollback(cx), tree.serialize(cx)]);
+        for node in serialized {
+            let json = serde_json::to_string(&node).unwrap();
+            let restored: LayoutNode = serde_json::from_str(&json).unwrap();
+            let LayoutNode::Split { children, .. } = restored else {
+                panic!("the review grid must retain both panes")
+            };
+            assert_eq!(children.len(), subjects.len());
+            for (child, subject) in children.iter().zip(&subjects) {
+                let LayoutNode::Pane { surfaces } = child else {
+                    panic!("each review grid child must be a pane")
+                };
+                assert_eq!(surfaces.len(), 1, "Diff subjects must not be filtered out");
+                let surface = &surfaces[0];
+                assert_eq!(surface.surface_type.as_deref(), Some("diff"));
+                assert_eq!(surface.path.as_deref(), subject.repo_root.to_str());
+                assert_eq!(surface.cwd.as_deref(), subject.worktree.path.to_str());
+                assert_eq!(
+                    surface.name.as_deref(),
+                    Some(subject.worktree.branch.as_str())
+                );
+                assert!(surface.scrollback.is_none());
+            }
         }
     }
 

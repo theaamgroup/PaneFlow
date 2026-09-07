@@ -1,47 +1,41 @@
-//! Multi-worktree diff viewer (prd-multi-worktree-diff-2026-Q3.md).
+//! Single-worktree diff viewer.
 //!
-//! EP-001 scaffold (US-003): stands up the `DiffView` GPUI entity and its tab
-//! plumbing only - it renders an empty/placeholder state seeded with the
-//! sibling worktrees of one repo. The diff engine (EP-002), side-by-side
-//! render (EP-003), and N-column live view + base selector (EP-004) fill in
-//! `DiffView` with real hunk data on top of this host.
+//! Issue #438 (upstream a8d55f74): Review stopped being one host with N
+//! columns over a scope and became a grid of panes that each hold one
+//! [`DiffView`] pointed at one [`ReviewSubject`]. The multi-column arranger,
+//! the multi-repo host and the scope model went with that change.
 //!
-//! `DiffView` is the exact structural analog of `markdown::MarkdownView`: an
-//! `Entity` implementing `Render + Focusable`, hosted in a pane via the new
-//! `PaneSurface::Diff` variant. It is ephemeral - never persisted to
-//! `session.json` (like markdown tabs, dropped by `layout/serde.rs`).
+//! `DiffView` is the structural analog of `markdown::MarkdownView`: an
+//! `Entity` implementing `Render + Focusable`, hosted in a pane through the
+//! `PaneSurface::Diff` variant. Unlike a markdown pane it IS persisted: a
+//! Review pane round-trips through `SessionState::review_layout` as its
+//! subject (`app/review/session.rs`), so the grid survives a relaunch.
 
 mod align;
-mod arrange;
 mod element;
 mod engine;
 mod extract;
+// Keep the fork's audited discovery helpers and regression tests unchanged.
+#[allow(dead_code)]
 mod git;
 mod highlighter;
 mod hit_test;
 mod hscroll;
-mod multi_view;
 #[cfg(test)]
 pub(crate) mod parity_tests;
-mod review_terminal;
+pub(crate) mod review_terminal;
 mod rows;
-mod scope;
-mod scope_header;
 mod syntax;
 mod view;
 
 #[cfg(test)]
 pub(crate) use git::tests::{capture_logs, captured_logs_contain};
 
-// Only the host view + its seed type are consumed outside this module
-// (`pane::PaneSurface::Diff`, `event_handlers::open_multi_diff_for_repo`). The
-// engine / git / rows types stay crate-internal, reached via `super::` paths.
-pub use git::{FileChange, list_repo_worktrees};
-pub use multi_view::MultiRepoDiffView;
-pub use scope::{DiffScope, RepoGroup};
-pub use view::{
-    DiffView, DiffViewEvent, DiffWorktree, FileEntry, FileListState, aggregate_file_lists,
-};
+// Only the host view and its subject/seed types are consumed outside this
+// module (`pane::PaneSurface::Diff`, `app/review/`). The engine / git / rows
+// types stay crate-internal, reached via `super::` paths.
+pub use git::FileChange;
+pub use view::{DiffView, DiffWorktree, FileEntry, FileListState, ReviewSubject};
 
 // EP-001 (review redesign, US-001/US-002): the diff dock
 // (`crate::app::diff_dock`) renders through the SAME `DiffElement` + git

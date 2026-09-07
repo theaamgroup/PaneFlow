@@ -15,6 +15,8 @@
 //! former tab strip and paints nothing of its own: the floating card behind it
 //! owns the fill (commit `30e26c5`).
 
+mod review;
+
 use crate::ui_primitives::TooltipDelayExt;
 use gpui::Role;
 use std::cell::Cell;
@@ -35,7 +37,8 @@ use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 use crate::diff::DiffView;
 use crate::markdown::MarkdownView;
 use crate::pane_drag::{
-    DragPreview, DropEdge, PaneDrag, SPLIT_EDGE_BAND, SessionDrag, compute_drop_edge, split_rect,
+    DragPreview, DropEdge, PaneDrag, ReviewSubjectDrag, SPLIT_EDGE_BAND, SessionDrag,
+    compute_drop_edge, split_rect,
 };
 use crate::terminal::{TerminalEvent, TerminalView};
 
@@ -205,6 +208,15 @@ fn truncate_surface_title(raw: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub enum PaneEvent {
+    DropSubjectSplit {
+        edge: Option<DropEdge>,
+        subject: crate::diff::ReviewSubject,
+    },
+    ReviewWithAgent {
+        subject: crate::diff::ReviewSubject,
+        base: String,
+        picks: Vec<crate::diff::review_terminal::ReviewCli>,
+    },
     /// This pane's surface ended (its process exited, or the user closed it) -
     /// the parent removes the pane from the layout tree. EP-002 US-004: a pane
     /// has exactly one surface, so this is what closing the last tab of a pane
@@ -391,6 +403,8 @@ pub struct Pane {
     close_armed: bool,
     /// Inline header rename. `None` when the title is a label, not an editor.
     rename: Option<PaneRename>,
+    review_menu_open: bool,
+    review_picks: [bool; 4],
     rename_focus: FocusHandle,
     /// Ghostty-style unfocused dim: `true` when this pane is NOT the focused
     /// one in a multi-pane workspace. Pushed idempotently by
@@ -457,6 +471,8 @@ impl Pane {
             broadcast_stripe: None,
             close_armed: false,
             rename: None,
+            review_menu_open: false,
+            review_picks: [true, false, false, false],
             rename_focus: cx.focus_handle(),
             dimmed: false,
             dim_from: 0.0,
@@ -1551,6 +1567,9 @@ impl Pane {
                 .into_any_element();
         }
 
+        if let PaneSurface::Diff(diff) = &self.surface {
+            return Self::render_diff_surface_title(diff, cx);
+        }
         let full_title = Self::surface_full_title(&self.surface, cx);
         let show_tooltip = full_title.chars().count() > SURFACE_TITLE_TOOLTIP_THRESHOLD;
         let mut title = div()
@@ -1577,6 +1596,59 @@ impl Pane {
     /// unfocused dim from `f2bdd9d` covers the header exactly like the surface
     /// below it: the header is rendered *inside* the dim host (`pane-content`),
     /// under the dim layer and under the drop overlay.
+    fn render_diff_surface_title(
+        diff: &Entity<crate::diff::DiffView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let ui = pane_colors();
+        let subject = diff.read(cx).subject();
+        let repo = subject.repo_name();
+        let branch = subject.branch_label();
+        let tooltip = std::iter::once(subject.label().into())
+            .chain(diff.read(cx).attribution_lines())
+            .map(|line: SharedString| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        div()
+            .id("pane-header-title")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(HEADER_GAP))
+            .min_w_0()
+            .overflow_x_hidden()
+            .text_size(px(HEADER_TEXT_SIZE))
+            .line_height(px(HEADER_TEXT_LINE_HEIGHT))
+            .child(
+                svg()
+                    .size(px(13.))
+                    .flex_none()
+                    .path("icons/git-branch.svg")
+                    .text_color(ui.muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(ui.text)
+                    .child(repo),
+            )
+            .when(!branch.is_empty(), |title| {
+                title.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(ui.muted)
+                        .child(format!("\u{b7} {branch}")),
+                )
+            })
+            .delayed_tooltip(crate::ui_primitives::text_tooltip(tooltip))
+            .into_any_element()
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = pane_colors();
 
@@ -1844,8 +1916,9 @@ impl Pane {
             .h_full()
             .gap(px(0.));
 
-        let show_sessions_button =
-            !crate::agent_sessions::enabled_session_agents_from_config(&self.cached_config)
+        let is_diff = matches!(self.surface, PaneSurface::Diff(_));
+        let show_sessions_button = !is_diff
+            && !crate::agent_sessions::enabled_session_agents_from_config(&self.cached_config)
                 .is_empty();
 
         let mut action_cluster = div()
@@ -1856,6 +1929,55 @@ impl Pane {
             .h_full()
             .gap(px(HEADER_GAP));
 
+        if let PaneSurface::Diff(diff) = &self.surface {
+            let refresh = diff.clone();
+            let toggle = diff.clone();
+            let collapse = diff.clone();
+            action_cluster = action_cluster
+                .child(
+                    crate::ui_primitives::icon_button_sm(
+                        "diff-refresh",
+                        "icons/refresh.svg",
+                        "Refresh diff",
+                        ui.muted,
+                        ui.text.opacity(0.1),
+                    )
+                    .on_click(move |_, _, cx| refresh.update(cx, |view, cx| view.refresh(cx))),
+                )
+                .child(self.action_button(
+                    "diff-view-mode",
+                    "Toggle unified / split",
+                    "icons/split_vertical.svg",
+                    move |_, _, cx| {
+                        toggle.update(cx, |view, cx| view.set_split(!view.is_split(), cx))
+                    },
+                    cx,
+                ))
+                .child(self.action_button(
+                    "diff-collapse",
+                    "Expand / collapse all files",
+                    "icons/chevron-down.svg",
+                    move |_, _, cx| {
+                        collapse.update(cx, |view, cx| {
+                            view.set_all_collapsed(!view.all_collapsed(), cx)
+                        })
+                    },
+                    cx,
+                ))
+                .child(
+                    crate::ui_primitives::icon_button_md(
+                        "pane-review-agent",
+                        "icons/sparkles.svg",
+                        "Review with agent",
+                        ui.muted,
+                        ui.text.opacity(0.1),
+                    )
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.review_menu_open = !this.review_menu_open;
+                        cx.notify();
+                    })),
+                );
+        }
         // Zoom indicator badge
         if self.zoomed {
             action_cluster = action_cluster.child(
@@ -1923,16 +2045,18 @@ impl Pane {
             // Right side dock for this pane's workspace folder: the git diff, a
             // shell, or an open file, picked on the dock's first open. Trails
             // the cluster so the two splits keep their leading slots.
-            .child(self.action_button(
-                "pane-btn-diff-dock",
-                "Toggle dock",
-                "icons/layout-sidebar-right.svg",
-                cx.listener(|_this, _e: &ClickEvent, _window, cx| {
-                    cx.emit(PaneEvent::ToggleDiffDock);
-                    cx.stop_propagation();
-                }),
-                cx,
-            ));
+            .when(!is_diff, |cluster| {
+                cluster.child(self.action_button(
+                    "pane-btn-diff-dock",
+                    "Toggle dock",
+                    "icons/layout-sidebar-right.svg",
+                    cx.listener(|_this, _e: &ClickEvent, _window, cx| {
+                        cx.emit(PaneEvent::ToggleDiffDock);
+                        cx.stop_propagation();
+                    }),
+                    cx,
+                ))
+            });
 
         end_section.child(action_cluster)
     }
@@ -2088,6 +2212,7 @@ impl Render for Pane {
             .invisible()
             // A session dragged from the sidebar lights up the drop overlay.
             .group_drag_over::<SessionDrag>(group_name.clone(), |s| s.visible())
+            .group_drag_over::<ReviewSubjectDrag>(group_name.clone(), |s| s.visible())
             // A pane dragged by its header: same overlay, neutral palette -
             // the drop swaps the two panes instead of splitting this one.
             .group_drag_over::<PaneDrag>(group_name.clone(), move |s| {
@@ -2102,6 +2227,14 @@ impl Render for Pane {
                 cx.emit(PaneEvent::DropPaneMove {
                     source_pane_id: drag.pane_id,
                     edge,
+                });
+                cx.notify();
+            }))
+            .on_drop(cx.listener(|this, drag: &ReviewSubjectDrag, _window, cx| {
+                let edge = this.drag_split_direction.take();
+                cx.emit(PaneEvent::DropSubjectSplit {
+                    edge,
+                    subject: drag.subject.clone(),
                 });
                 cx.notify();
             }))
@@ -2194,7 +2327,23 @@ impl Render for Pane {
             // header + body, drop overlay over the dim (a preview must stay
             // crisp on an unfocused pane), and the overlay stays inside
             // `group_name` so its `group_drag_over` still resolves.
+            .on_drag_move::<ReviewSubjectDrag>(cx.listener(
+                |this, e: &DragMoveEvent<ReviewSubjectDrag>, _window, cx| {
+                    this.apply_drag_edge(e.bounds, e.event.position, cx);
+                },
+            ))
+            .on_action(
+                cx.listener(|this, _: &crate::DiffReviewWithAgent, _window, cx| {
+                    if matches!(this.surface, PaneSurface::Diff(_)) {
+                        this.review_menu_open = !this.review_menu_open;
+                        cx.notify();
+                    }
+                }),
+            )
             .child(self.render_header(cx))
+            .when(self.review_menu_open, |content| {
+                content.child(self.render_review_menu(cx))
+            })
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(dim_layer)
             .child(overlay);

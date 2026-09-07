@@ -594,17 +594,17 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         group: ShortcutGroup::Diff,
     },
     ActionMeta {
+        name: "diff_review_with_agent",
+        factory: || Box::new(crate::DiffReviewWithAgent),
+        context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
+        description: "Diff: review with agent",
+        group: ShortcutGroup::Diff,
+    },
+    ActionMeta {
         name: "diff_toggle_view",
         factory: || Box::new(crate::DiffToggleView),
         context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
         description: "Diff: toggle unified / split",
-        group: ShortcutGroup::Diff,
-    },
-    ActionMeta {
-        name: "diff_toggle_sync",
-        factory: || Box::new(crate::DiffToggleSync),
-        context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
-        description: "Diff: toggle scroll sync",
         group: ShortcutGroup::Diff,
     },
     // EP-005 US-018 (prd-file-editor-2026-Q3): the diff dock's new-tab chords.

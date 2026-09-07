@@ -447,17 +447,16 @@ fn release_layout_scrollback(
 /// Drop the parts of a serialized tree that cannot be restored, returning
 /// `None` when nothing restorable is left.
 ///
-/// A leaf holding a Diff surface serializes to `LayoutNode::Pane { surfaces:
-/// [] }` - `serialize_with` filters the diff `SurfaceDefinition` out but still
-/// emits the leaf. Restoring that leaf would fall into
-/// `spawn_pane_from_surfaces`' fallback and silently hand back a plain shell,
-/// contradicting the pane-level rule that a diff surface is derived state and
-/// not restorable at all. So the leaf goes, and the tree closes over the gap:
-/// a split left with one child collapses into that child, a split left with
-/// none disappears, and a tree that prunes away entirely yields `None`.
+/// Review serializes its diff subjects in its own grid. Workspace undo still
+/// excludes diff surfaces, so an ephemeral diff tab cannot resurrect as a
+/// shell. Empty leaves disappear and one-child splits collapse around them.
 pub(crate) fn prune_unrestorable(node: LayoutNode) -> Option<LayoutNode> {
     match node {
         LayoutNode::Pane { surfaces } => {
+            let surfaces: Vec<_> = surfaces
+                .into_iter()
+                .filter(|surface| surface.surface_type.as_deref() != Some("diff"))
+                .collect();
             if surfaces.is_empty() {
                 None
             } else {
@@ -813,133 +812,15 @@ fn restore_closed_surface_record(
 }
 
 impl PaneFlowApp {
-    pub(crate) fn diff_review_terminals_for_workspace(
-        &self,
-        workspace_id: u64,
-        cx: &App,
-    ) -> Vec<Entity<TerminalView>> {
-        let target_repo = self
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.id == workspace_id)
-            .and_then(|workspace| workspace.repo_root.as_deref());
-        let unowned_repo = target_repo.filter(|repo| {
-            !self.workspaces.iter().any(|workspace| {
-                workspace.id != workspace_id && workspace.repo_root.as_deref() == Some(*repo)
-            })
-        });
-        let mut terminals = Vec::new();
-        for view in self.diff_mode.diff_view_cache.values() {
-            let view = view.read(cx);
-            let include_every_column = unowned_repo.is_some_and(|repo| view.repo_root() == repo);
-            terminals
-                .extend(view.review_terminals_for_workspace(workspace_id, include_every_column));
-        }
-        if let Some(view) = &self.diff_mode.diff_view {
-            let view = view.read(cx);
-            let include_every_column = unowned_repo.is_some_and(|repo| view.repo_root() == repo);
-            terminals
-                .extend(view.review_terminals_for_workspace(workspace_id, include_every_column));
-        }
-        if let Some(view) = &self.diff_mode.multi_diff_view {
-            terminals.extend(view.read(cx).review_terminals_for_workspace(
-                workspace_id,
-                unowned_repo,
-                cx,
-            ));
-        }
-        if let Some((_, view)) = &self.diff_mode.multi_diff_view_retained {
-            terminals.extend(view.read(cx).review_terminals_for_workspace(
-                workspace_id,
-                unowned_repo,
-                cx,
-            ));
-        }
-        terminals.sort_by_key(|terminal| terminal.entity_id());
-        terminals.dedup();
-        terminals
-    }
-
-    /// Drop the exact Review terminals that die with a workspace close even
-    /// when Diff mode is not mounted. Cache pruning/rebuild is mode-dependent;
-    /// terminal lifecycle is not.
-    fn drop_diff_review_terminals_for_workspace(
-        &mut self,
-        workspace_id: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let target_repo = self
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.id == workspace_id)
-            .and_then(|workspace| workspace.repo_root.clone());
-        let unowned_repo = target_repo.as_deref().filter(|repo| {
-            !self.workspaces.iter().any(|workspace| {
-                workspace.id != workspace_id && workspace.repo_root.as_deref() == Some(*repo)
-            })
-        });
-
-        let mut views: Vec<_> = self.diff_mode.diff_view_cache.values().cloned().collect();
-        views.extend(self.diff_mode.diff_view.clone());
-        views.sort_by_key(|view| view.entity_id());
-        views.dedup();
-        for view in views {
-            let include_every_column = {
-                let view = view.read(cx);
-                unowned_repo.is_some_and(|repo| view.repo_root() == repo)
-            };
-            view.update(cx, |view, _| {
-                view.drop_review_terminals_for_workspace(workspace_id, include_every_column);
-            });
-        }
-
-        if let Some(view) = self.diff_mode.multi_diff_view.clone() {
-            view.update(cx, |view, cx| {
-                view.drop_review_terminals_for_workspace(workspace_id, unowned_repo, cx);
-            });
-        }
-        if let Some((_, view)) = self.diff_mode.multi_diff_view_retained.clone() {
-            view.update(cx, |view, cx| {
-                view.drop_review_terminals_for_workspace(workspace_id, unowned_repo, cx);
-            });
-        }
-    }
-
-    fn diff_review_terminal_cwds(&self, cx: &App) -> Vec<std::path::PathBuf> {
-        let mut cwds = Vec::new();
-        for view in self.diff_mode.diff_view_cache.values() {
-            cwds.extend(view.read(cx).review_terminal_cwds(cx));
-        }
-        if let Some(view) = &self.diff_mode.diff_view {
-            cwds.extend(view.read(cx).review_terminal_cwds(cx));
-        }
-        if let Some(view) = &self.diff_mode.multi_diff_view {
-            cwds.extend(view.read(cx).review_terminal_cwds(cx));
-        }
-        if let Some((_, view)) = &self.diff_mode.multi_diff_view_retained {
-            cwds.extend(view.read(cx).review_terminal_cwds(cx));
-        }
-        cwds
-    }
-
-    fn all_diff_review_terminals(&self, cx: &App) -> Vec<Entity<TerminalView>> {
-        let mut terminals = Vec::new();
-        for view in self.diff_mode.diff_view_cache.values() {
-            terminals.extend(view.read(cx).review_terminals());
-        }
-        if let Some(view) = &self.diff_mode.diff_view {
-            terminals.extend(view.read(cx).review_terminals());
-        }
-        if let Some(view) = &self.diff_mode.multi_diff_view {
-            terminals.extend(view.read(cx).review_terminals(cx));
-        }
-        if let Some((_, view)) = &self.diff_mode.multi_diff_view_retained {
-            terminals.extend(view.read(cx).review_terminals(cx));
-        }
-        terminals.sort_by_key(|terminal| terminal.entity_id());
-        terminals.dedup();
-        terminals
-    }
+    // Issue #438: the four Review-terminal sweeps that used to live here are
+    // gone. Review no longer embeds terminals inside a `DiffView` (upstream
+    // a8d55f74 deleted the review terminal panel), so "Review with agent"
+    // opens an ordinary workspace tab at the checkout - the same path #334's
+    // "Continue in" uses. A review agent is therefore an ordinary pane on a
+    // tab's layout tree, already covered by the normal close-confirmation and
+    // worktree-retirement walks; it no longer needs an off-tree sweep of its
+    // own. That also removes the gap where a review agent hosted in a
+    // `PaneSurface::Diff` pane was invisible to both.
 
     /// PTY session IDs whose members can independently `cd` after the UI-side
     /// retirement sample. The background worker uses these plus PaneFlow's
@@ -952,7 +833,6 @@ impl PaneFlowApp {
             .flat_map(|pane| pane.read(cx).terminals().cloned().collect::<Vec<_>>())
             .collect();
         terminals.extend(self.all_diff_dock_terminals());
-        terminals.extend(self.all_diff_review_terminals(cx));
         terminals.sort_by_key(|terminal| terminal.entity_id());
         terminals.dedup();
 
@@ -1088,6 +968,7 @@ impl PaneFlowApp {
         self.pane_menu_open = None;
         self.profile_menu_open = None;
         self.files_menu_open = None;
+        self.review.dismiss_popovers();
         self.agent_sessions.sessions_menu_open = None;
         // Issue #349: the rail header's Customize Sidebar popover is a menu
         // like the rest, and folds its submenu with it.
@@ -1319,10 +1200,6 @@ impl PaneFlowApp {
                 .diff_dock_terminal_cwds(cx)
                 .iter()
                 .any(|cwd| path_is_within_worktree(cwd, worktree_path))
-            || self
-                .diff_review_terminal_cwds(cx)
-                .iter()
-                .any(|cwd| path_is_within_worktree(cwd, worktree_path))
     }
 
     /// Whether a candidate CWD is inside a checkout whose asynchronous
@@ -1485,18 +1362,11 @@ impl PaneFlowApp {
         self.retire_worktrees_after_durable_save(retired_worktrees, cx);
     }
 
-    /// US-005/US-014: if in Diff mode, rebuild the mounted diff (deferred) so it
-    /// follows the current workspace set and active workspace - covers workspace
-    /// switch (re-target) and close (Multi-project group reconcile). Deferred so
-    /// the rebuild (which mounts a fresh entity) never runs inside a
-    /// render/callback. No-op outside Diff mode.
-    pub(crate) fn reconcile_diff_after_workspace_change(&self, cx: &mut Context<Self>) {
-        if matches!(self.mode, paneflow_config::schema::AppMode::Diff) {
-            let weak = cx.weak_entity();
-            cx.defer(move |cx| {
-                let _ = weak.update(cx, |app, cx| app.rebuild_diff_view(cx));
-            });
-        }
+    /// Retire Review subjects whose repository closed, including a parked
+    /// zoom layout, and leave Review if no viable subject remains.
+    pub(crate) fn reconcile_diff_after_workspace_change(&mut self, cx: &mut Context<Self>) {
+        self.review_prune_after_workspace_change(cx);
+        self.leave_review_if_disabled(cx);
     }
 
     /// Add a workspace rooted at the implicit launch directory.
@@ -1663,6 +1533,20 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.mode == paneflow_config::schema::AppMode::Diff {
+            let focused = self
+                .review
+                .layout
+                .as_ref()
+                .and_then(|root| root.focused_pane(window, cx))
+                .or_else(|| self.review_active_pane());
+            if let Some(pane) = focused
+                && let Err(message) = self.review_split_pane(pane, direction, cx)
+            {
+                self.show_toast(message, cx);
+            }
+            return;
+        }
         let Some(ws) = self.active_workspace() else {
             return;
         };
@@ -1787,6 +1671,18 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.mode == paneflow_config::schema::AppMode::Diff {
+            let closing = self
+                .review
+                .layout
+                .as_ref()
+                .and_then(|root| root.focused_pane(window, cx))
+                .or_else(|| self.review_active_pane());
+            if let Some(pane) = closing {
+                self.review_close_pane(pane, cx);
+            }
+            return;
+        }
         // Issue #83: the pane this gesture would close, resolved once - the
         // guard below and the undo capture must agree on it.
         let closing_pane = self.active_workspace().and_then(|ws| {
@@ -1883,6 +1779,11 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.mode == paneflow_config::schema::AppMode::Diff {
+            self.show_toast("Switch to Agents to restore a closed pane", cx);
+            return;
+        }
+
         let Some(record) = self.closed_items.pop() else {
             self.show_toast("Nothing to restore", cx);
             return; // The undo stack is empty
@@ -2282,7 +2183,6 @@ impl PaneFlowApp {
         let closed_record = capture_closed_workspace_record(&self.workspaces[idx], idx, cx);
         let closed_id = self.workspaces[idx].id;
         self.drop_diff_dock_for_workspace(closed_id, cx);
-        self.drop_diff_review_terminals_for_workspace(closed_id, cx);
         let retired_worktrees =
             drop_closed_records_for_workspace(&mut self.closed_items, closed_id);
         self.retire_worktrees_after_durable_save(retired_worktrees, cx);
@@ -3517,36 +3417,20 @@ mod tests {
         );
     }
 
-    /// A Diff pane is derived state, not a document: `capture_closed_pane_record`
-    /// already refuses to record one, and a tab holding a diff must not smuggle
-    /// it back in. The chain has three links - `serialize_with` empties the diff
-    /// surface but still emits the leaf, `prune_unrestorable` drops that leaf,
-    /// and capture runs the two in that order.
-    ///
-    /// Links two and three are covered by the `prune_unrestorable_*` tests
-    /// above; this pins links one and three. It is deliberately NOT a
-    /// `#[gpui::test]`: constructing a real `DiffView` starts a filesystem
-    /// watcher through `smol::unblock`, which the GPUI test scheduler rejects
-    /// as non-deterministic and which aborts the whole test binary.
+    /// Review subject persistence must not make workspace undo restore a diff
+    /// as a shell. The workspace-specific pruning owns this separate rule.
     #[test]
     fn capture_closed_tab_record_prunes_the_leaf_a_diff_pane_serializes_to() {
-        let serde_src = include_str!("../../layout/serde.rs");
-        assert!(
-            serde_src
-                .contains(r#".filter(|surface| surface.surface_type.as_deref() != Some("diff"))"#),
-            "a diff surface is filtered out of the serialized leaf"
-        );
-        assert!(
-            serde_src.contains("LayoutNode::Pane { surfaces }"),
-            "the leaf itself is still emitted, which is why pruning is needed"
-        );
-
+        let layout = LayoutNode::Pane {
+            surfaces: vec![paneflow_config::schema::SurfaceDefinition {
+                surface_type: Some("diff".into()),
+                cwd: Some("/repo".into()),
+                path: Some("/repo".into()),
+                ..Default::default()
+            }],
+        };
+        assert!(prune_unrestorable(layout).is_none());
         let src = include_str!("mod.rs");
-        let layout_capture = source_slice(src, "fn capture_closed_tab_layout_with_budget(", "\n}");
-        assert!(
-            layout_capture.contains("prune_unrestorable(tree.serialize_with_scrollback_budget("),
-            "capture must prune the serialized tree before storing it"
-        );
         let record_capture = source_slice(src, "fn capture_closed_tab_record(", "\n}");
         assert!(
             record_capture.contains("capture_closed_tab_layout(tab, cx)?"),
@@ -4235,12 +4119,10 @@ mod tests {
             "fn live_terminal_session_ids(",
             "/// Whether any live workspace",
         );
-        for required in [
-            "self.workspaces",
-            "all_diff_dock_terminals",
-            "all_diff_review_terminals",
-            "child_pid",
-        ] {
+        // Issue #438: `all_diff_review_terminals` is gone with the embedded
+        // review terminal. A review agent is an ordinary pane now, so the
+        // `self.workspaces` walk already reaches it.
+        for required in ["self.workspaces", "all_diff_dock_terminals", "child_pid"] {
             assert!(capture.contains(required), "missing {required}: {capture}");
         }
 
@@ -4373,7 +4255,6 @@ mod tests {
         let closer = source_slice(src, "fn close_workspace_at_inner", "fn reorder_workspace");
         for helper in [
             "drop_diff_dock_for_workspace",
-            "drop_diff_review_terminals_for_workspace",
             "refresh_composer_slot",
             "sync_broadcast_stripes",
             "flush_pending_prefill",

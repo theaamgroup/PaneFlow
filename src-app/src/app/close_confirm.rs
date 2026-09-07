@@ -338,13 +338,16 @@ impl PaneFlowApp {
         states
     }
 
+    /// Issue #438: the dock is the only off-tree terminal host left. Review
+    /// used to embed terminals inside a `DiffView`, invisible to the layout
+    /// walk; "Review with agent" now opens an ordinary workspace tab, so a
+    /// review agent is an on-tree pane the caller has already counted.
     fn workspace_off_tree_close_states(
         &self,
         workspace_id: u64,
         cx: &App,
     ) -> Vec<SurfaceCloseState> {
         let mut off_tree = self.diff_dock_terminals_for_workspace(workspace_id);
-        off_tree.extend(self.diff_review_terminals_for_workspace(workspace_id, cx));
         off_tree.sort_by_key(|terminal| terminal.entity_id());
         off_tree.dedup();
         Self::terminal_close_states(off_tree, cx)
@@ -990,6 +993,37 @@ mod tests {
     }
 
     #[test]
+    fn review_context_close_routes_to_review_before_workspace_lookup() {
+        let menu = include_str!("sidebar/context_menu.rs");
+        let close_item = source_slice(
+            menu,
+            "\"pane-context-close\".into()",
+            "cx.stop_propagation()",
+        );
+        assert!(close_item.contains("this.request_close_pane("));
+        let close = include_str!("close_confirm.rs");
+        let request = source_slice(close, "pub(crate) fn request_close_pane(", "\n    }");
+        assert!(request.contains("self.close_pane_undoably(&pane, cx)"));
+        let undoable = source_slice(close, "pub(crate) fn close_pane_undoably(", "\n    }");
+        assert!(undoable.contains("self.remove_pane_from_tree(pane, cx)"));
+        let removal = source_slice(
+            include_str!("event_handlers.rs"),
+            "pub(crate) fn remove_pane_from_tree(",
+            "\n    }",
+        );
+        let review = removal
+            .find("if self.review_contains_pane(pane)")
+            .expect("Review ownership gate");
+        let workspace = removal
+            .find("let Some((ws_idx, tab_idx))")
+            .expect("workspace ownership lookup");
+        assert!(review < workspace);
+        let review_route = &removal[review..workspace];
+        assert!(review_route.contains("self.review_close_pane(pane.clone(), cx)"));
+        assert!(review_route.contains("return;"));
+    }
+
+    #[test]
     fn close_confirm_body_names_the_agent_and_both_consequences() {
         let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"), false);
         assert!(
@@ -1243,8 +1277,10 @@ mod tests {
             "diff-dock agents die with their workspace and must arm confirmation: {states}"
         );
         assert!(
-            states.contains("diff_review_terminals_for_workspace"),
-            "Diff Review agents die with their host repo and must arm confirmation: {states}"
+            !states.contains("diff_review_terminals_for_workspace"),
+            "issue #438: Review no longer embeds terminals, so there is no \
+             off-tree Review sweep to fold in - a review agent is an ordinary \
+             pane the layout walk already covers: {states}"
         );
         assert!(
             states.contains("terminal_close_states(off_tree"),
@@ -1254,8 +1290,9 @@ mod tests {
 
     /// #184 Phase 4: the dock is parked per tab, so a tab close kills that
     /// tab's dock terminals and must arm confirmation for an agent in one -
-    /// and only that tab's: a sibling tab's dock, and the repo's Review
-    /// terminals, are not on a tab close's kill list.
+    /// and only that tab's: a sibling tab's dock is not on a tab close's kill
+    /// list. (Review terminals used to be named here too; issue #438 removed
+    /// them as a category.)
     #[test]
     fn tab_guard_includes_its_own_dock_terminals_only() {
         let src = include_str!("close_confirm.rs");
@@ -1269,9 +1306,8 @@ mod tests {
             "dock terminals are resolved per tab, never per workspace: {states}"
         );
         assert!(
-            !states.contains("diff_dock_terminals_for_workspace")
-                && !states.contains("diff_review_terminals_for_workspace"),
-            "a tab close must not count sibling tabs' docks or Review terminals: {states}"
+            !states.contains("diff_dock_terminals_for_workspace"),
+            "a tab close must not count sibling tabs' docks: {states}"
         );
 
         let request = source_slice(
