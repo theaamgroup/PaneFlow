@@ -310,9 +310,13 @@ fn wait_git_dir_probe(probe: &GitDirSharedProbe) -> Option<std::path::PathBuf> {
     if remaining.is_zero() {
         return None;
     }
+    // Issue #451: loop on the predicate. A bare `wait_timeout` returns on a
+    // spurious wakeup with `timed_out()` false and the slot still empty, which
+    // would report a healthy checkout as "not a repo" for that call.
+    // `wait_timeout_while` re-waits on what is left of the original budget.
     let (slot, timed_out) = probe
         .cond
-        .wait_timeout(slot, remaining)
+        .wait_timeout_while(slot, remaining, |slot| slot.is_none())
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if timed_out.timed_out() {
         log::warn!(
@@ -924,6 +928,90 @@ mod tests {
             git_dir_probe_spawn_count(dir.path().to_str().unwrap()),
             1,
             "overlapping callers must share one waiter"
+        );
+    }
+
+    /// Issue #451: a condition variable may return without a notification.
+    /// The waiter has to re-wait on that instead of reading an empty slot and
+    /// telling its caller the checkout is not a repo.
+    #[test]
+    fn wait_git_dir_probe_re_waits_after_a_spurious_wakeup() {
+        let probe = std::sync::Arc::new(GitDirSharedProbe {
+            result: std::sync::Mutex::new(None),
+            cond: std::sync::Condvar::new(),
+            started: std::time::Instant::now(),
+        });
+        let expected = std::path::PathBuf::from("/spurious/checkout/.git");
+        let waker = std::sync::Arc::clone(&probe);
+        let published = expected.clone();
+        let notifier = std::thread::spawn(move || {
+            // Two wakeups with the slot still empty: what a spurious wakeup
+            // looks like from inside the waiter.
+            for _ in 0..2 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                waker.cond.notify_all();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            {
+                let mut slot = waker
+                    .result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *slot = Some(Some(published));
+            }
+            waker.cond.notify_all();
+        });
+
+        let started = std::time::Instant::now();
+        let answer = wait_git_dir_probe(&probe);
+        let elapsed = started.elapsed();
+        notifier.join().expect("notifier");
+
+        assert_eq!(
+            answer,
+            Some(expected),
+            "a spurious wakeup must not report a real repo as missing"
+        );
+        assert!(
+            elapsed < GIT_DIR_PROBE_TIMEOUT,
+            "the real answer arrived well inside the budget: {elapsed:?}"
+        );
+    }
+
+    /// Issue #451: re-waiting must draw on what is left of the original
+    /// 250 ms deadline - neither returning early on a wakeup that published
+    /// nothing, nor restarting the budget on each one.
+    #[test]
+    fn wait_git_dir_probe_honours_the_deadline_across_spurious_wakeups() {
+        let probe = std::sync::Arc::new(GitDirSharedProbe {
+            result: std::sync::Mutex::new(None),
+            cond: std::sync::Condvar::new(),
+            started: std::time::Instant::now(),
+        });
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = std::sync::Arc::clone(&probe);
+        let waker_stop = std::sync::Arc::clone(&stop);
+        let notifier = std::thread::spawn(move || {
+            while !waker_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                waker.cond.notify_all();
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let answer = wait_git_dir_probe(&probe);
+        let elapsed = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        notifier.join().expect("notifier");
+
+        assert_eq!(answer, None, "a probe that never answers is not a repo");
+        assert!(
+            elapsed + std::time::Duration::from_millis(25) >= GIT_DIR_PROBE_TIMEOUT,
+            "an unpublished wakeup must not end the wait early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < GIT_DIR_PROBE_TIMEOUT * 3,
+            "each wakeup must not restart the budget: {elapsed:?}"
         );
     }
 
