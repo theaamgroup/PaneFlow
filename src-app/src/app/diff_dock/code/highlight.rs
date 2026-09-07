@@ -951,8 +951,10 @@ mod tests {
             .edit;
         // Applied second, above it, and it changes both the row and the byte
         // count, so every byte of the rename moved.
+        // Ten inserted rows, so the stale range lands clear of the renamed
+        // row instead of merely straddling it.
         let low = d
-            .insert(d.line_to_byte(50), "// a\n// b\n// c\n")
+            .insert(d.line_to_byte(50), &"// filler line\n".repeat(10))
             .expect("insert");
 
         assert!(
@@ -968,16 +970,16 @@ mod tests {
         assert!(
             after.contains("fn renamed_symbol() {}"),
             "the rename landed: {:?}",
-            &after[d.line_to_byte(153)..d.line_to_byte(154)]
+            &after[d.line_to_byte(160)..d.line_to_byte(161)]
         );
         let expected = expected_rows(&after, d.ext(), d.line_count());
         assert!(
-            !expected[153].is_empty(),
+            !expected[160].is_empty(),
             "the renamed row is colored from scratch"
         );
         assert_eq!(
-            h.runs(153),
-            expected[153].as_slice(),
+            h.runs(160),
+            expected[160].as_slice(),
             "the renamed row must be requeried at its shifted offset, not left interpolated"
         );
     }
