@@ -296,9 +296,221 @@ fn ensure_binaries_extracted_into(cache_root: &Path, exe: &Path) -> Result<PathB
             })
             .collect();
 
+        // Lease first so a concurrent prune of `bin/<version>/` sees a live
+        // holder before the wrappers exist (#442).
+        write_version_lock(&target_dir);
         extract_into(&entries, &target_dir)?;
         link_cli_into(&target_dir, exe)?;
+        prune_stale_version_dirs(&target_dir);
         Ok(target_dir)
+    }
+}
+
+/// Per-process lease prefix inside `bin/<version>/`. Hidden so it is never
+/// mistaken for a shim. The pid is in the filename so two same-version
+/// instances (`PANEFLOW_ALLOW_MULTIPLE`) do not overwrite each other.
+const VERSION_LOCK_PREFIX: &str = ".paneflow-live.";
+/// Single-file lease written by the first #442 landing. Still honored so a
+/// process that has not restarted keeps its dir.
+const VERSION_LOCK_LEGACY: &str = ".paneflow-live";
+
+struct VersionLock {
+    pid: u32,
+    start: Option<u64>,
+}
+
+fn version_lock_name(pid: u32) -> String {
+    format!("{VERSION_LOCK_PREFIX}{pid}")
+}
+
+fn write_version_lock(dir: &Path) {
+    let pid = std::process::id();
+    write_version_lock_for(dir, pid, process_start_time(pid));
+}
+
+fn write_version_lock_for(dir: &Path, pid: u32, start: Option<u64>) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::debug!(
+            "#442: could not create {} for live lock: {e}",
+            dir.display()
+        );
+        return;
+    }
+    let body = match start {
+        Some(start) => format!("pid={pid}\nstart={start}\n"),
+        None => format!("pid={pid}\n"),
+    };
+    let path = dir.join(version_lock_name(pid));
+    if let Err(e) = std::fs::write(&path, body) {
+        log::debug!("#442: could not write live lock {}: {e}", path.display());
+    }
+}
+
+fn parse_version_lock(body: &str) -> Option<VersionLock> {
+    let mut pid = None;
+    let mut start = None;
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("pid=") {
+            pid = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("start=") {
+            start = rest.trim().parse().ok();
+        }
+    }
+    Some(VersionLock { pid: pid?, start })
+}
+
+fn parse_lease_file(name: &std::ffi::OsStr, body: &str) -> Option<VersionLock> {
+    let name = name.to_str()?;
+    if name == VERSION_LOCK_LEGACY {
+        return parse_version_lock(body);
+    }
+    let rest = name.strip_prefix(VERSION_LOCK_PREFIX)?;
+    let pid: u32 = rest.parse().ok()?;
+    let start = body
+        .lines()
+        .find_map(|line| line.strip_prefix("start=")?.trim().parse().ok());
+    Some(VersionLock { pid, start })
+}
+
+fn process_start_time(pid: u32) -> Option<u64> {
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::proc_pid::pidinfo;
+    let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
+    Some(
+        info.pbi_start_tvsec
+            .wrapping_mul(1_000_000)
+            .wrapping_add(info.pbi_start_tvusec),
+    )
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    // SAFETY: `kill` with sig=0 is an existence check; it does not deliver.
+    let ret = unsafe { libc::kill(pid as i32, 0) };
+    if ret == -1 {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        return errno != libc::ESRCH;
+    }
+    true
+}
+
+/// Skip prune unless the sibling is proven unused. A live pid whose start
+/// time still matches is the process that staged the dir; a dead pid or a
+/// start-time mismatch (PID reuse) is unused. A live pid we cannot pin is
+/// kept, because deleting a running version's PATH dir is worse than
+/// leaving a stale one.
+fn lock_holder_is_live(pid: u32, pinned_start: Option<u64>) -> bool {
+    if !process_is_alive(pid) {
+        return false;
+    }
+    match (pinned_start, process_start_time(pid)) {
+        (Some(pinned), Some(current)) => pinned == current,
+        _ => true,
+    }
+}
+
+fn version_dir_in_use(dir: &Path) -> bool {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return true,
+        };
+        let name = entry.file_name();
+        if name != std::ffi::OsStr::new(VERSION_LOCK_LEGACY)
+            && !name
+                .to_str()
+                .is_some_and(|n| n.starts_with(VERSION_LOCK_PREFIX))
+        {
+            continue;
+        }
+        let body = match std::fs::read_to_string(entry.path()) {
+            Ok(body) => body,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return true,
+        };
+        if parse_lease_file(&name, &body)
+            .is_some_and(|lock| lock_holder_is_live(lock.pid, lock.start))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// #442: remove sibling `bin/<other-version>/` directories once this
+/// version's wrappers are in place. Nothing references an old version
+/// directory after the app that staged it is gone: `PANEFLOW_BIN_DIR` is
+/// rewritten for every new pane, and the bridge and hook binaries live at
+/// stable non-versioned paths under `data_dir()`.
+///
+/// A sibling is kept if **any** per-process `.paneflow-live.<pid>` lease
+/// (or a legacy `.paneflow-live`) still names a live process. Prune only
+/// when every lease is dead (pid gone or start-time mismatch). This
+/// process's own `VERSION` directory is never a prune target.
+///
+/// Best-effort and never fatal: extraction has already succeeded. The
+/// sweep is all-or-nothing and confined to `bin/`: if any entry beside
+/// `current` is not a plain directory (a file, a symlink), the layout is
+/// not ours to reason about and nothing is removed.
+fn prune_stale_version_dirs(current: &Path) {
+    let Some(bin) = current.parent() else {
+        return;
+    };
+    let entries = match std::fs::read_dir(bin) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::debug!("#442: not pruning {}: {e}", bin.display());
+            return;
+        }
+    };
+    let mut stale = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log::debug!("#442: not pruning {}: {e}", bin.display());
+                return;
+            }
+        };
+        let path = entry.path();
+        if path == current {
+            continue;
+        }
+        // `symlink_metadata` so a symlink to a directory is not a plain
+        // directory: the sweep must never follow one outside `bin/`.
+        let is_plain_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir());
+        if !is_plain_dir {
+            log::debug!(
+                "#442: not pruning {}: {} is not a plain directory",
+                bin.display(),
+                path.display()
+            );
+            return;
+        }
+        if version_dir_in_use(&path) {
+            log::debug!(
+                "#442: keeping {}: a live process still uses it",
+                path.display()
+            );
+            continue;
+        }
+        stale.push(path);
+    }
+    for path in stale {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => log::info!("#442: removed stale wrapper dir {}", path.display()),
+            Err(e) => log::warn!(
+                "#442: failed to remove stale wrapper dir {}: {e}",
+                path.display()
+            ),
+        }
     }
 }
 
@@ -874,6 +1086,217 @@ mod tests {
         );
         assert!(cli.is_file(), "#440: the CLI link must resolve");
         assert!(wrappers_present_for(&dir, &exe));
+    }
+
+    #[test]
+    fn extraction_prunes_stale_version_directories() {
+        // #442: sibling `bin/<other-version>/` directories left behind by
+        // earlier releases are removed once this version has extracted.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale_a = bin.join("0.1.1");
+        let stale_b = bin.join("0.2.1");
+        for stale in [&stale_a, &stale_b] {
+            std::fs::create_dir_all(stale).unwrap();
+            std::fs::write(stale.join("claude"), b"old shim").unwrap();
+        }
+        // A sibling outside `bin/` is never a pruning target.
+        let outside = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("0.1.1");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let dir = ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(dir.is_dir(), "#442: the current version dir must survive");
+        assert!(
+            !stale_a.exists() && !stale_b.exists(),
+            "#442: stale version dirs must be pruned after a successful extraction"
+        );
+        assert!(
+            outside.is_dir(),
+            "#442: nothing outside bin/ may be touched"
+        );
+        assert!(wrappers_present_for(&dir, &exe));
+    }
+
+    #[test]
+    fn extraction_keeps_a_version_dir_a_live_process_still_uses() {
+        // #442: two PaneFlow versions can run at once. A live lock in the
+        // older dir means panes still have it on PATH, so prune must keep it.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let live = bin.join("0.1.1");
+        let unused = bin.join("0.2.1");
+        for dir in [&live, &unused] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("claude"), b"old shim").unwrap();
+        }
+        write_version_lock(&live);
+
+        let dir = ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(dir.is_dir());
+        assert!(
+            live.is_dir(),
+            "#442: a sibling with a live lock must not be pruned"
+        );
+        assert!(
+            !unused.exists(),
+            "#442: a sibling with no lock is unused and may be pruned"
+        );
+    }
+
+    #[test]
+    fn extraction_prunes_a_version_dir_whose_lock_pid_is_dead() {
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale = bin.join("0.1.1");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("claude"), b"old shim").unwrap();
+        write_version_lock_for(&stale, 1_999_999_999, Some(1));
+
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(
+            !stale.exists(),
+            "#442: a stale lock (dead pid) may be pruned"
+        );
+    }
+
+    #[test]
+    fn extraction_keeps_a_dir_when_one_of_two_leases_is_still_live() {
+        // Two same-version instances each write `.paneflow-live.<pid>`.
+        // Killing one must not let a newer extract prune the dir.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let live = bin.join("0.1.1");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("claude"), b"old shim").unwrap();
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let child_pid = child.id();
+        write_version_lock_for(&live, child_pid, process_start_time(child_pid));
+        write_version_lock(&live);
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(
+            live.is_dir(),
+            "#442: one dead sibling lease must not prune a dir this process still holds"
+        );
+    }
+
+    #[test]
+    fn extraction_prunes_a_dir_when_every_lease_is_dead() {
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale = bin.join("0.1.1");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("claude"), b"old shim").unwrap();
+        write_version_lock_for(&stale, 1_999_999_998, Some(1));
+        write_version_lock_for(&stale, 1_999_999_999, Some(2));
+
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(
+            !stale.exists(),
+            "#442: a dir whose every lease is dead may be pruned"
+        );
+    }
+
+    #[test]
+    fn extraction_skips_the_prune_when_bin_holds_a_non_directory() {
+        // #442: the sweep is all-or-nothing - a stray file or symlink under
+        // `bin/` means the layout is not ours to reason about, so nothing
+        // is removed.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale = bin.join("0.1.1");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("claude"), b"old shim").unwrap();
+        std::fs::write(bin.join("stray-file"), b"not a version dir").unwrap();
+
+        let dir = ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(dir.is_dir());
+        assert!(
+            stale.is_dir(),
+            "#442: a non-directory entry under bin/ must skip the whole sweep"
+        );
+        assert!(bin.join("stray-file").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_skips_the_prune_when_bin_holds_a_symlinked_directory() {
+        // #442: a symlink to a directory is not a plain directory; the
+        // sweep must not follow or remove it, and skips entirely.
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("PaneFlow.app-exe");
+        std::fs::write(&exe, b"stand-in for the app executable").unwrap();
+        let bin = cache_root
+            .path()
+            .join(crate::runtime_paths::APP_SUBDIR)
+            .join("bin");
+        let stale = bin.join("0.1.1");
+        std::fs::create_dir_all(&stale).unwrap();
+        let elsewhere = cache_root.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), b"precious").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, bin.join("0.3.0")).unwrap();
+
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+
+        assert!(
+            stale.is_dir(),
+            "#442: a symlink under bin/ must skip the sweep"
+        );
+        assert!(
+            bin.join("0.3.0").symlink_metadata().is_ok(),
+            "#442: the symlink itself must survive"
+        );
+        assert!(
+            elsewhere.join("keep").is_file(),
+            "#442: the symlink target must never be swept"
+        );
     }
 
     #[test]

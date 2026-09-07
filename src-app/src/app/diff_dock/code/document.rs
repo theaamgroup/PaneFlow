@@ -22,10 +22,14 @@
 //! **Longest line.** [`CodeDocument::longest_line_chars`] backs the horizontal
 //! scroll extent of US-008. It is measured over every line exactly once, at
 //! construction; afterwards each edit only measures the rows it actually
-//! touched. That makes it grow-only between loads: deleting the longest line
-//! leaves an over-estimate rather than paying a full rescan per keystroke. The
-//! direction is deliberate - an over-estimate only offers scroll room nobody
-//! uses, while an under-estimate would clip real text.
+//! touched, so on the render thread the value never drops below the real
+//! maximum - an over-estimate only offers scroll room nobody uses, while an
+//! under-estimate would clip real text. An edit that may have shrunk the
+//! widest line (a removal on it, or one spanning rows) marks the value stale
+//! rather than paying a full rescan per keystroke:
+//! [`CodeDocument::longest_line_snapshot`] hands the rope to a background
+//! measurement and [`CodeDocument::apply_longest_line_measurement`] takes the
+//! result back only while the revision it measured is still the current one.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -121,6 +125,12 @@ pub(crate) struct CodeDocument {
     line_ending: LineEnding,
     read_only: Option<ReadOnlyReason>,
     longest_line_chars: usize,
+    /// Bumped by every mutation; a background measurement carries the
+    /// revision it scanned so a result from before a later edit is refused.
+    revision: u64,
+    /// `longest_line_chars` may be above the real maximum: an edit may have
+    /// shrunk the widest line, and only a full rescan can say.
+    longest_line_stale: bool,
 }
 
 /// Deliberately hand-written rather than derived: a derived `Debug` would dump
@@ -148,16 +158,18 @@ impl CodeDocument {
         // a path can never resolve to one grammar in the diff and another in
         // the editor (US-004).
         let ext = crate::diff::file_ext(&path.to_string_lossy());
-        let mut doc = Self {
+        let normalized = normalize_newlines(raw);
+        let longest_line_chars = measure_text_lines(&normalized);
+        Self {
             path,
             ext,
-            text: Rope::from_str(&normalize_newlines(raw)),
+            text: Rope::from_str(&normalized),
             line_ending,
             read_only: None,
-            longest_line_chars: 0,
-        };
-        doc.longest_line_chars = doc.measure_all_lines();
-        doc
+            longest_line_chars,
+            revision: 0,
+            longest_line_stale: false,
+        }
     }
 
     #[allow(dead_code)] // EP-001 accessor: the view holds the path it opened, so nothing reads it back off the document yet.
@@ -182,6 +194,13 @@ impl CodeDocument {
 
     pub(crate) fn len_bytes(&self) -> usize {
         self.text.len_bytes()
+    }
+
+    /// Mutation counter, bumped by every insert and remove. A background diff
+    /// carries the revision it was computed against so a batch of splices from
+    /// before a later edit is refused instead of landing on shifted offsets.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Number of lines, editor-style: an empty file is one empty line, and a
@@ -210,10 +229,37 @@ impl CodeDocument {
         self.line_ending = line_ending;
     }
 
-    /// Widest line measured so far, in characters. Grow-only between loads -
-    /// see the module header for why that direction is the safe one.
+    /// Widest line measured so far, in characters. Never below the real
+    /// maximum; possibly above it until a pending background measurement
+    /// lands - see the module header for why that direction is the safe one.
     pub(crate) fn longest_line_chars(&self) -> usize {
         self.longest_line_chars
+    }
+
+    /// The rope and its revision, for a background rescan, when an edit may
+    /// have shrunk the widest line. `None` while the maximum is known exact.
+    /// The rope clone is O(1): `ropey` shares the tree until a write.
+    pub(crate) fn longest_line_snapshot(&self) -> Option<(Rope, u64)> {
+        self.longest_line_stale
+            .then(|| (self.text.clone(), self.revision))
+    }
+
+    /// Full scan of `text`, in characters per line. Free of `self` so it can
+    /// run on another thread over a [`Self::longest_line_snapshot`].
+    pub(crate) fn measure_longest_line(text: &Rope) -> usize {
+        measure_rope_lines(text)
+    }
+
+    /// Take a background measurement back. Refused, returning `false`, when
+    /// `revision` is no longer the current one (an edit landed while the scan
+    /// ran; the next snapshot carries it) or when nothing is stale.
+    pub(crate) fn apply_longest_line_measurement(&mut self, revision: u64, longest: usize) -> bool {
+        if revision != self.revision || !self.longest_line_stale {
+            return false;
+        }
+        self.longest_line_chars = longest;
+        self.longest_line_stale = false;
+        true
     }
 
     /// Byte range of row `row`'s **content**, with the trailing `\n` (and a
@@ -285,8 +331,14 @@ impl CodeDocument {
         }
         let start_byte = self.snap_to_boundary(byte_offset);
         let start_point = self.point_at(start_byte);
+        // A line break inserted into the widest row splits it, and both
+        // pieces may be narrower - only a rescan can tell.
+        let may_shrink_longest = normalized.contains('\n')
+            && self.line_chars(start_point.row) == self.longest_line_chars;
         let char_idx = self.text.byte_to_char(start_byte);
         self.text.insert(char_idx, &normalized);
+        self.revision = self.revision.wrapping_add(1);
+        self.longest_line_stale |= may_shrink_longest;
 
         let new_end_byte = start_byte + normalized.len();
         let new_end_point = self.point_at(new_end_byte);
@@ -315,9 +367,15 @@ impl CodeDocument {
         }
         let start_point = self.point_at(start_byte);
         let old_end_point = self.point_at(old_end_byte);
+        // A removal on the widest row, or one that swallows whole rows, may
+        // have taken the maximum with it.
+        let may_shrink_longest = start_point.row != old_end_point.row
+            || self.line_chars(start_point.row) == self.longest_line_chars;
         let start_char = self.text.byte_to_char(start_byte);
         let end_char = self.text.byte_to_char(old_end_byte);
         self.text.remove(start_char..end_char);
+        self.revision = self.revision.wrapping_add(1);
+        self.longest_line_stale |= may_shrink_longest;
 
         self.remeasure_rows(start_point.row, start_point.row);
         Some(CodeEdit {
@@ -347,48 +405,21 @@ impl CodeDocument {
     /// UTF-16 code-unit index of byte `offset` (US-012).
     ///
     /// GPUI's [`gpui::EntityInputHandler`] speaks UTF-16 because that is what
-    /// every platform IME speaks; the document speaks bytes. `ropey` 1.6 ships
-    /// no UTF-16 conversion, so this walks the rope's chunks and takes an
-    /// `is_ascii` fast path per chunk - the vectorized check turns the common
-    /// case (a source file that is ASCII up to the caret) into a length sum
-    /// instead of a per-character loop.
+    /// every platform IME speaks; the document speaks bytes. `ropey` carries
+    /// UTF-16 counts in its tree metadata, so both directions are a tree
+    /// descent, O(log n), rather than a walk of every chunk up to the caret.
     pub(crate) fn byte_to_utf16(&self, offset: usize) -> usize {
         let offset = self.snap_to_boundary(offset);
         let char_idx = self.text.byte_to_char(offset);
-        self.text
-            .slice(..char_idx)
-            .chunks()
-            .map(utf16_len)
-            .sum::<usize>()
+        self.text.char_to_utf16_cu(char_idx)
     }
 
     /// Inverse of [`Self::byte_to_utf16`]. An index that lands inside a
     /// surrogate pair resolves to the start of that character, which keeps the
-    /// result a legal caret slot.
+    /// result a legal caret slot; one past the end clamps to the end.
     pub(crate) fn utf16_to_byte(&self, target: usize) -> usize {
-        let mut units = 0usize;
-        let mut byte = 0usize;
-        for chunk in self.text.chunks() {
-            let chunk_units = utf16_len(chunk);
-            if units + chunk_units < target {
-                units += chunk_units;
-                byte += chunk.len();
-                continue;
-            }
-            for ch in chunk.chars() {
-                if units >= target {
-                    return byte;
-                }
-                let char_units = ch.len_utf16();
-                if units < target && units + char_units > target {
-                    return byte;
-                }
-                units += char_units;
-                byte += ch.len_utf8();
-            }
-            return byte;
-        }
-        byte
+        let target = target.min(self.text.len_utf16_cu());
+        self.text.char_to_byte(self.text.utf16_cu_to_char(target))
     }
 
     /// The bytes to write to disk: the rope's LF text, with every `\n` turned
@@ -422,15 +453,6 @@ impl CodeDocument {
         self.line(row).map_or(0, |l| l.len_chars())
     }
 
-    /// Full scan, load-time only (US-001 AC: a complete recompute is allowed
-    /// exactly here).
-    fn measure_all_lines(&self) -> usize {
-        (0..self.text.len_lines())
-            .map(|row| self.line_chars(row))
-            .max()
-            .unwrap_or(0)
-    }
-
     /// Measure only the rows an edit touched and keep the running maximum.
     /// Bounded by the edit's own row span, never by `line_count`.
     fn remeasure_rows(&mut self, first_row: usize, last_row: usize) {
@@ -444,14 +466,39 @@ impl CodeDocument {
     }
 }
 
-/// UTF-16 code units in `chunk`. ASCII is one unit per byte, which is the
-/// whole point of the fast path.
-fn utf16_len(chunk: &str) -> usize {
-    if chunk.is_ascii() {
-        chunk.len()
-    } else {
-        chunk.chars().map(char::len_utf16).sum()
+/// Widest line of `text`, in characters: the load-time scan (US-001 AC: a
+/// complete recompute is allowed exactly here). Runs over the source string
+/// rather than the rope, so an ASCII file - the common case - is a byte-length
+/// maximum over `\n` splits with no per-character work.
+fn measure_text_lines(text: &str) -> usize {
+    if text.is_ascii() {
+        return text
+            .as_bytes()
+            .split(|byte| *byte == b'\n')
+            .map(<[u8]>::len)
+            .max()
+            .unwrap_or(0);
     }
+    text.split('\n')
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Widest line of `text`, in characters: the full rescan a stale maximum
+/// needs, run off the render thread over a snapshot of the rope.
+fn measure_rope_lines(text: &Rope) -> usize {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for ch in text.chars() {
+        if ch == '\n' {
+            longest = longest.max(current);
+            current = 0;
+        } else {
+            current += 1;
+        }
+    }
+    longest.max(current)
 }
 
 /// Collapse `\r\n` to `\n`. Borrows when there is nothing to do, which is the
@@ -509,6 +556,17 @@ mod tests {
         assert_eq!(d.line_count(), 3);
         assert_eq!(d.line_string(2).as_deref(), Some(""));
         assert_eq!(d.line(3), None);
+    }
+
+    #[test]
+    fn utf16_offsets_use_rope_metadata_and_clamp_to_character_boundaries() {
+        let d = doc("a👍🏽z");
+        assert_eq!(d.byte_to_utf16(0), 0);
+        assert_eq!(d.byte_to_utf16(1), 1);
+        assert_eq!(d.byte_to_utf16(5), 3);
+        assert_eq!(d.utf16_to_byte(2), 1);
+        assert_eq!(d.utf16_to_byte(4), 5);
+        assert_eq!(d.utf16_to_byte(usize::MAX), d.len_bytes());
     }
 
     #[test]
@@ -648,11 +706,47 @@ mod tests {
         assert_eq!(d.longest_line_chars(), 4);
         d.insert(0, "ZZZZZZZZ").expect("insert");
         assert_eq!(d.longest_line_chars(), 10);
-        // Only the edited rows are re-measured, so the maximum is grow-only:
-        // deleting the widest line leaves the over-estimate rather than paying
-        // an O(lines) rescan on a keystroke.
+        // Only the edited rows are re-measured on the spot: deleting the
+        // widest line leaves the over-estimate rather than paying an O(lines)
+        // rescan on a keystroke...
         d.remove(0..8).expect("remove");
         assert_eq!(d.longest_line_chars(), 10);
+        // ...and marks it stale, so the rescan can run off-thread and land
+        // the exact value afterwards.
+        let (snapshot, revision) = d.longest_line_snapshot().expect("stale maximum");
+        let longest = CodeDocument::measure_longest_line(&snapshot);
+        assert!(d.apply_longest_line_measurement(revision, longest));
+        assert_eq!(d.longest_line_chars(), 4);
+        assert!(d.longest_line_snapshot().is_none());
+    }
+
+    #[test]
+    fn a_non_longest_line_edit_does_not_request_a_global_measurement() {
+        let mut d = doc("longest line\nshort\n");
+        d.remove(13..14).expect("remove from short line");
+        assert!(d.longest_line_snapshot().is_none());
+    }
+
+    #[test]
+    fn a_multiline_removal_requests_one_global_measurement() {
+        let mut d = doc("longest line\nfirst\nsecond\n");
+        d.remove(13..25).expect("remove across short lines");
+        let (snapshot, revision) = d.longest_line_snapshot().expect("stale maximum");
+        let longest = CodeDocument::measure_longest_line(&snapshot);
+        assert!(d.apply_longest_line_measurement(revision, longest));
+        assert_eq!(d.longest_line_chars(), 12);
+    }
+
+    #[test]
+    fn a_stale_longest_line_measurement_cannot_overwrite_a_newer_edit() {
+        let mut d = doc("longest\nshort\n");
+        d.remove(0..3).expect("shrink longest");
+        let (snapshot, revision) = d.longest_line_snapshot().expect("stale maximum");
+        let longest = CodeDocument::measure_longest_line(&snapshot);
+        d.insert(d.len_bytes(), "much longer now")
+            .expect("new edit");
+        assert!(!d.apply_longest_line_measurement(revision, longest));
+        assert_eq!(d.longest_line_chars(), 15);
     }
 
     #[test]

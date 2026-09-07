@@ -118,34 +118,7 @@ fn load() -> Option<PersistedWindowSize> {
 }
 
 fn load_from_path(path: &Path) -> Option<PersistedWindowSize> {
-    // `open(O_RDONLY)` on a FIFO with no writer blocks forever, so refuse
-    // anything that is not a regular file before the open. The size cap and
-    // the type check are applied again on the opened descriptor below, which
-    // is what closes the stat-to-read swap window (issue #258).
-    match std::fs::metadata(path) {
-        Ok(metadata) if !metadata.is_file() => {
-            log::warn!("window state: rejected invalid file at {}", path.display());
-            return None;
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            log::warn!(
-                "window state: failed to inspect {}: {error}",
-                path.display()
-            );
-            return None;
-        }
-    }
-
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            log::warn!("window state: failed to open {}: {error}", path.display());
-            return None;
-        }
-    };
+    let file = open_state_file(path)?;
     let contents = read_capped(file, path)?;
     match serde_json::from_str::<PersistedWindowSize>(&contents) {
         Ok(state) if state.width.is_finite() && state.height.is_finite() => Some(state),
@@ -158,6 +131,27 @@ fn load_from_path(path: &Path) -> Option<PersistedWindowSize> {
         }
         Err(error) => {
             log::warn!("window state: invalid JSON at {}: {error}", path.display());
+            None
+        }
+    }
+}
+
+/// Open the window-state file without blocking. `open(O_RDONLY)` on a FIFO
+/// with no writer blocks forever, and a pre-open `metadata()` type check
+/// cannot close that window (issue #407: a FIFO swapped in after the stat
+/// still hangs the open), so the open itself is `O_NONBLOCK`. The type and
+/// size checks then run on the opened descriptor in `read_capped`.
+fn open_state_file(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            log::warn!("window state: failed to open {}: {error}", path.display());
             None
         }
     }
@@ -282,6 +276,40 @@ mod tests {
         assert!(
             load_from_path(&path).is_none(),
             "a file over MAX_WINDOW_STATE_BYTES must be rejected"
+        );
+    }
+
+    #[test]
+    fn load_from_path_returns_none_on_fifo_without_blocking() {
+        // Issue #407: a FIFO at the window-state path must not hang startup
+        // on `open(2)`. A pre-open `metadata()` check cannot close this: the
+        // FIFO can land between the stat and the open, so the open itself has
+        // to be non-blocking. `open_state_file` is exercised directly because
+        // it is the step that used to block.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("window-state.json");
+        let c_path = std::ffi::CString::new(path.to_str().expect("utf-8 path")).expect("cstring");
+        // SAFETY: `c_path` is a valid NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let started = std::time::Instant::now();
+        let opened = open_state_file(&path);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "opening a FIFO window-state file must not block: {elapsed:?}"
+        );
+        let file = opened.expect("O_NONBLOCK open of a reader-less FIFO succeeds");
+        assert!(
+            read_capped(file, &path).is_none(),
+            "a FIFO must be rejected by the descriptor type check"
+        );
+
+        let started = std::time::Instant::now();
+        assert!(load_from_path(&path).is_none(), "a FIFO must load as None");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "load_from_path on a FIFO must not block"
         );
     }
 

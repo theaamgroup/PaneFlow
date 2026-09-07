@@ -579,16 +579,41 @@ pub(crate) fn read_sessions_for_cwd_with_omitted(
     agent: SessionAgent,
     cwd: &str,
 ) -> (Vec<SessionMeta>, usize) {
+    read_sessions_for_cwd_with_omitted_within(
+        agent,
+        cwd,
+        std::time::Instant::now() + crate::command_sessions::COMMAND_DEADLINE,
+    )
+}
+
+/// [`read_sessions_for_cwd_with_omitted`] drawing on a caller-owned wall-clock
+/// budget (issue #401). Only the command-backed agents spawn a subprocess, so
+/// only they consult `budget_until`; the file readers are unaffected.
+pub(crate) fn read_sessions_for_cwd_with_omitted_within(
+    agent: SessionAgent,
+    cwd: &str,
+    budget_until: std::time::Instant,
+) -> (Vec<SessionMeta>, usize) {
     match agent {
         SessionAgent::Claude => crate::claude_sessions::read_sessions_for_cwd_with_omitted(cwd),
         SessionAgent::Codex => crate::codex_sessions::read_sessions_for_cwd_with_omitted(cwd),
         SessionAgent::OpenCode => crate::opencode_sessions::read_sessions_for_cwd_with_omitted(cwd),
         SessionAgent::Pi => crate::pi_sessions::read_sessions_for_cwd_with_omitted(cwd),
-        SessionAgent::Cursor => crate::command_sessions::read_cursor_sessions_for_cwd(cwd),
-        SessionAgent::Gemini => crate::command_sessions::read_gemini_sessions_for_cwd(cwd),
-        SessionAgent::Kiro => crate::command_sessions::read_kiro_sessions_for_cwd(cwd),
-        SessionAgent::Grok => crate::command_sessions::read_grok_sessions_for_cwd(cwd),
-        SessionAgent::Hermes => crate::command_sessions::read_hermes_sessions_for_cwd(cwd),
+        SessionAgent::Cursor => {
+            crate::command_sessions::read_cursor_sessions_for_cwd(cwd, budget_until)
+        }
+        SessionAgent::Gemini => {
+            crate::command_sessions::read_gemini_sessions_for_cwd(cwd, budget_until)
+        }
+        SessionAgent::Kiro => {
+            crate::command_sessions::read_kiro_sessions_for_cwd(cwd, budget_until)
+        }
+        SessionAgent::Grok => {
+            crate::command_sessions::read_grok_sessions_for_cwd(cwd, budget_until)
+        }
+        SessionAgent::Hermes => {
+            crate::command_sessions::read_hermes_sessions_for_cwd(cwd, budget_until)
+        }
     }
 }
 
@@ -861,8 +886,32 @@ pub fn match_sessions_to_column(
 /// `smol::unblock` (it is folded into the off-thread diff-load task so
 /// attribution never blocks first paint and is re-fetched only on re-diff).
 pub fn attribution_for_column(cwd: &str, branch: &str) -> Vec<SessionMeta> {
+    attribution_for_column_within(
+        cwd,
+        branch,
+        &enabled_session_agents(),
+        std::time::Instant::now() + DIFF_ATTRIBUTION_DEADLINE,
+    )
+}
+
+/// Wall-clock budget for one column's attribution load (issue #401). Every
+/// command-backed session reader in [`attribution_for_column`] draws on this
+/// single deadline, so N enabled list CLIs cannot stack N independent
+/// `COMMAND_DEADLINE`s on one blocking-pool worker; a starved agent simply
+/// contributes no sessions to that load. Mirrors `GIT_STATS_SWEEP_DEADLINE`.
+pub const DIFF_ATTRIBUTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// [`attribution_for_column`] over an explicit agent list and a caller-owned
+/// budget. Command-backed agents whose turn comes after `budget_until` spawn
+/// nothing; the file-backed readers do not consult the clock.
+pub(crate) fn attribution_for_column_within(
+    cwd: &str,
+    branch: &str,
+    agents: &[SessionAgent],
+    budget_until: std::time::Instant,
+) -> Vec<SessionMeta> {
     let mut all = Vec::new();
-    for agent in enabled_session_agents() {
+    for &agent in agents {
         match agent {
             SessionAgent::Claude => all.extend(
                 crate::claude_sessions::read_sessions_with_usage_for_attribution(cwd, branch),
@@ -878,12 +927,14 @@ pub fn attribution_for_column(cwd: &str, branch: &str) -> Vec<SessionMeta> {
             // These readers expose title-only metadata through documented
             // local contracts. They have no token usage in PaneFlow today, so
             // attribution degrades to agent + recency like OpenCode.
-            SessionAgent::Pi
-            | SessionAgent::Hermes
+            SessionAgent::Pi => all.extend(read_sessions_for_cwd(agent, cwd)),
+            SessionAgent::Hermes
             | SessionAgent::Grok
             | SessionAgent::Cursor
             | SessionAgent::Gemini
-            | SessionAgent::Kiro => all.extend(read_sessions_for_cwd(agent, cwd)),
+            | SessionAgent::Kiro => {
+                all.extend(read_sessions_for_cwd_with_omitted_within(agent, cwd, budget_until).0)
+            }
         }
         all = match_sessions_to_column(all, cwd, branch);
     }
@@ -1026,6 +1077,33 @@ fn parse_iso8601_to_unix_secs(iso: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #401: once the column's shared budget is spent, every remaining
+    /// command-backed agent is skipped without spawning its list CLI.
+    #[test]
+    fn attribution_for_column_within_skips_command_agents_once_the_budget_is_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let agents = [
+            SessionAgent::Hermes,
+            SessionAgent::Grok,
+            SessionAgent::Cursor,
+            SessionAgent::Gemini,
+            SessionAgent::Kiro,
+        ];
+        let started = std::time::Instant::now();
+        let sessions = attribution_for_column_within(&cwd, "main", &agents, spent);
+        let elapsed = started.elapsed();
+        assert!(
+            sessions.is_empty(),
+            "a spent budget contributes no sessions"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "spent budget must not run any list command, took {elapsed:?}"
+        );
+    }
     use super::*;
 
     #[test]
