@@ -2622,6 +2622,7 @@ pub(crate) fn base_block_text(base_lines: &[&str], range: &Range<u32>) -> String
         text.push('\n');
     } else if end > start
         && end == base_lines.len()
+        && base_lines.len() > 1
         && start + 1 == end
         && base_lines.last() == Some(&"")
     {
@@ -2644,6 +2645,33 @@ pub(crate) fn doc_line_range(doc: &CodeDocument, lines: &Range<u32>) -> Range<us
         }
     };
     byte_at(start)..byte_at(end)
+}
+
+/// Splice line tokens, including the separator before an EOF suffix. A
+/// trailing empty token represents a final newline but occupies zero bytes
+/// at line_to_byte, so ordinary row-start offsets cannot delete it.
+fn block_replacement(
+    doc: &CodeDocument,
+    base_lines: &[&str],
+    block: &Block,
+) -> (Range<usize>, String) {
+    let mut range = doc_line_range(doc, &block.lines);
+    let start = (block.base_lines.start as usize).min(base_lines.len());
+    let end = (block.base_lines.end as usize).clamp(start, base_lines.len());
+    let mut replacement = base_lines[start..end].join("\n");
+    if block.lines.end as usize >= doc.line_count() {
+        if block.lines.start > 0 {
+            if (block.lines.start as usize) < doc.line_count() {
+                range.start = range.start.saturating_sub(1);
+            }
+            if start < end {
+                replacement.insert(0, '\n');
+            }
+        }
+    } else if start < end {
+        replacement.push('\n');
+    }
+    (range, replacement)
 }
 
 fn plural(count: usize, word: &str) -> String {
@@ -2805,6 +2833,7 @@ impl CodeView {
         let tracker = self.tracker.clone();
         let load_generation = self.slot.current();
         self.tracker_generation = self.tracker_generation.wrapping_add(1);
+        let tracker_generation = self.tracker_generation;
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let compute = move || {
                 let mut tracker = tracker;
@@ -2820,7 +2849,10 @@ impl CodeView {
             let tracker = cx.background_spawn(async move { compute() }).await;
             cx.update(|cx| {
                 let _ = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
-                    if !view.slot.accept(load_generation) || !view.tracker.is_active() {
+                    if !view.slot.accept(load_generation)
+                        || !view.tracker.is_active()
+                        || view.tracker_generation != tracker_generation
+                    {
                         return;
                     }
                     let current = view.state.document().map(CodeDocument::revision);
@@ -2931,13 +2963,17 @@ impl CodeView {
         // `popup.block.lines` is the range at open time. Keystrokes shift the
         // live tracker; `base_lines` is the stable HEAD identity, so look the
         // block up there instead of restoring whatever now sits at the old row.
-        let line = self
+        let Some(line) = self
             .tracker
             .blocks()
             .iter()
             .find(|block| block.base_lines == popup.block.base_lines)
             .map(|block| block.lines.start as usize)
-            .unwrap_or(popup.block.lines.start as usize);
+        else {
+            // The original block may have disappeared or merged during an
+            // edit. Its former row can now name an unrelated change.
+            return;
+        };
         self.revert_block(line, cx);
     }
 
@@ -2963,10 +2999,7 @@ impl CodeView {
                 return false;
             };
             let base_lines = split_lines(base);
-            (
-                doc_line_range(doc, &block.lines),
-                base_block_text(&base_lines, &block.base_lines),
-            )
+            block_replacement(doc, &base_lines, &block)
         };
         let caret = CodeSelection::at(range.start);
         self.end_typing_group();
@@ -5692,6 +5725,37 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn a_pending_tracker_cannot_replace_a_new_base_at_the_same_commit(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "a\nB\nc\n");
+        view.update(cx, |view, cx| {
+            view.install_base(
+                Base::Text {
+                    text: "a\nb\nc\n".into(),
+                    head_sha: "same-commit".into(),
+                },
+                cx,
+            );
+            view.refresh_tracker_now(cx);
+            view.install_base(
+                Base::Text {
+                    text: "a\nB\nc\n".into(),
+                    head_sha: "same-commit".into(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert!(
+                view.tracker.is_dirty(),
+                "the old worker must not mark the new base clean"
+            );
+        });
+        settle_tracker(cx);
+        view.update(cx, |view, _| assert!(view.marker_blocks().is_empty()));
+    }
+
     fn blocks_of(view: &CodeView) -> Vec<(BlockKind, Range<u32>, Range<u32>)> {
         view.marker_blocks()
             .iter()
@@ -6031,6 +6095,41 @@ mod tests {
         });
     }
 
+    #[test]
+    fn gutter_revert_restores_eof_separators_and_empty_files() {
+        for (base, edited) in [
+            ("a\nb", "a\nb\n"),
+            ("a\nb\n", "a\nb"),
+            ("a", "a\nextra"),
+            ("a\nextra", "a"),
+            ("", "\nx"),
+            ("\nx", ""),
+            ("", "x"),
+            ("x", ""),
+        ] {
+            let doc = build_document(PathBuf::from("/nonexistent/eof.txt"), edited, false);
+            let base_lines = split_lines(base);
+            let mut tracker = BlockTracker::fresh(doc.line_count() as u32, base_lines.len() as u32);
+            tracker.refresh_dirty(&split_lines(edited), &base_lines, TRACKER_POLICY);
+            assert_eq!(tracker.blocks().len(), 1, "{base:?} -> {edited:?}");
+            let (range, replacement) = block_replacement(&doc, &base_lines, &tracker.blocks()[0]);
+            let mut restored = edited.to_string();
+            restored.replace_range(range, &replacement);
+            assert_eq!(restored, base, "{base:?} -> {edited:?}");
+        }
+    }
+
+    #[gpui::test]
+    fn removing_a_final_newline_through_gutter_revert_is_undoable(cx: &mut TestAppContext) {
+        let (view, cx) = tracked_view(cx, "a\nb", "a\nb\n");
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.revert_block(2, cx));
+            assert_eq!(text_of(view), "a\nb");
+            view.undo(&CeUndo, window, cx);
+            assert_eq!(text_of(view), "a\nb\n");
+        });
+    }
+
     #[gpui::test]
     fn the_popup_shows_the_base_text_copies_all_of_it_and_reverts(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
@@ -6080,6 +6179,30 @@ mod tests {
                 text_of(view),
                 "HEAD\na\nb\nc\n",
                 "Revert must restore the HEAD block at its shifted row, not the new top line"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_popup_whose_block_disappeared_does_not_revert_another_block(cx: &mut TestAppContext) {
+        let (view, cx) = tracked_view(cx, "a\nb\nc\nd\ne\n", "a\nB\nc\nD\ne\n");
+        view.update(cx, |view, cx| {
+            view.open_marker_popup(0, cx);
+            assert!(view.splice_all(
+                &[(0..4, "".into())],
+                CodeSelection::at(0),
+                EditGroup::Atomic,
+                cx
+            ));
+        });
+        settle_tracker(cx);
+        view.update(cx, |view, cx| {
+            assert!(view.popup.is_some());
+            view.revert_from_popup(cx);
+            assert_eq!(
+                text_of(view),
+                "c\nD\ne\n",
+                "the second change must remain intact"
             );
         });
     }
@@ -6171,7 +6294,7 @@ mod tests {
             "\n",
             "the trailing empty slot of a terminated file is a newline"
         );
-        assert_eq!(base_block_text(&[""], &(0..1)), "\n");
+        assert_eq!(base_block_text(&[""], &(0..1)), "");
         let unterminated = ["a", "b"];
         assert_eq!(base_block_text(&unterminated, &(1..2)), "b");
 
