@@ -50,7 +50,7 @@ pub(crate) use engine::{DiffHunk, hunk_for_base_line, hunk_for_new_line};
 pub(crate) use git::FileDiff;
 pub(crate) use git::{
     HeadFile, MAX_FILE_BYTES as MAX_DIFF_FILE_BYTES, classify as classify_git_bytes,
-    compute_head_diff, head_sha, is_git_worktree, show_head_file, try_worktree_toplevel,
+    compute_head_diff, head_sha, is_git_worktree, show_revision_file, try_worktree_toplevel,
 };
 pub(crate) use highlighter::{
     Grammar, MAX_HIGHLIGHT_BYTES, grammar_for_ext, highlight_lines, markdown_inline_grammar,

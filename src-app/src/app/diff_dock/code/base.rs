@@ -4,7 +4,7 @@ use std::sync::Arc;
 use gpui::{AsyncApp, Context, WeakEntity};
 
 use crate::diff::{
-    HeadFile, MAX_DIFF_FILE_BYTES, classify_git_bytes, head_sha, show_head_file,
+    HeadFile, MAX_DIFF_FILE_BYTES, classify_git_bytes, head_sha, show_revision_file,
     try_worktree_toplevel,
 };
 
@@ -86,8 +86,11 @@ pub(crate) fn load_base_blocking(path: &Path) -> Base {
         log::debug!("editor base: {} has no HEAD commit yet", toplevel.display());
         return Base::Untracked;
     };
-    match show_head_file(&toplevel, &rel_path) {
+    match show_revision_file(&toplevel, &sha, &rel_path) {
         Ok(HeadFile::Missing) => Base::Untracked,
+        // A former symlink now opened as source has a pathname blob at HEAD,
+        // not a text base suitable for a gutter Revert.
+        Ok(HeadFile::Symlink(_)) => Base::None,
         Ok(HeadFile::Content(bytes)) => {
             if bytes.len() as u64 > MAX_DIFF_FILE_BYTES {
                 log::debug!(
@@ -316,6 +319,32 @@ mod tests {
         };
         assert_eq!(&**text, "fn main() {}\n");
         assert_eq!(via_link, via_target);
+    }
+
+    #[test]
+    fn a_symlink_replaced_by_a_regular_file_has_no_pathname_gutter_base() {
+        let Some(dir) = repo() else { return };
+        let path = dir.path().join("link");
+        std::os::unix::fs::symlink("target", &path).unwrap();
+        assert!(commit(dir.path(), "symlink"));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "source text\n").unwrap();
+        assert_eq!(load_base_blocking(&path), Base::None);
+    }
+
+    #[test]
+    fn a_base_blob_is_read_from_the_pinned_commit_after_head_moves() {
+        let Some(dir) = repo() else { return };
+        let path = dir.path().join("file");
+        std::fs::write(&path, "old\n").unwrap();
+        assert!(commit(dir.path(), "old"));
+        let sha = head_sha(dir.path()).unwrap();
+        std::fs::write(&path, "new\n").unwrap();
+        assert!(commit(dir.path(), "new"));
+        let HeadFile::Content(bytes) = show_revision_file(dir.path(), &sha, "file").unwrap() else {
+            panic!("expected a regular blob");
+        };
+        assert_eq!(bytes, b"old\n");
     }
 
     #[cfg(unix)]

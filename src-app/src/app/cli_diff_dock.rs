@@ -81,6 +81,14 @@ pub(crate) struct DiffDockSlot {
 }
 
 impl DiffDockSlot {
+    /// Preserve the original folder while forcing a fresh snapshot when this
+    /// parked dock is next restored after a background file write.
+    fn invalidate_for_cwd(&mut self, cwd: &str) {
+        if let Some(data) = self.data.as_mut().filter(|data| data.cwd == cwd) {
+            data.loading = true;
+        }
+    }
+
     /// Nothing worth keeping: the session never opened the dock (or was left at
     /// its birth state), so parking it would only grow the map with slots
     /// indistinguishable from a fresh one.
@@ -226,6 +234,12 @@ pub(crate) fn any_file_tab_dirty<'a>(
 }
 
 impl PaneFlowApp {
+    pub(crate) fn invalidate_parked_diff_docks_for_cwd(&mut self, cwd: &str) {
+        for slot in self.diff_dock.parked.values_mut() {
+            slot.invalidate_for_cwd(cwd);
+        }
+    }
+
     /// Every dock terminal in the process: the live dock plus every parked
     /// slot. Feeds the worktree-teardown CWD gate, which must see every PTY.
     pub(crate) fn all_diff_dock_terminals(
@@ -647,6 +661,25 @@ mod tests {
             active_tab: 0,
             data: None,
         }
+    }
+
+    #[test]
+    fn a_background_revert_invalidates_only_matching_parked_snapshots() {
+        let mut parked = slot(true, true, 1);
+        let mut data = DiffDockData::loading("/repo/subfolder".into());
+        data.loading = false;
+        parked.data = Some(data);
+        parked.invalidate_for_cwd("/other");
+        assert!(!parked.data.as_ref().unwrap().loading);
+        parked.invalidate_for_cwd("/repo/subfolder");
+        let data = parked.data.as_ref().unwrap();
+        assert!(
+            data.loading,
+            "restoring the dock must rebuild this snapshot"
+        );
+        assert_eq!(data.cwd, "/repo/subfolder");
+        assert_eq!(parked.tabs.len(), 1);
+        assert!(parked.open);
     }
 
     #[test]
