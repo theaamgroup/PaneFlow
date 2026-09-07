@@ -2317,10 +2317,13 @@ impl CodeView {
         self.popup = None;
         self.hovered_marker = None;
         self.reset_tracker(cx);
-        // A symlink may now point at a different tracked file; re-resolve HEAD
-        // for that target. Regular files no-op in `install_base` when the SHA
-        // is unchanged.
-        self.start_base_load(cx);
+        // A symlink may now point at a different tracked file. Regular-file
+        // reloads must not spawn `start_base_load`: tests drain the document
+        // reload, and an extra `smol::unblock` wakes the GPUI local task from
+        // a blocking thread (`a_forced_reload_still_overwrites_the_document_the_user_edited`).
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            self.start_base_load(cx);
+        }
         self.sync_scroll_line_count();
         self.scroll.set_rows(scroll_rows);
         cx.notify();
