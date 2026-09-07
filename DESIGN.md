@@ -94,8 +94,11 @@ selection are translucent washes of the text color, not colored fills.
 corner — `|u|^n + |v|^n = 1` at exponent 4, sampled 16 times per corner and
 painted as a path, because GPUI has no corner-smoothing knob
 (`src-app/src/ui_primitives/squircle.rs`). A hovered row and the card around
-it read as one material. Separators are gone between chips and tabs. Hover,
-dim, and the sidebar slide are interpolated, never stepped.
+it read as one material. Separators are gone between chips and tabs. Hover on
+an `animated_hover` control, dim, and the sidebar slide are interpolated, never
+stepped. Rows skinned by `squircle_skin` are the deliberate exception: their
+hover fill is a visibility toggle so a long list does not ask GPUI for an
+animation frame per row (4.8).
 
 **Native.** The window is client-decorated with the macOS traffic lights. The
 shell reveals the AppKit sidebar material when the user asks for it. Terminal
@@ -189,7 +192,8 @@ is not rendered at all — one reachable mode is not a choice — and
 Every overlay is deferred at an explicit priority, and that ladder is itself
 part of the contract: **1** settings selects · **2** toasts · **3** menus
 (branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
-profile menu, Composer, dock options · **6** full-surface overlays · **8**
+profile menu, Composer, dock options, the diff feedback flash
+(`diff/view/interaction.rs`) · **6** full-surface overlays · **8**
 Launch Pad, Custom Buttons and the Review-with-agent popover · **10** dialogs ·
 **11** close confirm. A new overlay picks the rung that matches its kind rather
 than inventing one.
@@ -1207,7 +1211,7 @@ behavior.
 - `window_decorations` and `window_backdrop` are read once at startup.
 - `reduce_motion` reaches only three animations (4.8) and does not follow the
   macOS system setting.
-- The five accessibility gaps in 7.5, of which the missing focus ring is the
+- The six accessibility gaps in 7.5, of which the missing focus ring is the
   most consequential.
 - The About dialog is **Migration** in shape only: issue #273 moved its colors
   onto `UiColors`, but it still paints a plain 10 px round with a shadow
