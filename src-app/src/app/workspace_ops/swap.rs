@@ -24,8 +24,7 @@ impl PaneFlowApp {
         if self.swap_source.is_some() {
             // Already in swap mode - toggle off (cancel)
             self.set_swap_source(None, cx);
-        } else if let Some(ws) = self.active_workspace()
-            && let Some(root) = &ws.active_tab().root
+        } else if let Some(root) = self.nav_root()
             && root.leaf_count() > 1
         {
             // Enter swap mode: record the currently focused pane

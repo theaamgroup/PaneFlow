@@ -205,6 +205,10 @@ impl PaneFlowApp {
                 && let Ok(checkout) = checkout
             {
                 let ws_id = self.workspaces[w].id;
+                let repo_root = self.workspaces[w]
+                    .repo_root
+                    .clone()
+                    .unwrap_or_else(|| checkout.root.clone());
                 let worktree = crate::diff::DiffWorktree {
                     path: checkout.root.clone(),
                     branch: checkout.branch,
@@ -212,8 +216,10 @@ impl PaneFlowApp {
                 };
                 let diff = cx.new(|cx| {
                     crate::diff::DiffView::with_base(
-                        checkout.root,
-                        vec![worktree],
+                        crate::diff::ReviewSubject {
+                            repo_root,
+                            worktree,
+                        },
                         checkout.base.or(checkout.head),
                         cx,
                     )

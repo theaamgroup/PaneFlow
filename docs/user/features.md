@@ -161,7 +161,9 @@ and the tab reuses it; pick one that has none and PaneFlow checks it out
 under `<workspace>.worktrees/<branch>` next to the repository, then
 starts the pane there. Picking the branch the repository itself is on
 unbinds the tab. The sidebar shows a bound tab's branch under its title,
-and the diff dock and Review scope follow the active tab's checkout.
+and the diff dock follows the active tab's checkout. Review starts from that
+checkout when its grid is empty; its Workspaces rail lets you open other
+checkouts in independent diff panes (see [Review](review.md)).
 
 The binding decides where the *next* pane lands: a split or a new pane
 in a bound tab always starts inside that worktree, and a running pane is

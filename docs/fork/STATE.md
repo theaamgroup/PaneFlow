@@ -1,12 +1,55 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-06, through the first v0.12.0 port
-batch (#417: the terminal rendering chain #418 / #419 / #420, the Zed
-highlight queries #433, and the editor benchmark harness #425). The prior
+Living handoff record. Updated 2026-09-07, through the Review grid port
+(#438) following the first v0.12.0 port batch (#417: the terminal rendering
+chain #418 / #419 / #420, the Zed highlight queries #433, and the editor
+benchmark harness #425). The prior
 entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 #357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-07 #438: Review rails and diff pane grid.** The port of upstream
+`a8d55f74` replaces the former scope/multi-view Review surface with
+`app/review/`: a 220 px Workspaces rail, a 300 px Changes rail following
+the active pane, and a `LayoutTree` of at most six single-subject diff panes.
+Clicking a checkout focuses its existing pane or replaces the active subject;
+rail drag supports center replacement and edge splits, and pane headers use
+the existing move/split/zoom machinery. Each viewer owns its base and display
+mode. Session save/restore retains subjects, split geometry, and collapsed
+repository groups, pruning missing checkouts or repositories no longer open.
+
+The fork's Review with agent action lives in the diff pane header and opens
+selected installed agents in ordinary workspace tabs through
+`open_agent_tab_at_cwd`, with a second-opinion prompt for additional agents.
+It copies the first prompt to the clipboard and prefills with delayed
+`send_text` only, preserving `review_prefill_delay_ms` and human Enter
+submission. Embedded Review/shell terminals and the old multi-project
+scope/sync layer are removed. The `review_enabled` entry and demotion gates
+live in `app/review/mode.rs`; disabling it hides the entire mode strip and
+makes `Cmd+Shift+G` inert. Restore requires the switch and a viable layout or
+default subject. The action registry now has 94 actions.
+
+Verification on the port rebased onto `40ef0786` (the merged #452 / #453
+stack): `cargo build` exit 0; `cargo test --workspace` **3,300 passed,
+0 failed, 5 ignored**; `cargo clippy --workspace --all-targets` exit 0,
+**WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0;
+`./target/debug/paneflow --version` → `paneflow 0.4.0`;
+`cargo deny check advisories licenses sources` exit 0 →
+`advisories ok, licenses ok, sources ok`. The strict workspace Clippy check
+(`-- -D warnings`) and both platform censuses also passed.
+
+Executed test names were compared with main CI run `34130251928`: 20
+added and 15 removed. Five removals are moved/renamed switch, checkout-dedup,
+cache-cleanup and session tests; nine belong to the deleted custom column
+arranger; one covered ownership of the removed embedded Review terminals.
+All eight acceptance tests, both #309 budget tests, seven prompt tests and
+three fork watcher-cooldown tests pass. New coverage exercises actual grid
+serialization, the six-pane cap while zoomed, revealing a parked pane,
+linked-checkout agent placement, non-submitting prefill, mode gates and
+context-menu close routing. `diff/git.rs` is unchanged from the base.
+Independent spec and quality reviews passed after their fixes. Manual UI
+smoke was not run because macOS UI automation was disabled.
 
 **2026-09-06 #417, first batch: upstream v0.12.0 terminal chain, Zed
 queries, editor bench.** Upstream tagged v0.12.0 at `0ce6fd35`; the survey

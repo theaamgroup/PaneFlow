@@ -492,11 +492,6 @@ impl PaneFlowApp {
                                     app.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
                                 }
                                 app.spawn_worktree_listing(ws_idx, cx);
-                                // A checkout made behind a tab is invisible
-                                // to the Worktree-scope cache key (issue
-                                // #348): force the miss so the new lane
-                                // appears without a scope toggle.
-                                app.invalidate_worktree_diff_cache(&repo_root, cx);
                             }
                             Err(message) => app.show_toast(message, cx),
                         }
@@ -723,7 +718,7 @@ impl PaneFlowApp {
         for ws_idx in on_repo {
             self.spawn_worktree_listing(ws_idx, cx);
         }
-        self.invalidate_worktree_diff_cache(repo_root, cx);
+        self.review_forget_worktree(repo_root, path, cx);
     }
 }
 

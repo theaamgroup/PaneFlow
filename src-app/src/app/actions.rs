@@ -120,32 +120,22 @@ actions!(
         MarkdownFindPrev,
         MarkdownFindDismiss,
         MarkdownCopy,
-        // US-003 of tasks/prd-multi-worktree-diff-2026-Q3.md - open the
-        // multi-worktree diff view for the active workspace's repo. Resolves
-        // the repo from `active_idx`'s `repo_root` and opens a `DiffView` tab
-        // seeded with every sibling worktree. Also invoked directly by the
-        // sidebar group header's "Diff all" button.
-        OpenMultiDiff,
-        // US-003 of tasks/prd-git-diff-mode-2026-Q3.md - toggle the
-        // dedicated Git Diff mode (AppMode::Diff): a full-screen diff
-        // surface entered via the CLI / Diff sidebar toggle. Distinct from
-        // `OpenMultiDiff` (the ephemeral tab path), which stays alive as a
-        // secondary entry.
+        // Toggle the Review rails and pane grid.
         OpenDiffView,
         // US-003 of tasks/prd-ai-in-diff-2026-Q3.md - copy the hunk under the
         // cursor as a unified diff (Ctrl+Shift+C inside the DiffView context).
         CopyDiffHunk,
         // EP-003 US-009 (review redesign) - keyboard-first review
         // loop. All scoped to `DiffView && !Terminal && !TextInput` so they drive
-        // the diff body without stealing keystrokes from an embedded review/shell
-        // terminal or the base-branch filter input.
+        // the diff body without stealing keystrokes from terminals or the
+        // base-branch filter input.
         // `[`/`]` step hunks (wired to `goto_hunk`), `u` toggles unified/split,
-        // `s` toggles cross-column scroll sync, `Esc` dismisses any open
+        // `Esc` dismisses any open
         // popover/menu and refocuses the body.
         DiffNextHunk,
         DiffPrevHunk,
         DiffToggleView,
-        DiffToggleSync,
+        DiffReviewWithAgent,
         DiffDismiss,
         // EP-001 (CLI Cockpit) - CLI cockpit
         // steering. `OpenComposer` (US-001) anchors the multi-line prompt
@@ -192,7 +182,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert!(declared > 0, "the actions! block must have entries");
+        assert_eq!(declared, 94, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

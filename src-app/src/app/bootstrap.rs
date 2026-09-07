@@ -165,12 +165,13 @@ impl PaneFlowApp {
         // Pull the UI-mode bits out of the saved session BEFORE the
         // workspaces match consumes it.
         let restored_mode = saved_session.as_ref().map(|s| s.mode).unwrap_or_default();
-        // US-015 (prd-git-diff-mode-2026-Q3.md): restore the diff scope (an
-        // unknown / absent value falls back to the default, Project).
-        let restored_diff_scope = saved_session
+        // Issue #438: restore the Review pane grid and the folded Workspaces
+        // rows. Both are applied later, in `apply_restored_diff_mode`, because
+        // the grid's panes can only be built once the workspaces exist.
+        let restored_review_layout = saved_session.as_ref().and_then(|s| s.review_layout.clone());
+        let restored_review_collapsed = saved_session
             .as_ref()
-            .and_then(|s| s.diff_scope.as_deref())
-            .and_then(crate::diff::DiffScope::from_persisted)
+            .map(|s| s.review_collapsed.clone())
             .unwrap_or_default();
         // Issue #106: and the primary rail's collapse, restored as the state
         // the rail *starts* in - never as an animation.
@@ -697,12 +698,6 @@ impl PaneFlowApp {
             );
         }
 
-        // US-008: the diff panel's persistent file filter. Observe it so each
-        // keystroke re-renders the app (the TextInput only notifies itself).
-        let diff_file_filter =
-            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter files…", cx));
-        cx.observe(&diff_file_filter, |_, _, cx| cx.notify())
-            .detach();
         // The About dialog's credit plate paints a block caret off the shared
         // blink phase. Only `TerminalView` observes that entity, so on an idle
         // window nothing would mark the app dirty and the caret would freeze
@@ -964,28 +959,7 @@ impl PaneFlowApp {
             // US-006: shared signal flipped by the theme watcher's debounce
             // thread; drained by the 50 ms IPC loop to schedule a repaint.
             theme_changed,
-            diff_mode: crate::DiffModeState {
-                diff_view: None,
-                multi_diff_view: None,
-                diff_view_cache: std::collections::HashMap::new(),
-                diff_view_key: None,
-                multi_diff_view_retained: None,
-                diff_collapsed_branches: std::collections::HashSet::new(),
-                diff_discovering: false,
-                diff_discovering_root: None,
-                diff_chosen_worktrees: std::collections::HashMap::new(),
-                diff_worktree_picker_open: false,
-                diff_available_worktrees: Vec::new(),
-                diff_available_repo: None,
-                diff_scope: restored_diff_scope,
-                diff_scope_picker_open: false,
-                diff_project_picker_open: false,
-                diff_selected_file: None,
-                diff_files_collapsed: false,
-                diff_files_tree: false,
-                diff_collapsed_dirs: std::collections::HashSet::new(),
-                diff_file_filter,
-            },
+            review: crate::app::review::ReviewState::new(cx),
             // Start in the mode the user left on quit, unless a staged
             // restore still has to finish (Diff is applied then).
             mode: boot_mode,
@@ -1021,7 +995,12 @@ impl PaneFlowApp {
         };
 
         if app.session_restore.is_none() {
-            app.apply_restored_diff_mode(boot_mode, cx);
+            app.apply_restored_diff_mode(
+                boot_mode,
+                restored_review_layout,
+                &restored_review_collapsed,
+                cx,
+            );
             // The journal was durable before the prior process attempted cleanup.
             // Resume it only after the full app exists so completion can remove the
             // entries and persist the cleared journal.
@@ -1501,7 +1480,8 @@ mod tests {
             workspaces: Vec::new(),
             pending_worktree_teardowns: Vec::new(),
             mode: Default::default(),
-            diff_scope: None,
+            review_layout: None,
+            review_collapsed: Vec::new(),
             primary_sidebar_collapsed: collapsed,
         }
     }

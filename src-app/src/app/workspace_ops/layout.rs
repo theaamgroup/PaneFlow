@@ -46,6 +46,10 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(self.mode, paneflow_config::schema::AppMode::Diff) {
+            self.review_toggle_zoom(window, cx);
+            return;
+        }
         let Some(ws) = self.active_workspace_mut() else {
             return;
         };
@@ -85,21 +89,16 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ws) = self.active_workspace_mut() {
-            ws.exit_zoom(cx);
-        }
+        self.exit_nav_zoom(cx);
 
-        let Some(ws) = self.active_workspace_mut() else {
-            return;
-        };
-        let Some(root) = ws.active_tab_mut().root.take() else {
+        let Some(root) = self.take_nav_root() else {
             return;
         };
         let panes = root.collect_leaves();
 
         // No-op for single pane
         if panes.len() <= 1 {
-            ws.active_tab_mut().root = Some(root);
+            self.put_nav_root(Some(root));
             return;
         }
 
@@ -107,8 +106,8 @@ impl PaneFlowApp {
         // (root is consumed by collect_leaves moving entities out - but collect_leaves
         //  clones Entity refs, so root is still valid. We drop it explicitly.)
         drop(root);
-        ws.active_tab_mut().root = build(panes);
-        if let Some(ref r) = ws.active_tab().root {
+        self.put_nav_root(build(panes));
+        if let Some(r) = self.nav_root() {
             r.focus_first(window, cx);
         }
         self.save_session(cx);
@@ -215,14 +214,9 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ws) = self.active_workspace_mut() {
-            ws.exit_zoom(cx);
-        }
+        self.exit_nav_zoom(cx);
 
-        let Some(ws) = self.active_workspace() else {
-            return;
-        };
-        let Some(root) = &ws.active_tab().root else {
+        let Some(root) = self.nav_root() else {
             return;
         };
 
@@ -231,17 +225,15 @@ impl PaneFlowApp {
         }
 
         // The main pane is the focused one, or the first leaf
-        let main_pane = root
-            .focused_pane(window, cx)
-            .or_else(|| root.first_leaf())
-            .unwrap();
+        let Some(main_pane) = root.focused_pane(window, cx).or_else(|| root.first_leaf()) else {
+            return;
+        };
 
         let panes = root.collect_leaves();
         let others: Vec<_> = panes.into_iter().filter(|p| *p != main_pane).collect();
 
-        let ws = self.active_workspace_mut().unwrap();
-        drop(ws.active_tab_mut().root.take());
-        ws.active_tab_mut().root = LayoutTree::main_vertical(main_pane.clone(), others);
+        drop(self.take_nav_root());
+        self.put_nav_root(LayoutTree::main_vertical(main_pane.clone(), others));
         main_pane.read(cx).focus_handle(cx).focus(window, cx);
         self.save_session(cx);
         cx.notify();
@@ -262,9 +254,7 @@ impl PaneFlowApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ws) = self.active_workspace_mut()
-            && let Some(ref root) = ws.active_tab().root
-        {
+        if let Some(root) = self.nav_root() {
             root.equalize_ratios();
             self.save_session(cx);
             cx.notify();

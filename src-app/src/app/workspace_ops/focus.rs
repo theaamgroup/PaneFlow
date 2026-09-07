@@ -4,13 +4,65 @@
 //! the pre-refactor `main.rs` implementation.
 
 use gpui::{Context, Focusable, Window};
+use paneflow_config::schema::AppMode;
 
 use super::WorkspaceFocusTarget;
 use crate::PaneFlowApp;
-use crate::layout::{FocusDirection, FocusNav};
+use crate::layout::{FocusDirection, FocusNav, LayoutTree};
 use crate::{FocusDown, FocusLeft, FocusRight, FocusUp, JumpNextWaiting};
 
 impl PaneFlowApp {
+    pub(crate) fn nav_root(&self) -> Option<&LayoutTree> {
+        match self.mode {
+            AppMode::Diff => self.review.layout.as_ref(),
+            AppMode::Cli => self
+                .active_workspace()
+                .and_then(|ws| ws.active_tab().root.as_ref()),
+        }
+    }
+
+    pub(crate) fn nav_root_mut(&mut self) -> Option<&mut LayoutTree> {
+        match self.mode {
+            AppMode::Diff => self.review.layout.as_mut(),
+            AppMode::Cli => self
+                .active_workspace_mut()
+                .and_then(|ws| ws.active_tab_mut().root.as_mut()),
+        }
+    }
+
+    pub(crate) fn take_nav_root(&mut self) -> Option<LayoutTree> {
+        match self.mode {
+            AppMode::Diff => self.review.layout.take(),
+            AppMode::Cli => self
+                .active_workspace_mut()
+                .and_then(|ws| ws.active_tab_mut().root.take()),
+        }
+    }
+
+    pub(crate) fn put_nav_root(&mut self, root: Option<LayoutTree>) {
+        match self.mode {
+            AppMode::Diff => self.review.layout = root,
+            AppMode::Cli => {
+                if let Some(ws) = self.active_workspace_mut() {
+                    ws.active_tab_mut().root = root;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn exit_nav_zoom(&mut self, cx: &mut Context<Self>) {
+        match self.mode {
+            AppMode::Diff => {
+                self.review_exit_zoom(cx);
+            }
+            AppMode::Cli => {
+                if let Some(ws) = self.active_workspace_mut() {
+                    ws.exit_zoom(cx);
+                }
+            }
+        }
+    }
+
     pub(crate) fn handle_focus(
         &mut self,
         dir: FocusDirection,
@@ -21,17 +73,13 @@ impl PaneFlowApp {
         if let Some(source) = self.swap_source.clone() {
             self.set_swap_source(None, cx);
 
-            if let Some(ws) = self.active_workspace()
-                && let Some(root) = &ws.active_tab().root
-            {
+            if let Some(root) = self.nav_root() {
                 // Move focus to find the target pane
                 let moved = matches!(root.focus_in_direction(dir, window, cx), FocusNav::Moved);
                 if let Some(target) = root.focused_pane(window, cx)
                     && target != source
                 {
-                    let swapped = if let Some(ws) = self.active_workspace_mut()
-                        && let Some(ref mut root) = ws.active_tab_mut().root
-                    {
+                    let swapped = if let Some(root) = self.nav_root_mut() {
                         root.swap_panes(&source, &target)
                     } else {
                         false
@@ -50,8 +98,7 @@ impl PaneFlowApp {
             return;
         }
 
-        if let Some(ws) = self.active_workspace()
-            && let Some(root) = &ws.active_tab().root
+        if let Some(root) = self.nav_root()
             && !matches!(root.focus_in_direction(dir, window, cx), FocusNav::Moved)
         {
             self.show_toast("No pane in that direction", cx);
