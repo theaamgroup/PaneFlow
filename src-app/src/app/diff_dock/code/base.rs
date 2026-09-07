@@ -36,6 +36,27 @@ impl Base {
 }
 
 pub(crate) fn load_base_blocking(path: &Path) -> Base {
+    // The editor follows symlinks (`load_stamped` / `save_blocking`).
+    // `git show HEAD:<link>` returns the target pathname blob, not the
+    // pointee, so Revert+Save would write that pathname into the target.
+    // Resolve to the opened file, or refuse a dangling / unreadable link.
+    let canonical;
+    let path = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(path) {
+            Ok(resolved) => {
+                canonical = resolved;
+                canonical.as_path()
+            }
+            Err(err) => {
+                log::debug!(
+                    "editor base: {}: dangling or unreadable symlink: {err}",
+                    path.display()
+                );
+                return Base::None;
+            }
+        },
+        _ => path,
+    };
     let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -271,6 +292,53 @@ mod tests {
         assert_eq!(
             git_path_string(Path::new("..").join("x.rs").as_path()),
             None
+        );
+    }
+
+    /// Opening the symlink must compare against the target's HEAD blob, not
+    /// Git's symlink pathname. Revert+Save follows the link (`save_blocking`).
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_symlink_loads_the_target_head_not_the_pathname_blob() {
+        let Some(dir) = repo() else { return };
+        let root = dir.path();
+        let target = root.join("real.rs");
+        std::fs::write(&target, "fn main() {}\n").expect("seed");
+        let link = root.join("main.rs");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(commit(root, "init"));
+        std::fs::write(&target, "fn main() { edited(); }\n").expect("modify");
+
+        let via_link = load_base_blocking(&link);
+        let via_target = load_base_blocking(&target);
+        let Base::Text { text, .. } = &via_link else {
+            panic!("expected the target's HEAD through the link, got {via_link:?}");
+        };
+        assert_eq!(&**text, "fn main() {}\n");
+        assert_eq!(via_link, via_target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_and_an_out_of_tree_target_have_no_base() {
+        let Some(dir) = repo() else { return };
+        let root = dir.path();
+        std::fs::write(root.join("tracked.txt"), "x\n").expect("seed");
+        assert!(commit(root, "init"));
+
+        let dangling = root.join("gone.rs");
+        std::os::unix::fs::symlink(root.join("missing.rs"), &dangling).expect("dangling");
+        assert_eq!(load_base_blocking(&dangling), Base::None);
+
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "secret\n").expect("write");
+        let escape = root.join("escape.rs");
+        std::os::unix::fs::symlink(&outside_file, &escape).expect("escape");
+        assert_eq!(
+            load_base_blocking(&escape),
+            Base::None,
+            "a link out of the worktree must not become a gutter base"
         );
     }
 }

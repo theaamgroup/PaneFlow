@@ -127,13 +127,12 @@ impl PaneFlowApp {
         let cwd = cwd.trim().to_string();
         let generation = self.diff_dock.generation.wrapping_add(1);
         self.diff_dock.generation = generation;
-        let previous_fingerprint = self
-            .diff_dock
-            .data
-            .as_ref()
-            .filter(|data| data.cwd == cwd)
-            .map(|data| data.fingerprint)
-            .unwrap_or(0);
+        let previous = self.diff_dock.data.as_ref().filter(|data| data.cwd == cwd);
+        let previous_fingerprint = previous.map(|data| data.fingerprint).unwrap_or(0);
+        // The loading stub has no rows. Carry the last HEAD so the build
+        // callback can still tell a commit/checkout from a same-SHA refresh;
+        // `has_rows()` would make `reload_file_tab_bases` a no-op.
+        let previous_head_sha = previous.and_then(|data| data.head_sha.clone());
         let cwd_changed = self
             .diff_dock
             .data
@@ -153,6 +152,7 @@ impl PaneFlowApp {
         }
         let mut loading = DiffDockData::loading(cwd.clone());
         loading.fingerprint = previous_fingerprint;
+        loading.head_sha = previous_head_sha;
         self.diff_dock.data = Some(loading);
         cx.notify();
 
@@ -256,7 +256,6 @@ impl PaneFlowApp {
                                     .diff_dock
                                     .data
                                     .as_ref()
-                                    .filter(|data| data.has_rows())
                                     .is_some_and(|data| data.head_sha != built.head_sha);
                                 if let Some(data) = app.diff_dock.data.as_mut() {
                                     data.apply_built(built, &collapsed, &expanded);

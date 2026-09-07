@@ -170,6 +170,7 @@ impl DiffDockData {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn has_rows(&self) -> bool {
         self.unified_loaded || self.split_loaded
     }
@@ -294,5 +295,25 @@ impl DiffDockData {
     /// Whether every file is currently folded (drives the toolbar toggle label).
     pub(super) fn all_collapsed(&self, collapsed: &HashSet<String>) -> bool {
         !self.paths.is_empty() && self.paths.iter().all(|p| collapsed.contains(p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_loading_placeholder_can_carry_the_previous_head_sha_without_rows() {
+        let mut loading = DiffDockData::loading("/tmp/repo".into());
+        assert!(!loading.has_rows(), "the stub has no display rows");
+        assert!(loading.head_sha.is_none());
+        loading.head_sha = Some("abc".into());
+        let built = Some("def".to_string());
+        assert_ne!(
+            loading.head_sha, built,
+            "reload_file_tab_bases is keyed on this comparison; has_rows() must not gate it"
+        );
+        loading.head_sha = built.clone();
+        assert_eq!(loading.head_sha, built);
     }
 }
