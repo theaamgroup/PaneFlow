@@ -392,7 +392,7 @@ impl PaneFlowApp {
         let recorded = data.stamps.get(&file.path).copied();
         let cwd = data.cwd.clone();
         let owner = self.diff_dock.owner;
-        if self.dirty_file_tab_open(&path, cx) {
+        if self.dock_file_dirty_at_path(&path, cx) {
             self.show_diff_dock_error(DIRTY_TAB_MESSAGE, cx);
             return;
         }
@@ -420,23 +420,21 @@ impl PaneFlowApp {
                             Err(err) if same_cwd && app.diff_dock.owner == owner => {
                                 app.show_diff_dock_error(&err, cx);
                             }
-                            Err(_) => {}
+                            Err(err) => {
+                                // The user left this dock before the write
+                                // landed, so the banner has nowhere to go
+                                // (`show_diff_dock_error` replaces the whole
+                                // diff body of whichever dock is on screen).
+                                // Log it so a silently refused revert is still
+                                // diagnosable.
+                                log::warn!("hunk revert failed: {err}");
+                            }
                         }
                     })
                 });
             },
         )
         .detach();
-    }
-
-    fn dirty_file_tab_open(&self, path: &Path, cx: &Context<Self>) -> bool {
-        self.diff_dock.diff_tabs.iter().any(|tab| match tab {
-            DiffDockTab::File(view) => {
-                let view = view.read(cx);
-                view.path() == path && view.is_dirty()
-            }
-            _ => false,
-        })
     }
 
     fn show_diff_dock_error(&mut self, message: &str, cx: &mut Context<Self>) {
@@ -459,6 +457,44 @@ mod tests {
 
     fn hunks(base: &str, new: &str) -> Vec<DiffHunk> {
         crate::diff::compute_hunks(base, new)
+    }
+
+    /// Issue #468: the guard scanned `self.diff_dock.diff_tabs` only, so a
+    /// `CodeView` with unsaved edits in a *parked* dock (a sibling tab on the
+    /// same checkout) never refused the revert. A `PaneFlowApp` cannot be
+    /// constructed in a test (its constructor binds a Unix socket and spawns
+    /// PTYs), so this pins the wiring on the raw function body the way
+    /// `session.rs` does for #396;
+    /// `a_dirty_parked_dock_file_is_visible_to_the_revert_guard` in
+    /// `diff_dock/code/view.rs` exercises the predicate against a real,
+    /// edited buffer.
+    #[test]
+    fn the_revert_guard_consults_parked_docks_and_logs_a_dropped_failure() {
+        let src = include_str!("revert.rs");
+        let body = src
+            .split("fn revert_diff_dock_hunk(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn show_diff_dock_error(").next())
+            .expect("revert_diff_dock_hunk body");
+
+        let guard_at = body
+            .find("self.dock_file_dirty_at_path(&path, cx)")
+            .expect("the revert must consult the live-plus-parked dirty check");
+        let spawn_at = body
+            .find("cx.spawn(")
+            .expect("the revert must still run its write off the render thread");
+        assert!(
+            guard_at < spawn_at,
+            "the dirty check must refuse before the write is spawned: {body}"
+        );
+        assert!(
+            !body.contains("self.diff_dock.diff_tabs"),
+            "scanning the live dock alone misses a parked editor's edits: {body}"
+        );
+        assert!(
+            !body.contains("Err(_) => {}"),
+            "a revert failure the banner cannot show must still be logged: {body}"
+        );
     }
 
     fn revert(new: &str, base: &str, hunk: usize) -> String {
