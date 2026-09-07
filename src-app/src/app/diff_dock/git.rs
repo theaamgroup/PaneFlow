@@ -57,6 +57,10 @@ pub(super) fn build_diff_dock(
     if let Some(e) = diff.error {
         return Err(e);
     }
+    // Stamp immediately after the read that produced `new_text`, before the
+    // (slow) highlight pass. A later replacement file would otherwise pass
+    // the Revert chip's stamp check against stale hunk ranges.
+    let stamps = snapshot_stamps(diff.toplevel.as_deref(), &diff.files);
     let syntax = DiffSyntax::from_theme(&theme);
     let row_caches = build_file_row_caches(&diff.files, Some(&syntax));
     // File path → header row index, in file order, so a body click can resolve
@@ -112,14 +116,6 @@ pub(super) fn build_diff_dock(
     };
     let toplevel = diff.toplevel.clone();
     let head_sha = diff.head_sha.clone();
-    let mut stamps = HashMap::new();
-    if let Some(top) = &toplevel {
-        for file in &diff.files {
-            if let Some(stamp) = FileStamp::read(&top.join(&file.path)) {
-                stamps.insert(file.path.clone(), stamp);
-            }
-        }
-    }
     Ok(DiffDockBuilt {
         unified,
         anchors_unified,
@@ -137,6 +133,43 @@ pub(super) fn build_diff_dock(
         head_sha,
         stamps,
     })
+}
+
+fn snapshot_stamps(toplevel: Option<&Path>, files: &[FileDiff]) -> HashMap<String, FileStamp> {
+    let Some(top) = toplevel else {
+        return HashMap::new();
+    };
+    let mut stamps = HashMap::new();
+    for file in files {
+        let path = top.join(&file.path);
+        if !working_text_matches(&path, &file.new_text) {
+            continue;
+        }
+        if let Some(stamp) = FileStamp::read(&path) {
+            stamps.insert(file.path.clone(), stamp);
+        }
+    }
+    stamps
+}
+
+fn working_text_matches(path: &Path, expected: &str) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(path)
+            .map(|target| target.to_string_lossy() == expected)
+            .unwrap_or(false),
+        Ok(_) => std::fs::read(path)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .is_some_and(|text| {
+                let text = if text.as_bytes().contains(&b'\r') {
+                    text.replace("\r\n", "\n").replace('\r', "\n")
+                } else {
+                    text
+                };
+                text == expected
+            }),
+        Err(_) => false,
+    }
 }
 
 fn diff_dock_snapshot_fingerprint(files: &[FileDiff]) -> u64 {

@@ -2317,6 +2317,10 @@ impl CodeView {
         self.popup = None;
         self.hovered_marker = None;
         self.reset_tracker(cx);
+        // A symlink may now point at a different tracked file; re-resolve HEAD
+        // for that target. Regular files no-op in `install_base` when the SHA
+        // is unchanged.
+        self.start_base_load(cx);
         self.sync_scroll_line_count();
         self.scroll.set_rows(scroll_rows);
         cx.notify();

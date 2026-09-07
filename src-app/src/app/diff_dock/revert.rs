@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui::{Context, Pixels, Point, point, px};
 
@@ -70,10 +70,11 @@ pub(super) fn revert_hunk_blocking(
     base_text: &str,
     hunk: &DiffHunk,
     recorded: Option<FileStamp>,
+    expected_working: &str,
 ) -> Result<FileStamp, String> {
     let meta = std::fs::symlink_metadata(path).map_err(|_| STALE_FILE_MESSAGE.to_string())?;
     if meta.file_type().is_symlink() {
-        return revert_symlink_blocking(path, base_text, hunk);
+        return revert_symlink_blocking(path, base_text, hunk, expected_working);
     }
     match (recorded, FileStamp::read(path)) {
         (Some(recorded), Some(current)) if !recorded.differs(&current) => {}
@@ -97,9 +98,13 @@ fn revert_symlink_blocking(
     path: &Path,
     base_text: &str,
     hunk: &DiffHunk,
+    expected_working: &str,
 ) -> Result<FileStamp, String> {
     let current = std::fs::read_link(path).map_err(|err| format!("{}: {err}", path.display()))?;
     let new_text = current.to_string_lossy();
+    if new_text.trim_end_matches(['\n', '\r']) != expected_working.trim_end_matches(['\n', '\r']) {
+        return Err(STALE_FILE_MESSAGE.to_string());
+    }
     let restored = splice_base_lines(&new_text, base_text, hunk);
     let target = Path::new(restored.trim_end_matches(['\n', '\r']));
     if target.as_os_str().is_empty() {
@@ -116,14 +121,28 @@ fn revert_symlink_blocking(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("link");
-    let tmp = parent.join(format!(".{name}.paneflow-revert"));
-    let _ = std::fs::remove_file(&tmp);
-    std::os::unix::fs::symlink(target, &tmp).map_err(|err| format!("{}: {err}", path.display()))?;
+    let tmp = unique_symlink_temp(parent, name, target)?;
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{}: {err}", path.display()));
     }
     Ok(FileStamp::read(path).unwrap_or_else(FileStamp::discarded))
+}
+
+fn unique_symlink_temp(parent: &Path, name: &str, target: &Path) -> Result<PathBuf, String> {
+    let pid = std::process::id();
+    for n in 0..1024u32 {
+        let tmp = parent.join(format!(".{name}.paneflow-revert-{pid}-{n}"));
+        match std::os::unix::fs::symlink(target, &tmp) {
+            Ok(()) => return Ok(tmp),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("{}: {err}", tmp.display())),
+        }
+    }
+    Err(format!(
+        "could not allocate a temporary symlink in {}",
+        parent.display()
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +338,7 @@ impl PaneFlowApp {
         };
         let path = toplevel.join(&file.path);
         let base_text = file.base_text.clone();
+        let expected_working = file.new_text.clone();
         let recorded = data.stamps.get(&file.path).copied();
         let cwd = data.cwd.clone();
         if self.dirty_file_tab_open(&path, cx) {
@@ -327,9 +347,10 @@ impl PaneFlowApp {
         }
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                let result =
-                    smol::unblock(move || revert_hunk_blocking(&path, &base_text, &hunk, recorded))
-                        .await;
+                let result = smol::unblock(move || {
+                    revert_hunk_blocking(&path, &base_text, &hunk, recorded, &expected_working)
+                })
+                .await;
                 let _ = cx.update(|cx| {
                     this.update(cx, |app, cx| match result {
                         Ok(_) => app.refresh_diff_dock(cwd, cx),
@@ -653,16 +674,23 @@ mod tests {
         };
         assert!(stale.differs(&wrong_len));
         assert_eq!(
-            revert_hunk_blocking(&on_disk, &file.base_text, &file.hunks[0], Some(wrong_len)),
+            revert_hunk_blocking(
+                &on_disk,
+                &file.base_text,
+                &file.hunks[0],
+                Some(wrong_len),
+                edited,
+            ),
             Err(STALE_FILE_MESSAGE.to_string())
         );
         assert_eq!(
-            revert_hunk_blocking(&on_disk, &file.base_text, &file.hunks[0], None),
+            revert_hunk_blocking(&on_disk, &file.base_text, &file.hunks[0], None, edited),
             Err(STALE_FILE_MESSAGE.to_string())
         );
         assert_eq!(std::fs::read_to_string(&on_disk).expect("read"), edited);
 
-        revert_hunk_blocking(&on_disk, &file.base_text, &file.hunks[0], stamp).expect("revert");
+        revert_hunk_blocking(&on_disk, &file.base_text, &file.hunks[0], stamp, edited)
+            .expect("revert");
         assert_eq!(
             std::fs::read_to_string(&on_disk).expect("read"),
             "one\ntwo\nthree\nfour\nfive\nSIX\n"
@@ -712,6 +740,7 @@ mod tests {
             &file.base_text,
             &file.hunks[0],
             FileStamp::read(&latest),
+            &file.new_text,
         )
         .expect("revert");
         assert_eq!(
