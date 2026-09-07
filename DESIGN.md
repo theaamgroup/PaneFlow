@@ -612,8 +612,9 @@ so the glow paints without reflow. There is no blue focus ring anywhere.
 
 **The dock** attaches to a workspace tab and opens on a surface picker of
 **four** cards — Changes, Terminal, File, Agent setup — 122 by 98 on a wrapping
-grid. The choice is remembered per workspace, so only a project's first dock
-open asks.
+grid. The choice is parked on the **tab**, not the workspace: dock slots are
+keyed by `Tab::id` (`app/cli_diff_dock.rs:18`), so a sibling tab of the same
+folder is a new session and shows the picker again.
 
 Its width is a **preference, not a measurement**. `DiffDockState::width`
 defaults to 880 and is bounded 360 to 1400, but the rendered width is
@@ -855,9 +856,15 @@ selection, copy-mode, or search highlights.
 
 `secondary` is **Cmd**. This is a macOS-only fork, so the cross-platform arm of
 `keybindings/display.rs` is dead code. Chords render as Apple HIG glyphs with
-no separator. Every overlay has a binding, every default-bound action is
-remappable in Settings ▸ Keyboard Shortcuts, and every modal answers Enter and
-Escape.
+no separator. Every default-bound action is remappable in Settings ▸ Keyboard
+Shortcuts, and every modal answers Enter and Escape.
+
+Not every overlay has an opening chord, and the table below is the whole set
+that does. Custom Buttons opens only from the workspace context menu; About,
+System Info, and Check for Updates are menu-bar only (6.1's list of twelve
+unassignable actions); and the theme picker is reachable only through
+`render_profile_menu`, which nothing opens (11). A **new** overlay SHOULD take
+a chord or a menu item, and MUST NOT rely on a surface that has neither.
 
 | Surface | Default |
 | --- | --- |
@@ -1104,7 +1111,9 @@ review would raise anywhere.
 1. PaneFlow Dark and PaneFlow Light, plus one of Vercel, Claude, or Cursor in
    both variants.
 2. `macos_chrome_material` on and off.
-3. `reduce_motion` on: nothing still moves except live status.
+3. `reduce_motion` on: every animation **you touched** settles without
+   interpolation. Do not attest more than that — 4.8 lists five animations
+   that still ignore the flag, so "nothing moves" is not yet true of the app.
 4. The 800 by 500 minimum window, with the primary sidebar hidden and a right
    rail or the diff dock open at the same time. Check that the dock's render
    floor behaves — below roughly 464 px of remainder it MUST disappear cleanly
@@ -1125,10 +1134,17 @@ after, quoting the real output — never a piped exit status:
 cargo build                                     # exit 0
 cargo test --workspace                          # diff test names, do not trust the integer
 cargo clippy --workspace --all-targets          # exit 0, WARNING COUNT 1 (block v0.1.6)
+cargo clippy --workspace --all-targets -- -D warnings   # exit 0; what CI enforces
 cargo fmt --check                               # exit 0
 ./target/debug/paneflow --version               # paneflow 0.4.0
 cargo deny check advisories licenses sources    # exit 0
 ```
+
+Both Clippy forms matter and neither is a superset of the other: the counted
+form is the local gate CLAUDE.md prescribes, and the denying form is what the
+macOS job runs (`.github/workflows/run_tests.yml`, which pins
+`--locked --target aarch64-apple-darwin`). The workflow comment says the two
+must not drift; run both before pushing a UI change.
 
 Shared primitives to reach for first, in `src-app/src/ui_primitives.rs`:
 `AnimatedHoverExt`, `squircle_skin`, `icon_button_sm`, `icon_button_md`,
