@@ -292,10 +292,19 @@ impl CodeHighlighter {
         // One budget for the whole batch, not one per pass: Markdown must not
         // get twice the stall budget of every other file type.
         let deadline = Instant::now() + budget;
-        let mut dirty: Vec<Range<usize>> = edits
-            .iter()
-            .map(|edit| edit.start_byte..edit.new_end_byte.max(edit.start_byte))
-            .collect();
+        // Issue #450: a hunk's bytes are recorded in the coordinate space it
+        // was applied in, and the batch descends, so every later hunk sits
+        // above it and moved it. `changed_ranges` below is already in final
+        // coordinates; these have to be translated into it, the same way
+        // `edit::shift_selection_for_splices` carries the caret.
+        let mut dirty: Vec<Range<usize>> = Vec::with_capacity(edits.len());
+        let mut shift = 0isize;
+        for edit in edits.iter().rev() {
+            let start = (edit.start_byte as isize + shift).max(0) as usize;
+            let end = (edit.new_end_byte.max(edit.start_byte) as isize + shift).max(0) as usize;
+            dirty.push(start..end);
+            shift += edit.new_end_byte as isize - edit.old_end_byte as isize;
+        }
         let mut without_old_tree = false;
         let mut deferred = false;
         for pass in &mut self.passes {
@@ -922,6 +931,55 @@ mod tests {
         for (row, want) in expected.iter().enumerate() {
             assert_eq!(h.runs(row), want.as_slice(), "row {row} after a batch");
         }
+    }
+
+    /// Issue #450: the lower hunk of a batch moves the bytes of the hunk
+    /// above it, so the earlier hunk's dirty range has to be translated into
+    /// the final document before it is requeried. A rename preserves the
+    /// syntax-tree shape, so `changed_ranges` contributes nothing and the
+    /// translated range is the only thing that can requery that row.
+    #[test]
+    fn a_batch_requeries_the_upper_hunk_through_the_lower_hunks_shift() {
+        let mut d = doc("batch.rs", &rows_of_code(200));
+        let mut h = CodeHighlighter::new(&d, syntax());
+
+        // Applied first, at the bottom: rename the identifier in place.
+        let row = d.line_to_byte(150);
+        let name = row + "fn ".len();
+        let high = super::super::edit::splice(&mut d, name..name + "f150".len(), "renamed_symbol")
+            .expect("rename")
+            .edit;
+        // Applied second, above it, and it changes both the row and the byte
+        // count, so every byte of the rename moved.
+        let low = d
+            .insert(d.line_to_byte(50), "// a\n// b\n// c\n")
+            .expect("insert");
+
+        assert!(
+            matches!(
+                h.edit_batch(&d, &[high, low], Duration::from_secs(5))
+                    .expect("descending hunks are a valid batch"),
+                HighlightOutcome::Synced
+            ),
+            "a real budget must parse in line"
+        );
+
+        let after = d.to_disk_string();
+        assert!(
+            after.contains("fn renamed_symbol() {}"),
+            "the rename landed: {:?}",
+            &after[d.line_to_byte(153)..d.line_to_byte(154)]
+        );
+        let expected = expected_rows(&after, d.ext(), d.line_count());
+        assert!(
+            !expected[153].is_empty(),
+            "the renamed row is colored from scratch"
+        );
+        assert_eq!(
+            h.runs(153),
+            expected[153].as_slice(),
+            "the renamed row must be requeried at its shifted offset, not left interpolated"
+        );
     }
 
     #[test]
