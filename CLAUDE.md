@@ -548,6 +548,13 @@ Stateful methods dispatch to the GPUI main thread via a channel drained by `Pane
 
 ## Styling conventions
 
+**`DESIGN.md` at the repo root is the design contract** and outranks this
+section on anything visual: the tokens, the geometry and radius tables, the
+motion rules, the per-component contracts, the accessibility floors, and the
+delivery gate a UI change has to clear. Read it before touching chrome, and
+update it in the same PR as any visual change. The notes below are the
+engineering summary, not the contract.
+
 - **All styling is inline** via GPUI's Tailwind-like builder API: `.bg(rgb(0x181825)).px_3().rounded_md()`
 - **Sidebar/titlebar colors are hardcoded** dark hex values unless the active theme supplies a `UiColors` block. Legacy themes derive chrome colors from light/dark defaults; the bundled custom themes opt into exact UI tokens so the theme affects the whole app, not just ANSI colors.
 - **Terminal colors** come from `TerminalTheme` (36 `Hsla` slots plus optional `ui: UiColors` and a `syntax: SyntaxPalette`, `theme/model.rs:11`) resolved via `active_theme()`. `selection_foreground` is computed at theme-load time so `apca_contrast(selection_foreground, selection) >= 45.0` holds at every observation point; if you construct a theme by hand, call `recompute_selection_foreground()`.
