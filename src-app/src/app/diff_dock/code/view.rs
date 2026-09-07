@@ -4417,6 +4417,53 @@ mod tests {
         });
     }
 
+    /// Issue #468: the hunk-revert guard scanned only the live dock, so an
+    /// editor holding unsaved edits in a *parked* dock (a sibling tab on the
+    /// same checkout) let the revert rewrite the file underneath it. The guard
+    /// now walks `all_dock_tabs`, which chains the parked slots.
+    #[gpui::test]
+    fn a_dirty_parked_dock_file_is_visible_to_the_revert_guard(cx: &mut TestAppContext) {
+        use std::collections::HashMap;
+
+        use crate::app::cli_diff_dock::{DiffDockSlot, all_dock_tabs, file_tab_dirty_at_path};
+        use crate::app::diff_dock::DiffDockTab;
+
+        let path = "/nonexistent/paneflow-code.rs";
+        let (view, cx) = view_named(cx, path, "hello world\n");
+        view.update_in(cx, |view, window, cx| {
+            view.selection = CodeSelection { anchor: 0, head: 5 };
+            view.replace_text_in_range(None, "bye", window, cx);
+        });
+
+        // The dirty editor sits in another tab's parked slot; the live dock
+        // holds nothing but the Changes surface.
+        let live = vec![DiffDockTab::Changes];
+        let mut parked = HashMap::new();
+        parked.insert(
+            7u64,
+            DiffDockSlot::parked_with_tabs(vec![DiffDockTab::File(view.clone())]),
+        );
+
+        cx.cx.update(|cx| {
+            assert!(
+                !file_tab_dirty_at_path(live.iter(), Path::new(path), cx),
+                "the live dock alone cannot see the parked editor - that was the bug"
+            );
+            assert!(
+                file_tab_dirty_at_path(all_dock_tabs(&live, &parked), Path::new(path), cx),
+                "a parked dock's unsaved edits must refuse the revert"
+            );
+            assert!(
+                !file_tab_dirty_at_path(
+                    all_dock_tabs(&live, &parked),
+                    Path::new("/nonexistent/other.rs"),
+                    cx
+                ),
+                "an unrelated file's revert stays allowed"
+            );
+        });
+    }
+
     /// US-012 AC: Backspace removes a full grapheme, so a composed emoji goes in
     /// one press instead of shedding its skin-tone modifier first.
     #[gpui::test]

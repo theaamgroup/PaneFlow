@@ -23,6 +23,7 @@
 //! already promises ("dock and Review sessions are not restored").
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
@@ -78,6 +79,22 @@ pub(crate) struct DiffDockSlot {
     tabs: Vec<DiffDockTab>,
     active_tab: usize,
     data: Option<DiffDockData>,
+}
+
+#[cfg(test)]
+impl DiffDockSlot {
+    /// Test-only: a parked slot holding `tabs`, so a guard that has to see a
+    /// parked dock can be exercised without a live `PaneFlowApp`.
+    pub(crate) fn parked_with_tabs(tabs: Vec<DiffDockTab>) -> Self {
+        Self {
+            open: true,
+            picker: false,
+            picked: true,
+            tabs,
+            active_tab: 0,
+            data: None,
+        }
+    }
 }
 
 impl DiffDockSlot {
@@ -217,6 +234,36 @@ fn dock_terminals<'a>(
     result
 }
 
+/// Every dock tab in the process: the live dock's tabs followed by every
+/// parked slot's. A free function over the two collections rather than a
+/// `PaneFlowApp` method so the chain itself stays testable (a live
+/// `PaneFlowApp` cannot be constructed in a test).
+pub(crate) fn all_dock_tabs<'a>(
+    live_tabs: &'a [DiffDockTab],
+    parked: &'a HashMap<u64, DiffDockSlot>,
+) -> impl Iterator<Item = &'a DiffDockTab> {
+    live_tabs
+        .iter()
+        .chain(parked.values().flat_map(|slot| slot.tabs.iter()))
+}
+
+/// Whether a `DiffDockTab::File` among `tabs` open on `path` holds unsaved
+/// edits (issue #468: the hunk-revert guard must refuse to rewrite a file some
+/// dock editor is still holding edits for, parked docks included).
+pub(crate) fn file_tab_dirty_at_path<'a>(
+    tabs: impl IntoIterator<Item = &'a DiffDockTab>,
+    path: &Path,
+    cx: &App,
+) -> bool {
+    tabs.into_iter().any(|tab| match tab {
+        DiffDockTab::File(view) => {
+            let view = view.read(cx);
+            view.path() == path && view.is_dirty()
+        }
+        _ => false,
+    })
+}
+
 /// Whether any `DiffDockTab::File` among `tabs` holds unsaved edits
 /// (issue #396: quit must see this before it discards the buffer for good).
 ///
@@ -267,6 +314,18 @@ impl PaneFlowApp {
                     .values()
                     .flat_map(|slot| slot.tabs.iter()),
             ),
+            cx,
+        )
+    }
+
+    /// Whether a dock file tab open on `path` - live dock or parked slot -
+    /// holds unsaved edits (issue #468). The hunk revert rewrites that file on
+    /// disk, so an editor holding edits for it anywhere in the process must
+    /// refuse the revert up front rather than let the later save collide.
+    pub(crate) fn dock_file_dirty_at_path(&self, path: &Path, cx: &App) -> bool {
+        file_tab_dirty_at_path(
+            all_dock_tabs(&self.diff_dock.diff_tabs, &self.diff_dock.parked),
+            path,
             cx,
         )
     }
