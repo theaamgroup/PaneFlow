@@ -183,11 +183,16 @@ not rendered at all — one reachable mode is not a choice — and
 ### 3.3 Overlays
 
 Every overlay is deferred at an explicit priority, and that ladder is itself
-part of the contract: **1** settings selects · **3** menus (branch, new tab,
-dock options, Customize Sidebar, palette branch) · **4** profile menu,
-Composer, dock options · **6** full-surface overlays · **8** Launch Pad and
-Custom Buttons · **10** dialogs · **11** close confirm. A new overlay picks
-the rung that matches its kind rather than inventing one.
+part of the contract: **1** settings selects · **2** toasts · **3** menus
+(branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
+profile menu, Composer, dock options · **6** full-surface overlays · **8**
+Launch Pad and Custom Buttons · **10** dialogs · **11** close confirm. A new
+overlay picks the rung that matches its kind rather than inventing one.
+
+One live exception: Work Review calls `deferred(...)` with **no** explicit
+priority (`app/work_review/mod.rs:488-502`), so it is not on the ladder and
+must not be read as sharing the full-surface rung. Give a new overlay an
+explicit priority.
 
 | Overlay | Placement | Shell | Source |
 | --- | --- | --- | --- |
@@ -466,11 +471,11 @@ is a single-color brand logo drawn with its own accent.
 
 | Motion | Duration | Easing | Notes |
 | --- | --- | --- | --- |
-| Hover on any control | 120 ms, scaled by the distance left to travel | ease-out quint | `animated_hover`, retargets mid-flight, pauses during a drag |
+| Hover on an `animated_hover` control | 120 ms, scaled by the distance left to travel | ease-out quint | Retargets mid-flight, pauses during a drag. **Rows are the deliberate exception**: `squircle_skin` (and `select_item` through it) toggles visibility on `group_hover` instead, so a long list does not request an animation frame per row. Do not "fix" a snapping row into an animated one |
 | Pane header buttons | 120 ms | ease-out quint | The action-button tint and the close glyph's 0.16 → 0.92 ramp |
 | Unfocused pane dim, drop overlay glide | 130 ms, scaled by distance | ease-out quint | Cross-fade dropped below 0.002; the overlay lerps its absolute rect between regions |
 | Primary sidebar slide | 280 ms | cubic ease-out `1 − (1 − p)³` | Panel inset and gutter follow the width |
-| Toast | 180 ms in, 1440 ms hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit |
+| Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift |
 | Status spinner | 1 s loop | linear rotate | Empty states while scanning |
 | Sidebar comet-trail loader | 720 ms cycle | stepped | 3 by 3 perimeter of 3 px dots, gap 1, trailing opacities 0.81, 0.49, 0.26 over a 0.06 base |
 | Startup splash | 2600 ms shimmer, 900 ms minimum on screen | linear | Letters at 0.54 alpha, shimmering to 0.82 |
@@ -634,8 +639,11 @@ A modified tab swaps that glyph for a 7 px `vc_modified` dot at rest, and
 arming the close paints it `vc_deleted` — the same two-press confirm the pane
 uses. **Changes is the permanent tab 0 and carries no close control**; only
 Terminal, File, and Agent setup tabs close. `MAX_DIFF_FILE_TABS` is 8 and
-counts *file* tabs only; past the cap the oldest tab that is neither modified
-nor active is evicted. The `+` trigger is a 28 px `ROW_RADIUS` square opening a
+counts *file* tabs only; past the cap the leftmost file tab that is neither
+modified nor active is evicted. **The cap yields to unsaved work**: when every
+file tab is modified or active, `file_tab_eviction` returns `None` and the new
+tab is still inserted, so the strip may exceed eight rather than drop an edit
+(`app/diff_dock/tabs.rs:329-346`). The `+` trigger is a 28 px `ROW_RADIUS` square opening a
 236 px menu of Changes, File (`secondary-g`), Terminal (`secondary-j`), and
 Agent setup.
 
@@ -1013,12 +1021,15 @@ row washes carry no floor today.
 These answer arrows, Enter, and Escape in full: attention queue, Pane Overview
 (two-dimensional), sessions rail, files rail, theme picker, pane palette, fleet
 search, work review, broadcast groups, and the Editor Controls menu. Launch
-Pad, the diff branch menu, close confirm, System Info, and About answer Escape
-and Enter only; Launch Pad additionally cycles its text fields with Tab, and
-its agent list is mouse-driven by design.
+Pad, the diff branch menu, close confirm, and About answer Escape and Enter
+only; Launch Pad additionally cycles its text fields with Tab, and its agent
+list is mouse-driven by design. **System Info is Escape-only** — it carries
+two footer buttons, Close and Copy, and neither is the default, so Enter is
+deliberately ignored.
 
-A new overlay MUST at minimum dismiss on Escape and confirm on Enter. A new
-list surface SHOULD be arrow-navigable.
+A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
+when it has a single default action. A new list surface SHOULD be
+arrow-navigable.
 
 ### 7.5 Known accessibility gaps
 
