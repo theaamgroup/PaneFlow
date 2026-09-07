@@ -406,7 +406,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Icon buttons | small 20 outer with 12 icon, medium 24 outer with 13 icon |
 | Toolbar pill | height 24, padding 8, gap 5 |
 | Filter field | padding 10 by 6, gap 6, 13 px search icon; the clear control is a **24 by 24 hit target** carrying a 10 px glyph, pulled in by −4 so it keeps a 16 px layout footprint (WCAG 2.5.8) |
-| Toast | inset 18, padding 12 / 14 by 11, minimum width 220, max width 340 (440 for an error), single line |
+| Toast | right 18, bottom **20** (the animation owns the vertical axis - see 3.3), padding 12 / 14 by 11, minimum width 220, max width 340 (440 for an error), single line |
 | Scrollbar | width 6, gutter 10, minimum thumb 24 |
 | Diff | row 18, file header 32, fold row 32, sticky header 24, gutter 36 (a floor, widened per digit count), change bar 4, split divider 3, minimum split column 360, revert chip 56 by 16 inset 10, horizontal track 6 |
 | Code editor | 12 px mono, row 18, caret 2, scrollbar track 15, minimum thumb 25 vertical and 28 horizontal; git marker column 6 left of the numbers, bar 4 radius 2 inset 1, deleted dot 8, hover grows 3 to the left |
