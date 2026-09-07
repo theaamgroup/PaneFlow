@@ -2730,12 +2730,12 @@ impl CodeView {
     }
 
     fn install_base(&mut self, base: Base, cx: &mut Context<Self>) {
-        let same_commit = matches!(
-            (self.base.head_sha(), base.head_sha()),
-            (Some(current), Some(next)) if current == next
-        );
+        // Same commit SHA is not the same blob after a symlink retarget
+        // (`latest` → `a.rs` then `b.rs`): HEAD did not move, the canonical
+        // file did. Compare the loaded text, not only the SHA.
+        let same_base = self.base == base;
         self.base = base;
-        if same_commit && self.tracker.is_active() {
+        if same_base && self.tracker.is_active() {
             return;
         }
         self.popup = None;
