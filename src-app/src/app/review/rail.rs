@@ -45,8 +45,9 @@ impl ReviewWorkspace {
 
 pub(crate) fn norm_path(path: &Path) -> String {
     let resolved = normalize_lexically(path);
-    let s = resolved.to_string_lossy().into_owned();
-    s.to_lowercase()
+    // Checkout paths come from Git. Preserve their case just as
+    // ReviewSubject::same_worktree does: macOS volumes can be case-sensitive.
+    resolved.to_string_lossy().into_owned()
 }
 
 fn normalize_lexically(path: &Path) -> PathBuf {
@@ -55,7 +56,9 @@ fn normalize_lexically(path: &Path) -> PathBuf {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                if !out.pop() {
+                if out.file_name().is_some_and(|name| name != "..") {
+                    out.pop();
+                } else if !out.has_root() {
                     out.push(component.as_os_str());
                 }
             }
@@ -480,6 +483,22 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkout_identity_preserves_case_and_leading_parent_components() {
+        assert_ne!(
+            norm_path(Path::new("/repo/Fix")),
+            norm_path(Path::new("/repo/fix"))
+        );
+        assert_eq!(norm_path(Path::new("../../repo")), "../../repo");
+        assert_eq!(norm_path(Path::new("/../repo")), "/repo");
+        let mut out = workspace("/repo");
+        let mut seen = HashSet::new();
+        for path in ["/repo/Fix", "/repo/fix"] {
+            push_checkout(&mut out, &mut seen, path.into(), "fix".into(), None, None);
+        }
+        assert_eq!(out.checkouts.len(), 2);
+    }
 
     fn workspace(root: &str) -> ReviewWorkspace {
         ReviewWorkspace {
