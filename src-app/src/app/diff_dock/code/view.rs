@@ -594,6 +594,9 @@ pub(crate) struct CodeView {
     base: Base,
     tracker: BlockTracker,
     tracker_generation: u64,
+    /// Independent of [`Self::slot`]: overlapping HEAD reloads must not share
+    /// the document-load generation, or a slower older probe can install last.
+    base_generation: u64,
     hovered_marker: Option<usize>,
     popup: Option<MarkerPopup>,
 }
@@ -642,6 +645,7 @@ impl CodeView {
             base: Base::None,
             tracker: BlockTracker::inactive(),
             tracker_generation: 0,
+            base_generation: 0,
             hovered_marker: None,
             popup: None,
         };
@@ -707,6 +711,7 @@ impl CodeView {
             base: Base::None,
             tracker: BlockTracker::inactive(),
             tracker_generation: 0,
+            base_generation: 0,
             hovered_marker: None,
             popup: None,
         }
@@ -2702,13 +2707,14 @@ impl CodeView {
     }
 
     fn start_base_load(&mut self, cx: &mut Context<Self>) {
-        let generation = self.slot.current();
+        self.base_generation = self.base_generation.wrapping_add(1);
+        let generation = self.base_generation;
         spawn_base_load(
             self.path.clone(),
             generation,
             cx,
             |view: &mut Self, generation, base: Base, cx| {
-                if !view.slot.accept(generation) {
+                if view.base_generation != generation {
                     return;
                 }
                 view.install_base(base, cx);
@@ -3557,6 +3563,7 @@ mod tests {
                 base: Base::None,
                 tracker: BlockTracker::inactive(),
                 tracker_generation: 0,
+                base_generation: 0,
                 hovered_marker: None,
                 popup: None,
             }
@@ -4306,6 +4313,7 @@ mod tests {
                 base: Base::None,
                 tracker: BlockTracker::inactive(),
                 tracker_generation: 0,
+                base_generation: 0,
                 hovered_marker: None,
                 popup: None,
             }
@@ -4468,6 +4476,7 @@ mod tests {
                 base: Base::None,
                 tracker: BlockTracker::inactive(),
                 tracker_generation: 0,
+                base_generation: 0,
                 hovered_marker: None,
                 popup: None,
             }

@@ -13,7 +13,9 @@ use crate::diff::{
 pub(super) const DIRTY_TAB_MESSAGE: &str = "Save or discard the editor changes first";
 pub(super) const STALE_FILE_MESSAGE: &str = "File changed on disk, refresh first";
 
-fn line_contents(text: &str) -> Vec<&str> {
+/// Lines with their original terminators still attached, so a single-hunk
+/// Revert does not rewrite untouched LF/CRLF mix.
+fn line_slices(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut lines = Vec::new();
     let mut start = 0usize;
@@ -21,17 +23,18 @@ fn line_contents(text: &str) -> Vec<&str> {
     while index < bytes.len() {
         match bytes[index] {
             b'\n' => {
-                lines.push(&text[start..index]);
+                lines.push(&text[start..=index]);
                 index += 1;
                 start = index;
             }
             b'\r' => {
-                lines.push(&text[start..index]);
-                index += if bytes.get(index + 1) == Some(&b'\n') {
-                    2
+                let end = if bytes.get(index + 1) == Some(&b'\n') {
+                    index + 2
                 } else {
-                    1
+                    index + 1
                 };
+                lines.push(&text[start..end]);
+                index = end;
                 start = index;
             }
             _ => index += 1,
@@ -43,37 +46,21 @@ fn line_contents(text: &str) -> Vec<&str> {
     lines
 }
 
-fn ends_with_newline(text: &str) -> bool {
-    text.ends_with('\n') || text.ends_with('\r')
-}
-
-fn dominant_terminator(text: &str) -> &'static str {
-    let crlf = text.matches("\r\n").count();
-    let lf = text.matches('\n').count() - crlf;
-    if crlf > lf { "\r\n" } else { "\n" }
-}
-
 pub(crate) fn splice_base_lines(new_text: &str, base_text: &str, hunk: &DiffHunk) -> String {
-    let terminator = dominant_terminator(new_text);
-    let new_lines = line_contents(new_text);
-    let base_lines = line_contents(base_text);
+    let new_lines = line_slices(new_text);
+    let base_lines = line_slices(base_text);
     let start = (hunk.new_row_range.start as usize).min(new_lines.len());
     let end = (hunk.new_row_range.end as usize).clamp(start, new_lines.len());
     let base_start = (hunk.base_row_range.start as usize).min(base_lines.len());
     let base_end = (hunk.base_row_range.end as usize).clamp(base_start, base_lines.len());
 
-    let mut lines = Vec::with_capacity(new_lines.len() + base_end - base_start);
-    lines.extend_from_slice(&new_lines[..start]);
-    lines.extend_from_slice(&base_lines[base_start..base_end]);
-    lines.extend_from_slice(&new_lines[end..]);
-    let terminated = if end == new_lines.len() {
-        ends_with_newline(base_text)
-    } else {
-        ends_with_newline(new_text)
-    };
-    let mut out = lines.join(terminator);
-    if terminated && !lines.is_empty() {
-        out.push_str(terminator);
+    let mut out = String::new();
+    for line in new_lines[..start]
+        .iter()
+        .chain(&base_lines[base_start..base_end])
+        .chain(&new_lines[end..])
+    {
+        out.push_str(line);
     }
     out
 }
@@ -431,17 +418,29 @@ mod tests {
         let modified = hunks(base, "a\nB\nc\n");
         assert_eq!(
             splice_base_lines("a\r\nB\r\nc\r\n", base, &modified[0]),
-            "a\r\nb\r\nc\r\n"
+            "a\r\nb\nc\r\n",
+            "untouched lines keep CRLF; the restored line keeps HEAD's LF"
         );
         let unterminated = hunks("a\nb\nc", "a\nB\nc");
         assert_eq!(
             splice_base_lines("a\r\nB\r\nc", "a\nb\nc", &unterminated[0]),
-            "a\r\nb\r\nc"
+            "a\r\nb\nc"
         );
         let last_line = hunks("a\nb\nc", "a\nb\nC");
         assert_eq!(
             splice_base_lines("a\nb\nC", "a\nb\nc", &last_line[0]),
             "a\nb\nc"
+        );
+    }
+
+    #[test]
+    fn a_mixed_ending_file_does_not_rewrite_untouched_lines() {
+        let base = "keep\r\nchange\nend\r\n";
+        let new = "keep\r\nCHANGE\nend\r\n";
+        assert_eq!(
+            revert(new, base, 0),
+            "keep\r\nchange\nend\r\n",
+            "Revert must not normalize the surrounding CRLF lines"
         );
     }
 
