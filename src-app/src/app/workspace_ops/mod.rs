@@ -2799,6 +2799,93 @@ mod tests {
         );
     }
 
+    /// Issue #454: the same walk `live_terminal_session_ids` performs, over a
+    /// workspace shaped the way a review leaves one - a diff pane on the tab
+    /// the review started from, and the agents "Review with agent" opened
+    /// behind it, each in a tab of its own (`open_agent_tab_at_cwd`). The
+    /// second launch pushes the first agent's tab off the active slot, so a
+    /// walk that stopped at the active tab would hand worktree retirement a
+    /// checkout an agent is still working in and let the close modal come up
+    /// silent. The diff pane contributes nothing to the walk, which is the
+    /// whole reason the guard below forbids a terminal from living behind one.
+    #[gpui::test]
+    fn the_terminal_walk_reaches_agent_tabs_behind_the_active_one_and_never_into_a_diff(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let subject = crate::diff::ReviewSubject {
+            repo_root: std::path::PathBuf::from("/repo"),
+            worktree: crate::diff::DiffWorktree {
+                path: std::path::PathBuf::from("/repo"),
+                branch: "feature".into(),
+                workspace_id: Some(1),
+            },
+        };
+        let diff_view = cx.new(|cx| crate::diff::DiffView::for_test(subject, cx));
+        let diff_pane = cx.new(|cx| {
+            crate::pane::Pane::new_with_surface(crate::pane::PaneSurface::Diff(diff_view), 1, cx)
+        });
+        let (first_agent, _) = waiting_test_pane(cx);
+        let (second_agent, _) = waiting_test_pane(cx);
+
+        let mut ws = Workspace::with_layout_and_id(
+            1,
+            "ws",
+            std::path::PathBuf::new(),
+            LayoutTree::Leaf(diff_pane.clone()),
+        );
+        for pane in [first_agent.clone(), second_agent.clone()] {
+            assert!(ws.open_tab(crate::workspace::Tab::new(
+                String::new(),
+                Some(LayoutTree::Leaf(pane))
+            )));
+        }
+        assert_eq!(
+            ws.active_tab_idx(),
+            2,
+            "the second launch leaves the first agent's tab behind the active one"
+        );
+
+        // The workspace half of the expression `live_terminal_session_ids`
+        // runs, verbatim; the dock half and the child-PID filter are out of
+        // scope here (these panes hold display-only terminals with no PTY).
+        // The source guard on that function is what pins this copy to it.
+        let workspaces = [ws];
+        let terminals: Vec<_> = cx.update(|_, cx| {
+            workspaces
+                .iter()
+                .flat_map(|workspace| workspace.collect_panes())
+                .flat_map(|pane| pane.read(cx).terminals().cloned().collect::<Vec<_>>())
+                .collect()
+        });
+
+        let mut reached = |pane: &gpui::Entity<crate::pane::Pane>| {
+            cx.update(|_, cx| {
+                pane.read(cx)
+                    .terminals()
+                    .next()
+                    .is_some_and(|terminal| terminals.contains(terminal))
+            })
+        };
+        assert!(reached(&first_agent), "the backgrounded agent tab is swept");
+        assert!(reached(&second_agent), "the active agent tab is swept");
+        // The gap #454 was filed on, stated as behaviour: the walk DOES reach
+        // the diff pane, and still comes away with nothing from it. Whatever
+        // a diff surface owns is therefore uncounted - which is what the
+        // guard below is defending.
+        let panes = cx.update(|_, cx| {
+            let panes = workspaces[0].collect_panes();
+            let from_diff = panes
+                .iter()
+                .filter(|pane| **pane == diff_pane)
+                .flat_map(|pane| pane.read(cx).terminals().cloned().collect::<Vec<_>>())
+                .count();
+            (panes.len(), from_diff)
+        });
+        assert_eq!(panes, (3, 0), "the diff pane is walked and yields nothing");
+        assert_eq!(terminals.len(), 2, "only the two agent tabs contribute");
+    }
+
     #[gpui::test]
     fn waiting_pane_in_a_background_tab_reports_its_tab(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
@@ -4121,8 +4208,17 @@ mod tests {
         );
         // Issue #438: `all_diff_review_terminals` is gone with the embedded
         // review terminal. A review agent is an ordinary pane now, so the
-        // `self.workspaces` walk already reaches it.
-        for required in ["self.workspaces", "all_diff_dock_terminals", "child_pid"] {
+        // `self.workspaces` walk already reaches it - which is exactly why
+        // issue #454 needs `workspace.collect_panes()` named here: that is
+        // the ONE call reaching a review agent's tab, and narrowing it to the
+        // active tab would put the agent back out of sight with every other
+        // guard still green.
+        for required in [
+            "self.workspaces",
+            "workspace.collect_panes()",
+            "all_diff_dock_terminals",
+            "child_pid",
+        ] {
             assert!(capture.contains(required), "missing {required}: {capture}");
         }
 
@@ -4137,6 +4233,119 @@ mod tests {
         let spawn = teardown.find("cx.spawn").expect("background worker spawn");
         assert!(sessions < spawn, "{teardown}");
         assert!(teardown.contains("teardown_all(worktrees, protected_session_ids)"));
+    }
+
+    /// Issue #454: the sweeps above reach a terminal through
+    /// `PaneSurface::Terminal` on a tab's layout tree, plus the dock. The
+    /// modules scanned here are the ones that build the surfaces that route
+    /// skips: `DiffView` and `MarkdownView` (`as_terminal()` hands back
+    /// `None` for both), the Review grid, whose panes live in
+    /// `ReviewState::layout` off `PaneFlowApp::review` rather than off any
+    /// tab, and Work Review, which is a pane factory for the same diffs. All
+    /// are terminal-free today, which is why #438 could delete the
+    /// Review-terminal sweeps, and the close confirmation and worktree
+    /// retirement now depend on them staying that way. A `TerminalView`
+    /// behind one of them is the #454 bug again: a live agent the close modal
+    /// never mentions, in a checkout retirement is free to delete underneath
+    /// it. So none of these modules may name that type at all - the same
+    /// shape as the engine-absence guard in `terminal/types.rs`, and for the
+    /// same reason: a rule about how the type is spelled
+    /// (`Entity<TerminalView>` and not `Entity<crate::terminal::TerminalView>`)
+    /// is a rule a later edit walks straight past. What this cannot see is a
+    /// handle whose type is never written - `app/review/agent.rs` holds the
+    /// terminals it prefills through a generic - so it is a guard on the
+    /// OWNING shapes (a field, an annotated collection) and on pane
+    /// placement, not a proof of absence. Other strong `Entity<Pane>` holders
+    /// exist elsewhere (`pane_menu_open`, `swap_armed_panes`); they are
+    /// transient UI state, not hosts, and out of this guard's scope. The
+    /// guard fails with the offending `file:line`.
+    #[test]
+    fn no_terminal_may_hide_behind_a_pane_surface_the_sweeps_skip() {
+        use std::path::{Path, PathBuf};
+
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let guarded = ["diff", "markdown", "app/review", "app/work_review"];
+        // A scan whose roots have been renamed away covers nothing and says
+        // nothing, which reads exactly like a scan that found nothing. Both
+        // halves of the negative control are asserted: the roots exist, and
+        // the walk reached files.
+        let mut stack: Vec<PathBuf> = guarded
+            .iter()
+            .map(|dir| {
+                let path = src_root.join(dir);
+                assert!(
+                    path.is_dir(),
+                    "guarded module `{dir}` moved; re-aim this guard or it covers nothing"
+                );
+                path
+            })
+            .collect();
+        let mut scanned = 0usize;
+        let mut violations = Vec::new();
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    stack.push(entry.unwrap().path());
+                }
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            scanned += 1;
+            let rel = path.strip_prefix(&src_root).unwrap().to_string_lossy();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                // The type itself, and the placement that would put a terminal
+                // pane in one of these layouts without ever naming the type.
+                if line.contains("TerminalView") || line.contains("PaneSurface::Terminal") {
+                    violations.push(format!("{rel}:{}", i + 1));
+                }
+            }
+        }
+        assert!(scanned > guarded.len(), "the walk read {scanned} files");
+        assert!(
+            violations.is_empty(),
+            "a terminal reachable only from here is invisible to \
+             live_terminal_session_ids and to the close-confirmation modal \
+             (issue #454); open it as a workspace tab pane through \
+             open_agent_tab_at_cwd, or teach both sweeps to walk this host:\n{}",
+            violations.join("\n")
+        );
+
+        // The Review grid is the surface that carries the "Review with agent"
+        // pill, and its panes live in `ReviewState::layout`, which
+        // `collect_panes` never walks. Every pane it builds must be a diff.
+        let grid = source_slice(
+            include_str!("../review/grid.rs"),
+            "fn review_new_pane(",
+            "fn review_set_pane_subject(",
+        );
+        assert!(
+            grid.contains("PaneSurface::Diff(view)"),
+            "review_new_pane must build a diff surface: {grid}"
+        );
+
+        // A fourth `PaneSurface` variant is a compile error here that an
+        // author closes reflexively with another `=> None` arm - and a
+        // surface this guard never heard of. Make that edit fail a test that
+        // names the guard instead.
+        let as_terminal = source_slice(
+            include_str!("../../pane.rs"),
+            "pub fn as_terminal(",
+            "/// Icon of the surface",
+        );
+        assert_eq!(
+            as_terminal.matches("PaneSurface::").count(),
+            3,
+            "a PaneSurface variant came or went; add its module to the scan \
+             above if it can host a terminal: {as_terminal}"
+        );
+        assert!(
+            !as_terminal.contains("_ =>"),
+            "as_terminal must stay exhaustive, so a new variant is a compile \
+             error rather than a silent None: {as_terminal}"
+        );
     }
 
     #[test]
