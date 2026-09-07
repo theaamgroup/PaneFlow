@@ -147,6 +147,16 @@ pub(crate) fn save_blocking(
     save_blocking_with(path, contents, expected, || {})
 }
 
+/// A Changes-tab revert edits the regular file it snapshotted, never a newly
+/// substituted symlink's target.
+pub(crate) fn save_regular_blocking(
+    path: &Path,
+    contents: &str,
+    expected: Option<FileStamp>,
+) -> Result<FileStamp, SaveError> {
+    persist_blocking_with(path, contents, expected, true, || {})
+}
+
 /// [`save_blocking`] with a seam between the temp write and the rename, so a
 /// test can land an agent write in exactly the window issue #402 describes.
 fn save_blocking_with(
@@ -155,7 +165,21 @@ fn save_blocking_with(
     expected: Option<FileStamp>,
     before_persist: impl FnOnce(),
 ) -> Result<FileStamp, SaveError> {
-    let path = &write_target(path)?;
+    let path = write_target(path)?;
+    persist_blocking_with(&path, contents, expected, false, before_persist)
+}
+
+fn persist_blocking_with(
+    path: &Path,
+    contents: &str,
+    expected: Option<FileStamp>,
+    regular_only: bool,
+    before_persist: impl FnOnce(),
+) -> Result<FileStamp, SaveError> {
+    let is_regular = || std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file());
+    if regular_only && !is_regular() {
+        return Err(SaveError::Conflict);
+    }
     let parent = parent_dir(path);
     let existing = std::fs::metadata(path).ok();
     if FileStamp::conflicts(
@@ -176,14 +200,12 @@ fn save_blocking_with(
     temp.as_file().sync_all().map_err(|err| write_error(&err))?;
 
     // `NamedTempFile` creates 0600. Restore the original's mode so saving does
-    // not silently strip a group-readable or executable bit. Skipped when the
-    // original is read-only: applying that to the temp would make the rename
-    // itself fail on Windows, and a read-only document never reaches here.
+    // not silently strip a group-readable or executable bit, or make a
+    // read-only file writable through Changes-tab Revert. On macOS a
+    // read-only temporary file can still be renamed into place.
     if let Some(meta) = &existing {
         let permissions = meta.permissions();
-        if !permissions.readonly()
-            && let Err(err) = temp.as_file().set_permissions(permissions)
-        {
+        if let Err(err) = temp.as_file().set_permissions(permissions) {
             log::warn!(
                 "could not carry the original permissions onto {}: {err}",
                 path.display()
@@ -197,7 +219,7 @@ fn save_blocking_with(
     // while the bytes were being written and synced would otherwise be
     // renamed over without a conflict banner (issue #402). Dropping `temp`
     // unlinks it.
-    if FileStamp::conflicts(expected, FileStamp::read(path)) {
+    if (regular_only && !is_regular()) || FileStamp::conflicts(expected, FileStamp::read(path)) {
         return Err(SaveError::Conflict);
     }
     temp.persist(path).map_err(|err| write_error(&err.error))?;
@@ -253,6 +275,57 @@ fn write_error(err: &std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_revert_preserves_a_read_only_files_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, "modified\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        save_regular_blocking(&path, "base\n", FileStamp::read(&path)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "base\n");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+    }
+
+    #[test]
+    fn a_regular_revert_never_follows_a_substituted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let path = dir.path().join("file");
+        std::fs::write(&target, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert_eq!(
+            save_regular_blocking(&path, "revert\n", FileStamp::read(&path)),
+            Err(SaveError::Conflict)
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "secret\n");
+    }
+
+    #[test]
+    fn a_regular_revert_refuses_a_symlink_substituted_during_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let target = dir.path().join("target");
+        std::fs::write(&path, "before\n").unwrap();
+        std::fs::write(&target, "secret\n").unwrap();
+        let result =
+            persist_blocking_with(&path, "reverted\n", FileStamp::read(&path), true, || {
+                std::fs::remove_file(&path).unwrap();
+                std::os::unix::fs::symlink(&target, &path).unwrap();
+            });
+        assert_eq!(result, Err(SaveError::Conflict));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "secret\n");
+        assert!(
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 
     /// US-015 AC: the write is atomic, it lands the exact bytes, and it leaves
     /// no temp file behind.

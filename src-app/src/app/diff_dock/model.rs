@@ -95,7 +95,7 @@ pub(crate) struct DiffDockData {
     /// The working directory this diff was computed for. Used to ignore a
     /// stale async result after the user switches threads or closes the panel.
     pub(crate) cwd: String,
-    pub(super) loading: bool,
+    pub(crate) loading: bool,
     pub(super) error: Option<String>,
     pub(super) unified_loaded: bool,
     pub(super) split_loaded: bool,

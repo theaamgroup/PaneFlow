@@ -716,26 +716,54 @@ pub(crate) fn head_sha(worktree_dir: &Path) -> Option<String> {
 
 pub(crate) enum HeadFile {
     Content(Vec<u8>),
+    Symlink(Vec<u8>),
     Missing,
 }
 
-/// Load `rel_path` as it exists at `HEAD`. A path that is simply not in the
+/// Load `rel_path` at a pinned revision, retaining its Git file type.
+/// A path that is simply not in the
 /// tree is [`HeadFile::Missing`]; a blob that exists but cannot be shown stays
 /// `Err`.
-pub(crate) fn show_head_file(worktree_dir: &Path, rel_path: &str) -> Result<HeadFile, String> {
+pub(crate) fn show_revision_file(
+    worktree_dir: &Path,
+    revision: &str,
+    rel_path: &str,
+) -> Result<HeadFile, String> {
     let budget = GitBudget::for_column();
-    let spec = format!("HEAD:{rel_path}");
-    match budget.run(worktree_dir, &["show", &spec]) {
-        Ok(bytes) => Ok(HeadFile::Content(bytes)),
-        Err(show_err) => match base_path_exists_within(&budget, worktree_dir, "HEAD", rel_path) {
-            Ok(false) => Ok(HeadFile::Missing),
-            Ok(true) => Err(show_err),
-            Err(exists_err) if exists_err.contains("Needed a single revision") => {
-                Ok(HeadFile::Missing)
-            }
-            Err(exists_err) => Err(format!("{show_err}; {exists_err}")),
-        },
+    let tree = budget.run(
+        worktree_dir,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            revision,
+            "--",
+            rel_path,
+        ],
+    )?;
+    for entry in tree.split(|byte| *byte == 0) {
+        let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        if &entry[tab + 1..] != rel_path.as_bytes() {
+            continue;
+        }
+        let header = std::str::from_utf8(&entry[..tab]).map_err(|err| err.to_string())?;
+        let mut parts = header.split_whitespace();
+        let mode = parts.next().unwrap_or_default();
+        let kind = parts.next().unwrap_or_default();
+        let oid = parts.next().unwrap_or_default();
+        if kind != "blob" || !matches!(mode, "100644" | "100755" | "120000") {
+            return Err("The revision path is not a file".into());
+        }
+        let bytes = budget.run(worktree_dir, &["cat-file", "blob", oid])?;
+        return Ok(if mode == "120000" {
+            HeadFile::Symlink(bytes)
+        } else {
+            HeadFile::Content(bytes)
+        });
     }
+    Ok(HeadFile::Missing)
 }
 
 fn base_path_exists_within(

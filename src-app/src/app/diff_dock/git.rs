@@ -142,34 +142,41 @@ fn snapshot_stamps(toplevel: Option<&Path>, files: &[FileDiff]) -> HashMap<Strin
     let mut stamps = HashMap::new();
     for file in files {
         let path = top.join(&file.path);
-        if !working_text_matches(&path, &file.new_text) {
-            continue;
-        }
-        if let Some(stamp) = FileStamp::read(&path) {
+        if let Some((text, stamp)) = read_regular_snapshot(&path)
+            && normalized_working_text(&text) == file.new_text
+        {
             stamps.insert(file.path.clone(), stamp);
         }
     }
     stamps
 }
 
-fn working_text_matches(path: &Path, expected: &str) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(path)
-            .map(|target| target.to_string_lossy() == expected)
-            .unwrap_or(false),
-        Ok(_) => std::fs::read(path)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .is_some_and(|text| {
-                let text = if text.as_bytes().contains(&b'\r') {
-                    text.replace("\r\n", "\n").replace('\r', "\n")
-                } else {
-                    text
-                };
-                text == expected
-            }),
-        Err(_) => false,
+/// Read only a bounded regular file, and stamp the handle that supplied the
+/// bytes. A file replaced by a FIFO or symlink must not block or be followed.
+pub(super) fn read_regular_snapshot(path: &Path) -> Option<(String, FileStamp)> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let stamp = FileStamp::from_metadata(&file.metadata().ok()?)?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(crate::diff::MAX_DIFF_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > crate::diff::MAX_DIFF_FILE_BYTES
+        || FileStamp::from_metadata(&file.metadata().ok()?)? != stamp
+    {
+        return None;
     }
+    Some((String::from_utf8(bytes).ok()?, stamp))
+}
+
+pub(super) fn normalized_working_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn diff_dock_snapshot_fingerprint(files: &[FileDiff]) -> u64 {
@@ -191,6 +198,30 @@ fn diff_dock_snapshot_fingerprint(files: &[FileDiff]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revert_snapshots_refuse_symlinks_fifos_and_oversized_files() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, "text\r\n").unwrap();
+        let (text, stamp) = read_regular_snapshot(&path).unwrap();
+        assert_eq!(text, "text\r\n");
+        assert_eq!(Some(stamp), FileStamp::read(&path));
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(read_regular_snapshot(&link).is_none());
+        let fifo = dir.path().join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is NUL-terminated and lives through this call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(read_regular_snapshot(&fifo).is_none());
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(crate::diff::MAX_DIFF_FILE_BYTES + 1)
+            .unwrap();
+        assert!(read_regular_snapshot(&path).is_none());
+    }
 
     fn git(cwd: &Path, args: &[&str]) -> Vec<u8> {
         let output = crate::workspace::worktree::git_command()

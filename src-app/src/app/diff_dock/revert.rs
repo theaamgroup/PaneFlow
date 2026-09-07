@@ -2,16 +2,42 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Context, Pixels, Point, point, px};
 
-use super::code::save::{FileStamp, SaveError, save_blocking};
+use super::code::save::{FileStamp, SaveError, save_regular_blocking};
+use super::git::{normalized_working_text, read_regular_snapshot};
 use super::model::{DiffDockTab, DiffHover};
 use crate::PaneFlowApp;
 use crate::diff::{
-    CellKind, DiffHunk, DisplayRow, FileChange, FileDiff, RowKind, SplitRow, hunk_for_base_line,
-    hunk_for_new_line, revert_chip_bounds, row_at_offset,
+    CellKind, DiffHunk, DisplayRow, FileChange, FileDiff, HeadFile, RowKind, SplitRow,
+    hunk_for_base_line, hunk_for_new_line, revert_chip_bounds, row_at_offset, show_revision_file,
 };
 
 pub(super) const DIRTY_TAB_MESSAGE: &str = "Save or discard the editor changes first";
 pub(super) const STALE_FILE_MESSAGE: &str = "File changed on disk, refresh first";
+
+/// Recover the exact HEAD bytes discarded by display normalization. Also
+/// refuse type changes: a pathname blob is never a regular source-file base.
+fn load_revert_base(
+    top: &Path,
+    relative: &str,
+    sha: &str,
+    displayed: &str,
+) -> Result<String, String> {
+    let (bytes, symlink) = match show_revision_file(top, sha, relative)? {
+        HeadFile::Content(bytes) => (bytes, false),
+        HeadFile::Symlink(bytes) => (bytes, true),
+        HeadFile::Missing => return Err(STALE_FILE_MESSAGE.into()),
+    };
+    let raw = String::from_utf8(bytes).map_err(|_| STALE_FILE_MESSAGE.to_string())?;
+    let meta = std::fs::symlink_metadata(top.join(relative))
+        .map_err(|_| STALE_FILE_MESSAGE.to_string())?;
+    if meta.file_type().is_symlink() != symlink
+        || (!symlink && !meta.is_file())
+        || normalized_working_text(&raw) != displayed
+    {
+        return Err(STALE_FILE_MESSAGE.into());
+    }
+    Ok(raw)
+}
 
 /// Lines with their original terminators still attached, so a single-hunk
 /// Revert does not rewrite untouched LF/CRLF mix.
@@ -76,15 +102,17 @@ pub(super) fn revert_hunk_blocking(
     if meta.file_type().is_symlink() {
         return revert_symlink_blocking(path, base_text, hunk, expected_working);
     }
-    match (recorded, FileStamp::read(path)) {
+    let (new_text, current) =
+        read_regular_snapshot(path).ok_or_else(|| STALE_FILE_MESSAGE.to_string())?;
+    match (recorded, Some(current)) {
         (Some(recorded), Some(current)) if !recorded.differs(&current) => {}
         _ => return Err(STALE_FILE_MESSAGE.to_string()),
     }
-    let bytes = std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let new_text =
-        String::from_utf8(bytes).map_err(|_| format!("{}: not UTF-8 text", path.display()))?;
+    if normalized_working_text(&new_text) != expected_working {
+        return Err(STALE_FILE_MESSAGE.to_string());
+    }
     let text = splice_base_lines(&new_text, base_text, hunk);
-    save_blocking(path, &text, recorded).map_err(|err| match err {
+    save_regular_blocking(path, &text, recorded).map_err(|err| match err {
         SaveError::Conflict => STALE_FILE_MESSAGE.to_string(),
         SaveError::Write(message) => message,
     })
@@ -100,13 +128,26 @@ fn revert_symlink_blocking(
     hunk: &DiffHunk,
     expected_working: &str,
 ) -> Result<FileStamp, String> {
+    revert_symlink_with(path, base_text, hunk, expected_working, || {})
+}
+
+fn revert_symlink_with(
+    path: &Path,
+    base_text: &str,
+    _hunk: &DiffHunk,
+    expected_working: &str,
+    before_persist: impl FnOnce(),
+) -> Result<FileStamp, String> {
     let current = std::fs::read_link(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let new_text = current.to_string_lossy();
-    if new_text.trim_end_matches(['\n', '\r']) != expected_working.trim_end_matches(['\n', '\r']) {
+    let Some(new_text) = current.to_str() else {
+        return Err(STALE_FILE_MESSAGE.to_string());
+    };
+    if new_text != expected_working {
         return Err(STALE_FILE_MESSAGE.to_string());
     }
-    let restored = splice_base_lines(&new_text, base_text, hunk);
-    let target = Path::new(restored.trim_end_matches(['\n', '\r']));
+    // A symlink is one pathname, even when that pathname contains line
+    // terminators. Restore it as a whole instead of line-splicing the name.
+    let target = Path::new(base_text);
     if target.as_os_str().is_empty() {
         return Err(format!(
             "{}: reverted symlink target is empty",
@@ -122,6 +163,11 @@ fn revert_symlink_blocking(
         .and_then(|name| name.to_str())
         .unwrap_or("link");
     let tmp = unique_symlink_temp(parent, name, target)?;
+    before_persist();
+    if std::fs::read_link(path).ok().as_ref() != Some(&current) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(STALE_FILE_MESSAGE.to_string());
+    }
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{}: {err}", path.display()));
@@ -338,9 +384,14 @@ impl PaneFlowApp {
         };
         let path = toplevel.join(&file.path);
         let base_text = file.base_text.clone();
+        let relative = file.path.clone();
+        let Some(head_sha) = data.head_sha.clone() else {
+            return;
+        };
         let expected_working = file.new_text.clone();
         let recorded = data.stamps.get(&file.path).copied();
         let cwd = data.cwd.clone();
+        let owner = self.diff_dock.owner;
         if self.dirty_file_tab_open(&path, cx) {
             self.show_diff_dock_error(DIRTY_TAB_MESSAGE, cx);
             return;
@@ -348,13 +399,29 @@ impl PaneFlowApp {
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let result = smol::unblock(move || {
+                    let base_text = load_revert_base(&toplevel, &relative, &head_sha, &base_text)?;
                     revert_hunk_blocking(&path, &base_text, &hunk, recorded, &expected_working)
                 })
                 .await;
                 let _ = cx.update(|cx| {
-                    this.update(cx, |app, cx| match result {
-                        Ok(_) => app.refresh_diff_dock(cwd, cx),
-                        Err(err) => app.show_diff_dock_error(&err, cx),
+                    this.update(cx, |app, cx| {
+                        let same_cwd = app
+                            .diff_dock
+                            .data
+                            .as_ref()
+                            .is_some_and(|data| data.cwd == cwd);
+                        match result {
+                            Ok(_) => {
+                                app.invalidate_parked_diff_docks_for_cwd(&cwd);
+                                if same_cwd {
+                                    app.refresh_diff_dock(cwd, cx);
+                                }
+                            }
+                            Err(err) if same_cwd && app.diff_dock.owner == owner => {
+                                app.show_diff_dock_error(&err, cx);
+                            }
+                            Err(_) => {}
+                        }
                     })
                 });
             },
@@ -463,6 +530,64 @@ mod tests {
             "keep\r\nchange\nend\r\n",
             "Revert must not normalize the surrounding CRLF lines"
         );
+    }
+
+    #[test]
+    fn revert_refuses_stale_text_even_when_the_recorded_stamp_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, "agent\nnew\ntext\n").unwrap();
+        let hunk = hunks("a\nb\nc\n", "a\nB\nc\n").remove(0);
+        assert_eq!(
+            revert_hunk_blocking(
+                &path,
+                "a\nb\nc\n",
+                &hunk,
+                FileStamp::read(&path),
+                "a\nB\nc\n"
+            ),
+            Err(STALE_FILE_MESSAGE.into())
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "agent\nnew\ntext\n");
+    }
+
+    #[test]
+    fn symlink_revert_preserves_newlines_in_the_target_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link");
+        let base = "old\n";
+        let new = "new\n";
+        std::os::unix::fs::symlink(new, &path).unwrap();
+        revert_hunk_blocking(&path, base, &hunks(base, new)[0], None, new).unwrap();
+        assert_eq!(std::fs::read_link(path).unwrap(), Path::new(base));
+    }
+
+    #[test]
+    fn symlink_revert_refuses_a_newline_only_target_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link");
+        std::os::unix::fs::symlink("new\n", &path).unwrap();
+        assert_eq!(
+            revert_hunk_blocking(&path, "old", &hunks("old", "new")[0], None, "new"),
+            Err(STALE_FILE_MESSAGE.into())
+        );
+        assert_eq!(std::fs::read_link(path).unwrap(), Path::new("new\n"));
+    }
+
+    #[test]
+    fn symlink_revert_rechecks_the_target_before_publishing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link");
+        std::os::unix::fs::symlink("new", &path).unwrap();
+        assert_eq!(
+            revert_symlink_with(&path, "old", &hunks("old", "new")[0], "new", || {
+                std::fs::remove_file(&path).unwrap();
+                std::os::unix::fs::symlink("agent", &path).unwrap();
+            }),
+            Err(STALE_FILE_MESSAGE.into())
+        );
+        assert_eq!(std::fs::read_link(&path).unwrap(), Path::new("agent"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -761,5 +886,31 @@ mod tests {
             "hello from v2\n",
             "the old target must not be rewritten with the pathname blob"
         );
+    }
+
+    #[test]
+    fn revert_loads_exact_base_endings_and_refuses_file_type_changes() {
+        let Some(dir) = repo() else { return };
+        let root = dir.path();
+        let path = root.join("file");
+        let link = root.join("link");
+        std::fs::write(&path, "old\r\n").unwrap();
+        std::os::unix::fs::symlink("old\r\n", &link).unwrap();
+        assert!(commit(root, "base"));
+        let sha = head_sha(root).unwrap();
+        assert_eq!(
+            load_revert_base(root, "file", &sha, "old\n").unwrap(),
+            "old\r\n"
+        );
+        assert_eq!(
+            load_revert_base(root, "link", &sha, "old\n").unwrap(),
+            "old\r\n"
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, "regular\n").unwrap();
+        assert!(load_revert_base(root, "link", &sha, "old\n").is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("new", &path).unwrap();
+        assert!(load_revert_base(root, "file", &sha, "old\n").is_err());
     }
 }
