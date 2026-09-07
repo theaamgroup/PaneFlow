@@ -350,6 +350,10 @@ fn publish_git_dir_probe(probe: &GitDirSharedProbe, cwd: &str, result: Option<st
 /// answer counts as "no repo". A second call for the same cwd does not spawn
 /// another waiter: it shares the in-flight result up to the remaining budget.
 pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
+    wait_git_dir_probe(&start_git_dir_probe(cwd))
+}
+
+fn start_git_dir_probe(cwd: &str) -> std::sync::Arc<GitDirSharedProbe> {
     let (probe, spawned_here) = {
         let mut map = git_dir_probes();
         if let Some(existing) = map.get(cwd).cloned() {
@@ -365,7 +369,7 @@ pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
         }
     };
     if !spawned_here {
-        return wait_git_dir_probe(&probe);
+        return probe;
     }
 
     let owned = cwd.to_string();
@@ -379,7 +383,7 @@ pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
     if let Err(err) = spawned {
         publish_git_dir_probe(&probe, cwd, None);
         log::warn!("git: could not spawn .git probe for {cwd}: {err}; treating it as not a repo");
-        return None;
+        return probe;
     }
     #[cfg(test)]
     {
@@ -388,7 +392,7 @@ pub fn find_git_dir(cwd: &str) -> Option<std::path::PathBuf> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(cwd.to_string());
     }
-    wait_git_dir_probe(&probe)
+    probe
 }
 
 /// Test-only stand-in for a dead network mount: probing `.git` inside any
@@ -401,14 +405,14 @@ static STALLED_GIT_PROBE_DIRS: std::sync::Mutex<Vec<std::path::PathBuf>> =
 #[cfg(test)]
 const STALLED_GIT_PROBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Test-only pause that still answers truthfully, so two overlapping callers
-/// can share one in-flight walk of a real repo.
+/// Test-only gate that holds a real probe until both callers have joined it.
 #[cfg(test)]
-static SLOW_GIT_PROBE_DIRS: std::sync::Mutex<Vec<std::path::PathBuf>> =
-    std::sync::Mutex::new(Vec::new());
+type GitProbeGate = (std::sync::Mutex<bool>, std::sync::Condvar);
 
 #[cfg(test)]
-const SLOW_GIT_PROBE_DELAY: std::time::Duration = std::time::Duration::from_millis(80);
+static PAUSED_GIT_PROBE_DIRS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, std::sync::Arc<GitProbeGate>)>,
+> = std::sync::Mutex::new(Vec::new());
 
 /// `Path::exists` on a `.git` candidate as the walk sees it. Under test a
 /// candidate whose parent is registered in [`STALLED_GIT_PROBE_DIRS`]
@@ -426,13 +430,22 @@ fn git_entry_exists(candidate: &std::path::Path) -> bool {
             std::thread::sleep(STALLED_GIT_PROBE_DELAY);
             return false;
         }
-        let slow = SLOW_GIT_PROBE_DIRS
+        let gate = PAUSED_GIT_PROBE_DIRS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .any(|dir| Some(dir.as_path()) == parent);
-        if slow {
-            std::thread::sleep(SLOW_GIT_PROBE_DELAY);
+            .find(|(dir, _)| Some(dir.as_path()) == parent)
+            .map(|(_, gate)| std::sync::Arc::clone(gate));
+        if let Some(gate) = gate {
+            let _released = gate
+                .1
+                .wait_while(
+                    gate.0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    |released| !*released,
+                )
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
     candidate.exists()
@@ -903,27 +916,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let git_dir = dir.path().join(".git");
         std::fs::create_dir(&git_dir).unwrap();
-        SLOW_GIT_PROBE_DIRS
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        PAUSED_GIT_PROBE_DIRS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(dir.path().to_path_buf());
+            .push((dir.path().to_path_buf(), gate.clone()));
         let cwd = dir.path().to_str().unwrap().to_string();
-        let cwd_b = cwd.clone();
         let expected = git_dir.clone();
 
-        let first = std::thread::spawn(move || find_git_dir(&cwd));
-        std::thread::sleep(SLOW_GIT_PROBE_DELAY / 4);
-        let second = std::thread::spawn(move || find_git_dir(&cwd_b));
-        let first = first.join().expect("first probe");
-        let second = second.join().expect("second probe");
+        let first = start_git_dir_probe(&cwd);
+        let second = start_git_dir_probe(&cwd);
+        let shared = std::sync::Arc::ptr_eq(&first, &second);
+        // Release only after both handles exist. A sleep cannot establish
+        // overlap on a loaded CI runner (main run 34134611737).
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let (published, _) = first
+            .cond
+            .wait_timeout_while(
+                first.result.lock().unwrap(),
+                std::time::Duration::from_secs(10),
+                |result| result.is_none(),
+            )
+            .unwrap();
+        let completed = published.is_some();
+        drop(published);
 
-        SLOW_GIT_PROBE_DIRS
+        PAUSED_GIT_PROBE_DIRS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|path| path != dir.path());
+            .retain(|(path, _)| path != dir.path());
 
-        assert_eq!(first, Some(expected.clone()));
-        assert_eq!(second, Some(expected));
+        assert!(shared, "both callers must acquire the same in-flight probe");
+        assert!(completed, "the released probe must publish its answer");
+        assert_eq!(wait_git_dir_probe(&first), Some(expected.clone()));
+        assert_eq!(wait_git_dir_probe(&second), Some(expected));
         assert_eq!(
             git_dir_probe_spawn_count(dir.path().to_str().unwrap()),
             1,
