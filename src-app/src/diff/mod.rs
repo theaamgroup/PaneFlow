@@ -48,17 +48,20 @@ pub use view::{
 // pipeline + row model as the Review view, so these are exposed crate-internally
 // rather than re-implemented. Kept `pub(crate)` (not `pub`) so the unification
 // surface stays inside the binary.
-pub(crate) use element::{DiffBody, DiffElement};
-pub(crate) use git::FileDiff;
-pub(crate) use git::{compute_head_diff, is_git_worktree};
-pub(crate) use highlighter::{
-    Grammar, MAX_HIGHLIGHT_BYTES, grammar_for_ext, markdown_inline_grammar, resolve_runs,
-};
-// The editor drives its own incremental parse; it calls the diff's one-shot
-// entry point only to assert the two produce identical runs
-// (prd-file-editor-2026-Q3, US-004 parity test).
+pub(crate) use align::CellKind;
+pub(crate) use element::{DiffBody, DiffElement, revert_chip_bounds};
 #[cfg(test)]
-pub(crate) use highlighter::highlight_lines;
+pub(crate) use engine::compute_hunks;
+pub(crate) use engine::{DiffHunk, hunk_for_base_line, hunk_for_new_line};
+pub(crate) use git::FileDiff;
+pub(crate) use git::{
+    HeadFile, MAX_FILE_BYTES as MAX_DIFF_FILE_BYTES, classify as classify_git_bytes,
+    compute_head_diff, head_sha, is_git_worktree, show_head_file, try_worktree_toplevel,
+};
+pub(crate) use highlighter::{
+    Grammar, MAX_HIGHLIGHT_BYTES, grammar_for_ext, highlight_lines, markdown_inline_grammar,
+    resolve_runs,
+};
 pub(crate) use hit_test::row_at_offset;
 pub(crate) use hscroll::{
     H_SCROLLBAR_TRACK_HEIGHT, HScrollbarSegment, file_at_row, h_offset_index, h_offset_len,

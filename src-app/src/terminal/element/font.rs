@@ -87,10 +87,11 @@ pub(crate) const PANEFLOW_SANS_ALIAS: &str = ".PaneflowSans";
 fn expand_paneflow_alias(name: &str) -> &str {
     match name {
         PANEFLOW_MONO_ALIAS
+        | ".ZedMono"
         | JETBRAINS_MONO_NF_ALIAS
         | JETBRAINS_MONO_NFM_ALIAS
         | LEGACY_JETBRAINS_MONO_NFM_FAMILY => EMBEDDED_MONO_FAMILY,
-        PANEFLOW_SANS_ALIAS => EMBEDDED_SANS_FAMILY,
+        PANEFLOW_SANS_ALIAS | ".ZedSans" => EMBEDDED_SANS_FAMILY,
         other => other,
     }
 }
@@ -1271,6 +1272,8 @@ mod tests {
             resolve_font_family(Some(".PaneflowMono")),
             EMBEDDED_MONO_FAMILY
         );
+        assert_eq!(resolve_font_family(Some(".ZedMono")), EMBEDDED_MONO_FAMILY);
+        assert_eq!(resolve_font_family(Some(".ZedSans")), EMBEDDED_SANS_FAMILY);
         assert_eq!(
             resolve_font_family(Some("JetBrainsMono NF")),
             EMBEDDED_MONO_FAMILY

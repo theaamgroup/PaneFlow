@@ -386,6 +386,7 @@ KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
 | `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |
 | `paneflow-libghostty-sys` | `crates/paneflow-libghostty-sys/` | Library | Raw libghostty-vt FFI; `build.rs` verifies and links `native/libghostty/prebuilt/aarch64-apple-darwin` (no Zig) |
 | `paneflow-terminal-ghostty` | `crates/paneflow-terminal-ghostty/` | Library | Safe `DisplayTerminal` wrapper over the FFI (unwired until #184 Phase 2) |
+| `paneflow-textdiff` | `crates/paneflow-textdiff/` | Library | IntelliJ-style line/word comparison + `BlockTracker` for editor gutter markers (#432). GPU-free; never linked by the size-capped helpers |
 | `paneflow-ghostty-smoke` | `crates/paneflow-ghostty-smoke/` | Binary | Headless PTY smoke against the linked archive |
 
 There is **no** `paneflow-telemetry` crate. It was deleted in the post-2c

@@ -29,6 +29,7 @@ mod model;
 mod new_tab_menu;
 mod options_menu;
 mod render;
+mod revert;
 mod setup;
 mod surface_picker;
 mod tabs;
@@ -36,13 +37,13 @@ mod tabs;
 pub(crate) use branch::{DiffBranchMenuState, list_branches};
 pub(crate) use model::{
     DIFF_DOCK_PANEL_MAX_WIDTH, DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_WIDTH, DiffDockData,
-    DiffDockHScrollDrag, DiffDockTab,
+    DiffDockHScrollDrag, DiffDockTab, DiffHover,
 };
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement,
-    Styled, Window, div, px,
+    MouseMoveEvent, ParentElement, Pixels, Point, ScrollHandle, ScrollWheelEvent,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use self::branch::render_diff_branch_chip;
@@ -383,7 +384,7 @@ impl PaneFlowApp {
             // (US-018): same 36 px band, describing the open document instead
             // of the working tree.
             Some(DiffDockTab::File(view)) => {
-                let (icon, path, line, column) = {
+                let (icon, path, line, column, controls) = {
                     let view = view.read(cx);
                     let path = view.path().to_path_buf();
                     let (line, column) = view.cursor_line_column();
@@ -396,10 +397,13 @@ impl PaneFlowApp {
                         diff_file_header_path(&cwd, &path),
                         line,
                         column,
+                        view.controls.clone().into_any_element(),
                     )
                 };
                 (
-                    Some(render_diff_file_header(icon, path, line, column, ui)),
+                    Some(render_diff_file_header(
+                        icon, path, line, column, controls, ui,
+                    )),
                     view.clone().into_any_element(),
                 )
             }
@@ -597,6 +601,12 @@ impl PaneFlowApp {
         };
         let pal = palette(ui);
         let scroll = self.diff_dock.scroll.clone();
+        let chip_row = self
+            .diff_dock
+            .hover
+            .as_ref()
+            .filter(|hover| hover.split == split)
+            .map(|hover| hover.chip_row);
 
         // Custom direct-paint element hosted in a scroll-tracked div, exactly
         // like the Review view (`diff/view/render.rs`): `overflow_y_scroll` so
@@ -632,9 +642,16 @@ impl PaneFlowApp {
             .on_click(cx.listener(|this, ev: &ClickEvent, _w, cx| {
                 this.handle_diff_dock_body_click(ev, cx);
             }))
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _w, cx| {
+                this.update_diff_dock_hover(ev.position, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                    if this.handle_diff_dock_revert_click(ev.position, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     let split = this.diff_dock.split;
                     if this.handle_diff_dock_h_scrollbar_mouse_down(ev.position, split, cx) {
                         cx.stop_propagation();
@@ -644,7 +661,7 @@ impl PaneFlowApp {
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
                 this.apply_diff_dock_wheel(ev, window, cx);
             }))
-            .child(DiffElement::new(body, pal));
+            .child(DiffElement::new(body, pal).with_revert_chip(chip_row));
         // Not exposed as a builder method on the pinned fork - set on the style
         // refinement directly, the same raw mutation Zed uses.
         element.style().restrict_scroll_to_axis = Some(true);
@@ -926,6 +943,9 @@ impl PaneFlowApp {
     /// file's collapse. Mirrors the Review view's header-collapse path (the dock
     /// has no click-to-ask, so a non-header click is a no-op).
     fn handle_diff_dock_body_click(&mut self, ev: &ClickEvent, cx: &mut Context<Self>) {
+        if self.handle_diff_dock_revert_click(ev.position(), cx) {
+            return;
+        }
         let split = self.diff_dock.split;
         if self.handle_diff_dock_h_scrollbar_click(ev.position(), split, cx) {
             return;

@@ -40,3 +40,27 @@ fn cargo_lock_git_sources_are_immutable() {
         );
     }
 }
+
+#[test]
+fn embedded_helpers_never_link_the_textdiff_crate() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for package in ["paneflow-shim", "paneflow-ai-hook", "paneflow-mcp"] {
+        let output = std::process::Command::new("cargo")
+            .args(["tree", "-p", package, "--format", "{p}", "--prefix", "none"])
+            .current_dir(&manifest)
+            .output()
+            .unwrap_or_else(|err| panic!("cargo tree -p {package}: {err}"));
+        assert!(
+            output.status.success(),
+            "cargo tree -p {package} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.starts_with("paneflow-textdiff ")),
+            "{package} must not depend on paneflow-textdiff:\n{stdout}"
+        );
+    }
+}

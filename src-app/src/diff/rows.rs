@@ -347,6 +347,8 @@ pub struct RowPalette {
     /// bundled theme files keep their current shape and a user theme cannot
     /// forget to define it.
     pub cursor_line_bg: Hsla,
+    pub chip_bg: Hsla,
+    pub chip_fg: Hsla,
 }
 
 fn content_row(
@@ -568,6 +570,8 @@ pub fn palette(ui: crate::theme::UiColors) -> RowPalette {
         // shade on light, and stays under every diff wash so a changed line
         // keeps its status color when the caret sits on it.
         cursor_line_bg: ui.text.opacity(0.05),
+        chip_bg: crate::app::constants::sidebar_tab_hover_background(),
+        chip_fg: ui.text,
     }
 }
 

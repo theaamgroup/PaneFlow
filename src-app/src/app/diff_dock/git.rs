@@ -6,8 +6,10 @@
 //! [`DiffDockBuilt`] that [`super::model::DiffDockData::apply_built`] wraps in
 //! `Rc`s back on the main thread.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
+use super::code::save::FileStamp;
 use crate::diff::{
     DiffSyntax, DisplayRow, FileDiff, FileRowCache, RowKind, SplitRow,
     build_display_rows_with_caches, build_file_row_caches, build_split_rows_with_caches,
@@ -31,6 +33,8 @@ pub(super) struct DiffDockBuilt {
     pub(super) row_caches: Vec<FileRowCache>,
     pub(super) theme_generation: u64,
     pub(super) fingerprint: u64,
+    pub(super) toplevel: Option<PathBuf>,
+    pub(super) stamps: HashMap<String, FileStamp>,
 }
 
 /// Off-thread builder: shell the HEAD-relative diff and turn it into both shared
@@ -105,6 +109,15 @@ pub(super) fn build_diff_dock(
             u32::try_from(git_stats.deletions).unwrap_or(u32::MAX),
         )
     };
+    let toplevel = diff.toplevel.clone();
+    let mut stamps = HashMap::new();
+    if let Some(top) = &toplevel {
+        for file in &diff.files {
+            if let Some(stamp) = FileStamp::read(&top.join(&file.path)) {
+                stamps.insert(file.path.clone(), stamp);
+            }
+        }
+    }
     Ok(DiffDockBuilt {
         unified,
         anchors_unified,
@@ -118,6 +131,8 @@ pub(super) fn build_diff_dock(
         row_caches,
         theme_generation,
         fingerprint,
+        toplevel,
+        stamps,
     })
 }
 

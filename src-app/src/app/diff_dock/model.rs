@@ -1,10 +1,12 @@
 //! The Agents dock's render-ready data snapshot + its layout constants.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::Pixels;
 
+use super::code::save::FileStamp;
 use super::git::DiffDockBuilt;
 use crate::diff::{
     DisplayRow, FileDiff, FileRowCache, FileSpan, SplitRow, apply_collapse_split,
@@ -76,6 +78,14 @@ pub(crate) struct DiffDockHScrollDrag {
     pub(super) thumb_width: f32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffHover {
+    pub(crate) split: bool,
+    pub(crate) path: String,
+    pub(crate) hunk: usize,
+    pub(crate) chip_row: usize,
+}
+
 /// Render-ready snapshot of the panel's data. Cheap to clone every frame: every
 /// row vector is shared behind an `Rc` (single-threaded GPUI state). Mirrors a
 /// single [`crate::diff`] `Column`: the full rows are kept so a collapse toggle
@@ -119,6 +129,8 @@ pub(crate) struct DiffDockData {
     pub(super) removed: u32,
     pub(super) theme_generation: u64,
     pub(super) fingerprint: u64,
+    pub(crate) toplevel: Option<PathBuf>,
+    pub(crate) stamps: Rc<HashMap<String, FileStamp>>,
 }
 
 impl DiffDockData {
@@ -151,6 +163,8 @@ impl DiffDockData {
             removed: 0,
             theme_generation: crate::theme::theme_generation(),
             fingerprint: 0,
+            toplevel: None,
+            stamps: Rc::new(HashMap::new()),
         }
     }
 
@@ -196,6 +210,8 @@ impl DiffDockData {
         self.removed = built.removed;
         self.theme_generation = built.theme_generation;
         self.fingerprint = built.fingerprint;
+        self.toplevel = built.toplevel;
+        self.stamps = Rc::new(built.stamps);
         self.files_full = Rc::new(built.files_full);
         self.row_caches = Rc::new(built.row_caches);
 

@@ -86,6 +86,86 @@ impl AppliedEdit {
     }
 }
 
+/// Line window a splice occupies in the git-gutter tracker: the first
+/// affected line plus how many lines were there before and after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TrackerWindow {
+    pub(crate) start_line: u32,
+    pub(crate) before_len: u32,
+    pub(crate) after_len: u32,
+}
+
+/// One applied document edit plus the tracker window it covers.
+pub(crate) struct DocChange {
+    #[allow(dead_code)]
+    pub(crate) edit: CodeEdit,
+    pub(crate) window: TrackerWindow,
+}
+
+pub(crate) fn tracker_window(doc: &CodeDocument, edit: &CodeEdit, fragment: &str) -> TrackerWindow {
+    let line1 = edit.start_point.row;
+    let old_len = edit.old_end_byte - edit.start_byte;
+    let new_len = edit.new_end_byte - edit.start_byte;
+    let line2 = if old_len == 0 {
+        line1 + 1
+    } else {
+        edit.old_end_point.row + 1
+    };
+    let new_line2 = if new_len == 0 {
+        line1 + 1
+    } else {
+        edit.new_end_point.row + 1
+    };
+    let mut start_line = line1;
+    let mut before_len = line2 - line1;
+    let mut after_len = new_line2 - line1;
+    let whole_lines = (old_len == 0) != (new_len == 0);
+    // A combined replacement still includes the terminator in `old_end_point`,
+    // so the same "whole line" trim as an insert-or-delete keeps a one-line
+    // revert from swallowing the next block.
+    if fragment.ends_with('\n') && newline_before(doc, edit.start_byte) {
+        before_len = before_len.saturating_sub(1);
+        after_len = after_len.saturating_sub(1);
+    } else if whole_lines && fragment.starts_with('\n') && newline_after(doc, edit.new_end_byte) {
+        start_line += 1;
+        before_len = before_len.saturating_sub(1);
+        after_len = after_len.saturating_sub(1);
+    }
+    TrackerWindow {
+        start_line: start_line as u32,
+        before_len: before_len as u32,
+        after_len: after_len as u32,
+    }
+}
+
+fn newline_before(doc: &CodeDocument, offset: usize) -> bool {
+    offset == 0 || doc.text().byte(offset - 1) == b'\n'
+}
+
+fn newline_after(doc: &CodeDocument, offset: usize) -> bool {
+    offset >= doc.len_bytes() || doc.text().byte(offset) == b'\n'
+}
+
+fn window_from_edits(doc: &CodeDocument, edits: &[CodeEdit], fragment: &str) -> TrackerWindow {
+    let Some(first) = edits.first() else {
+        return TrackerWindow {
+            start_line: 0,
+            before_len: 0,
+            after_len: 0,
+        };
+    };
+    let last = edits.last().unwrap_or(first);
+    let combined = CodeEdit {
+        start_byte: first.start_byte,
+        old_end_byte: first.old_end_byte,
+        new_end_byte: last.new_end_byte,
+        start_point: first.start_point,
+        old_end_point: first.old_end_point,
+        new_end_point: last.new_end_point,
+    };
+    tracker_window(doc, &combined, fragment)
+}
+
 /// What [`splice`] produced: the one document edit to feed the highlighter,
 /// and the record to hand the history.
 ///
@@ -94,6 +174,7 @@ impl AppliedEdit {
 /// hunks stays one entry per hunk so it can be validated as descending.
 pub(crate) struct Splice {
     pub(crate) edit: CodeEdit,
+    pub(crate) window: TrackerWindow,
     pub(crate) record: AppliedEdit,
 }
 
@@ -120,8 +201,15 @@ pub(crate) fn splice(doc: &mut CodeDocument, range: Range<usize>, text: &str) ->
         .then(|| doc.insert(start, &inserted))
         .flatten();
     let edit = replacement_edit(removal, insertion)?;
+    let fragment = if inserted.is_empty() {
+        removed.as_str()
+    } else {
+        inserted.as_str()
+    };
+    let window = tracker_window(doc, &edit, fragment);
     Some(Splice {
         edit,
+        window,
         record: AppliedEdit {
             start,
             removed,
@@ -297,14 +385,28 @@ fn shift_offset_for_splices(offset: usize, splices_descending: &[(Range<usize>, 
 }
 
 /// Replay `record` in the direction it was originally applied.
-fn apply_forward(doc: &mut CodeDocument, record: &AppliedEdit) -> Vec<CodeEdit> {
-    raw_splice(doc, record.removed_range(), &record.inserted)
+fn apply_forward(doc: &mut CodeDocument, record: &AppliedEdit) -> (Vec<CodeEdit>, TrackerWindow) {
+    let edits = raw_splice(doc, record.removed_range(), &record.inserted);
+    let fragment = if record.inserted.is_empty() {
+        record.removed.as_str()
+    } else {
+        record.inserted.as_str()
+    };
+    let window = window_from_edits(doc, &edits, fragment);
+    (edits, window)
 }
 
 /// Replay `record` backwards: put the removed bytes back where the inserted
 /// ones are.
-fn apply_reverse(doc: &mut CodeDocument, record: &AppliedEdit) -> Vec<CodeEdit> {
-    raw_splice(doc, record.inserted_range(), &record.removed)
+fn apply_reverse(doc: &mut CodeDocument, record: &AppliedEdit) -> (Vec<CodeEdit>, TrackerWindow) {
+    let edits = raw_splice(doc, record.inserted_range(), &record.removed);
+    let fragment = if record.removed.is_empty() {
+        record.inserted.as_str()
+    } else {
+        record.removed.as_str()
+    };
+    let window = window_from_edits(doc, &edits, fragment);
+    (edits, window)
 }
 
 /// The splice a replay performs: no record, no normalization (both texts came
@@ -373,6 +475,8 @@ impl Transaction {
 pub(crate) struct HistoryStep {
     /// Document edits, in the order they were applied, to feed `Tree::edit`.
     pub(crate) edits: Vec<CodeEdit>,
+    /// Tracker windows matching the replayed records, in the same order.
+    pub(crate) windows: Vec<TrackerWindow>,
     /// Selection to restore.
     pub(crate) selection: CodeSelection,
 }
@@ -481,13 +585,20 @@ impl UndoHistory {
         let bytes = transaction.bytes();
         self.undo_bytes = self.undo_bytes.saturating_sub(bytes);
         let mut edits = Vec::new();
+        let mut windows = Vec::new();
         for record in transaction.edits.iter().rev() {
-            edits.extend(apply_reverse(doc, record));
+            let (step_edits, window) = apply_reverse(doc, record);
+            edits.extend(step_edits);
+            windows.push(window);
         }
         let selection = transaction.before;
         self.redo.push(transaction);
         self.redo_bytes = self.redo_bytes.saturating_add(bytes);
-        Some(HistoryStep { edits, selection })
+        Some(HistoryStep {
+            edits,
+            windows,
+            selection,
+        })
     }
 
     /// Redo the newest undone transaction.
@@ -497,13 +608,20 @@ impl UndoHistory {
         let bytes = transaction.bytes();
         self.redo_bytes = self.redo_bytes.saturating_sub(bytes);
         let mut edits = Vec::new();
+        let mut windows = Vec::new();
         for record in &transaction.edits {
-            edits.extend(apply_forward(doc, record));
+            let (step_edits, window) = apply_forward(doc, record);
+            edits.extend(step_edits);
+            windows.push(window);
         }
         let selection = transaction.after;
         self.undo.push_back(transaction);
         self.undo_bytes = self.undo_bytes.saturating_add(bytes);
-        Some(HistoryStep { edits, selection })
+        Some(HistoryStep {
+            edits,
+            windows,
+            selection,
+        })
     }
 
     /// Where the history stands right now.

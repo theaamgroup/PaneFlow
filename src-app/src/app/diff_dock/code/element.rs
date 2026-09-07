@@ -34,15 +34,25 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Corners, Element, ElementId, ElementInputHandler,
-    Entity, Focusable, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, SharedString, Style,
-    TextAlign, TextRun, UnderlineStyle, Window, fill, point, px, quad, relative, size,
+    App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, Focusable, Font, FontFeatures, FontStyle, FontWeight,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
+    Pixels, Point, ShapedLine, SharedString, Style, TextAlign, TextRun, UnderlineStyle, Window,
+    fill, point, px, quad, relative, size,
 };
+use paneflow_textdiff::BlockKind;
 use ropey::RopeSlice;
 
 use super::cursor;
 use super::document::CodeDocument;
+use super::markers::{
+    MARKER_BAR_RADIUS, MARKER_BAR_W, MARKER_COLUMN_W, MARKER_HOVER_GROW, marker_rects,
+};
+use super::minimap::MinimapPaint;
+use super::navigation::{
+    MINIMAP_FONT_SIZE, NavigationLayout, SCROLLBAR_SIZE, minimap_top, minimap_track, minimap_width,
+    scrollbar_track,
+};
 use super::view::CodeView;
 use crate::diff::{ROW_HEIGHT, RowPalette};
 use crate::widgets::scrollbar::ScrollableHandle;
@@ -59,6 +69,7 @@ const NUM_GAP: f32 = 6.0;
 const GUTTER_PAD_L: f32 = 8.0;
 /// Gutter floor width - narrow files still get a readable rail.
 const GUTTER_MIN_W: f32 = 36.0;
+const MARKER_INSET_L: f32 = 2.0;
 /// Inset between the gutter's right edge and the first code glyph.
 const CODE_PAD_L: f32 = 6.0;
 /// Right inset so the last column never sits flush against the scrollbar.
@@ -68,16 +79,8 @@ const H_SCROLL_MARGIN: f32 = 12.0;
 /// Caret bar thickness (US-009).
 const CARET_WIDTH: f32 = 2.0;
 
-/// Vertical scrollbar track/thumb width. Matches `widgets::scrollbar`.
-const V_SCROLLBAR_W: f32 = 6.0;
-/// Gap between the thumb and the element's right edge.
-const V_SCROLLBAR_INSET: f32 = 2.0;
-/// Horizontal scrollbar thickness, matching the diff's own
-/// (`hscroll.rs::H_SCROLLBAR_TRACK_HEIGHT`).
-const H_SCROLLBAR_H: f32 = 6.0;
-/// Gap between the horizontal thumb and the viewport's bottom edge.
-const H_SCROLLBAR_INSET: f32 = 3.0;
 /// Below this the horizontal thumb is too small to grab.
+#[cfg(test)]
 const H_SCROLLBAR_MIN_THUMB: f32 = 28.0;
 /// Offsets under this magnitude count as "fits" - no scrollbar, no scrolling.
 const SCROLL_EPSILON: f32 = 0.5;
@@ -147,7 +150,60 @@ pub(crate) fn digit_count(n: usize) -> usize {
 /// Gutter column width for `digits` line-number digits at a monospace advance
 /// of `digit_w`, floored at [`GUTTER_MIN_W`].
 pub(crate) fn gutter_width(digits: usize, digit_w: f32) -> f32 {
-    (GUTTER_PAD_L + digits as f32 * digit_w + NUM_GAP).max(GUTTER_MIN_W)
+    (GUTTER_PAD_L + MARKER_COLUMN_W + digits as f32 * digit_w + NUM_GAP)
+        .max(GUTTER_MIN_W + MARKER_COLUMN_W)
+}
+
+pub(crate) fn code_font() -> Font {
+    thread_local! {
+        static MONO_FAMILY: SharedString =
+            crate::terminal::element::resolve_font_family(None).into();
+    }
+    Font {
+        family: MONO_FAMILY.with(|f| f.clone()),
+        features: FontFeatures::disable_ligatures(),
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: FontStyle::Normal,
+    }
+}
+
+pub(crate) fn syntax_text_runs(
+    text: &str,
+    syntax: &[(Range<usize>, Hsla)],
+    font: &Font,
+    default: Hsla,
+) -> Vec<TextRun> {
+    let run = |len: usize, color: Hsla| TextRun {
+        len,
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    if syntax.is_empty() {
+        return vec![run(text.len(), default)];
+    }
+    let len = text.len();
+    let mut runs = Vec::new();
+    let mut ix = 0usize;
+    for (r, color) in syntax {
+        let start = r.start.min(len);
+        let end = r.end.min(len);
+        if start < ix || start >= end {
+            continue;
+        }
+        if start > ix {
+            runs.push(run(start - ix, default));
+        }
+        runs.push(run(end - start, *color));
+        ix = end;
+    }
+    if ix < len {
+        runs.push(run(len - ix, default));
+    }
+    runs
 }
 
 /// Width available to code once the gutter and the right inset are removed.
@@ -168,6 +224,7 @@ pub(crate) fn max_h_offset(longest_line_chars: usize, char_w: f32, text_viewport
 
 /// Horizontal thumb `(x, width)` inside a track of `track_w`, or `None` when
 /// the longest line fits (US-008: no scrollbar unless it overflows).
+#[cfg(test)]
 pub(crate) fn h_thumb(offset: f32, max_offset: f32, track_w: f32) -> Option<(f32, f32)> {
     if track_w <= 0.0 || max_offset < SCROLL_EPSILON {
         return None;
@@ -502,6 +559,16 @@ pub(crate) struct CodeColors {
     pub(crate) cursor: Hsla,
     pub(crate) selection: Hsla,
     pub(crate) selection_fg: Hsla,
+    pub(crate) marker_added: Hsla,
+    pub(crate) marker_modified: Hsla,
+    pub(crate) marker_deleted: Hsla,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MarkerHit {
+    pub(crate) index: usize,
+    pub(crate) y0: f32,
+    pub(crate) y1: f32,
 }
 
 /// The caret state for one frame (US-009, US-010).
@@ -538,6 +605,8 @@ pub(crate) struct CodeHitMap {
     /// Window-space x of a line's first glyph, horizontal offset already
     /// applied.
     pub(crate) text_x: f32,
+    pub(crate) marker_x: f32,
+    pub(crate) markers: Vec<MarkerHit>,
     /// Rows this frame had to build a `String` for because the layout cache
     /// held nothing under their content hash (US-025). Zero on a warm frame.
     pub(crate) materialized_lines: usize,
@@ -551,6 +620,25 @@ impl CodeHitMap {
     /// Row under `y`, unclamped by the map's own window.
     fn row_at(&self, y: f32) -> isize {
         self.first_row as isize + ((y - self.top_y) / CODE_ROW_HEIGHT).floor() as isize
+    }
+
+    pub(crate) fn row_top(&self, row: usize) -> f32 {
+        self.top_y + (row as f32 - self.first_row as f32) * CODE_ROW_HEIGHT
+    }
+
+    pub(crate) fn marker_at(&self, position: Point<Pixels>) -> Option<usize> {
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        if self.markers.is_empty()
+            || x < self.marker_x - MARKER_HOVER_GROW
+            || x > self.marker_x + MARKER_COLUMN_W
+        {
+            return None;
+        }
+        self.markers
+            .iter()
+            .find(|hit| y >= hit.y0 && y < hit.y1)
+            .map(|hit| hit.index)
     }
 
     /// Caret slot under a window-space position.
@@ -582,9 +670,15 @@ impl CodeHitMap {
 
 /// Everything `paint` needs, resolved once in `prepaint`.
 pub(crate) struct CodePrepaint {
+    content_bounds: Bounds<Pixels>,
     quads: Vec<Quad>,
+    markers: Vec<RoundedQuad>,
     glyphs: Vec<CodeGlyph>,
-    scrollbars: Vec<RoundedQuad>,
+    navigation: NavigationLayout,
+    navigation_hitbox: Hitbox,
+    minimap: Option<MinimapPaint>,
+    marker_hitbox: Hitbox,
+    marker_pointer: bool,
 }
 
 /// Initial capacity of the per-element run buffers: comfortably more runs
@@ -830,21 +924,95 @@ impl Element for CodeElement {
         let doc = view.document()?;
         let line_count = doc.line_count();
 
-        // Visible window (US-024): the element is the viewport, and the row at
-        // its top edge is the position the view owns. Publishing the metrics
-        // first re-clamps that position to this frame's document and height.
-        self.scroll.set_metrics(bounds, line_count);
-        let scroll_rows = self.scroll.rows();
-        let scale_factor = window.scale_factor();
-        let viewport_h = f32::from(bounds.size.height);
-        let rows = visible_rows_at(scroll_rows, viewport_h, line_count);
-
         let memo = self.resolve_gutter(window, digit_count(line_count));
         let gutter_w = memo.gutter_w;
-        let element_w = f32::from(bounds.size.width);
+        let display = view.controls.read(cx).display;
+        let scrollbar_w = if display.scrollbar {
+            SCROLLBAR_SIZE
+        } else {
+            0.0
+        };
+        let minimap_w = minimap_width(
+            text_viewport_width(f32::from(bounds.size.width) - scrollbar_w, gutter_w),
+            memo.digit_w * MINIMAP_FONT_SIZE / CODE_FONT_SIZE,
+            display.minimap,
+        );
+        let element_w = (f32::from(bounds.size.width) - scrollbar_w - minimap_w).max(0.0);
         let text_viewport_w = text_viewport_width(element_w, gutter_w);
         let h_max = max_h_offset(doc.longest_line_chars(), memo.digit_w, text_viewport_w);
         let h_offset = self.h_offset.clamp(0.0, h_max);
+        let scrollbar_h = if display.scrollbar && h_max > SCROLL_EPSILON {
+            SCROLLBAR_SIZE
+        } else {
+            0.0
+        };
+        let viewport_h = (f32::from(bounds.size.height) - scrollbar_h).max(0.0);
+        self.scroll.set_metrics(
+            Bounds::new(bounds.origin, size(bounds.size.width, px(viewport_h))),
+            line_count,
+        );
+        let scroll_rows = self.scroll.rows();
+        let scale_factor = window.scale_factor();
+        let rows = visible_rows_at(scroll_rows, viewport_h, line_count);
+        let vertical = display.scrollbar.then(|| {
+            scrollbar_track(
+                Bounds::new(
+                    point(bounds.right() - px(SCROLLBAR_SIZE), bounds.origin.y),
+                    size(px(SCROLLBAR_SIZE), px(viewport_h)),
+                ),
+                self.scroll.visible_rows(),
+                line_count as f64,
+                scroll_rows,
+                false,
+            )
+        });
+        let horizontal = (scrollbar_h > 0.0).then(|| {
+            scrollbar_track(
+                Bounds::new(
+                    point(
+                        bounds.origin.x + px(gutter_w + CODE_PAD_L),
+                        bounds.bottom() - px(SCROLLBAR_SIZE),
+                    ),
+                    size(px(text_viewport_w), px(SCROLLBAR_SIZE)),
+                ),
+                f64::from(text_viewport_w),
+                f64::from(text_viewport_w + h_max),
+                f64::from(h_offset),
+                true,
+            )
+        });
+        let minimap_track = (minimap_w > 0.0).then(|| {
+            minimap_track(
+                Bounds::new(
+                    point(bounds.origin.x + px(element_w), bounds.origin.y),
+                    size(px(minimap_w), px(viewport_h)),
+                ),
+                line_count,
+                &self.scroll,
+            )
+        });
+        let navigation = NavigationLayout {
+            vertical,
+            horizontal,
+            minimap: minimap_track,
+            minimap_top: minimap_top(line_count, &self.scroll),
+        };
+        if minimap_track.is_some() && view.navigation.layout.get().minimap.is_none() {
+            window.request_animation_frame();
+        }
+        view.navigation.layout.set(navigation);
+        let navigation_hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let minimap = minimap_track.and_then(|track| {
+            MinimapPaint::layout(
+                view,
+                track,
+                &self.scroll,
+                self.palette.context_bg,
+                self.palette.text,
+                window,
+            )
+        });
+        let bounds = Bounds::new(bounds.origin, size(px(element_w), px(viewport_h)));
         self.geometry.set(CodeGeometry {
             gutter_w,
             char_w: memo.digit_w,
@@ -867,7 +1035,6 @@ impl Element for CodeElement {
         let visible = rows.len();
         let mut quads = Vec::with_capacity(visible + 2);
         let mut glyphs = Vec::with_capacity(visible * 2);
-        let mut scrollbars = Vec::with_capacity(2);
 
         let left = bounds.origin.x;
         let gutter_px = px(gutter_w);
@@ -914,14 +1081,66 @@ impl Element for CodeElement {
             });
         }
 
+        let column_x = left + px(MARKER_INSET_L);
         let mut hits = CodeHitMap {
             first_row: rows.start,
             top_y: f32::from(row_y(rows.start)),
             text_x: f32::from(text_x) - h_offset,
+            marker_x: f32::from(column_x),
+            markers: Vec::new(),
             materialized_lines: 0,
             materialized_numbers: 0,
             lines: Vec::with_capacity(visible),
         };
+
+        let mut markers = Vec::new();
+        let blocks = view.marker_blocks();
+        let hovered = view.hovered_marker();
+        if visible > 0 && !blocks.is_empty() {
+            let window_top = hits.top_y;
+            for rect in marker_rects(
+                blocks,
+                rows.start,
+                CODE_ROW_HEIGHT,
+                visible as f32 * CODE_ROW_HEIGHT,
+            ) {
+                let hover = hovered == Some(rect.index);
+                let (color, x, w) = match rect.kind {
+                    BlockKind::Added => {
+                        (self.colors.marker_added, column_x + px(1.0), MARKER_BAR_W)
+                    }
+                    BlockKind::Modified => (
+                        self.colors.marker_modified,
+                        column_x + px(1.0),
+                        MARKER_BAR_W,
+                    ),
+                    BlockKind::Deleted => (self.colors.marker_deleted, column_x, MARKER_COLUMN_W),
+                };
+                let (x, w) = if hover {
+                    (x - px(MARKER_HOVER_GROW), w + MARKER_HOVER_GROW)
+                } else {
+                    (x, w)
+                };
+                markers.push(RoundedQuad {
+                    bounds: Bounds::new(point(x, px(window_top + rect.y)), size(px(w), px(rect.h))),
+                    corners: Corners::all(px(MARKER_BAR_RADIUS)),
+                    color,
+                });
+                hits.markers.push(MarkerHit {
+                    index: rect.index,
+                    y0: window_top + rect.hit_y,
+                    y1: window_top + rect.hit_y + rect.hit_h,
+                });
+            }
+        }
+        let marker_hitbox = window.insert_hitbox(
+            Bounds::new(
+                point(left, bounds.origin.y),
+                size(px(MARKER_INSET_L + MARKER_COLUMN_W), bounds.size.height),
+            ),
+            HitboxBehavior::Normal,
+        );
+        let marker_pointer = hovered.is_some();
 
         let hl = view.highlighter();
         for row in rows.clone() {
@@ -1087,38 +1306,16 @@ impl Element for CodeElement {
         }
         *self.hits.borrow_mut() = hits;
 
-        // Vertical scrollbar (US-007). Geometry comes from the shared scroll
-        // state, so the painted thumb and the dragged thumb can never diverge.
-        let corners = Corners::all(px(3.));
-        if let Some(m) = crate::widgets::scrollbar::metrics(&self.scroll) {
-            let x = bounds.right() - px(V_SCROLLBAR_INSET + V_SCROLLBAR_W);
-            scrollbars.push(RoundedQuad {
-                bounds: Bounds::new(
-                    point(x, bounds.origin.y + px(m.thumb_top)),
-                    size(px(V_SCROLLBAR_W), px(m.thumb_h)),
-                ),
-                corners,
-                color: self.colors.scrollbar_thumb,
-            });
-        }
-
-        // Horizontal scrollbar (US-008), only when the longest line overflows.
-        if let Some((thumb_x, thumb_w)) = h_thumb(h_offset, h_max, text_viewport_w) {
-            let y = bounds.bottom() - px(H_SCROLLBAR_INSET + H_SCROLLBAR_H);
-            scrollbars.push(RoundedQuad {
-                bounds: Bounds::new(
-                    point(text_x + px(thumb_x), y),
-                    size(px(thumb_w), px(H_SCROLLBAR_H)),
-                ),
-                corners,
-                color: self.colors.scrollbar_thumb,
-            });
-        }
-
         Some(CodePrepaint {
+            content_bounds: bounds,
             quads,
+            markers,
             glyphs,
-            scrollbars,
+            navigation,
+            navigation_hitbox,
+            minimap,
+            marker_hitbox,
+            marker_pointer,
         })
     }
 
@@ -1149,37 +1346,25 @@ impl Element for CodeElement {
             cx,
         );
         let lh = self.line_height;
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for q in &layout.quads {
-                match q.clip {
-                    Some(clip) => {
-                        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                            window.paint_quad(fill(q.bounds, q.color));
-                        });
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: layout.content_bounds,
+            }),
+            |window| {
+                for q in &layout.quads {
+                    match q.clip {
+                        Some(clip) => {
+                            window.with_content_mask(
+                                Some(ContentMask { bounds: clip }),
+                                |window| {
+                                    window.paint_quad(fill(q.bounds, q.color));
+                                },
+                            );
+                        }
+                        None => window.paint_quad(fill(q.bounds, q.color)),
                     }
-                    None => window.paint_quad(fill(q.bounds, q.color)),
                 }
-            }
-            for g in layout.glyphs {
-                if let Some(clip) = g.clip {
-                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                        let _ = g
-                            .line
-                            .paint(g.origin, lh, TextAlign::Left, None, window, cx);
-                    });
-                } else {
-                    let _ = g
-                        .line
-                        .paint(g.origin, lh, TextAlign::Left, None, window, cx);
-                }
-            }
-        });
-        // Scrollbars are viewport furniture, not content: they get their own
-        // layer so a row's glyphs can never paint over the thumb. Since US-024
-        // the element is the viewport, so `bounds` is the layer.
-        if !layout.scrollbars.is_empty() {
-            window.paint_layer(bounds, |window| {
-                for q in &layout.scrollbars {
+                for q in &layout.markers {
                     window.paint_quad(quad(
                         q.bounds,
                         q.corners,
@@ -1189,8 +1374,41 @@ impl Element for CodeElement {
                         BorderStyle::Solid,
                     ));
                 }
-            });
+                if layout.marker_pointer {
+                    window.set_cursor_style(CursorStyle::PointingHand, &layout.marker_hitbox);
+                }
+                for g in layout.glyphs {
+                    if let Some(clip) = g.clip {
+                        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                            let _ = g
+                                .line
+                                .paint(g.origin, lh, TextAlign::Left, None, window, cx);
+                        });
+                    } else {
+                        let _ = g
+                            .line
+                            .paint(g.origin, lh, TextAlign::Left, None, window, cx);
+                    }
+                }
+            },
+        );
+        if let Some(minimap) = layout.minimap {
+            minimap.paint(window, cx);
         }
+        let view = self.view.read(cx);
+        if view.navigation.drag.is_some() {
+            super::navigation::bind_drag(&self.view, window);
+        }
+        if layout.navigation.part_at(window.mouse_position()).is_some() {
+            window.set_cursor_style(CursorStyle::Arrow, &layout.navigation_hitbox);
+        }
+        super::navigation_paint::paint(
+            layout.navigation,
+            &view.navigation,
+            view,
+            self.colors.scrollbar_thumb,
+            window,
+        );
     }
 }
 
@@ -1312,9 +1530,49 @@ mod tests {
     }
 
     #[test]
-    fn gutter_never_goes_below_its_floor() {
-        assert_eq!(gutter_width(1, 1.0), GUTTER_MIN_W);
-        assert!(gutter_width(6, 7.5) > GUTTER_MIN_W);
+    fn gutter_never_goes_below_its_floor_and_always_reserves_the_marker_column() {
+        assert_eq!(gutter_width(1, 1.0), GUTTER_MIN_W + MARKER_COLUMN_W);
+        assert!(gutter_width(6, 7.5) > GUTTER_MIN_W + MARKER_COLUMN_W);
+        assert_eq!(
+            gutter_width(4, 7.0) - (GUTTER_PAD_L + 4.0 * 7.0 + NUM_GAP),
+            MARKER_COLUMN_W,
+            "the six pixel column sits left of the numbers whether or not a base is loaded"
+        );
+    }
+
+    #[test]
+    fn marker_hits_extend_three_pixels_left_and_stop_at_the_numbers() {
+        let map = CodeHitMap {
+            marker_x: 10.0,
+            markers: vec![
+                MarkerHit {
+                    index: 0,
+                    y0: 100.0,
+                    y1: 136.0,
+                },
+                MarkerHit {
+                    index: 3,
+                    y0: 200.0,
+                    y1: 220.0,
+                },
+            ],
+            ..CodeHitMap::default()
+        };
+        assert_eq!(map.marker_at(point(px(12.), px(110.))), Some(0));
+        assert_eq!(
+            map.marker_at(point(px(7.), px(135.))),
+            Some(0),
+            "grown to the left"
+        );
+        assert_eq!(map.marker_at(point(px(6.), px(110.))), None);
+        assert_eq!(
+            map.marker_at(point(px(17.), px(110.))),
+            None,
+            "past the column"
+        );
+        assert_eq!(map.marker_at(point(px(12.), px(136.))), None);
+        assert_eq!(map.marker_at(point(px(12.), px(205.))), Some(3));
+        assert_eq!(CodeHitMap::default().marker_at(point(px(0.), px(0.))), None);
     }
 
     /// US-008 AC: the horizontal extent comes from the maintained longest line
@@ -1766,6 +2024,7 @@ mod tests {
             materialized_lines: 0,
             materialized_numbers: 0,
             lines: vec![None],
+            ..CodeHitMap::default()
         };
 
         // Far below the last row: clamped to the last row, then to its end.
