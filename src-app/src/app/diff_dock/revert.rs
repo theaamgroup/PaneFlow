@@ -84,6 +84,10 @@ pub(super) fn revert_hunk_blocking(
     hunk: &DiffHunk,
     recorded: Option<FileStamp>,
 ) -> Result<FileStamp, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| STALE_FILE_MESSAGE.to_string())?;
+    if meta.file_type().is_symlink() {
+        return revert_symlink_blocking(path, base_text, hunk);
+    }
     match (recorded, FileStamp::read(path)) {
         (Some(recorded), Some(current)) if !recorded.differs(&current) => {}
         _ => return Err(STALE_FILE_MESSAGE.to_string()),
@@ -96,6 +100,43 @@ pub(super) fn revert_hunk_blocking(
         SaveError::Conflict => STALE_FILE_MESSAGE.to_string(),
         SaveError::Write(message) => message,
     })
+}
+
+/// The Changes tab diffs a symlink as Git does (`load_working_text`: the
+/// target pathname, not the pointee). Restore the HEAD pathname onto the
+/// link inode. Following the link and writing through `save_blocking` would
+/// splice that pathname into the target file.
+fn revert_symlink_blocking(
+    path: &Path,
+    base_text: &str,
+    hunk: &DiffHunk,
+) -> Result<FileStamp, String> {
+    let current = std::fs::read_link(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let new_text = current.to_string_lossy();
+    let restored = splice_base_lines(&new_text, base_text, hunk);
+    let target = Path::new(restored.trim_end_matches(['\n', '\r']));
+    if target.as_os_str().is_empty() {
+        return Err(format!(
+            "{}: reverted symlink target is empty",
+            path.display()
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("link");
+    let tmp = parent.join(format!(".{name}.paneflow-revert"));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(target, &tmp).map_err(|err| format!("{}: {err}", path.display()))?;
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {err}", path.display()));
+    }
+    Ok(FileStamp::read(path).unwrap_or_else(FileStamp::discarded))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -635,5 +676,62 @@ mod tests {
             .expect("notes.txt");
         assert_eq!(file.hunks.len(), 1);
         assert_eq!(file.hunks[0].new_row_range, 5..6);
+    }
+
+    /// The chip diffs a symlink as Git does (pathname in, pathname out).
+    /// Following the link would splice `v1.md` into `v2.md` and leave the
+    /// link pointing at the corrupted file.
+    #[cfg(unix)]
+    #[test]
+    fn reverting_a_tracked_symlink_restores_the_head_pathname_not_the_target() {
+        let Some(dir) = repo() else {
+            return;
+        };
+        let root = dir.path();
+        let v1 = root.join("v1.md");
+        let v2 = root.join("v2.md");
+        let latest = root.join("latest");
+        std::fs::write(&v1, "hello from v1\n").expect("v1");
+        std::fs::write(&v2, "hello from v2\n").expect("v2");
+        std::os::unix::fs::symlink("v1.md", &latest).expect("link");
+        assert!(commit(root, "base"));
+        std::fs::remove_file(&latest).expect("unlink");
+        std::os::unix::fs::symlink("v2.md", &latest).expect("repoint");
+
+        let diff = compute_head_diff(root);
+        assert!(diff.error.is_none(), "{:?}", diff.error);
+        let file = diff
+            .files
+            .iter()
+            .find(|f| f.path == "latest")
+            .expect("latest");
+        assert_eq!(file.change, FileChange::Modified);
+        assert_eq!(file.base_text, "v1.md");
+        assert_eq!(file.new_text, "v2.md");
+        revert_hunk_blocking(
+            &latest,
+            &file.base_text,
+            &file.hunks[0],
+            FileStamp::read(&latest),
+        )
+        .expect("revert");
+        assert_eq!(
+            std::fs::read_link(&latest).expect("readlink"),
+            Path::new("v1.md"),
+            "the link inode points at HEAD again"
+        );
+        assert!(
+            std::fs::symlink_metadata(&latest)
+                .expect("lstat")
+                .file_type()
+                .is_symlink(),
+            "Revert must not replace the link with a regular file"
+        );
+        assert_eq!(std::fs::read_to_string(&v1).expect("v1"), "hello from v1\n");
+        assert_eq!(
+            std::fs::read_to_string(&v2).expect("v2"),
+            "hello from v2\n",
+            "the old target must not be rewritten with the pathname blob"
+        );
     }
 }
