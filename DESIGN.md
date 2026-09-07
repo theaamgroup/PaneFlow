@@ -169,14 +169,18 @@ PaneFlow has two modes and one takeover surface.
 | Mode | Sidebar | Main panel | Entry |
 | --- | --- | --- | --- |
 | Agents | Workspaces: folder rows, tab rows with the branch and diffstat as meta lines beneath the title, and an agent icon stack | Pane grid | Footer switch, default |
-| Review | Workspaces (220): one folder row per open repository, folding its checkouts and git worktrees as child rows; then Changes (300): a `Changes` header with the tree toggle, a base-branch row, an optional filter pill, and file rows | The same pane grid, each pane card holding one unified or split diff with sticky file headers | Footer switch or `secondary-shift-g`, both gated on `review_enabled` |
+| Review | Workspaces (220): one folder row per open repository, folding its checkouts and git worktrees as child rows; then Changes (300): a `Changes` header with the tree toggle, a base-branch row, an optional filter pill, and file rows | The same pane grid, each pane card holding one unified or split diff with sticky file headers | Footer switch or `secondary-shift-g`, both gated on `review_is_viable` |
 | Settings | Back to the app, a search field, three nav groups | One page at a time, centered column, 26 px heading | macOS menu bar, **PaneFlow ▸ Settings…** |
 
 Settings is not a window. It replaces the main panel and reuses the sidebar
 width for its navigation, so the shell never changes shape.
 
-`review_enabled` defaults to `true`. When it is off the footer mode strip is
-not rendered at all — one reachable mode is not a choice — and
+`review_enabled` defaults to `true`, but it is only half the gate.
+`review_is_viable()` is `review_view_enabled() && (a restored Review layout ||
+a default subject)`, so with the switch on and no repository-backed workspace
+open the footer still renders the strip while entry is a no-op. Treat the
+visible switch as necessary, not sufficient. When the switch is off the strip
+is not rendered at all — one reachable mode is not a choice — and
 `secondary-shift-g` becomes a silent no-op through `review_is_viable`
 (`app/review/mode.rs:55-58`).
 
@@ -332,8 +336,11 @@ to the surfaces named:
 | `hsl(40 85% 55%)`, `hsl(0 62% 56%)` | Callout warning and error | Severity hues independent of preset |
 | `#232323` / `#ffffff` | Settings card fill, keyed on `background.l > 0.5` | Card sits one step above `base` in either lightness |
 | `0x2c2c2c` / `0x8b8b8b` / `0xb9b9b9` | Surface picker ink on dark themes | **Contextual**, `app/diff_dock/surface_picker.rs:49-59` |
-| `0x2d8c4a` / `0x5cff8a` / `0x021608` | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
+| `0x2d8c4a` / `0x5cff8a` / `0x021608` (and its inset shadow pair) | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
 | `0x323232` | Custom Buttons icon picker, selected tile | **Migration**: predates the `UiColors` roles and should move onto one, `app/custom_buttons_modal.rs:895` |
+| `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1902-1903` |
+| `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
+| `0x2fd7f2` | Settings ▸ Terminal, the "uses theme" scheme chip | **Migration**: should be `accent`, `settings/tabs/terminal.rs:593-598` |
 
 The sidebar's drop affordances are **not** blue. Only the pane split preview
 is; the swap preview, the sidebar placeholder, and the reorder line are all
@@ -467,10 +474,14 @@ button *box*, not a glyph.
 
 The fork ships 16 agent launchers (`agent_launcher.rs:23-40`). Marks live in
 `src-app/assets/agents/` for the eleven secondary agents and in `icons/` for
-Claude, Codex, OpenCode, and Pi. `TerminalAgent::icon_multicolor`
-(`agent_launcher.rs:155-163`) is the authority: exactly five — Antigravity,
-CodeBuddy, Gemini, Kiro, Openclaw — render through `img()`; every other mark
-is a single-color brand logo drawn with its own accent.
+Claude, Codex, OpenCode, Pi, and Hermes (`icons/hermesagent.svg`).
+`TerminalAgent::icon_multicolor` (`agent_launcher.rs:155-163`) is the authority
+on rendering: exactly five — Antigravity, CodeBuddy, Gemini, Kiro, Openclaw —
+render through `img()`. `TerminalAgent::accent()` is a separate and narrower
+authority on tint: it returns a brand color for **only three** agents — Claude
+`#d97757`, Amp `#F34E3F`, Qoder `#2ADB5C` — and `None` for every other, whose
+monochrome mark deliberately takes the theme's text color. Do not invent a
+brand tint for a mark that returns `None`.
 
 ### 4.8 Motion
 
@@ -694,8 +705,13 @@ copy file diff, and the same view switch.
 
 Change bars are 4 px, dashed at a 1 px stroke on a 2 px step for deletions.
 File headers are 32 px rows that collapse to a 24 px sticky header while
-scrolling. Changed rows paint a single line wash — `vc_added_background` or
-`vc_deleted_background`, 0.12 in dark and 0.16 in light.
+scrolling. Changed rows paint a single line wash, and which one depends on the
+resolver in 4.2 — `UiColors::diff_colors()`, not the raw role. **Light** takes
+the theme's `vc_*_background` at 0.16. **Dark** splits: a preset that sets
+`use_theme_diff_washes` (both Vercel variants) keeps its own 0.16 alphas, and
+every other dark preset takes the opaque fallback `#1d3a2b` / `#402425` with
+`#16281f` / `#2c1718` gutters. So no bundled dark preset paints the 0.12 alpha
+the role itself carries; do not "restore" it.
 
 **Word-level diff was deliberately removed** (`diff/engine.rs:12-16`): on
 rewritten lines it painted a second, louder wash over the row tint and read as
@@ -1209,3 +1225,8 @@ behavior.
   named constant.
 - Roughly two hundred `text_size(px(N.))` literals remain where a named size
   from 4.6 belongs.
+- 4.3's fixed-value table is the set a **new** surface may draw from, and the
+  rows marked **Migration** there are existing debt rather than precedent. It
+  is kept accurate against render code — `grep -rE 'rgba?\(0x' src-app/src`
+  outside `theme/` is the check — but a literal added without a table row is a
+  contract violation, not a new fixed value.
