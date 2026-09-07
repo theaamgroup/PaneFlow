@@ -1,6 +1,8 @@
 use crate::by_char;
 use crate::chunk_optimizer::{optimize_chunks, select, BoundaryShift};
-use crate::iterable::{lcs_bounded, ChangeBuilder, Changes, DiffTooBig, Range};
+use crate::iterable::{
+    lcs_bounded, ChangeBuilder, Changes, DiffTooBig, Range, DELTA_THRESHOLD_SIZE,
+};
 use crate::splitter::{split_line_blocks, WordBlock};
 use crate::text::{
     expand_whitespaces, expand_whitespaces_backward, expand_whitespaces_forward, is_alpha,
@@ -75,9 +77,17 @@ fn views<'a>(text: &'a str, chunks: &[InlineChunk]) -> Vec<ChunkView<'a>> {
         .collect()
 }
 
-pub(crate) fn inline_chunks(text: &str) -> Vec<InlineChunk> {
+fn inline_chunks_capped(text: &str) -> Result<Vec<InlineChunk>, DiffTooBig> {
     let mut chunks = Vec::new();
     let mut word_start: Option<usize> = None;
+    let push = |chunks: &mut Vec<InlineChunk>, chunk: InlineChunk| -> Result<(), DiffTooBig> {
+        chunks.push(chunk);
+        if chunks.len() > DELTA_THRESHOLD_SIZE {
+            Err(DiffTooBig)
+        } else {
+            Ok(())
+        }
+    };
     for (offset, c) in text.char_indices() {
         let alpha = is_alpha(c);
         let word_part = alpha && !is_continuous_script(c);
@@ -88,24 +98,30 @@ pub(crate) fn inline_chunks(text: &str) -> Vec<InlineChunk> {
             continue;
         }
         if let Some(start) = word_start.take() {
-            chunks.push(InlineChunk::Word { start, end: offset });
+            push(&mut chunks, InlineChunk::Word { start, end: offset })?;
         }
         if alpha {
-            chunks.push(InlineChunk::Word {
-                start: offset,
-                end: offset + c.len_utf8(),
-            });
+            push(
+                &mut chunks,
+                InlineChunk::Word {
+                    start: offset,
+                    end: offset + c.len_utf8(),
+                },
+            )?;
         } else if c == '\n' {
-            chunks.push(InlineChunk::Newline { offset });
+            push(&mut chunks, InlineChunk::Newline { offset })?;
         }
     }
     if let Some(start) = word_start {
-        chunks.push(InlineChunk::Word {
-            start,
-            end: text.len(),
-        });
+        push(
+            &mut chunks,
+            InlineChunk::Word {
+                start,
+                end: text.len(),
+            },
+        )?;
     }
-    chunks
+    Ok(chunks)
 }
 
 fn diff_chunks(
@@ -125,8 +141,8 @@ pub(crate) fn compare(
     text2: &str,
     policy: ComparisonPolicy,
 ) -> Result<Vec<DiffFragment>, DiffTooBig> {
-    let words1 = inline_chunks(text1);
-    let words2 = inline_chunks(text2);
+    let words1 = inline_chunks_capped(text1)?;
+    let words2 = inline_chunks_capped(text2)?;
     let changes = diff_chunks(text1, &words1, text2, &words2)?;
     let changes = optimize_word_chunks(text1, text2, &words1, &words2, &changes);
     let delimiters = match_adjustment_delimiters(text1, text2, &words1, &words2, &changes, 0, 0);
@@ -146,8 +162,8 @@ pub(crate) fn compare_and_split(
     text2: &str,
     policy: ComparisonPolicy,
 ) -> Result<Vec<LineBlock>, DiffTooBig> {
-    let words1 = inline_chunks(text1);
-    let words2 = inline_chunks(text2);
+    let words1 = inline_chunks_capped(text1)?;
+    let words2 = inline_chunks_capped(text2)?;
     let changes = diff_chunks(text1, &words1, text2, &words2)?;
     let changes = optimize_word_chunks(text1, text2, &words1, &words2, &changes);
 
