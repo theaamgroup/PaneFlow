@@ -111,8 +111,8 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
    (section 9).
 3. One highlight material. Hovered, active, and selected states are alpha
    tints of one color per theme lightness, never a per-component fill.
-4. Every rounded surface takes its radius from section 4.4. New radii are not
-   introduced.
+4. Every rounded surface takes its radius from section 4.4, which is the
+   closed set. New radii are not introduced.
 5. Motion explains state: hover, focus dim, the sidebar slide, the toast
    lifecycle. Nothing animates for decoration except the startup splash
    shimmer and the status spinners. Any new animation MUST read
@@ -186,8 +186,9 @@ Every overlay is deferred at an explicit priority, and that ladder is itself
 part of the contract: **1** settings selects · **2** toasts · **3** menus
 (branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
 profile menu, Composer, dock options · **6** full-surface overlays · **8**
-Launch Pad and Custom Buttons · **10** dialogs · **11** close confirm. A new
-overlay picks the rung that matches its kind rather than inventing one.
+Launch Pad, Custom Buttons and the Review-with-agent popover · **10** dialogs ·
+**11** close confirm. A new overlay picks the rung that matches its kind rather
+than inventing one.
 
 One live exception: Work Review calls `deferred(...)` with **no** explicit
 priority (`app/work_review/mod.rs:488-502`), so it is not on the ladder and
@@ -200,11 +201,11 @@ explicit priority.
 | Pane palette | Fills an empty tab, titled `New pane` | A centered 260 px column on a 20 px squircle of the terminal background: 13 px Semibold title, an optional branch row 28 tall, preset rows 34 tall with a 14 px agent mark, gap 2, list capped at 420 tall, inline error at 11 px | `app/pane_palette.rs:36-40,654-782,1021-1059` |
 | Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Four** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
-| Pane Overview | Centered, viewport less 24 on each side | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 250 by 154 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
-| Attention Queue · Fleet Search | Centered | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/attention_queue.rs:227-234`, `app/fleet_search.rs:379-386` |
-| Broadcast groups | Centered | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
-| Theme picker | Centered | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
-| Custom Buttons | Centered | 560 wide, radius 10, black 0.45 scrim | `app/custom_buttons_modal.rs:489-543` |
+| Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 250 by 154 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
+| Attention Queue · Fleet Search | Horizontally centered, top-anchored at 96 | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/attention_queue.rs:227-234`, `app/fleet_search.rs:379-386` |
+| Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
+| Theme picker | Horizontally centered, top-anchored at 96 | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
+| Custom Buttons | Horizontally centered, top-anchored at 72 | 560 wide, radius 10, black 0.45 scrim | `app/custom_buttons_modal.rs:489-543` |
 | Close confirm | Centered | 360 wide, radius 10, padding 16, gap 10 | `app/close_confirm.rs:922-931` |
 | Menus and selects | Deferred, anchored under the trigger | Squircle 18, list padding 4, item height 28 | `settings/components.rs:482,551,627` |
 | Tooltip | After 800 ms | Squircle 14 on the title bar color with a 1 px `border` at full alpha | `ui_primitives.rs:494,524,539-549` |
@@ -234,7 +235,7 @@ Color resolves in three layers.
 
 Components MUST consume `UiColors` through `crate::theme::ui_colors()` (or the
 lock-free `ui_colors_with(&theme)`). A hex literal in render code is allowed
-only for the fixed values in 4.3.
+only for the fixed and Contextual values listed in 4.3.
 
 **The palette lives in two files, not one.** `theme/builtin.rs` holds the ANSI
 and base slots for all eight variants and the `UiColors` of Vercel, Claude, and
@@ -332,6 +333,7 @@ to the surfaces named:
 | `#232323` / `#ffffff` | Settings card fill, keyed on `background.l > 0.5` | Card sits one step above `base` in either lightness |
 | `0x2c2c2c` / `0x8b8b8b` / `0xb9b9b9` | Surface picker ink on dark themes | **Contextual**, `app/diff_dock/surface_picker.rs:49-59` |
 | `0x2d8c4a` / `0x5cff8a` / `0x021608` | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
+| `0x323232` | Custom Buttons icon picker, selected tile | **Migration**: predates the `UiColors` roles and should move onto one, `app/custom_buttons_modal.rs:895` |
 
 The sidebar's drop affordances are **not** blue. Only the pane split preview
 is; the swap preview, the sidebar placeholder, and the reorder line are all
@@ -348,6 +350,7 @@ neutral `text` tints.
 | System Info dialog | 20 | squircle | 1 px `border` at 0.6, plus `shadow_lg` |
 | Menu, select popup | 18 | squircle | 1 px `border` at 0.6 |
 | Sidebar rows, tab icon cards, footer mode buttons, row skin, secondary button, select item, dock tab chip, file tree row, tooltip | 14 (`ROW_RADIUS`) | squircle | tab icon card and tooltip, 1 px `border` |
+| Pane Overview panel | 12 | round | 1 px `border`, plus `shadow_lg` |
 | Theme tile | 10 | round | 2 px `text` at 0.12, 0.32 on hover, 0.85 when selected |
 | About dialog | 10 | round | 1 px, plus `shadow_lg`; **Migration** |
 | Filter field, settings control, select trigger, toast, composer, drop overlay, drop placeholder, theme mockup inner frame | 8 | round | drop overlay 2 px blue |
@@ -837,7 +840,8 @@ Window ▸ Show All Panes, or the sidebar header button opens a cross-workspace
 grid of every **terminal** pane, grouped workspace then tab. Markdown and diff
 panes are omitted and the surface is gated to Agents mode.
 
-The panel is the viewport less 24 on each side at radius 12 with a 1 px border
+The panel is top-anchored at `OVERVIEW_MARGIN` (24) and inset 24 on each side,
+at radius 12 with a 1 px border
 and `shadow_lg` on a black 0.4 scrim. Cards are 250 by 154 at radius 8, gap 10,
 grid padding 16, with a 30 px header (a 6 px status dot, the 12 px name, a 9 px
 `current` chip, a 10 px status label), an 88 px preview band at radius 6 on the
@@ -1054,6 +1058,10 @@ These are real and MUST NOT be described as solved:
    per-surface.
 5. **`reduce_motion` is config-driven, not OS-driven.** It does not read the
    macOS "Reduce Motion" system setting.
+6. **The Review-with-agent popover is mouse-only.** It has no focus handle and
+   no key handler; its rows are click-only and the sole dismissal is an outside
+   mouse press (`pane/review.rs`). It does not meet the Escape floor above, and
+   it is the one live overlay that does not.
 
 ## 8. Platform Material
 
@@ -1091,9 +1099,12 @@ Rules that follow:
 These are the PaneFlow-specific bans, in addition to the generic ones a design
 review would raise anywhere.
 
-- **Shadows on chrome.** No shadow on chrome, rows, chips, tabs, menus, or
-  toasts. A floating overlay or dialog takes `shadow_lg()` — that is the fork's
-  standard skin for them, and the window shell and both drag ghosts keep theirs.
+- **Shadows on chrome.** No shadow on chrome, rows, tabs, menus, or toasts. A
+  floating overlay or dialog takes `shadow_lg()` — that is the fork's standard
+  skin for them, and the window shell and both drag ghosts keep theirs. The
+  **pane close chip** is a named Contextual exception: it lifts off the card on
+  `shadow_lg` (`pane.rs:1285-1312`, 5.3) because it floats over live terminal
+  output. No other chip takes one.
 - Separators between tabs, chips, or toolbar buttons. The floating chip
   language replaced full-height bordered tabs. The dock tab strip's bottom
   hairline is the one deliberate rule, and it separates the strip from the
