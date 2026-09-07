@@ -134,6 +134,11 @@ ZED_QUERIES_NOTICE="$REPO_ROOT/src-app/src/diff/queries/NOTICE"
 [ -f "$ZED_QUERIES_NOTICE" ] || die "Zed queries NOTICE not found at $ZED_QUERIES_NOTICE"
 install -m 0644 "$ZED_QUERIES_NOTICE" "$RESOURCES_DIR/ThirdPartyLicenses/zed-queries.txt"
 
+# paneflow-textdiff ports IntelliJ's comparison pipeline (Apache-2.0 portions).
+TEXTDIFF_NOTICE="$REPO_ROOT/crates/paneflow-textdiff/NOTICE"
+[ -f "$TEXTDIFF_NOTICE" ] || die "paneflow-textdiff NOTICE not found at $TEXTDIFF_NOTICE"
+install -m 0644 "$TEXTDIFF_NOTICE" "$RESOURCES_DIR/ThirdPartyLicenses/paneflow-textdiff.txt"
+
 # Substitute @VERSION@ in the Info.plist template. `sed -e` keeps the
 # command BSD-sed safe (macOS ships BSD sed).
 sed \

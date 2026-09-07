@@ -57,6 +57,15 @@ impl FileStamp {
         Self::from_metadata(&std::fs::metadata(path).ok()?)
     }
 
+    /// A stamp the Changes-tab Revert chip discards after restoring a
+    /// symlink whose target cannot be stat'd (dangling HEAD path).
+    pub(crate) fn discarded() -> Self {
+        Self {
+            mtime: None,
+            len: 0,
+        }
+    }
+
     /// The stamp of metadata already in hand. The load path stats the handle
     /// it read from rather than the path, so the stamp describes the bytes
     /// that landed in the buffer and not whatever an agent renamed over the

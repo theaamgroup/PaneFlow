@@ -61,7 +61,21 @@ const FOLD_CHEVRON_OFFSET: f32 = 4.0;
 const PHANTOM_HATCH_SPACING: f32 = 8.0;
 const PHANTOM_HATCH_STROKE: f32 = 1.0;
 const SPLIT_DIVIDER_W: f32 = 3.0;
-const PAD2: f32 = 6.0; // gap between the hunk bar and the line-number gutter
+const PAD2: f32 = 6.0;
+pub(crate) const REVERT_CHIP_W: f32 = 56.0;
+pub(crate) const REVERT_CHIP_H: f32 = 16.0;
+pub(crate) const REVERT_CHIP_PAD_R: f32 = 10.0;
+const REVERT_CHIP_LABEL: &str = "Revert";
+
+pub(crate) fn revert_chip_bounds(
+    row_origin: Point<Pixels>,
+    row_width: Pixels,
+    row_h: Pixels,
+) -> Bounds<Pixels> {
+    let x = row_origin.x + row_width - px(REVERT_CHIP_PAD_R + REVERT_CHIP_W);
+    let y = row_origin.y + (row_h - px(REVERT_CHIP_H)) / 2.0;
+    Bounds::new(point(x, y), size(px(REVERT_CHIP_W), px(REVERT_CHIP_H)))
+} // gap between the hunk bar and the line-number gutter
 
 /// The row source for one column - either unified or side-by-side.
 ///
@@ -191,6 +205,8 @@ pub struct DiffPrepaint {
     sticky_quads: Vec<Quad>,
     sticky_images: Vec<ImagePaint>,
     sticky_glyphs: Vec<Glyphs>,
+    chips: Vec<RoundedQuad>,
+    chip_glyphs: Vec<Glyphs>,
 }
 
 pub struct DiffElement {
@@ -203,6 +219,7 @@ pub struct DiffElement {
     /// number (floor [`GUTTER_W`]). A field so the layout helpers read one
     /// resolved value instead of threading it through every signature.
     gutter_w: Pixels,
+    revert_chip: Option<usize>,
 }
 
 impl DiffElement {
@@ -229,7 +246,38 @@ impl DiffElement {
             font_size: px(12.),
             line_height: px(ROW_HEIGHT),
             gutter_w: px(GUTTER_W),
+            revert_chip: None,
         }
+    }
+
+    pub fn with_revert_chip(mut self, row: Option<usize>) -> Self {
+        self.revert_chip = row;
+        self
+    }
+
+    fn push_revert_chip(
+        &self,
+        window: &mut Window,
+        row_origin: Point<Pixels>,
+        row_width: Pixels,
+        row_h: Pixels,
+        chips: &mut Vec<RoundedQuad>,
+        chip_glyphs: &mut Vec<Glyphs>,
+    ) {
+        let bounds = revert_chip_bounds(row_origin, row_width, row_h);
+        chips.push(RoundedQuad {
+            bounds,
+            color: self.palette.chip_bg,
+            corners: Corners::all(bounds.size.height / 2.0),
+        });
+        let label = self.shape_plain(window, REVERT_CHIP_LABEL.into(), self.palette.chip_fg);
+        let x = bounds.origin.x + ((bounds.size.width - label.width()) / 2.0).max(px(0.));
+        let y = bounds.origin.y + (bounds.size.height - self.line_height) / 2.0;
+        chip_glyphs.push(Glyphs {
+            origin: point(x, y),
+            line: label,
+            clip: None,
+        });
     }
 
     /// Split a line into `TextRun`s: the syntax runs carry their own color, the
@@ -1375,6 +1423,22 @@ impl Element for DiffElement {
         );
         self.push_horizontal_scrollbars(bounds, &segments, &mut scrollbars);
         let hatches = Self::build_hatch_paths(hatches);
+        let mut chips = Vec::new();
+        let mut chip_glyphs = Vec::new();
+        if let Some(row) = self.revert_chip
+            && row >= first
+            && row < last
+            && let (Some(top), Some(bottom)) = (offsets.get(row), offsets.get(row + 1))
+        {
+            self.push_revert_chip(
+                window,
+                point(bounds.origin.x, bounds.origin.y + px(*top)),
+                width,
+                px(bottom - top),
+                &mut chips,
+                &mut chip_glyphs,
+            );
+        }
 
         log::trace!(
             target: "paneflow::diff::render",
@@ -1402,6 +1466,8 @@ impl Element for DiffElement {
             sticky_quads,
             sticky_images,
             sticky_glyphs,
+            chips,
+            chip_glyphs,
         })
     }
 
@@ -1459,6 +1525,21 @@ impl Element for DiffElement {
                         .paint(g.origin, lh, TextAlign::Left, None, window, cx);
                 }
             }
+            for q in &layout.chips {
+                window.paint_quad(quad(
+                    q.bounds,
+                    q.corners,
+                    q.color,
+                    px(0.),
+                    q.color,
+                    BorderStyle::Solid,
+                ));
+            }
+            for g in layout.chip_glyphs {
+                let _ = g
+                    .line
+                    .paint(g.origin, lh, TextAlign::Left, None, window, cx);
+            }
             // Sticky header floats above the scrolled body: paint its quads then
             // glyphs LAST so they overlay the rows that scroll underneath.
             for q in &layout.sticky_quads {
@@ -1510,5 +1591,24 @@ impl IntoElement for DiffElement {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_revert_chip_sits_at_the_right_edge_of_the_row() {
+        let bounds = revert_chip_bounds(point(px(100.), px(200.)), px(400.), px(ROW_HEIGHT));
+        assert_eq!(
+            bounds.origin.x,
+            px(100. + 400. - REVERT_CHIP_PAD_R - REVERT_CHIP_W)
+        );
+        assert_eq!(bounds.origin.y, px(201.));
+        assert_eq!(bounds.size.width, px(REVERT_CHIP_W));
+        assert_eq!(bounds.size.height, px(REVERT_CHIP_H));
+        assert!(bounds.contains(&point(px(440.), px(210.))));
+        assert!(!bounds.contains(&point(px(300.), px(210.))));
     }
 }

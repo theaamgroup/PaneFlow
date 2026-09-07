@@ -1,10 +1,12 @@
 //! The Agents dock's render-ready data snapshot + its layout constants.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::Pixels;
 
+use super::code::save::FileStamp;
 use super::git::DiffDockBuilt;
 use crate::diff::{
     DisplayRow, FileDiff, FileRowCache, FileSpan, SplitRow, apply_collapse_split,
@@ -76,6 +78,14 @@ pub(crate) struct DiffDockHScrollDrag {
     pub(super) thumb_width: f32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffHover {
+    pub(crate) split: bool,
+    pub(crate) path: String,
+    pub(crate) hunk: usize,
+    pub(crate) chip_row: usize,
+}
+
 /// Render-ready snapshot of the panel's data. Cheap to clone every frame: every
 /// row vector is shared behind an `Rc` (single-threaded GPUI state). Mirrors a
 /// single [`crate::diff`] `Column`: the full rows are kept so a collapse toggle
@@ -119,6 +129,9 @@ pub(crate) struct DiffDockData {
     pub(super) removed: u32,
     pub(super) theme_generation: u64,
     pub(super) fingerprint: u64,
+    pub(crate) toplevel: Option<PathBuf>,
+    pub(crate) head_sha: Option<String>,
+    pub(crate) stamps: Rc<HashMap<String, FileStamp>>,
 }
 
 impl DiffDockData {
@@ -151,7 +164,15 @@ impl DiffDockData {
             removed: 0,
             theme_generation: crate::theme::theme_generation(),
             fingerprint: 0,
+            toplevel: None,
+            head_sha: None,
+            stamps: Rc::new(HashMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_rows(&self) -> bool {
+        self.unified_loaded || self.split_loaded
     }
 
     pub(super) fn message(cwd: String, error: String) -> Self {
@@ -196,6 +217,9 @@ impl DiffDockData {
         self.removed = built.removed;
         self.theme_generation = built.theme_generation;
         self.fingerprint = built.fingerprint;
+        self.toplevel = built.toplevel;
+        self.head_sha = built.head_sha;
+        self.stamps = Rc::new(built.stamps);
         self.files_full = Rc::new(built.files_full);
         self.row_caches = Rc::new(built.row_caches);
 
@@ -271,5 +295,25 @@ impl DiffDockData {
     /// Whether every file is currently folded (drives the toolbar toggle label).
     pub(super) fn all_collapsed(&self, collapsed: &HashSet<String>) -> bool {
         !self.paths.is_empty() && self.paths.iter().all(|p| collapsed.contains(p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_loading_placeholder_can_carry_the_previous_head_sha_without_rows() {
+        let mut loading = DiffDockData::loading("/tmp/repo".into());
+        assert!(!loading.has_rows(), "the stub has no display rows");
+        assert!(loading.head_sha.is_none());
+        loading.head_sha = Some("abc".into());
+        let built = Some("def".to_string());
+        assert_ne!(
+            loading.head_sha, built,
+            "reload_file_tab_bases is keyed on this comparison; has_rows() must not gate it"
+        );
+        loading.head_sha = built.clone();
+        assert_eq!(loading.head_sha, built);
     }
 }

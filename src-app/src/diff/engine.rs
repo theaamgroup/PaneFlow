@@ -91,6 +91,18 @@ impl Sink for HunkCollector {
     }
 }
 
+pub(crate) fn hunk_for_base_line(hunks: &[DiffHunk], line: u32) -> Option<&DiffHunk> {
+    let index = hunks.partition_point(|h| h.base_row_range.end <= line);
+    hunks
+        .get(index)
+        .filter(|h| h.base_row_range.contains(&line))
+}
+
+pub(crate) fn hunk_for_new_line(hunks: &[DiffHunk], line: u32) -> Option<&DiffHunk> {
+    let index = hunks.partition_point(|h| h.new_row_range.end <= line);
+    hunks.get(index).filter(|h| h.new_row_range.contains(&line))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1305,6 +1305,8 @@ struct DiffDockState {
     /// resized to the file count at render (collapse/split never change the
     /// count, so offsets stay aligned).
     pub(crate) h_offsets: std::rc::Rc<Vec<f32>>,
+    /// Hovered revert-chip target on the Changes tab, if any.
+    pub(crate) hover: Option<crate::app::diff_dock::DiffHover>,
 }
 
 struct PaneFlowApp {

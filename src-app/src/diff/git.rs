@@ -98,6 +98,14 @@ impl FileDiff {
 pub struct WorktreeDiff {
     pub files: Vec<FileDiff>,
     pub error: Option<String>,
+    /// Working-tree root this diff was computed from. Set by
+    /// [`compute_head_diff`] so the Changes-tab revert path can join
+    /// relative file paths without re-probing git.
+    pub toplevel: Option<PathBuf>,
+    /// `HEAD`'s object name when the worktree has a commit. `None` for an
+    /// unborn HEAD. The dock uses this to re-probe open file tabs when the
+    /// revision moves.
+    pub head_sha: Option<String>,
 }
 
 /// Git-native per-file diffstat for one file.
@@ -684,6 +692,67 @@ fn worktree_toplevel_within(budget: &GitBudget, dir: &Path) -> PathBuf {
     }
 }
 
+/// Resolve the working-tree root of `dir`. `Ok(None)` when Git reports that
+/// `dir` is not inside a repository; other failures stay `Err`.
+pub(crate) fn try_worktree_toplevel(dir: &Path) -> Result<Option<PathBuf>, String> {
+    match GitBudget::for_column().run(dir, &["rev-parse", "--show-toplevel"]) {
+        Ok(out) => {
+            let s = String::from_utf8_lossy(&out).trim().to_string();
+            Ok((!s.is_empty()).then(|| PathBuf::from(s)))
+        }
+        Err(err) if err.contains("not a git repository") => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// `HEAD`'s object name, or `None` when the ref is unborn or unreadable.
+pub(crate) fn head_sha(worktree_dir: &Path) -> Option<String> {
+    GitBudget::for_column()
+        .run(worktree_dir, &["rev-parse", "--verify", "HEAD"])
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string())
+        .filter(|sha| !sha.is_empty())
+}
+
+pub(crate) enum HeadFile {
+    Content(Vec<u8>),
+    Missing,
+}
+
+/// Load `rel_path` as it exists at `HEAD`. A path that is simply not in the
+/// tree is [`HeadFile::Missing`]; a blob that exists but cannot be shown stays
+/// `Err`.
+pub(crate) fn show_head_file(worktree_dir: &Path, rel_path: &str) -> Result<HeadFile, String> {
+    let budget = GitBudget::for_column();
+    let spec = format!("HEAD:{rel_path}");
+    match budget.run(worktree_dir, &["show", &spec]) {
+        Ok(bytes) => Ok(HeadFile::Content(bytes)),
+        Err(show_err) => match base_path_exists_within(&budget, worktree_dir, "HEAD", rel_path) {
+            Ok(false) => Ok(HeadFile::Missing),
+            Ok(true) => Err(show_err),
+            Err(exists_err) if exists_err.contains("Needed a single revision") => {
+                Ok(HeadFile::Missing)
+            }
+            Err(exists_err) => Err(format!("{show_err}; {exists_err}")),
+        },
+    }
+}
+
+fn base_path_exists_within(
+    budget: &GitBudget,
+    worktree_dir: &Path,
+    merge_base: &str,
+    rel_path: &str,
+) -> Result<bool, String> {
+    let out = budget.run(
+        worktree_dir,
+        &["ls-tree", "-z", "--name-only", merge_base, "--", rel_path],
+    )?;
+    Ok(out
+        .split(|&b| b == 0)
+        .any(|path| path == rel_path.as_bytes()))
+}
+
 fn list_untracked_limited_timed(
     dir: &Path,
     limit: usize,
@@ -739,7 +808,7 @@ fn normalize_git_text(text: String) -> String {
 }
 
 /// Bytes look textual if they contain no NUL and decode as UTF-8.
-fn classify(bytes: Vec<u8>) -> (String, bool) {
+pub(crate) fn classify(bytes: Vec<u8>) -> (String, bool) {
     if bytes.contains(&0) {
         return (String::new(), true);
     }
@@ -1129,7 +1198,7 @@ fn parse_numstat_count(raw: &[u8]) -> u32 {
 /// file (minified bundle, vendored blob) loads megabytes into RAM, runs
 /// `imara-diff` + a full syntect pass over it, and - across N columns - OOMs the
 /// process. 512 KiB comfortably covers hand-written source.
-const MAX_FILE_BYTES: u64 = 512 * 1024;
+pub(crate) const MAX_FILE_BYTES: u64 = 512 * 1024;
 
 /// Hard cap on changed files diffed per worktree. A 1000-file refactor would
 /// otherwise load every file into RAM (×N columns); beyond this the column
@@ -1241,6 +1310,7 @@ fn load_column_within(budget: &GitBudget, worktree_dir: &Path, base_ref: &str) -
         Err(e) => WorktreeDiff {
             files: Vec::new(),
             error: Some(e.clone()),
+            ..Default::default()
         },
     };
     let file_stats = merge_base
@@ -1276,7 +1346,12 @@ pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
         Ok(out) => String::from_utf8_lossy(&out).trim().to_string(),
         Err(_) => EMPTY_TREE_SHA.to_string(),
     };
-    compute_diff_against(worktree_dir, &base)
+    let mut diff = compute_diff_against(worktree_dir, &base);
+    diff.toplevel = Some(toplevel);
+    if base != EMPTY_TREE_SHA {
+        diff.head_sha = Some(base);
+    }
+    diff
 }
 
 /// Shared core of [`load_column`] and [`compute_head_diff`]: diff the
@@ -1307,6 +1382,7 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some(e),
+                ..Default::default()
             };
         }
     };
@@ -1327,6 +1403,7 @@ fn compute_diff_against_within(
                 return WorktreeDiff {
                     files: Vec::new(),
                     error: Some(e),
+                    ..Default::default()
                 };
             }
         };
@@ -1338,6 +1415,7 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
+                        ..Default::default()
                     };
                 }
             };
@@ -1360,6 +1438,7 @@ fn compute_diff_against_within(
                 return WorktreeDiff {
                     files: Vec::new(),
                     error: Some(e),
+                    ..Default::default()
                 };
             }
         }
@@ -1381,6 +1460,7 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some(e),
+                ..Default::default()
             };
         }
     };
@@ -1395,6 +1475,7 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some("git diff exceeded its deadline".to_string()),
+                ..Default::default()
             };
         }
         // Skip lockfiles and oversized files: emit a stub, never load/diff/
@@ -1408,6 +1489,7 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
+                        ..Default::default()
                     };
                 }
             }
@@ -1443,6 +1525,7 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
+                        ..Default::default()
                     };
                 }
             },
@@ -1482,7 +1565,11 @@ fn compute_diff_against_within(
         ));
     }
 
-    WorktreeDiff { files, error: None }
+    WorktreeDiff {
+        files,
+        error: None,
+        ..Default::default()
+    }
 }
 
 /// Per-file diffstat of the working tree against `base`, charged against

@@ -1013,6 +1013,7 @@ impl PaneFlowApp {
                 h_scroll_drag: None,
                 vertical_scrollbar: Default::default(),
                 h_offsets: std::rc::Rc::new(Vec::new()),
+                hover: None,
             },
             sidebar_order_cache: std::cell::RefCell::new(Default::default()),
             empty_workspace_focus: cx.focus_handle(),
