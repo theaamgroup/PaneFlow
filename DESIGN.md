@@ -156,7 +156,7 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 20, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
 | Right rail | Sessions rail, or the Files tree rail. Mutually exclusive. | Width 300 each | `app/sessions_sidebar.rs:37`, `app/files_sidebar/mod.rs:52` |
-| Diff dock | Side dock attached to a workspace tab, holding Changes plus file, terminal, and Agent setup tabs | Preferred width 880, minimum 360, maximum 1400, fitted to the live remainder and hidden below the floor (5.4); 8 file tabs maximum | `app/diff_dock/model.rs:23-34`, `app/cli_diff_dock.rs:38-64` |
+| Diff dock | Side dock attached to a workspace tab, holding Changes plus file, terminal, and Agent setup tabs | Preferred width 880, minimum 360, maximum 1400, fitted to the live remainder and hidden below the floor (5.4); 8 file tabs, a cap that yields to unsaved work (5.4) | `app/diff_dock/model.rs:23-34`, `app/cli_diff_dock.rs:38-64` |
 | Footer | IPC offline banner, MCP bridge callout, then the Agents / Review mode strip | Persistent primary navigation. **No Settings gear** (issue #105) and **no update banner** | `app/sidebar_actions_menu.rs:21-60,62-178,254-299` |
 
 The window is 800 by 500 at minimum, and a surface MUST hold there with the
@@ -457,7 +457,9 @@ chrome only.
 | 16 | Sidebar tab icon, callout icon, dock options trigger |
 | 18 | Empty-state glyph |
 
-No glyph outside 10–16 and 18 exists. Every larger `size(px(N.))` is an icon
+The pane card's close chip is the one glyph below the table: `CLOSE_GLYPH_SIZE`
+is 9 (`pane.rs:150`), sized to sit inside a 15 px chip (5.3). Apart from it no
+glyph outside 10–16 and 18 exists, and every larger `size(px(N.))` is an icon
 button *box*, not a glyph.
 
 The fork ships 16 agent launchers (`agent_launcher.rs:23-40`). Marks live in
@@ -666,8 +668,9 @@ refresh, unified/split, expand/collapse all, and Review with agent — not a
 shared options menu. `render_diff_options_menu` is private to the dock.
 
 **Review with agent is a fork feature and stays.** The sparkles button opens a
-256 px popover headed `Review in a new agent tab` with one row per installed
-review CLI; confirming opens one ordinary workspace tab per pick at the
+256 px popover headed `Review in a new agent tab` with one row per **supported**
+review CLI — `ReviewCli::all()` is rendered unfiltered, so a CLI that is not
+installed still gets a row; confirming opens one ordinary workspace tab per pick at the
 checkout's cwd, copies the prompt to the clipboard, and prefills the pane
 without ever pressing Enter.
 
@@ -812,8 +815,9 @@ on.
 **Toasts** appear bottom right on `subtle` with a 15 px icon and 12.5 px text
 on a single ellipsized line. They **do not stack**: one is visible and the rest
 queue FIFO. They carry **no action row and no dismiss affordance** — they time
-out after 180 ms in, 1440 ms held, 180 ms out, entering on an 8 px lift and
-leaving on an 8 px drop. Error text is detected from twelve substrings and
+out after 180 ms in, the hold, then 180 ms out, entering on an 8 px lift and
+leaving on an 8 px drop. The hold is 1440 ms by default and is carried per
+`Toast`; 4.8 names the deliberate longer-lived cases. Error text is detected from twelve substrings and
 takes the alert glyph in `agent_error` with a wider 440 px cap.
 
 **Callouts** (`widgets/callout.rs`) are a 16 px icon, a 14 Semibold title, and
@@ -865,7 +869,9 @@ selection, copy-mode, or search highlights.
 `secondary` is **Cmd**. This is a macOS-only fork, so the cross-platform arm of
 `keybindings/display.rs` is dead code. Chords render as Apple HIG glyphs with
 no separator. Every default-bound action is remappable in Settings ▸ Keyboard
-Shortcuts, and every modal answers Enter and Escape.
+Shortcuts, and every modal answers Escape. Enter confirms wherever a modal has
+a single default action — System Info is the standing exception, with two
+footer buttons and no default (7.4).
 
 Not every overlay has an opening chord, and the table below is the whole set
 that does. Custom Buttons opens only from the workspace context menu; About,
