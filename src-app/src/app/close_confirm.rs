@@ -1286,6 +1286,14 @@ mod tests {
             states.contains("terminal_close_states(off_tree"),
             "off-tree terminals must use the same live-agent predicate: {states}"
         );
+        // Issue #454: the on-tree half is the ONLY thing that reaches a review
+        // agent, which "Review with agent" opens as a pane on a tab of its
+        // own. Narrowed to the active tab, this modal goes silent on exactly
+        // the agent #454 was filed about.
+        assert!(
+            states.contains("workspace.collect_panes()"),
+            "every tab's panes must arm confirmation, not just the active tab's: {states}"
+        );
     }
 
     /// #184 Phase 4: the dock is parked per tab, so a tab close kills that
