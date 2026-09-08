@@ -795,7 +795,7 @@ pub fn detect_code_paths_on_line_mapped(
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn line0() -> crate::terminal::types::Line {
         crate::terminal::types::Line(0)
@@ -1435,13 +1435,14 @@ mod tests {
 
     #[test]
     fn perf_scan_200_lines_under_budget() {
-        // AC budget: 200×80 grid scan < 5 ms (release).
-        // Debug builds are ~5-10× slower; we assert release < 5 ms strictly
-        // on Linux/macOS and apply a 25 ms ceiling in debug as a regression
-        // guard. On Windows the hosted runners are 2-3× slower at the same
-        // workload (US-004 AC5), so we relax to 15 ms in release without
-        // weakening the regression intent - anything significantly above
-        // 15 ms still surfaces as a perf regression.
+        // Budget: 200×80 grid scan < 5 ms release, < 25 ms debug (debug builds
+        // run this scan ~5-10× slower). The guard exists to catch an algorithmic
+        // regression, so we take the FASTEST of several passes: libtest runs this
+        // binary with full thread parallelism, and a single sample charges the
+        // scan for whatever else the scheduler was doing (issue #477 saw 76 ms
+        // for work that costs well under a millisecond). Contention only ever
+        // inflates a sample, so the minimum is the stable estimate - and a real
+        // O(n²) regression blows through it just the same.
         let tmp = tempfile::tempdir().expect("tempdir");
         let md_path = write_md(tmp.path(), "perf.md");
         let target = canonical_display(&md_path);
@@ -1459,20 +1460,26 @@ mod tests {
                 line.push(' ');
             }
         }
-        let started = Instant::now();
+        const PASSES: usize = 5;
+        let mut best = Duration::MAX;
         let mut total = 0usize;
-        for line in &lines {
-            let map = ascii_map(line);
-            let zones = detect_file_paths_on_line_mapped(line, line0(), &map, None);
-            total += zones.len();
+        for _ in 0..PASSES {
+            total = 0;
+            let started = Instant::now();
+            for line in &lines {
+                let map = ascii_map(line);
+                let zones = detect_file_paths_on_line_mapped(line, line0(), &map, None);
+                total += zones.len();
+            }
+            best = best.min(started.elapsed());
         }
-        let elapsed = started.elapsed();
         assert!(total >= 10, "expected at least 10 hits, got {}", total);
         let budget_ms: u128 = if cfg!(debug_assertions) { 25 } else { 5 };
         assert!(
-            elapsed.as_millis() < budget_ms,
-            "200×80 scan took {:?}, exceeds {} ms budget",
-            elapsed,
+            best.as_millis() < budget_ms,
+            "fastest of {} 200×80 scans took {:?}, exceeds {} ms budget",
+            PASSES,
+            best,
             budget_ms
         );
     }
