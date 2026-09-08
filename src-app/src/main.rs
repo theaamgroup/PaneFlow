@@ -73,7 +73,8 @@ use crate::window_chrome::title_bar;
 use gpui::{
     Animation, AnimationExt, App, Context, CursorStyle, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, PathBuilder, Pixels, Point, Render, SharedString, Styled,
-    Window, WindowBounds, WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px,
+    WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, canvas, div, point,
+    prelude::*, px,
 };
 use gpui_platform::application;
 use notify::Watcher;
@@ -242,9 +243,16 @@ pub(crate) struct TabContextMenu {
 /// Right-click menu for a pane, anchored on its header (EP-002 US-007). A pane
 /// is mono-surface, so the menu identifies its target by the pane alone - there
 /// is no tab index, and no cross-pane move entry.
+///
+/// Issue #472: the handle is WEAK, like `CloseTarget::Pane`. An open menu is a
+/// reference to a pane, never an owner of one. Held strongly it outlived the
+/// close paths that do not run through a menu item - `Cmd+Shift+W`, a
+/// workspace close, an IPC `workspace.close` - and a `Pane` that is never
+/// dropped is a `TerminalState` whose `Drop` never runs, i.e. a child that is
+/// never signalled and a PTY the sweeps can no longer see.
 #[derive(Clone)]
 pub(crate) struct PaneContextMenu {
-    pub(crate) pane: Entity<Pane>,
+    pub(crate) pane: WeakEntity<Pane>,
     pub(crate) position: Point<Pixels>,
 }
 
@@ -1496,10 +1504,21 @@ struct PaneFlowApp {
     /// agents instead of bouncing on the first one.
     jump_cursor: Option<u64>,
     /// Source pane for swap mode, or `None` if not in swap mode.
-    swap_source: Option<Entity<crate::pane::Pane>>,
+    ///
+    /// Issue #471: weak, like `swap_armed_panes` below. Arming a swap must not
+    /// give the app a second owner of any pane.
+    swap_source: Option<WeakEntity<crate::pane::Pane>>,
     /// Panes whose terminals `set_swap_source` armed for Escape, so the same
     /// set is disarmed even if the layout changed meanwhile (issue #299).
-    swap_armed_panes: Vec<Entity<crate::pane::Pane>>,
+    ///
+    /// Issue #471: this is EVERY leaf pane in the app, so holding it strongly
+    /// made an armed swap an owner of the whole workspace list. Nothing in any
+    /// close path disarms - not pane close, not tab close, not workspace
+    /// close - so a pane closed while armed was kept alive here, and a `Pane`
+    /// that is never dropped is a `TerminalState::Drop` that never runs: the
+    /// child is never signalled and `live_terminal_session_ids` can no longer
+    /// see it.
+    swap_armed_panes: Vec<WeakEntity<crate::pane::Pane>>,
     /// LIFO stack of recently closed panes for undo-close (US-014).
     /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
     /// `Cmd+Shift+T` restores whichever kind was closed most recently.
@@ -2672,9 +2691,14 @@ impl Render for PaneFlowApp {
             app_content = app_content.child(self.render_tab_context_menu(menu, ui, window, cx));
         }
 
-        // EP-002 US-007: pane header context menu.
-        if let Some(menu) = self.pane_menu_open.clone() {
-            app_content = app_content.child(self.render_pane_context_menu(menu, ui, window, cx));
+        // EP-002 US-007: pane header context menu. Issue #472: the pane is
+        // re-validated by upgrade, the way the tab menu re-validates its
+        // indices above - a menu whose pane has closed simply does not paint.
+        if let Some(menu) = self.pane_menu_open.clone()
+            && let Some(pane) = menu.pane.upgrade()
+        {
+            app_content =
+                app_content.child(self.render_pane_context_menu(&menu, pane, ui, window, cx));
         }
 
         // files-tree EP-003 US-009: per-file copy-path context menu.

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, InteractiveElement,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Entity, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, SharedString, Styled, Window, deferred, div,
     point, prelude::*, px,
 };
@@ -687,15 +687,17 @@ impl PaneFlowApp {
         rows
     }
 
+    /// Issue #472: `menu` carries only the anchor position now - the caller
+    /// upgrades `menu.pane` and hands the live pane in, so this body never
+    /// paints, renames, or closes a pane that has already gone.
     pub(crate) fn render_pane_context_menu(
         &self,
-        menu: PaneContextMenu,
+        menu: &PaneContextMenu,
+        source: Entity<crate::pane::Pane>,
         ui: crate::theme::UiColors,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let source = menu.pane.clone();
-
         // Workspace root of the pane, for the relative-path entry. The pane
         // carries its owning workspace id, so this resolves without walking
         // every tab's layout tree.
@@ -730,7 +732,15 @@ impl PaneFlowApp {
         let menu_height = px(8. + rows as f32 * 29. + 18.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
-        let source_for_rename = source.clone();
+        // Issue #472: the click callbacks hold WEAK handles, and this is
+        // load-bearing rather than tidiness. GPUI renders the next frame while
+        // `rendered_frame` still holds the previous frame's listeners, so a
+        // strong capture here would keep the pane alive across the very
+        // `menu.pane.upgrade()` that is meant to notice it closed - the gate
+        // would succeed, the menu would re-render, and it would capture the
+        // pane strongly again. The menu would resurrect its own pane for as
+        // long as it stayed open.
+        let source_for_rename = source.downgrade();
         let mut context_menu = select_menu("pane-context-menu", ui)
             .occlude()
             .absolute()
@@ -750,7 +760,9 @@ impl PaneFlowApp {
                 cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.pane_menu_open = None;
                     this.commit_inline_rename(window, cx);
-                    source_for_rename.update(cx, |pane, cx| pane.begin_rename(window, cx));
+                    if let Some(pane) = source_for_rename.upgrade() {
+                        pane.update(cx, |pane, cx| pane.begin_rename(window, cx));
+                    }
                     cx.stop_propagation();
                     cx.notify();
                 }),
@@ -821,7 +833,7 @@ impl PaneFlowApp {
                 .bg(menu_divider_color(ui)),
         );
 
-        let source_for_close = source.clone();
+        let source_for_close = source.downgrade();
         context_menu = context_menu.child(self.render_select_menu_item(
             "pane-context-close".into(),
             "Close Pane",
@@ -834,11 +846,9 @@ impl PaneFlowApp {
                 // an inline affordance here would be a dead menu item. The
                 // session save moved into the close path itself so a pending
                 // close never persists the pre-close tree.
-                this.request_close_pane(
-                    source_for_close.clone(),
-                    crate::app::close_guard::ConfirmStyle::Modal,
-                    cx,
-                );
+                if let Some(pane) = source_for_close.upgrade() {
+                    this.request_close_pane(pane, crate::app::close_guard::ConfirmStyle::Modal, cx);
+                }
                 cx.stop_propagation();
                 cx.notify();
             }),
@@ -894,7 +904,86 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::{tab_context_menu_height, workspace_context_menu_counts};
+    use crate::source_probe::source_slice;
     use gpui::px;
+
+    /// Issue #472: an open pane menu is a REFERENCE to a pane, never an owner
+    /// of one. The menu's own items dismiss before they act, but the close
+    /// routes that do not run through an item never did:
+    /// `remove_pane_from_tree`, `close_pane_undoably`, `handle_close_pane`
+    /// (`Cmd+Shift+W`) and `close_workspace_at_inner` - which stands down the
+    /// workspace and tab menus by name and skipped this one, even though its
+    /// own comment argues an IPC `workspace.close` has no gesture to dismiss
+    /// with. Held strongly, the menu kept the `Pane` alive past its close, so
+    /// `TerminalState::Drop` never ran its kill ladder and the child survived
+    /// unsignalled, invisible to `live_terminal_session_ids`.
+    ///
+    /// A weak handle makes every one of those routes correct at once, and
+    /// makes the render gate a liveness check rather than the bounds check
+    /// its `tab_menu_open` neighbour settles for. `pane.rs`'s
+    /// `closing_a_tab_releases_its_panes_unless_something_else_holds_one` pins
+    /// the release a close depends on.
+    #[test]
+    fn an_open_pane_menu_references_its_pane_and_never_owns_it() {
+        let main = include_str!("../../main.rs");
+        let decl = source_slice(main, "pub(crate) struct PaneContextMenu {", "\n}\n");
+        assert!(
+            decl.contains("pub(crate) pane: WeakEntity<Pane>"),
+            "an open menu must not own a pane (issue #472): {decl}"
+        );
+
+        // The render gate upgrades, so a menu whose pane closed never paints
+        // and never hands a departed pane to Rename or Close Pane.
+        let gate = source_slice(
+            main,
+            "// EP-002 US-007: pane header context menu.",
+            "// files-tree EP-003 US-009",
+        );
+        assert!(
+            gate.contains("&& let Some(pane) = menu.pane.upgrade()"),
+            "the pane menu must re-validate by upgrade before painting: {gate}"
+        );
+
+        // The rendered callbacks must hold weak handles too. A strong clone
+        // captured into a listener survives in `rendered_frame` while the next
+        // frame renders, so the gate's upgrade would still succeed and the
+        // menu would re-capture the pane every frame - a live pane for as long
+        // as the menu stayed open, which is the whole defect. Reviewers of the
+        // first cut of this fix caught exactly that.
+        let body = source_slice(
+            include_str!("context_menu.rs"),
+            "pub(crate) fn render_pane_context_menu(",
+            "\n    }",
+        );
+        for required in [
+            "let source_for_rename = source.downgrade();",
+            "let source_for_close = source.downgrade();",
+            "if let Some(pane) = source_for_rename.upgrade() {",
+            "if let Some(pane) = source_for_close.upgrade() {",
+        ] {
+            assert!(
+                body.contains(required),
+                "the pane menu's callbacks must not own the pane (issue #472); \
+                 expected `{required}`"
+            );
+        }
+        assert!(
+            !body.contains("source.clone()"),
+            "no strong clone of the pane may reach a rendered callback: {body}"
+        );
+
+        // Both writers store a weak handle.
+        for (label, src) in [
+            ("workspace panes", include_str!("../event_handlers.rs")),
+            ("review-grid panes", include_str!("../review/events.rs")),
+        ] {
+            let opener = source_slice(src, "OpenPaneMenu { position } =>", "cx.notify();");
+            assert!(
+                opener.contains("pane: pane.downgrade(),"),
+                "the {label} menu opener must downgrade: {opener}"
+            );
+        }
+    }
 
     #[test]
     fn tab_menu_height_never_exceeds_the_surface_cap() {

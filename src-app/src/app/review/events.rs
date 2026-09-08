@@ -22,7 +22,7 @@ impl PaneFlowApp {
             PaneEvent::OpenPaneMenu { position } => {
                 self.dismiss_transient_surfaces();
                 self.pane_menu_open = Some(crate::PaneContextMenu {
-                    pane: pane.clone(),
+                    pane: pane.downgrade(),
                     position: *position,
                 });
                 cx.notify();
