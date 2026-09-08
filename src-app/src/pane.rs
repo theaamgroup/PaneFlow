@@ -2768,3 +2768,90 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod ownership_tests {
+    /// Issues #471 and #472: the mechanism both fixes turn on, over a real
+    /// close path. A `Pane` is released only when the LAST strong handle goes,
+    /// and this fork puts the entire kill ladder in `TerminalState::Drop` -
+    /// pinning the PTY session's process groups, SIGTERM, SIGKILL. So a
+    /// long-lived strong `Entity<Pane>` outside the layout tree is a child
+    /// that is never signalled when its pane closes, and one the sweeps can no
+    /// longer see (`live_terminal_session_ids` walks the tree the pane just
+    /// left).
+    ///
+    /// Both halves come off one fixture, because the positive half alone would
+    /// pass against a test that never held anything: it is the strong-holder
+    /// half that shows the release is real and that ONE side holder defeats
+    /// it. That side holder is exactly the shape `swap_armed_panes` and
+    /// `PaneContextMenu::pane` had.
+    ///
+    /// What this does NOT prove, and no test in this crate can: that the kill
+    /// ladder itself then runs. `PaneFlowApp` binds a Unix socket and cannot
+    /// be constructed in a test, and `display_only_for_test` has no PTY and no
+    /// child. `terminal::pty_session`'s
+    /// `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session`
+    /// owns that half against a live shell. This pins the link between them:
+    /// closing a tab drops its panes, unless something else is holding one.
+    #[gpui::test]
+    fn closing_a_tab_releases_its_panes_unless_something_else_holds_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::layout::LayoutTree;
+        use crate::workspace::{Tab, Workspace};
+        use gpui::AppContext as _;
+
+        let new_pane = |cx: &mut gpui::VisualTestContext| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| super::Pane::new(terminal, 1, cx))
+        };
+        let cx = cx.add_empty_window();
+
+        // Two panes, one per tab, and the workspace is the only owner of the
+        // second - the post-fix shape, where an armed swap and an open pane
+        // menu both hold nothing but a weak handle.
+        let kept = new_pane(cx);
+        let released = new_pane(cx);
+        let released_weak = released.downgrade();
+        let mut ws = Workspace::with_layout_and_id(
+            1,
+            "ws",
+            std::path::PathBuf::new(),
+            LayoutTree::Leaf(kept),
+        );
+        assert!(ws.open_tab(Tab::new(String::new(), Some(LayoutTree::Leaf(released)))));
+
+        // `close_tab` hands the tab back so the caller can offer an undo; the
+        // pane dies with that record, not with the call.
+        let closed = ws.close_tab(1).expect("the second tab closes");
+        assert!(
+            released_weak.upgrade().is_some(),
+            "the returned tab still owns the pane"
+        );
+        drop(closed);
+        cx.update(|_, _| {});
+        assert!(
+            released_weak.upgrade().is_none(),
+            "with only weak references left, closing the tab must release the              pane so TerminalState::Drop can run its kill ladder"
+        );
+
+        // Same close, one strong side handle: the pre-fix shape. The pane -
+        // and its child - outlive the close.
+        let owned = new_pane(cx);
+        let owned_weak = owned.downgrade();
+        let side_holder = vec![owned.clone()];
+        assert!(ws.open_tab(Tab::new(String::new(), Some(LayoutTree::Leaf(owned)))));
+        drop(ws.close_tab(1).expect("the tab closes"));
+        cx.update(|_, _| {});
+        assert!(
+            owned_weak.upgrade().is_some(),
+            "a strong side handle must be what keeps the pane alive here, or              the half above proves nothing"
+        );
+        drop(side_holder);
+        cx.update(|_, _| {});
+        assert!(
+            owned_weak.upgrade().is_none(),
+            "releasing the side handle must release the pane"
+        );
+    }
+}

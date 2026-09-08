@@ -73,21 +73,27 @@ impl PaneFlowApp {
         if let Some(source) = self.swap_source.clone() {
             self.set_swap_source(None, cx);
 
+            // Issue #471: the source is a weak handle now, so a pane closed
+            // while the swap was armed is already gone - which is the point,
+            // its kill ladder ran. A departed source is then indistinguishable
+            // from one that left the tree, and takes the identical path below:
+            // the focus move still happens, and the swap is refused with the
+            // same toast. Nothing here may resurrect it.
+            let source = source.upgrade();
+
             if let Some(root) = self.nav_root() {
                 // Move focus to find the target pane
                 let moved = matches!(root.focus_in_direction(dir, window, cx), FocusNav::Moved);
                 if let Some(target) = root.focused_pane(window, cx)
-                    && target != source
+                    && source.as_ref() != Some(&target)
                 {
-                    let swapped = if let Some(root) = self.nav_root_mut() {
-                        root.swap_panes(&source, &target)
-                    } else {
-                        false
-                    };
-                    if swapped {
-                        source.read(cx).focus_handle(cx).focus(window, cx);
-                    } else {
-                        self.show_toast("Swap source pane is no longer available", cx);
+                    let swapped = source
+                        .as_ref()
+                        .zip(self.nav_root_mut())
+                        .is_some_and(|(source, root)| root.swap_panes(source, &target));
+                    match source.filter(|_| swapped) {
+                        Some(source) => source.read(cx).focus_handle(cx).focus(window, cx),
+                        None => self.show_toast("Swap source pane is no longer available", cx),
                     }
                 } else if !moved {
                     self.show_toast("No pane in that direction", cx);

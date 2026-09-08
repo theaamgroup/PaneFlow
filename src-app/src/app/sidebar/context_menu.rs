@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, InteractiveElement,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Entity, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, SharedString, Styled, Window, deferred, div,
     point, prelude::*, px,
 };
@@ -687,15 +687,17 @@ impl PaneFlowApp {
         rows
     }
 
+    /// Issue #472: `menu` carries only the anchor position now - the caller
+    /// upgrades `menu.pane` and hands the live pane in, so this body never
+    /// paints, renames, or closes a pane that has already gone.
     pub(crate) fn render_pane_context_menu(
         &self,
-        menu: PaneContextMenu,
+        menu: &PaneContextMenu,
+        source: Entity<crate::pane::Pane>,
         ui: crate::theme::UiColors,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let source = menu.pane.clone();
-
         // Workspace root of the pane, for the relative-path entry. The pane
         // carries its owning workspace id, so this resolves without walking
         // every tab's layout tree.
@@ -894,7 +896,58 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::{tab_context_menu_height, workspace_context_menu_counts};
+    use crate::source_probe::source_slice;
     use gpui::px;
+
+    /// Issue #472: an open pane menu is a REFERENCE to a pane, never an owner
+    /// of one. The menu's own items dismiss before they act, but the close
+    /// routes that do not run through an item never did:
+    /// `remove_pane_from_tree`, `close_pane_undoably`, `handle_close_pane`
+    /// (`Cmd+Shift+W`) and `close_workspace_at_inner` - which stands down the
+    /// workspace and tab menus by name and skipped this one, even though its
+    /// own comment argues an IPC `workspace.close` has no gesture to dismiss
+    /// with. Held strongly, the menu kept the `Pane` alive past its close, so
+    /// `TerminalState::Drop` never ran its kill ladder and the child survived
+    /// unsignalled, invisible to `live_terminal_session_ids`.
+    ///
+    /// A weak handle makes every one of those routes correct at once, and
+    /// makes the render gate a liveness check rather than the bounds check
+    /// its `tab_menu_open` neighbour settles for. `pane.rs`'s
+    /// `closing_a_tab_releases_its_panes_unless_something_else_holds_one` pins
+    /// the release a close depends on.
+    #[test]
+    fn an_open_pane_menu_references_its_pane_and_never_owns_it() {
+        let main = include_str!("../../main.rs");
+        let decl = source_slice(main, "pub(crate) struct PaneContextMenu {", "\n}\n");
+        assert!(
+            decl.contains("pub(crate) pane: WeakEntity<Pane>"),
+            "an open menu must not own a pane (issue #472): {decl}"
+        );
+
+        // The render gate upgrades, so a menu whose pane closed never paints
+        // and never hands a departed pane to Rename or Close Pane.
+        let gate = source_slice(
+            main,
+            "// EP-002 US-007: pane header context menu.",
+            "// files-tree EP-003 US-009",
+        );
+        assert!(
+            gate.contains("&& let Some(pane) = menu.pane.upgrade()"),
+            "the pane menu must re-validate by upgrade before painting: {gate}"
+        );
+
+        // Both writers store a weak handle.
+        for (label, src) in [
+            ("workspace panes", include_str!("../event_handlers.rs")),
+            ("review-grid panes", include_str!("../review/events.rs")),
+        ] {
+            let opener = source_slice(src, "OpenPaneMenu { position } =>", "cx.notify();");
+            assert!(
+                opener.contains("pane: pane.downgrade(),"),
+                "the {label} menu opener must downgrade: {opener}"
+            );
+        }
+    }
 
     #[test]
     fn tab_menu_height_never_exceeds_the_surface_cap() {

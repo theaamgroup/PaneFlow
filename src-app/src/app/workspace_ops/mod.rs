@@ -2175,6 +2175,11 @@ impl PaneFlowApp {
         // repository (issue #347). An IPC `workspace.close` has no window
         // gesture to dismiss it, so it is dismissed here.
         self.tab_menu_open = None;
+        // Issue #472: the pane menu goes with them. Its weak handle already
+        // makes a stale entry inert - the render gate upgrades - but the
+        // asymmetry beside its two siblings reads as an oversight, and an IPC
+        // close has no gesture to fold it either.
+        self.pane_menu_open = None;
         // Issue #111: capture the entire workspace before dropping any pane
         // entity. Older pane/tab records for this id become redundant once the
         // whole workspace is represented by one newer record, and leaving
@@ -4057,6 +4062,13 @@ mod tests {
         assert!(
             close.contains("self.tab_menu_open = None;"),
             "the tab menu must not survive the workspace list changing: {close}"
+        );
+        // Issue #472: all three menus stand down together. The pane menu's
+        // weak handle is what makes a survivor harmless; this keeps it from
+        // being the one sibling left behind.
+        assert!(
+            close.contains("self.pane_menu_open = None;"),
+            "the pane menu must not survive its workspace: {close}"
         );
     }
 
