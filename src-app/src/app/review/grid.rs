@@ -48,11 +48,14 @@ impl PaneFlowApp {
     }
 
     pub(crate) fn review_active_pane(&self) -> Option<Entity<Pane>> {
+        // Issue #475: the handle is weak, so an upgrade comes first; the
+        // containment filter that was already here then rejects a pane that
+        // outlived the layout it belonged to.
         self.review
             .active_pane
             .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
             .filter(|pane| self.review_contains_pane(pane))
-            .cloned()
             .or_else(|| self.review.layout.as_ref().and_then(LayoutTree::first_leaf))
     }
 
@@ -73,9 +76,13 @@ impl PaneFlowApp {
             .as_ref()
             .and_then(|root| root.focused_pane(window, cx));
         if let Some(pane) = focused
-            && self.review.active_pane.as_ref() != Some(&pane)
+            && !self
+                .review
+                .active_pane
+                .as_ref()
+                .is_some_and(|active| active == &pane)
         {
-            self.review.active_pane = Some(pane);
+            self.review.active_pane = Some(pane.downgrade());
             self.review.selected_file = None;
             self.review.dismiss_popovers();
         }
@@ -127,7 +134,7 @@ impl PaneFlowApp {
         self.review.dismiss_popovers();
         if let Some(pane) = self.review_pane_for_subject(&subject, cx) {
             self.review.reveal_pane(&pane, cx);
-            self.review.active_pane = Some(pane.clone());
+            self.review.active_pane = Some(pane.downgrade());
             self.pending_pane_focus = Some(pane);
             self.save_session(cx);
             cx.notify();
@@ -136,13 +143,13 @@ impl PaneFlowApp {
         match self.review_active_pane() {
             Some(pane) => {
                 self.review_set_pane_subject(&pane, subject, cx);
-                self.review.active_pane = Some(pane.clone());
+                self.review.active_pane = Some(pane.downgrade());
                 self.pending_pane_focus = Some(pane);
             }
             None => {
                 let pane = self.review_new_pane(subject, cx);
                 self.review.layout = Some(LayoutTree::Leaf(pane.clone()));
-                self.review.active_pane = Some(pane.clone());
+                self.review.active_pane = Some(pane.downgrade());
                 self.pending_pane_focus = Some(pane);
             }
         }
@@ -164,7 +171,7 @@ impl PaneFlowApp {
         match edge {
             None => {
                 self.review_set_pane_subject(&target, subject, cx);
-                self.review.active_pane = Some(target.clone());
+                self.review.active_pane = Some(target.downgrade());
                 self.pending_pane_focus = Some(target);
             }
             Some(edge) => {
@@ -191,7 +198,7 @@ impl PaneFlowApp {
                 if !inserted {
                     return;
                 }
-                self.review.active_pane = Some(new_pane.clone());
+                self.review.active_pane = Some(new_pane.downgrade());
                 self.pending_pane_focus = Some(new_pane);
             }
         }
@@ -225,7 +232,7 @@ impl PaneFlowApp {
         if !inserted {
             return Err("That pane no longer exists".to_string());
         }
-        self.review.active_pane = Some(new_pane.clone());
+        self.review.active_pane = Some(new_pane.downgrade());
         self.pending_pane_focus = Some(new_pane);
         self.save_session(cx);
         cx.notify();
@@ -247,9 +254,17 @@ impl PaneFlowApp {
         if removed && let Some(view) = pane_view(&pane, cx) {
             view.update(cx, |view, cx| view.suspend(cx));
         }
-        if self.review.active_pane.as_ref() == Some(&pane) {
-            self.review.active_pane = self.review.layout.as_ref().and_then(LayoutTree::first_leaf);
-            self.pending_pane_focus = self.review.active_pane.clone();
+        if self
+            .review
+            .active_pane
+            .as_ref()
+            .is_some_and(|active| active == &pane)
+        {
+            let next = self.review.layout.as_ref().and_then(LayoutTree::first_leaf);
+            self.review.active_pane = next.as_ref().map(Entity::downgrade);
+            // `pending_pane_focus` is consumed on the next frame, so it stays
+            // strong - a one-frame hold, not a holder.
+            self.pending_pane_focus = next;
             self.review.selected_file = None;
         }
         self.review.dismiss_popovers();
@@ -382,5 +397,68 @@ impl PaneFlowApp {
                     .iter()
                     .find_map(|ws| self.review_subject_for_workspace(ws))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::source_probe::source_slice;
+
+    /// Issue #475: the last transient holder of the #471/#472 class. Review
+    /// panes are `PaneSurface::Diff`, so unlike those two this was never a
+    /// live-PTY leak - but its correctness rested on one clearing site
+    /// (`review_close_pane`) rather than on the handle type, and two paths
+    /// already walk past it: `enter_cli_mode` never clears, and
+    /// `restore_review_layout` returns early on a prune failure or over the
+    /// pane cap, leaving a handle into a layout that was just replaced.
+    ///
+    /// The field was already being *treated* as a reference - the single read
+    /// chokepoint filters by `review_contains_pane` before handing the pane
+    /// out - so this gives it the type it was already behaving as, and stops
+    /// it keeping a `DiffView` and its watchers alive. `pending_pane_focus`
+    /// deliberately stays strong: `drain_pending_window_actions` `take()`s it
+    /// on the next frame, so it is a one-frame hold, not a holder.
+    #[test]
+    fn the_active_review_pane_is_a_reference_not_an_owner() {
+        assert!(
+            include_str!("mod.rs").contains("pub(crate) active_pane: Option<WeakEntity<Pane>>,"),
+            "the active Review pane must not be owned (issue #475)"
+        );
+
+        // The production half only: this test names the field itself, and a
+        // guard that counts its own string literal counts wrong.
+        let src = include_str!("grid.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("grid.rs has a production half");
+        let read = source_slice(src, "pub(crate) fn review_active_pane(", "\n    }");
+        assert!(
+            read.contains(".and_then(gpui::WeakEntity::upgrade)")
+                && read.contains(".filter(|pane| self.review_contains_pane(pane))"),
+            "the read chokepoint must upgrade and keep the containment \
+             filter: {read}"
+        );
+
+        // Every write stores a weak handle. A strong one anywhere here is the
+        // defect back, and `Some(x.clone())` is the shape it takes.
+        let writes: Vec<_> = src
+            .match_indices("self.review.active_pane = ")
+            .map(|(at, _)| src[at..].lines().next().unwrap_or_default())
+            .collect();
+        assert_eq!(writes.len(), 8, "write sites moved: {writes:?}");
+        for write in &writes {
+            assert!(
+                write.contains(".downgrade())") || write.contains("map(Entity::downgrade)"),
+                "every write must downgrade: {write}"
+            );
+        }
+
+        // The close path hands the NEXT pane to focus over strongly, and that
+        // is the one place a strong handle is still correct.
+        let close = source_slice(src, "pub(crate) fn review_close_pane(", "\n    }");
+        assert!(
+            close.contains("self.pending_pane_focus = next;"),
+            "the focus handoff stays strong: {close}"
+        );
     }
 }
