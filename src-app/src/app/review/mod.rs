@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use gpui::{AppContext, Context, Entity, Pixels, Point};
+use gpui::{AppContext, Context, Entity, Pixels, Point, WeakEntity};
 
 use crate::diff::ReviewSubject;
 use crate::layout::LayoutTree;
@@ -31,7 +31,13 @@ pub(crate) struct ReviewRailMenu {
 pub(crate) struct ReviewState {
     pub(crate) layout: Option<LayoutTree>,
     pub(crate) saved_layout: Option<LayoutTree>,
-    pub(crate) active_pane: Option<Entity<Pane>>,
+    /// Issue #475: weak, like every other transient pane reference in the
+    /// app (`PendingClose`, the pane palette, the composer, the launch pad).
+    /// The read chokepoint `review_active_pane` already treats this as a
+    /// reference - it filters by `review_contains_pane` before handing the
+    /// pane out - so nothing here should keep a `DiffView` and its watchers
+    /// alive after the layout that held it went away.
+    pub(crate) active_pane: Option<WeakEntity<Pane>>,
     pub(crate) collapsed: HashSet<PathBuf>,
     pub(crate) rail_menu: Option<ReviewRailMenu>,
     pub(crate) base_picker_open: bool,

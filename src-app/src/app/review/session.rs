@@ -181,7 +181,7 @@ impl PaneFlowApp {
             fallback.push(subject.clone());
             self.review_new_pane(subject, cx)
         });
-        self.review.active_pane = tree.first_leaf();
+        self.review.active_pane = tree.first_leaf().as_ref().map(gpui::Entity::downgrade);
         self.review.layout = Some(tree);
     }
 }

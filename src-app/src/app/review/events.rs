@@ -83,7 +83,7 @@ impl PaneFlowApp {
                 if !moved {
                     return;
                 }
-                self.review.active_pane = Some(source.clone());
+                self.review.active_pane = Some(source.downgrade());
                 self.pending_pane_focus = Some(source);
                 self.save_session(cx);
                 cx.notify();
