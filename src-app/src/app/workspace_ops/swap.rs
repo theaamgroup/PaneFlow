@@ -12,6 +12,7 @@
 use gpui::{Context, Entity, Window};
 
 use crate::pane::Pane;
+use crate::workspace::Workspace;
 use crate::{PaneFlowApp, SwapPane};
 
 impl PaneFlowApp {
@@ -60,12 +61,17 @@ impl PaneFlowApp {
             }
         }
         if let Some(pane) = &source {
+            // Issue #474: `Workspace::collect_panes` walks each tab's root AND
+            // its zoom-parked `saved_layout`, which a `tab.root` walk misses
+            // entirely - under zoom the real layout lives in `saved_layout`
+            // and `root` holds only the zoomed pane, so a zoomed tab used to
+            // contribute exactly one armed pane. Unzooming it then put panes
+            // on screen that Escape did not cancel from. Same helper the
+            // close-confirmation and worktree sweeps walk.
             let mut armed: Vec<Entity<Pane>> = self
                 .workspaces
                 .iter()
-                .flat_map(|ws| ws.tabs().iter())
-                .filter_map(|tab| tab.root.as_ref())
-                .flat_map(|root| root.collect_leaves())
+                .flat_map(Workspace::collect_panes)
                 .collect();
             if !armed.contains(pane) {
                 armed.push(pane.clone());
@@ -89,6 +95,65 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use crate::source_probe::source_slice;
+
+    /// Issue #474: a zoomed tab keeps the real layout in `saved_layout` and
+    /// only the zoomed leaf in `root` (`Tab::pane_count` states that
+    /// invariant), so the `tab.root` walk `set_swap_source` used to do armed
+    /// exactly one pane per zoomed tab and skipped the rest. Unzoom that tab
+    /// and those panes are on screen, focusable, and Escape does not cancel
+    /// from them - the Escape falls through to the terminal, where a TUI or an
+    /// agent may act on it. `Workspace::collect_panes` is the both-trees walk,
+    /// and the same one the close-confirmation and worktree sweeps use.
+    ///
+    /// Asserted in BOTH directions off one fixture: the old expression is
+    /// evaluated here too, because "the new walk finds two panes" alone would
+    /// pass against a fixture that was never zoomed in the first place.
+    #[gpui::test]
+    fn arming_reaches_panes_parked_under_a_zoomed_tab(cx: &mut gpui::TestAppContext) {
+        use crate::layout::{LayoutTree, SplitDirection};
+        use crate::workspace::Workspace;
+        use gpui::AppContext as _;
+
+        let cx = cx.add_empty_window();
+        let new_pane = |cx: &mut gpui::VisualTestContext| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+        };
+        let zoomed = new_pane(cx);
+        let parked = new_pane(cx);
+        let root = LayoutTree::from_panes_equal(
+            SplitDirection::Vertical,
+            vec![zoomed.clone(), parked.clone()],
+        )
+        .expect("two panes build a container");
+        let mut ws = Workspace::with_layout_and_id(1, "ws", std::path::PathBuf::new(), root);
+
+        // Zoom the tab, exactly as `handle_toggle_zoom` does: the tree moves to
+        // `saved_layout` and `root` keeps only the zoomed leaf.
+        let full = ws.active_tab_mut().root.take().expect("the tab has a tree");
+        ws.active_tab_mut().saved_layout = Some(full);
+        ws.active_tab_mut().root = Some(LayoutTree::Leaf(zoomed.clone()));
+        assert!(ws.is_zoomed());
+
+        let root_only: Vec<_> = ws
+            .tabs()
+            .iter()
+            .filter_map(|tab| tab.root.as_ref())
+            .flat_map(|root| root.collect_leaves())
+            .collect();
+        assert_eq!(
+            root_only,
+            vec![zoomed.clone()],
+            "the pre-#474 walk sees only the zoomed leaf, which is the defect"
+        );
+
+        let armed = ws.collect_panes();
+        assert!(
+            armed.contains(&zoomed) && armed.contains(&parked),
+            "every pane the user can reach after unzooming must be armed"
+        );
+        assert_eq!(armed.len(), 2, "and no pane is armed twice");
+    }
 
     /// Issue #471: `set_swap_source` arms EVERY leaf pane of every tab of
     /// every workspace, and nothing in any close path disarms it - not
@@ -136,6 +201,8 @@ mod tests {
             "fn arm_swap_terminal(",
         );
         for required in [
+            // Issue #474: the both-trees walk, or a zoomed tab arms one pane.
+            ".flat_map(Workspace::collect_panes)",
             "self.swap_armed_panes = armed.iter().map(Entity::downgrade).collect();",
             "self.swap_source = source.as_ref().map(Entity::downgrade);",
             "if let Some(pane) = pane.upgrade() {",
