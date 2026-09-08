@@ -1,13 +1,46 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-07, through the Review grid port
-(#438) following the first v0.12.0 port batch (#417: the terminal rendering
-chain #418 / #419 / #420, the Zed highlight queries #433, and the editor
-benchmark harness #425). The prior
+Living handoff record. Updated 2026-09-07 at the **0.5.0 cut**, which ships
+the Review grid port (#438) and the first v0.12.0 port batch (#417: the
+terminal rendering chain #418 / #419 / #420, the Zed highlight queries #433,
+and the editor benchmark harness #425). The prior
 entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 #357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-07: the 0.5.0 cut.** 85 non-merge commits since `v0.4.0`, a minor
+bump because the release adds a surface rather than only fixing one: Review
+mode's rails and diff-pane grid (#438), the editor's gutter markers, revert
+chip and minimap (#432, #435), the Changes-dock scrollbar (#434), the
+font-measured cell grid and sprite/Nerd Font chain (#418-#420), Zed highlight
+queries for 15 languages (#433), the compacted Pane Overview (#389), the
+sidebar MCP-bridge nudge (#443), agent context and task reporting (#409), and
+`Entity::cached` idle terminal panes (#429). Curated notes live in
+`docs/releases/v0.5.0.md`; the release workflow feeds that file to both the
+GitHub Release and Sparkle.
+
+Pre-flight verification on `main` at the bump commit: `cargo build` exit 0;
+`cargo test --workspace` **3,326 passed, 0 failed, 5 ignored** (3,300 at the
+#438 landing; executed test names diffed identical across two consecutive
+runs); `cargo clippy --workspace --all-targets` exit 0, **WARNING COUNT 1**
+(`block v0.1.6`); `cargo fmt --check` exit 0;
+`./target/debug/paneflow --version` -> `paneflow 0.5.0`;
+`cargo deny check advisories licenses sources` exit 0 ->
+`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` STAGE 2c
+zero-condition **0** with the negative control at **176** `cfg(unix)` /
+**93** `cfg(macos)` live sites (CLAUDE.md's figures were refreshed to match);
+`./scripts/win-census.sh` STAGE 2b zero-condition **0**.
+
+The first pre-flight run failed one test:
+`terminal::element::hyperlink::tests::perf_scan_200_lines_under_budget`
+measured 76 ms against its 25 ms debug budget, then passed on an immediate
+re-run and in isolation. It took a single wall-clock sample inside a test
+binary libtest runs fully parallel, so it charged the scan for whatever else
+was scheduled; zeroing the budget showed the scan actually costs **431 us**,
+58x under. It now asserts the fastest of five passes (#477), which keeps the
+algorithmic-regression signal that `#[ignore]` would have discarded. Issue
+#477 lists the five sibling single-sample budget tests that share the shape.
 
 **2026-09-07 #438: Review rails and diff pane grid.** The port of upstream
 `a8d55f74` replaces the former scope/multi-view Review surface with

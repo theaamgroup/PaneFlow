@@ -1185,7 +1185,7 @@ cargo test --workspace                          # diff test names, do not trust 
 cargo clippy --workspace --all-targets          # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo clippy --workspace --all-targets -- -D warnings   # exit 0; what CI enforces
 cargo fmt --check                               # exit 0
-./target/debug/paneflow --version               # paneflow 0.4.0
+./target/debug/paneflow --version               # paneflow 0.5.0
 cargo deny check advisories licenses sources    # exit 0
 ```
 
