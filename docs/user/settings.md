@@ -49,6 +49,10 @@ Common examples:
 * `terminal.scrollback_lines` for per-terminal scrollback history.
 * `terminal.ligatures`, `terminal.cursor_blink`, `terminal.env`, and
   `terminal.scroll_multiplier` for advanced terminal behavior.
+* `terminal.minimum_contrast` for the APCA contrast floor (`0` to `90`)
+  that rewrites the theme's ANSI colours against the cell background;
+  `45` by default (the floor PaneFlow always enforced), `0` turns it off and
+  shows the theme's literal colours. Hot-reloads.
 * `terminal.osc52_clipboard` to stop programs from writing the system
   clipboard through OSC 52 (`"disabled"`; the default is `"copy_only"`).
 * `commands[]` entries that are not workspace templates.

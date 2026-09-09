@@ -154,6 +154,7 @@ preserved; an invalid config is left untouched.
 | `terminal.cursor_blink` | string or null | `terminal_controlled` | `on`, `off`, or `terminal_controlled`. |
 | `terminal.env` | object or null | none | Environment variables injected into new terminals. Protected keys are filtered at PTY spawn. |
 | `terminal.scroll_multiplier` | number or null | `1.0` | Mouse-wheel multiplier outside mouse-reporting and alternate-screen modes. Clamped to `0.1` to `10.0`; NaN and infinity revert to the default. |
+| `terminal.minimum_contrast` | number or null | `45.0` | Minimum APCA lightness contrast (Lc) enforced between text and its cell background, on the theme's ANSI colors only. `0` disables the floor and leaves theme colors untouched (Ghostty's default); this fork defaults to Zed's `45`, the floor it always enforced, where upstream PaneFlow defaults to `0`. Range `0` to `90`; NaN and infinity disable it. Hot-reloaded. |
 | `terminal.osc52_clipboard` | string or null | `copy_only` | `copy_only` lets a focused pane write the system clipboard through OSC 52; `disabled` ignores every OSC 52 write. Clipboard reads are never served. Applies to newly created terminals. |
 
 ```json
@@ -330,7 +331,8 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
     "cursor_shape": "block",
     "cursor_blink": "terminal_controlled",
     "env": {},
-    "scroll_multiplier": 1.0
+    "scroll_multiplier": 1.0,
+    "minimum_contrast": 45.0
   },
   "agent_panel": {
     "max_content_width": 760,
