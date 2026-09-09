@@ -39,15 +39,29 @@ impl PaneFlowApp {
         }
 
         let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, Some(effective_cwd), None, cx));
-        // Only the exit is wired: the dock terminal has no pane in the layout
-        // tree, so the app-level CWD / port-scan / open-path handlers have
-        // nothing to act on for it.
+        // Only the exit and the program's own notifications are wired: the
+        // dock terminal has no pane in the layout tree, so the app-level CWD
+        // / port-scan / open-path handlers have nothing to act on for it, and
+        // `handle_terminal_event` (which delivers OSC 9/777 for hosted panes,
+        // #422) would never find it under a workspace.
         cx.subscribe(
             &terminal,
-            |this, terminal: Entity<TerminalView>, event: &TerminalEvent, cx| {
-                if matches!(event, TerminalEvent::ChildExited) {
-                    this.close_diff_terminal_tab(&terminal, cx);
+            |this, terminal: Entity<TerminalView>, event: &TerminalEvent, cx| match event {
+                TerminalEvent::ChildExited => this.close_diff_terminal_tab(&terminal, cx),
+                TerminalEvent::ProgramNotification { title, body } => {
+                    let seen = this.dock_terminal_is_seen(&terminal);
+                    let pane_title = terminal.read(cx).terminal.title.clone();
+                    crate::agents::notifications::fire_program_notification(
+                        crate::agents::notifications::program_notification(
+                            title.clone(),
+                            body.clone(),
+                            &pane_title,
+                        ),
+                        seen,
+                        cx.background_executor().clone(),
+                    );
                 }
+                _ => {}
             },
         )
         .detach();

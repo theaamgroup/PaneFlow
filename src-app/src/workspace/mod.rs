@@ -75,8 +75,10 @@ pub fn next_workspace_id() -> u64 {
 
 /// Runtime-only notification state for a completed agent turn.
 ///
-/// A natural `ai.stop` marks the completion unread only while this workspace is
-/// not visible in the active Paneflow window. It survives the transient
+/// A natural `ai.stop` marks the completion unread only while the pane the
+/// turn finished in is not under the user's eye (`seen`: the active window,
+/// its workspace and tab on screen - `PaneFlowApp::surfaces_under_user_eye`,
+/// keyed on the session's surface). It survives the transient
 /// `AgentState::Finished` session auto-clear until the user interacts with the
 /// workspace card or its pane area.
 #[derive(Debug, Default)]
@@ -85,8 +87,11 @@ pub(crate) struct AgentCompletionNotification {
 }
 
 impl AgentCompletionNotification {
-    pub(crate) fn record_finished(&mut self, workspace_visible: bool) {
-        self.unread = !workspace_visible;
+    /// `seen` is the surface-keyed answer (`completion_was_seen`), never a
+    /// workspace-level one: a turn that ends in a background tab of the
+    /// active workspace is unread.
+    pub(crate) fn record_finished(&mut self, seen: bool) {
+        self.unread = !seen;
     }
 
     pub(crate) fn acknowledge(&mut self) {

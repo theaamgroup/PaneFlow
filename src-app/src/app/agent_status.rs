@@ -127,6 +127,33 @@ impl PaneFlowApp {
             .map(|ws| ws.active_tab().surface_ids(cx))
     }
 
+    /// Whether the pane a session lives in is under the user's eye, for the
+    /// desktop notification gates: the same rule as the completion dot, so a
+    /// session whose pane is not resolved yet counts as seen exactly when its
+    /// workspace is on screen.
+    pub(super) fn session_is_seen(&self, workspace_id: u64, key: u32, cx: &gpui::App) -> bool {
+        let surface = self
+            .workspaces
+            .iter()
+            .find(|ws| ws.id == workspace_id)
+            .and_then(|ws| ws.agent_sessions.get(&key))
+            .and_then(|session| session.surface_id);
+        completion_was_seen(
+            self.surfaces_under_user_eye(workspace_id, cx).as_ref(),
+            surface,
+        )
+    }
+
+    /// Whether a terminal that lives in a pane is the one under the user's
+    /// eye: its workspace and tab are on screen in the active window and it is
+    /// one of that tab's surfaces. A terminal no pane hosts (the Changes-dock
+    /// terminal) is never found here; the dock answers for its own.
+    pub(super) fn hosted_surface_is_seen(&self, surface_id: u64, cx: &gpui::App) -> bool {
+        self.workspace_id_for_surface(surface_id, cx)
+            .and_then(|ws_id| self.surfaces_under_user_eye(ws_id, cx))
+            .is_some_and(|visible| visible.contains(&surface_id))
+    }
+
     /// Apply a state observation that did not come from a hook.
     ///
     /// `surface_id` is the pane the observation belongs to and is always
@@ -307,7 +334,7 @@ impl PaneFlowApp {
     }
 
     /// The workspace a surface belongs to, across every tab.
-    fn workspace_id_for_surface(&self, surface_id: u64, cx: &gpui::App) -> Option<u64> {
+    pub(super) fn workspace_id_for_surface(&self, surface_id: u64, cx: &gpui::App) -> Option<u64> {
         self.workspaces
             .iter()
             .find(|ws| {

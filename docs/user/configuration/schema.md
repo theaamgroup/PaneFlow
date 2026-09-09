@@ -177,7 +177,7 @@ preserved; an invalid config is left untouched.
 | `agent_panel.thinking_display` | string or null | `Auto` | `Auto`, `Preview`, `AlwaysExpanded`, or `AlwaysCollapsed`. |
 | `agent_panel.profiles` | object | `{}` | Named agent launch profiles. |
 | `agent_panel.default_profile` | string or null | none | Profile selected by default. |
-| `agent_panel.notify_when_agent_waiting` | string or null | `Never` | `PrimaryScreen`, `AllScreens`, or `Never`. `AllScreens` currently behaves identically to `PrimaryScreen` at runtime. |
+| `agent_panel.notify_when_agent_waiting` | string or null | `Never` | `PrimaryScreen`, `AllScreens`, or `Never`. `AllScreens` currently behaves identically to `PrimaryScreen` at runtime. A notification is dropped only when the agent's pane is under your eye (the PaneFlow window is active and the pane's workspace and tab are on screen); an agent in another workspace or a background tab notifies even while you work elsewhere in PaneFlow. |
 
 Profile entries under `agent_panel.profiles` can set `agent`, `model`,
 `mode`, `effort`, and `tools`.

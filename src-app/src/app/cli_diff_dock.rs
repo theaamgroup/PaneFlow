@@ -617,6 +617,24 @@ impl PaneFlowApp {
             && matches!(self.mode, paneflow_config::schema::AppMode::Cli)
     }
 
+    /// Whether a dock terminal is the one under the user's eye (#422): the
+    /// window is active, the mounted dock (the active tab's) is on screen, and
+    /// `terminal` is its active dock tab. A dock parked under another tab, or
+    /// a dock tab behind the active one, is not seen, so its program
+    /// notification goes out - the same line
+    /// [`Self::surfaces_under_user_eye`] draws for hosted panes.
+    pub(crate) fn dock_terminal_is_seen(
+        &self,
+        terminal: &gpui::Entity<crate::terminal::TerminalView>,
+    ) -> bool {
+        crate::agents::notifications::window_active()
+            && self.diff_dock_visible()
+            && matches!(
+                self.diff_dock.diff_tabs.get(self.diff_dock.diff_active_tab),
+                Some(DiffDockTab::Terminal(active)) if active == terminal
+            )
+    }
+
     /// Dock the diff panel to the right of the CLI pane grid when it is open.
     /// The resize / horizontal-scrollbar drags are captured on this wrapper (a
     /// full-height surface) so a drag keeps tracking once the cursor outruns its
