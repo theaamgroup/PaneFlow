@@ -46,12 +46,37 @@ use super::syntax::DiffSyntax;
 
 /// Full-file tree-sitter parsing above this size is more likely to hurt Review
 /// responsiveness than help readability. The diff still renders normally.
-pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 300_000;
+///
+/// Set by measurement, not by guess (#427): a file at its cap must hold less
+/// than 128 MiB of tree-sitter tree, and `tree_memory_probe`
+/// (`app/diff_dock/code/perf_bench.rs`) asserts it. The densest single-pass
+/// grammar in the corpus, minified JSON, sets the number; Rust alone would
+/// allow twice as much.
+pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 2_000_000;
+
+/// Markdown's own cap: the inline injection parses the whole document a
+/// second time, so its tree costs about four times Rust's per source byte.
+/// Read through [`highlight_cap`] by the editor and the diff view alike.
+pub(crate) const MAX_MARKDOWN_HIGHLIGHT_BYTES: usize = 1_000_000;
 
 /// Upper bound on the captures one row feeds into [`resolve_runs`]; anything
 /// past it is dropped in capture order. A pathological minified line cannot
 /// turn the stack walk into an unbounded amount of work per frame.
 pub(crate) const MAX_CAPTURES_PER_ROW: usize = 4_096;
+
+pub(crate) fn is_markdown(ext: &str) -> bool {
+    matches!(ext, "md" | "markdown" | "mdx")
+}
+
+/// The highlight cap for a file extension: Markdown's two-pass budget, or
+/// [`MAX_HIGHLIGHT_BYTES`] for everything else.
+pub(crate) fn highlight_cap(ext: &str) -> usize {
+    if is_markdown(ext) {
+        MAX_MARKDOWN_HIGHLIGHT_BYTES
+    } else {
+        MAX_HIGHLIGHT_BYTES
+    }
+}
 
 /// A resolved grammar: its `Language` + parsed highlights `Query`, interned
 /// once per process (`Query::new` is not cheap).
@@ -209,7 +234,7 @@ pub fn highlight_lines(
     ext: &str,
     syntax: &DiffSyntax,
 ) -> Vec<Vec<(Range<usize>, Hsla)>> {
-    if text.len() > MAX_HIGHLIGHT_BYTES {
+    if text.len() > highlight_cap(ext) {
         return text.lines().map(|_| Vec::new()).collect();
     }
 
@@ -233,7 +258,7 @@ pub fn highlight_lines(
     // US-004: Markdown gets a second inline pass merged into the same runs.
     // `resolve_runs` (below) collapses block/inline overlaps: the inline
     // captures come later in capture order, so they paint over the block ones.
-    if matches!(ext, "md" | "markdown" | "mdx")
+    if is_markdown(ext)
         && let Some(inline) = markdown_inline_grammar()
     {
         apply_grammar(inline, text, syntax, &line_ranges, &mut out);
@@ -384,6 +409,34 @@ mod tests {
         for w in lines[0].windows(2) {
             assert!(w[0].0.end <= w[1].0.start);
         }
+    }
+
+    #[test]
+    fn the_diff_view_caps_markdown_at_its_own_two_pass_budget() {
+        let syn = DiffSyntax::from_theme(&paneflow_dark());
+        let mut text = String::with_capacity(MAX_MARKDOWN_HIGHLIGHT_BYTES + 128);
+        while text.len() <= MAX_MARKDOWN_HIGHLIGHT_BYTES {
+            text.push_str("# Heading with `code`, *emphasis* and [a link](https://paneflow.dev)\n");
+        }
+        assert!(
+            text.len() < MAX_HIGHLIGHT_BYTES,
+            "the markdown cap must be the lower of the two, or this test proves nothing"
+        );
+
+        let lines = highlight_lines(&text, "md", &syn);
+        assert_eq!(lines.len(), text.lines().count(), "one run-list per line");
+        assert!(
+            lines.iter().all(Vec::is_empty),
+            "a markdown side past its own cap must not build two trees for the diff view"
+        );
+
+        let under = "# Title\n\nSome `code` here.\n";
+        assert!(
+            highlight_lines(under, "md", &syn)
+                .iter()
+                .any(|runs| !runs.is_empty()),
+            "markdown under the cap still colors"
+        );
     }
 
     #[test]

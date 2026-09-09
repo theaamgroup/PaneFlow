@@ -80,26 +80,105 @@ the platform shaper.
 
 | Metric | Unit | What it captures |
 |---|---|---|
-| `open_300kb_highlighted` | ns | A 300 KB Rust file opened: rope build, longest-line measure, tree-sitter parse, and an explicit query of the first 60-row viewport. |
-| `open_3_7mb` | ns | A 3.7 MB Rust file opened past the 300 KB highlight cap, covering the rope build and the source-string longest-line scan. |
+| `open_300kb_highlighted` | ns | A 300 KB Rust file opened: rope build, longest-line measure, and a 2 ms fill of the first 60-row viewport. Since #427 the initial parse is deferred, so this is the work between the read and the first visible text. |
+| `open_to_first_tree_300kb` | ns | The same file from the read to `apply_parsed`: the deferred initial parse plus the viewport fill it makes possible. Everything but the apply runs off the render thread, so this is latency to color, not render-thread cost. |
+| `open_2mb_to_text` | ns | A 2 MB Rust file from the read to visible text, with the initial parse still in flight. Target under 50 ms. |
+| `open_3_7mb` | ns | A 3.7 MB Rust file opened past the 2 MB highlight cap, covering the rope build and the source-string longest-line scan. |
 | `open_markdown_injected` | ns | A 64 KB Markdown file opened, the only corpus that runs a second grammar pass through the inline injection. |
-| `keystroke_to_runs` | ns | Render-thread work of one inserted character at a pseudo-random row of 300 KB of Rust: splice, incremental parse, highlight requery. Deferred parses run outside the timer; the `apply_parsed` requery they trigger is inside it. Its `p95` column is the keystroke latency target. |
-| `viewport_query_60_rows` | ns | The highlight query for one 60-row viewport, the work a viewport-bounded requery would do per frame. |
-| `unclosed_comment_close_ui` | ns | Render-thread work of closing an unterminated block comment at the top of the file, which re-tokenizes the whole document. |
+| `keystroke_to_runs` | ns | Render-thread work of one inserted character at a pseudo-random row of 300 KB of Rust: splice, incremental parse or deferred-tree apply, then a viewport-bounded 2 ms highlight fill. Background parsing runs outside the timer. Its `p95` column is the keystroke latency target. |
+| `viewport_query_60_rows` | ns | The highlight query for one 60-row viewport, the work a viewport-bounded requery does per frame. |
+| `pagedown_stale_rows` | rows | Median rows of a 60-row viewport still uncolored after one 2 ms fill, over 20 pseudo-random jumps on a freshly opened 300 KB Rust file. |
+| `pagedown_stale_rows_max` | rows | The worst of those 20 jumps: rows the first frame after a PageDown leaves in plain text. |
+| `pagedown_frames_to_fresh` | frames | Successive 2 ms fills the worst of those 20 jumps needs before no visible row is stale. |
+| `unclosed_comment_close_ui` | ns | Render-thread work of closing an unterminated block comment at the top of the file: edit, deferred-tree apply and the first viewport fill. Background parsing is excluded. |
+| `deferred_burst_completed_parses` | count | Complete background parses after 50 zero-budget edits; superseded generations cancel, so only the latest completes. |
+| `deferred_burst_cpu` | ns | Process CPU spent running every deferred parse of that 50-edit burst after cancellation. Target below 120 ms. |
+| `deferred_burst_edit_wall` | ns | Wall time to enqueue the 50 zero-budget edits and their background parses. Target below 200 ms. |
 | `resolve_runs_3750` | ns | `resolve_runs` over 3 750 captures taken from a 10 000-character minified JSON line, the shape the diff view shares. |
 | `byte_to_utf16_eof` | ns | One byte offset converted to a UTF-16 offset at the end of a 3.7 MB document, two to four times per keystroke through `EntityInputHandler`. |
 | `to_disk_string_3_7mb` | ns | The whole 3.7 MB document rendered to the string a save writes. |
-| `theme_switch` | ns | A theme change on 300 KB of Rust, which today requeries the whole document on the render thread. |
+| `theme_switch` | ns | A theme change on 300 KB of Rust: the capture color tables are rebuilt without querying tree-sitter or rewriting row runs. |
 | `shape_cold_60_rows` | ns | Sixty never-seen ASCII rows of 100 characters shaped with the editor monospace font, the cold-cache cost of one scrolled viewport. |
 | `shape_warm_60_rows` | ns | The same sixty rows shaped again, the warm-cache cost the line-layout cache serves on a second frame. |
-| `reload_200_retained_bytes` | bytes | Live allocated bytes a tab still holds after 200 external reloads of a 2 MB file: document, highlighter, and undo history. |
+| `reload_200_retained_bytes` | bytes | Live allocated bytes a colored 2 MB tab still holds after 200 external reloads: document, per-row runs, and undo history. Tree-sitter trees allocate through the C allocator, so they are outside this number and the tree memory probe below counts them instead. |
 
 The corpus is `src-app/src/app/diff_dock/code/bench_corpus.rs`, seeded with
 `EDITOR_CORPUS_SEED`. It is generated, never read from the repository's own
-sources, so a run is byte-identical everywhere: synthetic Rust sized to 295 KB
-(under the 300 KB highlight cap), 2 MB, and 3.7 MB (about 110 000 lines); a
-single-line minified JSON document of exactly 10 000 characters; and Markdown
-carrying both inline and fenced code so the injection pass has work to do.
+sources, so a run is byte-identical everywhere: synthetic Rust sized to 295 KB,
+2 MB (both under the 2 MB highlight cap, the larger by 48 bytes), and 3.7 MB
+(about 110 000 lines, past it); a single-line minified JSON document of exactly
+10 000 characters; and Markdown carrying both inline and fenced code so the
+injection pass has work to do.
+
+### The PageDown stale-row probe
+
+`pagedown_stale_rows`, `pagedown_stale_rows_max` and `pagedown_frames_to_fresh`
+turn the 2 ms highlight budget into a number. Each of the 20 jumps moves a
+60-row viewport to a pseudo-random row of the 300 KB Rust corpus, calls
+`CodeHighlighter::fill_stale_rows` with `HIGHLIGHT_FRAME_BUDGET`, records the
+rows the call left stale, then keeps calling until none is. Rows left stale are
+rows the user reads in plain text; frames-to-fresh is how many frames the
+editor needs before the viewport is fully colored, and a starved fill asks the
+view for the next frame itself (`CodeView::fill_visible_highlights` calls
+`cx.notify()`). A file past the highlight cap reports 0 stale rows in 1 frame
+and spends no budget at all, and so does a file whose initial parse has not
+landed yet: a treeless highlighter fills nothing and asks for no follow-up
+frame.
+
+### The tree memory probe and the highlight caps
+
+`MAX_HIGHLIGHT_BYTES` and `MAX_MARKDOWN_HIGHLIGHT_BYTES`
+(`src-app/src/diff/highlighter.rs`) are set by measurement, not by guess. The
+rule: **a file at its cap must hold less than 128 MiB of tree-sitter tree.**
+Both caps are read through `highlight_cap(ext)`, so the editor's
+`CodeHighlighter` and the diff view's `highlight_lines` sit behind the same
+rule.
+
+The measurement is a second ignored test, `tree_memory_probe`, in the same
+file as the editor suite. It routes tree-sitter's own C allocator to a counting
+allocator through `tree_sitter::set_allocator`, so the bytes it reports are the
+tree and nothing else. That counter is deliberately kept out of the timed
+suite: installing it would change every parse timing, and freeing a block
+allocated before it was installed would corrupt the heap. Run it alone:
+
+```bash
+cargo test --release --locked -p paneflow-app --bin paneflow \
+  app::diff_dock::code::perf_bench::tree_memory_probe \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Measured on Apple Silicon (macOS 26, tree-sitter 0.27.0) on the generated
+corpus; the tree byte counts do not depend on the build profile:
+
+| Grammar | Source | Tree | Bytes of tree per source byte | Cap the 128 MiB rule allows |
+|---|---|---|---|---|
+| Rust | 295 KB | 8.70 MB | 29.5 | 4.55 MB |
+| Rust | 2 MB | 58.7 MB | 29.4 | 4.57 MB |
+| Rust | 3.7 MB | 108.4 MB | 29.3 | 4.58 MB |
+| Minified JSON | 295 KB | 16.1 MB | 54.6 | 2.46 MB |
+| Minified JSON | 2 MB | 101.6 MB | 50.8 | 2.64 MB |
+| Markdown (two passes) | 64 KB | 8.25 MB | 129.1 | 1.04 MB |
+| Markdown (two passes) | 2 MB | 254.9 MB | 127.5 | 1.05 MB |
+
+At the caps the measured grammars hold 56.0 MiB (Rust, 2 MB), 96.9 MiB (JSON,
+2 MB) and 121.8 MiB (Markdown, 1 MB, the tightest margin); on the 295 KB Rust
+corpus a one-line edit's deferred parse adds 203 KB to the 8.70 MB the first
+tree holds, and the counter returns to 8.70 MB once `apply_parsed` has run.
+
+The ratio is a property of the grammar, not of the file size, so a cap set on
+Rust alone does not hold. Minified JSON costs more than Rust per source byte,
+because a one-line document of short key-value pairs is nearly all nodes and
+no text. Markdown costs the most, because the inline injection parses the
+whole document a second time; that second pass is why it keeps a cap of its
+own. `MAX_HIGHLIGHT_BYTES` is therefore 2 MB, set by the densest single-pass
+grammar in the corpus rather than by Rust, and `MAX_MARKDOWN_HIGHLIGHT_BYTES`
+is 1 MB. The probe asserts all three caps against the budget, so raising a cap
+without re-measuring fails the test.
+
+The probe also checks the other half of the rule: a deferred parse holds a
+second tree while it is in flight, and `apply_parsed` drops the superseded
+one. That second tree costs far less than the first, because an incremental
+parse shares the subtrees the edit did not touch.
 
 These are the metrics the editor performance ports that follow this harness
 (#426 to #430) are expected to move; each of those lands with its

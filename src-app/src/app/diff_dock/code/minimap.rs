@@ -48,7 +48,7 @@ impl MinimapPaint {
             }
             syntax.clear();
             if let Some(highlighter) = view.highlighter() {
-                syntax.extend_from_slice(highlighter.runs(row));
+                syntax.extend(highlighter.runs(row));
             }
             let runs = syntax_text_runs(&text, &syntax, &font, foreground);
             let line =

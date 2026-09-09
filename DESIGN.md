@@ -740,7 +740,18 @@ closes it. In the Changes tab, hovering a modified file's block shows a
 `Revert` pill, 56 by 16 on the sidebar hover tint, inset 10 from the right.
 
 The file header is a 36 px row, gap 6, px 10, with a bottom border, the
-file-type icon at the far left, and `Ln {line}, Col {column}`. Its right end
+file-type icon at the far left, and `Ln {line}, Col {column}`. Banners stack
+under it, each a `text_xs` row with `px 3 / py 1.5`, gap 2, and a bottom
+`border`: the read-only notice (on `overlay` in `muted`, flashing to
+`vc_conflict` at 0.22 in `text` for 600 ms on a refused keystroke), the
+on-disk conflict and deletion notices (`vc_conflict` at 0.16, `text`), the
+last failed write (`vc_deleted` at 0.16, `text`), and, when the file's
+initial parse ran past 5 s, `This file is too complex to color.` on `overlay`
+in `muted`; that file stays plain and fully editable. A file opens as plain
+text and colors when its tree lands off the render thread; each frame colors
+only the stale rows in view under a 2 ms budget, so a scrolled-to region may
+read plain for a frame before it colors. An unfocused editor, or one whose
+caret is scrolled out of view, does not repaint for the caret blink. Its right end
 carries the **Editor Controls trigger** — a 20 px `icon_button_sm` with a 12 px
 `icons/editor-controls.svg` glyph. That menu offers Minimap and Scrollbar
 toggles scoped to the open file tab; the minimap starts hidden and scrollbars
