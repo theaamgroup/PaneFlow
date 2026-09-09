@@ -965,6 +965,44 @@ mod tests {
         assert!(ws.is_zoomed(), "returning to the tab restores its zoom");
     }
 
+    /// #422 review: the notification gate and the completion dot key on the
+    /// surfaces a tab paints. A zoomed tab paints only its `root`; the split
+    /// parked in `saved_layout` is not under the user's eye, so it must be
+    /// absent from `visible_surface_ids` while `surface_ids` (membership)
+    /// still lists it.
+    #[gpui::test]
+    fn a_zoomed_away_split_is_not_a_visible_surface(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let shown = terminal_pane(cx, None);
+            let hidden = terminal_pane(cx, None);
+            let surface_of = |pane: &gpui::Entity<crate::pane::Pane>, cx: &gpui::App| {
+                pane.read(cx)
+                    .terminals()
+                    .next()
+                    .expect("one terminal per pane")
+                    .entity_id()
+                    .as_u64()
+            };
+            let shown_id = surface_of(&shown, cx);
+            let hidden_id = surface_of(&hidden, cx);
+            let mut tab = Tab::new("zoomed", Some(LayoutTree::Leaf(shown)));
+            tab.saved_layout = Some(LayoutTree::Leaf(hidden));
+            assert!(tab.is_zoomed());
+
+            let visible = tab.visible_surface_ids(cx);
+            assert!(visible.contains(&shown_id), "the zoomed pane is on screen");
+            assert!(
+                !visible.contains(&hidden_id),
+                "a split zoomed away is not under the user's eye"
+            );
+            let all = tab.surface_ids(cx);
+            assert!(
+                all.contains(&shown_id) && all.contains(&hidden_id),
+                "membership still counts the parked split"
+            );
+        });
+    }
+
     #[gpui::test]
     fn reorder_tab_keeps_the_same_tab_visible(cx: &mut TestAppContext) {
         // US-011: reordering is a view operation - the tab you were looking at

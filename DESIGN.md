@@ -974,8 +974,11 @@ Focus is shown by absence of dim: the focused pane stays at full contrast while
 its siblings fade. There is no focus ring (7.5). An agent that needs the user
 gets the `vc_conflict` border at 0.7 and a sidebar bell; clicking anywhere in
 the panel acknowledges visible completions. The attention queue lists those
-panes and `secondary-shift-j` jumps through them. Native notifications fire
-only while the window is unfocused.
+panes and `secondary-shift-j` jumps through them. A native notification is
+dropped only when its pane is under the user's eye: the window is focused and
+the pane's workspace and tab are on screen (the same test as the completion
+dot, #408 / #422). A pane in another workspace, a background tab, a zoomed-away
+split, or an unmounted dock notifies even while the window is focused.
 
 ## 7. Accessibility
 

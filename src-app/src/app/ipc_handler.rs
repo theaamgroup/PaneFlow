@@ -2006,10 +2006,12 @@ impl PaneFlowApp {
             // 500 ms; resolve the reloaded block now so the repaint the
             // propagation below triggers measures the new font (#429).
             crate::terminal::element::refresh_font_config(&self.cached_config);
-            // US-015: push the refreshed config to every pane's tab-bar cache.
+            // US-015: push the refreshed config to every pane's tab-bar cache,
+            // and to the dock terminals the layout walk cannot reach.
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
             }
+            self.propagate_config_to_dock_terminals(cx);
             // The embedded settings page reads `self.cached_config` directly and
             // its shortcut list is refreshed above (`effective_shortcuts`), so an
             // external `paneflow.json` edit reflects without any extra push.

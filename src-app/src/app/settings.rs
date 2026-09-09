@@ -233,10 +233,16 @@ impl PaneFlowApp {
                 ws.propagate_config(&self.cached_config, cx);
             }
         }
-        if nested && matches!(key, "integrated_glyphs" | "color_emoji" | "cursor_color") {
+        if nested
+            && matches!(
+                key,
+                "integrated_glyphs" | "color_emoji" | "cursor_color" | "minimum_contrast"
+            )
+        {
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
             }
+            self.propagate_config_to_dock_terminals(cx);
         }
         if is_font_block_key(nested, key) {
             // The font block is read by the render thread from a 500 ms
@@ -248,6 +254,7 @@ impl PaneFlowApp {
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
             }
+            self.propagate_config_to_dock_terminals(cx);
         }
         if !nested && key == "reduce_motion" {
             crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());

@@ -965,6 +965,7 @@ impl PaneFlowApp {
             mode: boot_mode,
             diff_dock: crate::DiffDockState {
                 open: false,
+                rendered: false,
                 data: None,
                 collapsed: std::collections::HashSet::new(),
                 expanded_folds: std::collections::HashSet::new(),

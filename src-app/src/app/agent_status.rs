@@ -107,9 +107,10 @@ impl PaneFlowApp {
     /// or `None` when that workspace is not on screen at all.
     ///
     /// Being the active workspace is not enough: a turn can finish in one of
-    /// its other tabs, which the user has not seen. The three conditions below
-    /// are what "on screen" means for a workspace - no settings overlay, CLI
-    /// mode, and a focused window.
+    /// its other tabs, which the user has not seen, or in a split the active
+    /// tab has zoomed away (only the rendered root counts, #422). The three
+    /// conditions below are what "on screen" means for a workspace - no
+    /// settings overlay, CLI mode, and a focused window.
     pub(crate) fn surfaces_under_user_eye(
         &self,
         workspace_id: u64,
@@ -124,7 +125,7 @@ impl PaneFlowApp {
         self.workspaces
             .get(self.active_idx)
             .filter(|ws| ws.id == workspace_id)
-            .map(|ws| ws.active_tab().surface_ids(cx))
+            .map(|ws| ws.active_tab().visible_surface_ids(cx))
     }
 
     /// Whether the pane a session lives in is under the user's eye, for the
