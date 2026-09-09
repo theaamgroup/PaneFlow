@@ -359,7 +359,11 @@ impl PaneFlowApp {
         // dropping into the diff. Gated on `Cli` because the flag is set by the
         // pane-header toggle - the Agents dock is opened from its own chrome,
         // already on a chosen surface, and must never inherit the question.
-        if self.diff_dock.picker && matches!(self.mode, paneflow_config::schema::AppMode::Cli) {
+        // An empty strip is the same question: nothing was chosen yet, or the
+        // last tab was closed.
+        if (self.diff_dock.picker || self.diff_dock.diff_tabs.is_empty())
+            && matches!(self.mode, paneflow_config::schema::AppMode::Cli)
+        {
             return self.render_diff_dock_picker(width, ui, cx);
         }
         self.refresh_diff_dock_if_theme_changed(cx);
@@ -424,10 +428,11 @@ impl PaneFlowApp {
                     view.clone().into_any_element(),
                 )
             }
-            _ => (
+            Some(DiffDockTab::Changes) => (
                 Some(self.render_diff_toolbar(&cwd, &data, ui, cx)),
                 self.render_diff_dock_body(&data, ui, cx),
             ),
+            None => (None, render_diff_surface_picker(ui, cx)),
         };
 
         // The dock is a floating card beside the pane grid, drawn with the same

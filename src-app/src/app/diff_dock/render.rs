@@ -55,7 +55,7 @@ pub(super) fn render_diff_resize_handle(
         .into_any_element()
 }
 
-/// The dock's tab strip: the permanent "Changes" diff tab, then one tab per
+/// The dock's tab strip: the "Changes" diff tab when opened, then one tab per
 /// terminal opened from the trailing `+` (which opens the surface picker in
 /// [`super::new_tab_menu`]). The dock's own close button is pinned right, so it
 /// stays reachable from every tab.
@@ -233,94 +233,88 @@ fn render_diff_tab(
             .child(label),
     );
 
-    if matches!(
-        tab,
-        DiffDockTab::Terminal(_)
-            | DiffDockTab::File(_)
-            | DiffDockTab::PendingFile
-            | DiffDockTab::Setup(_)
-    ) {
-        // Cursor's grammar: a modified document trades the close glyph for a
-        // dot at rest, the dot yields the slot back to the glyph while the
-        // pointer is on the chip, and the control keeps its hit target through
-        // both. Arming the close (the confirmation US-017 asks for) pins the
-        // glyph in the deletion color, so the second press reads as
-        // destructive.
-        //
-        // Issue #340: the control's name follows the same arming, so a screen
-        // reader hears what the next click does, as the pane header's `x`
-        // (issue #83) already says in its tooltip.
-        let close_label = if close_armed {
-            "Click again to close"
-        } else {
-            "Close tab"
-        };
-        let mark: AnyElement = if dirty && !close_armed {
-            // The two states share the slot and swap by visibility, the way
-            // `squircle_skin` swaps its own fills: both are laid out every
-            // frame, so the flip cannot disagree with itself between prepaint
-            // and paint, and the chip never resizes under the pointer.
-            div()
-                .relative()
-                .flex_none()
-                .size(px(11.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(7.))
-                        .rounded_full()
-                        .bg(ui.vc_modified)
-                        .group_hover(group.clone(), |style| style.invisible()),
-                )
-                .child(
-                    svg()
-                        .absolute()
-                        .inset_0()
-                        .size(px(11.))
-                        .invisible()
-                        .group_hover(group.clone(), |style| style.visible())
-                        .path("icons/close.svg")
-                        .text_color(ui.muted),
-                )
-                .into_any_element()
-        } else {
-            svg()
-                .size(px(11.))
-                .flex_none()
-                .path("icons/close.svg")
-                .text_color(if close_armed { ui.vc_deleted } else { ui.muted })
-                .into_any_element()
-        };
-        chip = chip.child(
-            div()
-                .id(SharedString::from(format!("diff-dock-tab-close-{index}")))
-                .role(Role::Button)
-                .aria_label(close_label)
-                .flex_none()
-                .size(px(16.))
-                .flex()
-                .items_center()
-                .justify_center()
-                // A control nested inside a filled row, like the rail's own
-                // hover actions: it keeps a plain 6 px corner (a superellipse
-                // this small resolves to a lozenge) and hovers one tint step
-                // past the row it sits on, or it would be invisible.
-                .rounded(px(6.))
-                .animated_hover_bg(
-                    gpui::transparent_black(),
-                    crate::app::constants::sidebar_tab_active_background(),
-                )
-                .delayed_tooltip(text_tooltip(close_label))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    this.request_close_diff_tab(index, cx);
-                }))
-                .child(mark),
-        );
-    }
+    // Every tab closes, `Changes` included (upstream f587f7fc): the strip
+    // that empties hands the dock back to its surface picker.
+    // Cursor's grammar: a modified document trades the close glyph for a
+    // dot at rest, the dot yields the slot back to the glyph while the
+    // pointer is on the chip, and the control keeps its hit target through
+    // both. Arming the close (the confirmation US-017 asks for) pins the
+    // glyph in the deletion color, so the second press reads as
+    // destructive.
+    //
+    // Issue #340: the control's name follows the same arming, so a screen
+    // reader hears what the next click does, as the pane header's `x`
+    // (issue #83) already says in its tooltip.
+    let close_label = if close_armed {
+        "Click again to close"
+    } else {
+        "Close tab"
+    };
+    let mark: AnyElement = if dirty && !close_armed {
+        // The two states share the slot and swap by visibility, the way
+        // `squircle_skin` swaps its own fills: both are laid out every
+        // frame, so the flip cannot disagree with itself between prepaint
+        // and paint, and the chip never resizes under the pointer.
+        div()
+            .relative()
+            .flex_none()
+            .size(px(11.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(ui.vc_modified)
+                    .group_hover(group.clone(), |style| style.invisible()),
+            )
+            .child(
+                svg()
+                    .absolute()
+                    .inset_0()
+                    .size(px(11.))
+                    .invisible()
+                    .group_hover(group.clone(), |style| style.visible())
+                    .path("icons/close.svg")
+                    .text_color(ui.muted),
+            )
+            .into_any_element()
+    } else {
+        svg()
+            .size(px(11.))
+            .flex_none()
+            .path("icons/close.svg")
+            .text_color(if close_armed { ui.vc_deleted } else { ui.muted })
+            .into_any_element()
+    };
+    chip = chip.child(
+        div()
+            .id(SharedString::from(format!("diff-dock-tab-close-{index}")))
+            .role(Role::Button)
+            .aria_label(close_label)
+            .flex_none()
+            .size(px(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            // A control nested inside a filled row, like the rail's own
+            // hover actions: it keeps a plain 6 px corner (a superellipse
+            // this small resolves to a lozenge) and hovers one tint step
+            // past the row it sits on, or it would be invisible.
+            .rounded(px(6.))
+            .animated_hover_bg(
+                gpui::transparent_black(),
+                crate::app::constants::sidebar_tab_active_background(),
+            )
+            .delayed_tooltip(text_tooltip(close_label))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                this.request_close_diff_tab(index, cx);
+            }))
+            .child(mark),
+    );
 
     chip.into_any_element()
 }

@@ -33,10 +33,11 @@ pub(crate) const DIFF_DOCK_PANEL_MAX_WIDTH: f32 = 1400.0;
 /// never drop unsaved work.
 pub(crate) const MAX_DIFF_FILE_TABS: usize = 8;
 
-/// One tab of the dock's strip. `Changes` is the permanent diff tab (index 0);
-/// `Terminal` tabs are opened from the strip's `+` menu and are closable.
-/// `File` tabs host the editor of `super::code` and are closable too, with a
-/// confirmation step while the document is modified (US-017).
+/// One tab of the dock's strip. `Changes` is the diff tab, opened from the
+/// surface picker or the strip's `+` menu like every other kind and closable
+/// like every other kind (upstream f587f7fc); `Terminal` tabs are opened from
+/// the `+` menu. `File` tabs host the editor of `super::code`, with a
+/// confirmation step on close while the document is modified (US-017).
 #[derive(Clone)]
 pub(crate) enum DiffDockTab {
     Changes,

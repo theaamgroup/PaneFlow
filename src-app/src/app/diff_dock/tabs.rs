@@ -1,8 +1,9 @@
 //! Lifecycle of the diff dock's tabs: opening a terminal tab from the `+`
 //! menu, selecting a tab, and closing one.
 //!
-//! The `Changes` tab is permanent and always index 0, so a dock that has never
-//! been given a second tab behaves exactly as before this strip existed.
+//! No tab is permanent (upstream `f587f7fc`): `Changes` is opened from the
+//! surface picker or the `+` menu like any other surface, every tab closes,
+//! and a strip that empties hands the dock back to the picker.
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +15,21 @@ use crate::PaneFlowApp;
 use crate::terminal::{TerminalEvent, TerminalView};
 
 impl PaneFlowApp {
+    /// The picker's `Changes` card and the `+` menu's "Changes" row. Singleton
+    /// per dock: a second invocation selects the existing tab.
+    pub(crate) fn open_diff_changes_tab(&mut self, cx: &mut Context<Self>) {
+        let index = self
+            .diff_dock
+            .diff_tabs
+            .iter()
+            .position(|tab| matches!(tab, DiffDockTab::Changes));
+        let index = index.unwrap_or_else(|| {
+            self.diff_dock.diff_tabs.push(DiffDockTab::Changes);
+            self.diff_dock.diff_tabs.len() - 1
+        });
+        self.select_diff_tab(index, cx);
+    }
+
     /// Open a terminal tab in the dock and focus it. The shell lands in the
     /// folder the dock is diffing, falling back to the active workspace root
     /// (the same chain `new_terminal_cwd` uses for a split).
@@ -71,9 +87,7 @@ impl PaneFlowApp {
         self.diff_dock
             .diff_tabs
             .push(DiffDockTab::Terminal(terminal));
-        self.diff_dock.diff_active_tab = self.diff_dock.diff_tabs.len() - 1;
-        self.diff_dock.diff_tab_close_armed = None;
-        cx.notify();
+        self.select_diff_tab(self.diff_dock.diff_tabs.len() - 1, cx);
     }
 
     /// Open `path` in a dock file tab and focus it (US-017).
@@ -96,10 +110,8 @@ impl PaneFlowApp {
         }
 
         if let Some(index) = file_tab_index(&self.diff_tab_facts(cx), &path) {
-            self.diff_dock.diff_active_tab = index;
-            self.diff_dock.diff_tab_close_armed = None;
+            self.select_diff_tab(index, cx);
             self.focus_diff_tab(index, window, cx);
-            cx.notify();
             return;
         }
 
@@ -115,10 +127,8 @@ impl PaneFlowApp {
         self.diff_dock
             .diff_tabs
             .insert(index, DiffDockTab::File(view));
-        self.diff_dock.diff_active_tab = index;
-        self.diff_dock.diff_tab_close_armed = None;
+        self.select_diff_tab(index, cx);
         self.focus_diff_tab(index, window, cx);
-        cx.notify();
     }
 
     /// Where the dock's placeholder `File` tab sits, if it has one.
@@ -213,9 +223,7 @@ impl PaneFlowApp {
             Some(index) => self.select_diff_tab(index, cx),
             None => {
                 self.diff_dock.diff_tabs.push(DiffDockTab::PendingFile);
-                self.diff_dock.diff_active_tab = self.diff_dock.diff_tabs.len() - 1;
-                self.diff_dock.diff_tab_close_armed = None;
-                cx.notify();
+                self.select_diff_tab(self.diff_dock.diff_tabs.len() - 1, cx);
             }
         }
         if !self.files_sidebar_open {
@@ -226,8 +234,13 @@ impl PaneFlowApp {
         }
     }
 
+    /// Select the tab at `index`. Owns the picker state: landing on a tab is
+    /// the answer to the dock's surface question, both now and the next time
+    /// this session toggles the dock from a pane header.
     pub(crate) fn select_diff_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.diff_dock.diff_tabs.len() && self.diff_dock.diff_active_tab != index {
+        if index < self.diff_dock.diff_tabs.len() {
+            self.diff_dock.picker = false;
+            self.diff_dock.picked = true;
             self.diff_dock.diff_active_tab = index;
             // Moving off a tab drops any pending close confirmation: the arm is
             // a one-gesture state, not a mode the user has to escape.
@@ -240,7 +253,7 @@ impl PaneFlowApp {
     /// instead of closing: the second press on the armed control is the
     /// confirmation. Every other tab closes on the first press.
     pub(crate) fn request_close_diff_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index == 0 || index >= self.diff_dock.diff_tabs.len() {
+        if index >= self.diff_dock.diff_tabs.len() {
             return;
         }
         if close_arms_first(
@@ -285,10 +298,11 @@ impl PaneFlowApp {
         .detach();
     }
 
-    /// Close the tab at `index`. Index 0 (`Changes`) is permanent, so the call
-    /// is a no-op there. The selection falls back to the previous tab.
+    /// Close the tab at `index`. The selection falls back to the previous
+    /// tab; closing the last one returns the dock to its surface picker,
+    /// re-armed so the session is asked again.
     pub(crate) fn close_diff_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index == 0 || index >= self.diff_dock.diff_tabs.len() {
+        if index >= self.diff_dock.diff_tabs.len() {
             return;
         }
         self.diff_dock.diff_tabs.remove(index);
@@ -298,6 +312,14 @@ impl PaneFlowApp {
         // rather than re-mapped: a stale arm would put the confirmation on
         // whatever tab slid into the slot.
         self.diff_dock.diff_tab_close_armed = None;
+        if self.diff_dock.diff_tabs.is_empty() {
+            self.diff_dock.picker = true;
+            self.diff_dock.picked = false;
+        }
+        // The menus describe a strip that just changed under them.
+        self.close_diff_options_menu(cx);
+        self.close_diff_new_tab_menu(cx);
+        self.diff_dock.diff_branch_menu = None;
         cx.notify();
     }
 
@@ -476,8 +498,7 @@ mod tests {
         assert!(!close_arms_first(&facts, 9, None));
     }
 
-    /// US-017: closing a tab leaves `diff_active_tab` inside the strip, and
-    /// the `Changes` tab is always a valid landing spot.
+    /// US-017: closing a tab leaves `diff_active_tab` inside the strip.
     #[test]
     fn the_active_index_stays_in_bounds_after_a_close() {
         // Closing the active tab falls back to the previous one.
@@ -486,13 +507,17 @@ mod tests {
         assert_eq!(active_tab_after_close(3, 1), 2);
         // Closing after it leaves it alone.
         assert_eq!(active_tab_after_close(1, 2), 1);
-        // The last remaining non-permanent tab lands back on `Changes`.
+        // The last remaining tab after the previous one lands on its neighbor.
         assert_eq!(active_tab_after_close(1, 1), 0);
+        // Index 0 is closable too (upstream f587f7fc): closing the first tab
+        // keeps the selection at the front of the shortened strip.
+        assert_eq!(active_tab_after_close(0, 0), 0);
+        assert_eq!(active_tab_after_close(1, 0), 0);
 
-        // Exhaustive: for any strip up to 12 tabs, closing any closable index
-        // leaves an index inside the shortened strip.
+        // Exhaustive: for any strip up to 12 tabs, closing any index leaves
+        // an index inside the shortened strip.
         for len in 2..=12usize {
-            for closed in 1..len {
+            for closed in 0..len {
                 for active in 0..len {
                     let next = active_tab_after_close(active, closed);
                     assert!(

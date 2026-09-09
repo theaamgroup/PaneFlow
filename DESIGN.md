@@ -658,8 +658,12 @@ on a `ROW_RADIUS` squircle, gap 6, px 8, with a 13 px kind icon, the title at
 body size Medium, and a 16 px close slot at radius 6 carrying an 11 px glyph.
 A modified tab swaps that glyph for a 7 px `vc_modified` dot at rest, and
 arming the close paints it `vc_deleted` — the same two-press confirm the pane
-uses. **Changes is the permanent tab 0 and carries no close control**; only
-Terminal, File, and Agent setup tabs close. `MAX_DIFF_FILE_TABS` is 8 and
+uses. **No tab is permanent**: the dock starts with no content tabs, Changes
+is created only when its picker card or `+` menu row is chosen (and reused
+when it already exists), and every tab carries the close control, Changes and
+the first tab included. Closing the last tab returns the dock to the picker,
+re-armed. A Changes tab explicitly opened against a non-git or clean-diff
+workspace keeps the blank Changes body (#393). `MAX_DIFF_FILE_TABS` is 8 and
 counts *file* tabs only; past the cap the leftmost file tab that is neither
 modified nor active is evicted. **The cap yields to unsaved work**: when every
 file tab is modified or active, `file_tab_eviction` returns `None` and the new

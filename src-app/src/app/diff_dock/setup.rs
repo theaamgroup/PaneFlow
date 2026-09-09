@@ -515,9 +515,7 @@ impl PaneFlowApp {
         )
         .detach();
         self.diff_dock.diff_tabs.push(DiffDockTab::Setup(view));
-        self.diff_dock.diff_active_tab = self.diff_dock.diff_tabs.len() - 1;
-        self.diff_dock.diff_tab_close_armed = None;
-        cx.notify();
+        self.select_diff_tab(self.diff_dock.diff_tabs.len() - 1, cx);
     }
 
     /// The folder the Setup tab describes: the dock's own folder, falling
