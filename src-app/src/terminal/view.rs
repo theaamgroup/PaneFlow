@@ -310,6 +310,8 @@ pub struct TerminalView {
     pub(super) integrated_glyphs_enabled: bool,
     /// Renderer switch: emoji glyphs use GPUI's platform color-emoji path.
     pub(super) color_emoji_enabled: bool,
+    /// APCA Lc floor between a cell's text and its background, `0` off.
+    pub(super) minimum_contrast: f32,
     /// Whether copy mode (keyboard-driven selection) is active
     pub(super) copy_mode_active: bool,
     /// Issue #299: a pane swap is armed in this view's tab, so Escape cancels
@@ -421,24 +423,13 @@ impl TerminalView {
         }
 
         // Desktop notifications the program asked for
-        // with OSC 9 or OSC 777.
-        let notifications = std::mem::take(&mut view.terminal.pending_notifications);
-        if !notifications.is_empty() {
-            let pane_title = view.terminal.title.clone();
-            for notification in notifications {
-                cx.emit(TerminalEvent::AgentAttention {
-                    title: notification.title.clone(),
-                    body: notification.body.clone(),
-                });
-                crate::agents::notifications::fire_program_notification(
-                    crate::agents::notifications::program_notification(
-                        notification.title,
-                        notification.body,
-                        &pane_title,
-                    ),
-                    cx.background_executor().clone(),
-                );
-            }
+        // with OSC 9 or OSC 777. Delivered by the app,
+        // which knows whether this pane is on screen.
+        for notification in std::mem::take(&mut view.terminal.pending_notifications) {
+            cx.emit(TerminalEvent::ProgramNotification {
+                title: notification.title,
+                body: notification.body,
+            });
         }
 
         // OSC 10/11/12 color queries are now handled
@@ -571,6 +562,10 @@ impl TerminalView {
             .terminal
             .as_ref()
             .is_none_or(|terminal| terminal.resolved_color_emoji());
+        let minimum_contrast = config.terminal.as_ref().map_or(
+            paneflow_config::schema::TerminalConfig::DEFAULT_MINIMUM_CONTRAST,
+            |terminal| terminal.resolved_minimum_contrast(),
+        );
         let cursor_color_override = config
             .terminal
             .as_ref()
@@ -578,8 +573,16 @@ impl TerminalView {
             .and_then(hsla_from_hex_color);
         self.set_integrated_glyphs_enabled(integrated_glyphs_enabled, cx);
         self.set_color_emoji_enabled(color_emoji_enabled, cx);
+        self.set_minimum_contrast(minimum_contrast, cx);
         self.set_cursor_color_override(cursor_color_override, cx);
         cx.notify();
+    }
+
+    pub(crate) fn set_minimum_contrast(&mut self, minimum_contrast: f32, cx: &mut Context<Self>) {
+        if self.minimum_contrast != minimum_contrast {
+            self.minimum_contrast = minimum_contrast;
+            cx.notify();
+        }
     }
 
     /// Issue #299: arm or disarm swap-mode Escape interception on this view.
@@ -927,6 +930,7 @@ impl TerminalView {
         );
         let integrated_glyphs_enabled = terminal_config.resolved_integrated_glyphs();
         let color_emoji_enabled = terminal_config.resolved_color_emoji();
+        let minimum_contrast = terminal_config.resolved_minimum_contrast();
 
         Self {
             terminal,
@@ -965,6 +969,7 @@ impl TerminalView {
             scroll_multiplier,
             integrated_glyphs_enabled,
             color_emoji_enabled,
+            minimum_contrast,
             copy_mode_active: false,
             swap_mode_armed: false,
             copy_cursor: Point::new(0, 0),
@@ -1353,11 +1358,12 @@ pub enum TerminalEvent {
     /// itself - no hook involved. Emitted only on a change, never per report.
     AgentProgressChanged { busy: bool },
     /// The program in this pane asked for the user's attention through OSC 9
-    /// or OSC 777. Already routed to a desktop notification; the receiver
-    /// (`PaneFlowApp`) additionally reads it as agent state when the pane is
-    /// running an agent, because that is the one thing Claude Code still says
-    /// out loud when its hooks are switched off.
-    AgentAttention { title: String, body: String },
+    /// or OSC 777. The receiver (`PaneFlowApp`) turns it into a desktop
+    /// notification unless the pane is on screen, and additionally reads it
+    /// as agent state when the pane is running an agent, because that is the
+    /// one thing Claude Code still says out loud when its hooks are switched
+    /// off.
+    ProgramNotification { title: String, body: String },
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -1761,6 +1767,7 @@ impl Render for TerminalView {
             self.cursor_color_override,
             self.integrated_glyphs_enabled,
             self.color_emoji_enabled,
+            self.minimum_contrast,
             frame_metrics,
             alt_screen,
             self.layout_cache.clone(),

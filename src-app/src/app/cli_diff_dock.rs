@@ -330,6 +330,22 @@ impl PaneFlowApp {
         )
     }
 
+    /// Push a refreshed config to every dock terminal, live or parked (#422
+    /// review): `Workspace::propagate_config` walks the layout tree, which
+    /// never holds a dock terminal, so a hot-reloaded render setting
+    /// (`terminal.minimum_contrast`, `integrated_glyphs`, `color_emoji`,
+    /// `cursor_color`, the font block) would otherwise stop at the pane grid.
+    pub(crate) fn propagate_config_to_dock_terminals(&self, cx: &mut App) {
+        for terminal in dock_terminals(all_dock_tabs(
+            &self.diff_dock.diff_tabs,
+            &self.diff_dock.parked,
+        )) {
+            terminal.update(cx, |view, cx| {
+                view.apply_render_config(&self.cached_config, cx)
+            });
+        }
+    }
+
     /// The dock terminals that die when the tab `tab_id` closes: the live dock
     /// when that tab owns it, plus the tab's parked slot.
     pub(crate) fn diff_dock_terminals_for_tab(
@@ -617,6 +633,27 @@ impl PaneFlowApp {
             && matches!(self.mode, paneflow_config::schema::AppMode::Cli)
     }
 
+    /// Whether a dock terminal is the one under the user's eye (#422): the
+    /// window is active, the mounted dock (the active tab's) was painted by
+    /// the last frame (`rendered`, which also covers a main panel too narrow
+    /// to hold the dock's floor), and `terminal` is its active dock tab. A
+    /// dock parked under another tab, a dock squeezed out by the pane grid,
+    /// or a dock tab behind the active one is not seen, so its program
+    /// notification goes out - the same line
+    /// [`Self::surfaces_under_user_eye`] draws for hosted panes.
+    pub(crate) fn dock_terminal_is_seen(
+        &self,
+        terminal: &gpui::Entity<crate::terminal::TerminalView>,
+    ) -> bool {
+        crate::agents::notifications::window_active()
+            && self.diff_dock_visible()
+            && self.diff_dock.rendered
+            && matches!(
+                self.diff_dock.diff_tabs.get(self.diff_dock.diff_active_tab),
+                Some(DiffDockTab::Terminal(active)) if active == terminal
+            )
+    }
+
     /// Dock the diff panel to the right of the CLI pane grid when it is open.
     /// The resize / horizontal-scrollbar drags are captured on this wrapper (a
     /// full-height surface) so a drag keeps tracking once the cursor outruns its
@@ -640,6 +677,7 @@ impl PaneFlowApp {
             // button release; a thumb drag held across the switch must not
             // resume from its old anchor when the dock comes back.
             self.diff_dock.vertical_scrollbar.cancel_drag();
+            self.diff_dock.rendered = false;
             return body;
         }
         let Some((width, max_width)) = diff_dock_fit(self.diff_dock.width, available_width) else {
@@ -650,8 +688,10 @@ impl PaneFlowApp {
             self.diff_dock.resize = None;
             self.diff_dock.h_scroll_drag = None;
             self.diff_dock.vertical_scrollbar.cancel_drag();
+            self.diff_dock.rendered = false;
             return body;
         };
+        self.diff_dock.rendered = true;
         let ui = crate::theme::ui_colors();
         div()
             .size_full()
@@ -891,6 +931,52 @@ mod tests {
                 assert!(width <= max, "{width} exceeds the ceiling {max}");
             }
         }
+    }
+
+    /// #422 review: `open` is not "on screen". The dock host is the one
+    /// writer of `rendered`, it clears the flag on both early returns (the
+    /// unmounted modes and the below-the-floor squeeze) and sets it only once
+    /// the fit succeeded, and the seen predicate reads it, so a dock the pane
+    /// grid squeezed out never swallows a program notification.
+    #[test]
+    fn the_seen_predicate_reads_the_rendered_flag_the_host_writes() {
+        let host = include_str!("cli_diff_dock.rs");
+        let wrapper = host
+            .split("pub(crate) fn wrap_cli_diff_dock(")
+            .nth(1)
+            .and_then(|rest| rest.split("#[cfg(test)]").next())
+            .expect("dock host");
+        let head = wrapper
+            .split("self.diff_dock.rendered = true;")
+            .next()
+            .expect("the host sets `rendered` once the fit succeeded");
+        assert_eq!(
+            head.matches("self.diff_dock.rendered = false;").count(),
+            2,
+            "both early returns (unmounted mode, below the floor) clear `rendered`: {head}"
+        );
+        assert!(
+            head.contains("diff_dock_fit(") && head.contains("return body;"),
+            "the clears sit before the fit's early return: {head}"
+        );
+        let seen = host
+            .split("pub(crate) fn dock_terminal_is_seen(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("seen predicate");
+        assert!(
+            seen.contains("self.diff_dock.rendered"),
+            "a dock that was not painted is not under the user's eye: {seen}"
+        );
+        // The non-test source: everything before this test module. The
+        // slice cannot start at the file's first `#[cfg(test)]`, which sits
+        // on a helper above the dock host.
+        let source = host.split("\nmod tests {").next().expect("non-test source");
+        let writers = source.matches("diff_dock.rendered =").count();
+        assert_eq!(
+            writers, 3,
+            "the dock host is the only writer of `rendered` (two clears, one set)"
+        );
     }
 
     /// #184 Phase 4: the rendered width is `min(stored, remainder)` with the
