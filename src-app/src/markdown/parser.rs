@@ -1017,8 +1017,11 @@ mod tests {
         let mut nodes = Vec::new();
         for _ in 0..PASSES {
             let started = Instant::now();
-            nodes = parse_with_limit(&src).expect("parse");
+            let parsed = parse_with_limit(&src).expect("parse");
+            // Read the clock before the previous pass's AST is dropped, so the
+            // sample is the parse alone.
             best = best.min(started.elapsed());
+            nodes = parsed;
         }
         assert!(!nodes.is_empty());
         let budget_ms: u128 = if cfg!(debug_assertions) { 60 } else { 10 };

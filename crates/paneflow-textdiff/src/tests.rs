@@ -112,8 +112,10 @@ fn ten_thousand_different_lines_compare_under_two_hundred_milliseconds() {
     let mut ranges = Vec::new();
     for _ in 0..PASSES {
         let started = Instant::now();
-        ranges = compare_lines(&lines1, &lines2, ComparisonPolicy::Default);
+        let compared = compare_lines(&lines1, &lines2, ComparisonPolicy::Default);
+        // Read the clock before the previous pass's result is dropped.
         best = best.min(started.elapsed());
+        ranges = compared;
     }
     assert_eq!(ranges, vec![Range::new(0, 10_000, 0, 10_000)]);
     assert!(best.as_millis() < 200, "fastest of {PASSES} took {best:?}");
@@ -228,8 +230,10 @@ fn ten_thousand_cjk_chars_compare_under_fifty_milliseconds() {
     let mut fragments = Vec::new();
     for _ in 0..PASSES {
         let started = Instant::now();
-        fragments = compare_words(&text1, &text2, ComparisonPolicy::Default).unwrap();
+        let compared = compare_words(&text1, &text2, ComparisonPolicy::Default).unwrap();
+        // Read the clock before the previous pass's result is dropped.
         best = best.min(started.elapsed());
+        fragments = compared;
     }
     assert_fair(&fragments, &text1, &text2);
     assert_eq!(fragments.len(), 2);

@@ -427,8 +427,11 @@ mod tests {
         let mut rows = Vec::new();
         for _ in 0..PASSES {
             let start = std::time::Instant::now();
-            rows = filter_rows(&root, &children, "module_42.rs");
+            let filtered = filter_rows(&root, &children, "module_42.rs");
+            // Read the clock before the previous pass's rows are dropped, so
+            // the sample is the filter alone.
             best = best.min(start.elapsed());
+            rows = filtered;
         }
 
         assert_eq!(rows.len(), 500);
