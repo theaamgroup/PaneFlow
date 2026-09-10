@@ -110,7 +110,7 @@ impl DiffDockSlot {
     /// its birth state), so parking it would only grow the map with slots
     /// indistinguishable from a fresh one.
     fn is_idle(&self) -> bool {
-        !self.open && !self.picked && self.tabs.len() <= 1
+        !self.open && !self.picked && self.tabs.is_empty()
     }
 }
 
@@ -551,7 +551,7 @@ impl PaneFlowApp {
             open: self.diff_dock.open,
             picker: self.diff_dock.picker,
             picked: self.diff_dock.picked,
-            tabs: std::mem::replace(&mut self.diff_dock.diff_tabs, vec![DiffDockTab::Changes]),
+            tabs: std::mem::take(&mut self.diff_dock.diff_tabs),
             active_tab: std::mem::replace(&mut self.diff_dock.diff_active_tab, 0),
             data: self.diff_dock.data.take(),
         };
@@ -1112,9 +1112,9 @@ mod tests {
         // The birth state. Parking it would make "this session has a slot"
         // stop meaning "this session has a dock", and every tab merely visited
         // once would grow the map.
-        assert!(slot(false, false, 1).is_idle());
+        assert!(slot(false, false, 0).is_idle());
         let mut parked = HashMap::new();
-        park_dock_slot(&mut parked, Some(7), slot(false, false, 1));
+        park_dock_slot(&mut parked, Some(7), slot(false, false, 0));
         assert!(parked.is_empty(), "an idle slot must not take a map entry");
     }
 
@@ -1122,14 +1122,14 @@ mod tests {
     fn a_dock_worth_restoring_is_parked() {
         // Open, or answered, or carrying tabs: each on its own is state the
         // session must find again when it comes back.
-        assert!(!slot(true, false, 1).is_idle(), "an open dock must survive");
+        assert!(!slot(true, false, 0).is_idle(), "an open dock must survive");
         assert!(
-            !slot(false, true, 1).is_idle(),
+            !slot(false, true, 0).is_idle(),
             "an answered picker must not ask again"
         );
         assert!(
-            !slot(false, false, 2).is_idle(),
-            "a terminal / file tab must not be dropped"
+            !slot(false, false, 1).is_idle(),
+            "a Changes / terminal / file tab must not be dropped"
         );
     }
 

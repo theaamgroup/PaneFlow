@@ -69,28 +69,24 @@ pub(crate) enum DiffDockSurface {
 }
 
 impl PaneFlowApp {
-    /// Answer the picker: dismiss it, remember that this workspace has chosen
-    /// once (so its later opens restore the last tab instead of asking again),
-    /// then route to the surface.
+    /// Answer the picker: route to the surface. Selecting the resulting tab
+    /// (`select_diff_tab`) is what dismisses the picker and remembers that this
+    /// workspace has chosen once, so its later opens restore the last tab
+    /// instead of asking again.
     pub(crate) fn choose_diff_dock_surface(
         &mut self,
         surface: DiffDockSurface,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.diff_dock.picker = false;
-        self.diff_dock.picked = true;
         match surface {
-            // `Changes` is the permanent tab 0, so choosing it opens nothing -
-            // it just selects the tab the dismissed picker was covering.
-            DiffDockSurface::Changes => self.select_diff_tab(0, cx),
+            DiffDockSurface::Changes => self.open_diff_changes_tab(cx),
             DiffDockSurface::Terminal => self.open_diff_terminal_tab(window, cx),
             // Same as the `+` menu's File row: the Files tree is the picker, and
             // a row there opens the document as a dock tab.
             DiffDockSurface::File => self.open_diff_file_picker(window, cx),
             DiffDockSurface::Setup => self.open_diff_setup_tab(window, cx),
         }
-        cx.notify();
     }
 }
 

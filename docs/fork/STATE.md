@@ -42,6 +42,23 @@ was scheduled; zeroing the budget showed the scan actually costs **431 us**,
 algorithmic-regression signal that `#[ignore]` would have discarded. Issue
 #477 lists the five sibling single-sample budget tests that share the shape.
 
+**2026-09-09 #436: Changes opt-in, every dock tab closable (upstream
+`f587f7fc`).** The dock no longer seeds a permanent `Changes` tab:
+`bootstrap.rs` starts `diff_tabs` empty, `cli_diff_dock.rs` parks with
+`mem::take` and treats an empty strip as idle, `tabs.rs::open_diff_changes_tab`
+creates or reuses the Changes tab, `select_diff_tab` owns `picker` / `picked`,
+and both `index == 0` close guards are gone, so the close chip renders on all
+five tab kinds (`Setup` included) and closing the last tab returns the dock to
+the picker, re-armed. The `+` menu gains a Changes row (`plus-minus.svg`, no
+chord) above File / Terminal / Agent setup. **Maintainer decision (2026-09-07,
+issue #436):** the surface picker is the default landing for a fresh dock
+regardless of git state; #393 / #394's blank Changes body is kept as the
+rendering of a Changes tab the user explicitly opened against a non-git or
+clean-diff workspace. Auto-creating Changes inside a git worktree and showing
+the picker only outside git was rejected (it puts a git probe back into the
+session-model decision and makes the parking plumbing conditional on repository
+state).
+
 **2026-09-07 #438: Review rails and diff pane grid.** The port of upstream
 `a8d55f74` replaces the former scope/multi-view Review surface with
 `app/review/`: a 220 px Workspaces rail, a 300 px Changes rail following
