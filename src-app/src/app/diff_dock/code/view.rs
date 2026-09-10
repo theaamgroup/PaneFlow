@@ -806,19 +806,21 @@ impl CodeView {
 
     /// Fold one blink tick in. Returns whether the frame has to be repainted:
     /// never for an unfocused editor or a caret outside the viewport, so a
-    /// dock tab behind a terminal stops redrawing twice a second (#427). A
-    /// caret that just moved stays solid for a full interval: blinking
-    /// through a burst of navigation is what makes a caret hard to follow.
+    /// dock tab behind a terminal stops redrawing twice a second (#427). The
+    /// phase is still tracked while the caret is off-screen or the view is
+    /// blurred: only the repaint is skipped, so a caret scrolled back into
+    /// view shows in the current phase instead of staying stuck in the
+    /// hidden half it was in when it left. A caret that just moved stays
+    /// solid for a full interval: blinking through a burst of navigation is
+    /// what makes a caret hard to follow.
     fn apply_blink_phase(&mut self, phase_visible: bool, caret_visible: bool) -> bool {
+        let visible = self.last_motion.elapsed() < CURSOR_BLINK_INTERVAL || phase_visible;
+        let changed = visible != self.blink_visible;
+        self.blink_visible = visible;
         if !self.focused || !caret_visible {
             return false;
         }
-        let visible = self.last_motion.elapsed() < CURSOR_BLINK_INTERVAL || phase_visible;
-        if visible == self.blink_visible {
-            return false;
-        }
-        self.blink_visible = visible;
-        true
+        changed
     }
 
     /// Color the stale rows in view under [`HIGHLIGHT_FRAME_BUDGET`] (#427),
@@ -829,19 +831,44 @@ impl CodeView {
         let Some(line_count) = self.state.document().map(CodeDocument::line_count) else {
             return;
         };
-        let viewport_h = self.scroll.viewport_height();
-        let rows = if viewport_h > 0.0 {
-            super::element::visible_rows_at(self.scroll.rows(), viewport_h, line_count)
-        } else {
-            0..INITIAL_HIGHLIGHT_ROWS.min(line_count)
+        let minimap = self.controls.read(cx).display.minimap;
+        let (rows, minimap_rows) = Self::highlight_fill_rows(&self.scroll, line_count, minimap);
+        let Some((doc, highlighter)) = self.state.editable() else {
+            return;
         };
-        if let Some((doc, highlighter)) = self.state.editable()
-            && highlighter
-                .fill_stale_rows(doc, rows, HIGHLIGHT_FRAME_BUDGET)
-                .any_stale()
-        {
+        let started = Instant::now();
+        let mut stale = highlighter
+            .fill_stale_rows(doc, rows, HIGHLIGHT_FRAME_BUDGET)
+            .any_stale();
+        if let Some(minimap_rows) = minimap_rows {
+            let remaining = HIGHLIGHT_FRAME_BUDGET.saturating_sub(started.elapsed());
+            stale |= highlighter
+                .fill_stale_rows(doc, minimap_rows, remaining)
+                .any_stale();
+        }
+        if stale {
             cx.notify();
         }
+    }
+
+    /// The rows a frame colors: the editor viewport first, then, when the
+    /// minimap is shown, the rows it paints (many more than the viewport, at
+    /// `MINIMAP_LINE_HEIGHT` each), so the minimap colors over the frames
+    /// that follow instead of staying monochrome until those rows have
+    /// scrolled through the editor. Before the viewport has been measured
+    /// the first [`INITIAL_HIGHLIGHT_ROWS`] stand in for it.
+    fn highlight_fill_rows(
+        scroll: &CodeScroll,
+        line_count: usize,
+        minimap: bool,
+    ) -> (Range<usize>, Option<Range<usize>>) {
+        let viewport_h = scroll.viewport_height();
+        if viewport_h <= 0.0 {
+            return (0..INITIAL_HIGHLIGHT_ROWS.min(line_count), None);
+        }
+        let rows = super::element::visible_rows_at(scroll.rows(), viewport_h, line_count);
+        let minimap_rows = minimap.then(|| super::minimap::visible_rows(line_count, scroll));
+        (rows, minimap_rows)
     }
 
     /// Point the view at a different file, cancelling whatever load is in
@@ -3751,6 +3778,44 @@ mod tests {
         })
     }
 
+    /// With the minimap on, a frame's fill covers its rows too (issue #427
+    /// review): they are far more than the viewport's, and `runs` is empty
+    /// for a stale row, so a minimap fed only by the editor's range stayed
+    /// monochrome until each row had scrolled through the editor.
+    #[test]
+    fn highlight_fill_covers_the_minimap_rows_only_while_it_is_shown() {
+        let line_count = 5_000;
+        let scroll = CodeScroll::new();
+        assert_eq!(
+            CodeView::highlight_fill_rows(&scroll, line_count, true),
+            (0..INITIAL_HIGHLIGHT_ROWS, None),
+            "an unmeasured viewport falls back to the initial rows"
+        );
+
+        scroll.set_metrics(
+            gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(400.0), px(360.0)),
+            ),
+            line_count,
+        );
+        assert!(scroll.set_rows(1_000.0));
+        let editor = super::super::element::visible_rows_at(scroll.rows(), 360.0, line_count);
+        let minimap = super::super::minimap::visible_rows(line_count, &scroll);
+        assert!(!editor.is_empty() && minimap.len() > editor.len());
+
+        assert_eq!(
+            CodeView::highlight_fill_rows(&scroll, line_count, false),
+            (editor.clone(), None),
+            "minimap off: the viewport alone"
+        );
+        assert_eq!(
+            CodeView::highlight_fill_rows(&scroll, line_count, true),
+            (editor, Some(minimap)),
+            "minimap on: the viewport first, then the minimap's rows"
+        );
+    }
+
     #[gpui::test]
     fn blink_phase_is_ignored_while_the_view_is_unfocused(cx: &mut TestAppContext) {
         let (view, cx) = view(cx, "one\ntwo\n");
@@ -3759,7 +3824,12 @@ mod tests {
             view.focused = false;
             view.last_motion = Instant::now() - CURSOR_BLINK_INTERVAL;
             view.blink_visible = true;
-            assert!(!view.apply_blink_phase(false, true));
+            assert!(
+                !view.apply_blink_phase(false, true),
+                "no repaint while blurred"
+            );
+            assert!(!view.blink_visible, "but the phase is still tracked");
+            assert!(!view.apply_blink_phase(true, true));
             assert!(view.blink_visible);
         });
     }
@@ -3774,7 +3844,44 @@ mod tests {
             view.blink_visible = true;
             let caret_visible = CodeView::row_intersects_viewport(2, 0.0, CODE_ROW_HEIGHT * 2.0);
             assert!(!caret_visible);
-            assert!(!view.apply_blink_phase(false, caret_visible));
+            assert!(
+                !view.apply_blink_phase(false, caret_visible),
+                "no repaint while the caret is off-screen"
+            );
+            assert!(!view.blink_visible, "but the phase is still tracked");
+            assert!(!view.apply_blink_phase(true, caret_visible));
+            assert!(view.blink_visible);
+        });
+    }
+
+    /// The caret leaves the viewport in its hidden half; the phase goes
+    /// visible while it is away; scrolling it back shows it at once. Before
+    /// the fix the off-screen ticks left `blink_visible` stuck at `false`
+    /// until the next focus return.
+    #[gpui::test]
+    fn scrolling_the_caret_back_into_view_shows_it_in_the_current_phase(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "one\ntwo\n");
+
+        view.update(cx, |view, _cx| {
+            view.focused = true;
+            view.last_motion = Instant::now() - CURSOR_BLINK_INTERVAL;
+            view.blink_visible = true;
+            let on_screen = CodeView::row_intersects_viewport(1, 0.0, CODE_ROW_HEIGHT * 2.0);
+            let off_screen = CodeView::row_intersects_viewport(2, 0.0, CODE_ROW_HEIGHT * 2.0);
+            assert!(on_screen && !off_screen);
+
+            assert!(view.apply_blink_phase(false, on_screen), "hidden half");
+            assert!(!view.blink_visible);
+            assert!(!view.apply_blink_phase(false, off_screen), "scrolled away");
+            assert!(
+                !view.apply_blink_phase(true, off_screen),
+                "phase flips while away"
+            );
+            assert!(view.blink_visible, "the bit follows the phase off-screen");
+            assert!(
+                !view.apply_blink_phase(true, on_screen),
+                "scrolling back needs no extra repaint: the frame the scroll paints shows it"
+            );
             assert!(view.blink_visible);
         });
     }

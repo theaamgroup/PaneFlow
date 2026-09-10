@@ -131,6 +131,10 @@ struct GrammarPass {
     colors: Vec<Option<Hsla>>,
 }
 
+/// How many captures [`CodeHighlighter::requery_rows`] pulls between two
+/// looks at the frame deadline while a row is being queried.
+const DEADLINE_CHECK_STRIDE: usize = 64;
+
 /// What a [`CodeHighlighter::fill_stale_rows`] call left behind: the rows of
 /// the requested range still uncolored when the budget ran out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -267,6 +271,10 @@ pub(crate) struct CodeHighlighter {
     generation: u64,
     /// Cancel token of the deferred parse in flight, if any.
     deferred_cancel: Option<Arc<AtomicBool>>,
+    /// Captures pulled from the query cursors so far: the enumeration
+    /// [`Self::requery_rows`] bounds, not the runs it stores.
+    #[cfg(test)]
+    captures_pulled: usize,
 }
 
 impl CodeHighlighter {
@@ -319,6 +327,8 @@ impl CodeHighlighter {
             too_complex: false,
             generation: 0,
             deferred_cancel: None,
+            #[cfg(test)]
+            captures_pulled: 0,
         }
     }
 
@@ -626,8 +636,27 @@ impl CodeHighlighter {
     /// Re-run every grammar's query over `rows` only and rebuild their runs.
     /// The query is bounded with `QueryCursor::set_byte_range`, so its cost
     /// follows the requested rows, not the file. A treeless highlighter leaves
-    /// the rows stale.
+    /// the rows stale. Production goes through [`Self::fill_stale_rows`],
+    /// which carries the frame deadline; the tests and the bench query
+    /// whole ranges without one.
+    #[cfg(test)]
     pub(crate) fn requery_rows(&mut self, doc: &CodeDocument, rows: Range<usize>) {
+        self.requery_rows_until(doc, rows, None);
+    }
+
+    /// [`Self::requery_rows`] with two bounds on the enumeration itself, not
+    /// only on what is stored: the cursor stops once every requested row has
+    /// reached [`MAX_CAPTURES_PER_ROW`] (captures arrive in document order,
+    /// so nothing past that point could be kept), and once `deadline` has
+    /// passed, checked every [`DEADLINE_CHECK_STRIDE`] captures. A row cut
+    /// short by the deadline keeps what was gathered and is still marked
+    /// fresh: a single 2 MB minified row must not be retried every frame.
+    fn requery_rows_until(
+        &mut self,
+        doc: &CodeDocument,
+        rows: Range<usize>,
+        deadline: Option<Instant>,
+    ) {
         let lines = doc.line_count();
         if self.rows.len() != lines {
             self.rows.resize(lines, Vec::new());
@@ -653,11 +682,16 @@ impl CodeHighlighter {
             .filter_map(|row| doc.line_byte_range(row))
             .collect::<Vec<_>>();
         let mut capture_counts = vec![0usize; line_ranges.len()];
+        let mut saturated_rows = 0usize;
+        let mut pulled = 0usize;
         for row in rows.clone() {
             self.rows[row].clear();
         }
 
-        for (pass_index, pass) in self.passes.iter().enumerate() {
+        'passes: for (pass_index, pass) in self.passes.iter().enumerate() {
+            if saturated_rows == capture_counts.len() {
+                break;
+            }
             let Some(tree) = pass.tree.as_ref() else {
                 continue;
             };
@@ -669,6 +703,16 @@ impl CodeHighlighter {
             let mut caps =
                 cursor.captures(&pass.grammar.query, tree.root_node(), RopeText(doc.text()));
             while let Some((mat, idx)) = caps.next() {
+                pulled += 1;
+                #[cfg(test)]
+                {
+                    self.captures_pulled += 1;
+                }
+                if pulled.is_multiple_of(DEADLINE_CHECK_STRIDE)
+                    && deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    break 'passes;
+                }
                 let cap = mat.captures()[*idx];
                 let Ok(capture) = u16::try_from(cap.index) else {
                     continue;
@@ -682,7 +726,7 @@ impl CodeHighlighter {
                 {
                     continue;
                 }
-                bucket_capture(
+                saturated_rows += bucket_capture(
                     cap.node.start_byte(),
                     cap.node.end_byte(),
                     IndexedCapture {
@@ -694,6 +738,9 @@ impl CodeHighlighter {
                     &mut capture_counts,
                     &mut self.rows,
                 );
+                if saturated_rows == capture_counts.len() {
+                    break 'passes;
+                }
             }
         }
 
@@ -724,7 +771,7 @@ impl CodeHighlighter {
             if self.row_states.get(row) != Some(&RowState::Stale) {
                 continue;
             }
-            self.requery_rows(doc, row..row + 1);
+            self.requery_rows_until(doc, row..row + 1, Some(deadline));
             if Instant::now() >= deadline {
                 break;
             }
@@ -896,7 +943,9 @@ fn interpolate_rows(rows: &mut Vec<IndexedLineRuns>, line_count: usize, edit: &C
 /// Same contract as `highlighter.rs::bucket_capture`, resolved against the
 /// byte ranges of the queried rows alone (a `partition_point` over a
 /// viewport-sized slice), never a materialized `Vec` of every line in the
-/// file. A row stops accepting captures at [`MAX_CAPTURES_PER_ROW`].
+/// file. A row stops accepting captures at [`MAX_CAPTURES_PER_ROW`]; returns
+/// how many rows this capture brought to that cap, so the caller can stop
+/// enumerating once every row it asked for is full.
 fn bucket_capture(
     cstart: usize,
     cend: usize,
@@ -905,9 +954,10 @@ fn bucket_capture(
     line_ranges: &[Range<usize>],
     capture_counts: &mut [usize],
     out: &mut [IndexedLineRuns],
-) {
+) -> usize {
+    let mut newly_saturated = 0usize;
     if cend <= cstart {
-        return;
+        return newly_saturated;
     }
     let mut local_row = line_ranges.partition_point(|range| range.end <= cstart);
     while let Some(lr) = line_ranges.get(local_row) {
@@ -922,9 +972,13 @@ fn bucket_capture(
         {
             out[rows.start + local_row].push((s, e, capture));
             capture_counts[local_row] += 1;
+            if capture_counts[local_row] == MAX_CAPTURES_PER_ROW {
+                newly_saturated += 1;
+            }
         }
         local_row += 1;
     }
+    newly_saturated
 }
 
 /// [`resolve_runs`] over the indexed storage: widen to `usize` ranges, resolve
@@ -1367,6 +1421,75 @@ mod tests {
         );
         assert!(!h.runs(1).is_empty());
         assert!(!h.runs(2).is_empty());
+    }
+
+    /// One row holding more colored captures than [`MAX_CAPTURES_PER_ROW`]:
+    /// the shape of a minified file. Captures arrive in document order, so
+    /// doubling the row cannot move the point where the cap is reached: the
+    /// pull count is the same for both, which is what proves the enumeration
+    /// stopped at the cap instead of walking the whole row.
+    #[test]
+    fn a_saturated_row_stops_the_query_at_the_capture_cap() {
+        let statement = "let a = 1; ";
+        let short = format!("fn f() {{ {} }}\n", statement.repeat(MAX_CAPTURES_PER_ROW));
+        let long = format!(
+            "fn f() {{ {} }}\n",
+            statement.repeat(MAX_CAPTURES_PER_ROW * 2)
+        );
+
+        let d = doc("short.rs", &short);
+        let mut h = parsed(&d);
+        h.requery_rows(&d, 0..1);
+        let pulled_short = h.captures_pulled;
+        let stored = h.runs(0).len();
+        assert!(
+            stored > 0 && stored <= MAX_CAPTURES_PER_ROW,
+            "the row stores at most the cap (overlaps resolve down), got {stored}"
+        );
+        assert!(!h.all_rows_stale() && h.row_states[0] == RowState::Fresh);
+
+        let d = doc("long.rs", &long);
+        let mut h = parsed(&d);
+        h.requery_rows(&d, 0..1);
+        assert!(h.runs(0).len() <= MAX_CAPTURES_PER_ROW);
+        assert!(pulled_short > 0);
+        assert_eq!(
+            h.captures_pulled, pulled_short,
+            "a row twice as long pulls no more captures once the cap is reached"
+        );
+        assert!(
+            h.captures_pulled < MAX_CAPTURES_PER_ROW * 2,
+            "well under the {} statements the long row holds",
+            MAX_CAPTURES_PER_ROW * 2
+        );
+    }
+
+    /// A deadline that has already passed cuts the row's query short but
+    /// still marks the row fresh with what it gathered, so a huge single row
+    /// is never re-queried frame after frame.
+    #[test]
+    fn a_row_cut_short_by_the_deadline_keeps_its_partial_runs_and_stays_fresh() {
+        let text = format!(
+            "fn f() {{ {} }}\n",
+            "let a = 1; ".repeat(MAX_CAPTURES_PER_ROW)
+        );
+        let d = doc("deadline.rs", &text);
+        let mut h = parsed(&d);
+        let fill = h.fill_stale_rows(&d, 0..1, Duration::ZERO);
+        assert_eq!(fill.stale_rows, 0, "the row is fresh");
+        assert!(h.row_states[0] == RowState::Fresh);
+        assert!(
+            h.captures_pulled <= DEADLINE_CHECK_STRIDE,
+            "the expired deadline stops the enumeration at the first check, pulled {}",
+            h.captures_pulled
+        );
+        assert!(
+            !h.runs(0).is_empty() && h.runs(0).len() < MAX_CAPTURES_PER_ROW,
+            "the captures gathered before the check are kept"
+        );
+        let before = h.captures_pulled;
+        assert_eq!(h.fill_stale_rows(&d, 0..1, Duration::ZERO).stale_rows, 0);
+        assert_eq!(h.captures_pulled, before, "a fresh row is not re-queried");
     }
 
     #[test]
