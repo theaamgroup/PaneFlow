@@ -1,64 +1,31 @@
-//! Single Files-tree row render: indent + chevron + icon + name, with the
-//! editor-refusal styling , click-to-open / expand , and
-//! the right-click copy-path menu trigger . Rows carry no drag: every
-//! file opens in the dock editor, so the sidebar has a single gesture. Split
-//! out of `view.rs` to keep each file under the 250-line budget.
-
-use std::ops::Range;
-
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, HighlightStyle, InteractiveElement, IntoElement,
-    ParentElement, SharedString, Styled, StyledText, div, img, prelude::*, px, svg,
+    ParentElement, Styled, StyledText, div, img, prelude::*, px, svg,
 };
 
+use super::panel::{FilesEvent, FilesSidebar};
+use super::projection::FileRow;
 use super::{DIMMED_OPACITY, INDENT_STEP, ROW_GAP, ROW_HEIGHT, ROW_SLOT};
-use crate::PaneFlowApp;
-use crate::app::files_tree::{self, VisibleRowRef};
-use crate::app::sidebar::{SIDEBAR_ROW_LINE_HEIGHT, SIDEBAR_ROW_MARGIN_X, SIDEBAR_ROW_PADDING_X};
+use crate::app::files_tree;
+use crate::app::sidebar::{SIDEBAR_ROW_LINE_HEIGHT, SIDEBAR_ROW_PADDING_X};
 use crate::ui_primitives::{ROW_RADIUS, squircle_skin};
 
-/// What a row prints on its name line. In tree mode this is the node's own file
-/// name with no highlight; under the US-020 filter it is the workspace-relative
-/// path with the matched byte range picked out.
-pub(super) struct FilesRowLabel {
-    pub text: SharedString,
-    pub highlight: Option<Range<usize>>,
-}
-
-impl FilesRowLabel {
-    pub(super) fn plain(text: SharedString) -> Self {
-        Self {
-            text,
-            highlight: None,
-        }
-    }
-}
-
-impl PaneFlowApp {
+impl FilesSidebar {
     pub(super) fn files_row(
         &self,
-        row: VisibleRowRef<'_>,
-        label: FilesRowLabel,
+        row: &FileRow,
         selected: bool,
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let node = row.node;
-        // US-019: the markdown lock is gone - every file is clickable and read
-        // at full text color. The one remaining muted tier is a file the editor
-        // would refuse (binary extension or over `MAX_FILE_BYTES`); it stays
-        // clickable so opening it surfaces the US-003 error inside the tab.
+        let node = &row.node;
         let refused = files_tree::editor_refuses(node);
         let dimmed = node.is_ignored || node.is_hidden;
         let text_color = if refused { ui.muted } else { ui.text };
         let indent = px(SIDEBAR_ROW_PADDING_X + row.depth as f32 * INDENT_STEP);
         let path = node.path.clone();
         let is_dir = node.is_dir;
-        // Same card as a workspace-rail row: the rail's fills, traced by the
-        // shared `squircle` primitive at `ROW_RADIUS` rather than GPUI's
-        // circular `rounded()`. A selected row rests filled and drops its hover
-        // layer, exactly like the rail's visible tab.
-        let group = SharedString::from(format!("files-row-group-{}", node.path.display()));
+        let group = row.group.clone();
         let (resting, hovered) = if selected {
             (
                 Some(crate::app::constants::sidebar_tab_active_background()),
@@ -71,14 +38,6 @@ impl PaneFlowApp {
             )
         };
 
-        // One leading slot, never two: a directory prints its chevron there
-        // (right = collapsed, down = expanded - a static swap, legible under
-        // reduced motion) and a file its language icon, so both start on the
-        // same pixel and the name column stays straight. Directories carry no
-        // folder glyph; the chevron alone says "container".
-        //
-        // The language icons ship their own `fill`, so they are painted as
-        // images. `svg()` would flatten each one to a single text color.
         let slot = if is_dir {
             svg()
                 .size(px(ROW_SLOT))
@@ -91,18 +50,12 @@ impl PaneFlowApp {
                 .text_color(ui.muted)
                 .into_any_element()
         } else {
-            img(crate::file_icons::language_icon_path(
-                &files_tree::node_name(node),
-            ))
-            .size(px(ROW_SLOT))
-            .flex_none()
-            .into_any_element()
+            img(row.icon)
+                .size(px(ROW_SLOT))
+                .flex_none()
+                .into_any_element()
         };
 
-        // One hairline per ancestor level, centered on that ancestor's slot, so
-        // a deep row stays visually tied to the folder that holds it. Painted
-        // after the card fill and before the content, which is why they read
-        // over a selected row instead of under it.
         let guide_color = ui.text.opacity(0.08);
         let guides = (0..row.depth)
             .map(|level| {
@@ -120,10 +73,7 @@ impl PaneFlowApp {
             .collect::<Vec<_>>();
 
         let mut el = squircle_skin(
-            div().id(SharedString::from(format!(
-                "files-row-{}",
-                node.path.display()
-            ))),
+            div().id(row.id.clone()),
             group,
             ROW_RADIUS,
             resting,
@@ -134,58 +84,46 @@ impl PaneFlowApp {
         .items_center()
         .gap(px(ROW_GAP))
         .h(ROW_HEIGHT)
+        .w_full()
         .flex_none()
         .overflow_x_hidden()
-        // Rail inset and padding box; only the left padding differs, and only
-        // by the tree indent it carries. The name is centered by `items_center`
-        // rather than vertical padding, so the row keeps its 28px whatever font
-        // resolves.
-        .mx(px(SIDEBAR_ROW_MARGIN_X))
         .pl(indent)
         .pr(px(SIDEBAR_ROW_PADDING_X))
         .when(dimmed, |s| s.opacity(DIMMED_OPACITY))
         .children(guides);
 
-        // US-009: right-click any row (file or directory) to open the copy-path
-        // menu.
+        #[cfg(test)]
+        {
+            el = el.debug_selector(|| row.id.to_string());
+        }
+
         let menu_path = path.clone();
         el = el.on_aux_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-            if e.is_right_click()
+            if this.active
+                && e.is_right_click()
                 && let Some(position) = e.mouse_position()
             {
-                this.dismiss_transient_surfaces();
-                this.files_focus.focus(window, cx);
-                this.select_files_row(&menu_path, cx);
-                this.files_menu_open = Some(crate::FilesContextMenu {
+                this.focus.focus(window, cx);
+                this.select_path(&menu_path, cx);
+                cx.emit(FilesEvent::ContextMenu(crate::FilesContextMenu {
+                    root: this.tree.root.clone(),
                     path: menu_path.clone(),
                     position,
-                });
+                }));
                 cx.stop_propagation();
                 cx.notify();
             }
         }));
 
-        // Whole row toggles a directory or opens any file, markdown
-        // included, in the diff dock's editor . Markdown gets no
-        // surface of its own from here: a click reads it as source next to
-        // every other file, and no row carries a drag.
         let click_path = path.clone();
         el = el.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.files_focus.focus(window, cx);
-            this.select_files_row(&click_path, cx);
-            if is_dir {
-                this.toggle_dir(&click_path, cx);
-            } else {
-                this.open_file_in_diff_dock(click_path.clone(), window, cx);
-            }
+            this.focus.focus(window, cx);
+            this.activate_path(&click_path, is_dir, window, cx);
             cx.stop_propagation();
         }));
 
-        // US-020: the matched segment is picked out with `StyledText`'s
-        // highlight list - one text element with a styled byte range, not
-        // nested spans.
-        let name = match label.highlight {
-            Some(range) => StyledText::new(label.text)
+        let name = match row.highlight.clone() {
+            Some(range) => StyledText::new(row.label.clone())
                 .with_highlights([(
                     range,
                     HighlightStyle {
@@ -195,15 +133,13 @@ impl PaneFlowApp {
                     },
                 )])
                 .into_any_element(),
-            None => label.text.into_any_element(),
+            None => row.label.clone().into_any_element(),
         };
 
         let el = el.child(slot).child(
             div()
                 .flex_1()
                 .min_w_0()
-                // Rail type scale: `text_sm` on a pinned line height, so the
-                // row keeps its height whatever font resolves.
                 .text_sm()
                 .line_height(px(SIDEBAR_ROW_LINE_HEIGHT))
                 .text_color(text_color)
