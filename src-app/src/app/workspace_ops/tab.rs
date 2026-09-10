@@ -137,8 +137,11 @@ impl PaneFlowApp {
         let title = crate::sidebar_title::clean_sidebar_title(&title).unwrap_or_default();
         let terminal =
             cx.new(|cx| TerminalView::with_cwd_and_profile(ws_id, cwd, None, profile, cx));
-        cx.subscribe(&terminal, Self::handle_terminal_event)
-            .detach();
+        // Issue #422: do NOT subscribe here - `create_pane` already wires
+        // `handle_terminal_event`. The duplicate subscription fired every
+        // terminal event twice (the US-028 class); it was harmless while the
+        // view fired its own OSC 9/777 notification, and fires every program
+        // notification twice now that the app handler delivers it.
         let pane = self.create_pane(terminal.clone(), ws_id, cx);
         let root = LayoutTree::Leaf(pane);
         // EP-005: the palette is the content of an empty tab, so the preset
@@ -972,6 +975,31 @@ mod tests {
         assert!(
             !body.contains("active_tab_mut()") && !body.contains("active.root = Some("),
             "the helper must never fill the active tab: {body}"
+        );
+    }
+
+    /// Issue #422: `open_tab_with_surface` used to subscribe
+    /// `handle_terminal_event` by hand and then call `create_pane`, which
+    /// subscribes it again (the US-028 class). The duplicate was harmless while
+    /// the view fired its own OSC 9 / 777 desktop notification; once the app
+    /// handler delivers it, every program notification fired twice. Pinned on
+    /// the source body because a `PaneFlowApp` cannot be constructed in a test.
+    #[test]
+    fn open_tab_with_surface_subscribes_terminal_events_exactly_once() {
+        let src = include_str!("tab.rs");
+        let body = src
+            .split("pub(crate) fn open_tab_with_surface(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn open_agent_tab_at_cwd(").next())
+            .expect("open_tab_with_surface body");
+        assert!(
+            body.contains("self.create_pane(terminal.clone(), ws_id, cx)"),
+            "the pane is built through `create_pane`, which wires the app-level \
+             terminal subscription: {body}"
+        );
+        assert!(
+            !body.contains("cx.subscribe(&terminal, Self::handle_terminal_event)"),
+            "no manual `handle_terminal_event` subscription beside `create_pane`: {body}"
         );
     }
 

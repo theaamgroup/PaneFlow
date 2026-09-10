@@ -192,6 +192,23 @@ impl Tab {
         ids
     }
 
+    /// The terminal surfaces this tab actually paints, by entity id: only
+    /// the rendered `root`, so while the tab is zoomed the panes parked in
+    /// `saved_layout` are absent. This is the set the notification gate and
+    /// the completion dot key on (#422): a zoomed-away split is not under the
+    /// user's eye. `surface_ids` is the membership question and stays whole.
+    pub fn visible_surface_ids(&self, cx: &gpui::App) -> std::collections::HashSet<u64> {
+        let mut ids = std::collections::HashSet::new();
+        if let Some(root) = &self.root {
+            for pane in root.collect_leaves() {
+                for terminal in pane.read(cx).terminals() {
+                    ids.insert(terminal.entity_id().as_u64());
+                }
+            }
+        }
+        ids
+    }
+
     pub fn collect_panes(&self) -> Vec<Entity<Pane>> {
         let mut panes = Vec::new();
         if let Some(root) = &self.root {

@@ -75,8 +75,10 @@ pub fn next_workspace_id() -> u64 {
 
 /// Runtime-only notification state for a completed agent turn.
 ///
-/// A natural `ai.stop` marks the completion unread only while this workspace is
-/// not visible in the active Paneflow window. It survives the transient
+/// A natural `ai.stop` marks the completion unread only while the pane the
+/// turn finished in is not under the user's eye (`seen`: the active window,
+/// its workspace and tab on screen - `PaneFlowApp::surfaces_under_user_eye`,
+/// keyed on the session's surface). It survives the transient
 /// `AgentState::Finished` session auto-clear until the user interacts with the
 /// workspace card or its pane area.
 #[derive(Debug, Default)]
@@ -85,8 +87,16 @@ pub(crate) struct AgentCompletionNotification {
 }
 
 impl AgentCompletionNotification {
-    pub(crate) fn record_finished(&mut self, workspace_visible: bool) {
-        self.unread = !workspace_visible;
+    /// `seen` is the surface-keyed answer (`completion_was_seen`), never a
+    /// workspace-level one: a turn that ends in a background tab of the
+    /// active workspace is unread.
+    ///
+    /// This is the workspace's one aggregate bit, so an unseen completion
+    /// stays unread until [`Self::acknowledge`]: a later turn finishing in
+    /// the tab the user is looking at says nothing about the background tab
+    /// they never visited (PR #478 review).
+    pub(crate) fn record_finished(&mut self, seen: bool) {
+        self.unread |= !seen;
     }
 
     pub(crate) fn acknowledge(&mut self) {
@@ -960,6 +970,44 @@ mod tests {
         assert!(ws.is_zoomed(), "returning to the tab restores its zoom");
     }
 
+    /// #422 review: the notification gate and the completion dot key on the
+    /// surfaces a tab paints. A zoomed tab paints only its `root`; the split
+    /// parked in `saved_layout` is not under the user's eye, so it must be
+    /// absent from `visible_surface_ids` while `surface_ids` (membership)
+    /// still lists it.
+    #[gpui::test]
+    fn a_zoomed_away_split_is_not_a_visible_surface(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let shown = terminal_pane(cx, None);
+            let hidden = terminal_pane(cx, None);
+            let surface_of = |pane: &gpui::Entity<crate::pane::Pane>, cx: &gpui::App| {
+                pane.read(cx)
+                    .terminals()
+                    .next()
+                    .expect("one terminal per pane")
+                    .entity_id()
+                    .as_u64()
+            };
+            let shown_id = surface_of(&shown, cx);
+            let hidden_id = surface_of(&hidden, cx);
+            let mut tab = Tab::new("zoomed", Some(LayoutTree::Leaf(shown)));
+            tab.saved_layout = Some(LayoutTree::Leaf(hidden));
+            assert!(tab.is_zoomed());
+
+            let visible = tab.visible_surface_ids(cx);
+            assert!(visible.contains(&shown_id), "the zoomed pane is on screen");
+            assert!(
+                !visible.contains(&hidden_id),
+                "a split zoomed away is not under the user's eye"
+            );
+            let all = tab.surface_ids(cx);
+            assert!(
+                all.contains(&shown_id) && all.contains(&hidden_id),
+                "membership still counts the parked split"
+            );
+        });
+    }
+
     #[gpui::test]
     fn reorder_tab_keeps_the_same_tab_visible(cx: &mut TestAppContext) {
         // US-011: reordering is a view operation - the tab you were looking at
@@ -1046,17 +1094,24 @@ mod tests {
     }
 
     #[test]
-    fn agent_completion_is_unread_only_while_workspace_is_not_visible() {
+    fn agent_completion_is_unread_until_acknowledged() {
         let mut notification = AgentCompletionNotification::default();
         assert!(!notification.is_unread());
 
-        notification.record_finished(false);
-        assert!(notification.is_unread());
-
         notification.record_finished(true);
-        assert!(!notification.is_unread());
+        assert!(!notification.is_unread(), "a seen turn raises nothing");
 
         notification.record_finished(false);
+        assert!(notification.is_unread(), "an unseen turn is unread");
+
+        // PR #478 review: a turn the user watched in another tab must not
+        // clear the one they never visited; only acknowledging does.
+        notification.record_finished(true);
+        assert!(
+            notification.is_unread(),
+            "a later seen completion keeps the outstanding unseen one"
+        );
+
         notification.acknowledge();
         assert!(!notification.is_unread());
     }

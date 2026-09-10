@@ -211,7 +211,7 @@ impl Element for TerminalThumbnail {
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Self::PrepaintState {
         // Cull off-screen cards. This is the culling mechanism the frame
         // budget depends on: a card scrolled out of the overlay's viewport
@@ -226,6 +226,12 @@ impl Element for TerminalThumbnail {
 
         let dims = thumbnail_cell_dimensions();
         let (base_font, _size) = thumbnail_font();
+        // Same `terminal.minimum_contrast` floor the live pane applies, so a
+        // preview never shows colours its pane does not.
+        let minimum_contrast = crate::config_writer::current_config(cx).terminal.map_or(
+            paneflow_config::schema::TerminalConfig::DEFAULT_MINIMUM_CONTRAST,
+            |terminal| terminal.resolved_minimum_contrast(),
+        );
         // A dim, non-blinking block cursor (spec §4.3): a useful "parked at a
         // prompt" signal for one quad. `cursor_from_content` is the private
         // helper `build_layout` uses; `focused: true` because the helper
@@ -268,6 +274,7 @@ impl Element for TerminalThumbnail {
             exit_signal: None,
             integrated_glyphs_enabled: true,
             color_emoji_enabled: false,
+            minimum_contrast,
         }))
     }
 
@@ -491,6 +498,7 @@ mod tests {
             exit_signal: None,
             integrated_glyphs_enabled: true,
             color_emoji_enabled: false,
+            minimum_contrast: 0.0,
         });
         let lines: std::collections::BTreeSet<i32> =
             layout.batched_runs.iter().map(|run| run.line).collect();
@@ -544,6 +552,7 @@ mod tests {
             exit_signal: None,
             integrated_glyphs_enabled: true,
             color_emoji_enabled: false,
+            minimum_contrast: 0.0,
         });
         assert_eq!(
             layout.symbols.len(),

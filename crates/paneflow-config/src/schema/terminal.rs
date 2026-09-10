@@ -252,6 +252,16 @@ pub struct TerminalConfig {
     /// constructed, so existing terminals keep their current scroll feel.
     #[serde(default, deserialize_with = "lenient_opt_f32")]
     pub scroll_multiplier: Option<f32>,
+    /// Minimum APCA lightness contrast (`Lc`) the renderer enforces between a
+    /// cell's text and its background, on the theme's ANSI colors only.
+    /// `0` leaves the theme's colors exactly as they are (Ghostty's
+    /// `minimum-contrast` default). Clamped to `[0, 90]`. Hot-reloaded.
+    ///
+    /// Fork divergence (#421): `None` resolves to `45` (Zed's floor, the
+    /// value PaneFlow enforced before the key existed) so no terminal changes
+    /// appearance on upgrade; upstream PaneFlow and Ghostty default to `0`.
+    #[serde(default, deserialize_with = "lenient_opt_f32")]
+    pub minimum_contrast: Option<f32>,
     /// OSC 52 clipboard policy. `None` resolves to `CopyOnly`: a focused pane
     /// may write the system clipboard. `Disabled` refuses every OSC 52 store,
     /// so PTY-controlled text never reaches the pasteboard. Read once at PTY
@@ -282,12 +292,34 @@ impl TerminalConfig {
     /// Upper bound: beyond 10× a single tick jumps multiple screens.
     pub const MAX_SCROLL_MULTIPLIER: f32 = 10.0;
 
+    /// Upper bound of `minimum_contrast`: APCA Lc 90 is the ceiling of
+    /// "body text" contrast; above it the search degenerates to black/white.
+    pub const MAX_MINIMUM_CONTRAST: f32 = 90.0;
+
+    /// Floor applied when `minimum_contrast` is absent: Zed's APCA Lc 45,
+    /// the contrast PaneFlow enforced unconditionally before #421 made it
+    /// configurable. Upstream defaults to `0` (off); this fork keeps 45.
+    pub const DEFAULT_MINIMUM_CONTRAST: f32 = 45.0;
+
     pub fn resolved_integrated_glyphs(&self) -> bool {
         self.integrated_glyphs.unwrap_or(true)
     }
 
     pub fn resolved_color_emoji(&self) -> bool {
         self.color_emoji.unwrap_or(true)
+    }
+
+    /// Resolve `minimum_contrast` to an APCA Lc floor: `45` when absent
+    /// (`DEFAULT_MINIMUM_CONTRAST`), `0` (off) for a non-finite value,
+    /// otherwise clamped to `[0, 90]`.
+    pub fn resolved_minimum_contrast(&self) -> f32 {
+        let raw = self
+            .minimum_contrast
+            .unwrap_or(Self::DEFAULT_MINIMUM_CONTRAST);
+        if !raw.is_finite() {
+            return 0.0;
+        }
+        raw.clamp(0.0, Self::MAX_MINIMUM_CONTRAST)
     }
 
     pub fn normalized_cursor_color(&self) -> Option<String> {

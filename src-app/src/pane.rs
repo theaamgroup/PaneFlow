@@ -843,7 +843,7 @@ impl Pane {
                 | TerminalEvent::FleetSearchRequested { .. }
                 | TerminalEvent::FocusGained
                 | TerminalEvent::AgentProgressChanged { .. }
-                | TerminalEvent::AgentAttention { .. }
+                | TerminalEvent::ProgramNotification { .. }
                 | TerminalEvent::ShellPromptReady => {}
             }
         })

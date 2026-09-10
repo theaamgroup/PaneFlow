@@ -1028,7 +1028,21 @@ impl PaneFlowApp {
                     cx,
                 );
             }
-            terminal::TerminalEvent::AgentAttention { title, body } => {
+            terminal::TerminalEvent::ProgramNotification { title, body } => {
+                // The desktop notification goes out unless this pane is the
+                // one the user is looking at: same test as the completion
+                // dot, so "seen" means the same thing everywhere (#422).
+                let seen = self.hosted_surface_is_seen(terminal.entity_id().as_u64(), cx);
+                let pane_title = terminal.read(cx).terminal.title.clone();
+                crate::agents::notifications::fire_program_notification(
+                    crate::agents::notifications::program_notification(
+                        title.clone(),
+                        body.clone(),
+                        &pane_title,
+                    ),
+                    seen,
+                    cx.background_executor().clone(),
+                );
                 if let Some(tool) = terminal.read(cx).terminal.detected_agent
                     && let Some(event) =
                         crate::app::agent_status::notification_lifecycle_event(tool, title, body)
@@ -1255,8 +1269,15 @@ impl PaneFlowApp {
         let stall_threshold = std::time::Duration::from_secs(
             self.cached_config.resolved_agent_stall_threshold_secs(),
         );
-        let mut stalled_notifs: Vec<(crate::agent_launcher::TerminalAgent, String, u64)> =
-            Vec::new();
+        // (agent, workspace title, silent secs, workspace id, surface): the
+        // last two feed the notification gate once the borrow below ends.
+        let mut stalled_notifs: Vec<(
+            crate::agent_launcher::TerminalAgent,
+            String,
+            u64,
+            u64,
+            Option<u64>,
+        )> = Vec::new();
         for ws in &mut self.workspaces {
             if ws.agent_sessions.is_empty() {
                 continue;
@@ -1297,6 +1318,8 @@ impl PaneFlowApp {
                             session.tool,
                             ws.title.clone(),
                             session.last_activity.elapsed().as_secs(),
+                            ws.id,
+                            session.surface_id,
                         ));
                         changed = true;
                     }
@@ -1317,12 +1340,17 @@ impl PaneFlowApp {
         // EP-004 US-011: fire AFTER the state writes so the notification and
         // the UI agree. One entry per Thinking→Stalled transition == one
         // notification per stall episode (PRD dedup AC).
-        for (agent, title, silent_secs) in stalled_notifs {
+        for (agent, title, silent_secs, ws_id, surface_id) in stalled_notifs {
+            let seen = crate::app::agent_status::completion_was_seen(
+                self.surfaces_under_user_eye(ws_id, cx).as_ref(),
+                surface_id,
+            );
             super::ipc_handler::fire_stalled_notification(
                 agent,
                 &title,
                 silent_secs,
                 &self.cached_config,
+                seen,
                 cx.background_executor().clone(),
             );
         }
