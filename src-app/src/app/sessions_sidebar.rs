@@ -79,7 +79,7 @@ impl PaneFlowApp {
     ) {
         // Mutual exclusion: only one right column. Opening sessions closes
         // the Files sidebar (and vice-versa, in `toggle_files_sidebar`).
-        if self.files_sidebar_open {
+        if self.files_sidebar_open && !self.files_tree_in_dock() {
             self.close_files_sidebar(cx);
         }
 

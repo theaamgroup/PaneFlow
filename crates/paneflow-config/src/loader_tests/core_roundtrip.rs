@@ -5,6 +5,7 @@ use std::collections::HashMap;
 #[test]
 fn test_serialization_roundtrip() {
     let config = PaneFlowConfig {
+        files_tree_placement: crate::schema::FilesTreePlacement::Dock,
         shortcuts: {
             let mut m = HashMap::new();
             m.insert("ctrl+n".to_string(), "new_window".to_string());

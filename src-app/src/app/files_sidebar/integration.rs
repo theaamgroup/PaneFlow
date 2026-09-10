@@ -94,13 +94,22 @@ impl PaneFlowApp {
     ) -> AnyElement {
         let material = self.cached_config.cockpit_chrome_material_enabled();
         self.files_sidebar.update(cx, |panel, cx| {
-            panel.set_chrome(material, window.is_window_active(), cx)
+            panel.set_chrome(
+                material,
+                window.is_window_active(),
+                self.files_tree_in_dock(),
+                cx,
+            )
         });
         self.files_sidebar
             .clone()
             .cached(
                 StyleRefinement::default()
-                    .w(px(FILES_SIDEBAR_WIDTH))
+                    .w(px(if self.files_tree_in_dock() {
+                        super::DOCK_TREE_WIDTH
+                    } else {
+                        FILES_SIDEBAR_WIDTH
+                    }))
                     .h_full()
                     .flex_shrink_0(),
             )

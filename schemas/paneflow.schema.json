@@ -96,6 +96,12 @@
       "description": "Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. Default false.",
       "default": false
     },
+    "files_tree_placement": {
+      "type": "string",
+      "enum": ["rail", "dock"],
+      "default": "rail",
+      "description": "Files tree host: standalone 300 px rail (default), or a 250 px panel inside file tabs in the editor dock."
+    },
     "sidebar_show": {
       "type": ["object", "null"],
       "description": "What the workspaces rail shows beyond a row's name, one switch per line, toggled from the rail's Customize Sidebar menu or by hand. The defaults are the rail before the menu existed: branch on, everything else off.",

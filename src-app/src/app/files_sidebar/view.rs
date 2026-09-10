@@ -80,7 +80,7 @@ impl FilesSidebar {
             .flex()
             .flex_col()
             .flex_none()
-            .child(title_row)
+            .when(!self.docked, |header| header.child(title_row))
             .child(self.files_filter_row(ui, cx))
             .into_any_element()
     }
@@ -92,6 +92,7 @@ impl FilesSidebar {
             .flex_none()
             .px(px(8.))
             .pb(px(6.))
+            .when(self.docked, |row| row.pt(px(8.)))
             .child(
                 crate::ui_primitives::filter_pill(
                     "files-sidebar-filter",
@@ -167,17 +168,103 @@ impl Render for FilesSidebar {
             .id("files-sidebar")
             .flex()
             .flex_col()
-            .w(SIDEBAR_WIDTH)
+            .w(if self.docked {
+                px(super::DOCK_TREE_WIDTH)
+            } else {
+                SIDEBAR_WIDTH
+            })
             .h_full()
             .min_h_0()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::handle_files_sidebar_key_down))
-            .bg(crate::app::constants::cockpit_chrome_background(
-                theme.title_bar_background,
-                self.window_active,
-                self.material,
-            ))
+            .when(!self.docked, |panel| {
+                panel.bg(crate::app::constants::cockpit_chrome_background(
+                    theme.title_bar_background,
+                    self.window_active,
+                    self.material,
+                ))
+            })
             .child(self.files_sidebar_header(ui, cx))
             .child(self.files_sidebar_body(ui, cx))
+    }
+}
+
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+    use crate::app::files_sidebar::projection::FilesProjection;
+    use crate::app::files_tree::{FileNode, FilesTreeState};
+    use gpui::{TestAppContext, size};
+    use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
+
+    #[gpui::test]
+    fn both_mounts_share_markdown_source_activation_filter_and_panel_state(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, cx) = cx.add_window_view(|_, cx| FilesSidebar::new(cx));
+        cx.simulate_resize(size(px(300.), px(350.)));
+        let path = PathBuf::from("workspace/README.md");
+        let root = PathBuf::from("workspace");
+        panel.update(cx, |panel, _| {
+            let mut tree = FilesTreeState::root_shell(root.clone());
+            tree.children.insert(
+                root.clone(),
+                vec![FileNode {
+                    path: path.clone(),
+                    is_dir: false,
+                    is_hidden: false,
+                    is_ignored: false,
+                    size: 0,
+                }],
+            );
+            panel.active = true;
+            panel.expanded = tree.expanded.clone();
+            panel.projection = Arc::new(FilesProjection::build(&tree, &panel.expanded, ""));
+            panel.tree = Arc::new(tree);
+        });
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let events = opened.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event, _| {
+                if let FilesEvent::OpenFile { path, root, .. } = event {
+                    events.borrow_mut().push((path.clone(), root.clone()));
+                }
+            })
+            .detach();
+        });
+        let snapshot = panel.read_with(cx, |panel, _| panel.tree.clone());
+        for (docked, expected_width) in [(false, 284.), (true, 234.), (false, 284.)] {
+            cx.update(|window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.set_chrome(true, true, docked, cx);
+                    panel
+                        .filter_input
+                        .update(cx, |input, cx| input.set_value("readme", cx));
+                });
+                window.refresh();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            let bounds = cx
+                .debug_bounds("files-row-workspace/README.md")
+                .expect("Markdown row in either mount");
+            assert_eq!(bounds.size.width, px(expected_width));
+            assert_eq!(bounds.size.height, px(28.));
+            cx.update(|window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.activate_path(&path, false, window, cx)
+                })
+            });
+            cx.run_until_parked();
+            panel.read_with(cx, |panel, cx| {
+                assert!(panel.active);
+                assert!(Arc::ptr_eq(&snapshot, &panel.tree));
+                assert_eq!(panel.filter_input.read(cx).value(), "readme");
+                assert_eq!(panel.selected.as_ref(), Some(&path));
+            });
+        }
+        assert_eq!(*opened.borrow(), vec![(path, root); 3]);
     }
 }

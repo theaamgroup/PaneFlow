@@ -1929,6 +1929,13 @@ impl Render for PaneFlowApp {
         };
         let files_sidebar_mounted = files_sidebar_host_visible
             && (self.files_sidebar_open || self.files_sidebar_animation.is_some());
+        // Both mounts share state; dock mode consumes no standalone rail space.
+        let files_sidebar_width = if self.files_tree_in_dock() {
+            0.
+        } else {
+            files_sidebar_width
+        };
+        let files_sidebar_mounted = files_sidebar_mounted && !self.files_tree_in_dock();
         let files_sidebar_opacity = (files_sidebar_width
             / crate::app::files_sidebar::FILES_SIDEBAR_WIDTH.max(1.))
         .clamp(0., 1.);
@@ -2133,7 +2140,7 @@ impl Render for PaneFlowApp {
         };
         // The right diff dock rides beside the CLI pane grid, opened from a
         // pane header. A no-op in every other mode.
-        let main_content = self.wrap_cli_diff_dock(main_content, main_panel_width, cx);
+        let main_content = self.wrap_cli_diff_dock(main_content, main_panel_width, window, cx);
         // Update title bar with current workspace name.
         let ws_name = if self.settings_section.is_some() {
             // Settings open: the title-bar center is left empty (the section
