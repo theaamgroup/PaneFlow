@@ -241,10 +241,15 @@ impl PaneFlowApp {
         if index < self.diff_dock.diff_tabs.len() {
             self.diff_dock.picker = false;
             self.diff_dock.picked = true;
-            self.diff_dock.diff_active_tab = index;
-            // Moving off a tab drops any pending close confirmation: the arm is
-            // a one-gesture state, not a mode the user has to escape.
-            self.diff_dock.diff_tab_close_armed = None;
+            // Re-selecting the active tab is not a move: the chip's own click
+            // fires right after its close control's, and clearing the arm here
+            // would undo the confirmation that click just set.
+            if self.diff_dock.diff_active_tab != index {
+                self.diff_dock.diff_active_tab = index;
+                // Moving off a tab drops any pending close confirmation: the
+                // arm is a one-gesture state, not a mode the user has to escape.
+                self.diff_dock.diff_tab_close_armed = None;
+            }
             cx.notify();
         }
     }
@@ -305,7 +310,7 @@ impl PaneFlowApp {
         if index >= self.diff_dock.diff_tabs.len() {
             return;
         }
-        self.diff_dock.diff_tabs.remove(index);
+        let closed = self.diff_dock.diff_tabs.remove(index);
         self.diff_dock.diff_active_tab =
             active_tab_after_close(self.diff_dock.diff_active_tab, index);
         // The armed index refers to a strip that just shifted, so it is dropped
@@ -319,7 +324,13 @@ impl PaneFlowApp {
         // The menus describe a strip that just changed under them.
         self.close_diff_options_menu(cx);
         self.close_diff_new_tab_menu(cx);
-        self.diff_dock.diff_branch_menu = None;
+        // The branch picker belongs to the Changes surface, and this path has
+        // no `Window` to hand its focus back through `close_diff_branch_menu`
+        // (a terminal exiting under another tab lands here). Drop it only when
+        // the surface it was open over is the tab that just went away.
+        if matches!(closed, DiffDockTab::Changes) {
+            self.diff_dock.diff_branch_menu = None;
+        }
         cx.notify();
     }
 
@@ -405,6 +416,42 @@ pub(super) fn active_tab_after_close(active: usize, closed: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The close control's click is followed by the chip's own click, which
+    /// re-selects the same index. A same-index select must not clear the arm
+    /// `request_close_diff_tab` just set, or a modified file tab could never
+    /// be closed (PR #482 review). Source-text assertion because the two
+    /// handlers only meet through GPUI's event dispatch, which has no
+    /// headless harness here.
+    #[test]
+    fn a_same_tab_select_keeps_the_close_arm_and_the_close_chip_owns_its_click() {
+        use crate::source_probe::source_slice;
+        let select = source_slice(
+            include_str!("tabs.rs"),
+            "pub(crate) fn select_diff_tab(",
+            "\n    }\n",
+        );
+        let guard = select
+            .find("if self.diff_dock.diff_active_tab != index {")
+            .expect("select_diff_tab must guard the arm reset on a real move");
+        let reset = select
+            .find("self.diff_dock.diff_tab_close_armed = None;")
+            .expect("select_diff_tab must still drop the arm when moving tabs");
+        assert!(
+            guard < reset,
+            "the arm reset must sit inside the move guard"
+        );
+
+        let close = source_slice(
+            include_str!("render.rs"),
+            "this.request_close_diff_tab(index, cx);",
+            "}))",
+        );
+        assert!(
+            close.contains("cx.stop_propagation();"),
+            "the dock tab close chip must stop its click from reaching the chip"
+        );
+    }
 
     fn file(path: &str, dirty: bool) -> DiffTabFact {
         DiffTabFact::File {

@@ -312,6 +312,9 @@ fn render_diff_tab(
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                 this.request_close_diff_tab(index, cx);
+                // The chip underneath selects on click; let the close control
+                // own this gesture so the arm it just set survives.
+                cx.stop_propagation();
             }))
             .child(mark),
     );
