@@ -152,7 +152,9 @@ pub(crate) const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 pub(crate) enum ListingAuthority {
     /// Every raw entry was read.
     Complete,
-    /// The raw walk stopped at `MAX_DIRECTORY_ENTRIES` (issue #238).
+    /// The raw walk stopped at `MAX_DIRECTORY_ENTRIES` (issue #238), or at
+    /// least one entry could not be read and was skipped, so an absent child
+    /// may still exist on disk.
     Truncated,
     /// `read_dir` itself failed (permissions / removed).
     Failed,
@@ -177,10 +179,18 @@ pub(crate) fn read_dir_listing(root: &Path, dir: &Path) -> (Vec<FileNode>, Listi
     // Cap the raw walk, not the surviving rows: otherwise a directory of
     // thousands of ignored / hidden entries is read and gitignore-matched in
     // full before the cap ever applies.
+    let mut saw_entry_error = false;
     let mut nodes: Vec<FileNode> = entries
         .by_ref()
         .take(MAX_DIRECTORY_ENTRIES)
-        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            // An entry that vanished mid-scan is skipped, but the listing
+            // then says nothing about what is absent from it.
+            if entry.is_err() {
+                saw_entry_error = true;
+            }
+            entry.ok()
+        })
         .filter_map(|entry| {
             let path = entry.path();
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -213,12 +223,18 @@ pub(crate) fn read_dir_listing(root: &Path, dir: &Path) -> (Vec<FileNode>, Listi
         .collect();
     nodes.sort_by(compare_nodes);
     // One more raw entry past the cap means the walk was cut short.
-    let authority = if entries.next().is_some() {
+    let truncated = entries.next().is_some();
+    (nodes, listing_authority(saw_entry_error, truncated))
+}
+
+/// The authority of a listing whose `read_dir` succeeded: `Complete` only
+/// when every raw entry was read and none was skipped over an error.
+fn listing_authority(saw_entry_error: bool, truncated: bool) -> ListingAuthority {
+    if saw_entry_error || truncated {
         ListingAuthority::Truncated
     } else {
         ListingAuthority::Complete
-    };
-    (nodes, authority)
+    }
 }
 
 fn is_hidden_name(path: &Path) -> bool {
@@ -332,6 +348,14 @@ mod tests {
             is_hidden: false,
             size: 0,
         }
+    }
+
+    #[test]
+    fn listing_authority_is_complete_only_without_skipped_entries_or_truncation() {
+        assert_eq!(listing_authority(false, false), ListingAuthority::Complete);
+        assert_eq!(listing_authority(true, false), ListingAuthority::Truncated);
+        assert_eq!(listing_authority(false, true), ListingAuthority::Truncated);
+        assert_eq!(listing_authority(true, true), ListingAuthority::Truncated);
     }
 
     #[test]
