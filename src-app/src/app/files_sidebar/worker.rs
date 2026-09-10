@@ -185,6 +185,25 @@ impl Scanner {
         self.dirty.extend(self.tree.children.keys().cloned());
     }
 
+    /// Mark every directory whose last listing was not `Complete` for a
+    /// re-read, and report whether there was one. A watch does not cover
+    /// recovery from a read error: an entry skipped mid-scan, a type that
+    /// could not be read, or a directory that was unreadable for a moment
+    /// produces no filesystem event once it is readable again, so the
+    /// fallback timer retries those listings even while the watcher is
+    /// available.
+    fn retry_incomplete_listings(&mut self) -> bool {
+        let incomplete: Vec<PathBuf> = self
+            .authority
+            .iter()
+            .filter(|(_, authority)| **authority != ListingAuthority::Complete)
+            .map(|(dir, _)| dir.clone())
+            .collect();
+        let any = !incomplete.is_empty();
+        self.dirty.extend(incomplete);
+        any
+    }
+
     fn invalidate_subtree(&mut self, path: &std::path::Path) {
         self.dirty.extend(
             self.tree
@@ -327,6 +346,8 @@ async fn run(
                 if first_event.is_none() {
                     scanner.rescan();
                 }
+                ready = true;
+            } else if scanner.retry_incomplete_listings() {
                 ready = true;
             } else {
                 deadline = Instant::now() + FALLBACK_INTERVAL;

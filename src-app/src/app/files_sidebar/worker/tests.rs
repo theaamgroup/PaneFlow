@@ -325,3 +325,53 @@ fn live_watcher_refusing_one_directory_keeps_root_watch_and_falls_back_to_pollin
         "root watch must remain after a later expanded-dir watch error"
     );
 }
+
+/// A listing that came back incomplete is retried by the fallback timer even
+/// though every directory is watched: recovering from a read error produces
+/// no filesystem event, so a watch alone would leave it stale.
+#[test]
+fn incomplete_listings_are_retried_while_the_watcher_is_available() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().to_path_buf();
+    let outer = root.join("outer");
+    std::fs::create_dir(&outer).expect("outer directory");
+    std::fs::write(outer.join("file.txt"), "x").expect("file");
+    let mut scanner = scanner(root.clone(), vec![outer.clone()]);
+    scanner.watched = HashSet::from([root.clone(), outer.clone()]);
+    assert!(scanner.watcher_available());
+    assert!(
+        !scanner.retry_incomplete_listings(),
+        "every listing is complete, nothing to retry"
+    );
+    assert!(scanner.dirty.is_empty());
+
+    std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o000))
+        .expect("revoke outer permissions");
+    assert!(scanner.changed(changed(outer.join("touched.txt"))));
+    assert!(scanner.scan(|| false));
+    assert_eq!(
+        scanner.authority.get(&outer),
+        Some(&ListingAuthority::Failed)
+    );
+    assert!(
+        scanner.watcher_available(),
+        "the watches are all still installed"
+    );
+
+    assert!(
+        scanner.retry_incomplete_listings(),
+        "the failed listing is queued for a re-read"
+    );
+    assert_eq!(scanner.dirty, HashSet::from([outer.clone()]));
+
+    std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o755))
+        .expect("restore outer permissions");
+    assert!(scanner.scan(|| false));
+    assert_eq!(
+        scanner.authority.get(&outer),
+        Some(&ListingAuthority::Complete)
+    );
+    assert_eq!(scanner.tree.children[&outer].len(), 1);
+    assert!(!scanner.retry_incomplete_listings());
+}
