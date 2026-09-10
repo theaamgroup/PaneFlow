@@ -43,6 +43,7 @@ pub(crate) struct FilesSidebar {
     pub(super) projection_task: Option<Task<()>>,
     pub(super) updates_task: Option<Task<()>>,
     pub(super) worker: Option<FilesWorker>,
+    pub(super) docked: bool,
     pub(super) material: bool,
     pub(super) window_active: bool,
     pub(super) pending_reveal: bool,
@@ -92,6 +93,7 @@ impl FilesSidebar {
             projection_task: None,
             updates_task: None,
             worker: None,
+            docked: false,
             material: false,
             window_active: true,
             pending_reveal: false,
@@ -141,9 +143,12 @@ impl FilesSidebar {
         &mut self,
         material: bool,
         window_active: bool,
+        docked: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.material != material || self.window_active != window_active {
+        if self.material != material || self.window_active != window_active || self.docked != docked
+        {
+            self.docked = docked;
             self.material = material;
             self.window_active = window_active;
             cx.notify();

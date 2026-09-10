@@ -50,7 +50,7 @@ use std::path::PathBuf;
 
 use gpui::{Context, Focusable, Pixels, Window, px};
 
-use paneflow_config::schema::AppMode;
+use paneflow_config::schema::{AppMode, FilesTreePlacement};
 
 use crate::{PaneFlowApp, ToggleFilesSidebar};
 pub(crate) use panel::{FilesEvent, FilesSidebar};
@@ -59,6 +59,35 @@ pub(crate) use panel::{FilesEvent, FilesSidebar};
 /// deferred per the PRD non-goals).
 pub(crate) const FILES_SIDEBAR_WIDTH: f32 = 300.;
 pub(super) const SIDEBAR_WIDTH: Pixels = px(FILES_SIDEBAR_WIDTH);
+pub(crate) const DOCK_TREE_WIDTH: f32 = 250.;
+
+/// Hide only the tree when its fixed width would leave less than 200 px for
+/// the editor. Neither this calculation nor either mount writes the dock width.
+pub(crate) fn dock_tree_width(open: bool, file_active: bool, dock_width: f32) -> f32 {
+    if open && file_active && dock_width >= DOCK_TREE_WIDTH + 200. {
+        DOCK_TREE_WIDTH
+    } else {
+        0.
+    }
+}
+/// File placeholders count as file tabs until a source document replaces them.
+pub(crate) fn first_file_tab(tabs: &[crate::app::diff_dock::DiffDockTab]) -> Option<usize> {
+    tabs.iter().position(|tab| {
+        matches!(
+            tab,
+            crate::app::diff_dock::DiffDockTab::File(_)
+                | crate::app::diff_dock::DiffDockTab::PendingFile
+        )
+    })
+}
+
+pub(crate) fn closes_with_last_file(
+    placement: FilesTreePlacement,
+    tabs: &[crate::app::diff_dock::DiffDockTab],
+) -> bool {
+    placement == FilesTreePlacement::Dock && first_file_tab(tabs).is_none()
+}
+
 /// Tree geometry, measured off the Codex file tree so the two read as the same
 /// widget: 28px rows, an 18px indent step, one 14px leading slot (chevron for a
 /// directory, language icon for a file) and a 12px gap before the name.
@@ -107,6 +136,41 @@ pub(crate) fn files_sidebar_sync_step(tab_wants_open: bool, rail_open: bool) -> 
 }
 
 impl PaneFlowApp {
+    /// Release keyboard ownership when the entire dock host is unmounted.
+    pub(crate) fn blur_unmounted_files_tree(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.files_tree_in_dock()
+            && self
+                .files_sidebar
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        {
+            window.blur();
+            if self.files_sidebar_host_visible()
+                && let Some(pane) = self.focused_or_first_pane(window, cx)
+            {
+                pane.read(cx).focus_handle(cx).focus(window, cx);
+            }
+        }
+    }
+
+    pub(crate) fn files_tree_in_dock(&self) -> bool {
+        self.cached_config.files_tree_placement == FilesTreePlacement::Dock
+    }
+
+    pub(crate) fn diff_file_tab_active(&self) -> bool {
+        self.diff_dock
+            .diff_tabs
+            .get(self.diff_dock.diff_active_tab)
+            .is_some_and(|tab| {
+                matches!(
+                    tab,
+                    crate::app::diff_dock::DiffDockTab::File(_)
+                        | crate::app::diff_dock::DiffDockTab::PendingFile
+                )
+            })
+    }
+
     /// Whether the surface that hosts the Files rail is on screen, whatever
     /// `files_sidebar_open` says.
     ///
@@ -142,9 +206,37 @@ impl PaneFlowApp {
         if !self.files_sidebar_host_visible() {
             return;
         }
+        self.sync_diff_dock_session(cx);
+        self.sync_files_sidebar_session(cx);
+        if self.files_tree_in_dock()
+            && (!self.files_sidebar_open || !self.diff_file_tab_active() || !self.diff_dock.open)
+        {
+            if !self.diff_dock.open {
+                let Some(ws) = self.active_workspace() else {
+                    return;
+                };
+                self.open_diff_dock_panel(ws.cwd.clone(), cx);
+            }
+            if !self.diff_file_tab_active() {
+                if let Some(index) = first_file_tab(&self.diff_dock.diff_tabs) {
+                    self.select_diff_tab(index, cx);
+                } else {
+                    self.open_diff_file_picker(window, cx);
+                    return;
+                }
+            }
+            // The tree may already be wanted but hidden behind another dock
+            // tab (or a closed dock). Showing that file must not close it.
+            if self.files_sidebar_open {
+                self.focus_files_sidebar(window, cx);
+                return;
+            }
+        }
         self.toggle_files_sidebar(cx);
         if self.files_sidebar_open {
             self.focus_files_sidebar(window, cx);
+        } else if self.files_tree_in_dock() {
+            self.focus_diff_tab(self.diff_dock.diff_active_tab, window, cx);
         }
     }
 
@@ -169,8 +261,9 @@ impl PaneFlowApp {
         let persisted = ws.files_expanded.clone();
         self.files_sidebar_workspace = Some(ws.id);
         // Mutual exclusion: only one right column is ever visible.
-        if self.agent_sessions.sessions_sidebar_open
-            || self.agent_sessions.sessions_sidebar_animation.is_some()
+        if !self.files_tree_in_dock()
+            && (self.agent_sessions.sessions_sidebar_open
+                || self.agent_sessions.sessions_sidebar_animation.is_some())
         {
             self.close_sessions_sidebar_immediate(cx);
         }
@@ -273,6 +366,14 @@ impl PaneFlowApp {
     pub(crate) fn sync_files_sidebar_session(&mut self, cx: &mut Context<Self>) {
         if !self.files_sidebar_host_visible() {
             return;
+        }
+        self.sync_diff_dock_session(cx);
+        // A hot reload into rail mode restores the one-right-column contract.
+        if !self.files_tree_in_dock()
+            && self.files_sidebar_open
+            && self.agent_sessions.sessions_sidebar_open
+        {
+            self.close_sessions_sidebar_immediate(cx);
         }
         let wanted = self
             .active_workspace()
@@ -640,5 +741,50 @@ mod fork_tests {
             tree.contains(".take(MAX_DIRECTORY_ENTRIES)"),
             "read_dir_sorted keeps the #238 raw-entry cap"
         );
+    }
+}
+
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn file_picker_selection_and_last_file_close_cover_both_placements(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::app::diff_dock::{DiffDockTab, code::view::CodeView};
+        use gpui::AppContext;
+        let file = cx.new(|cx| CodeView::new(PathBuf::from("/tmp/paneflow-file-test.md"), cx));
+        let mut tabs = vec![
+            DiffDockTab::Changes,
+            DiffDockTab::PendingFile,
+            DiffDockTab::File(file),
+        ];
+        assert_eq!(first_file_tab(&tabs), Some(1));
+        for placement in [FilesTreePlacement::Rail, FilesTreePlacement::Dock] {
+            assert!(!closes_with_last_file(placement, &tabs));
+        }
+        tabs.remove(1);
+        assert_eq!(first_file_tab(&tabs), Some(1));
+        assert!(!closes_with_last_file(FilesTreePlacement::Dock, &tabs));
+        tabs.remove(1);
+        assert_eq!(first_file_tab(&tabs), None);
+        assert!(closes_with_last_file(FilesTreePlacement::Dock, &tabs));
+        assert!(!closes_with_last_file(FilesTreePlacement::Rail, &tabs));
+    }
+
+    #[test]
+    fn dock_tree_hides_before_the_dock_floor_without_changing_preference() {
+        for (width, expected) in [(360., 0.), (449., 0.), (450., 250.), (880., 250.)] {
+            assert_eq!(dock_tree_width(true, true, width), expected);
+            if expected > 0. {
+                assert!(width - expected >= 200.);
+            }
+            assert_eq!(dock_tree_width(false, true, width), 0.);
+            assert_eq!(dock_tree_width(true, false, width), 0.);
+        }
+        // Widening restores the tree without any intervening state mutation.
+        assert_eq!(dock_tree_width(true, true, 449.), 0.);
+        assert_eq!(dock_tree_width(true, true, 450.), 250.);
     }
 }

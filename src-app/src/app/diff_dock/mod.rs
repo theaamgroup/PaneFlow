@@ -353,8 +353,30 @@ impl PaneFlowApp {
         &mut self,
         width: f32,
         ui: crate::theme::UiColors,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let files_width = crate::app::files_sidebar::dock_tree_width(
+            self.files_tree_in_dock()
+                && self.files_sidebar_open
+                && self.files_sidebar_host_visible(),
+            self.diff_file_tab_active(),
+            width,
+        );
+        // A tree hidden by the active tab or the width clamp cannot keep the
+        // keyboard. The panel and watcher remain alive for the next mount.
+        if self.files_tree_in_dock() && files_width == 0. {
+            self.files_menu_open = None;
+            use gpui::Focusable;
+            if self
+                .files_sidebar
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+            {
+                self.focus_diff_tab(self.diff_dock.diff_active_tab, window, cx);
+            }
+        }
         // First open of the session: the dock asks what to show instead of
         // dropping into the diff. Gated on `Cli` because the flag is set by the
         // pane-header toggle - the Agents dock is opened from its own chrome,
@@ -389,7 +411,12 @@ impl PaneFlowApp {
             Some(DiffDockTab::Terminal(terminal)) => (None, terminal.clone().into_any_element()),
             // No toolbar either: the file header describes an open document,
             // and this tab is the one that has none yet.
-            Some(DiffDockTab::PendingFile) => (None, render::render_pending_file_body(ui)),
+            Some(DiffDockTab::PendingFile) => (
+                self.files_tree_in_dock().then(|| {
+                    render_dock_file_toolbar(&cwd, None, self.render_files_tree_toggle(ui, cx), ui)
+                }),
+                render::render_pending_file_body(ui),
+            ),
             // The inventory follows the dock's folder: a dock retargeted onto
             // another checkout rescans, a repaint does not.
             Some(DiffDockTab::Setup(view)) => {
@@ -422,9 +449,16 @@ impl PaneFlowApp {
                     )
                 };
                 (
-                    Some(render_diff_file_header(
-                        icon, path, line, column, controls, ui,
-                    )),
+                    Some(if self.files_tree_in_dock() {
+                        render_dock_file_toolbar(
+                            &cwd,
+                            Some((icon, path, line, column, controls)),
+                            self.render_files_tree_toggle(ui, cx),
+                            ui,
+                        )
+                    } else {
+                        render_diff_file_header(icon, path, line, column, controls, ui)
+                    }),
                     view.clone().into_any_element(),
                 )
             }
@@ -433,6 +467,12 @@ impl PaneFlowApp {
                 self.render_diff_dock_body(&data, ui, cx),
             ),
             None => (None, render_diff_surface_picker(ui, cx)),
+        };
+
+        let body = if files_width > 0. {
+            render_dock_file_split(body, self.render_files_sidebar(window, cx), files_width, ui)
+        } else {
+            body
         };
 
         // The dock is a floating card beside the pane grid, drawn with the same
@@ -455,6 +495,53 @@ impl PaneFlowApp {
             .child(body)
             .child(squircle_border(radius, px(1.), ui.border))
             .into_any_element()
+    }
+
+    fn render_files_tree_toggle(
+        &self,
+        ui: crate::theme::UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::ui_primitives::{ROW_RADIUS, TooltipDelayExt, squircle_skin, text_tooltip};
+        let label = if self.files_sidebar_open {
+            "Hide files tree"
+        } else {
+            "Show files tree"
+        };
+        squircle_skin(
+            div()
+                .id("diff-files-tree-toggle")
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .aria_toggled(crate::settings::components::switch_toggled(
+                    self.files_sidebar_open,
+                ))
+                .flex_none()
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center(),
+            "diff-files-tree-toggle-group",
+            ROW_RADIUS,
+            None,
+            Some(crate::app::constants::sidebar_tab_hover_background()),
+        )
+        .delayed_tooltip(text_tooltip(label))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.handle_toggle_files_sidebar(&crate::ToggleFilesSidebar, window, cx);
+        }))
+        .child(
+            gpui::svg()
+                .path("icons/folder-open.svg")
+                .size(px(14.))
+                .text_color(if self.files_sidebar_open {
+                    ui.text
+                } else {
+                    ui.muted
+                }),
+        )
+        .into_any_element()
     }
 
     /// The dock drawn on its surface picker: same card silhouette, same resize
@@ -1039,5 +1126,183 @@ impl PaneFlowApp {
             return; // not a file header - nothing to collapse
         };
         self.toggle_diff_file_collapsed(path, cx);
+    }
+}
+
+/// Dock placement shares one breadcrumb band across editor and tree. Rail
+/// placement continues to use the existing 36 px file header above.
+fn render_dock_file_toolbar(
+    root: &str,
+    file: Option<(&'static str, String, usize, usize, AnyElement)>,
+    toggle: AnyElement,
+    ui: crate::theme::UiColors,
+) -> AnyElement {
+    let project = std::path::Path::new(root)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.to_string());
+    let mut row = div()
+        .id("diff-file-breadcrumb-toolbar")
+        .flex_none()
+        .h(px(40.))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(10.))
+        .border_b_1()
+        .border_color(ui.border);
+    let (path, position, controls) = match file {
+        Some((icon, path, line, column, controls)) => {
+            row = row.child(if icon.starts_with("icons/languages/") {
+                gpui::img(icon).size(px(14.)).flex_none().into_any_element()
+            } else {
+                gpui::svg()
+                    .path(icon)
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(ui.muted)
+                    .into_any_element()
+            });
+            (
+                format!("{project} › {}", path.replace('/', " › ")),
+                Some(format!("Ln {line}, Col {column}")),
+                Some(controls),
+            )
+        }
+        None => (project, None, None),
+    };
+    row.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_size(crate::ui_primitives::BODY)
+            .text_color(ui.text)
+            .child(path),
+    )
+    .children(position.map(|position| {
+        div()
+            .flex_none()
+            .text_size(crate::ui_primitives::BODY)
+            .text_color(ui.muted)
+            .child(position)
+    }))
+    .children(controls)
+    .child(toggle)
+    .into_any_element()
+}
+
+/// The editor and shared Files panel below their common toolbar.
+fn render_dock_file_split(
+    body: AnyElement,
+    tree: AnyElement,
+    files_width: f32,
+    ui: crate::theme::UiColors,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .child(
+            div()
+                // CodeView fills a flex parent; a block host collapses its
+                // percentage-height viewport even when this box is full height.
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(200.))
+                .h_full()
+                .overflow_hidden()
+                .child(body),
+        )
+        .child(
+            div()
+                .w(px(files_width))
+                .flex_shrink_0()
+                .h_full()
+                .relative()
+                .child(tree)
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(1.))
+                        .bg(ui.border),
+                ),
+        )
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod dock_file_layout_tests {
+    use super::code::{element::visible_rows_at, view::CodeView};
+    use super::*;
+    use crate::app::files_sidebar::FilesSidebar;
+    use gpui::{AppContext, Entity, Render, TestAppContext, size};
+
+    struct FileDock {
+        editor: Entity<CodeView>,
+        tree: Entity<FilesSidebar>,
+    }
+
+    impl Render for FileDock {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let ui = crate::theme::ui_colors();
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(render_dock_file_toolbar(
+                    "/workspace",
+                    None,
+                    div().into_any_element(),
+                    ui,
+                ))
+                .child(render_dock_file_split(
+                    self.editor.clone().into_any_element(),
+                    self.tree.clone().into_any_element(),
+                    250.,
+                    ui,
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn dock_tree_split_keeps_loaded_editor_viewport_at_full_body_height(cx: &mut TestAppContext) {
+        let text = "let value = 1;\n".repeat(100);
+        let (host, cx) = cx.add_window_view(move |_, cx| FileDock {
+            editor: cx.new(|cx| CodeView::ready_for_test("/workspace/main.rs".into(), &text, cx)),
+            tree: cx.new(|cx| {
+                let mut panel = FilesSidebar::new(cx);
+                panel.set_chrome(false, true, true, cx);
+                panel
+            }),
+        });
+        let editor = host.read_with(cx, |host, _| host.editor.clone());
+        // The exact tree/editor width boundary and a wider, taller dock both
+        // render the actual loaded editor through the production split builder.
+        for (width, height) in [(450., 400.), (800., 640.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            editor.read_with(cx, |editor, _| {
+                let lines = editor.document().expect("loaded source document").line_count();
+                assert_eq!(editor.visible_row_range(), visible_rows_at(0., height - 40., lines),
+                    "the loaded editor must fill the body below the 40 px toolbar at {width} by {height}");
+                // A resize can warm shaping before this explicit draw, so inspect
+                // retained row geometry rather than cache misses in this frame.
+                assert!(editor.row_width(10).is_some_and(|width| width > 0.),
+                    "the viewport must retain shaped source rows");
+            });
+        }
     }
 }

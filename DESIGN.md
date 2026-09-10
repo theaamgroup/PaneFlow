@@ -158,7 +158,7 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 | Primary sidebar | Workspaces rail in Agents mode; the Workspaces and Changes rails side by side in Review; navigation in Settings | Width 300, **520 in Review** (220 + 300); slides in 280 ms | `app/constants.rs:15`, `app/review/mod.rs:22-23`, `app/review/mode.rs:90-92`, `main.rs:352`, `settings/chrome.rs:35` |
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 20, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
-| Right rail | Sessions rail, or the Files tree rail. Mutually exclusive. | Width 300 each | `app/sessions_sidebar.rs:37`, `app/files_sidebar/mod.rs:52` |
+| Right rail | Sessions rail, or the default Files tree rail. Mutually exclusive in rail placement; Sessions can coexist with a dock tree. | Width 300 each | `app/sessions_sidebar.rs:37`, `app/files_sidebar/mod.rs:52` |
 | Diff dock | Side dock attached to a workspace tab, holding Changes plus file, terminal, and Agent setup tabs | Preferred width 880, minimum 360, maximum 1400, fitted to the live remainder and hidden below the floor (5.4); 8 file tabs, a cap that yields to unsaved work (5.4) | `app/diff_dock/model.rs:23-34`, `app/cli_diff_dock.rs:38-64` |
 | Footer | IPC offline banner, MCP bridge callout, then the Agents / Review mode strip | Persistent primary navigation. **No Settings gear** (issue #105) and **no update banner** | `app/sidebar_actions_menu.rs:21-60,62-178,254-299` |
 
@@ -398,7 +398,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Sidebar footer | padding 6 top and 8 bottom; mode buttons 30 tall on squircle 14, gap 3, margin 8; IPC banner mx 6 / mb 2 / px 8 / py 6 with no fixed height |
 | Review rail row | margin-x 8, padding-x 8, height 30, gap 4, child indent 18, icon 14, subject dot 6 |
 | Sessions row | height 30; 5 rows per agent group before **Show more** |
-| Files tree | rail 300; rows 28, indent 18, leading slot 14, row gap 12; selection is a `ROW_RADIUS` squircle |
+| Files tree | rail 300, optional dock panel 250; rows 28, indent 18, leading slot 14, row gap 12; selection is a `ROW_RADIUS` squircle |
 | Settings row | padding 12 by 10, gap 16; section header bottom padding 8 |
 | Select trigger | padding 10 by 6, width 190 to 260 |
 | Menu | list padding 4, item gap 1, item height 28, width 200 to 280, max height 320 |
@@ -672,13 +672,25 @@ tab is still inserted, so the strip may exceed eight rather than drop an edit
 236 px menu of Changes, File (`secondary-g`), Terminal (`secondary-j`), and
 Agent setup.
 
-**The Files tree is a separate 300 px right rail**, not an in-dock panel. It is
+**The Files tree defaults to a separate 300 px right rail** (`files_tree_placement: "rail"`). It is
 per workspace tab (`Tab::files_sidebar_open`), mutually exclusive with the
 Sessions rail, unmounted in Review and Settings while staying warm, and
 toggled by `secondary-alt-f`. Its width is fixed and resizing it is an explicit
 non-goal. Rows are 28 tall with 18 px indentation, a 14 px leading slot, a
 12 px row gap, and a `ROW_RADIUS` squircle selection; the header is a 36 px
 title row and the search field is the shared `filter_pill`.
+
+With `files_tree_placement: "dock"`, the same panel renders at 250 px to the
+right of the editor, below a shared 40 px project/file breadcrumb toolbar.
+The named folder button and `secondary-alt-f` toggle it. It has the same rows,
+filter and context menus, with no duplicate title, close button or material
+background. Sessions can coexist. File and PendingFile tabs show it; other
+tabs hide it. The chord creates a file-picker tab and opens the dock when
+needed, and closing the last file tab closes the tree. Below 450 px of
+rendered dock width only the tree hides, preserving a 200 px editor and the
+existing 360 px dock floor and stored width preference. Unmounting preserves
+the panel and watches. Both layouts keep per-tab open state and source-only
+file opening, including Markdown.
 
 **Review** puts the same `DiffElement` inside ordinary pane cards. One pane
 shows one worktree against one base branch, and the grid caps at six. The pane

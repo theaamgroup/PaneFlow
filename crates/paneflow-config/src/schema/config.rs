@@ -5,6 +5,15 @@ use super::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Host for the workspace Files tree; existing configurations keep the rail.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesTreePlacement {
+    #[default]
+    Rail,
+    Dock,
+}
+
 /// Top-level PaneFlow configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -56,6 +65,9 @@ pub struct PaneFlowConfig {
     /// Everything off is the rail as it ships.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub sidebar_show: SidebarShow,
+    /// Workspace Files tree layout; defaults to the standalone rail.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub files_tree_placement: FilesTreePlacement,
     /// Issue #107: order the workspace sidebar automatically - pinned first,
     /// then active, then inactive, alphabetically within each group - instead
     /// of keeping the order the user dragged rows into. `None`/`false` keeps
@@ -802,4 +814,29 @@ pub struct ToolPermissionsEntry {
     /// §13 / PRD US-111 AC #8.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub always_deny: Vec<String>,
+}
+
+#[cfg(test)]
+mod files_tree_tests {
+    use super::*;
+
+    #[test]
+    fn files_tree_placement_loads_dock_and_defaults_to_rail() {
+        for (input, expected) in [
+            ("{}", "rail"),
+            (r#"{"files_tree_placement":"dock"}"#, "dock"),
+            (r#"{"files_tree_placement":"rail"}"#, "rail"),
+            (r#"{"files_tree_placement":null}"#, "rail"),
+            (
+                r#"{"files_tree_placement":"unknown","theme":"Cursor Dark"}"#,
+                "rail",
+            ),
+        ] {
+            let config: PaneFlowConfig = serde_json::from_str(input).unwrap();
+            assert_eq!(
+                serde_json::to_value(config).unwrap()["files_tree_placement"],
+                expected
+            );
+        }
+    }
 }

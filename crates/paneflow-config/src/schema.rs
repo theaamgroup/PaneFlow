@@ -72,6 +72,7 @@ mod tests {
         // Deliberately exhaustive struct literals: adding a Rust config field
         // fails this test at compile time until the public schema is updated.
         let config = PaneFlowConfig {
+            files_tree_placement: FilesTreePlacement::Dock,
             shortcuts: HashMap::new(),
             default_shell: Some("sh".to_string()),
             theme: Some("One Dark".to_string()),

@@ -167,7 +167,12 @@ impl PaneFlowApp {
 
     /// Move keyboard focus onto whatever the tab at `index` hosts. The
     /// `Changes` tab owns no focus handle of its own, so it is a no-op there.
-    fn focus_diff_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_diff_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let focus = match self.diff_dock.diff_tabs.get(index) {
             Some(DiffDockTab::File(view)) => Some(view.read(cx).focus_handle(cx)),
             Some(DiffDockTab::Terminal(terminal)) => Some(terminal.read(cx).focus_handle(cx)),
@@ -175,6 +180,12 @@ impl PaneFlowApp {
         };
         if let Some(focus) = focus {
             window.focus(&focus, cx);
+        } else if self.files_tree_in_dock() {
+            if let Some(pane) = self.focused_or_first_pane(window, cx) {
+                pane.read(cx).focus_handle(cx).focus(window, cx);
+            } else {
+                window.blur();
+            }
         }
     }
 
@@ -311,6 +322,12 @@ impl PaneFlowApp {
             return;
         }
         let closed = self.diff_dock.diff_tabs.remove(index);
+        if crate::app::files_sidebar::closes_with_last_file(
+            self.cached_config.files_tree_placement,
+            &self.diff_dock.diff_tabs,
+        ) {
+            self.close_files_sidebar(cx);
+        }
         self.diff_dock.diff_active_tab =
             active_tab_after_close(self.diff_dock.diff_active_tab, index);
         // The armed index refers to a strip that just shifted, so it is dropped

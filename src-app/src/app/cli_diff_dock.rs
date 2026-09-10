@@ -508,7 +508,7 @@ impl PaneFlowApp {
     /// workspace create / close / restore, IPC `workspace.select`, Settings):
     /// the dock follows one fact - which session is visible - so it reconciles
     /// against that fact instead of asking every caller to remember it.
-    fn sync_diff_dock_session(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_diff_dock_session(&mut self, cx: &mut Context<Self>) {
         // Above the early return, so a slot whose tab vanished is caught on
         // the next paint whether or not the visible session moved. Free in the
         // common case (nothing parked); otherwise a handful of id compares.
@@ -667,6 +667,7 @@ impl PaneFlowApp {
         &mut self,
         body: AnyElement,
         available_width: f32,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Before the visibility test, not after: a session whose parked dock is
@@ -678,6 +679,7 @@ impl PaneFlowApp {
             // resume from its old anchor when the dock comes back.
             self.diff_dock.vertical_scrollbar.cancel_drag();
             self.diff_dock.rendered = false;
+            self.blur_unmounted_files_tree(window, cx);
             return body;
         }
         let Some((width, max_width)) = diff_dock_fit(self.diff_dock.width, available_width) else {
@@ -689,6 +691,7 @@ impl PaneFlowApp {
             self.diff_dock.h_scroll_drag = None;
             self.diff_dock.vertical_scrollbar.cancel_drag();
             self.diff_dock.rendered = false;
+            self.blur_unmounted_files_tree(window, cx);
             return body;
         };
         self.diff_dock.rendered = true;
@@ -737,7 +740,7 @@ impl PaneFlowApp {
                     .pt(px(crate::layout::PANE_GUTTER_PX))
                     .pb(px(crate::layout::PANE_GUTTER_PX))
                     .pr(px(crate::layout::PANE_GUTTER_PX))
-                    .child(self.render_diff_dock_panel(width, ui, cx)),
+                    .child(self.render_diff_dock_panel(width, ui, window, cx)),
             )
             .into_any_element()
     }
