@@ -15,9 +15,112 @@
 //! Everything here is `cfg(test)`: the module is only compiled into the test
 //! binary.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::ffi::c_void;
+use std::sync::Once;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) use crate::terminal::test_allocator::{allocation_counters, live_bytes};
+
+// ---------------------------------------------------------------------------
+// Tree-sitter allocation counter (#427)
+// ---------------------------------------------------------------------------
+
+/// Bytes kept ahead of every block handed to tree-sitter, holding the size
+/// `free` and `realloc` need back. 16 keeps libc `malloc` alignment.
+const TREE_SITTER_HEADER: usize = 16;
+
+static TREE_SITTER_LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+
+fn tree_sitter_layout(size: usize) -> Option<Layout> {
+    Layout::from_size_align(size.checked_add(TREE_SITTER_HEADER)?, TREE_SITTER_HEADER).ok()
+}
+
+unsafe fn tree_sitter_hand_out(block: *mut u8, size: usize) -> *mut c_void {
+    if block.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        block.cast::<usize>().write(size);
+        TREE_SITTER_LIVE_BYTES.fetch_add(size as i64, Ordering::Relaxed);
+        block.add(TREE_SITTER_HEADER).cast()
+    }
+}
+
+unsafe extern "C" fn tree_sitter_malloc(size: usize) -> *mut c_void {
+    let Some(layout) = tree_sitter_layout(size) else {
+        return std::ptr::null_mut();
+    };
+    unsafe { tree_sitter_hand_out(System.alloc(layout), size) }
+}
+
+unsafe extern "C" fn tree_sitter_calloc(count: usize, size: usize) -> *mut c_void {
+    let Some(total) = count.checked_mul(size) else {
+        return std::ptr::null_mut();
+    };
+    let Some(layout) = tree_sitter_layout(total) else {
+        return std::ptr::null_mut();
+    };
+    unsafe { tree_sitter_hand_out(System.alloc_zeroed(layout), total) }
+}
+
+unsafe extern "C" fn tree_sitter_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+    if ptr.is_null() {
+        return unsafe { tree_sitter_malloc(size) };
+    }
+    unsafe {
+        let block = ptr.cast::<u8>().sub(TREE_SITTER_HEADER);
+        let held = block.cast::<usize>().read();
+        let (Some(layout), Some(next_layout)) =
+            (tree_sitter_layout(held), tree_sitter_layout(size))
+        else {
+            return std::ptr::null_mut();
+        };
+        let next = System.realloc(block, layout, next_layout.size());
+        if next.is_null() {
+            return std::ptr::null_mut();
+        }
+        TREE_SITTER_LIVE_BYTES.fetch_sub(held as i64, Ordering::Relaxed);
+        tree_sitter_hand_out(next, size)
+    }
+}
+
+unsafe extern "C" fn tree_sitter_free(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let block = ptr.cast::<u8>().sub(TREE_SITTER_HEADER);
+        let held = block.cast::<usize>().read();
+        let Some(layout) = tree_sitter_layout(held) else {
+            return;
+        };
+        TREE_SITTER_LIVE_BYTES.fetch_sub(held as i64, Ordering::Relaxed);
+        System.dealloc(block, layout);
+    }
+}
+
+/// Route tree-sitter's C allocator through a counting allocator, once per
+/// process, so [`tree_sitter_live_bytes`] reports the bytes its trees hold.
+/// Only the `tree_memory_probe` calls this, alone in its process: installing
+/// it changes every parse timing, and freeing a block allocated before it was
+/// installed would corrupt the heap.
+pub(crate) fn count_tree_sitter_allocations() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| unsafe {
+        tree_sitter::set_allocator(Some(tree_sitter::Allocator {
+            malloc: tree_sitter_malloc,
+            calloc: tree_sitter_calloc,
+            realloc: tree_sitter_realloc,
+            free: tree_sitter_free,
+        }));
+    });
+}
+
+pub(crate) fn tree_sitter_live_bytes() -> i64 {
+    TREE_SITTER_LIVE_BYTES.load(Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // Metrics

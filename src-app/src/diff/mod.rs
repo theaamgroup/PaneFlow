@@ -53,9 +53,11 @@ pub(crate) use git::{
     compute_head_diff, head_sha, is_git_worktree, show_revision_file, try_worktree_toplevel,
 };
 pub(crate) use highlighter::{
-    Grammar, MAX_HIGHLIGHT_BYTES, grammar_for_ext, highlight_lines, markdown_inline_grammar,
-    resolve_runs,
+    Grammar, MAX_CAPTURES_PER_ROW, grammar_for_ext, highlight_cap, highlight_lines, is_markdown,
+    markdown_inline_grammar, resolve_runs,
 };
+#[cfg(test)]
+pub(crate) use highlighter::{MAX_HIGHLIGHT_BYTES, MAX_MARKDOWN_HIGHLIGHT_BYTES};
 pub(crate) use hit_test::row_at_offset;
 pub(crate) use hscroll::{
     H_SCROLLBAR_TRACK_HEIGHT, HScrollbarSegment, file_at_row, h_offset_index, h_offset_len,

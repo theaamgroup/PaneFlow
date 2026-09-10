@@ -23,6 +23,8 @@
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use gpui::AppContext;
 use gpui::{AsyncApp, Context, WeakEntity};
 
 use super::document::{CodeDocument, ReadOnlyReason};
@@ -229,14 +231,14 @@ pub(crate) fn build_document(path: PathBuf, text: &str, read_only_on_disk: bool)
     doc
 }
 
-/// [`load_blocking`] plus the one full tree-sitter parse the file gets.
-/// **Blocking** - the caller runs it inside `smol::unblock` (see
-/// [`spawn_code_load`]).
+/// [`load_blocking`] plus the highlighter, **without its tree**. **Blocking**
+/// - the caller runs it inside `smol::unblock` (see [`spawn_code_load`]).
 ///
-/// The initial parse rides the same thread as the read on purpose (US-002): on
-/// a source file near [`crate::diff::MAX_HIGHLIGHT_BYTES`] it costs the same
-/// order of magnitude as the read itself, so leaving it on the render thread
-/// would hand back the stall the off-thread load was there to remove.
+/// The initial parse is deliberately not here (#427): the text is shown as
+/// soon as the read lands, and `CodeView::start_initial_parse` runs the
+/// parse as a second off-thread step that colors the file when it arrives.
+/// On a source file near [`crate::diff::MAX_HIGHLIGHT_BYTES`] the parse costs
+/// tens of milliseconds the reader should not wait behind.
 pub(crate) fn open_blocking(path: &Path, syntax: DiffSyntax) -> CodeOpen {
     let (document, stamp) = load_stamped(path)?;
     let indent = IndentUnit::detect(&document);
@@ -331,7 +333,12 @@ pub(crate) fn spawn_code_load<V, F>(
     F: FnOnce(&mut V, u64, CodeOpen, &mut Context<V>) + 'static,
 {
     cx.spawn(async move |this: WeakEntity<V>, cx: &mut AsyncApp| {
+        #[cfg(not(test))]
         let outcome = smol::unblock(move || open_blocking(&path, syntax)).await;
+        #[cfg(test)]
+        let outcome = cx
+            .background_spawn(async move { open_blocking(&path, syntax) })
+            .await;
         // A closed tab drops the entity: `update` returns `Err` and the result
         // is discarded. That failure is the expected path, not an error.
         cx.update(|cx| {
@@ -711,12 +718,12 @@ mod tests {
         );
     }
 
-    /// US-002: the read, the rope, the initial parse, the indent detection and
-    /// the stamp are one blocking unit, so `smol::unblock` carries all of them
-    /// off the render thread. Proven by the highlighter coming back already
-    /// colored, without any main-thread parse call in between.
+    /// US-002 / #427: the read, the rope, the indent detection and the stamp
+    /// are one blocking unit, and the initial parse is **not** part of it:
+    /// the highlighter comes back treeless, so the text can show before the
+    /// parse, and its deferred initial parse applies to it afterwards.
     #[test]
-    fn opening_a_file_parses_it_in_the_same_blocking_pass_as_the_read() {
+    fn opening_a_file_leaves_its_first_parse_to_the_deferred_pass() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write(
             &dir,
@@ -724,15 +731,25 @@ mod tests {
             b"fn main() {\n\tlet x = 1;\n\tlet y = 2;\n}\n",
         );
 
-        let opened = open_blocking(&path, syntax()).expect("open");
+        let mut opened = open_blocking(&path, syntax()).expect("open");
 
         assert_eq!(opened.document.line_count(), 5);
         assert!(opened.highlighter.is_enabled());
         assert_eq!(opened.indent, IndentUnit::Tab);
         assert_eq!(opened.stamp, FileStamp::read(&path));
         assert!(
-            !opened.highlighter.runs(0).is_empty(),
-            "the initial parse ran inside open_blocking, not later on the render thread"
+            !opened.highlighter.has_tree(),
+            "open_blocking returns the text before any parse has run"
+        );
+        assert!(opened.highlighter.runs(0).is_empty());
+
+        assert!(
+            opened.highlighter.parse_initial_blocking(&opened.document),
+            "the deferred initial parse applies to the highlighter it came from"
+        );
+        assert!(
+            opened.highlighter.has_tree(),
+            "and the tree arrives with it"
         );
     }
 

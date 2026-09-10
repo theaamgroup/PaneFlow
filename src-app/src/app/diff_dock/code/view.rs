@@ -138,7 +138,8 @@ use super::element::{
     syntax_text_runs,
 };
 use super::highlight::{
-    CodeHighlighter, DeferredParse, HighlightOutcome, SYNC_PARSE_BUDGET, spawn_deferred_parse,
+    CodeHighlighter, DeferredParse, HIGHLIGHT_FRAME_BUDGET, HighlightOutcome, SYNC_PARSE_BUDGET,
+    spawn_deferred_parse,
 };
 use super::load::{CodeLoadError, CodeLoadSlot, CodeLoadState, CodeOpen, spawn_code_load};
 use super::markers::MARKER_COLUMN_W;
@@ -188,6 +189,11 @@ const DRAG_SCROLL_COLUMNS: f32 = 3.0;
 /// enough to be noticed, short enough not to linger after a burst of typing.
 const READ_ONLY_FLASH: Duration = Duration::from_millis(600);
 
+/// Rows colored on the first frame, before the viewport has been measured.
+const INITIAL_HIGHLIGHT_ROWS: usize = 60;
+/// Banner under the file name once the initial parse gave up (#427).
+const TOO_COMPLEX_BANNER: &str = "This file is too complex to color.";
+
 /// Quiet period a burst of filesystem events has to end with before the file is
 /// re-read (US-016). Same value, same reasoning as `markdown/view.rs`: an
 /// editor writing through a temp file emits several events per save.
@@ -202,6 +208,13 @@ pub(crate) const TRACKER_DEBOUNCE: Duration = Duration::from_millis(150);
 const TRACKER_POLICY: ComparisonPolicy = ComparisonPolicy::Default;
 
 pub(crate) const POPUP_SHOWN_LINES: usize = 200;
+/// The marker popup colors its shown lines synchronously in the mouse
+/// handler, so it keeps a budget of its own instead of the editor's
+/// [`crate::diff::MAX_HIGHLIGHT_BYTES`] (#427): that cap is sized for a parse
+/// that runs off the render thread, and 200 base lines of minified source can
+/// reach it. Past this many bytes the popup shows the lines plain; the
+/// deferred parse of the document itself is unaffected.
+pub(crate) const POPUP_HIGHLIGHT_BYTES: usize = 64 * 1024;
 const POPUP_VISIBLE_ROWS: f32 = 12.0;
 const POPUP_MIN_W: f32 = 280.0;
 const POPUP_MAX_W: f32 = 520.0;
@@ -520,6 +533,12 @@ pub(crate) struct CodeView {
     last_motion: Instant,
     /// Blink phase, mirrored from the app-wide [`BlinkPhaseGlobal`].
     blink_visible: bool,
+    /// Whether the editor holds keyboard focus, kept by the focus observers
+    /// so a blink phase can be ignored without asking the window.
+    focused: bool,
+    /// The `on_focus` / `on_blur` observers are installed from the first
+    /// `render`, which is the first time a `Window` is in hand.
+    focus_observers_installed: bool,
     /// Theme snapshot the highlighter's colors were resolved against (US-005).
     theme_generation: u64,
     /// Geometry the element resolves each `prepaint` and the handlers read back.
@@ -623,6 +642,8 @@ impl CodeView {
             click_chain: None,
             last_motion: Instant::now(),
             blink_visible: true,
+            focused: false,
+            focus_observers_installed: false,
             theme_generation: crate::theme::theme_generation(),
             geometry: Rc::new(Cell::new(CodeGeometry::default())),
             gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
@@ -662,10 +683,11 @@ impl CodeView {
     #[cfg(test)]
     pub(crate) fn ready_for_test(path: PathBuf, text: &str, cx: &mut Context<Self>) -> Self {
         let document = super::load::build_document(path.clone(), text, false);
-        let highlighter = CodeHighlighter::new(
+        let mut highlighter = CodeHighlighter::new(
             &document,
             DiffSyntax::from_theme(&crate::theme::active_theme()),
         );
+        highlighter.parse_initial_blocking(&document);
         let focus = cx.focus_handle();
         let controls = EditorControls::attach(focus.clone(), cx);
         Self {
@@ -689,6 +711,8 @@ impl CodeView {
             click_chain: None,
             last_motion: Instant::now(),
             blink_visible: true,
+            focused: false,
+            focus_observers_installed: false,
             theme_generation: crate::theme::theme_generation(),
             geometry: Rc::new(Cell::new(CodeGeometry::default())),
             gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
@@ -727,17 +751,131 @@ impl CodeView {
         };
         let phase = global.0.clone();
         cx.observe(&phase, |view: &mut Self, phase, cx: &mut Context<Self>| {
-            // A caret that just moved stays solid for a full interval: blinking
-            // through a burst of navigation is what makes a caret hard to
-            // follow.
-            let visible =
-                view.last_motion.elapsed() < CURSOR_BLINK_INTERVAL || phase.read(cx).visible;
-            if visible != view.blink_visible {
-                view.blink_visible = visible;
+            let caret_visible = view.caret_is_visible();
+            if view.apply_blink_phase(phase.read(cx).visible, caret_visible) {
                 cx.notify();
             }
         })
         .detach();
+    }
+
+    /// Track focus through GPUI's observers instead of asking the window on
+    /// every blink tick (#427). Installed once, from the first `render`.
+    fn ensure_focus_observers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_focus_state(self.focus.is_focused(window));
+        if self.focus_observers_installed {
+            return;
+        }
+        self.focus_observers_installed = true;
+        let focus = self.focus.clone();
+        cx.on_focus(&focus, window, |view, _window, cx| {
+            view.sync_focus_state(true);
+            cx.notify();
+        })
+        .detach();
+        cx.on_blur(&focus, window, |view, _window, cx| {
+            view.sync_focus_state(false);
+            cx.notify();
+        })
+        .detach();
+    }
+
+    /// Returning focus shows the caret at once, solid for a full interval.
+    fn sync_focus_state(&mut self, focused: bool) {
+        if focused && !self.focused {
+            self.last_motion = Instant::now();
+            self.blink_visible = true;
+        }
+        self.focused = focused;
+    }
+
+    /// Whether the caret can be seen at all: the editor is focused, has a
+    /// document, and the caret's row intersects the measured viewport.
+    fn caret_is_visible(&self) -> bool {
+        if !self.focused {
+            return false;
+        }
+        let Some(doc) = self.state.document() else {
+            return false;
+        };
+        let viewport_h = self.scroll.viewport_height();
+        if viewport_h <= 0.0 {
+            return false;
+        }
+        let row = doc.byte_to_line(self.selection.cursor());
+        Self::row_intersects_viewport(row, self.scroll.content_top(), viewport_h)
+    }
+
+    fn row_intersects_viewport(row: usize, content_top: f32, viewport_h: f32) -> bool {
+        let row_top = row as f32 * CODE_ROW_HEIGHT;
+        row_top < content_top + viewport_h && row_top + CODE_ROW_HEIGHT > content_top
+    }
+
+    /// Fold one blink tick in. Returns whether the frame has to be repainted:
+    /// never for an unfocused editor or a caret outside the viewport, so a
+    /// dock tab behind a terminal stops redrawing twice a second (#427). The
+    /// phase is still tracked while the caret is off-screen or the view is
+    /// blurred: only the repaint is skipped, so a caret scrolled back into
+    /// view shows in the current phase instead of staying stuck in the
+    /// hidden half it was in when it left. A caret that just moved stays
+    /// solid for a full interval: blinking through a burst of navigation is
+    /// what makes a caret hard to follow.
+    fn apply_blink_phase(&mut self, phase_visible: bool, caret_visible: bool) -> bool {
+        let visible = self.last_motion.elapsed() < CURSOR_BLINK_INTERVAL || phase_visible;
+        let changed = visible != self.blink_visible;
+        self.blink_visible = visible;
+        if !self.focused || !caret_visible {
+            return false;
+        }
+        changed
+    }
+
+    /// Color the stale rows in view under [`HIGHLIGHT_FRAME_BUDGET`] (#427),
+    /// and ask for another frame when the budget ran out first. Before the
+    /// viewport has been measured the first [`INITIAL_HIGHLIGHT_ROWS`] stand
+    /// in for it.
+    fn fill_visible_highlights(&mut self, cx: &mut Context<Self>) {
+        let Some(line_count) = self.state.document().map(CodeDocument::line_count) else {
+            return;
+        };
+        let minimap = self.controls.read(cx).display.minimap;
+        let (rows, minimap_rows) = Self::highlight_fill_rows(&self.scroll, line_count, minimap);
+        let Some((doc, highlighter)) = self.state.editable() else {
+            return;
+        };
+        let started = Instant::now();
+        let mut stale = highlighter
+            .fill_stale_rows(doc, rows, HIGHLIGHT_FRAME_BUDGET)
+            .any_stale();
+        if let Some(minimap_rows) = minimap_rows {
+            let remaining = HIGHLIGHT_FRAME_BUDGET.saturating_sub(started.elapsed());
+            stale |= highlighter
+                .fill_stale_rows(doc, minimap_rows, remaining)
+                .any_stale();
+        }
+        if stale {
+            cx.notify();
+        }
+    }
+
+    /// The rows a frame colors: the editor viewport first, then, when the
+    /// minimap is shown, the rows it paints (many more than the viewport, at
+    /// `MINIMAP_LINE_HEIGHT` each), so the minimap colors over the frames
+    /// that follow instead of staying monochrome until those rows have
+    /// scrolled through the editor. Before the viewport has been measured
+    /// the first [`INITIAL_HIGHLIGHT_ROWS`] stand in for it.
+    fn highlight_fill_rows(
+        scroll: &CodeScroll,
+        line_count: usize,
+        minimap: bool,
+    ) -> (Range<usize>, Option<Range<usize>>) {
+        let viewport_h = scroll.viewport_height();
+        if viewport_h <= 0.0 {
+            return (0..INITIAL_HIGHLIGHT_ROWS.min(line_count), None);
+        }
+        let rows = super::element::visible_rows_at(scroll.rows(), viewport_h, line_count);
+        let minimap_rows = minimap.then(|| super::minimap::visible_rows(line_count, scroll));
+        (rows, minimap_rows)
     }
 
     /// Point the view at a different file, cancelling whatever load is in
@@ -812,6 +950,7 @@ impl CodeView {
                 self.indent = loaded.indent;
                 self.stamp = loaded.stamp;
                 self.state = CodeLoadState::Ready(Box::new(loaded));
+                self.start_initial_parse(cx);
                 self.start_base_load(cx);
             }
             Err(err) => {
@@ -821,6 +960,24 @@ impl CodeView {
         }
         self.start_watcher(cx);
         cx.notify();
+    }
+
+    /// The file's first parse, off the render thread (#427): the text is
+    /// already on screen, and the tree colors it when it lands.
+    fn start_initial_parse(&mut self, cx: &mut Context<Self>) {
+        let Some((doc, hl)) = self.state.editable() else {
+            return;
+        };
+        let Some(parse) = hl.initial_parse(doc) else {
+            return;
+        };
+        spawn_deferred_parse(parse, cx, |view: &mut Self, parsed, cx| {
+            if let Some((doc, hl)) = view.state.editable()
+                && hl.apply_parsed(doc, parsed)
+            {
+                cx.notify();
+            }
+        });
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -1060,10 +1217,10 @@ impl CodeView {
 
     /// Recolor after a theme hot-reload (US-005).
     ///
-    /// `set_syntax` re-derives every row's colors from the already-parsed trees,
-    /// so this costs one requery and no reparse. GPUI's shaped-line cache keys
-    /// on the `TextRun`s, colors included, so the new colors invalidate the
-    /// cached glyphs by themselves.
+    /// `set_syntax` rebuilds the capture color tables the stored runs are
+    /// read through, so this costs no requery and no reparse. GPUI's
+    /// shaped-line cache keys on the `TextRun`s, colors included, so the new
+    /// colors invalidate the cached glyphs by themselves.
     fn sync_theme(&mut self) {
         let generation = crate::theme::theme_generation();
         if generation == self.theme_generation {
@@ -2504,6 +2661,19 @@ impl CodeView {
                     .into_any_element(),
             );
         }
+        if self
+            .state
+            .highlighter()
+            .is_some_and(CodeHighlighter::is_too_complex)
+        {
+            out.push(
+                row()
+                    .bg(ui.overlay)
+                    .text_color(ui.muted)
+                    .child(TOO_COMPLEX_BANNER)
+                    .into_any_element(),
+            );
+        }
         out
     }
 }
@@ -2612,6 +2782,20 @@ fn conflict_button(
 
 fn count_lines(text: &str) -> u32 {
     (text.bytes().filter(|byte| *byte == b'\n').count() + 1) as u32
+}
+
+/// Per-line runs for the popup's shown lines: [`highlight_lines`] under
+/// [`POPUP_HIGHLIGHT_BYTES`], one empty run list per line above it. Runs on
+/// the render thread, so the cap is the whole budget.
+pub(crate) fn popup_highlight_runs(
+    shown_text: &str,
+    ext: &str,
+    syntax: &DiffSyntax,
+) -> Vec<Vec<(Range<usize>, Hsla)>> {
+    if shown_text.len() > POPUP_HIGHLIGHT_BYTES {
+        return shown_text.lines().map(|_| Vec::new()).collect();
+    }
+    highlight_lines(shown_text, ext, syntax)
 }
 
 pub(crate) fn base_block_text(base_lines: &[&str], range: &Range<u32>) -> String {
@@ -2926,7 +3110,7 @@ impl CodeView {
         let shown_count = block_lines.len().min(POPUP_SHOWN_LINES);
         let shown_text = block_lines[..shown_count].join("\n");
         let syntax = DiffSyntax::from_theme(&crate::theme::active_theme());
-        let runs = highlight_lines(&shown_text, doc.ext(), &syntax);
+        let runs = popup_highlight_runs(&shown_text, doc.ext(), &syntax);
         let shown = block_lines[..shown_count]
             .iter()
             .zip(runs.into_iter().chain(std::iter::repeat_with(Vec::new)))
@@ -3307,7 +3491,9 @@ impl Focusable for CodeView {
 
 impl Render for CodeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_focus_observers(window, cx);
         self.sync_theme();
+        self.fill_visible_highlights(cx);
         let ui = crate::theme::ui_colors();
 
         let Some(doc) = self.state.document() else {
@@ -3551,10 +3737,11 @@ mod tests {
             CodeLoadState::Loading
         } else {
             let document = build_document(path.clone(), text, false);
-            let highlighter = CodeHighlighter::new(
+            let mut highlighter = CodeHighlighter::new(
                 &document,
                 DiffSyntax::from_theme(&crate::theme::paneflow_dark()),
             );
+            highlighter.parse_initial_blocking(&document);
             CodeLoadState::Ready(Box::new(LoadedCode {
                 document,
                 highlighter,
@@ -3581,6 +3768,8 @@ mod tests {
                 click_chain: None,
                 last_motion: Instant::now(),
                 blink_visible: true,
+                focused: false,
+                focus_observers_installed: false,
                 theme_generation: 0,
                 geometry: Rc::new(Cell::new(CodeGeometry::default())),
                 gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
@@ -3608,6 +3797,145 @@ mod tests {
                 popup: None,
             }
         })
+    }
+
+    /// With the minimap on, a frame's fill covers its rows too (issue #427
+    /// review): they are far more than the viewport's, and `runs` is empty
+    /// for a stale row, so a minimap fed only by the editor's range stayed
+    /// monochrome until each row had scrolled through the editor.
+    #[test]
+    fn highlight_fill_covers_the_minimap_rows_only_while_it_is_shown() {
+        let line_count = 5_000;
+        let scroll = CodeScroll::new();
+        assert_eq!(
+            CodeView::highlight_fill_rows(&scroll, line_count, true),
+            (0..INITIAL_HIGHLIGHT_ROWS, None),
+            "an unmeasured viewport falls back to the initial rows"
+        );
+
+        scroll.set_metrics(
+            gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(400.0), px(360.0)),
+            ),
+            line_count,
+        );
+        assert!(scroll.set_rows(1_000.0));
+        let editor = super::super::element::visible_rows_at(scroll.rows(), 360.0, line_count);
+        let minimap = super::super::minimap::visible_rows(line_count, &scroll);
+        assert!(!editor.is_empty() && minimap.len() > editor.len());
+
+        assert_eq!(
+            CodeView::highlight_fill_rows(&scroll, line_count, false),
+            (editor.clone(), None),
+            "minimap off: the viewport alone"
+        );
+        assert_eq!(
+            CodeView::highlight_fill_rows(&scroll, line_count, true),
+            (editor, Some(minimap)),
+            "minimap on: the viewport first, then the minimap's rows"
+        );
+    }
+
+    #[gpui::test]
+    fn blink_phase_is_ignored_while_the_view_is_unfocused(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "one\ntwo\n");
+
+        view.update(cx, |view, _cx| {
+            view.focused = false;
+            view.last_motion = Instant::now() - CURSOR_BLINK_INTERVAL;
+            view.blink_visible = true;
+            assert!(
+                !view.apply_blink_phase(false, true),
+                "no repaint while blurred"
+            );
+            assert!(!view.blink_visible, "but the phase is still tracked");
+            assert!(!view.apply_blink_phase(true, true));
+            assert!(view.blink_visible);
+        });
+    }
+
+    #[gpui::test]
+    fn blink_phase_is_ignored_while_the_caret_is_outside_the_viewport(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "one\ntwo\n");
+
+        view.update(cx, |view, _cx| {
+            view.focused = true;
+            view.last_motion = Instant::now() - CURSOR_BLINK_INTERVAL;
+            view.blink_visible = true;
+            let caret_visible = CodeView::row_intersects_viewport(2, 0.0, CODE_ROW_HEIGHT * 2.0);
+            assert!(!caret_visible);
+            assert!(
+                !view.apply_blink_phase(false, caret_visible),
+                "no repaint while the caret is off-screen"
+            );
+            assert!(!view.blink_visible, "but the phase is still tracked");
+            assert!(!view.apply_blink_phase(true, caret_visible));
+            assert!(view.blink_visible);
+        });
+    }
+
+    /// The caret leaves the viewport in its hidden half; the phase goes
+    /// visible while it is away; scrolling it back shows it at once. Before
+    /// the fix the off-screen ticks left `blink_visible` stuck at `false`
+    /// until the next focus return.
+    #[gpui::test]
+    fn scrolling_the_caret_back_into_view_shows_it_in_the_current_phase(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "one\ntwo\n");
+
+        view.update(cx, |view, _cx| {
+            view.focused = true;
+            view.last_motion = Instant::now() - CURSOR_BLINK_INTERVAL;
+            view.blink_visible = true;
+            let on_screen = CodeView::row_intersects_viewport(1, 0.0, CODE_ROW_HEIGHT * 2.0);
+            let off_screen = CodeView::row_intersects_viewport(2, 0.0, CODE_ROW_HEIGHT * 2.0);
+            assert!(on_screen && !off_screen);
+
+            assert!(view.apply_blink_phase(false, on_screen), "hidden half");
+            assert!(!view.blink_visible);
+            assert!(!view.apply_blink_phase(false, off_screen), "scrolled away");
+            assert!(
+                !view.apply_blink_phase(true, off_screen),
+                "phase flips while away"
+            );
+            assert!(view.blink_visible, "the bit follows the phase off-screen");
+            assert!(
+                !view.apply_blink_phase(true, on_screen),
+                "scrolling back needs no extra repaint: the frame the scroll paints shows it"
+            );
+            assert!(view.blink_visible);
+        });
+    }
+
+    #[gpui::test]
+    fn blink_phase_notifies_only_when_a_visible_caret_changes(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "one\ntwo\n");
+
+        view.update(cx, |view, _cx| {
+            view.focused = true;
+            view.last_motion = Instant::now() - CURSOR_BLINK_INTERVAL;
+            view.blink_visible = true;
+            let caret_visible = CodeView::row_intersects_viewport(1, 0.0, CODE_ROW_HEIGHT * 2.0);
+            assert!(caret_visible);
+            assert!(view.apply_blink_phase(false, caret_visible));
+            assert!(!view.blink_visible);
+            assert!(!view.apply_blink_phase(false, caret_visible));
+        });
+    }
+
+    #[gpui::test]
+    fn returning_focus_makes_the_caret_visible_immediately(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "one\ntwo\n");
+
+        view.update(cx, |view, _cx| {
+            view.focused = false;
+            view.last_motion = Instant::now() - CURSOR_BLINK_INTERVAL;
+            view.blink_visible = false;
+            view.sync_focus_state(true);
+            assert!(view.focused);
+            assert!(view.blink_visible);
+            assert!(view.last_motion.elapsed() < CURSOR_BLINK_INTERVAL);
+        });
     }
 
     /// A release outside the view never reaches the mouse-up listener, so the
@@ -4301,10 +4629,11 @@ mod tests {
         text: &str,
     ) -> impl FnOnce(&mut Context<CodeView>) -> CodeView + use<> {
         let document = build_document(path.clone(), text, false);
-        let highlighter = CodeHighlighter::new(
+        let mut highlighter = CodeHighlighter::new(
             &document,
             DiffSyntax::from_theme(&crate::theme::paneflow_dark()),
         );
+        highlighter.parse_initial_blocking(&document);
         let stamp = FileStamp::read(&path);
         let state = CodeLoadState::Ready(Box::new(LoadedCode {
             document,
@@ -4331,6 +4660,8 @@ mod tests {
                 click_chain: None,
                 last_motion: Instant::now(),
                 blink_visible: true,
+                focused: false,
+                focus_observers_installed: false,
                 theme_generation: 0,
                 geometry: Rc::new(Cell::new(CodeGeometry::default())),
                 gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
@@ -4504,6 +4835,104 @@ mod tests {
         });
     }
 
+    /// #427: `open_blocking` hands the text over treeless, and the view's
+    /// deferred initial parse colors it once it lands.
+    #[gpui::test]
+    async fn opening_a_file_shows_its_text_first_and_colors_it_when_the_tree_lands(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "fn main() {\n    let value = 1;\n}\n").expect("seed");
+        let opened = open_blocking(
+            &path,
+            DiffSyntax::from_theme(&crate::theme::paneflow_dark()),
+        )
+        .expect("open");
+        assert!(
+            !opened.highlighter.has_tree(),
+            "the blocking read hands the text over before any parse"
+        );
+        drop(opened);
+
+        let spawn_path = path.clone();
+        let (view, cx) = cx.add_window_view(move |_window, cx| CodeView::new(spawn_path, cx));
+        cx.executor().allow_parking();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.update(cx, |view, _cx| {
+                view.state
+                    .highlighter()
+                    .is_some_and(CodeHighlighter::has_tree)
+            }) {
+                break;
+            }
+            smol::Timer::after(Duration::from_millis(10)).await;
+        }
+
+        view.update(cx, |view, _cx| {
+            let (doc, highlighter) = view.state.editable().expect("the file loaded");
+            assert_eq!(doc.line_count(), 4, "the text is there");
+            assert!(
+                highlighter.has_tree(),
+                "the deferred initial parse landed and installed the tree"
+            );
+            assert!(
+                !highlighter.is_too_complex(),
+                "a three-line file is not too complex to color"
+            );
+            highlighter.requery_rows(doc, 0..doc.line_count());
+            assert!(
+                (0..doc.line_count()).any(|row| !highlighter.runs(row).is_empty()),
+                "and the rows color from it"
+            );
+            let bridge = view._watch_bridge.take();
+            if let Some(bridge) = bridge {
+                *bridge.lock().expect("bridge lock") = None;
+            }
+            view._watcher = None;
+        });
+    }
+
+    /// #427: an initial parse that ran past its timeout greys the file and
+    /// raises the too-complex banner under the file name.
+    #[gpui::test]
+    fn an_initial_parse_that_gives_up_greys_the_file_and_raises_its_banner(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = view(cx, "fn main() {\n    let value = 1;\n}\n");
+        let ui = crate::theme::ui_colors();
+
+        let before = view.update(cx, |view, cx| view.banners(ui, cx).len());
+
+        view.update(cx, |view, _cx| {
+            let (doc, highlighter) = view.state.editable().expect("ready");
+            // The loaded highlighter already holds its tree, so the deferred
+            // parse comes from a fresh one that then takes its place: a result
+            // only lands on the highlighter that started it (#427).
+            let mut fresh =
+                CodeHighlighter::new(doc, DiffSyntax::from_theme(&crate::theme::paneflow_dark()));
+            let expired = fresh
+                .initial_parse(doc)
+                .expect("a fresh highlighter defers its first parse")
+                .with_timeout_for_test(Duration::ZERO);
+            *highlighter = fresh;
+            assert!(
+                highlighter.apply_parsed(doc, expired.run()),
+                "the expired parse is applied to the live highlighter"
+            );
+            assert!(highlighter.is_too_complex(), "the tab gave up on coloring");
+            assert!(!highlighter.is_enabled(), "and the file stays grey");
+        });
+
+        let after = view.update(cx, |view, cx| view.banners(ui, cx).len());
+        assert_eq!(
+            after,
+            before + 1,
+            "giving up on the parse raises one banner under the file name"
+        );
+    }
+
     /// US-012 AC: a keystroke on a read-only document mutates nothing and says
     /// so. The refusal has to be visible, which is why the input handler is left
     /// enabled and the keystroke is turned down here rather than by the
@@ -4512,10 +4941,11 @@ mod tests {
     fn a_keystroke_on_a_read_only_document_is_refused_visibly(cx: &mut TestAppContext) {
         let path = PathBuf::from("/nonexistent/paneflow-code.rs");
         let document = build_document(path.clone(), "locked\n", true);
-        let highlighter = CodeHighlighter::new(
+        let mut highlighter = CodeHighlighter::new(
             &document,
             DiffSyntax::from_theme(&crate::theme::paneflow_dark()),
         );
+        highlighter.parse_initial_blocking(&document);
         let state = CodeLoadState::Ready(Box::new(LoadedCode {
             document,
             highlighter,
@@ -4541,6 +4971,8 @@ mod tests {
                 click_chain: None,
                 last_motion: Instant::now(),
                 blink_visible: true,
+                focused: false,
+                focus_observers_installed: false,
                 theme_generation: 0,
                 geometry: Rc::new(Cell::new(CodeGeometry::default())),
                 gutter_memo: Rc::new(Cell::new(GutterMemo::default())),
@@ -4647,10 +5079,12 @@ mod tests {
         cx.run_until_parked();
 
         view.update(cx, |view, _cx| {
-            let doc = view.document().expect("document");
-            let oracle =
+            let (doc, live) = view.state.editable().expect("document and highlighter");
+            live.requery_rows(doc, 0..doc.line_count());
+            let mut oracle =
                 CodeHighlighter::new(doc, DiffSyntax::from_theme(&crate::theme::paneflow_dark()));
-            let live = view.highlighter().expect("highlighter");
+            oracle.parse_initial_blocking(doc);
+            oracle.requery_rows(doc, 0..doc.line_count());
             assert!(live.is_enabled(), "the grammar is loaded");
             assert!(
                 !oracle.runs(1).is_empty(),
@@ -6327,6 +6761,43 @@ mod tests {
             popup_anchor(50.0, 68.0, 200.0, 100.0),
             (Anchor::TopLeft, 68.0),
             "no room either side keeps the default below"
+        );
+    }
+
+    /// #427: the popup colors its lines on the render thread, so a block of
+    /// 200 shown lines that fits the editor's off-thread cap but not the
+    /// popup's own budget renders plain instead of parsing in the mouse
+    /// handler. A block under the budget still gets its runs.
+    #[test]
+    fn the_marker_popup_stops_highlighting_past_its_own_byte_budget() {
+        let syntax = DiffSyntax::from_theme(&crate::theme::paneflow_dark());
+        let small = "fn main() {\n    let value = 1;\n}";
+        let runs = popup_highlight_runs(small, "rs", &syntax);
+        assert_eq!(runs.len(), 3);
+        assert!(
+            runs.iter().any(|line| !line.is_empty()),
+            "a small block is colored"
+        );
+
+        // 200 lines whose total sits between the popup budget and the
+        // editor's cap: each line is a long minified-style statement.
+        let per_line = POPUP_HIGHLIGHT_BYTES / POPUP_SHOWN_LINES + 64;
+        let line = format!("let x = \"{}\";", "a".repeat(per_line));
+        let big = (0..POPUP_SHOWN_LINES)
+            .map(|_| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(big.len() > POPUP_HIGHLIGHT_BYTES);
+        assert!(big.len() <= crate::diff::MAX_HIGHLIGHT_BYTES);
+        assert!(
+            !highlight_lines(&big, "rs", &syntax)[0].is_empty(),
+            "the editor's cap alone would still parse this block"
+        );
+        let runs = popup_highlight_runs(&big, "rs", &syntax);
+        assert_eq!(runs.len(), POPUP_SHOWN_LINES, "one run list per line");
+        assert!(
+            runs.iter().all(Vec::is_empty),
+            "the popup renders the block plain rather than parse it in the mouse handler"
         );
     }
 

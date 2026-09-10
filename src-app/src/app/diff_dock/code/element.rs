@@ -1200,12 +1200,12 @@ impl Element for CodeElement {
             let line = match doc.line(row).filter(|_| len > 0) {
                 None => None,
                 Some(slice) => {
-                    let syntax = hl.map_or(&[][..], |hl| hl.runs(row));
+                    let syntax = hl.map(|hl| hl.runs(row)).unwrap_or_default();
                     Self::fill_text_runs(
                         &self.font,
                         &mut self.runs,
                         len,
-                        syntax,
+                        &syntax,
                         self.palette.text,
                     );
                     if let Some((local, _)) = &row_sel {
