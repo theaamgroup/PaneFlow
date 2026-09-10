@@ -1050,8 +1050,18 @@ impl PaneFlowApp {
                     self.apply_terminal_agent_observation(&terminal, event, cx);
                 }
             }
-            // TitleChanged is handled by Pane's subscription
-            _ => {}
+            terminal::TerminalEvent::TitleChanged => {
+                let mut changed = false;
+                for workspace in &mut self.workspaces {
+                    for tab in workspace.tabs_mut() {
+                        changed |= tab.follow_terminal_title(&terminal, cx);
+                    }
+                }
+                if changed {
+                    self.save_session(cx);
+                }
+                cx.notify();
+            }
         }
     }
 

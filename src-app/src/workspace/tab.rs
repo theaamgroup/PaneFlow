@@ -224,6 +224,27 @@ impl Tab {
         panes
     }
 
+    /// Let a single-pane tab follow its session after a terminal title change.
+    /// Clear the stored label once; subsequent OSC updates use the sidebar's
+    /// pane-title resolver without persisting every agent status/title update.
+    pub(crate) fn follow_terminal_title(
+        &mut self,
+        terminal: &Entity<crate::terminal::TerminalView>,
+        cx: &App,
+    ) -> bool {
+        if self.title.is_empty() {
+            return false;
+        }
+        let panes = self.collect_panes();
+        if let [pane] = panes.as_slice()
+            && pane.read(cx).active_terminal_opt() == Some(terminal)
+        {
+            self.title.clear();
+            return true;
+        }
+        false
+    }
+
     /// Focus this tab's first pane. Returns `true` when focus actually landed
     /// on a pane; `false` for an empty tab (no root), which has nothing to
     /// focus and leaves the caller to park focus somewhere else.
