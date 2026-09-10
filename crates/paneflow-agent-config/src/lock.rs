@@ -8,11 +8,22 @@ const LOCK_RETRY: Duration = Duration::from_millis(25);
 /// Cross-process lock for Paneflow's agent-configuration mutations.
 ///
 /// The file is intentionally persistent. The operating system owns the
-/// actual lock and releases it when the process exits, including after a
-/// crash. Keeping one global lock outside agent-owned directories also lets
-/// ephemeral `.claude` and `.codex` directories be removed safely.
+/// actual lock and releases it when its last descriptor closes, including
+/// after a crash. Dropping the guard explicitly unlocks it even if a forked
+/// child still holds an inherited descriptor. Keeping one global lock outside
+/// agent-owned directories also lets ephemeral `.claude` and `.codex`
+/// directories be removed safely.
 pub struct ConfigLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        // flock is shared by duplicated/inherited descriptors. Closing only our
+        // File can leave the lock held until a forked child closes its copy.
+        // Drop cannot return an error; File's close remains the fallback.
+        let _ = self.file.unlock();
+    }
 }
 
 fn lock_path() -> Result<PathBuf> {
@@ -46,7 +57,7 @@ fn acquire_lock(lock_path: &Path, target: &Path, timeout: Duration) -> Result<Co
     let deadline = Instant::now() + timeout;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(ConfigLock { _file: file }),
+            Ok(()) => return Ok(ConfigLock { file }),
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
                     return Err(Error::new(
@@ -93,6 +104,42 @@ mod tests {
         drop(first);
         contender.try_lock().unwrap();
         drop(contender);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drop_releases_lock_while_duplicate_descriptor_remains_open() {
+        let dir = tempfile_path();
+        let config = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock_path = dir.join("agent-config.lock");
+        let first = acquire_lock(&lock_path, &config, Duration::from_secs(1)).unwrap();
+        // Model a descriptor inherited across fork without racing process startup.
+        let duplicate = first.file.try_clone().unwrap();
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(TryLockError::WouldBlock)
+        ));
+        drop(first);
+        contender.try_lock().unwrap();
+
+        // Closing the old description must not release the next owner's lock.
+        drop(duplicate);
+        let observer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(observer.try_lock(), Err(TryLockError::WouldBlock)));
+        contender.unlock().unwrap();
+        drop(contender);
+        observer.try_lock().unwrap();
+        drop(observer);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
