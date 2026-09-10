@@ -274,10 +274,17 @@ fn cap_truncated_parent_listing_keeps_expanded_descendants() {
 
     assert_eq!(
         scanner.authority.get(&outer),
-        Some(&ListingAuthority::Truncated)
+        Some(&ListingAuthority::Capped)
     );
     assert!(scanner.tree.expanded.contains(&inner));
     assert!(scanner.tree.children.contains_key(&inner));
+    // The cap is permanent, so the fallback timer has nothing to retry:
+    // polling it would re-read and republish the directory every interval.
+    assert!(
+        !scanner.retry_incomplete_listings(),
+        "a capped listing is never polled"
+    );
+    assert!(scanner.dirty.is_empty());
     // readdir order decides whether `inner` made the capped window; pin the
     // case where it did not, and rescan on the cached truncated listing.
     scanner

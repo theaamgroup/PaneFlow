@@ -185,18 +185,25 @@ impl Scanner {
         self.dirty.extend(self.tree.children.keys().cloned());
     }
 
-    /// Mark every directory whose last listing was not `Complete` for a
-    /// re-read, and report whether there was one. A watch does not cover
-    /// recovery from a read error: an entry skipped mid-scan, a type that
-    /// could not be read, or a directory that was unreadable for a moment
-    /// produces no filesystem event once it is readable again, so the
-    /// fallback timer retries those listings even while the watcher is
-    /// available.
+    /// Mark every directory whose last listing failed or skipped an entry
+    /// for a re-read, and report whether there was one. A watch does not
+    /// cover recovery from a read error: an entry skipped mid-scan, a type
+    /// that could not be read, or a directory that was unreadable for a
+    /// moment produces no filesystem event once it is readable again, so
+    /// the fallback timer retries those listings even while the watcher is
+    /// available. A `Capped` listing is left alone: re-reading a directory
+    /// that is over `MAX_DIRECTORY_ENTRIES` cannot make it whole, and
+    /// would publish a fresh snapshot every interval for nothing.
     fn retry_incomplete_listings(&mut self) -> bool {
         let incomplete: Vec<PathBuf> = self
             .authority
             .iter()
-            .filter(|(_, authority)| **authority != ListingAuthority::Complete)
+            .filter(|(_, authority)| {
+                matches!(
+                    authority,
+                    ListingAuthority::Truncated | ListingAuthority::Failed
+                )
+            })
             .map(|(dir, _)| dir.clone())
             .collect();
         let any = !incomplete.is_empty();

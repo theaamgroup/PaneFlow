@@ -152,10 +152,13 @@ pub(crate) const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 pub(crate) enum ListingAuthority {
     /// Every raw entry was read.
     Complete,
-    /// The raw walk stopped at `MAX_DIRECTORY_ENTRIES` (issue #238), or at
-    /// least one entry could not be read and was skipped, so an absent child
-    /// may still exist on disk.
+    /// At least one entry could not be read and was skipped, so an absent
+    /// child may still exist on disk. Transient: the worker re-reads it.
     Truncated,
+    /// The raw walk stopped at `MAX_DIRECTORY_ENTRIES` (issue #238). As
+    /// silent about absent children as `Truncated`, but permanent: the
+    /// directory is not going to shrink, so it is never polled.
+    Capped,
     /// `read_dir` itself failed (permissions / removed).
     Failed,
 }
@@ -227,8 +230,8 @@ pub(crate) fn read_dir_listing(root: &Path, dir: &Path) -> (Vec<FileNode>, Listi
     }
     nodes.sort_by(compare_nodes);
     // One more raw entry past the cap means the walk was cut short.
-    let truncated = entries.next().is_some();
-    (nodes, listing_authority(saw_entry_error, truncated))
+    let capped = entries.next().is_some();
+    (nodes, listing_authority(saw_entry_error, capped))
 }
 
 /// `Some(is_dir)` when the entry's type could be read, `None` when it could
@@ -239,9 +242,13 @@ fn entry_is_dir(file_type: std::io::Result<std::fs::FileType>) -> Option<bool> {
 }
 
 /// The authority of a listing whose `read_dir` succeeded: `Complete` only
-/// when every raw entry was read and none was skipped over an error.
-fn listing_authority(saw_entry_error: bool, truncated: bool) -> ListingAuthority {
-    if saw_entry_error || truncated {
+/// when every raw entry was read and none was skipped over an error. The cap
+/// outranks a skipped entry: a re-read cannot make a capped listing whole,
+/// so it must not be classified as something worth retrying.
+fn listing_authority(saw_entry_error: bool, capped: bool) -> ListingAuthority {
+    if capped {
+        ListingAuthority::Capped
+    } else if saw_entry_error {
         ListingAuthority::Truncated
     } else {
         ListingAuthority::Complete
@@ -379,8 +386,12 @@ mod tests {
     fn listing_authority_is_complete_only_without_skipped_entries_or_truncation() {
         assert_eq!(listing_authority(false, false), ListingAuthority::Complete);
         assert_eq!(listing_authority(true, false), ListingAuthority::Truncated);
-        assert_eq!(listing_authority(false, true), ListingAuthority::Truncated);
-        assert_eq!(listing_authority(true, true), ListingAuthority::Truncated);
+        assert_eq!(listing_authority(false, true), ListingAuthority::Capped);
+        assert_eq!(
+            listing_authority(true, true),
+            ListingAuthority::Capped,
+            "a skipped entry inside a capped walk is still a capped listing"
+        );
     }
 
     #[test]
