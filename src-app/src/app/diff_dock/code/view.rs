@@ -208,6 +208,13 @@ pub(crate) const TRACKER_DEBOUNCE: Duration = Duration::from_millis(150);
 const TRACKER_POLICY: ComparisonPolicy = ComparisonPolicy::Default;
 
 pub(crate) const POPUP_SHOWN_LINES: usize = 200;
+/// The marker popup colors its shown lines synchronously in the mouse
+/// handler, so it keeps a budget of its own instead of the editor's
+/// [`crate::diff::MAX_HIGHLIGHT_BYTES`] (#427): that cap is sized for a parse
+/// that runs off the render thread, and 200 base lines of minified source can
+/// reach it. Past this many bytes the popup shows the lines plain; the
+/// deferred parse of the document itself is unaffected.
+pub(crate) const POPUP_HIGHLIGHT_BYTES: usize = 64 * 1024;
 const POPUP_VISIBLE_ROWS: f32 = 12.0;
 const POPUP_MIN_W: f32 = 280.0;
 const POPUP_MAX_W: f32 = 520.0;
@@ -2777,6 +2784,20 @@ fn count_lines(text: &str) -> u32 {
     (text.bytes().filter(|byte| *byte == b'\n').count() + 1) as u32
 }
 
+/// Per-line runs for the popup's shown lines: [`highlight_lines`] under
+/// [`POPUP_HIGHLIGHT_BYTES`], one empty run list per line above it. Runs on
+/// the render thread, so the cap is the whole budget.
+pub(crate) fn popup_highlight_runs(
+    shown_text: &str,
+    ext: &str,
+    syntax: &DiffSyntax,
+) -> Vec<Vec<(Range<usize>, Hsla)>> {
+    if shown_text.len() > POPUP_HIGHLIGHT_BYTES {
+        return shown_text.lines().map(|_| Vec::new()).collect();
+    }
+    highlight_lines(shown_text, ext, syntax)
+}
+
 pub(crate) fn base_block_text(base_lines: &[&str], range: &Range<u32>) -> String {
     let start = (range.start as usize).min(base_lines.len());
     let end = (range.end as usize).min(base_lines.len()).max(start);
@@ -3089,7 +3110,7 @@ impl CodeView {
         let shown_count = block_lines.len().min(POPUP_SHOWN_LINES);
         let shown_text = block_lines[..shown_count].join("\n");
         let syntax = DiffSyntax::from_theme(&crate::theme::active_theme());
-        let runs = highlight_lines(&shown_text, doc.ext(), &syntax);
+        let runs = popup_highlight_runs(&shown_text, doc.ext(), &syntax);
         let shown = block_lines[..shown_count]
             .iter()
             .zip(runs.into_iter().chain(std::iter::repeat_with(Vec::new)))
@@ -4886,12 +4907,16 @@ mod tests {
 
         view.update(cx, |view, _cx| {
             let (doc, highlighter) = view.state.editable().expect("ready");
+            // The loaded highlighter already holds its tree, so the deferred
+            // parse comes from a fresh one that then takes its place: a result
+            // only lands on the highlighter that started it (#427).
             let mut fresh =
                 CodeHighlighter::new(doc, DiffSyntax::from_theme(&crate::theme::paneflow_dark()));
             let expired = fresh
                 .initial_parse(doc)
                 .expect("a fresh highlighter defers its first parse")
                 .with_timeout_for_test(Duration::ZERO);
+            *highlighter = fresh;
             assert!(
                 highlighter.apply_parsed(doc, expired.run()),
                 "the expired parse is applied to the live highlighter"
@@ -6736,6 +6761,43 @@ mod tests {
             popup_anchor(50.0, 68.0, 200.0, 100.0),
             (Anchor::TopLeft, 68.0),
             "no room either side keeps the default below"
+        );
+    }
+
+    /// #427: the popup colors its lines on the render thread, so a block of
+    /// 200 shown lines that fits the editor's off-thread cap but not the
+    /// popup's own budget renders plain instead of parsing in the mouse
+    /// handler. A block under the budget still gets its runs.
+    #[test]
+    fn the_marker_popup_stops_highlighting_past_its_own_byte_budget() {
+        let syntax = DiffSyntax::from_theme(&crate::theme::paneflow_dark());
+        let small = "fn main() {\n    let value = 1;\n}";
+        let runs = popup_highlight_runs(small, "rs", &syntax);
+        assert_eq!(runs.len(), 3);
+        assert!(
+            runs.iter().any(|line| !line.is_empty()),
+            "a small block is colored"
+        );
+
+        // 200 lines whose total sits between the popup budget and the
+        // editor's cap: each line is a long minified-style statement.
+        let per_line = POPUP_HIGHLIGHT_BYTES / POPUP_SHOWN_LINES + 64;
+        let line = format!("let x = \"{}\";", "a".repeat(per_line));
+        let big = (0..POPUP_SHOWN_LINES)
+            .map(|_| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(big.len() > POPUP_HIGHLIGHT_BYTES);
+        assert!(big.len() <= crate::diff::MAX_HIGHLIGHT_BYTES);
+        assert!(
+            !highlight_lines(&big, "rs", &syntax)[0].is_empty(),
+            "the editor's cap alone would still parse this block"
+        );
+        let runs = popup_highlight_runs(&big, "rs", &syntax);
+        assert_eq!(runs.len(), POPUP_SHOWN_LINES, "one run list per line");
+        assert!(
+            runs.iter().all(Vec::is_empty),
+            "the popup renders the block plain rather than parse it in the mouse handler"
         );
     }
 

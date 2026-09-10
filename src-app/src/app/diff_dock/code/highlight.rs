@@ -48,9 +48,13 @@
 //!    carries a cancel token: the next edit, or dropping the highlighter,
 //!    stops it at its next progress callback instead of letting a burst of
 //!    keystrokes queue a full parse each.
-//! 5. The deferred result carries a generation. [`CodeHighlighter::apply_parsed`]
-//!    drops it if any edit happened in between, so a slow parse can never
-//!    repaint stale colors over newer text.
+//! 5. The deferred result carries a generation and the cancel token it ran
+//!    under. [`CodeHighlighter::apply_parsed`] drops it if any edit happened
+//!    in between, so a slow parse can never repaint stale colors over newer
+//!    text, and it drops a result whose token is not the one it is waiting
+//!    on: a file switch replaces the highlighter, and the replacement also
+//!    starts at generation 0, so generation and length alone would let a
+//!    result parsed for the previous file land on the new one (#427).
 //!
 //! After a successful parse, only the rows tree-sitter reports as changed
 //! (`Tree::changed_ranges`, unioned with the edit itself) are marked stale. A
@@ -184,6 +188,10 @@ pub(crate) struct ParsedTrees {
     trees: Vec<Option<Tree>>,
     timed_out: bool,
     cancelled: bool,
+    /// The cancel token the parse ran under: the load identity
+    /// [`CodeHighlighter::apply_parsed`] binds the result to, and re-read
+    /// live there, so a cancellation after the snapshot still counts.
+    token: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -249,6 +257,7 @@ impl DeferredParse {
             trees,
             timed_out,
             cancelled: cancel.load(Ordering::Relaxed),
+            token: cancel,
         }
     }
 }
@@ -561,12 +570,21 @@ impl CodeHighlighter {
 
     /// Install an off-thread parse. Returns `false` - changing nothing, so
     /// the caller must not repaint - when the parse was cancelled, when
-    /// another edit landed in the meantime, or when the document no longer
-    /// matches the text that was parsed. An initial parse that timed out is
-    /// applied as a give-up: the file turns plain and
+    /// another edit landed in the meantime, when the document no longer
+    /// matches the text that was parsed, or when the result was not started
+    /// by this highlighter: its token must be the very one this highlighter
+    /// is waiting on, so a result parsed for the file a tab just left cannot
+    /// land on the file that replaced it (#427). An initial parse that timed
+    /// out is applied as a give-up: the file turns plain and
     /// [`Self::is_too_complex`] goes up.
     pub(crate) fn apply_parsed(&mut self, doc: &CodeDocument, parsed: ParsedTrees) -> bool {
-        if parsed.cancelled
+        let ours = self
+            .deferred_cancel
+            .as_ref()
+            .is_some_and(|live| Arc::ptr_eq(live, &parsed.token));
+        if !ours
+            || parsed.cancelled
+            || parsed.token.load(Ordering::Relaxed)
             || parsed.generation != self.generation
             || parsed.len_bytes != doc.len_bytes()
         {
@@ -1276,6 +1294,69 @@ mod tests {
         for (row, want) in expected.iter().enumerate() {
             assert_eq!(h.runs(row), want.as_slice(), "row {row}");
         }
+    }
+
+    /// #427: a file switch replaces the highlighter, and the replacement also
+    /// starts at generation 0, so a result the previous file's parse produced
+    /// (already snapshotted as not cancelled, still queued for the main
+    /// thread) must not land on a new file of the same length and grammar.
+    #[test]
+    fn a_parse_result_from_another_highlighter_is_rejected_at_the_same_length() {
+        let old = doc("old.rs", "fn main() { let value = 1; }\n");
+        let new = doc("new.rs", "fn next() { let other = 2; }\n");
+        assert_eq!(
+            old.len_bytes(),
+            new.len_bytes(),
+            "the fixture needs equal lengths"
+        );
+
+        // A successful parse of the old text: a tree for different text.
+        let mut old_h = CodeHighlighter::new(&old, syntax());
+        let stray = old_h.initial_parse(&old).expect("deferred").run();
+        assert!(!stray.was_cancelled());
+        let mut new_h = CodeHighlighter::new(&new, syntax());
+        assert_eq!(
+            new_h.generation(),
+            0,
+            "both highlighters start at generation 0"
+        );
+        assert!(
+            !new_h.apply_parsed(&new, stray),
+            "a tree parsed for another file is rejected"
+        );
+        assert!(!new_h.has_tree(), "nothing was installed");
+
+        // A timed-out parse of the old text: must not grey the new file.
+        let mut old_h = CodeHighlighter::new(&old, syntax());
+        let expired = old_h
+            .initial_parse(&old)
+            .expect("deferred")
+            .with_timeout_for_test(Duration::ZERO);
+        let expired = expired.run();
+        assert!(!expired.was_cancelled(), "a timeout is not a cancellation");
+        assert!(
+            !new_h.apply_parsed(&new, expired),
+            "a give-up for another file is rejected"
+        );
+        assert!(new_h.is_enabled(), "the new file keeps its coloring");
+        assert!(!new_h.is_too_complex(), "and raises no banner");
+
+        // The new file's own parse still lands.
+        assert!(new_h.parse_initial_blocking(&new));
+        assert!(new_h.has_tree());
+    }
+
+    /// #427: the token is read live at application, so a cancellation that
+    /// arrives after the parse snapshotted its flag still rejects the result.
+    #[test]
+    fn a_result_whose_token_was_cancelled_after_the_snapshot_is_rejected() {
+        let d = doc("late.rs", "fn main() { let value = 1; }\n");
+        let mut h = CodeHighlighter::new(&d, syntax());
+        let parsed = h.initial_parse(&d).expect("deferred").run();
+        assert!(!parsed.was_cancelled(), "the snapshot predates the cancel");
+        h.cancel_deferred();
+        assert!(!h.apply_parsed(&d, parsed), "a cancelled token is rejected");
+        assert!(!h.has_tree());
     }
 
     #[test]
