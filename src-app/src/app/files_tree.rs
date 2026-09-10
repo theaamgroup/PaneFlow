@@ -180,51 +180,62 @@ pub(crate) fn read_dir_listing(root: &Path, dir: &Path) -> (Vec<FileNode>, Listi
     // thousands of ignored / hidden entries is read and gitignore-matched in
     // full before the cap ever applies.
     let mut saw_entry_error = false;
-    let mut nodes: Vec<FileNode> = entries
-        .by_ref()
-        .take(MAX_DIRECTORY_ENTRIES)
-        .filter_map(|entry| {
-            // An entry that vanished mid-scan is skipped, but the listing
-            // then says nothing about what is absent from it.
-            if entry.is_err() {
+    let mut nodes: Vec<FileNode> = Vec::new();
+    for entry in entries.by_ref().take(MAX_DIRECTORY_ENTRIES) {
+        // An entry that vanished mid-scan is skipped, but the listing
+        // then says nothing about what is absent from it.
+        let Ok(entry) = entry else {
+            saw_entry_error = true;
+            continue;
+        };
+        let path = entry.path();
+        // An entry whose type cannot be read is shown as a file, but a
+        // directory misread that way would look deleted to the prune, so
+        // the listing loses its authority over absent children too.
+        let is_dir = match entry_is_dir(entry.file_type()) {
+            Some(is_dir) => is_dir,
+            None => {
                 saw_entry_error = true;
+                false
             }
-            entry.ok()
-        })
-        .filter_map(|entry| {
-            let path = entry.path();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let is_hidden = is_hidden_name(&path);
-            let is_ignored = gitignore
-                .as_ref()
-                .map(|gi| gi.matched(&path, is_dir).is_ignore())
-                .unwrap_or(false);
-            if is_hidden || is_ignored {
-                return None;
-            }
-            // Stat only what survives the filter, and only for files: the
-            // sort, the gitignore pass and the watcher are untouched, this
-            // just carries the size US-019 dims on. A failed stat reads as 0,
-            // i.e. "not too large" - `code::load` still checks the real length
-            // when the file is actually opened.
-            let size = if is_dir {
-                0
-            } else {
-                entry.metadata().map(|m| m.len()).unwrap_or(0)
-            };
-            Some(FileNode {
-                path,
-                is_dir,
-                is_ignored,
-                is_hidden,
-                size,
-            })
-        })
-        .collect();
+        };
+        let is_hidden = is_hidden_name(&path);
+        let is_ignored = gitignore
+            .as_ref()
+            .map(|gi| gi.matched(&path, is_dir).is_ignore())
+            .unwrap_or(false);
+        if is_hidden || is_ignored {
+            continue;
+        }
+        // Stat only what survives the filter, and only for files: the
+        // sort, the gitignore pass and the watcher are untouched, this
+        // just carries the size US-019 dims on. A failed stat reads as 0,
+        // i.e. "not too large" - `code::load` still checks the real length
+        // when the file is actually opened.
+        let size = if is_dir {
+            0
+        } else {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        nodes.push(FileNode {
+            path,
+            is_dir,
+            is_ignored,
+            is_hidden,
+            size,
+        });
+    }
     nodes.sort_by(compare_nodes);
     // One more raw entry past the cap means the walk was cut short.
     let truncated = entries.next().is_some();
     (nodes, listing_authority(saw_entry_error, truncated))
+}
+
+/// `Some(is_dir)` when the entry's type could be read, `None` when it could
+/// not: the caller records that as a skipped entry, because a directory
+/// misread as a file would otherwise look deleted to the worker's prune.
+fn entry_is_dir(file_type: std::io::Result<std::fs::FileType>) -> Option<bool> {
+    file_type.ok().map(|t| t.is_dir())
 }
 
 /// The authority of a listing whose `read_dir` succeeded: `Complete` only
@@ -348,6 +359,20 @@ mod tests {
             is_hidden: false,
             size: 0,
         }
+    }
+
+    #[test]
+    fn an_unreadable_file_type_is_a_skipped_entry_not_a_file() {
+        assert_eq!(
+            entry_is_dir(Err(std::io::Error::other("stat failed"))),
+            None,
+            "a type that could not be read is not classified at all"
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            entry_is_dir(std::fs::metadata(dir.path()).map(|m| m.file_type())),
+            Some(true)
+        );
     }
 
     #[test]
