@@ -56,6 +56,21 @@ pub(super) fn render_diff_new_tab_menu(
             }),
         )
         .child(
+            // No chord: Changes is opt-in (upstream f587f7fc) and reuses its
+            // existing tab when the dock already has one.
+            menu_row(
+                "diff-dock-new-tab-changes",
+                "icons/plus-minus.svg",
+                "Changes",
+                None,
+                ui,
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_diff_new_tab_menu(cx);
+                this.open_diff_changes_tab(cx);
+            })),
+        )
+        .child(
             menu_row(
                 "diff-dock-new-tab-file",
                 "icons/file-text.svg",

@@ -843,6 +843,7 @@ impl PaneFlowApp {
             mode: boot_mode,
             diff_dock: crate::DiffDockState {
                 open: false,
+                rendered: false,
                 data: None,
                 collapsed: std::collections::HashSet::new(),
                 expanded_folds: std::collections::HashSet::new(),
@@ -856,7 +857,7 @@ impl PaneFlowApp {
                 picked: false,
                 owner: None,
                 parked: std::collections::HashMap::new(),
-                diff_tabs: vec![crate::app::diff_dock::DiffDockTab::Changes],
+                diff_tabs: Vec::new(),
                 diff_active_tab: 0,
                 diff_tab_close_armed: None,
                 diff_branch_menu: None,

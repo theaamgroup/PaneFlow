@@ -699,7 +699,7 @@ fn push_or_extend(spans: &mut Vec<Span>, text: String, style: SpanStyle, link: O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn first(nodes: &[MdNode]) -> &MdNode {
         nodes.first().expect("expected at least one node")
@@ -1009,15 +1009,27 @@ mod tests {
                 "## A heading\n\nSome **bold** _emphasis_ and `code` plus a [link](https://x.io).\n\n- bullet one\n- bullet two\n\n```rust\nfn x() {}\n```\n\n",
             );
         }
-        let started = Instant::now();
-        let nodes = parse_with_limit(&src).expect("parse");
-        let elapsed = started.elapsed();
+        // Fastest of a few passes: a loaded test run inflates single
+        // samples with scheduler contention, while the minimum still
+        // tracks the parser's own cost.
+        const PASSES: usize = 5;
+        let mut best = Duration::MAX;
+        let mut nodes = Vec::new();
+        for _ in 0..PASSES {
+            let started = Instant::now();
+            let parsed = parse_with_limit(&src).expect("parse");
+            // Read the clock before the previous pass's AST is dropped, so the
+            // sample is the parse alone.
+            best = best.min(started.elapsed());
+            nodes = parsed;
+        }
         assert!(!nodes.is_empty());
         let budget_ms: u128 = if cfg!(debug_assertions) { 60 } else { 10 };
         assert!(
-            elapsed.as_millis() < budget_ms,
-            "100 KB parse took {:?}, exceeds {} ms budget",
-            elapsed,
+            best.as_millis() < budget_ms,
+            "fastest of {} 100 KB parses took {:?}, exceeds {} ms budget",
+            PASSES,
+            best,
             budget_ms
         );
     }

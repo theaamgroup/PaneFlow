@@ -139,6 +139,7 @@ mod tests {
                 cursor_blink: Some(CursorBlinkConfig::TerminalControlled),
                 env: Some(HashMap::new()),
                 scroll_multiplier: Some(1.0),
+                minimum_contrast: Some(0.0),
                 osc52_clipboard: Some(Osc52ClipboardConfig::CopyOnly),
             }),
             agent_panel: Some(AgentPanelConfig {

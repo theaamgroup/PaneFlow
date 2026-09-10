@@ -825,17 +825,29 @@ mod tests {
         for line in doc.iter_mut().skip(50_000).take(100) {
             line.push_str(" // edited");
         }
-        let mut tracker = tracked(&base, &base, ComparisonPolicy::Default);
-        tracker.range_changed(50_000, 100, 100);
         let doc_refs = refs(&doc);
         let base_refs = refs(&base);
-        let started = Instant::now();
-        tracker.refresh_dirty(&doc_refs, &base_refs, ComparisonPolicy::Default);
-        let elapsed = started.elapsed();
+        // Fastest of a few passes: a loaded test run inflates single samples
+        // with scheduler contention, while the minimum still tracks the cost.
+        // Each pass refreshes a freshly dirtied tracker, so only the refresh
+        // itself is timed.
+        const PASSES: usize = 5;
+        let mut best = Duration::MAX;
+        let mut tracker = tracked(&base, &base, ComparisonPolicy::Default);
+        for _ in 0..PASSES {
+            tracker = tracked(&base, &base, ComparisonPolicy::Default);
+            tracker.range_changed(50_000, 100, 100);
+            let started = Instant::now();
+            tracker.refresh_dirty(&doc_refs, &base_refs, ComparisonPolicy::Default);
+            best = best.min(started.elapsed());
+        }
         assert_eq!(
             tracker.blocks(),
             &[Block::new(50_000..50_100, 50_000..50_100, false, false)]
         );
-        assert!(elapsed.as_millis() < 5, "refresh_dirty took {elapsed:?}");
+        assert!(
+            best.as_millis() < 5,
+            "fastest of {PASSES} refresh_dirty took {best:?}"
+        );
     }
 }

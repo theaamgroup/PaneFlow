@@ -66,6 +66,11 @@ struct TranscriptTurnEndNotification {
     agent: TerminalAgent,
     title: String,
     config: PaneFlowConfig,
+    /// Whether the finishing pane was under the user's eye when the stop
+    /// frame landed (#422). Captured at frame time, as upstream does: the
+    /// transcript read is a few milliseconds of I/O, and the answer the
+    /// completion dot was recorded with is the one the notification honours.
+    seen: bool,
     executor: BackgroundExecutor,
 }
 
@@ -326,11 +331,13 @@ fn fire_turn_end_notification(
     workspace_title: &str,
     session_summary: Option<&str>,
     config: &paneflow_config::schema::PaneFlowConfig,
+    seen: bool,
     executor: gpui::BackgroundExecutor,
 ) {
     desktop_notifications::fire_desktop_notification(
         DesktopNotification::turn_finished(agent, workspace_title, session_summary),
         config,
+        seen,
         executor,
     );
 }
@@ -340,11 +347,13 @@ fn fire_attention_notification(
     workspace_title: &str,
     message: Option<&str>,
     config: &paneflow_config::schema::PaneFlowConfig,
+    seen: bool,
     executor: gpui::BackgroundExecutor,
 ) {
     desktop_notifications::fire_desktop_notification(
         DesktopNotification::needs_input(agent, workspace_title, message),
         config,
+        seen,
         executor,
     );
 }
@@ -679,11 +688,13 @@ fn fire_agent_exit_notification(
     workspace_title: &str,
     exit_code: i32,
     config: &paneflow_config::schema::PaneFlowConfig,
+    seen: bool,
     executor: gpui::BackgroundExecutor,
 ) {
     desktop_notifications::fire_desktop_notification(
         DesktopNotification::agent_exited(agent, workspace_title, exit_code),
         config,
+        seen,
         executor,
     );
 }
@@ -698,11 +709,13 @@ pub(crate) fn fire_stalled_notification(
     workspace_title: &str,
     silent_secs: u64,
     config: &paneflow_config::schema::PaneFlowConfig,
+    seen: bool,
     executor: gpui::BackgroundExecutor,
 ) {
     desktop_notifications::fire_desktop_notification(
         DesktopNotification::stalled(agent, workspace_title, silent_secs),
         config,
+        seen,
         executor,
     );
 }
@@ -1993,10 +2006,12 @@ impl PaneFlowApp {
             // 500 ms; resolve the reloaded block now so the repaint the
             // propagation below triggers measures the new font (#429).
             crate::terminal::element::refresh_font_config(&self.cached_config);
-            // US-015: push the refreshed config to every pane's tab-bar cache.
+            // US-015: push the refreshed config to every pane's tab-bar cache,
+            // and to the dock terminals the layout walk cannot reach.
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
             }
+            self.propagate_config_to_dock_terminals(cx);
             // The embedded settings page reads `self.cached_config` directly and
             // its shortcut list is refreshed above (`effective_shortcuts`), so an
             // external `paneflow.json` edit reflects without any extra push.
@@ -2698,6 +2713,7 @@ impl PaneFlowApp {
                             extracted.as_deref(),
                         ),
                         &notification.config,
+                        notification.seen,
                         notification.executor,
                     );
                 }
@@ -4226,18 +4242,21 @@ impl PaneFlowApp {
                     };
                     let ws_title = ws.title.clone();
                     cx.notify();
-                    fire_attention_notification(
-                        tool,
-                        &ws_title,
-                        message.as_deref(),
-                        &notify_config,
-                        cx.background_executor().clone(),
-                    );
+                    // Bind first: the notification gate needs to know which
+                    // pane is asking to tell "on screen" from "elsewhere".
                     self.bind_or_resolve_session_surface(
                         workspace_id,
                         key,
                         explicit_surface_id,
                         cx,
+                    );
+                    fire_attention_notification(
+                        tool,
+                        &ws_title,
+                        message.as_deref(),
+                        &notify_config,
+                        self.session_is_seen(workspace_id, key, cx),
+                        cx.background_executor().clone(),
                     );
                     self.sync_attention(cx);
                     // EP-001 US-003 (cli-cockpit): WaitingForInput is a safe
@@ -4262,13 +4281,6 @@ impl PaneFlowApp {
                 };
                 let explicit_surface_id = self.validated_frame_surface_id(params, cx);
                 let notify_config = self.cached_config.clone();
-                let workspace_visible = self.settings_section.is_none()
-                    && matches!(self.mode, paneflow_config::schema::AppMode::Cli)
-                    && self
-                        .workspaces
-                        .get(self.active_idx)
-                        .is_some_and(|ws| ws.id == workspace_id)
-                    && desktop_notifications::window_active();
                 if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) {
                     let interrupt_stop = is_interrupt_lifecycle_event(params);
                     // EP-004 US-015: a best-effort summary of the just-finished
@@ -4298,16 +4310,33 @@ impl PaneFlowApp {
                     ) else {
                         return stale_frame_response();
                     };
+                    let ws_title = ws.title.clone();
+                    cx.notify();
+                    // Bind first (#422): the completion dot and the desktop
+                    // notification below are keyed on the surface that
+                    // finished, so the session has to know its pane before
+                    // either asks whether that pane is under the user's eye.
+                    self.bind_or_resolve_session_surface(
+                        workspace_id,
+                        session_key,
+                        explicit_surface_id,
+                        cx,
+                    );
+                    // Same answer as the needs-input, exited and stalled
+                    // notifications: the pane the turn finished in, not the
+                    // workspace. A turn ending in a background tab of the
+                    // active workspace notifies and stays unread.
+                    let seen = self.session_is_seen(workspace_id, session_key, cx);
                     // Counted only for a stop that actually applied, so a
                     // reordered frame can't inflate the completion tally.
-                    if !interrupt_stop {
-                        ws.agent_completion_notification
-                            .record_finished(workspace_visible);
+                    if !interrupt_stop
+                        && let Some(ws) =
+                            self.workspaces.iter_mut().find(|ws| ws.id == workspace_id)
+                    {
+                        ws.agent_completion_notification.record_finished(seen);
                     }
                     // EP-004 US-020: natural turn ends notify when the user is
                     // looking elsewhere. Ctrl+C stops only clear local state.
-                    let ws_title = ws.title.clone();
-                    cx.notify();
                     if !interrupt_stop {
                         if let Some(path) = transcript_to_read {
                             Self::schedule_transcript_turn_end(
@@ -4317,6 +4346,7 @@ impl PaneFlowApp {
                                     agent: tool,
                                     title: ws_title.clone(),
                                     config: notify_config.clone(),
+                                    seen,
                                     executor: cx.background_executor().clone(),
                                 }),
                                 cx,
@@ -4327,16 +4357,11 @@ impl PaneFlowApp {
                                 &ws_title,
                                 session_summary.as_deref(),
                                 &notify_config,
+                                seen,
                                 cx.background_executor().clone(),
                             );
                         }
                     }
-                    self.bind_or_resolve_session_surface(
-                        workspace_id,
-                        session_key,
-                        explicit_surface_id,
-                        cx,
-                    );
                     self.sync_attention(cx);
                     // EP-001 US-003 (cli-cockpit): the turn ended - flush any
                     // queued prompt for this pane (prefill only).
@@ -4420,30 +4445,25 @@ impl PaneFlowApp {
                     };
                     let ws_title = ws.title.clone();
                     cx.notify();
+                    // A crash-on-launch session may have had no prior
+                    // frame: try resolving its pane while the shim (the
+                    // PID anchor) is still alive, so the Errored dot can
+                    // land on a tab and the notification gate knows which
+                    // pane died. No-op if already resolved.
+                    self.bind_or_resolve_session_surface(
+                        workspace_id,
+                        key,
+                        explicit_surface_id,
+                        cx,
+                    );
                     if errored {
                         fire_agent_exit_notification(
                             tool,
                             &ws_title,
                             exit_code,
                             &notify_config,
+                            self.session_is_seen(workspace_id, key, cx),
                             cx.background_executor().clone(),
-                        );
-                        // A crash-on-launch session may have had no prior
-                        // frame: try resolving its pane while the shim (the
-                        // PID anchor) is still alive, so the Errored dot can
-                        // land on a tab. No-op if already resolved.
-                        self.bind_or_resolve_session_surface(
-                            workspace_id,
-                            key,
-                            explicit_surface_id,
-                            cx,
-                        );
-                    } else {
-                        self.bind_or_resolve_session_surface(
-                            workspace_id,
-                            key,
-                            explicit_surface_id,
-                            cx,
                         );
                     }
                     // Clean exits intentionally fire no notification here.

@@ -658,8 +658,12 @@ on a `ROW_RADIUS` squircle, gap 6, px 8, with a 13 px kind icon, the title at
 body size Medium, and a 16 px close slot at radius 6 carrying an 11 px glyph.
 A modified tab swaps that glyph for a 7 px `vc_modified` dot at rest, and
 arming the close paints it `vc_deleted` — the same two-press confirm the pane
-uses. **Changes is the permanent tab 0 and carries no close control**; only
-Terminal, File, and Agent setup tabs close. `MAX_DIFF_FILE_TABS` is 8 and
+uses. **No tab is permanent**: the dock starts with no content tabs, Changes
+is created only when its picker card or `+` menu row is chosen (and reused
+when it already exists), and every tab carries the close control, Changes and
+the first tab included. Closing the last tab returns the dock to the picker,
+re-armed. A Changes tab explicitly opened against a non-git or clean-diff
+workspace keeps the blank Changes body (#393). `MAX_DIFF_FILE_TABS` is 8 and
 counts *file* tabs only; past the cap the leftmost file tab that is neither
 modified nor active is evicted. **The cap yields to unsaved work**: when every
 file tab is modified or active, `file_tab_eviction` returns `None` and the new
@@ -974,8 +978,11 @@ Focus is shown by absence of dim: the focused pane stays at full contrast while
 its siblings fade. There is no focus ring (7.5). An agent that needs the user
 gets the `vc_conflict` border at 0.7 and a sidebar bell; clicking anywhere in
 the panel acknowledges visible completions. The attention queue lists those
-panes and `secondary-shift-j` jumps through them. Native notifications fire
-only while the window is unfocused.
+panes and `secondary-shift-j` jumps through them. A native notification is
+dropped only when its pane is under the user's eye: the window is focused and
+the pane's workspace and tab are on screen (the same test as the completion
+dot, #408 / #422). A pane in another workspace, a background tab, a zoomed-away
+split, or an unmounted dock notifies even while the window is focused.
 
 ## 7. Accessibility
 

@@ -290,6 +290,13 @@
           "maximum": 10.0,
           "default": 1.0
         },
+        "minimum_contrast": {
+          "type": ["number", "null"],
+          "description": "Minimum APCA lightness contrast (Lc) enforced between text and its cell background, on the theme's ANSI colors only. Defaults to 45 (Zed's floor, PaneFlow's long-standing behaviour); 0 disables the floor and leaves theme colors untouched, as in Ghostty. Range 0 to 90. Hot-reloaded.",
+          "minimum": 0.0,
+          "maximum": 90.0,
+          "default": 45.0
+        },
         "osc52_clipboard": {
           "type": ["string", "null"],
           "description": "OSC 52 clipboard policy for programs running in a pane. 'copy_only' lets a focused pane write the system clipboard; 'disabled' ignores every OSC 52 write. Clipboard reads are never served. Applied to newly-created terminals.",

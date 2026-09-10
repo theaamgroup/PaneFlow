@@ -1205,6 +1205,12 @@ struct DiffDockState {
     /// is the only writer, and a drag pinned at the render ceiling leaves a
     /// wider preference alone (`diff_dock::diff_dock_drag_preference`).
     pub(crate) width: f32,
+    /// Whether the last frame actually painted the dock: `open` in CLI mode
+    /// with Settings closed *and* a main panel wide enough to hold the floor
+    /// beside a minimum pane. Written only by `wrap_cli_diff_dock`, read by
+    /// the notification gate (#422): a dock the panel squeezed out is not
+    /// under the user's eye even though it is logically open.
+    pub(crate) rendered: bool,
     /// Live drag anchor `(cursor_x, rendered_width_at_grab)` while the dock's
     /// left edge is being dragged to resize; `None` when not resizing. The
     /// ceiling is not part of the anchor: the dock host re-reads it from the
