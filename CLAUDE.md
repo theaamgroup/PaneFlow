@@ -247,7 +247,9 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     mode.rs gates entry, grid.rs handles opening/split/move/zoom,
 │   │                                     session.rs persists subjects + geometry + collapsed repository groups
 │   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
-│   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor
+│   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor;
+│   │                                     `FilesSidebar` entity (#430): `worker.rs` thread owns the snapshot + watches,
+│   │                                     `projection.rs` builds rows off-thread, `view.rs` is a `uniform_list`
 │   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348;
 │   │                                     Mark as read row, #408, only on a tab with a waiting/errored/stalled session),
 │   │                                     Customize Sidebar menu (`customize_menu.rs`: `sidebar_show` toggles,

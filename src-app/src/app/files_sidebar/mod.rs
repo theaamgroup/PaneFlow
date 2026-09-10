@@ -20,32 +20,40 @@
 //! mirror of the visible tab's flag, reconciled by `sync_files_sidebar_session`.
 //! The rail is hosted by the CLI cockpit only: Review and Settings unmount its
 //! *element* (`files_sidebar_host_visible`), so no focus or keyboard work
-//! happens there, while the tree, its watcher and any background `read_dir`
+//! happens there, while the panel entity, its worker thread and its watches
 //! stay warm underneath - which is why coming back is instant.
 //!
-//! This module holds the state mutations (open/close, re-root, expand/collapse,
-//! open-in-dock) + the container render; the header/body/row rendering lives in
-//! `view.rs`, the type-to-filter matcher in `filter.rs`, and the pure tree model
-//! + fs helpers in `files_tree.rs`.
+//! The tree follows Zed's project-panel shape (issue #430, upstream
+//! `d6a44bfc`): `worker.rs` owns the directory snapshot and the non-recursive
+//! `notify` watches on a dedicated OS thread, `projection.rs` turns a snapshot
+//! plus fold state plus filter query into the ordered rows on the background
+//! executor, and `panel.rs` is the `FilesSidebar` entity that owns the current
+//! projection, selection, focus and scroll handle. `view.rs` / `row.rs` render
+//! only the rows `uniform_list` asks for. This module holds the app-side
+//! placement: open/close, width animation, workspace association, and the
+//! per-tab reconciliation; `integration.rs` turns the panel's events into dock
+//! and session work.
 
 mod context_menu;
 mod filter;
+mod integration;
 mod keyboard;
+mod list;
+mod panel;
+mod projection;
 mod row;
 mod view;
 mod watch;
+mod worker;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Styled, Window,
-    div, px,
-};
+use gpui::{Context, Focusable, Pixels, Window, px};
 
 use paneflow_config::schema::AppMode;
 
-use crate::app::files_tree::{self, FilesTreeState};
 use crate::{PaneFlowApp, ToggleFilesSidebar};
+pub(crate) use panel::{FilesEvent, FilesSidebar};
 
 /// Fixed sidebar width - matches the sessions sidebar (a resizable width is
 /// deferred per the PRD non-goals).
@@ -69,8 +77,8 @@ pub(super) const DIMMED_OPACITY: f32 = 0.55;
 /// with Settings closed. The tree's rows open into the dock's editor, which
 /// only exists there, so Review (`AppMode::Diff`) and Settings unmount the
 /// rail's element instead of painting a tree whose clicks would land nowhere.
-/// Only the element: the tree and its watcher keep running underneath (see
-/// `PaneFlowApp::files_sidebar_host_visible`).
+/// Only the element: the panel entity and its worker keep running underneath
+/// (see `PaneFlowApp::files_sidebar_host_visible`).
 pub(crate) fn files_rail_host_visible(settings_open: bool, mode: AppMode) -> bool {
     !settings_open && matches!(mode, AppMode::Cli)
 }
@@ -79,7 +87,7 @@ pub(crate) fn files_rail_host_visible(settings_open: bool, mode: AppMode) -> boo
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FilesSidebarSync {
     /// The visible tab wants the rail and it is down: open it. Opening
-    /// hydrates from the active workspace's `cwd`, so no re-root follows.
+    /// roots the panel on the active workspace's `cwd`, so no re-root follows.
     Open,
     /// The visible tab does not want the rail and it is up: close it.
     Close,
@@ -110,18 +118,18 @@ impl PaneFlowApp {
     /// what brings the same tree back on return.
     ///
     /// Unmounting is the element and its focus/keyboard handling, nothing
-    /// more: the tree, the `notify` watcher, its 50 ms drain loop in
-    /// `bootstrap.rs` and any in-flight background `read_dir` keep running
-    /// (`watch.rs`),
-    /// which is why the return is instant rather than a re-hydration. Only
-    /// `close_files_sidebar` drops them. Also gates the toggle, so the chord
-    /// cannot flip a rail the user cannot see.
+    /// more: the `FilesSidebar` entity stays active, so its `files-tree`
+    /// worker thread, the `notify` watches it registered and any in-flight
+    /// scan or projection keep running (`worker.rs`, `watch.rs`), which is
+    /// why the return is instant rather than a re-scan. Only
+    /// `close_files_sidebar` deactivates them. Also gates the toggle, so the
+    /// chord cannot flip a rail the user cannot see.
     pub(crate) fn files_sidebar_host_visible(&self) -> bool {
         files_rail_host_visible(self.settings_section.is_some(), self.mode)
     }
 
     /// Toggle the Files sidebar. Opening resolves the active workspace's `cwd`
-    /// to the tree root, reads + auto-expands it, and closes the sessions
+    /// to the tree root, starts the worker on it, and closes the sessions
     /// sidebar (mutual exclusion). Re-clicking closes and releases the tree.
     pub(crate) fn handle_toggle_files_sidebar(
         &mut self,
@@ -134,19 +142,17 @@ impl PaneFlowApp {
         if !self.files_sidebar_host_visible() {
             return;
         }
-        if !self.files_sidebar_open {
-            self.files_surface_id = self
-                .workspaces
-                .get(self.active_idx)
-                .and_then(|ws| ws.active_tab().root.as_ref())
-                .and_then(|root| root.focused_pane(window, cx))
-                .and_then(|pane| pane.read(cx).active_terminal_opt())
-                .map(|terminal| terminal.entity_id().as_u64());
-        }
         self.toggle_files_sidebar(cx);
         if self.files_sidebar_open {
-            self.files_focus.focus(window, cx);
+            self.focus_files_sidebar(window, cx);
         }
+    }
+
+    pub(crate) fn focus_files_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.files_sidebar
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
     }
 
     pub(crate) fn toggle_files_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -161,7 +167,7 @@ impl PaneFlowApp {
         // US-007: restore this workspace's expansion (held on the Workspace,
         // so it survives a previous close within the session and a restart).
         let persisted = ws.files_expanded.clone();
-
+        self.files_sidebar_workspace = Some(ws.id);
         // Mutual exclusion: only one right column is ever visible.
         if self.agent_sessions.sessions_sidebar_open
             || self.agent_sessions.sessions_sidebar_animation.is_some()
@@ -170,31 +176,28 @@ impl PaneFlowApp {
         }
         // Floating dropdowns would paint over the docked panel.
         self.dismiss_transient_surfaces();
-
         self.set_files_sidebar_open(true, cx);
-        self.files_tree_scroll = gpui::ScrollHandle::new();
-        self.files_selected = 0;
-        // US-020: a stale needle from a previous open would hide the tree the
-        // user just asked for.
-        self.files_filter_input
-            .update(cx, |input, cx| input.clear(cx));
-        // US-018: hydrate the tree + install non-recursive watches OFF the
-        // render thread. A root shell paints this frame; `sync_files_expansion`
-        // runs (and reconciles stale persisted paths back into `session.json`)
-        // once hydration lands.
-        self.spawn_files_hydration(root, persisted, cx);
+        self.files_sidebar_root = Some(root.clone());
+        self.files_sidebar
+            .update(cx, |panel, cx| panel.open(root, persisted, cx));
     }
 
-    /// Close the sidebar and release the per-open tree cache + watcher. The
-    /// per-workspace expansion lives on the `Workspace`, so it is NOT reset
-    /// here (US-007) - reopening restores it.
+    /// Close the sidebar: deactivate the panel (its worker thread, watches
+    /// and pending projections stop) and release the snapshot once the
+    /// closing animation has finished with it. The per-workspace expansion
+    /// lives on the `Workspace`, so it is NOT reset here (US-007) - reopening
+    /// restores it.
     pub(crate) fn close_files_sidebar(&mut self, cx: &mut Context<Self>) {
-        // US-005: drop the watch + its channel while closed.
-        self.files_watcher = None;
-        self.files_event_rx = None;
+        self.files_sidebar.update(cx, |panel, _| panel.deactivate());
         // Close any open row context menu so it can't outlive the tree.
         self.files_menu_open = None;
+        self.files_sidebar_root = None;
+        self.files_sidebar_workspace = None;
         self.set_files_sidebar_open(false, cx);
+        if self.files_sidebar_animation.is_none() {
+            self.files_sidebar
+                .update(cx, |panel, cx| panel.release_snapshot(cx));
+        }
     }
 
     fn files_sidebar_width_at(&self, now: std::time::Instant) -> f32 {
@@ -207,13 +210,18 @@ impl PaneFlowApp {
         }
     }
 
-    pub(crate) fn rendered_files_sidebar_width(&mut self, window: &mut Window) -> f32 {
+    pub(crate) fn rendered_files_sidebar_width(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> f32 {
         let now = std::time::Instant::now();
         if let Some(animation) = self.files_sidebar_animation {
             if animation.is_finished(now) {
                 self.files_sidebar_animation = None;
                 if !self.files_sidebar_open {
-                    self.clear_files_sidebar_state();
+                    self.files_sidebar
+                        .update(cx, |panel, cx| panel.release_snapshot(cx));
                 }
                 animation.to_width
             } else {
@@ -239,7 +247,6 @@ impl PaneFlowApp {
             ws.active_tab_mut().files_sidebar_open = open;
         }
         let to_width = if open { FILES_SIDEBAR_WIDTH } else { 0. };
-
         self.files_sidebar_animation =
             if (from_width - to_width).abs() > crate::PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA {
                 Some(crate::SidebarWidthAnimation {
@@ -250,21 +257,7 @@ impl PaneFlowApp {
             } else {
                 None
             };
-
-        if !open && self.files_sidebar_animation.is_none() {
-            self.clear_files_sidebar_state();
-        }
         cx.notify();
-    }
-
-    fn clear_files_sidebar_state(&mut self) {
-        self.files_tree = FilesTreeState::default();
-        self.files_watcher = None;
-        self.files_event_rx = None;
-        self.files_menu_open = None;
-        self.files_surface_id = None;
-        self.files_selected = 0;
-        self.files_dir_refresh_seq.clear();
     }
 
     /// Reconcile the live rail with the session (workspace tab) on screen.
@@ -285,7 +278,7 @@ impl PaneFlowApp {
             .active_workspace()
             .is_some_and(|ws| ws.active_tab().files_sidebar_open);
         match files_sidebar_sync_step(wanted, self.files_sidebar_open) {
-            // Opening hydrates from the active workspace's `cwd`, so the
+            // Opening roots the panel on the active workspace's `cwd`, so the
             // re-root has nothing left to do on this path.
             FilesSidebarSync::Open => self.toggle_files_sidebar(cx),
             FilesSidebarSync::Close => self.close_files_sidebar(cx),
@@ -293,10 +286,10 @@ impl PaneFlowApp {
         }
     }
 
-    /// Re-root the tree on the active workspace's `cwd` when it changed while
+    /// Re-root the panel on the active workspace's `cwd` when it changed while
     /// the sidebar is open (US-002 workspace-switch). No-op when closed or when
-    /// the root is unchanged. Restores the new workspace's expansion (US-007)
-    /// and re-targets the watcher (US-005).
+    /// the root and workspace are unchanged. Restores the new workspace's
+    /// expansion (US-007) and restarts the worker on the new root (US-005).
     pub(crate) fn reroot_files_tree(&mut self, cx: &mut Context<Self>) {
         if !self.files_sidebar_open {
             return;
@@ -304,114 +297,26 @@ impl PaneFlowApp {
         let Some(ws) = self.workspaces.get(self.active_idx) else {
             return;
         };
-        // Borrowed compare: this runs on the render path every frame the rail
-        // is up, and the owning `PathBuf` is only worth building on a miss.
-        if self.files_tree.root == *Path::new(&ws.cwd) {
+        let root = PathBuf::from(&ws.cwd);
+        if self.files_sidebar_root.as_ref() == Some(&root)
+            && self.files_sidebar_workspace == Some(ws.id)
+        {
             return;
         }
-        let root = PathBuf::from(&ws.cwd);
         let persisted = ws.files_expanded.clone();
-        // US-018: re-root off the render thread.
-        self.spawn_files_hydration(root, persisted, cx);
-    }
-
-    /// Expand or collapse a directory. First expand reads its listing (lazy,
-    /// cached thereafter); when the live watcher is unavailable (US-006), every
-    /// expand re-reads so manual navigation stays current without push updates.
-    /// Reads are synchronous on the interaction (not the render path) per the
-    /// PRD's "start synchronous" decision. Mirrors the expansion into the
-    /// workspace + persists it (US-007).
-    fn toggle_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if self.files_tree.expanded.contains(path) {
-            self.files_tree.expanded.remove(path);
-            self.unwatch_files_dir(path);
-        } else {
-            self.files_tree.expanded.insert(path.to_path_buf());
-            self.watch_files_dir(path);
-            let stale =
-                self.files_watcher.is_none() || !self.files_tree.children.contains_key(path);
-            if stale {
-                let listing = files_tree::read_dir_sorted(&self.files_tree.root, path);
-                self.files_tree.children.insert(path.to_path_buf(), listing);
-            }
-        }
-        self.sync_files_expansion();
-        self.clamp_files_selection();
-        self.save_session(cx);
-        cx.notify();
-    }
-
-    /// open a file in the diff dock's editor. Every file goes here,
-    /// markdown included - a `.md` row opens as source, not as a preview.
-    ///
-    /// The dock is the editor's only host, so a click from the sidebar has to
-    /// put it on screen first. `wrap_cli_diff_dock` only mounts the panel when
-    /// all three of its conditions hold, so satisfying `open` alone would
-    /// leave the click opening a tab nobody can see. The rail itself is only
-    /// mounted on the CLI cockpit (`files_sidebar_host_visible`), so the
-    /// Settings dismissal and the return to Cli mode below are idempotent
-    /// belt-and-braces rather than a path a click can reach today.
-    ///
-    /// `open_diff_file_tab` owns the rest of the lifecycle: a file already open
-    /// activates its tab instead of being duplicated, and a file the editor
-    /// refuses (binary, too large) surfaces the US-003 error inside the tab.
-    pub(crate) fn open_file_in_diff_dock(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.settings_section.is_some() {
-            self.close_settings(cx);
-        }
-        // Idempotent when already in Cli mode; otherwise it parks the diff host
-        // and hands focus to the active pane, which `open_diff_file_tab` then
-        // takes back for the editor.
-        self.enter_cli_mode(window, cx);
-        if !self.diff_dock.open {
-            let cwd = self.files_tree.root.to_string_lossy().into_owned();
-            self.open_diff_dock_panel(cwd, cx);
-        }
-        // Opening a document *is* an answer to the dock's surface picker: the
-        // dock must come up on the file, both now and the next time this
-        // workspace toggles it from a pane header.
-        self.diff_dock.picker = false;
-        self.diff_dock.picked = true;
-        self.open_diff_file_tab(path, window, cx);
-    }
-
-    /// Render the docked Files sidebar. Only called when `files_sidebar_open`.
-    pub(crate) fn render_files_sidebar(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let ui = crate::theme::ui_colors();
-        let theme = crate::theme::active_theme();
-        div()
-            .id("files-sidebar")
-            .flex()
-            .flex_col()
-            .w(SIDEBAR_WIDTH)
-            .flex_shrink_0()
-            .h_full()
-            .track_focus(&self.files_focus)
-            .on_key_down(cx.listener(Self::handle_files_sidebar_key_down))
-            // Match the app's other navigation rails: optional native material
-            // on Windows, platform default on macOS, and a light/dark tint on Linux.
-            .bg(crate::app::constants::cockpit_chrome_background(
-                theme.title_bar_background,
-                window.is_window_active(),
-                self.cached_config.cockpit_chrome_material_enabled(),
-            ))
-            .child(self.files_sidebar_header(ui, cx))
-            .child(self.files_sidebar_body(ui, cx))
-            .into_any_element()
+        self.files_sidebar_workspace = Some(ws.id);
+        self.files_sidebar_root = Some(root.clone());
+        self.files_menu_open = None;
+        self.files_sidebar
+            .update(cx, |panel, cx| panel.open(root, persisted, cx));
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod fork_tests {
     use paneflow_config::schema::AppMode;
 
     use super::{FilesSidebarSync, files_rail_host_visible, files_sidebar_sync_step};
@@ -440,7 +345,7 @@ mod tests {
     }
 
     /// #184 Phase 4: the rail lives on the CLI cockpit only. Review and
-    /// Settings unmount its element; the tree and watcher stay warm.
+    /// Settings unmount its element; the panel and its worker stay warm.
     #[test]
     fn files_rail_is_hosted_only_by_the_cli_cockpit_without_settings() {
         assert!(files_rail_host_visible(false, AppMode::Cli));
@@ -484,7 +389,7 @@ mod tests {
         let set_open = between(
             sidebar,
             "fn set_files_sidebar_open(",
-            "fn clear_files_sidebar_state(",
+            "pub(crate) fn sync_files_sidebar_session(",
         );
         assert!(
             set_open.contains("ws.active_tab_mut().files_sidebar_open = open;"),
@@ -512,10 +417,11 @@ mod tests {
     /// The Settings and Review surfaces do not render the Files rail's
     /// element at all - no focus or keyboard work happens there - and the
     /// chord cannot flip a rail the user cannot see. Only the element goes:
-    /// the tree, the `notify` watcher and its drain loop stay warm
-    /// (`watch.rs`), which is why the rail is back instantly on return and
-    /// why `close_files_sidebar` is the only thing that drops them. This
-    /// pins the mount gate; it does not claim the watcher stops.
+    /// the panel entity stays active, so its worker thread and its watches
+    /// stay warm (`worker.rs`), which is why the rail is back instantly on
+    /// return and why `close_files_sidebar` is the only thing that
+    /// deactivates them. This pins the mount gate and the deactivation
+    /// chokepoint; it does not claim the watcher stops.
     #[test]
     fn review_and_settings_unmount_the_files_rail() {
         let render = app_render();
@@ -550,18 +456,36 @@ mod tests {
         let toggle = between(
             sidebar,
             "pub(crate) fn handle_toggle_files_sidebar(",
-            "pub(crate) fn toggle_files_sidebar(",
+            "pub(crate) fn focus_files_sidebar(",
         );
         assert!(
             toggle.contains("if !self.files_sidebar_host_visible() {\n            return;"),
             "the chord is inert off the cockpit: {toggle}"
+        );
+        // Warm on unmount: the only production caller of `panel.deactivate()`
+        // is the close path, so leaving the cockpit never stops the worker.
+        let deactivations = sidebar.matches("panel.deactivate()").count();
+        assert_eq!(
+            deactivations, 1,
+            "mod.rs must deactivate the panel from close_files_sidebar only"
+        );
+        let close = between(
+            sidebar,
+            "pub(crate) fn close_files_sidebar(",
+            "fn files_sidebar_width_at(",
+        );
+        assert!(
+            close.contains("panel.deactivate()"),
+            "closing the rail is what stops the worker: {close}"
         );
     }
 
     /// A `.md` row is a file like any other: a click (or Enter) opens it as
     /// source in the dock editor, and rows carry no drag. The markdown
     /// drag-to-pane path is gone from the row, the payload, the pane's drop
-    /// targets and the app's event handler.
+    /// targets and the app's event handler. The panel emits
+    /// `FilesEvent::OpenFile` for every file and `integration.rs` turns that
+    /// into `open_diff_file_tab`, so there is exactly one destination.
     #[test]
     fn markdown_rows_open_as_source_in_the_dock_editor_and_carry_no_drag() {
         let row = production(include_str!("row.rs"));
@@ -577,8 +501,8 @@ mod tests {
             );
         }
         assert!(
-            row.contains("this.open_file_in_diff_dock(click_path.clone(), window, cx);"),
-            "a row click opens the file in the dock editor"
+            row.contains("this.activate_path(&click_path, is_dir, window, cx);"),
+            "a row click goes through the one activation path"
         );
 
         let keyboard = production(include_str!("keyboard.rs"));
@@ -588,14 +512,32 @@ mod tests {
                 "keyboard.rs must not contain {forbidden:?}"
             );
         }
+        let activate = between(
+            keyboard,
+            "pub(super) fn activate_path(",
+            "pub(super) fn clear_files_filter(",
+        );
         assert!(
-            keyboard.contains("self.open_file_in_diff_dock(path, window, cx);"),
-            "Enter on a row opens the file in the dock editor"
+            activate.contains("cx.emit(FilesEvent::OpenFile {"),
+            "every file row (Enter or click) emits OpenFile: {activate}"
+        );
+        assert!(
+            keyboard.contains("self.activate_path(&row.node.path, row.node.is_dir, window, cx)"),
+            "Enter on a row goes through the same activation path as a click"
         );
 
-        let sidebar = production(include_str!("mod.rs"));
+        let integration = production(include_str!("integration.rs"));
+        let open = between(
+            integration,
+            "fn open_file_in_diff_dock(",
+            "pub(crate) fn render_files_sidebar(",
+        );
         assert!(
-            !sidebar.contains("fn open_markdown_in_active_pane"),
+            open.contains("self.open_diff_file_tab(path, window, cx);"),
+            "OpenFile lands in the dock editor as source: {open}"
+        );
+        assert!(
+            !integration.contains("open_markdown_in_active_pane"),
             "the sidebar no longer opens rendered markdown panes"
         );
 
@@ -634,5 +576,69 @@ mod tests {
         let session = include_str!("../session.rs");
         assert!(session.contains("surface.surface_type.as_deref() == Some(\"markdown\")"));
         assert!(session.contains("return Some(crate::pane::PaneSurface::Markdown(markdown));"));
+    }
+
+    /// Issue #317 (deep-review S2): the filter's clear control must stay the
+    /// labelled 24 px button `filter_pill_with_clear_cursor` builds, not a
+    /// bare 16 px icon. Upstream's `d6a44bfc` rewrote the filter around the
+    /// projection's `query`; that is what the filter computes, not how the
+    /// clear control is presented, so the rail keeps going through the shared
+    /// `filter_pill` primitive whose body
+    /// `filter_pill_clear_control_is_a_labeled_24px_button` pins.
+    #[test]
+    fn files_filter_keeps_the_labelled_clear_control() {
+        let view = production(include_str!("view.rs"));
+        let filter_row = between(view, "fn files_filter_row(", "fn files_sidebar_body(");
+        assert!(
+            filter_row.contains("crate::ui_primitives::filter_pill("),
+            "the filter field is the shared pill: {filter_row}"
+        );
+        assert!(
+            filter_row.contains("\"files-sidebar-filter-clear\""),
+            "the pill gets its clear control id: {filter_row}"
+        );
+        assert!(
+            filter_row.contains("!is_empty,"),
+            "the clear control shows whenever there is a needle to clear: {filter_row}"
+        );
+        assert!(
+            filter_row.contains("this.clear_files_filter(window, cx);"),
+            "the clear control clears the filter and returns focus to the tree: {filter_row}"
+        );
+
+        let primitives = include_str!("../../ui_primitives.rs");
+        let pill = between(
+            primitives,
+            "pub(crate) fn filter_pill(",
+            "fn filter_pill_with_clear_cursor(",
+        );
+        assert!(
+            pill.contains("filter_pill_with_clear_cursor("),
+            "filter_pill must build its clear control through the labelled variant: {pill}"
+        );
+    }
+
+    /// Issue #238: the worker's scan must read directories through the
+    /// capped `read_dir_listing` (the authority-carrying form of
+    /// `read_dir_sorted`), which bounds the raw `read_dir` walk before
+    /// the ignore filter. A scan that reads on its own reopens the
+    /// pathological-directory hang the cap closed.
+    #[test]
+    fn files_worker_scans_through_the_capped_read_dir() {
+        let worker = production(include_str!("worker.rs"));
+        let scan = between(worker, "fn scan(&mut self", "fn watcher_available(");
+        assert!(
+            scan.contains("read_dir_listing(root, &dir)"),
+            "the scan reads every directory through read_dir_listing: {scan}"
+        );
+        assert!(
+            !worker.contains("std::fs::read_dir("),
+            "worker.rs must not walk directories on its own"
+        );
+        let tree = include_str!("../files_tree.rs");
+        assert!(
+            tree.contains(".take(MAX_DIRECTORY_ENTRIES)"),
+            "read_dir_sorted keeps the #238 raw-entry cap"
+        );
     }
 }

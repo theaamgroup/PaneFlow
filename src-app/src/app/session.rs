@@ -768,7 +768,7 @@ impl PaneFlowApp {
         workspace.managed_worktrees = restored_worktrees;
         // US-007: rehydrate expanded dirs as absolute paths under this
         // workspace's cwd. Paths that no longer resolve to a directory are
-        // dropped lazily later (by the tree's `hydrated` filter on open),
+        // dropped lazily later (by the files worker's scan on open),
         // so a deleted folder never resurrects a dead row.
         workspace.files_expanded = ws_session
             .expanded_paths

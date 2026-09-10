@@ -54,7 +54,7 @@ pub(crate) struct VisibleRowRef<'a> {
 /// In-memory tree state for the open Files sidebar. Rebuilt on open and on
 /// workspace re-root; cleared on close. `children` is a lazy cache keyed by
 /// directory path - a directory is read on first expand and kept thereafter.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct FilesTreeState {
     pub root: PathBuf,
     pub expanded: HashSet<PathBuf>,
@@ -64,9 +64,9 @@ pub(crate) struct FilesTreeState {
 impl FilesTreeState {
     /// US-018: a root-only shell - the root marked expanded but with no
     /// directory listings read yet. Shown synchronously the instant the sidebar
-    /// opens so the panel renders without blocking, while
-    /// [`crate::PaneFlowApp::spawn_files_hydration`] fills the listings and
-    /// installs the non-recursive watcher on a background task.
+    /// opens so the panel renders without blocking, while the `files-tree`
+    /// worker (`files_sidebar/worker.rs`) fills the listings and registers
+    /// the non-recursive watches on its own thread.
     pub(crate) fn root_shell(root: PathBuf) -> Self {
         let mut expanded = HashSet::new();
         expanded.insert(root.clone());
@@ -82,30 +82,6 @@ impl FilesTreeState {
     /// a transient loading state instead of a false empty folder.
     pub(crate) fn root_listing_ready(&self) -> bool {
         self.children.contains_key(&self.root)
-    }
-
-    /// Build a state rooted at `root`, restoring `persisted` expanded
-    /// directories (US-007). The root is always expanded; each persisted path
-    /// is restored only if it still resolves to a directory under the root -
-    /// stale paths (deleted folders) are silently dropped. Every restored dir's
-    /// listing is read so the flatten has a cache to walk.
-    pub(crate) fn hydrated(root: PathBuf, persisted: &[PathBuf]) -> Self {
-        let mut expanded = HashSet::new();
-        expanded.insert(root.clone());
-        for p in persisted {
-            if *p != root && p.starts_with(&root) && p.is_dir() {
-                expanded.insert(p.clone());
-            }
-        }
-        let mut children = HashMap::new();
-        for dir in &expanded {
-            children.insert(dir.clone(), read_dir_sorted(&root, dir));
-        }
-        Self {
-            root,
-            expanded,
-            children,
-        }
     }
 }
 
@@ -166,55 +142,117 @@ pub(crate) fn compare_nodes(a: &FileNode, b: &FileNode) -> std::cmp::Ordering {
     })
 }
 
-const MAX_DIRECTORY_ENTRIES: usize = 2_000;
+pub(crate) const MAX_DIRECTORY_ENTRIES: usize = 2_000;
+
+/// How much a directory listing can be trusted about what is *absent* from
+/// it. Only a `Complete` listing may be read as "this child no longer
+/// exists"; a `Truncated` or `Failed` one says nothing about the children it
+/// does not name, so the worker never prunes or unwatches on its strength.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListingAuthority {
+    /// Every raw entry was read.
+    Complete,
+    /// At least one entry could not be read and was skipped, so an absent
+    /// child may still exist on disk. Transient: the worker re-reads it.
+    Truncated,
+    /// The raw walk stopped at `MAX_DIRECTORY_ENTRIES` (issue #238). As
+    /// silent about absent children as `Truncated`, but permanent: the
+    /// directory is not going to shrink, so it is never polled.
+    Capped,
+    /// `read_dir` itself failed (permissions / removed).
+    Failed,
+}
 
 /// Read a directory into sorted [`FileNode`]s. Non-panicking: an unreadable
 /// directory (permissions / removed) yields an empty listing rather than an
 /// error. `root` anchors the gitignore matcher so root-level patterns
-/// (`target/`, `node_modules/`, …) tint nested entries too.
+/// (`target/`, `node_modules/`, …) tint nested entries too. The worker reads
+/// through [`read_dir_listing`]; this form serves the listing tests.
+#[cfg(test)]
 pub(crate) fn read_dir_sorted(root: &Path, dir: &Path) -> Vec<FileNode> {
+    read_dir_listing(root, dir).0
+}
+
+/// [`read_dir_sorted`] plus the [`ListingAuthority`] of the result.
+pub(crate) fn read_dir_listing(root: &Path, dir: &Path) -> (Vec<FileNode>, ListingAuthority) {
     let gitignore = build_gitignore(root, dir);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    let Ok(mut entries) = std::fs::read_dir(dir) else {
+        return (Vec::new(), ListingAuthority::Failed);
     };
     // Cap the raw walk, not the surviving rows: otherwise a directory of
     // thousands of ignored / hidden entries is read and gitignore-matched in
     // full before the cap ever applies.
-    let mut nodes: Vec<FileNode> = entries
-        .take(MAX_DIRECTORY_ENTRIES)
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let is_hidden = is_hidden_name(&path);
-            let is_ignored = gitignore
-                .as_ref()
-                .map(|gi| gi.matched(&path, is_dir).is_ignore())
-                .unwrap_or(false);
-            if is_hidden || is_ignored {
-                return None;
+    let mut saw_entry_error = false;
+    let mut nodes: Vec<FileNode> = Vec::new();
+    for entry in entries.by_ref().take(MAX_DIRECTORY_ENTRIES) {
+        // An entry that vanished mid-scan is skipped, but the listing
+        // then says nothing about what is absent from it.
+        let Ok(entry) = entry else {
+            saw_entry_error = true;
+            continue;
+        };
+        let path = entry.path();
+        // An entry whose type cannot be read is shown as a file, but a
+        // directory misread that way would look deleted to the prune, so
+        // the listing loses its authority over absent children too.
+        let is_dir = match entry_is_dir(entry.file_type()) {
+            Some(is_dir) => is_dir,
+            None => {
+                saw_entry_error = true;
+                false
             }
-            // Stat only what survives the filter, and only for files: the
-            // sort, the gitignore pass and the watcher are untouched, this
-            // just carries the size US-019 dims on. A failed stat reads as 0,
-            // i.e. "not too large" - `code::load` still checks the real length
-            // when the file is actually opened.
-            let size = if is_dir {
-                0
-            } else {
-                entry.metadata().map(|m| m.len()).unwrap_or(0)
-            };
-            Some(FileNode {
-                path,
-                is_dir,
-                is_ignored,
-                is_hidden,
-                size,
-            })
-        })
-        .collect();
+        };
+        let is_hidden = is_hidden_name(&path);
+        let is_ignored = gitignore
+            .as_ref()
+            .map(|gi| gi.matched(&path, is_dir).is_ignore())
+            .unwrap_or(false);
+        if is_hidden || is_ignored {
+            continue;
+        }
+        // Stat only what survives the filter, and only for files: the
+        // sort, the gitignore pass and the watcher are untouched, this
+        // just carries the size US-019 dims on. A failed stat reads as 0,
+        // i.e. "not too large" - `code::load` still checks the real length
+        // when the file is actually opened.
+        let size = if is_dir {
+            0
+        } else {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        nodes.push(FileNode {
+            path,
+            is_dir,
+            is_ignored,
+            is_hidden,
+            size,
+        });
+    }
     nodes.sort_by(compare_nodes);
-    nodes
+    // One more raw entry past the cap means the walk was cut short.
+    let capped = entries.next().is_some();
+    (nodes, listing_authority(saw_entry_error, capped))
+}
+
+/// `Some(is_dir)` when the entry's type could be read, `None` when it could
+/// not: the caller records that as a skipped entry, because a directory
+/// misread as a file would otherwise look deleted to the worker's prune.
+fn entry_is_dir(file_type: std::io::Result<std::fs::FileType>) -> Option<bool> {
+    file_type.ok().map(|t| t.is_dir())
+}
+
+/// The authority of a listing whose `read_dir` succeeded: `Complete` only
+/// when every raw entry was read and none was skipped over an error. The cap
+/// outranks a skipped entry: a re-read cannot make a capped listing whole,
+/// so it must not be classified as something worth retrying.
+fn listing_authority(saw_entry_error: bool, capped: bool) -> ListingAuthority {
+    if capped {
+        ListingAuthority::Capped
+    } else if saw_entry_error {
+        ListingAuthority::Truncated
+    } else {
+        ListingAuthority::Complete
+    }
 }
 
 fn is_hidden_name(path: &Path) -> bool {
@@ -253,9 +291,14 @@ pub(crate) fn flatten_visible(
     expanded: &HashSet<PathBuf>,
     children: &HashMap<PathBuf, Vec<FileNode>>,
 ) -> Vec<VisibleRow> {
-    let mut out = Vec::new();
-    push_children(root, 0, expanded, children, &mut out);
-    out
+    flatten_visible_refs(root, expanded, children)
+        .into_iter()
+        .map(|row| VisibleRow {
+            node: row.node.clone(),
+            depth: row.depth,
+            expanded: row.expanded,
+        })
+        .collect()
 }
 
 /// Path relative to the workspace root for "Copy relative path" (US-009).
@@ -268,25 +311,6 @@ pub(crate) fn workspace_relative_path(root: &Path, path: &Path) -> String {
     }
 }
 
-/// Coalesce a batch of affected directory paths into the minimal set to
-/// re-read (US-005): dedup, then drop any path that has an ancestor also in
-/// the set - a parent re-read subsumes its queued descendants (the burst-safe
-/// "parent change drops queued child events" rule). Pure / unit-tested.
-pub(crate) fn coalesce_by_prefix(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut dirs = dirs;
-    dirs.sort();
-    dirs.dedup();
-
-    let mut out: Vec<PathBuf> = Vec::new();
-    for dir in dirs {
-        if out.last().is_some_and(|parent| dir.starts_with(parent)) {
-            continue;
-        }
-        out.push(dir);
-    }
-    out
-}
-
 pub(crate) fn flatten_visible_refs<'a>(
     root: &Path,
     expanded: &HashSet<PathBuf>,
@@ -295,14 +319,6 @@ pub(crate) fn flatten_visible_refs<'a>(
     let mut out = Vec::new();
     push_children_refs(root, 0, expanded, children, &mut out);
     out
-}
-
-pub(crate) fn visible_len(
-    root: &Path,
-    expanded: &HashSet<PathBuf>,
-    children: &HashMap<PathBuf, Vec<FileNode>>,
-) -> usize {
-    count_children(root, expanded, children)
 }
 
 fn push_children_refs<'a>(
@@ -324,50 +340,6 @@ fn push_children_refs<'a>(
         });
         if is_expanded {
             push_children_refs(&node.path, depth + 1, expanded, children, out);
-        }
-    }
-}
-
-fn count_children(
-    dir: &Path,
-    expanded: &HashSet<PathBuf>,
-    children: &HashMap<PathBuf, Vec<FileNode>>,
-) -> usize {
-    let Some(listing) = children.get(dir) else {
-        return 0;
-    };
-    listing
-        .iter()
-        .map(|node| {
-            1 + if node.is_dir && expanded.contains(&node.path) {
-                count_children(&node.path, expanded, children)
-            } else {
-                0
-            }
-        })
-        .sum()
-}
-
-#[cfg(test)]
-fn push_children(
-    dir: &Path,
-    depth: usize,
-    expanded: &HashSet<PathBuf>,
-    children: &HashMap<PathBuf, Vec<FileNode>>,
-    out: &mut Vec<VisibleRow>,
-) {
-    let Some(listing) = children.get(dir) else {
-        return;
-    };
-    for node in listing {
-        let is_expanded = node.is_dir && expanded.contains(&node.path);
-        out.push(VisibleRow {
-            node: node.clone(),
-            depth,
-            expanded: is_expanded,
-        });
-        if is_expanded {
-            push_children(&node.path, depth + 1, expanded, children, out);
         }
     }
 }
@@ -397,13 +369,38 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_file_type_is_a_skipped_entry_not_a_file() {
+        assert_eq!(
+            entry_is_dir(Err(std::io::Error::other("stat failed"))),
+            None,
+            "a type that could not be read is not classified at all"
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            entry_is_dir(std::fs::metadata(dir.path()).map(|m| m.file_type())),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn listing_authority_is_complete_only_without_skipped_entries_or_truncation() {
+        assert_eq!(listing_authority(false, false), ListingAuthority::Complete);
+        assert_eq!(listing_authority(true, false), ListingAuthority::Truncated);
+        assert_eq!(listing_authority(false, true), ListingAuthority::Capped);
+        assert_eq!(
+            listing_authority(true, true),
+            ListingAuthority::Capped,
+            "a skipped entry inside a capped walk is still a capped listing"
+        );
+    }
+
+    #[test]
     fn root_shell_marks_root_listing_not_ready() {
         let root = PathBuf::from("/r");
-        let shell = FilesTreeState::root_shell(root.clone());
+        let mut shell = FilesTreeState::root_shell(root.clone());
         assert!(!shell.root_listing_ready());
-
-        let hydrated = FilesTreeState::hydrated(root, &[]);
-        assert!(hydrated.root_listing_ready());
+        shell.children.insert(root, Vec::new());
+        assert!(shell.root_listing_ready());
     }
 
     #[test]
@@ -471,29 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_parent_drops_children() {
-        let out = coalesce_by_prefix(vec![
-            PathBuf::from("/r"),
-            PathBuf::from("/r/src"),
-            PathBuf::from("/r/src/inner"),
-        ]);
-        assert_eq!(out, vec![PathBuf::from("/r")]);
-    }
-
-    #[test]
-    fn coalesce_preserves_siblings() {
-        let mut out = coalesce_by_prefix(vec![PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
-        out.sort();
-        assert_eq!(out, vec![PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
-    }
-
-    #[test]
-    fn coalesce_dedups() {
-        let out = coalesce_by_prefix(vec![PathBuf::from("/r/a"), PathBuf::from("/r/a")]);
-        assert_eq!(out, vec![PathBuf::from("/r/a")]);
-    }
-
-    #[test]
     fn relative_path_nested() {
         assert_eq!(
             workspace_relative_path(Path::new("/r"), Path::new("/r/a/b.md")),
@@ -518,45 +492,11 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_does_not_treat_name_prefix_as_ancestor() {
-        // `/r/src2` is NOT under `/r/src` - string-prefix would wrongly fold
-        // it, but `Path::starts_with` is component-wise so both survive.
-        let mut out = coalesce_by_prefix(vec![PathBuf::from("/r/src"), PathBuf::from("/r/src2")]);
-        out.sort();
-        assert_eq!(out, vec![PathBuf::from("/r/src"), PathBuf::from("/r/src2")]);
-    }
-
-    #[test]
     fn flatten_missing_root_listing_is_empty() {
         let root = PathBuf::from("/r");
         let children = HashMap::new();
         let expanded = HashSet::new();
         assert!(flatten_visible(&root, &expanded, &children).is_empty());
-    }
-
-    #[test]
-    fn hydrated_restores_existing_dirs_and_drops_stale_dirs() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        let src = root.join("src");
-        let stale = root.join("stale");
-        std::fs::create_dir(&src).expect("src dir");
-        std::fs::write(src.join("lib.rs"), "").expect("src file");
-
-        let tree = FilesTreeState::hydrated(root.clone(), &[src.clone(), stale.clone()]);
-
-        assert!(tree.expanded.contains(&root));
-        assert!(tree.expanded.contains(&src));
-        assert!(!tree.expanded.contains(&stale));
-        assert!(tree.children.contains_key(&root));
-        assert!(tree.children.contains_key(&src));
-        assert!(
-            tree.children
-                .get(&src)
-                .expect("src listing")
-                .iter()
-                .any(|node| node.path == src.join("lib.rs"))
-        );
     }
 
     // ── US-019: editor-refusal tiers ────────────────────────────────────────

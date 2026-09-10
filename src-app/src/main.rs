@@ -261,6 +261,8 @@ pub(crate) struct PaneContextMenu {
 /// relative path" resolves the workspace root at render/action time.
 #[derive(Clone)]
 pub(crate) struct FilesContextMenu {
+    /// Tree root the row belongs to; "Copy relative path" resolves against it.
+    pub(crate) root: std::path::PathBuf,
     pub(crate) path: std::path::PathBuf,
     pub(crate) position: Point<Pixels>,
 }
@@ -1465,36 +1467,18 @@ struct PaneFlowApp {
     /// Width animation for opening/closing the docked Files right sidebar.
     /// Matches the agent-sessions sidebar animation.
     files_sidebar_animation: Option<SidebarWidthAnimation>,
-    /// In-memory tree state for the open Files sidebar (root + expanded set +
-    /// lazily-cached directory listings). Empty when the sidebar is closed.
-    files_tree: app::files_tree::FilesTreeState,
-    /// Scroll state for the Files tree body. Re-created on every open so a
-    /// fresh sidebar starts at offset 0.
-    files_tree_scroll: gpui::ScrollHandle,
-    /// Keyboard-selected visible Files row. The index is over visible rows only.
-    files_selected: usize,
-    /// US-020: the Files sidebar type-to-filter needle. A real single-line
-    /// `TextInput`, observed at bootstrap so each keystroke re-renders.
-    pub(crate) files_filter_input: gpui::Entity<crate::widgets::text_input::TextInput>,
-    /// Focus target for keyboard navigation inside the docked Files sidebar.
-    files_focus: FocusHandle,
-    /// Surface id of the terminal that had focus when the Files sidebar was
-    /// opened by the chord. Nothing reads it since the sidebar stopped
-    /// opening rendered markdown panes (#184 Phase 4: every row opens in the
-    /// dock editor); it is cleared with the rest of the per-open state.
-    files_surface_id: Option<u64>,
-    /// Recursive `notify` watcher on the Files tree root (EP-002 US-005).
-    /// `None` when the sidebar is closed or the watch could not be installed
-    /// (US-006 graceful degradation - the tree then refreshes on expand).
-    files_watcher: Option<notify::RecommendedWatcher>,
-    /// Receiver for raw watch events, drained + debounced by the background
-    /// loop in `bootstrap`. `Some` only while a watcher is installed.
-    files_event_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
-    /// Invalidates detached Files tree hydration stages from an older open.
-    files_hydrate_generation: u64,
-    /// Per-directory refresh sequence so an older `smol::unblock` listing
-    /// cannot overwrite a newer one that shared the same hydration generation.
-    files_dir_refresh_seq: std::collections::HashMap<std::path::PathBuf, u64>,
+    /// The Files rail's own entity (issue #430, upstream `d6a44bfc`): the
+    /// cached tree snapshot, its worker thread and watches, the projection,
+    /// selection, filter, focus and scroll all live there. Created once at
+    /// bootstrap and reused across opens; `close_files_sidebar` deactivates
+    /// it and releases the snapshot once the closing animation is done.
+    files_sidebar: Entity<app::files_sidebar::FilesSidebar>,
+    /// Root the rail is currently showing, or `None` while closed. Compared
+    /// against the active workspace's `cwd` by `reroot_files_tree`.
+    files_sidebar_root: Option<std::path::PathBuf>,
+    /// Workspace id the rail is rooted on, so two workspaces on the same
+    /// `cwd` still re-root (their expansion sets differ).
+    files_sidebar_workspace: Option<u64>,
     /// Open right-click context menu for a Files-sidebar row (EP-003 US-009),
     /// or `None` when closed. Mutually exclusive with the other popovers.
     files_menu_open: Option<FilesContextMenu>,
@@ -1937,7 +1921,7 @@ impl Render for PaneFlowApp {
         if files_sidebar_host_visible {
             self.sync_files_sidebar_session(cx);
         }
-        let animated_files_sidebar_width = self.rendered_files_sidebar_width(window);
+        let animated_files_sidebar_width = self.rendered_files_sidebar_width(window, cx);
         let files_sidebar_width = if files_sidebar_host_visible {
             animated_files_sidebar_width
         } else {

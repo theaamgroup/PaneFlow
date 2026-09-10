@@ -77,6 +77,43 @@ own crate and never links GPUI.
   scanning a monorepo on the render thread is how you get a "not responding"
   window, so the codebase treats the main thread as render-only.
 
+## Files tree
+
+The right Files rail has its own `FilesSidebar` GPUI entity, mounted with
+the view cache. `PaneFlowApp` owns its placement, workspace association and
+editor integration; row hover and keyboard selection update the rail entity.
+The implementation is under `src-app/src/app/files_sidebar/` (issue #430,
+upstream `d6a44bfc`).
+
+Three states have separate lifetimes, following Zed's project panel model:
+
+- `worker.rs` owns the directory snapshot and nonrecursive filesystem watches
+  on a dedicated thread. It registers each watch before reading the directory,
+  loads newly expanded directories, and refreshes invalidated listings. Loaded
+  collapsed directories remain searchable and watched. Deleted or ignored
+  subtrees are pruned. Watch events are coalesced in the worker; unavailable
+  watches fall back to background polling and registration retries. Every
+  read goes through `files_tree::read_dir_sorted`, which keeps the #238 cap on
+  the raw `read_dir` walk ahead of the ignore filter.
+- `projection.rs` prepares ordered rows, labels, icons, filter highlights and
+  a path-to-index map on GPUI's background executor. Tree, expansion and query
+  changes replace the pending projection task. Epoch and revision checks
+  discard results from an earlier root, fold state or query.
+- `panel.rs` owns the current projection, path-based selection, input focus and
+  uniform-list scroll handle. `view.rs` renders only the requested row range.
+  Hover uses the immediate squircle state and does not flatten, filter or sort
+  the tree. Selection survives insertions; a collapsed selection returns to
+  its visible ancestor. Keyboard navigation reveals the selected row.
+
+Closing or switching workspaces cancels the worker and pending publications.
+The closing animation keeps its last snapshot until it finishes, then releases
+the snapshot on a background executor. The rail keeps PaneFlow's 300 px width,
+28 px rows, icons, indentation and full-width hover inside the 8 px edge insets.
+It stays a per-tab (`Tab::files_sidebar_open`), CLI-cockpit-only rail: Review
+and Settings unmount its element while the entity and its worker stay warm,
+every row (`.md` included) opens as source in the dock editor, and rows carry
+no drag.
+
 ## Editor and diff syntax highlighting
 
 The editor's `CodeHighlighter` and the diff view's `highlight_lines` share
