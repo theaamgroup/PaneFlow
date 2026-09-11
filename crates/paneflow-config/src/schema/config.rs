@@ -76,6 +76,15 @@ pub struct PaneFlowConfig {
     /// storage-order.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub workspace_auto_sort: Option<bool>,
+    /// Legacy new-tab switch, used only when `new_tab_branch` is absent.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub new_tabs_on_main: Option<bool>,
+    /// Default branch for new tabs. Absent defaults to main; empty uses the workspace checkout.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub new_tab_branch: Option<String>,
+    /// New-tab branch overrides keyed by workspace cwd. Empty uses that workspace's checkout.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub workspace_new_tab_branches: HashMap<String, String>,
     /// Show the built-in "Open in Zed" workspace context-menu row.
     /// Explicit booleans override; `None` shows it only when the `zed` CLI is
     /// installed. This affects menu chrome only, not the global keybinding.
@@ -506,6 +515,30 @@ impl PaneFlowConfig {
     /// Resolve the reduce-motion switch. Absent means full motion.
     pub fn reduce_motion_enabled(&self) -> bool {
         self.reduce_motion.unwrap_or(false)
+    }
+
+    /// Global new-tab policy, including compatibility with the original toggle.
+    pub fn default_new_tab_branch(&self) -> &str {
+        self.new_tab_branch
+            .as_deref()
+            .unwrap_or_else(|| {
+                if self.new_tabs_on_main == Some(false) {
+                    ""
+                } else {
+                    "main"
+                }
+            })
+            .trim()
+    }
+
+    /// A workspace-specific choice wins over the global default. An empty
+    /// choice deliberately selects the workspace checkout rather than inheriting.
+    pub fn new_tab_branch_for_workspace(&self, cwd: &str) -> Option<&str> {
+        let branch = self
+            .workspace_new_tab_branches
+            .get(cwd)
+            .map_or_else(|| self.default_new_tab_branch(), |branch| branch.trim());
+        (!branch.is_empty()).then_some(branch)
     }
 
     /// Resolve the workspace auto-sort switch. Absent means the manual,

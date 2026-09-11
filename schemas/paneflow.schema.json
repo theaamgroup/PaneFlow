@@ -129,6 +129,22 @@
         }
       }
     },
+    "new_tabs_on_main": {
+      "type": ["boolean", "null"],
+      "deprecated": true,
+      "description": "Legacy new-tab switch. Used only when new_tab_branch is absent: false uses the workspace checkout; otherwise main."
+    },
+    "new_tab_branch": {
+      "type": ["string", "null"],
+      "default": "main",
+      "description": "Default branch for new tabs. Empty uses the workspace checkout. Workspace-specific overrides take precedence."
+    },
+    "workspace_new_tab_branches": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "default": {},
+      "description": "New-tab branch overrides keyed by workspace cwd. An empty value uses that workspace's checkout; an absent entry inherits new_tab_branch."
+    },
     "workspace_auto_sort": {
       "type": ["boolean", "null"],
       "description": "Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. Default false (manual, drag-ordered).",
