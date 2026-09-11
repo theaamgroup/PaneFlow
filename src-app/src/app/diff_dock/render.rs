@@ -64,6 +64,7 @@ pub(super) fn render_diff_tab_strip(
     active: usize,
     close_armed: Option<usize>,
     new_tab_menu_open: bool,
+    maximized: bool,
     ui: crate::theme::UiColors,
     cx: &mut Context<PaneFlowApp>,
 ) -> AnyElement {
@@ -133,6 +134,23 @@ pub(super) fn render_diff_tab_strip(
             }),
         )
         .child(div().flex_1().min_w_0())
+        .child(render_diff_header_icon_button(
+            "diff-dock-maximize",
+            if maximized {
+                "icons/minimize.svg"
+            } else {
+                "icons/maximize.svg"
+            },
+            if maximized {
+                "Restore dock"
+            } else {
+                "Maximize dock"
+            },
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.toggle_diff_dock_maximize(window, cx);
+            }),
+            ui.muted,
+        ))
         .child(render_diff_header_icon_button(
             "diff-dock-close",
             "icons/close.svg",

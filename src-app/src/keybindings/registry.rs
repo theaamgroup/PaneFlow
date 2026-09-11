@@ -557,6 +557,13 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Toggle Files sidebar",
         group: ShortcutGroup::Diff,
     },
+    ActionMeta {
+        name: "toggle_diff_dock_maximize",
+        factory: || Box::new(crate::ToggleDiffDockMaximize),
+        context: "",
+        description: "Maximize or restore the Changes dock",
+        group: ShortcutGroup::Diff,
+    },
     // Issue #106: the primary left rail (CLI / Agents / Diff). Global context
     // on purpose - a terminal holds focus nearly all the time, so a scoped
     // binding would be dead exactly when it is wanted.

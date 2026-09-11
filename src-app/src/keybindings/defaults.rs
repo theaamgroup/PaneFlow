@@ -367,12 +367,19 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_diff_view",
         context: None,
     },
-    // Files right-sidebar toggle. Uses `secondary-alt-f` instead of
-    // `secondary-shift-f` so it never shadows the terminal search chord
-    // (`ctrl-shift-f`).
+    // Files right-sidebar toggle. `secondary-alt-f`: `f` for Files, kept off
+    // `secondary-shift-f`, which maximizes the Changes dock below. Neither
+    // shadows the terminal search chord (`ctrl-shift-f`).
     DefaultBinding {
         key: "secondary-alt-f",
         action_name: "toggle_files_sidebar",
+        context: None,
+    },
+    // Maximize / restore the Changes dock (upstream e0ff7e21): the dock takes
+    // the whole cockpit and the pane grid is clipped away, never resized.
+    DefaultBinding {
+        key: "secondary-shift-f",
+        action_name: "toggle_diff_dock_maximize",
         context: None,
     },
     // Issue #106: primary left-rail toggle. `secondary-alt-b` for the same

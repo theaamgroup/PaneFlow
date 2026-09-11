@@ -1213,6 +1213,20 @@ struct DiffDockState {
     /// the notification gate (#422): a dock the panel squeezed out is not
     /// under the user's eye even though it is logically open.
     pub(crate) rendered: bool,
+    /// `Some` while the dock fills the cockpit and the pane grid is hidden
+    /// (upstream e0ff7e21); the payload is the focus that was active before
+    /// maximizing, handed back on restore. Per-app, so a tab switch parks
+    /// the dock through `close_diff_dock_panel`, which resets it.
+    pub(crate) maximized: Option<Option<gpui::FocusHandle>>,
+    /// The pane grid's visible width sliding between its full width and 0
+    /// while maximize toggles; `None` once settled.
+    pub(crate) maximize_animation: Option<SidebarWidthAnimation>,
+    /// The dock column's reveal progress (0 to 1) while it slides in on open;
+    /// `None` once settled, and never set by a session-switch restore.
+    pub(crate) reveal_animation: Option<SidebarWidthAnimation>,
+    /// The pane grid's last measured width, the `full` extent the maximize
+    /// slide starts from.
+    pub(crate) pane_grid_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// Live drag anchor `(cursor_x, rendered_width_at_grab)` while the dock's
     /// left edge is being dragged to resize; `None` when not resizing. The
     /// ceiling is not part of the anchor: the dock host re-reads it from the
@@ -2296,6 +2310,7 @@ impl Render for PaneFlowApp {
                 }),
             )
             .on_action(cx.listener(Self::handle_toggle_files_sidebar))
+            .on_action(cx.listener(Self::handle_toggle_diff_dock_maximize))
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // EP-001 (cli-cockpit): Composer + broadcast groups.
