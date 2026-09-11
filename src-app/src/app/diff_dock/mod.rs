@@ -130,9 +130,30 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(previous_focus) = self.diff_dock.maximized.take() {
+            // A handle a dock tab owns (a File or Terminal tab was focused
+            // when the dock was maximized) is about to unmount with the
+            // dock, so it falls back to the workspace's first pane.
+            let owned_by_dock = previous_focus
+                .as_ref()
+                .is_some_and(|focus| self.dock_owns_focus(focus, window, cx));
+            let previous_focus = if owned_by_dock { None } else { previous_focus };
             self.restore_pre_maximize_focus(previous_focus, window, cx);
         }
         self.close_diff_dock_panel(cx);
+    }
+
+    /// Whether `focus` is, or sits inside, the handle of one of the dock's own
+    /// tabs.
+    fn dock_owns_focus(
+        &self,
+        focus: &gpui::FocusHandle,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> bool {
+        (0..self.diff_dock.diff_tabs.len()).any(|index| {
+            self.dock_tab_focus_handle(index, cx)
+                .is_some_and(|handle| handle == *focus || handle.contains(focus, window))
+        })
     }
 
     pub(crate) fn close_diff_dock_panel(&mut self, cx: &mut Context<Self>) {

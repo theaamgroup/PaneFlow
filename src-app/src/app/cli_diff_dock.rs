@@ -1210,9 +1210,11 @@ mod tests {
             .expect("strip close");
         assert!(
             close.contains("self.diff_dock.maximized.take()")
+                && close.contains("self.dock_owns_focus(focus, window, cx)")
                 && close.contains("self.restore_pre_maximize_focus(")
                 && close.contains("self.close_diff_dock_panel(cx);"),
-            "the strip close restores the saved focus before closing: {close}"
+            "the strip close restores the saved focus before closing, falling back \
+             to a workspace pane when the dock itself owned it: {close}"
         );
         let strip = include_str!("diff_dock/render.rs");
         assert!(
