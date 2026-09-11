@@ -846,6 +846,8 @@ impl PaneFlowApp {
                 rendered: false,
                 maximized: None,
                 maximize_animation: None,
+                restore_focus_after_slide: None,
+                pending_focus_restore: None,
                 reveal_animation: None,
                 pane_grid_width: std::rc::Rc::default(),
                 data: None,

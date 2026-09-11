@@ -677,8 +677,10 @@ container with no resize handle, and paints the grid's left gutter itself as
 the grid goes. Maximizing records the focus that was active and moves it onto
 the active dock tab's own handle (a File or Terminal tab), or blurs the pane
 when the tab has none (Changes), so keystrokes never reach the hidden grid;
-restoring, or closing the maximized dock from its strip, hands it back, or to
-the workspace's first pane. Panes behind a maximized dock are not under the
+restoring, or closing the maximized dock from its strip or a pane header's
+dock toggle, hands it back, or to
+the workspace's first pane. A restore that slides hands it back only once the
+slide settles, so keys typed while the grid is still clipped away stay off it. Panes behind a maximized dock are not under the
 user's eye: their agents' completions and notifications go out as for a
 zoomed-away split. The state is per-app: a tab switch parks the dock through
 the closer, and a trip through Review or Settings drops it as the dock
