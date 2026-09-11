@@ -561,6 +561,13 @@ per terminal. `branch` defaults on; `diffstat`, `pr`, and `indent_guide`
 default off, all four toggled from the Customize Sidebar menu's `Show`
 submenu, whose parent also carries `Expand all` and `Collapse all`.
 
+When a session changes its terminal title, a tab containing exactly one pane
+follows that pane's resolved name when its stored label was launch-generated.
+The label then stays derived so later session renames appear immediately.
+Names typed by the user take precedence and survive terminal title changes.
+Older saved labels without provenance are treated as manual. Split tabs keep
+their stored name, including when one of their panes is zoomed.
+
 Agent status occupies a 48 px slot when an agent needs input, 28 px when a row
 carries more than one agent, and 20 px otherwise, with 11 px glyphs: an amber
 bell when the agent needs input, a light blue 7 px dot when it finished, a

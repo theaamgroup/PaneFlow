@@ -664,6 +664,7 @@ fn capture_closed_tab_record(
     Some(crate::ClosedTabRecord {
         workspace_id,
         title: tab.title.clone(),
+        title_is_automatic: tab.title_is_automatic,
         index,
         layout,
         worktree: tab.worktree.clone(),
@@ -692,6 +693,7 @@ fn capture_closed_workspace_record(
             .iter()
             .map(|tab| ClosedWorkspaceTabRecord {
                 title: tab.title.clone(),
+                title_is_automatic: tab.title_is_automatic,
                 layout: capture_closed_tab_layout_with_budget(tab, cx, &remaining_scrollback),
                 worktree: tab.worktree.clone(),
             })
@@ -1936,6 +1938,7 @@ impl PaneFlowApp {
         let crate::ClosedTabRecord {
             workspace_id,
             title,
+            title_is_automatic,
             index,
             layout,
             worktree,
@@ -1973,6 +1976,7 @@ impl PaneFlowApp {
                 ClosedRecord::Tab(crate::ClosedTabRecord {
                     workspace_id,
                     title: title.clone(),
+                    title_is_automatic,
                     index,
                     layout: layout.clone(),
                     worktree: worktree.clone(),
@@ -1982,7 +1986,8 @@ impl PaneFlowApp {
             this.show_toast("Could not restore the tab", cx);
         };
 
-        let tab = crate::workspace::Tab::restored(title.clone(), Some(root), bound_to);
+        let tab = crate::workspace::Tab::restored(title.clone(), Some(root), bound_to)
+            .with_automatic_title(title_is_automatic);
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             // Unreachable: `ws_idx` was resolved above and the entity lease
             // stops `self.workspaces` changing under this body. Kept as a
@@ -2066,6 +2071,7 @@ impl PaneFlowApp {
                     )
                 });
                 crate::workspace::Tab::restored(tab.title, root, bound)
+                    .with_automatic_title(tab.title_is_automatic)
             })
             .collect();
         let mut workspace =
@@ -2394,7 +2400,7 @@ impl PaneFlowApp {
                     .get_mut(ws_idx)
                     .and_then(|ws| ws.tab_mut(tab_idx))
             {
-                tab.title = text;
+                tab.set_manual_title(text);
                 self.save_session(cx);
             }
         }
@@ -3181,6 +3187,7 @@ mod tests {
         ClosedRecord::Tab(crate::ClosedTabRecord {
             workspace_id,
             title: "tab".to_string(),
+            title_is_automatic: false,
             index: 0,
             worktree: None,
             layout: LayoutNode::Split {
@@ -3414,13 +3421,14 @@ mod tests {
         let right = named_test_pane(cx, "logs", "/tmp/logs");
         let tree = LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![left, right])
             .expect("two panes make a tree");
-        let tab = crate::workspace::Tab::new("Agents", Some(tree));
+        let tab = crate::workspace::Tab::new("Agents", Some(tree)).with_automatic_title(true);
 
         let record = cx
             .update(|_, cx| capture_closed_tab_record(&tab, 3, 42, cx))
             .expect("a two-pane tab is worth recording");
 
         assert_eq!(record.title, "Agents");
+        assert!(record.title_is_automatic);
         assert_eq!(record.index, 3, "the tab remembers the slot it held");
         assert_eq!(record.workspace_id, 42);
         assert_eq!(record.layout.leaf_count(), 2);
@@ -3449,6 +3457,7 @@ mod tests {
             LayoutTree::Leaf(pane),
         );
         workspace.active_tab_mut().title = "Agents".to_string();
+        workspace.active_tab_mut().title_is_automatic = true;
         assert!(workspace.open_tab(crate::workspace::Tab::new("Notes", None)));
         workspace.files_expanded = vec![std::path::PathBuf::from("/tmp/project/src")];
         workspace.sidebar_expanded = false;
@@ -3464,6 +3473,8 @@ mod tests {
         assert_eq!(record.active_tab, 1);
         assert_eq!(record.tabs.len(), 2);
         assert_eq!(record.tabs[0].title, "Agents");
+        assert!(record.tabs[0].title_is_automatic);
+        assert!(!record.tabs[1].title_is_automatic);
         assert!(record.tabs[0].layout.is_some());
         assert_eq!(record.tabs[1].title, "Notes");
         assert!(

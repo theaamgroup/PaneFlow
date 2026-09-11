@@ -3522,6 +3522,79 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn session_title_changes_rename_only_the_owning_single_pane_tab(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = titled_test_pane(cx, "Renamed session");
+        let other = titled_test_pane(cx, "Other session");
+        let terminal = cx.update(|_, cx| pane.read(cx).active_terminal_opt().unwrap().clone());
+        let mut tab = Tab::new("Claude", Some(crate::layout::LayoutTree::Leaf(pane)))
+            .with_automatic_title(true);
+        let mut other_tab = Tab::new("Other tab", Some(crate::layout::LayoutTree::Leaf(other)))
+            .with_automatic_title(true);
+        cx.update(|_, cx| {
+            assert!(!other_tab.follow_terminal_title(&terminal, cx));
+            assert_eq!(other_tab.title, "Other tab");
+            // Session restore must retain the permission to follow OSC titles.
+            let snapshot = paneflow_config::schema::TabSession {
+                title: tab.title.clone(),
+                title_is_automatic: tab.title_is_automatic,
+                ..Default::default()
+            };
+            let encoded = serde_json::to_string(&snapshot).unwrap();
+            let decoded: paneflow_config::schema::TabSession =
+                serde_json::from_str(&encoded).unwrap();
+            tab = Tab::restored(decoded.title, tab.root.take(), None)
+                .with_automatic_title(decoded.title_is_automatic);
+            assert!(tab.follow_terminal_title(&terminal, cx));
+            assert!(!tab.title_is_automatic);
+            assert_eq!(tab_row_title(&tab, 0, cx), "Renamed session");
+            terminal.update(cx, |view, _| {
+                view.terminal.title = "Renamed again".into();
+            });
+            assert!(!tab.follow_terminal_title(&terminal, cx));
+            assert_eq!(tab_row_title(&tab, 0, cx), "Renamed again");
+        });
+    }
+
+    #[gpui::test]
+    fn session_title_changes_preserve_manual_and_restored_tab_names(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = titled_test_pane(cx, "Renamed session");
+        let terminal = cx.update(|_, cx| pane.read(cx).active_terminal_opt().unwrap().clone());
+        cx.update(|_, cx| {
+            for name in ["build", "Claude"] {
+                let mut tab = Tab::new(name, Some(crate::layout::LayoutTree::Leaf(pane.clone())))
+                    .with_automatic_title(true);
+                tab.set_manual_title(name.to_string());
+                assert!(!tab.follow_terminal_title(&terminal, cx));
+                assert_eq!(tab_row_title(&tab, 0, cx), name);
+                let mut restored = Tab::restored(name, tab.root.take(), None);
+                assert!(!restored.follow_terminal_title(&terminal, cx));
+                assert_eq!(tab_row_title(&restored, 0, cx), name);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn session_title_changes_preserve_split_tab_names_even_when_zoomed(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = titled_test_pane(cx, "Renamed session");
+        let other = titled_test_pane(cx, "Other session");
+        let terminal = cx.update(|_, cx| pane.read(cx).active_terminal_opt().unwrap().clone());
+        let mut root = crate::layout::LayoutTree::Leaf(pane.clone());
+        assert!(root.split_at_pane(&pane, crate::layout::SplitDirection::Vertical, other));
+        let mut tab = Tab::new("Split tab", Some(root)).with_automatic_title(true);
+        cx.update(|_, cx| {
+            assert!(!tab.follow_terminal_title(&terminal, cx));
+            assert_eq!(tab_row_title(&tab, 0, cx), "Split tab");
+            tab.saved_layout = tab.root.take();
+            tab.root = Some(crate::layout::LayoutTree::Leaf(pane));
+            assert!(!tab.follow_terminal_title(&terminal, cx));
+            assert_eq!(tab_row_title(&tab, 0, cx), "Split tab");
+        });
+    }
+
     /// A PTY-free pane whose terminal carries `title` the way an agent's
     /// OSC 0/2 would have left it.
     fn titled_test_pane(

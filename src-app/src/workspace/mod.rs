@@ -627,6 +627,7 @@ impl Workspace {
             .iter()
             .map(|tab| TabSession {
                 title: tab.title.clone(),
+                title_is_automatic: tab.title_is_automatic,
                 layout: persisted_tab_layout(tab.serialize_without_scrollback(cx)),
                 worktree: tab
                     .worktree

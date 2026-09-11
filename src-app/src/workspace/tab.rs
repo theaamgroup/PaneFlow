@@ -29,6 +29,8 @@ pub struct Tab {
     /// User-facing title. Empty means "unnamed" - the sidebar derives a
     /// fallback label (US-009).
     pub title: String,
+    /// Only launch-generated labels may yield to terminal title changes.
+    pub title_is_automatic: bool,
     /// Pane layout tree. `None` for an empty tab (every pane closed).
     pub root: Option<LayoutTree>,
     /// Saved layout tree while zoomed. `Some(tree)` means this tab is zoomed
@@ -65,11 +67,24 @@ impl Tab {
         Self {
             id: next_tab_id(),
             title: title.into(),
+            title_is_automatic: false,
             root,
             saved_layout: None,
             worktree: None,
             files_sidebar_open: false,
         }
+    }
+
+    /// Record label provenance without guessing from the label's text.
+    pub(crate) fn with_automatic_title(mut self, automatic: bool) -> Self {
+        self.title_is_automatic = automatic;
+        self
+    }
+
+    /// A deliberate rename takes precedence over future terminal titles.
+    pub(crate) fn set_manual_title(&mut self, title: String) {
+        self.title = title;
+        self.title_is_automatic = false;
     }
 
     /// Rebuild a tab from a session record or an `up` batch: like
@@ -224,6 +239,28 @@ impl Tab {
         panes
     }
 
+    /// Let a single-pane tab follow its session after a terminal title change.
+    /// Clear a launch-generated label once; subsequent OSC updates use the sidebar's
+    /// pane-title resolver without persisting every agent status/title update.
+    pub(crate) fn follow_terminal_title(
+        &mut self,
+        terminal: &Entity<crate::terminal::TerminalView>,
+        cx: &App,
+    ) -> bool {
+        if !self.title_is_automatic || self.title.is_empty() {
+            return false;
+        }
+        let panes = self.collect_panes();
+        if let [pane] = panes.as_slice()
+            && pane.read(cx).active_terminal_opt() == Some(terminal)
+        {
+            self.title.clear();
+            self.title_is_automatic = false;
+            return true;
+        }
+        false
+    }
+
     /// Focus this tab's first pane. Returns `true` when focus actually landed
     /// on a pane; `false` for an empty tab (no root), which has nothing to
     /// focus and leaves the caller to park focus somewhere else.
@@ -263,7 +300,7 @@ impl Tab {
 /// header. `None` (or whitespace) clears the stored title so the row goes
 /// back to deriving from the pane.
 pub(crate) fn apply_pane_rename_to_tab(tab: &mut Tab, new_name: Option<&str>) {
-    tab.title = new_name.unwrap_or("").trim().to_string();
+    tab.set_manual_title(new_name.unwrap_or("").trim().to_string());
 }
 
 /// Whether `cwd` names a directory at or below `worktree` (issue #366).

@@ -148,6 +148,10 @@ pub struct TabSession {
     /// fallback label rather than persisting one.
     #[serde(default)]
     pub title: String,
+    /// True only for a launch-generated label. Old records default to manual
+    /// so a user's saved name is never inferred from its spelling.
+    #[serde(default)]
+    pub title_is_automatic: bool,
     /// Pane layout tree for this tab. `None` = the tab holds no pane.
     #[serde(default)]
     pub layout: Option<LayoutNode>,
@@ -174,6 +178,7 @@ impl TabSession {
     pub fn with_layout(layout: LayoutNode) -> Self {
         Self {
             title: String::new(),
+            title_is_automatic: false,
             layout: Some(layout),
             worktree: None,
         }
@@ -326,6 +331,7 @@ fn demote_panes_to_focused_surface(node: &mut LayoutNode, promoted: &mut Vec<Tab
                 let title = surface_title(&surface);
                 promoted.push(TabSession {
                     title,
+                    title_is_automatic: false,
                     layout: Some(LayoutNode::Pane {
                         surfaces: vec![surface],
                     }),

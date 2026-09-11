@@ -703,6 +703,7 @@ fn tab_worktree_needs_no_schema_bump() {
             "/home/user/project",
             vec![TabSession {
                 title: "parser".to_string(),
+                title_is_automatic: false,
                 layout: None,
                 worktree: Some("/home/user/project.worktrees/parser".to_string()),
             }],
@@ -717,4 +718,19 @@ fn tab_worktree_needs_no_schema_bump() {
     let restored: SessionState = serde_json::from_str(&json).unwrap();
     assert_eq!(state, restored);
     assert_eq!(restored.version, 2, "the binding rides v2 unchanged");
+}
+
+#[test]
+fn tab_title_provenance_round_trips_and_old_titles_remain_manual() {
+    let old: TabSession = serde_json::from_str(r#"{"title":"Claude","layout":null}"#).unwrap();
+    assert!(!old.title_is_automatic);
+    for automatic in [false, true] {
+        let tab = TabSession {
+            title_is_automatic: automatic,
+            ..old.clone()
+        };
+        let restored: TabSession =
+            serde_json::from_str(&serde_json::to_string(&tab).unwrap()).unwrap();
+        assert_eq!(restored, tab);
+    }
 }
