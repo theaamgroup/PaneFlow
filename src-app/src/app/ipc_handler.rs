@@ -2466,11 +2466,14 @@ impl PaneFlowApp {
                         .map(|mw| mw.branch.clone())
                 })
                 .unwrap_or_default();
-            tabs.push(crate::workspace::Tab::restored(
-                title,
-                Some(tree),
-                worktree.as_ref().map(std::path::PathBuf::from),
-            ));
+            tabs.push(
+                crate::workspace::Tab::restored(
+                    title,
+                    Some(tree),
+                    worktree.as_ref().map(std::path::PathBuf::from),
+                )
+                .with_automatic_title(true),
+            );
         }
 
         // The workspace root is the checkout the unbound panes are in, so a
@@ -5360,6 +5363,10 @@ mod tests {
         assert!(
             body.contains("crate::workspace::Tab::restored("),
             "each group must become a tab bound to its worktree"
+        );
+        assert!(
+            body.contains(".with_automatic_title(true)"),
+            "generated branch labels must follow a single pane's session title"
         );
         assert!(
             body.contains("Workspace::restored_with_id(ws_id, &name, ws_cwd, tabs, active_tab)"),
