@@ -167,14 +167,15 @@ fn render_diff_options_menu(
             .child(menu_label("Refresh Changes", ui)),
     );
 
-    deferred(
+    deferred(crate::ui_primitives::menu_reveal(
+        "diff-options-menu-reveal",
         div()
             .absolute()
             .top(px(32.))
             .right(px(0.))
             .occlude()
             .child(menu),
-    )
+    ))
     .with_priority(3)
     .into_any_element()
 }
@@ -232,14 +233,15 @@ fn render_layout_submenu(
         .child(render_layout_option("Split", true, split, ui, cx))
         .child(render_layout_option("Unified", false, !split, ui, cx));
 
-    deferred(
+    deferred(crate::ui_primitives::menu_reveal(
+        "diff-options-layout-submenu-reveal",
         div()
             .absolute()
             .top(px(-5.))
             .right(px(MENU_WIDTH - 12.))
             .occlude()
             .child(menu),
-    )
+    ))
     .with_priority(4)
     .into_any_element()
 }

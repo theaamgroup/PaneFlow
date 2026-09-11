@@ -452,7 +452,12 @@ impl PaneFlowApp {
                 })
         });
 
-        deferred(context_menu).priority(3).into_any_element()
+        deferred(crate::ui_primitives::menu_reveal(
+            ("workspace-context-menu-reveal", idx),
+            context_menu,
+        ))
+        .priority(3)
+        .into_any_element()
     }
 
     /// Build the deferred pane context menu, anchored on the pane header
@@ -532,7 +537,7 @@ impl PaneFlowApp {
             )
         });
 
-        select_menu("tab-context-menu", ui)
+        let context_menu = select_menu("tab-context-menu", ui)
             .occlude()
             .absolute()
             .left(menu_pos.x)
@@ -621,8 +626,14 @@ impl PaneFlowApp {
             })
             .when_some(remove_worktree_item, |menu, item| {
                 menu.child(context_menu_divider(ui)).child(item)
-            })
-            .into_any_element()
+            });
+        crate::ui_primitives::menu_reveal(
+            (
+                "tab-context-menu-reveal",
+                crate::ui_primitives::reveal_key((ws_idx, tab_idx)),
+            ),
+            context_menu,
+        )
     }
 
     /// The rows of the tab menu's Branch section: `(detached checkout path,
@@ -854,7 +865,12 @@ impl PaneFlowApp {
             }),
         ));
 
-        deferred(context_menu).priority(3).into_any_element()
+        deferred(crate::ui_primitives::menu_reveal(
+            ("pane-context-menu-reveal", source.entity_id()),
+            context_menu,
+        ))
+        .priority(3)
+        .into_any_element()
     }
 
     fn render_disabled_select_menu_item(
