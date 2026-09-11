@@ -558,7 +558,9 @@ pub(crate) struct PaneflowTooltip {
 
 impl Render for PaneflowTooltip {
     fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        tooltip_shell().child(self.label.clone())
+        tooltip_shell()
+            .debug_selector(|| "paneflow-text-tooltip".into())
+            .child(self.label.clone())
     }
 }
 

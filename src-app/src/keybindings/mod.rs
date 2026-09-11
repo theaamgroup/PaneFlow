@@ -14,6 +14,8 @@
 mod apply;
 mod defaults;
 mod display;
+mod fixed;
+pub use fixed::settings_shortcuts;
 mod registry;
 
 pub use apply::{apply_keybindings, keystrokes_conflict};

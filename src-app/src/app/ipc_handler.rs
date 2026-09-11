@@ -1974,7 +1974,7 @@ impl PaneFlowApp {
                 config.theme.as_deref(),
             );
             keybindings::apply_keybindings(cx, &config.shortcuts);
-            self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
+            self.effective_shortcuts = keybindings::settings_shortcuts(&config.shortcuts);
             if self.settings_section == Some(crate::SettingsSection::Shortcuts) {
                 // The Shortcuts page is virtualized off a cached row list that
                 // indexes `effective_shortcuts`, so a hand edit to `shortcuts`

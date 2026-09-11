@@ -209,7 +209,7 @@ explicit priority.
 | Pane palette | Fills an empty tab, titled `New pane` | A centered 260 px column on a 20 px squircle of the terminal background: 13 px Semibold title, an optional branch row 28 tall, preset rows 34 tall with a 14 px agent mark, gap 2, list capped at 420 tall, inline error at 11 px | `app/pane_palette.rs:36-40,654-782,1021-1059` |
 | Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Four** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
-| Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 250 by 154 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
+| Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
 | Attention Queue · Fleet Search | Horizontally centered, top-anchored at 96 | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/attention_queue.rs:227-234`, `app/fleet_search.rs:379-386` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
 | Theme picker | Horizontally centered, top-anchored at 96 | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
@@ -411,7 +411,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Diff | row 18, file header 32, fold row 32, sticky header 24, gutter 36 (a floor, widened per digit count), change bar 4, split divider 3, minimum split column 360, revert chip 56 by 16 inset 10, horizontal track 6 |
 | Code editor | 12 px mono, row 18, caret 2, scrollbar track 15, minimum thumb 25 vertical and 28 horizontal; git marker column 6 left of the numbers, bar 4 radius 2 inset 1, deleted dot 8, hover grows 3 to the left |
 | Dock | preferred 880, minimum 360, maximum 1400; tab strip 40 with 26 px chips, gap 4 |
-| Pane Overview | cards 250 by 154, gap 10, radius 8, grid padding 16, panel margin 24 |
+| Pane Overview | cards 312.5 by 192.5, gap 10, radius 8, grid padding 16, panel margin 24 |
 
 ### 4.6 Typography
 
@@ -811,6 +811,13 @@ knob on the fixed `#339cff` track. Selects open a `select_menu` under the
 trigger, whose 8 px corner is round — the one non-squircle in the family.
 Destructive actions use the fixed red button on a `ROW_RADIUS` squircle.
 
+Keyboard Shortcuts includes a searchable Fixed shortcuts section documenting
+editor, text-field, Composer, copy-mode, sidebar, and overlay controls. Each row
+names the context in which it applies and is marked Fixed; clicking it cannot
+arm recording or write a binding. Hover reveals a truncated description. Live
+alternative chords for the same action are also listed; editing either row
+rebinds that action.
+
 Keyboard Shortcuts is the one virtualized page (`gpui::list`, owns its scroll):
 roughly eighty rows of eight nodes rebuilt every frame made the whole surface
 lag. The Appearance page leads with three theme tiles (System, Light, Dark;
@@ -895,15 +902,25 @@ Window ▸ Show All Panes, or the sidebar header button opens a cross-workspace
 grid of every **terminal** pane, grouped workspace then tab. Markdown and diff
 panes are omitted and the surface is gated to Agents mode.
 
-The panel is top-anchored at `OVERVIEW_MARGIN` (24) and inset 24 on each side,
-at radius 12 with a 1 px border
-and `shadow_lg` on a black 0.4 scrim. Cards are 250 by 154 at radius 8, gap 10,
-grid padding 16, with a 30 px header (a 6 px status dot, the 12 px name, a 9 px
-`current` chip, a 10 px status label), an 88 px preview band at radius 6 on the
-terminal background, and a 26 px footer. Column count is
-`floor((width + gap) / (card_w + gap)).max(1)`. It reuses the sidebar's status
-grammar verbatim, including the two fixed hexes — `#fbbf24` for `Input`,
-`#83c3ff` for `Done`.
+The panel is top-anchored at `OVERVIEW_MARGIN` (24), inset 24 on each side,
+with radius 12, a 1 px border, and `shadow_lg` on a black 0.4 scrim.
+Cards have radius 8, gap 10, grid padding 16, a 30 px title row, a 28 px
+status row, and a 26 px footer. Column count is
+`floor((width + gap) / (card_w + gap)).max(1)`.
+
+The Show all panes control and its editable Settings row in Panes & splits
+share that name; the row also matches “pane overview”. Its tooltip shows the effective shortcut,
+omitting the chord when unassigned. The control uses the shared small icon
+button and the standard 800 ms tooltip delay.
+
+Overview cards are 312.5 by 192.5 px, 25% larger than the previous 250 by 154.
+The terminal preview uses a 6.25 px face, 25% smaller than before, in a 98.5 px
+band cropped from the bottom. Terminal content stays read-only. Full-size
+12 px status labels sit outside the preview. Unread input, error, and stalled
+states carry a bell, an explicit Unread label, and a semantic border; keyboard
+selection retains the accent border. Terminal running / Exited is shown
+separately from agent status, and exited previews are dimmed. Status text uses
+the shared contrast floor. Card accessible names include both states.
 
 Filtering matches **metadata only** — pane, workspace, and tab titles, the
 agent name, the cwd basename — because content search belongs to Fleet Search.

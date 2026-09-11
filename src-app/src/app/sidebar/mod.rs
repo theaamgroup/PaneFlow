@@ -474,6 +474,31 @@ fn fold_all_target(rows: impl IntoIterator<Item = (bool, bool)>) -> Option<bool>
     rows_somewhere.then_some(!all_expanded)
 }
 
+fn pane_overview_button(
+    shortcuts: &[crate::keybindings::ShortcutEntry],
+    ui: crate::theme::UiColors,
+) -> crate::ui_primitives::AnimatedHover {
+    crate::ui_primitives::icon_button_sm(
+        "sidebar-pane-overview",
+        "icons/layout-grid.svg",
+        pane_overview_button_label(shortcuts),
+        ui.muted,
+        crate::app::constants::sidebar_tab_active_background(),
+    )
+}
+
+fn pane_overview_button_label(shortcuts: &[crate::keybindings::ShortcutEntry]) -> SharedString {
+    let key = shortcuts
+        .iter()
+        .find(|entry| entry.action_name == "open_pane_overview")
+        .map(|entry| entry.key.as_str())
+        .filter(|key| *key != "Unassigned");
+    key.map_or_else(
+        || "Show all panes".into(),
+        |key| format!("Show all panes · {key}").into(),
+    )
+}
+
 fn sidebar_action_button(
     id: SharedString,
     label: SharedString,
@@ -1173,19 +1198,12 @@ impl PaneFlowApp {
                         // Dispatches the action rather than calling the handler
                         // so the button and Cmd+Shift+P cannot drift.
                         .child(
-                            sidebar_action_button(
-                                SharedString::from("sidebar-pane-overview"),
-                                SharedString::from("Show all panes \u{b7} \u{21e7}\u{2318}P"),
-                                "icons/layout-grid.svg",
-                                12.,
-                                ui,
-                            )
-                            .on_click(cx.listener(
-                                |_this, _: &ClickEvent, window, cx| {
+                            pane_overview_button(&self.effective_shortcuts, ui).on_click(
+                                cx.listener(|_this, _: &ClickEvent, window, cx| {
                                     window.dispatch_action(Box::new(crate::OpenPaneOverview), cx);
                                     cx.stop_propagation();
-                                },
-                            )),
+                                }),
+                            ),
                         ),
                 ),
         );
@@ -4336,6 +4354,60 @@ mod tests {
             auto.iter().map(|slot| slot.tab).collect::<Vec<_>>(),
             manual.iter().map(|slot| slot.tab).collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn overview_tooltip_tracks_rebinding_and_unassignment() {
+        use std::collections::HashMap;
+        assert!(
+            super::pane_overview_button_label(&crate::keybindings::effective_shortcuts(
+                &HashMap::new()
+            ))
+            .contains('P')
+        );
+        let rebound = HashMap::from([("cmd-alt-o".into(), "open_pane_overview".into())]);
+        assert_eq!(
+            super::pane_overview_button_label(&crate::keybindings::effective_shortcuts(&rebound))
+                .as_ref(),
+            "Show all panes · ⌘⌥O"
+        );
+        let unbound = HashMap::from([("cmd-shift-p".into(), "none".into())]);
+        assert_eq!(
+            super::pane_overview_button_label(&crate::keybindings::effective_shortcuts(&unbound))
+                .as_ref(),
+            "Show all panes"
+        );
+    }
+
+    #[gpui::test]
+    fn overview_button_tooltip_opens_after_dwell(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            Context, InteractiveElement, IntoElement, ParentElement, Render,
+            StatefulInteractiveElement, Styled, div, px,
+        };
+        struct Probe;
+        impl Render for Probe {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        super::pane_overview_button(&[], crate::theme::ui_colors())
+                            .on_click(|_, _, _| {}),
+                    )
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| Probe);
+        cx.simulate_mouse_move(gpui::point(px(10.), px(10.)), None, Default::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(799));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("paneflow-text-tooltip").is_none());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("paneflow-text-tooltip").is_some());
     }
 
     /// Issue #340: the rail's hover actions (new pane, close workspace, close
