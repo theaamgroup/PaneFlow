@@ -116,6 +116,37 @@ pub(crate) fn reduce_motion() -> bool {
     REDUCE_MOTION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+pub(crate) const MENU_REVEAL_MS: u64 = 140;
+const MENU_REVEAL_DROP: f32 = 4.;
+
+/// The cubic ease-out shared by the primary sidebar slide and `menu_reveal`.
+pub(crate) fn ease_out_cubic(delta: f32) -> f32 {
+    1. - (1. - delta).powi(3)
+}
+
+/// Fade a menu into place: 140 ms from opacity 0 with a 4 px drop on the
+/// sidebar's cubic ease-out. Mounted at rest under `reduce_motion`. There is
+/// no exit animation; GPUI drops the element when its state flips.
+pub(crate) fn menu_reveal<E>(id: impl Into<ElementId>, element: E) -> AnyElement
+where
+    E: IntoElement + Styled + 'static,
+{
+    if reduce_motion() {
+        return element.into_any_element();
+    }
+    element
+        .with_animation(
+            id,
+            gpui::Animation::new(Duration::from_millis(MENU_REVEAL_MS)).with_easing(ease_out_cubic),
+            |element, delta| {
+                element
+                    .opacity(delta)
+                    .mt(px(-MENU_REVEAL_DROP * (1. - delta)))
+            },
+        )
+        .into_any_element()
+}
+
 /// A reversible hover transition that keeps the wrapped GPUI hitbox as the
 /// interactive root. State follows the element ID across consecutive frames
 /// and disappears automatically when a transient control is unmounted.
@@ -1223,5 +1254,136 @@ mod tests {
             "a click 10 px from the clear glyph's center missed it; the hit target is \
              smaller than 24x24"
         );
+    }
+
+    #[test]
+    fn ease_out_cubic_starts_at_rest_and_lands_at_one() {
+        assert_eq!(ease_out_cubic(0.), 0.);
+        assert_eq!(ease_out_cubic(1.), 1.);
+        assert!(
+            ease_out_cubic(0.5) > 0.5,
+            "ease-out must lead a linear ramp"
+        );
+    }
+
+    /// Source-text assertion (issue #491, upstream `e87dc1df`): every menu,
+    /// select popup, context menu, and submenu mounts through `menu_reveal`
+    /// so it fades into place and honors `reduce_motion`. GPUI cannot report
+    /// whether a mounted element carries an animation, so the guard reads the
+    /// files instead: every `deferred(` mount in a menu file must carry a
+    /// `menu_reveal(` before its priority call, and every reveal id must be
+    /// unique across the app (two menus sharing an id would share one
+    /// animation state).
+    #[test]
+    fn every_menu_mount_fades_in_through_menu_reveal_with_a_unique_id() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let menu_files = [
+            "app/diff_dock/branch.rs",
+            "app/diff_dock/code/controls.rs",
+            "app/diff_dock/code/view.rs",
+            "app/diff_dock/new_tab_menu.rs",
+            "app/diff_dock/options_menu.rs",
+            "app/diff_sidebar/header.rs",
+            "app/files_sidebar/context_menu.rs",
+            "app/profile_menu.rs",
+            "app/review/menu.rs",
+            "app/sidebar/context_menu.rs",
+            "app/sidebar/customize_menu.rs",
+            "app/sessions_context_menu.rs",
+            "app/pane_palette.rs",
+            "app/theme_picker.rs",
+            "diff/view/interaction.rs",
+            "pane/review.rs",
+            "settings/components.rs",
+        ];
+        // Not menus: these own their own animation (the diff flash) and are
+        // skipped by function name.
+        let not_menus = [("diff/view/interaction.rs", "fn render_flash(")];
+        // Menus mounted by a caller's `deferred(`; only the reveal is checked.
+        let reveal_only = [("app/sidebar/context_menu.rs", "tab-context-menu-reveal")];
+        let mut failures = Vec::new();
+        for rel in menu_files {
+            let path = root.join(rel);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let skip: Vec<(usize, usize)> = not_menus
+                .iter()
+                .filter(|(f, _)| *f == rel)
+                .map(|(_, marker)| {
+                    let at = text.find(marker).expect(marker);
+                    let end = text[at + marker.len()..]
+                        .find("\n    pub")
+                        .map_or(text.len(), |n| at + marker.len() + n);
+                    (at, end)
+                })
+                .collect();
+            for (at, _) in text.match_indices("deferred(") {
+                let line_start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+                if text[line_start..].trim_start().starts_with("//") {
+                    continue;
+                }
+                if skip.iter().any(|(s, e)| (*s..*e).contains(&at)) {
+                    continue;
+                }
+                let rest = &text[at + "deferred(".len()..];
+                let mount_end = [
+                    "\n        .priority(",
+                    "\n    .priority(",
+                    ".with_priority(",
+                ]
+                .iter()
+                .filter_map(|m| rest.find(m))
+                .min()
+                .unwrap_or(rest.len());
+                if !rest[..mount_end].contains("menu_reveal(") {
+                    let line = text[..at].matches('\n').count() + 1;
+                    failures.push(format!("{rel}:{line} mounts a menu without menu_reveal"));
+                }
+            }
+        }
+        for (rel, id) in reveal_only {
+            let text = std::fs::read_to_string(root.join(rel)).unwrap();
+            if !text.contains(&format!("menu_reveal(\"{id}\"")) {
+                failures.push(format!(
+                    "{rel} does not reveal its menu through menu_reveal(\"{id}\""
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+        // Reveal ids are unique across the whole crate.
+        let mut ids: std::collections::HashMap<String, Vec<String>> = Default::default();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (at, _) in text.match_indices("menu_reveal(") {
+                    let after = text[at + "menu_reveal(".len()..].trim_start();
+                    let Some(quoted) = after.strip_prefix('"') else {
+                        continue;
+                    };
+                    let id = &quoted[..quoted.find('"').unwrap()];
+                    let line = text[..at].matches('\n').count() + 1;
+                    ids.entry(id.to_string())
+                        .or_default()
+                        .push(format!("{}:{line}", path.display()));
+                }
+            }
+        }
+        assert!(
+            ids.len() >= 20,
+            "expected at least 20 literal reveal ids under src-app/src, found {}",
+            ids.len()
+        );
+        let dupes: Vec<_> = ids.iter().filter(|(_, sites)| sites.len() > 1).collect();
+        assert!(dupes.is_empty(), "duplicate menu_reveal ids: {dupes:?}");
     }
 }

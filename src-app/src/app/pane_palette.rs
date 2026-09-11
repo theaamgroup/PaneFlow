@@ -866,7 +866,13 @@ impl PaneFlowApp {
                 menu =
                     menu.child(self.render_palette_branch_option(option, ws_idx, tab_idx, ui, cx));
             }
-            trigger.child(deferred(menu).with_priority(3))
+            trigger.child(
+                deferred(crate::ui_primitives::menu_reveal(
+                    "pane-palette-branch-menu-reveal",
+                    menu,
+                ))
+                .with_priority(3),
+            )
         });
 
         Some(

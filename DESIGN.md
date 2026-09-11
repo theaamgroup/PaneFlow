@@ -116,8 +116,8 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
    tints of one color per theme lightness, never a per-component fill.
 4. Every rounded surface takes its radius from section 4.4, which is the
    closed set. New radii are not introduced.
-5. Motion explains state: hover, focus dim, the sidebar slide, the toast
-   lifecycle. Nothing animates for decoration except the startup splash
+5. Motion explains state: hover, focus dim, the sidebar slide, the menu
+   reveal, the toast lifecycle. Nothing animates for decoration except the startup splash
    shimmer and the status spinners. Any new animation MUST read
    `reduce_motion`; section 4.8 lists which existing ones do.
 6. Color carries meaning first: added, modified, deleted, conflict, error,
@@ -496,6 +496,7 @@ brand tint for a mark that returns `None`.
 | Pane header buttons | 120 ms | ease-out quint | The action-button tint and the close glyph's 0.16 → 0.92 ramp |
 | Unfocused pane dim, drop overlay glide | 130 ms, scaled by distance | ease-out quint | Cross-fade dropped below 0.002; the overlay lerps its absolute rect between regions |
 | Primary sidebar slide | 280 ms | cubic ease-out `1 − (1 − p)³` | Panel inset and gutter follow the width |
+| Menu reveal | 140 ms | cubic ease-out `1 − (1 − p)³` (`ui_primitives::ease_out_cubic`, shared with the sidebar slide) | `menu_reveal`: every menu, select popup, context menu, and submenu fades in from 0 while dropping 4 px into place. No exit animation: GPUI drops the element when its state flips |
 | Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift |
 | Status spinner | 1 s loop | linear rotate | Empty states while scanning |
 | Sidebar comet-trail loader | 720 ms cycle | stepped | 3 by 3 perimeter of 3 px dots, gap 1, trailing opacities 0.81, 0.49, 0.26 over a 0.06 base |
@@ -507,10 +508,11 @@ facility: the pinned GPUI predates `App::set_reduce_motion`. It is written at
 startup, from the Settings toggle, and on config hot-reload, so it needs no
 restart, and it defaults to `false`.
 
-**Three animations honor it today**: `animated_hover` settles instantly
+**Four animations honor it today**: `animated_hover` settles instantly
 (`ui_primitives.rs:322-336`), the primary sidebar toggles without the slide
-(`main.rs:1726`), and `panel_empty_state`'s scanning spinner does not start
-(`ui_primitives.rs:859`). Still ignoring it: the pane header button hover, the
+(`main.rs:1726`), `panel_empty_state`'s scanning spinner does not start
+(`ui_primitives.rs:859`), and `menu_reveal` mounts every menu at rest
+(`ui_primitives.rs::menu_reveal`). Still ignoring it: the pane header button hover, the
 drop-overlay glide, toasts, the comet-trail loader, and the splash shimmer.
 The config description promises a static frame for decorative animations; that
 promise is **Proposed** until the rest read the flag. Feedback is never
@@ -1199,7 +1201,8 @@ review would raise anywhere.
 2. `macos_chrome_material` on and off.
 3. `reduce_motion` on: every animation **you touched** settles without
    interpolation. Do not attest more than that — 4.8 lists five animations
-   that still ignore the flag, so "nothing moves" is not yet true of the app.
+   that still ignore the flag (menus fade in through `menu_reveal` and snap
+   under the flag), so "nothing moves" is not yet true of the app.
 4. The 800 by 500 minimum window, with the primary sidebar hidden and a right
    rail or the diff dock open at the same time. Check that the dock's render
    floor behaves — below roughly 464 px of remainder it MUST disappear cleanly
@@ -1247,7 +1250,7 @@ behavior.
 - Custom user themes are not loaded. New palettes ship as presets in
   `theme/builtin.rs` with both variants, a `UiColors`, and a syntax palette.
 - `window_decorations` and `window_backdrop` are read once at startup.
-- `reduce_motion` reaches only three animations (4.8) and does not follow the
+- `reduce_motion` reaches only four animations (4.8) and does not follow the
   macOS system setting.
 - The six accessibility gaps in 7.5, of which the missing focus ring is the
   most consequential.

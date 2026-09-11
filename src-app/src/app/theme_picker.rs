@@ -341,7 +341,8 @@ impl PaneFlowApp {
                 .justify_center()
                 .pt(px(96.))
                 .bg(gpui::hsla(0., 0., 0., 0.4))
-                .child(
+                .child(crate::ui_primitives::menu_reveal(
+                    "theme-picker-reveal",
                     menu_surface(div().id("theme-picker"), ui)
                         .occlude()
                         .track_focus(&self.theme_picker_focus)
@@ -378,7 +379,7 @@ impl PaneFlowApp {
                         .overflow_hidden()
                         .child(search_input)
                         .child(list_wrapper),
-                ),
+                )),
         )
         .with_priority(6)
         .into_any_element()

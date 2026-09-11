@@ -108,7 +108,8 @@ impl PaneFlowApp {
             }),
         );
 
-        deferred(
+        deferred(crate::ui_primitives::menu_reveal(
+            "profile-menu-reveal",
             div()
                 .id("profile-menu")
                 .occlude()
@@ -140,7 +141,7 @@ impl PaneFlowApp {
                 .child(settings_item)
                 .child(themes_item)
                 .child(about_item),
-        )
+        ))
         .with_priority(4)
         .into_any_element()
     }
