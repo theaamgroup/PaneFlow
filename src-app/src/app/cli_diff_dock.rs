@@ -647,6 +647,16 @@ impl PaneFlowApp {
                 .as_ref()
                 .is_some_and(|data| data.cwd == cwd);
         if showing {
+            // The pane header's toggle has no `Window` (#506): a saved focus
+            // the maximize or a restore slide still holds goes to the
+            // window-bearing drain, which hands it back like the strip close.
+            // A tab-switch park never comes through here and keeps dropping
+            // the saved focus without touching the keyboard.
+            let parked = self.diff_dock.restore_focus_after_slide.take();
+            let saved = self.diff_dock.maximized.take();
+            if let Some(previous_focus) = saved.or(parked.map(|(focus, _)| focus)) {
+                self.diff_dock.pending_focus_restore = Some(previous_focus);
+            }
             self.close_diff_dock_panel(cx);
         } else {
             // The button opens the dock, not the diff: until this session has
@@ -688,13 +698,36 @@ impl PaneFlowApp {
             None if self.diff_dock.maximized.is_some() => 0.,
             None => full,
         };
+        // Whether the grid slides to `to`: never under `reduce_motion`, nor
+        // when it is already there.
+        let slides = |to: f32| {
+            !crate::ui_primitives::reduce_motion()
+                && (from - to).abs() > crate::PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA
+        };
         let to = match self.diff_dock.maximized.take() {
+            // The restore slide starts with the grid clipped to 0 wide (#506):
+            // handing the focus back now would type into a pane nobody can
+            // see, so it stays on the dock until `wrap_cli_diff_dock` renders
+            // the settled grid. The focus held now is kept beside it, so a
+            // focus the user moves during the slide stays where they put it.
+            Some(previous_focus) if slides(full) => {
+                self.diff_dock.restore_focus_after_slide =
+                    Some((previous_focus, window.focused(cx)));
+                full
+            }
             Some(previous_focus) => {
                 self.restore_pre_maximize_focus(previous_focus, window, cx);
                 full
             }
             None => {
-                self.diff_dock.maximized = Some(window.focused(cx));
+                let focused = window.focused(cx);
+                // Re-maximized before a restore slide settled: the parked
+                // focus is still the one to hand back, not the dock's own.
+                let previous_focus = match self.diff_dock.restore_focus_after_slide.take() {
+                    Some((parked, focus_at_restore)) if focused == focus_at_restore => parked,
+                    _ => focused,
+                };
+                self.diff_dock.maximized = Some(previous_focus);
                 // The hidden grid must not keep the keyboard: a tab with its
                 // own handle (File, Terminal) takes it, and Changes, which has
                 // none, blurs the pane instead. Never the `focus_diff_tab`
@@ -707,9 +740,7 @@ impl PaneFlowApp {
                 0.
             }
         };
-        self.diff_dock.maximize_animation = if !crate::ui_primitives::reduce_motion()
-            && (from - to).abs() > crate::PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA
-        {
+        self.diff_dock.maximize_animation = if slides(to) {
             Some(crate::SidebarWidthAnimation {
                 from_width: from,
                 to_width: to,
@@ -719,6 +750,20 @@ impl PaneFlowApp {
             None
         };
         cx.notify();
+    }
+
+    /// Hand back the focus a sliding restore parked (#506) now that the slide
+    /// has settled and the pane grid is on screen - unless the user moved the
+    /// focus during the slide, which then stays where they put it.
+    fn settle_pre_maximize_focus(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some((previous_focus, focus_at_restore)) =
+            self.diff_dock.restore_focus_after_slide.take()
+        else {
+            return;
+        };
+        if window.focused(cx) == focus_at_restore {
+            self.restore_pre_maximize_focus(previous_focus, window, cx);
+        }
     }
 
     /// Hand the keyboard back to where it was before the dock was maximized:
@@ -861,10 +906,16 @@ impl PaneFlowApp {
             // sight. The user comes back to dock and grid side by side.
             self.diff_dock.maximized = None;
             self.diff_dock.maximize_animation = None;
+            self.diff_dock.restore_focus_after_slide = None;
             self.blur_unmounted_files_tree(window, cx);
             return body;
         }
+        // A restore slide parks the pre-maximize focus (#506); the first frame
+        // that lays the grid out at rest hands it back.
         let grid = self.rendered_pane_grid_layout(window);
+        if self.diff_dock.maximize_animation.is_none() {
+            self.settle_pre_maximize_focus(window, cx);
+        }
         let fills_panel = grid != PaneGridLayout::Flex;
         let (width, max_width) = if fills_panel {
             let width = diff_dock_maximized_width(available_width);
@@ -1257,6 +1308,136 @@ mod tests {
         assert!(
             under_eye.contains("self.pane_grid_hidden_by_dock()"),
             "panes behind a maximized dock are not under the user's eye: {under_eye}"
+        );
+    }
+
+    /// Issue #506: the restore slide starts with the pane grid clipped to
+    /// zero width, so the saved focus goes back only once the slide settles -
+    /// keystrokes typed during it must not reach a pane nobody can see. With
+    /// no slide (`reduce_motion`) the handoff stays immediate, a re-maximize
+    /// mid-slide keeps the parked focus as the one to hand back, and every
+    /// path that drops the maximize state drops the parked focus with it.
+    #[test]
+    fn restoring_a_maximized_dock_keeps_the_focus_until_the_grid_is_on_screen() {
+        let host = include_str!("cli_diff_dock.rs");
+        let toggle = host
+            .split("pub(crate) fn toggle_diff_dock_maximize(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("toggle");
+        assert!(
+            toggle.contains("Some(previous_focus) if slides(full) => {")
+                && toggle.contains(
+                    "self.diff_dock.restore_focus_after_slide =\n                    Some((previous_focus, window.focused(cx)));"
+                ),
+            "a sliding restore parks the focus instead of handing it back at once: {toggle}"
+        );
+        assert!(
+            toggle.contains("self.diff_dock.maximize_animation = if slides(to) {"),
+            "the park and the slide share one predicate: {toggle}"
+        );
+        assert!(
+            toggle.contains("self.diff_dock.restore_focus_after_slide.take()"),
+            "a re-maximize mid-slide reclaims the parked focus: {toggle}"
+        );
+        let wrap = host
+            .split("pub(crate) fn wrap_cli_diff_dock(")
+            .nth(1)
+            .expect("wrap");
+        let (unmounted, mounted) = wrap
+            .split_once("let grid = self.rendered_pane_grid_layout(window);")
+            .expect("layout call");
+        assert!(
+            unmounted.contains("self.diff_dock.restore_focus_after_slide = None;"),
+            "a trip through Review or Settings drops the parked focus: {unmounted}"
+        );
+        assert!(
+            mounted.trim_start().starts_with(
+                "if self.diff_dock.maximize_animation.is_none() {\n            self.settle_pre_maximize_focus(window, cx);"
+            ),
+            "the parked focus goes back on the first frame the slide has settled: {mounted}"
+        );
+        let settle = host
+            .split("fn settle_pre_maximize_focus(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("settle");
+        assert!(
+            settle.contains("self.diff_dock.restore_focus_after_slide.take()")
+                && settle.contains("self.restore_pre_maximize_focus(previous_focus, window, cx);"),
+            "settling shares the focus handoff: {settle}"
+        );
+        let panel = include_str!("diff_dock/mod.rs");
+        let close = panel
+            .split("pub(crate) fn close_diff_dock_panel(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("closer");
+        assert!(
+            close.contains("self.diff_dock.restore_focus_after_slide = None;"),
+            "the closer drops the parked focus: {close}"
+        );
+        let strip_close = panel
+            .split("pub(crate) fn close_diff_dock_panel_from_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("strip close");
+        assert!(
+            strip_close.contains("self.diff_dock.restore_focus_after_slide.take()"),
+            "closing from the strip mid-slide still hands the parked focus back: {strip_close}"
+        );
+        // The pane header's dock toggle has no `Window`: it parks the saved
+        // focus for the window-bearing drain before it closes, the closer
+        // leaves that park alone, and a tab-switch park keeps dropping the
+        // saved focus without touching the keyboard.
+        let header_toggle = host
+            .split("pub(crate) fn toggle_cli_diff_dock(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("header toggle");
+        let (before_close, _) = header_toggle
+            .split_once("self.close_diff_dock_panel(cx);")
+            .expect("the header toggle closes the dock");
+        assert!(
+            before_close.contains("self.diff_dock.restore_focus_after_slide.take()")
+                && before_close.contains("self.diff_dock.maximized.take()")
+                && before_close
+                    .contains("self.diff_dock.pending_focus_restore = Some(previous_focus);"),
+            "the header toggle parks a saved focus before it closes the dock: {header_toggle}"
+        );
+        assert!(
+            !close.contains("pending_focus_restore"),
+            "the closer must not drop the focus the header toggle parked: {close}"
+        );
+        let hand_back = panel
+            .split("pub(crate) fn hand_back_pending_dock_focus(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("hand back");
+        assert!(
+            hand_back.contains("self.diff_dock.pending_focus_restore.take()")
+                && hand_back.contains("self.dock_owns_focus(focus, window, cx)")
+                && hand_back
+                    .contains("self.restore_pre_maximize_focus(previous_focus, window, cx);"),
+            "the parked focus goes back with the strip close's fallback: {hand_back}"
+        );
+        let drain = include_str!("../main.rs")
+            .split("fn drain_pending_window_actions(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("drain");
+        assert!(
+            drain.contains("self.hand_back_pending_dock_focus(window, cx);"),
+            "the window-bearing drain hands the parked focus back: {drain}"
+        );
+        let park = host
+            .split("fn park_live_diff_dock(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("park");
+        assert!(
+            !park.contains("pending_focus_restore") && !park.contains("restore_pre_maximize_focus"),
+            "a tab-switch park drops the saved focus without touching the keyboard: {park}"
         );
     }
 

@@ -129,7 +129,11 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(previous_focus) = self.diff_dock.maximized.take() {
+        // Closed before a restore slide settled (#506): the focus it parked
+        // has not gone back yet.
+        let parked = self.diff_dock.restore_focus_after_slide.take();
+        let saved = self.diff_dock.maximized.take();
+        if let Some(previous_focus) = saved.or(parked.map(|(focus, _)| focus)) {
             // A handle a dock tab owns (a File or Terminal tab was focused
             // when the dock was maximized) is about to unmount with the
             // dock, so it falls back to the workspace's first pane.
@@ -140,6 +144,25 @@ impl PaneFlowApp {
             self.restore_pre_maximize_focus(previous_focus, window, cx);
         }
         self.close_diff_dock_panel(cx);
+    }
+
+    /// Hand back the saved focus a pane header's dock toggle parked when it
+    /// closed a maximized or still-restoring dock (#506). That handler has no
+    /// `Window`, so the window-bearing drain runs this, with the strip
+    /// close's fallback for a handle one of the dock's own tabs owns.
+    pub(crate) fn hand_back_pending_dock_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(previous_focus) = self.diff_dock.pending_focus_restore.take() else {
+            return;
+        };
+        let owned_by_dock = previous_focus
+            .as_ref()
+            .is_some_and(|focus| self.dock_owns_focus(focus, window, cx));
+        let previous_focus = if owned_by_dock { None } else { previous_focus };
+        self.restore_pre_maximize_focus(previous_focus, window, cx);
     }
 
     /// Whether `focus` is, or sits inside, the handle of one of the dock's own
@@ -162,6 +185,7 @@ impl PaneFlowApp {
         self.clear_diff_dock_snapshot_state();
         self.diff_dock.maximized = None;
         self.diff_dock.maximize_animation = None;
+        self.diff_dock.restore_focus_after_slide = None;
         self.diff_dock.reveal_animation = None;
         self.diff_dock.resize = None;
         self.diff_dock.h_scroll_drag = None;

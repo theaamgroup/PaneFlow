@@ -1222,6 +1222,15 @@ struct DiffDockState {
     /// The pane grid's visible width sliding between its full width and 0
     /// while maximize toggles; `None` once settled.
     pub(crate) maximize_animation: Option<SidebarWidthAnimation>,
+    /// The focus a sliding restore hands back once the pane grid is on screen
+    /// again (#506), beside the focus the dock held when the slide started;
+    /// `None` when no restore slide is waiting to settle.
+    pub(crate) restore_focus_after_slide:
+        Option<(Option<gpui::FocusHandle>, Option<gpui::FocusHandle>)>,
+    /// The saved focus a pane header's dock toggle closed a maximized or
+    /// still-restoring dock over (#506). That handler has no `Window`, so
+    /// `drain_pending_window_actions` hands it back; `None` when nothing waits.
+    pub(crate) pending_focus_restore: Option<Option<gpui::FocusHandle>>,
     /// The dock column's reveal progress (0 to 1) while it slides in on open;
     /// `None` once settled, and never set by a session-switch restore.
     pub(crate) reveal_animation: Option<SidebarWidthAnimation>,
@@ -1894,6 +1903,9 @@ impl PaneFlowApp {
         if std::mem::take(&mut self.pending_palette_focus) {
             window.focus(&self.pane_palette_focus, cx);
         }
+        // The pane header's dock toggle closed a maximized or still-restoring
+        // dock over a saved focus (#506).
+        self.hand_back_pending_dock_focus(window, cx);
         self.prune_stale_split_palette(cx);
         self.ensure_empty_tab_palette(cx);
     }
