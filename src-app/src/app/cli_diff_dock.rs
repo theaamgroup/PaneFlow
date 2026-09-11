@@ -1216,11 +1216,19 @@ mod tests {
             "the strip close restores the saved focus before closing, falling back \
              to a workspace pane when the dock itself owned it: {close}"
         );
-        let strip = include_str!("diff_dock/render.rs");
-        assert!(
-            strip.contains("this.close_diff_dock_panel_from_strip(window, cx);"),
-            "the close button goes through the focus-restoring closer: {strip}"
-        );
+        for (name, header) in [
+            ("tab strip", include_str!("diff_dock/render.rs")),
+            (
+                "surface picker",
+                include_str!("diff_dock/surface_picker.rs"),
+            ),
+        ] {
+            assert!(
+                header.contains("this.close_diff_dock_panel_from_strip(window, cx);")
+                    && !header.contains("this.close_diff_dock_panel(cx);"),
+                "the {name}'s close button goes through the focus-restoring closer"
+            );
+        }
         let eye = include_str!("agent_status.rs");
         let under_eye = eye
             .split("pub(crate) fn surfaces_under_user_eye(")
