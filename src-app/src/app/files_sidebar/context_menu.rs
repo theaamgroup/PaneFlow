@@ -83,7 +83,10 @@ impl PaneFlowApp {
             ));
 
         deferred(crate::ui_primitives::menu_reveal(
-            "files-context-menu-reveal",
+            (
+                "files-context-menu-reveal",
+                crate::ui_primitives::reveal_key(&menu.path),
+            ),
             context_menu,
         ))
         .priority(3)

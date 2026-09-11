@@ -280,7 +280,10 @@ impl PaneFlowApp {
         }
 
         deferred(crate::ui_primitives::menu_reveal(
-            "sessions-context-menu-reveal",
+            (
+                "sessions-context-menu-reveal",
+                crate::ui_primitives::reveal_key(&session_id),
+            ),
             context_menu,
         ))
         .priority(3)

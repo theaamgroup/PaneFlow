@@ -147,6 +147,19 @@ where
         .into_any_element()
 }
 
+/// A stable per-process key for a `menu_reveal` id that must change with the
+/// menu's target. GPUI keeps animation state by element id across frames, so
+/// a context menu retargeted while open (right-click another tab, another
+/// session row) keeps its finished animation and snaps into place unless the
+/// id moves with the target. `("name", reveal_key(&target))` gives each target
+/// its own id. The hash only has to agree within one process.
+pub(crate) fn reveal_key(target: impl std::hash::Hash) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut hasher = DefaultHasher::new();
+    target.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// A reversible hover transition that keeps the wrapped GPUI hitbox as the
 /// interactive root. State follows the element ID across consecutive frames
 /// and disappears automatically when a transient control is unmounted.
@@ -1341,9 +1354,15 @@ mod tests {
                 }
             }
         }
+        // rustfmt breaks a keyed id across lines, so these checks read the
+        // source with its whitespace removed.
+        let compact = |text: &str| text.split_whitespace().collect::<String>();
         for (rel, id) in reveal_only {
-            let text = std::fs::read_to_string(root.join(rel)).unwrap();
-            if !text.contains(&format!("menu_reveal(\"{id}\"")) {
+            let text = compact(&std::fs::read_to_string(root.join(rel)).unwrap());
+            // Either the fixed spelling or the target-keyed one below.
+            if !text.contains(&format!("menu_reveal(\"{id}\""))
+                && !text.contains(&format!("(\"{id}\","))
+            {
                 failures.push(format!(
                     "{rel} does not reveal its menu through menu_reveal(\"{id}\""
                 ));
@@ -1367,6 +1386,10 @@ mod tests {
                 let text = std::fs::read_to_string(&path).unwrap();
                 for (at, _) in text.match_indices("menu_reveal(") {
                     let after = text[at + "menu_reveal(".len()..].trim_start();
+                    // A retargetable menu keys its id on the target:
+                    // `menu_reveal(("name", key), ..)`; the name is still
+                    // the literal the uniqueness check reads.
+                    let after = after.strip_prefix('(').unwrap_or(after).trim_start();
                     let Some(quoted) = after.strip_prefix('"') else {
                         continue;
                     };
@@ -1385,5 +1408,46 @@ mod tests {
         );
         let dupes: Vec<_> = ids.iter().filter(|(_, sites)| sites.len() > 1).collect();
         assert!(dupes.is_empty(), "duplicate menu_reveal ids: {dupes:?}");
+
+        // A menu that can be retargeted while it is open (right-click a
+        // different row, marker, or spot) must key its reveal id on the
+        // target, or GPUI keeps the finished animation and the replacement
+        // menu snaps into place instead of fading.
+        let retargetable = [
+            (
+                "app/sidebar/context_menu.rs",
+                "workspace-context-menu-reveal",
+            ),
+            ("app/sidebar/context_menu.rs", "tab-context-menu-reveal"),
+            ("app/sidebar/context_menu.rs", "pane-context-menu-reveal"),
+            (
+                "app/files_sidebar/context_menu.rs",
+                "files-context-menu-reveal",
+            ),
+            (
+                "app/sessions_context_menu.rs",
+                "sessions-context-menu-reveal",
+            ),
+            ("diff/view/interaction.rs", "diff-body-context-menu-reveal"),
+            ("app/diff_dock/code/view.rs", "code-marker-popup-reveal"),
+        ];
+        for (rel, id) in retargetable {
+            let text = compact(&std::fs::read_to_string(root.join(rel)).unwrap());
+            assert!(
+                text.contains(&format!("(\"{id}\",")),
+                "{rel}: {id} must be keyed on its target, `(\"{id}\", <key>)`"
+            );
+            assert!(
+                !text.contains(&format!("menu_reveal(\"{id}\"")),
+                "{rel}: {id} is mounted with a fixed id"
+            );
+        }
+    }
+
+    #[test]
+    fn reveal_key_follows_its_target() {
+        assert_eq!(reveal_key((3usize, 4usize)), reveal_key((3usize, 4usize)));
+        assert_ne!(reveal_key((3usize, 4usize)), reveal_key((4usize, 3usize)));
+        assert_ne!(reveal_key("session-a"), reveal_key("session-b"));
     }
 }

@@ -453,7 +453,7 @@ impl PaneFlowApp {
         });
 
         deferred(crate::ui_primitives::menu_reveal(
-            "workspace-context-menu-reveal",
+            ("workspace-context-menu-reveal", idx),
             context_menu,
         ))
         .priority(3)
@@ -627,7 +627,13 @@ impl PaneFlowApp {
             .when_some(remove_worktree_item, |menu, item| {
                 menu.child(context_menu_divider(ui)).child(item)
             });
-        crate::ui_primitives::menu_reveal("tab-context-menu-reveal", context_menu)
+        crate::ui_primitives::menu_reveal(
+            (
+                "tab-context-menu-reveal",
+                crate::ui_primitives::reveal_key((ws_idx, tab_idx)),
+            ),
+            context_menu,
+        )
     }
 
     /// The rows of the tab menu's Branch section: `(detached checkout path,
@@ -860,7 +866,7 @@ impl PaneFlowApp {
         ));
 
         deferred(crate::ui_primitives::menu_reveal(
-            "pane-context-menu-reveal",
+            ("pane-context-menu-reveal", source.entity_id()),
             context_menu,
         ))
         .priority(3)
