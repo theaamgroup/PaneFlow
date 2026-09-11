@@ -817,8 +817,8 @@ pub fn plan_branch_checkout(
 /// The directory to work in for `branch`: the worktree that already holds it,
 /// or a new sibling worktree checked out from it (issue #347).
 ///
-/// Blocking (two to three git subprocesses, one of them a full checkout, every
-/// one through [`run_git`] with `GIT_TERMINAL_PROMPT=0`) - the caller runs it
+/// Blocking git subprocesses, including a full checkout when needed, all
+/// through [`run_git`] with `GIT_TERMINAL_PROMPT=0` - the caller runs it
 /// through `smol::unblock`, never on the render thread.
 ///
 /// The result is deliberately NOT a [`ManagedWorktree`], and no owner marker
@@ -830,6 +830,19 @@ pub fn plan_branch_checkout(
 /// (`managed_worktree_from_record` validates the marker), so the checkout
 /// cannot be torn down by accident later.
 pub fn prepare_branch_checkout(repo_root: &Path, branch: &str) -> Result<PathBuf, String> {
+    // Configured defaults are arbitrary input, unlike the branch picker's list.
+    // Reject options, revision expressions, and previous-checkout expansion.
+    let checked = run_git(
+        repo_root,
+        &["check-ref-format", "--branch", branch],
+        GIT_DEADLINE,
+    )?;
+    if checked.trim() != branch {
+        return Err(format!("Not a literal branch name: {branch}"));
+    }
+    if !branch_exists(repo_root, branch) {
+        return Err(format!("Local branch {branch} does not exist"));
+    }
     let entries = list_worktrees(repo_root)?;
     match plan_branch_checkout(&entries, repo_root, branch)? {
         BranchCheckout::Existing(path) => Ok(path),
@@ -2230,6 +2243,66 @@ mod tests {
         assert_eq!(
             prepare_branch_checkout(&repo, "main").expect("main resolves"),
             repo
+        );
+    }
+
+    #[test]
+    fn new_tab_branch_checkouts_preserve_the_workspace_branch_and_dirty_files() {
+        let sandbox = tempfile::tempdir().expect("tempdir");
+        let repo = sandbox.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+            vec!["branch", "staging"],
+            vec!["tag", "tag-only"],
+            vec!["checkout", "-q", "-b", "feature"],
+        ] {
+            run_git(&repo, &args, GIT_DEADLINE).expect("git fixture");
+        }
+        let repo = std::fs::canonicalize(repo).expect("canonical repo");
+        std::fs::write(repo.join("unfinished.txt"), "keep my work").expect("dirty file");
+        for branch in ["main", "staging"] {
+            let checkout = prepare_branch_checkout(&repo, branch).expect("branch checkout");
+            assert_ne!(checkout, repo);
+            assert_eq!(
+                prepare_branch_checkout(&repo, branch).expect("reuse"),
+                checkout
+            );
+            let entries = list_worktrees(&repo).expect("listing");
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == repo && e.branch.as_deref() == Some("feature"))
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == checkout && e.branch.as_deref() == Some(branch))
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.join("unfinished.txt")).expect("preserved"),
+            "keep my work"
+        );
+        for invalid in [
+            "missing-branch",
+            "tag-only",
+            "--detach",
+            "HEAD",
+            "main~1",
+            "@{-1}",
+        ] {
+            assert!(
+                prepare_branch_checkout(&repo, invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            list_worktrees(&repo).expect("listing after refusals").len(),
+            3
         );
     }
 

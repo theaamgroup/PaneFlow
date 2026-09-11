@@ -90,6 +90,12 @@ mod tests {
                 indent_guide: Some(true),
             },
             workspace_auto_sort: Some(false),
+            new_tabs_on_main: Some(true),
+            new_tab_branch: Some("main".to_string()),
+            workspace_new_tab_branches: HashMap::from([(
+                "/projects/aftermarket".to_string(),
+                "staging".to_string(),
+            )]),
             workspace_zed_menu_visible: Some(true),
             workspace_cursor_menu_visible: Some(false),
             workspace_vscode_menu_visible: Some(true),

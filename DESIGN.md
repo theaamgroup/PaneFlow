@@ -817,6 +817,16 @@ lag. The Appearance page leads with three theme tiles (System, Light, Dark;
 134 tall, radius 10, 2 px border) holding a mockup painted from the preset and
 a live split-diff sample; the preset itself is a select, not a tile grid.
 
+Workspaces includes a **New tabs** card with a **Default branch** select
+(default `main`) and a select for each open Git workspace. Workspace rows show
+the folder name and path; they offer **Use default**, **Workspace checkout**,
+and the repository's local branches. The default select lists branches from
+open workspaces. Overrides persist by workspace cwd, so identical folder names
+do not share settings. New-tab actions resolve the selected checkout before
+opening the preset picker; a failure shows a toast and opens no tab. Existing
+terminals retain their checkout, and non-repository workspaces use their directory.
+Selects use the shared keyboard and accessibility behavior.
+
 ### 5.6 Menus, selects, tooltips
 
 Popups share `menu_surface` — squircle 18, a surface lifted 0.035 in dark or

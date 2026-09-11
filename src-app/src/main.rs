@@ -222,6 +222,7 @@ pub(crate) enum GeneralDropdown {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum WorkspaceTemplateDropdown {
     Layout,
+    NewTabBranch(Option<u64>),
 }
 
 #[derive(Clone, Copy)]
