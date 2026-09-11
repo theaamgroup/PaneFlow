@@ -151,10 +151,11 @@ impl PaneFlowApp {
             let active = ws.active_tab_mut();
             if active.root.is_none() && active.saved_layout.is_none() {
                 active.title = title;
+                active.title_is_automatic = true;
                 active.root = Some(root);
                 true
             } else {
-                ws.open_tab(Tab::new(title, Some(root)))
+                ws.open_tab(Tab::new(title, Some(root)).with_automatic_title(true))
             }
         });
         if !opened {

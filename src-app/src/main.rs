@@ -299,6 +299,7 @@ pub(crate) struct ClosedTabRecord {
     /// Stable [`Workspace::id`], not a positional index (issue #48).
     pub(crate) workspace_id: u64,
     pub(crate) title: String,
+    pub(crate) title_is_automatic: bool,
     /// Position the tab held, so undo puts it back where it was. Clamped on
     /// restore.
     pub(crate) index: usize,
@@ -314,6 +315,7 @@ pub(crate) struct ClosedTabRecord {
 /// and must come back as empty rather than disappearing from the record.
 pub(crate) struct ClosedWorkspaceTabRecord {
     pub(crate) title: String,
+    pub(crate) title_is_automatic: bool,
     pub(crate) layout: Option<paneflow_config::schema::LayoutNode>,
     /// The worktree the tab was bound to (issue #347).
     pub(crate) worktree: Option<std::path::PathBuf>,

@@ -9,6 +9,18 @@ The synthetic terminal emitted OSC 2 title changes through a real PTY.
 The test instance used its own IPC socket and temporary debug state;
 the original debug state was restored and verified byte-for-byte afterward.
 
+## Review follow-up
+
+Review identified that manually named tabs must survive OSC updates. The final
+implementation records `title_is_automatic` for new launch labels, persists it
+through session restore and undo, and clears only those labels. Older records
+without provenance remain manual; no label-text heuristic can erase a user's
+name. Regression tests cover both `build` and `Claude` as manual names,
+automatic labels, legacy session decoding, and provenance in undo records.
+The captures below predate this guard and document the unchanged visual
+presentation; their stored-label replacement scenario now requires an
+explicitly automatic label.
+
 ## Observed behavior
 
 - A single-pane tab initially displayed its stored label, `Before rename`.

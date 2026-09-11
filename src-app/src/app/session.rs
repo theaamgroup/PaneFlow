@@ -731,7 +731,10 @@ impl PaneFlowApp {
                     Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)
                 })
             });
-            tabs.push(Tab::restored(tab_session.title.clone(), root, bound));
+            tabs.push(
+                Tab::restored(tab_session.title.clone(), root, bound)
+                    .with_automatic_title(tab_session.title_is_automatic),
+            );
         }
         let mut workspace =
             Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
