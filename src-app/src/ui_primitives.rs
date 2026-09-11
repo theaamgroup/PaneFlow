@@ -1432,6 +1432,7 @@ mod tests {
             ),
             ("diff/view/interaction.rs", "diff-body-context-menu-reveal"),
             ("app/diff_dock/code/view.rs", "code-marker-popup-reveal"),
+            ("app/review/menu.rs", "review-rail-menu-reveal"),
         ];
         for (rel, id) in retargetable {
             let text = compact(&std::fs::read_to_string(root.join(rel)).unwrap());

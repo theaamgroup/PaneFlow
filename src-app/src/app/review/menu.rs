@@ -65,8 +65,18 @@ impl PaneFlowApp {
             }),
         ));
 
+        // Keyed on the subject and the click spot: a workspace header row and
+        // its primary checkout row share a subject, so the path alone would
+        // let a retarget between them snap instead of fading in again.
         deferred(crate::ui_primitives::menu_reveal(
-            "review-rail-menu-reveal",
+            (
+                "review-rail-menu-reveal",
+                crate::ui_primitives::reveal_key((
+                    &menu.subject.worktree.path,
+                    f32::from(menu.position.x).to_bits(),
+                    f32::from(menu.position.y).to_bits(),
+                )),
+            ),
             context_menu,
         ))
         .priority(3)
