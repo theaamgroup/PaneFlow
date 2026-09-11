@@ -678,8 +678,9 @@ when the tab has none (Changes), so keystrokes never reach the hidden grid;
 restoring, or closing the maximized dock from its strip, hands it back, or to
 the workspace's first pane. Panes behind a maximized dock are not under the
 user's eye: their agents' completions and notifications go out as for a
-zoomed-away split. The state is per-app, and a tab switch parks the dock
-through the closer, so the incoming tab always sees its grid. Both the open slide and the
+zoomed-away split. The state is per-app: a tab switch parks the dock through
+the closer, and a trip through Review or Settings drops it as the dock
+unmounts, so the incoming tab, and the user coming back, always see the grid. Both the open slide and the
 maximize slide reuse the primary sidebar's 280 ms curve (4.8) and settle
 instantly under `reduce_motion`.
 

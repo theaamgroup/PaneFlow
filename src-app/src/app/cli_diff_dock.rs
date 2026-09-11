@@ -855,6 +855,12 @@ impl PaneFlowApp {
             // resume from its old anchor when the dock comes back.
             self.diff_dock.vertical_scrollbar.cancel_drag();
             self.diff_dock.rendered = false;
+            // A maximized dock does not survive the trip either: Review and
+            // Settings hand the focus to a pane on the way back, and a grid
+            // still hidden behind the dock would take the keyboard out of
+            // sight. The user comes back to dock and grid side by side.
+            self.diff_dock.maximized = None;
+            self.diff_dock.maximize_animation = None;
             self.blur_unmounted_files_tree(window, cx);
             return body;
         }
@@ -1229,6 +1235,19 @@ mod tests {
                 "the {name}'s close button goes through the focus-restoring closer"
             );
         }
+        let unmounted = host
+            .split("pub(crate) fn wrap_cli_diff_dock(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("let grid = self.rendered_pane_grid_layout(window);")
+                    .next()
+            })
+            .expect("unmounted branch");
+        assert!(
+            unmounted.contains("self.diff_dock.maximized = None;")
+                && unmounted.contains("self.diff_dock.maximize_animation = None;"),
+            "a trip through Review or Settings drops the maximize state: {unmounted}"
+        );
         let eye = include_str!("agent_status.rs");
         let under_eye = eye
             .split("pub(crate) fn surfaces_under_user_eye(")
