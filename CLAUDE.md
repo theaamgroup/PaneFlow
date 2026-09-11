@@ -229,7 +229,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 94 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 95 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -241,7 +241,9 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     rendered width = min(stored, main-panel remainder), and the dock is
 │   │                                     not rendered at all below the floor (remainder < 360 px dock +
 │   │                                     one minimum pane); stored width only written by the resize drag,
-│   │                                     and a drag pinned at the render ceiling leaves a wider preference alone
+│   │                                     and a drag pinned at the render ceiling leaves a wider preference alone;
+│   │                                     `Cmd+Shift+F` maximizes the dock over a clipped (never resized) pane grid,
+│   │                                     with the sidebar slide on open and maximize (`reduce_motion` makes both instant)
 │   ├── review/                        ← Review mode: Workspaces rail (220 px), Changes rail (300 px),
 │   │                                     independent single-subject diff panes in LayoutTree (MAX_REVIEW_PANES = 6);
 │   │                                     mode.rs gates entry, grid.rs handles opening/split/move/zoom,
@@ -449,7 +451,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 94 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -475,6 +477,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 94 ac
 | `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
 | `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
 | `Cmd+Alt+F` | Toggle files sidebar for the active tab (inert in Review and Settings, where the rail is unmounted) | Global |
+| `Cmd+Shift+F` | Maximize / restore the Changes dock (`toggle_diff_dock_maximize`; no-op while the dock is not visible) | Global |
 | `Cmd+Alt+B` | Toggle primary sidebar (persisted across launches) | Global |
 | `Ctrl+Alt+R` / `Ctrl+Shift+Alt+C` | Reveal in Finder / copy workspace path | Global |
 | `Ctrl+Alt+Z` / `C` / `V` / `W` | Open workspace in Zed / Cursor / VS Code / Windsurf | Global |

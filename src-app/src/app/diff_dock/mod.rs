@@ -40,6 +40,7 @@ pub(crate) use model::{
     DiffDockHScrollDrag, DiffDockTab, DiffHover,
 };
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, ParentElement, Pixels, Point, ScrollHandle, ScrollWheelEvent,
@@ -102,6 +103,14 @@ impl PaneFlowApp {
                 && data.has_mode(split)
                 && data.theme_generation == crate::theme::theme_generation()
         });
+        if !self.diff_dock.open {
+            self.diff_dock.reveal_animation =
+                (!crate::ui_primitives::reduce_motion()).then(|| crate::SidebarWidthAnimation {
+                    from_width: 0.,
+                    to_width: 1.,
+                    started_at: std::time::Instant::now(),
+                });
+        }
         self.diff_dock.open = true;
         if has_current_snapshot {
             cx.notify();
@@ -110,10 +119,50 @@ impl PaneFlowApp {
         }
     }
 
+    /// The strip's close button: the user's way off a maximized dock beside
+    /// the restore toggle, so the focus saved at maximize goes back to its
+    /// pane before the dock unmounts. [`Self::close_diff_dock_panel`] itself
+    /// leaves focus alone because a tab-switch park also goes through it, and
+    /// focusing the outgoing tab's pane during a switch would be wrong.
+    pub(crate) fn close_diff_dock_panel_from_strip(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous_focus) = self.diff_dock.maximized.take() {
+            // A handle a dock tab owns (a File or Terminal tab was focused
+            // when the dock was maximized) is about to unmount with the
+            // dock, so it falls back to the workspace's first pane.
+            let owned_by_dock = previous_focus
+                .as_ref()
+                .is_some_and(|focus| self.dock_owns_focus(focus, window, cx));
+            let previous_focus = if owned_by_dock { None } else { previous_focus };
+            self.restore_pre_maximize_focus(previous_focus, window, cx);
+        }
+        self.close_diff_dock_panel(cx);
+    }
+
+    /// Whether `focus` is, or sits inside, the handle of one of the dock's own
+    /// tabs.
+    fn dock_owns_focus(
+        &self,
+        focus: &gpui::FocusHandle,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> bool {
+        (0..self.diff_dock.diff_tabs.len()).any(|index| {
+            self.dock_tab_focus_handle(index, cx)
+                .is_some_and(|handle| handle == *focus || handle.contains(focus, window))
+        })
+    }
+
     pub(crate) fn close_diff_dock_panel(&mut self, cx: &mut Context<Self>) {
         self.diff_dock.open = false;
         self.diff_dock.data = None;
         self.clear_diff_dock_snapshot_state();
+        self.diff_dock.maximized = None;
+        self.diff_dock.maximize_animation = None;
+        self.diff_dock.reveal_animation = None;
         self.diff_dock.resize = None;
         self.diff_dock.h_scroll_drag = None;
         self.diff_dock.vertical_scrollbar.cancel_drag();
@@ -396,11 +445,14 @@ impl PaneFlowApp {
             .diff_active_tab
             .min(self.diff_dock.diff_tabs.len().saturating_sub(1));
         let tabs = self.diff_dock.diff_tabs.clone();
+        let maximized = self.diff_dock.maximized.is_some();
+        let fills_panel = self.diff_dock_fills_panel();
         let header = render_diff_tab_strip(
             &tabs,
             active,
             self.diff_dock.diff_tab_close_armed,
             self.diff_dock.diff_new_tab_menu_open,
+            maximized,
             ui,
             cx,
         );
@@ -483,13 +535,21 @@ impl PaneFlowApp {
         let radius = crate::app::constants::PANE_CARD_RADIUS;
         div()
             .relative()
-            .w(px(width))
+            .map(|panel| {
+                if fills_panel {
+                    panel.w_full()
+                } else {
+                    panel.w(px(width))
+                }
+            })
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
             .child(squircle_fill(radius, ui.base))
-            .child(render_diff_resize_handle(width, ui, cx))
+            .when(!fills_panel, |panel| {
+                panel.child(render_diff_resize_handle(width, ui, cx))
+            })
             .child(header)
             .children(toolbar)
             .child(body)
@@ -555,15 +615,24 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let radius = crate::app::constants::PANE_CARD_RADIUS;
+        let fills_panel = self.diff_dock_fills_panel();
         div()
             .relative()
-            .w(px(width))
+            .map(|panel| {
+                if fills_panel {
+                    panel.w_full()
+                } else {
+                    panel.w(px(width))
+                }
+            })
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
             .child(squircle_fill(radius, ui.base))
-            .child(render_diff_resize_handle(width, ui, cx))
+            .when(!fills_panel, |panel| {
+                panel.child(render_diff_resize_handle(width, ui, cx))
+            })
             .child(render_diff_picker_header(ui, cx))
             .child(render_diff_surface_picker(ui, cx))
             .child(squircle_border(radius, px(1.), ui.border))

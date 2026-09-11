@@ -151,6 +151,7 @@ actions!(
         // (US-005) is the worktree + split + agent + prefill one-gesture
         // modal.
         ToggleFilesSidebar,
+        ToggleDiffDockMaximize,
         OpenAttentionQueue,
         OpenLaunchPad,
         // EP-005 US-018 (prd-file-editor-2026-Q3): the diff dock's `+` menu
@@ -182,7 +183,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 94, "review action surface is pinned");
+        assert_eq!(declared, 95, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

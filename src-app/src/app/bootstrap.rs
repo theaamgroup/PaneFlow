@@ -844,6 +844,10 @@ impl PaneFlowApp {
             diff_dock: crate::DiffDockState {
                 open: false,
                 rendered: false,
+                maximized: None,
+                maximize_animation: None,
+                reveal_animation: None,
+                pane_grid_width: std::rc::Rc::default(),
                 data: None,
                 collapsed: std::collections::HashSet::new(),
                 expanded_folds: std::collections::HashSet::new(),

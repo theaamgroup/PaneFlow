@@ -109,8 +109,8 @@ pub(super) fn render_diff_picker_header(
             "diff-dock-picker-close",
             "icons/close.svg",
             "Close dock",
-            cx.listener(|this, _: &ClickEvent, _w, cx| {
-                this.close_diff_dock_panel(cx);
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_diff_dock_panel_from_strip(window, cx);
             }),
             ui.muted,
         ))

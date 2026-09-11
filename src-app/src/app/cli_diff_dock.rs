@@ -25,9 +25,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
-    div, px,
+    canvas, div, px,
 };
 
 use crate::PaneFlowApp;
@@ -62,6 +63,39 @@ const PANE_GRID_RESERVED_WIDTH: f32 =
 fn diff_dock_fit(preferred: f32, available: f32) -> Option<(f32, f32)> {
     let max = available - PANE_GRID_RESERVED_WIDTH - crate::layout::PANE_GUTTER_PX;
     (max >= DIFF_DOCK_PANEL_MIN_WIDTH).then_some((preferred.min(max), max))
+}
+
+/// Width of a maximized dock (upstream e0ff7e21): the whole panel minus the
+/// gutter on each side, never below the floor. The pane grid is hidden, so
+/// the fit's reservation for it does not apply and the dock renders even in
+/// a panel the fit would refuse.
+fn diff_dock_maximized_width(available: f32) -> f32 {
+    (available - 2. * crate::layout::PANE_GUTTER_PX).max(DIFF_DOCK_PANEL_MIN_WIDTH)
+}
+
+/// How the pane grid sits beside the dock this frame: flexing to the
+/// remainder, clipped to `visible` of its `full` width while the maximize
+/// slide runs, or hidden behind a maximized dock. Clipped and hidden keep the
+/// grid mounted at constant bounds, so no pane sees a PTY resize.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PaneGridLayout {
+    Flex,
+    Clipped { visible: f32, full: f32 },
+    Hidden,
+}
+
+impl PaneGridLayout {
+    /// The left gutter the dock has to paint itself: the grid pads its own
+    /// right edge while it is on screen, and the dock takes that over as the
+    /// grid is clipped away.
+    fn dock_left_gutter(self) -> f32 {
+        let gutter = crate::layout::PANE_GUTTER_PX;
+        match self {
+            Self::Flex => 0.,
+            Self::Clipped { visible, full } => gutter * (1. - visible / full.max(1.)).clamp(0., 1.),
+            Self::Hidden => gutter,
+        }
+    }
 }
 
 /// The dock state one session owns, parked while another session is on screen.
@@ -596,6 +630,9 @@ impl PaneFlowApp {
             // snapshot valid if a dock is ever opened on a subfolder.
             let cwd = cwd.or_else(|| self.active_checkout()).unwrap_or_default();
             self.open_diff_dock_panel(cwd, cx);
+            // A session switch brings a parked dock straight back: the slide
+            // is for a dock the user just opened.
+            self.diff_dock.reveal_animation = None;
         }
     }
 
@@ -617,6 +654,143 @@ impl PaneFlowApp {
             // picker. Afterwards it restores whatever tab was last active there.
             self.diff_dock.picker = !self.diff_dock.picked;
             self.open_diff_dock_panel(cwd, cx);
+        }
+    }
+
+    pub(crate) fn handle_toggle_diff_dock_maximize(
+        &mut self,
+        _: &crate::ToggleDiffDockMaximize,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.diff_dock_visible() {
+            return;
+        }
+        self.toggle_diff_dock_maximize(window, cx);
+    }
+
+    /// Maximize the dock over the whole cockpit, or restore the pane grid
+    /// (upstream e0ff7e21). Maximizing records the focus that was active and
+    /// moves it onto the active dock tab; restoring hands it back (or the
+    /// workspace's first pane when nothing was focused). The grid slides
+    /// between its measured width and 0 like the primary sidebar, unless
+    /// `reduce_motion` is set.
+    pub(crate) fn toggle_diff_dock_maximize(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.diff_dock.resize = None;
+        let now = std::time::Instant::now();
+        let full = self.diff_dock.pane_grid_width.get();
+        let from = match self.diff_dock.maximize_animation {
+            Some(animation) => animation.width_at(now),
+            None if self.diff_dock.maximized.is_some() => 0.,
+            None => full,
+        };
+        let to = match self.diff_dock.maximized.take() {
+            Some(previous_focus) => {
+                self.restore_pre_maximize_focus(previous_focus, window, cx);
+                full
+            }
+            None => {
+                self.diff_dock.maximized = Some(window.focused(cx));
+                // The hidden grid must not keep the keyboard: a tab with its
+                // own handle (File, Terminal) takes it, and Changes, which has
+                // none, blurs the pane instead. Never the `focus_diff_tab`
+                // pane fallback, which would focus exactly the pane that is
+                // about to disappear.
+                match self.dock_tab_focus_handle(self.diff_dock.diff_active_tab, cx) {
+                    Some(focus) => window.focus(&focus, cx),
+                    None => window.blur(),
+                }
+                0.
+            }
+        };
+        self.diff_dock.maximize_animation = if !crate::ui_primitives::reduce_motion()
+            && (from - to).abs() > crate::PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA
+        {
+            Some(crate::SidebarWidthAnimation {
+                from_width: from,
+                to_width: to,
+                started_at: now,
+            })
+        } else {
+            None
+        };
+        cx.notify();
+    }
+
+    /// Hand the keyboard back to where it was before the dock was maximized:
+    /// the recorded handle, or the workspace's first pane when nothing was
+    /// focused. Shared by the restore toggle and the strip's close button, so
+    /// closing a maximized dock never strands the focus on a hidden surface.
+    pub(crate) fn restore_pre_maximize_focus(
+        &mut self,
+        previous_focus: Option<gpui::FocusHandle>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        match previous_focus {
+            Some(focus) => window.focus(&focus, cx),
+            None => {
+                // `false` is a zero-pane workspace: nothing to hand the
+                // focus back to.
+                if let Some(ws) = self.workspaces.get(self.active_idx) {
+                    let _ = ws.focus_first(window, cx);
+                }
+            }
+        }
+    }
+
+    /// Whether the dock flexes to its container this frame: maximized, or
+    /// sliding either way.
+    pub(crate) fn diff_dock_fills_panel(&self) -> bool {
+        self.diff_dock.maximized.is_some() || self.diff_dock.maximize_animation.is_some()
+    }
+
+    /// Whether the pane grid is behind a maximized dock this frame (#422 gate):
+    /// a pane that is not painted is not seen, so its agent's completion and
+    /// notifications must go out like a zoomed-away split's.
+    pub(crate) fn pane_grid_hidden_by_dock(&self) -> bool {
+        self.diff_dock.maximized.is_some() && self.diff_dock_visible()
+    }
+
+    /// The open slide's progress (0 to 1) this frame, or `None` once settled.
+    fn rendered_dock_reveal(&mut self, window: &mut gpui::Window) -> Option<f32> {
+        let animation = self.diff_dock.reveal_animation?;
+        let now = std::time::Instant::now();
+        if animation.is_finished(now) {
+            self.diff_dock.reveal_animation = None;
+            return None;
+        }
+        window.request_animation_frame();
+        Some(animation.width_at(now))
+    }
+
+    /// How the pane grid renders this frame, settling a finished maximize
+    /// slide and requesting the next frame of a running one.
+    fn rendered_pane_grid_layout(&mut self, window: &mut gpui::Window) -> PaneGridLayout {
+        let now = std::time::Instant::now();
+        if let Some(animation) = self.diff_dock.maximize_animation {
+            if animation.is_finished(now) {
+                self.diff_dock.maximize_animation = None;
+            } else {
+                window.request_animation_frame();
+                // `full` is the last Flex measurement, never the slide's
+                // endpoints: a toggle during a restore starts from the
+                // partly visible width, and laying the grid out at that
+                // width would resize every pane behind the dock.
+                return PaneGridLayout::Clipped {
+                    visible: animation.width_at(now),
+                    full: self.diff_dock.pane_grid_width.get().max(1.),
+                };
+            }
+        }
+        if self.diff_dock.maximized.is_some() {
+            PaneGridLayout::Hidden
+        } else {
+            PaneGridLayout::Flex
         }
     }
 
@@ -662,7 +836,9 @@ impl PaneFlowApp {
     /// `available_width` is the main panel's live width between the rails; the
     /// dock renders at [`diff_dock_fit`] of it and its stored preference, which
     /// this never writes - and not at all when the panel cannot hold the
-    /// dock's floor beside a minimum pane.
+    /// dock's floor beside a minimum pane. A maximized dock bypasses the fit:
+    /// the grid is clipped away (mounted at constant bounds, so no PTY
+    /// resize) and the dock flexes to the panel.
     pub(crate) fn wrap_cli_diff_dock(
         &mut self,
         body: AnyElement,
@@ -679,23 +855,45 @@ impl PaneFlowApp {
             // resume from its old anchor when the dock comes back.
             self.diff_dock.vertical_scrollbar.cancel_drag();
             self.diff_dock.rendered = false;
+            // A maximized dock does not survive the trip either: Review and
+            // Settings hand the focus to a pane on the way back, and a grid
+            // still hidden behind the dock would take the keyboard out of
+            // sight. The user comes back to dock and grid side by side.
+            self.diff_dock.maximized = None;
+            self.diff_dock.maximize_animation = None;
             self.blur_unmounted_files_tree(window, cx);
             return body;
         }
-        let Some((width, max_width)) = diff_dock_fit(self.diff_dock.width, available_width) else {
-            // Below the floor the pane grid wins. The dock keeps its state
-            // (open, tabs, snapshot) and is back the moment there is room for
-            // both; only a drag anchored on the edge that just left the screen
-            // is dropped, or it would resume on the dock's return.
-            self.diff_dock.resize = None;
-            self.diff_dock.h_scroll_drag = None;
-            self.diff_dock.vertical_scrollbar.cancel_drag();
-            self.diff_dock.rendered = false;
-            self.blur_unmounted_files_tree(window, cx);
-            return body;
+        let grid = self.rendered_pane_grid_layout(window);
+        let fills_panel = grid != PaneGridLayout::Flex;
+        let (width, max_width) = if fills_panel {
+            let width = diff_dock_maximized_width(available_width);
+            (width, width)
+        } else {
+            let Some(fit) = diff_dock_fit(self.diff_dock.width, available_width) else {
+                // Below the floor the pane grid wins. The dock keeps its state
+                // (open, tabs, snapshot) and is back the moment there is room
+                // for both; only a drag anchored on the edge that just left
+                // the screen is dropped, or it would resume on the dock's
+                // return.
+                self.diff_dock.resize = None;
+                self.diff_dock.h_scroll_drag = None;
+                self.diff_dock.vertical_scrollbar.cancel_drag();
+                self.diff_dock.rendered = false;
+                self.blur_unmounted_files_tree(window, cx);
+                return body;
+            };
+            fit
         };
         self.diff_dock.rendered = true;
         let ui = crate::theme::ui_colors();
+        let measured_grid_width = self.diff_dock.pane_grid_width.clone();
+        let reveal = if fills_panel {
+            None
+        } else {
+            self.rendered_dock_reveal(window)
+        };
+        let dock_column_width = width + crate::layout::PANE_GUTTER_PX;
         div()
             .size_full()
             .flex()
@@ -727,21 +925,82 @@ impl PaneFlowApp {
                     this.end_diff_dock_resize(cx);
                 }),
             )
-            .child(div().flex_1().min_w_0().h_full().child(body))
-            // The pane grid already pads its own right edge, so the dock only
-            // has to reproduce the other three gutters to sit on the same
-            // margins as the cards it docks beside.
-            .child(
-                div()
-                    .flex_none()
+            .map(|row| match grid {
+                // The canvas measures the grid's width for the maximize
+                // slide's `full` extent.
+                PaneGridLayout::Flex => row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .relative()
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    measured_grid_width.set(f32::from(bounds.size.width))
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                        .child(body),
+                ),
+                // Clipped, not shrunk: the grid keeps its full width inside
+                // the clip so no pane is laid out narrower.
+                PaneGridLayout::Clipped { visible, full } => row.child(
+                    div()
+                        .flex_none()
+                        .w(px(visible))
+                        .h_full()
+                        .overflow_hidden()
+                        .child(div().w(px(full)).h_full().child(body)),
+                ),
+                PaneGridLayout::Hidden => row,
+            })
+            // The pane grid already pads its own right edge while it is on
+            // screen, so the dock only has to reproduce the other three
+            // gutters to sit on the same margins as the cards it docks beside
+            // - and the left one as the grid is clipped away.
+            .child({
+                let dock = div()
+                    .map(|dock| {
+                        if fills_panel {
+                            dock.flex_1().min_w_0()
+                        } else {
+                            dock.flex_none()
+                        }
+                    })
+                    .pl(px(grid.dock_left_gutter()))
                     .h_full()
                     .flex()
                     .flex_col()
                     .pt(px(crate::layout::PANE_GUTTER_PX))
                     .pb(px(crate::layout::PANE_GUTTER_PX))
                     .pr(px(crate::layout::PANE_GUTTER_PX))
-                    .child(self.render_diff_dock_panel(width, ui, window, cx)),
-            )
+                    .child(self.render_diff_dock_panel(width, ui, window, cx));
+                match reveal {
+                    // Sliding in from the right edge: the column grows while
+                    // the dock stays pinned at its full width inside it.
+                    Some(progress) => div()
+                        .relative()
+                        .flex_none()
+                        .h_full()
+                        .w(px(dock_column_width * progress))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right_0()
+                                .w(px(dock_column_width))
+                                .child(dock),
+                        )
+                        .into_any_element(),
+                    None => dock.into_any_element(),
+                }
+            })
             .into_any_element()
     }
 }
@@ -878,6 +1137,177 @@ mod tests {
     /// 800 px minimum window with the sidebar and a right rail open the panel
     /// is ~196 px, so the grid shrank to zero and the dock was clipped. Now
     /// the dock is simply not rendered until there is room for both.
+    #[test]
+    fn a_maximized_dock_spans_the_panel_minus_the_gutters() {
+        let available = 1920.;
+        assert_eq!(
+            diff_dock_maximized_width(available),
+            available - 2. * crate::layout::PANE_GUTTER_PX
+        );
+        assert!(
+            diff_dock_maximized_width(available)
+                > diff_dock_fit(880., available)
+                    .expect("1920px holds the dock")
+                    .1
+        );
+    }
+
+    #[test]
+    fn the_dock_gutter_grows_as_the_pane_grid_is_clipped_away() {
+        let gutter = crate::layout::PANE_GUTTER_PX;
+        assert_eq!(PaneGridLayout::Flex.dock_left_gutter(), 0.);
+        assert_eq!(PaneGridLayout::Hidden.dock_left_gutter(), gutter);
+        let half = PaneGridLayout::Clipped {
+            visible: 400.,
+            full: 800.,
+        };
+        assert!((half.dock_left_gutter() - gutter / 2.).abs() < 1e-3);
+        let gone = PaneGridLayout::Clipped {
+            visible: 0.,
+            full: 800.,
+        };
+        assert_eq!(gone.dock_left_gutter(), gutter);
+    }
+
+    /// Review findings on #502: the clipped grid keeps the width the canvas
+    /// measured while it was flexing, so a toggle mid-slide never lays the
+    /// panes out narrower; maximizing takes the keyboard off the hidden grid
+    /// (a dock tab's own handle, or a blur, never the pane fallback); and the
+    /// strip's close button hands the saved focus back like the toggle does.
+    #[test]
+    fn maximize_never_resizes_or_strands_the_hidden_grid() {
+        let host = include_str!("cli_diff_dock.rs");
+        let layout = host
+            .split("fn rendered_pane_grid_layout(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("layout");
+        assert!(
+            layout.contains("full: self.diff_dock.pane_grid_width.get().max(1.),"),
+            "the clipped grid keeps its measured width: {layout}"
+        );
+        assert!(
+            !layout.contains("from_width.max("),
+            "the clipped width must not follow the slide's endpoints: {layout}"
+        );
+        let toggle = host
+            .split("pub(crate) fn toggle_diff_dock_maximize(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("toggle");
+        assert!(
+            toggle.contains("self.dock_tab_focus_handle(self.diff_dock.diff_active_tab, cx)")
+                && toggle.contains("None => window.blur(),"),
+            "maximizing blurs a pane when the dock tab has no handle: {toggle}"
+        );
+        assert!(
+            !toggle.contains("self.focus_diff_tab("),
+            "the pane fallback would focus the pane being hidden: {toggle}"
+        );
+        assert!(
+            toggle.contains("self.restore_pre_maximize_focus(previous_focus, window, cx);"),
+            "restore shares the focus handoff with the strip close: {toggle}"
+        );
+        let panel = include_str!("diff_dock/mod.rs");
+        let close = panel
+            .split("pub(crate) fn close_diff_dock_panel_from_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("strip close");
+        assert!(
+            close.contains("self.diff_dock.maximized.take()")
+                && close.contains("self.dock_owns_focus(focus, window, cx)")
+                && close.contains("self.restore_pre_maximize_focus(")
+                && close.contains("self.close_diff_dock_panel(cx);"),
+            "the strip close restores the saved focus before closing, falling back \
+             to a workspace pane when the dock itself owned it: {close}"
+        );
+        for (name, header) in [
+            ("tab strip", include_str!("diff_dock/render.rs")),
+            (
+                "surface picker",
+                include_str!("diff_dock/surface_picker.rs"),
+            ),
+        ] {
+            assert!(
+                header.contains("this.close_diff_dock_panel_from_strip(window, cx);")
+                    && !header.contains("this.close_diff_dock_panel(cx);"),
+                "the {name}'s close button goes through the focus-restoring closer"
+            );
+        }
+        let unmounted = host
+            .split("pub(crate) fn wrap_cli_diff_dock(")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("let grid = self.rendered_pane_grid_layout(window);")
+                    .next()
+            })
+            .expect("unmounted branch");
+        assert!(
+            unmounted.contains("self.diff_dock.maximized = None;")
+                && unmounted.contains("self.diff_dock.maximize_animation = None;"),
+            "a trip through Review or Settings drops the maximize state: {unmounted}"
+        );
+        let eye = include_str!("agent_status.rs");
+        let under_eye = eye
+            .split("pub(crate) fn surfaces_under_user_eye(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("under eye");
+        assert!(
+            under_eye.contains("self.pane_grid_hidden_by_dock()"),
+            "panes behind a maximized dock are not under the user's eye: {under_eye}"
+        );
+    }
+
+    #[test]
+    fn a_maximized_dock_never_drops_below_the_floor() {
+        assert_eq!(diff_dock_maximized_width(200.), DIFF_DOCK_PANEL_MIN_WIDTH);
+    }
+
+    /// A tab switch parks the live dock through `close_diff_dock_panel`, and
+    /// the closer must drop the maximize state with it: a parked dock that
+    /// left `maximized` set would hand the incoming tab a hidden pane grid.
+    /// A restored slot comes back without the reveal slide.
+    #[test]
+    fn parking_the_dock_drops_its_maximize_state() {
+        let host = include_str!("cli_diff_dock.rs");
+        let park = host
+            .split("fn park_live_diff_dock(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("park");
+        assert!(
+            park.contains("self.close_diff_dock_panel(cx);"),
+            "parking goes through the closer: {park}"
+        );
+        let panel = include_str!("diff_dock/mod.rs");
+        let close = panel
+            .split("pub(crate) fn close_diff_dock_panel(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("closer");
+        for needle in [
+            "self.diff_dock.maximized = None;",
+            "self.diff_dock.maximize_animation = None;",
+            "self.diff_dock.reveal_animation = None;",
+        ] {
+            assert!(
+                close.contains(needle),
+                "the closer lost `{needle}`: {close}"
+            );
+        }
+        let restore = host
+            .split("fn restore_diff_dock(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("restore");
+        assert!(
+            restore.contains("self.diff_dock.reveal_animation = None;"),
+            "a session switch restores a parked dock without a slide: {restore}"
+        );
+    }
+
     #[test]
     fn a_panel_too_narrow_for_the_floor_hides_the_dock_and_keeps_the_grid() {
         let floor =

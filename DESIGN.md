@@ -410,7 +410,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Scrollbar | width 6, gutter 10, minimum thumb 24 |
 | Diff | row 18, file header 32, fold row 32, sticky header 24, gutter 36 (a floor, widened per digit count), change bar 4, split divider 3, minimum split column 360, revert chip 56 by 16 inset 10, horizontal track 6 |
 | Code editor | 12 px mono, row 18, caret 2, scrollbar track 15, minimum thumb 25 vertical and 28 horizontal; git marker column 6 left of the numbers, bar 4 radius 2 inset 1, deleted dot 8, hover grows 3 to the left |
-| Dock | preferred 880, minimum 360, maximum 1400; tab strip 40 with 26 px chips, gap 4 |
+| Dock | preferred 880, minimum 360, maximum 1400; maximized: panel width minus two 8 px gutters, floor 360; tab strip 40 with 26 px chips, gap 4 |
 | Pane Overview | cards 312.5 by 192.5, gap 10, radius 8, grid padding 16, panel margin 24 |
 
 ### 4.6 Typography
@@ -497,6 +497,7 @@ brand tint for a mark that returns `None`.
 | Unfocused pane dim, drop overlay glide | 130 ms, scaled by distance | ease-out quint | Cross-fade dropped below 0.002; the overlay lerps its absolute rect between regions |
 | Primary sidebar slide | 280 ms | cubic ease-out `1 − (1 − p)³` | Panel inset and gutter follow the width |
 | Menu reveal | 140 ms | cubic ease-out `1 − (1 − p)³` (`ui_primitives::ease_out_cubic`, shared with the sidebar slide) | `menu_reveal`: every menu, select popup, context menu, and submenu fades in from 0 while dropping 4 px into place. No exit animation: GPUI drops the element when its state flips |
+| Diff dock open and maximize slides | 280 ms | cubic ease-out `1 − (1 − p)³` | `SidebarWidthAnimation` reused: the dock column grows from the right edge on open; on maximize the pane grid is clipped from its measured width to 0 (never resized) while the dock's left gutter grows with it. A session-switch restore skips the open slide |
 | Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift |
 | Status spinner | 1 s loop | linear rotate | Empty states while scanning |
 | Sidebar comet-trail loader | 720 ms cycle | stepped | 3 by 3 perimeter of 3 px dots, gap 1, trailing opacities 0.81, 0.49, 0.26 over a 0.06 base |
@@ -508,11 +509,13 @@ facility: the pinned GPUI predates `App::set_reduce_motion`. It is written at
 startup, from the Settings toggle, and on config hot-reload, so it needs no
 restart, and it defaults to `false`.
 
-**Four animations honor it today**: `animated_hover` settles instantly
+**Five animations honor it today**: `animated_hover` settles instantly
 (`ui_primitives.rs:322-336`), the primary sidebar toggles without the slide
-(`main.rs:1726`), `panel_empty_state`'s scanning spinner does not start
-(`ui_primitives.rs:859`), and `menu_reveal` mounts every menu at rest
-(`ui_primitives.rs::menu_reveal`). Still ignoring it: the pane header button hover, the
+(`main.rs:1726`), the diff dock opens and maximizes without its slides
+(`app/diff_dock/mod.rs::open_diff_dock_panel`,
+`app/cli_diff_dock.rs::toggle_diff_dock_maximize`), `panel_empty_state`'s
+scanning spinner does not start (`ui_primitives.rs:859`), and `menu_reveal`
+mounts every menu at rest (`ui_primitives.rs::menu_reveal`). Still ignoring it: the pane header button hover, the
 drop-overlay glide, toasts, the comet-trail loader, and the splash shimmer.
 The config description promises a static frame for decorative animations; that
 promise is **Proposed** until the rest read the flag. Feedback is never
@@ -661,6 +664,27 @@ closing rail or a growing window brings it straight back. The render clamp
 never writes back; the resize drag is the only writer, and a drag pinned at
 the ceiling leaves a wider stored preference alone
 (`app/cli_diff_dock.rs:38-64`, `app/diff_dock/mod.rs:68-86`).
+
+**Maximized**, the dock takes the whole cockpit: `secondary-shift-f` or the
+maximize button at the right of the tab strip (`diff-dock-maximize`, labelled
+"Maximize dock" / "Restore dock", a `minimize` glyph while maximized) hides
+the pane grid so Changes, an editor tab, or a dock terminal gets the full
+window width. The grid is **clipped, never resized**: it stays mounted at its
+last measured width inside an `overflow_hidden` column that slides to 0, so an
+agent running behind the dock never sees a PTY resize. The dock bypasses the
+fit (it renders even in a panel too narrow for dock plus grid), flexes to the
+container with no resize handle, and paints the grid's left gutter itself as
+the grid goes. Maximizing records the focus that was active and moves it onto
+the active dock tab's own handle (a File or Terminal tab), or blurs the pane
+when the tab has none (Changes), so keystrokes never reach the hidden grid;
+restoring, or closing the maximized dock from its strip, hands it back, or to
+the workspace's first pane. Panes behind a maximized dock are not under the
+user's eye: their agents' completions and notifications go out as for a
+zoomed-away split. The state is per-app: a tab switch parks the dock through
+the closer, and a trip through Review or Settings drops it as the dock
+unmounts, so the incoming tab, and the user coming back, always see the grid. Both the open slide and the
+maximize slide reuse the primary sidebar's 280 ms curve (4.8) and settle
+instantly under `reduce_motion`.
 
 The tab strip is 40 px with a bottom hairline, gap 4, px 8. Chips are 26 tall
 on a `ROW_RADIUS` squircle, gap 6, px 8, with a 13 px kind icon, the title at
@@ -984,6 +1008,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Pane overview | `secondary-shift-p` |
 | Work review | `secondary-shift-u` |
 | Primary sidebar, files rail | `secondary-alt-b`, `secondary-alt-f` |
+| Maximize / restore the Changes dock | `secondary-shift-f` |
 | New file tab, new terminal tab (dock) | `secondary-g`, `secondary-j` |
 | Composer, Launch Pad | `secondary-shift-space`, `secondary-shift-l` |
 | Attention queue, jump to next waiting agent | `secondary-shift-a`, `secondary-shift-j` |
