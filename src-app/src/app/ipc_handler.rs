@@ -4627,6 +4627,21 @@ pub(crate) fn bind_session_surface(
     if bound && twins.is_empty() {
         return false;
     }
+    // A stale row resolving late must not evict the live agent that replaced
+    // it: surface resolution is asynchronous and `bind_session_surface_if_child_current`
+    // pins the pane's shell pid, not the session pid, so a dead `Errored` row
+    // can still arrive after the relaunched agent is already bound. The live
+    // twin keeps the surface and the errored row stays unbound.
+    let incoming_errored = sessions
+        .get(&key)
+        .is_some_and(|session| session.state == ai_types::AgentState::Errored);
+    if incoming_errored
+        && twins
+            .iter()
+            .any(|k| sessions[k].state != ai_types::AgentState::Errored)
+    {
+        return false;
+    }
     let mut inherited_result = None;
     for twin in twins {
         if let Some(twin) = sessions.remove(&twin)
@@ -7329,6 +7344,50 @@ mod tests {
         );
         assert_eq!(sessions[&4242].surface_id, Some(11));
         assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn a_stale_errored_row_binding_late_does_not_evict_the_live_twin() {
+        // Surface resolution is asynchronous: an `Errored` row of the dead
+        // previous agent can resolve after its live replacement (same tool)
+        // is already bound. The live twin must survive and stay bound.
+        let mut sessions = std::collections::HashMap::new();
+        let mut live = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Thinking,
+        );
+        live.surface_id = Some(11);
+        live.last_result = Some("live turn".into());
+        sessions.insert(4242, live);
+        let stale = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        sessions.insert(3000, stale);
+
+        assert!(
+            !super::bind_session_surface(&mut sessions, 3000, 11),
+            "a stale errored row never takes the surface from a live twin"
+        );
+        assert_eq!(sessions[&4242].surface_id, Some(11));
+        assert_eq!(sessions[&4242].last_result.as_deref(), Some("live turn"));
+        assert_eq!(sessions[&3000].surface_id, None);
+
+        // Two errored rows of one tool still fold as before: no live twin.
+        let mut dead = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        dead.surface_id = Some(12);
+        sessions.insert(5000, dead);
+        let also_dead = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        sessions.insert(5001, also_dead);
+        assert!(super::bind_session_surface(&mut sessions, 5001, 12));
+        assert!(!sessions.contains_key(&5000));
+        assert_eq!(sessions[&5001].surface_id, Some(12));
     }
 
     #[test]
