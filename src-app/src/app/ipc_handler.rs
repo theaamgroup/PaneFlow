@@ -4324,7 +4324,12 @@ impl PaneFlowApp {
                         && let Some(ws) =
                             self.workspaces.iter_mut().find(|ws| ws.id == workspace_id)
                     {
-                        ws.agent_completion_notification.record_finished(seen);
+                        let finished_surface = ws
+                            .agent_sessions
+                            .get(&session_key)
+                            .and_then(|session| session.surface_id);
+                        ws.agent_completion_notification
+                            .record_finished(seen, finished_surface);
                     }
                     // EP-004 US-020: natural turn ends notify when the user is
                     // looking elsewhere. Ctrl+C stops only clear local state.

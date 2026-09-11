@@ -2467,9 +2467,7 @@ impl Render for PaneFlowApp {
                                                     .agent_completion_notification
                                                     .is_unread()
                                             {
-                                                workspace
-                                                    .agent_completion_notification
-                                                    .acknowledge();
+                                                workspace.agent_completion_notification.clear();
                                                 cx.notify();
                                             }
                                         },

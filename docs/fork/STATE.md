@@ -321,6 +321,9 @@ where the evidence is:
   and `WorkspaceSession.sidebar_collapsed` are additive, written only when
   set. The "Terminal shell resolved" log line rode along
   (`terminal/pty_session.rs`).
+  Issue #489 (upstream `9da2e4be`, persistence half) adds `TabSession.unread`,
+  `TabSession.pull_request` and `WorkspaceSession.muted` on the same terms;
+  `an_unread_tab_and_a_muted_workspace_survive_a_restart` pins it.
 - **Verified SKIP list**, not ported: the Windows shell work,
   `timeBeginPeriod`, the verbatim prefix, libghostty CI automation, and
   Fedora / Discord / CHANGELOG / AppStream.

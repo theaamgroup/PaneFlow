@@ -166,6 +166,26 @@ pub struct TabSession {
     /// unbound, so a session with no bound tab gains no key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// Whether an agent turn finished in this tab while the user was not
+    /// looking and has not been acknowledged yet (issue #489, upstream
+    /// `9da2e4be`). Additive on v2 like `worktree`: absent reads as `false`
+    /// and `false` is skipped on write.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unread: bool,
+    /// The last known pull request of the tab's branch, drawn at launch and
+    /// corrected in the background. Additive on v2; skipped while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequestSession>,
+}
+
+/// A tab's pull request as `session.json` remembers it: the branch it was
+/// looked up for, the number, and GitHub's state word (`open`, `draft`,
+/// `merged`, `closed`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PullRequestSession {
+    pub branch: String,
+    pub number: u64,
+    pub state: String,
 }
 
 impl TabSession {
@@ -181,6 +201,8 @@ impl TabSession {
             title_is_automatic: false,
             layout: Some(layout),
             worktree: None,
+            unread: false,
+            pull_request: None,
         }
     }
 }
@@ -253,6 +275,11 @@ pub struct WorkspaceSession {
     /// existing session.json changes meaning.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_collapsed: bool,
+    /// Whether the user muted this workspace's notifications (issue #489).
+    /// Additive on v2 like `pinned`: absent reads as `false`, `false` is
+    /// skipped on write.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub muted: bool,
 }
 
 /// Migrate a v1 `session.json` in place to the v2 tab shape (US-018).
@@ -337,6 +364,8 @@ fn demote_panes_to_focused_surface(node: &mut LayoutNode, promoted: &mut Vec<Tab
                     }),
                     // A v1 file predates tab worktrees by definition.
                     worktree: None,
+                    unread: false,
+                    pull_request: None,
                 });
             }
         }

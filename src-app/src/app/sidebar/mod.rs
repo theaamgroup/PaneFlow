@@ -1454,7 +1454,7 @@ impl PaneFlowApp {
             })
             .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                 if let Some(workspace) = this.workspaces.get_mut(idx) {
-                    workspace.agent_completion_notification.acknowledge();
+                    workspace.agent_completion_notification.clear();
                 }
                 let is_double = matches!(e, ClickEvent::Mouse(m) if m.down.click_count == 2);
                 // The dismiss cannot run before the single-vs-double decision:
