@@ -1974,7 +1974,7 @@ impl PaneFlowApp {
                 config.theme.as_deref(),
             );
             keybindings::apply_keybindings(cx, &config.shortcuts);
-            self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
+            self.effective_shortcuts = keybindings::settings_shortcuts(&config.shortcuts);
             if self.settings_section == Some(crate::SettingsSection::Shortcuts) {
                 // The Shortcuts page is virtualized off a cached row list that
                 // indexes `effective_shortcuts`, so a hand edit to `shortcuts`
@@ -4324,7 +4324,12 @@ impl PaneFlowApp {
                         && let Some(ws) =
                             self.workspaces.iter_mut().find(|ws| ws.id == workspace_id)
                     {
-                        ws.agent_completion_notification.record_finished(seen);
+                        let finished_surface = ws
+                            .agent_sessions
+                            .get(&session_key)
+                            .and_then(|session| session.surface_id);
+                        ws.agent_completion_notification
+                            .record_finished(seen, finished_surface);
                     }
                     // EP-004 US-020: natural turn ends notify when the user is
                     // looking elsewhere. Ctrl+C stops only clear local state.

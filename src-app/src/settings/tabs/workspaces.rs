@@ -120,6 +120,8 @@ impl PaneFlowApp {
                 ui,
                 cx,
             )))
+            .child(section_header(ui, "New tabs"))
+            .child(self.render_new_tab_branch_settings(ui, cx))
             .child(section_header(ui, "Editors"))
             .child(editors_card)
             .child(section_header_with_action(

@@ -241,7 +241,8 @@ impl PaneFlowApp {
                 // The fork's completion mark is per workspace, not per surface;
                 // `seen` carries the same meaning (the pane was under the
                 // user's eyes as the turn ended).
-                ws.agent_completion_notification.record_finished(seen);
+                ws.agent_completion_notification
+                    .record_finished(seen, Some(surface_id));
             }
             self.schedule_finished_sweep(ws_id, key, cx);
         }

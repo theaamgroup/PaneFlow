@@ -337,7 +337,7 @@ impl PaneFlowApp {
         // one.
         self.dismiss_inline_close_arm(cx);
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
-            ws.agent_completion_notification.acknowledge();
+            ws.agent_completion_notification.clear();
         }
         self.focus_workspace_tab(ws_idx, tab_idx, window, cx);
         cx.notify();

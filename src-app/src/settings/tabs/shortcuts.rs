@@ -75,7 +75,7 @@ use crate::settings::components::{
     section_header_with_action, setting_card,
 };
 use crate::terminal::element::{MIN_APCA_CONTRAST, ensure_minimum_contrast};
-use crate::ui_primitives::{ROW_RADIUS, squircle_skin};
+use crate::ui_primitives::{ROW_RADIUS, TooltipDelayExt, squircle_skin, text_tooltip};
 use crate::widgets::scrollbar::{self, ScrollableHandle as _};
 use crate::{PaneFlowApp, config_writer, keybindings};
 
@@ -460,7 +460,7 @@ impl PaneFlowApp {
             ResetOutcome::Reset(true) => {
                 let config = paneflow_config::loader::load_config();
                 keybindings::apply_keybindings(cx, &config.shortcuts);
-                self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
+                self.effective_shortcuts = keybindings::settings_shortcuts(&config.shortcuts);
                 self.recording_shortcut_idx = None;
                 self.rebuild_shortcut_rows(cx);
             }
@@ -486,7 +486,7 @@ impl PaneFlowApp {
         let hint = if self.shortcut_capture_active {
             "Press a chord to find what owns it. Escape to leave capture mode."
         } else {
-            "Click a row to record a new shortcut. Escape to cancel."
+            "Click an editable row to record a shortcut. Fixed shortcuts apply in the named context."
         };
 
         let body = if self.shortcut_rows.is_empty() {
@@ -968,7 +968,8 @@ impl PaneFlowApp {
         let Some(entry) = self.effective_shortcuts.get(idx) else {
             return gpui::Empty.into_any_element();
         };
-        let is_recording = self.recording_shortcut_idx == Some(idx);
+        let fixed = entry.fixed;
+        let is_recording = !fixed && self.recording_shortcut_idx == Some(idx);
         let unassigned = entry.key == "Unassigned";
 
         let key_badge = if is_recording {
@@ -1018,6 +1019,10 @@ impl PaneFlowApp {
             Some(ui.subtle),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            if fixed {
+                this.disarm_shortcut_recording(cx);
+                return;
+            }
             // Recording a rebind and capturing a search chord both want the
             // keyboard; arming one disarms the other.
             this.set_shortcut_capture(false, cx);
@@ -1045,7 +1050,15 @@ impl PaneFlowApp {
                 .truncate()
                 .child(entry.description.clone()),
         )
-        .child(key_badge);
+        .children(fixed.then(|| {
+            div()
+                .flex_none()
+                .text_size(px(11.))
+                .text_color(ui.muted)
+                .child("Fixed")
+        }))
+        .child(key_badge)
+        .delayed_tooltip(text_tooltip(entry.description.clone()));
 
         shortcut_card_slice(card_bg, first, last)
             .child(row)
@@ -1101,7 +1114,24 @@ mod tests {
         }
     }
 
-    /// The default rows, exactly as the page sees them at startup.
+    #[test]
+    fn fixed_shortcuts_are_searchable_by_description_and_captured_chord() {
+        let entries = keybindings::settings_shortcuts(&HashMap::new());
+        for (query, capture) in [
+            ("code editor · save".to_string(), false),
+            (keybindings::format_keystroke("cmd-s").to_lowercase(), true),
+        ] {
+            let rows = shortcut_rows_from(
+                &entries,
+                &query,
+                capture,
+                &HashSet::from([ShortcutGroup::Contextual]),
+            );
+            assert!(rows.iter().any(|row| matches!(row, ShortcutListRow::Binding { idx, .. } if entries[*idx].fixed && entries[*idx].description == "Code editor · save")));
+        }
+    }
+
+    /// Action-only fixtures keep the grouping tests independent of widget bindings.
     fn default_entries() -> Vec<keybindings::ShortcutEntry> {
         keybindings::effective_shortcuts(&HashMap::new())
     }
@@ -1245,7 +1275,14 @@ mod tests {
                 ShortcutListRow::Binding { .. } => None,
             })
             .collect();
-        assert_eq!(headers, ShortcutGroup::ALL.to_vec());
+        assert_eq!(
+            headers,
+            ShortcutGroup::ALL
+                .iter()
+                .copied()
+                .filter(|group| *group != ShortcutGroup::Contextual)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

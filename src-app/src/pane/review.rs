@@ -71,6 +71,11 @@ impl Pane {
                     .text_color(ui.muted)
                     .child("Prompt copied too · ⌘V to paste · Enter to submit"),
             );
-        deferred(menu).priority(8).into_any_element()
+        deferred(crate::ui_primitives::menu_reveal(
+            "pane-review-agent-menu-reveal",
+            menu,
+        ))
+        .priority(8)
+        .into_any_element()
     }
 }

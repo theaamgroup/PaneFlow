@@ -82,6 +82,16 @@ impl PrState {
         })
     }
 
+    /// The state word `session.json` stores (issue #489).
+    pub(crate) fn wire_str(self) -> &'static str {
+        match self {
+            PrState::Draft => "draft",
+            PrState::Open => "open",
+            PrState::Merged => "merged",
+            PrState::Closed => "closed",
+        }
+    }
+
     /// The Primer hex for this state on a light or a dark surface.
     fn hex(self, light: bool) -> u32 {
         match (self, light) {
@@ -377,6 +387,39 @@ impl PaneFlowApp {
     /// The pull request of a branch, if one has been read. Answers only while
     /// the switch is on: a cached answer from before the switch was turned off
     /// must not keep painting the marker.
+    /// The branch a tab row stands for: its bound checkout's branch, or the
+    /// workspace's when the tab is unbound (issue #489, upstream `9da2e4be`).
+    pub(crate) fn tab_row_branch(
+        &self,
+        ws: &crate::workspace::Workspace,
+        tab: &crate::workspace::Tab,
+    ) -> String {
+        match tab.worktree.as_ref() {
+            Some(_) => self
+                .tab_checkout_git(tab)
+                .map(|git| git.branch.clone())
+                .unwrap_or_default(),
+            None => ws.git_branch.clone(),
+        }
+    }
+
+    /// The cached pull request of a tab row's branch, when the `pr` sidebar
+    /// detail is on and the workspace has a repository root.
+    pub(crate) fn tab_pull_request(
+        &self,
+        ws: &crate::workspace::Workspace,
+        tab: &crate::workspace::Tab,
+    ) -> Option<PullRequest> {
+        if !self.cached_config.sidebar_show.pr_enabled() {
+            return None;
+        }
+        let repo_root = ws.repo_root.as_ref()?;
+        let branch = self.tab_row_branch(ws, tab);
+        (!branch.is_empty())
+            .then(|| self.pull_request_for(repo_root, &branch))
+            .flatten()
+    }
+
     pub(crate) fn pull_request_for(
         &self,
         repo_root: &std::path::Path,

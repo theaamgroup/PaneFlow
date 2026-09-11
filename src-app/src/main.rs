@@ -222,6 +222,7 @@ pub(crate) enum GeneralDropdown {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum WorkspaceTemplateDropdown {
     Layout,
+    NewTabBranch(Option<u64>),
 }
 
 #[derive(Clone, Copy)]
@@ -1055,7 +1056,7 @@ impl SidebarWidthAnimation {
         let duration = std::time::Duration::from_millis(PRIMARY_SIDEBAR_ANIMATION_MS);
         let progress = (now.duration_since(self.started_at).as_secs_f32() / duration.as_secs_f32())
             .clamp(0., 1.);
-        let eased = 1. - (1. - progress).powi(3);
+        let eased = crate::ui_primitives::ease_out_cubic(progress);
         self.from_width + (self.to_width - self.from_width) * eased
     }
 
@@ -2482,9 +2483,7 @@ impl Render for PaneFlowApp {
                                                     .agent_completion_notification
                                                     .is_unread()
                                             {
-                                                workspace
-                                                    .agent_completion_notification
-                                                    .acknowledge();
+                                                workspace.agent_completion_notification.clear();
                                                 cx.notify();
                                             }
                                         },

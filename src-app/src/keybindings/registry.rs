@@ -38,6 +38,7 @@ pub enum ShortcutGroup {
     Markdown,
     Agents,
     Application,
+    Contextual,
 }
 
 impl ShortcutGroup {
@@ -52,6 +53,7 @@ impl ShortcutGroup {
         ShortcutGroup::Markdown,
         ShortcutGroup::Agents,
         ShortcutGroup::Application,
+        ShortcutGroup::Contextual,
     ];
 
     pub fn label(self) -> &'static str {
@@ -65,6 +67,7 @@ impl ShortcutGroup {
             ShortcutGroup::Markdown => "Markdown",
             ShortcutGroup::Agents => "Agents & cockpit",
             ShortcutGroup::Application => "Application",
+            ShortcutGroup::Contextual => "Fixed shortcuts · editors & navigation",
         }
     }
 }
@@ -678,15 +681,13 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Launch Pad",
         group: ShortcutGroup::Agents,
     },
-    // Issue #339: Pane Overview. `ShortcutGroup::Agents` alongside the other
-    // cockpit overlays, so Settings > Keyboard Shortcuts files it with them.
-    // No `display.rs` edit is needed - that page is generated from this table.
+    // Keep the overview with pane navigation so its visible button name is easy to find.
     ActionMeta {
         name: "open_pane_overview",
         factory: || Box::new(crate::OpenPaneOverview),
         context: "",
-        description: "Pane overview",
-        group: ShortcutGroup::Agents,
+        description: "Show all panes (pane overview)",
+        group: ShortcutGroup::Panes,
     },
     ActionMeta {
         name: "open_work_review",

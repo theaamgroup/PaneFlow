@@ -28,6 +28,12 @@ fn test_serialization_roundtrip() {
         reduce_motion: None,
         sidebar_show: SidebarShow::default(),
         workspace_auto_sort: None,
+        new_tabs_on_main: None,
+        new_tab_branch: Some("main".to_string()),
+        workspace_new_tab_branches: HashMap::from([(
+            "/projects/aftermarket".to_string(),
+            "staging".to_string(),
+        )]),
         workspace_zed_menu_visible: None,
         workspace_cursor_menu_visible: None,
         workspace_vscode_menu_visible: None,
@@ -334,3 +340,62 @@ fn test_resolved_ratios_fallback_equal() {
 }
 
 // --- Session persistence round-trip tests (US-017) ---
+
+#[test]
+fn new_tab_branches_inherit_override_and_preserve_legacy_preferences() {
+    let config: PaneFlowConfig = serde_json::from_value(serde_json::json!({
+        "new_tab_branch": "main",
+        "workspace_new_tab_branches": {
+            "/projects/Aftermarket-Websites": "staging",
+            "/projects/current": ""
+        }
+    }))
+    .expect("branch settings");
+    assert_eq!(
+        config.new_tab_branch_for_workspace("/projects/Aftermarket-Websites"),
+        Some("staging")
+    );
+    assert_eq!(
+        config.new_tab_branch_for_workspace("/projects/another"),
+        Some("main")
+    );
+    assert_eq!(
+        config.new_tab_branch_for_workspace("/projects/current"),
+        None
+    );
+    let encoded = serde_json::to_string(&config).expect("serialize");
+    let restored: PaneFlowConfig = serde_json::from_str(&encoded).expect("reload");
+    assert_eq!(restored, config);
+    let mut custom = restored;
+    custom.new_tab_branch = Some("release/next".to_string());
+    assert_eq!(
+        custom.new_tab_branch_for_workspace("/projects/another"),
+        Some("release/next")
+    );
+    assert_eq!(
+        custom.new_tab_branch_for_workspace("/projects/Aftermarket-Websites"),
+        Some("staging")
+    );
+    custom
+        .workspace_new_tab_branches
+        .remove("/projects/Aftermarket-Websites");
+    assert_eq!(
+        custom.new_tab_branch_for_workspace("/projects/Aftermarket-Websites"),
+        Some("release/next")
+    );
+    let mut legacy: PaneFlowConfig =
+        serde_json::from_str(r#"{"new_tabs_on_main":false}"#).expect("legacy");
+    assert_eq!(
+        legacy.new_tab_branch_for_workspace("/projects/another"),
+        None
+    );
+    legacy.new_tab_branch = Some("staging".to_string());
+    assert_eq!(
+        legacy.new_tab_branch_for_workspace("/projects/another"),
+        Some("staging")
+    );
+    assert_eq!(
+        PaneFlowConfig::default().new_tab_branch_for_workspace("/projects/another"),
+        Some("main")
+    );
+}

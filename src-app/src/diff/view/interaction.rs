@@ -301,12 +301,15 @@ impl DiffView {
                     }))
                     .child(div().text_color(ui.text).child(mode_label)),
             );
-        deferred(
-            anchored()
-                .position(menu.position)
-                .snap_to_window()
-                .child(panel),
-        )
+        // Keyed on the click spot: a right-click elsewhere in the body while
+        // the menu is open replaces it and must fade in again.
+        let reveal_key = crate::ui_primitives::reveal_key((
+            f32::from(menu.position.x).to_bits(),
+            f32::from(menu.position.y).to_bits(),
+        ));
+        deferred(anchored().position(menu.position).snap_to_window().child(
+            crate::ui_primitives::menu_reveal(("diff-body-context-menu-reveal", reveal_key), panel),
+        ))
         .priority(3)
         .into_any_element()
     }

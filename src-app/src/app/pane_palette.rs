@@ -255,12 +255,93 @@ impl PaneFlowApp {
         let Some(ws) = self.workspaces.get(ws_idx) else {
             return;
         };
+        if !ws.can_open_tab() {
+            self.show_toast("Tab limit reached for this workspace", cx);
+            return;
+        }
         let ws_id = ws.id;
+        let repo_root = ws.repo_root.clone();
+        let branch = self
+            .cached_config
+            .new_tab_branch_for_workspace(&ws.cwd)
+            .map(str::to_string);
+        if branch.is_none() || repo_root.is_none() {
+            self.open_pane_palette_at_checkout(ws_idx, None, window, cx);
+            return;
+        }
+        if let Some(branch) = self.branch_checkout_pending.clone() {
+            self.show_toast(format!("Still checking out {branch}"), cx);
+            return;
+        }
+        let (Some(repo_root), Some(branch)) = (repo_root, branch) else {
+            return;
+        };
+        let handle = window.window_handle();
+        self.branch_checkout_pending = Some(branch.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let requested_branch = branch.clone();
+            let prepared = smol::unblock(move || {
+                crate::workspace::worktree::prepare_branch_checkout(&repo_root, &requested_branch)
+            })
+            .await;
+            let _ = handle.update(cx, |_, window, cx| {
+                this.update(cx, |app, cx| {
+                    app.branch_checkout_pending = None;
+                    cx.notify();
+                    let Some(ws_idx) = app.workspaces.iter().position(|ws| ws.id == ws_id) else {
+                        return;
+                    };
+                    match prepared {
+                        Ok(path) => {
+                            let Some(path) = crate::workspace::existing_worktree_dir(Some(path))
+                            else {
+                                app.show_toast(
+                                    format!("The {branch} checkout no longer exists; run `git worktree prune`"),
+                                    cx,
+                                );
+                                return;
+                            };
+                            if let Some(reason) = app.tab_binding_refusal(&path, ws_idx) {
+                                app.show_toast(reason, cx);
+                                return;
+                            }
+                            app.open_pane_palette_at_checkout(ws_idx, Some(path), window, cx);
+                        }
+                        Err(error) => {
+                            log::warn!("new tab on {branch}: {error}");
+                            app.show_toast(
+                                format!("Could not check out {branch}. Choose a new-tab branch in Settings → Workspaces."),
+                                cx,
+                            );
+                        }
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
+    fn open_pane_palette_at_checkout(
+        &mut self,
+        ws_idx: usize,
+        checkout: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return;
+        };
+        let ws_id = ws.id;
+        // The workspace's own checkout needs no binding. This also preserves
+        // a workspace opened at a subdirectory when it is already on the selected branch.
+        let checkout = checkout.filter(|path| path != &ws.worktree_root);
         self.commit_rename(cx);
         self.dismiss_transient_surfaces();
         let restore_focus = window.focused(cx);
 
-        let tab = crate::workspace::Tab::new(PALETTE_TAB_TITLE, None);
+        let mut tab = crate::workspace::Tab::new(PALETTE_TAB_TITLE, None);
+        tab.worktree = checkout.clone();
         let tab_id = tab.id;
         let opened = self
             .workspaces
@@ -275,6 +356,9 @@ impl PaneFlowApp {
             ws.sidebar_expanded = true;
         }
 
+        if let Some(checkout) = checkout {
+            Self::spawn_initial_git_stats(ws_id, checkout.to_string_lossy().into_owned(), cx);
+        }
         // The tab exists before any preset is picked, which is what lets the
         // worktree be chosen BEFORE the agent's process spawns (issue #347).
         // Refresh the repository's branch and worktree lists now so the header
@@ -866,7 +950,13 @@ impl PaneFlowApp {
                 menu =
                     menu.child(self.render_palette_branch_option(option, ws_idx, tab_idx, ui, cx));
             }
-            trigger.child(deferred(menu).with_priority(3))
+            trigger.child(
+                deferred(crate::ui_primitives::menu_reveal(
+                    "pane-palette-branch-menu-reveal",
+                    menu,
+                ))
+                .with_priority(3),
+            )
         });
 
         Some(

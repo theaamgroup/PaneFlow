@@ -226,14 +226,15 @@ fn render_menu(
 
     // Hangs under the trigger's right edge: the trigger sits at the rail's
     // right edge, so a left-anchored menu would overhang the main panel.
-    deferred(
+    deferred(crate::ui_primitives::menu_reveal(
+        "sidebar-customize-menu-reveal",
         div()
             .absolute()
             .top(px(26.))
             .right(px(0.))
             .occlude()
             .child(menu),
-    )
+    ))
     .with_priority(3)
     .into_any_element()
 }
@@ -333,14 +334,15 @@ fn render_show_submenu(
             cx,
         ));
 
-    deferred(
+    deferred(crate::ui_primitives::menu_reveal(
+        "sidebar-show-submenu-reveal",
         div()
             .absolute()
             .top(px(-5.))
             .left(px(MENU_WIDTH - 12.))
             .occlude()
             .child(menu),
-    )
+    ))
     .with_priority(4)
     .into_any_element()
 }

@@ -31,10 +31,10 @@ use rows::{
     group_cards, initial_selection, live_thumbnail_ids, selected_row,
 };
 
-/// Compact previews keep eight terminal rows at the existing readable font size.
+/// Cards are 25% larger, with a separate attention row above the preview.
 /// Include padding and borders in the card dimensions.
 const CARD_W: f32 = crate::terminal::element::THUMBNAIL_BAND_W + 10.0;
-const CARD_H: f32 = crate::terminal::element::THUMBNAIL_BAND_H + 66.0;
+const CARD_H: f32 = crate::terminal::element::THUMBNAIL_BAND_H + 94.0;
 const CARD_GAP: f32 = 10.0;
 const CARD_RADIUS: f32 = 8.0;
 const GRID_PADDING: f32 = 16.0;
@@ -575,7 +575,27 @@ impl PaneFlowApp {
             current,
         } = flags;
         let sid = card.surface_id;
-        let (dot, dot_color, status) = pane_overview_status_visual(card.state.as_ref(), ui);
+        let (dot, dot_color, status) =
+            pane_overview_status_visual(card.state.as_ref(), card.exited, ui);
+        let attention = matches!(
+            card.state,
+            Some(
+                crate::ai_types::AgentState::WaitingForInput
+                    | crate::ai_types::AgentState::Errored
+                    | crate::ai_types::AgentState::Stalled
+            )
+        );
+        let background = if selected { ui.subtle } else { ui.overlay };
+        let status_color = crate::terminal::element::ensure_minimum_contrast(
+            dot_color,
+            background,
+            crate::terminal::element::MIN_APCA_CONTRAST,
+        );
+        let lifecycle = if card.exited {
+            "Exited"
+        } else {
+            "Terminal running"
+        };
         // The "current" marker (spec §7.1): the pane that held focus when the
         // overlay opened. It does not move with the selection.
         let current_chip = current.then(|| {
@@ -589,13 +609,23 @@ impl PaneFlowApp {
                 .text_color(ui.text)
                 .child("current")
         });
-        let status: SharedString = if card.exited {
-            SharedString::from("exited")
-        } else {
-            status
-        };
         let mut shell = div()
             .id(SharedString::from(format!("pane-overview-card-{sid}")))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "{}, {} by {}, {}, {}{}",
+                card.name,
+                card.cols,
+                card.rows,
+                status,
+                lifecycle,
+                if attention {
+                    ", unread notification"
+                } else {
+                    ""
+                }
+            )))
+            .aria_selected(selected)
             .flex_none()
             .w(px(width))
             .h(px(CARD_H))
@@ -604,7 +634,13 @@ impl PaneFlowApp {
             .p(px(4.))
             .rounded(px(CARD_RADIUS))
             .border_1()
-            .border_color(if selected { ui.accent } else { ui.border })
+            .border_color(if selected {
+                ui.accent
+            } else if attention {
+                dot_color
+            } else {
+                ui.border
+            })
             .bg(if selected { ui.subtle } else { ui.overlay })
             .hover(move |style| style.bg(ui.subtle))
             .cursor(gpui::CursorStyle::PointingHand)
@@ -622,7 +658,6 @@ impl PaneFlowApp {
                     .flex_row()
                     .items_center()
                     .gap(px(6.))
-                    .child(dot)
                     .child(
                         div()
                             .flex_1()
@@ -632,14 +667,43 @@ impl PaneFlowApp {
                             .text_color(ui.text)
                             .child(SharedString::from(card.name.clone())),
                     )
-                    .children(current_chip)
+                    .children(current_chip),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex_none()
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(dot)
                     .child(
                         div()
-                            .flex_none()
-                            .text_size(px(10.))
-                            .text_color(if card.exited { ui.muted } else { dot_color })
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(status_color)
                             .child(status),
-                    ),
+                    )
+                    .children(attention.then(|| {
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_size(px(11.))
+                            .text_color(status_color)
+                            .child(
+                                gpui::svg()
+                                    .path("icons/bell.svg")
+                                    .size(px(12.))
+                                    .text_color(status_color),
+                            )
+                            .child("Unread")
+                    })),
             );
 
         let band = div()
@@ -698,10 +762,14 @@ impl PaneFlowApp {
                             card.tab_pane_count
                         )))
                     }))
-                    .child(div().flex_none().child(SharedString::from(format!(
-                        "{}\u{d7}{}",
-                        card.cols, card.rows
-                    )))),
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(ui.text)
+                            .child(lifecycle),
+                    ),
             )
             .into_any_element()
     }
@@ -756,21 +824,24 @@ fn reveal_overview_row(scroll: &ScrollHandle, row: usize, window: &Window) {
 /// idle.
 fn pane_overview_status_visual(
     state: Option<&crate::ai_types::AgentState>,
+    exited: bool,
     ui: crate::theme::UiColors,
 ) -> (AnyElement, gpui::Hsla, SharedString) {
     use crate::ai_types::AgentState;
     let (color, label) = match state {
-        Some(AgentState::WaitingForInput) => (rgb(0xFBBF24).into(), "Input"),
+        Some(AgentState::WaitingForInput) => (rgb(0xFBBF24).into(), "Needs input"),
         Some(AgentState::Errored) => (ui.agent_error, "Error"),
         Some(AgentState::Stalled) => (ui.agent_stalled, "Stalled"),
-        Some(AgentState::Thinking) => (ui.muted, "Working"),
+        Some(AgentState::Thinking) if exited => (ui.muted, "Stopped"),
+        Some(AgentState::Thinking) => (ui.accent, "Working"),
         Some(AgentState::Finished) => (rgb(0x83C3FF).into(), "Done"),
-        None => (ui.muted.opacity(0.0), ""),
+        None if exited => (ui.muted, "No agent"),
+        None => (ui.muted, "Idle"),
     };
     let dot = div()
         .flex_none()
-        .w(px(6.))
-        .h(px(6.))
+        .w(px(8.))
+        .h(px(8.))
         .rounded_full()
         .bg(color)
         .into_any_element();
@@ -781,6 +852,34 @@ fn pane_overview_status_visual(
 mod tests {
     use super::*;
     use crate::pane::Pane;
+
+    #[test]
+    fn exited_agents_never_claim_to_be_working_and_keep_unread_attention() {
+        use crate::ai_types::AgentState;
+        let ui = crate::theme::ui_colors();
+        assert_eq!(
+            pane_overview_status_visual(Some(&AgentState::Thinking), false, ui)
+                .2
+                .as_ref(),
+            "Working"
+        );
+        assert_eq!(
+            pane_overview_status_visual(Some(&AgentState::Thinking), true, ui)
+                .2
+                .as_ref(),
+            "Stopped"
+        );
+        assert_eq!(
+            pane_overview_status_visual(Some(&AgentState::WaitingForInput), true, ui)
+                .2
+                .as_ref(),
+            "Needs input"
+        );
+        assert_eq!(
+            pane_overview_status_visual(None, false, ui).2.as_ref(),
+            "Idle"
+        );
+    }
 
     fn terminal_pane(cx: &mut gpui::VisualTestContext) -> (gpui::Entity<Pane>, u64) {
         use gpui::AppContext;
@@ -915,7 +1014,7 @@ mod tests {
         impl Render for TestGrid {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let mut body = overview_grid_body(&self.scroll).child(div().flex_none().h(px(22.)));
-                for row_index in 0..4 {
+                for row_index in 0..20_usize.div_ceil(self.columns) {
                     let mut row = overview_grid_row();
                     for column in 0..self.columns {
                         let index = row_index * self.columns + column;
@@ -940,12 +1039,13 @@ mod tests {
         let cx = cx.add_empty_window();
         let scroll = ScrollHandle::new();
         let width = 1440.0 - 2.0 * OVERVIEW_MARGIN - 2.0;
+        cx.simulate_resize(gpui::size(px(width), px(1200.0)));
         let columns = cards_per_row(width - 2.0 * GRID_PADDING, CARD_W, CARD_GAP);
-        assert_eq!(columns, 5);
+        assert_eq!(columns, 4);
         let grid = cx.new(|_| TestGrid {
             scroll: scroll.clone(),
             width,
-            height: 750.0,
+            height: 1100.0,
             columns,
         });
         let draw = |height: f32, cx: &mut gpui::VisualTestContext| {
@@ -962,18 +1062,20 @@ mod tests {
                 |_, _| grid.clone().into_any_element(),
             );
         };
-        // 750 px leaves 150 px of a 900 px window for margins and chrome.
-        draw(750.0, cx);
+        // A tall viewport fits all five rows without shrinking the larger cards.
+        draw(1100.0, cx);
         let first = cx.debug_bounds("overview-test-card-0").expect("first card");
-        let fifth = cx.debug_bounds("overview-test-card-4").expect("fifth card");
+        let fourth = cx
+            .debug_bounds("overview-test-card-3")
+            .expect("fourth card");
         let last = cx.debug_bounds("overview-test-card-19").expect("last card");
-        assert_eq!(first.top(), fifth.top());
-        assert!(last.bottom() <= px(750.0));
+        assert_eq!(first.top(), fourth.top());
+        assert!(last.bottom() <= px(1100.0));
         assert!(last.right() <= px(width));
         assert_eq!(first.size.height, px(CARD_H));
         assert_eq!(scroll.offset().y, px(0.));
         // A shorter window must scroll to the selected row without shrinking cards.
-        cx.update(|window, _| reveal_overview_row(&scroll, 4, window));
+        cx.update(|window, _| reveal_overview_row(&scroll, 5, window));
         draw(360.0, cx);
         cx.update(|window, cx| {
             window.simulate_next_frame(cx);
