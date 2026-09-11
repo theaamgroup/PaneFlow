@@ -690,21 +690,20 @@ impl PaneFlowApp {
         };
         let to = match self.diff_dock.maximized.take() {
             Some(previous_focus) => {
-                match previous_focus {
-                    Some(focus) => window.focus(&focus, cx),
-                    None => {
-                        // `false` is a zero-pane workspace: nothing to hand
-                        // the focus back to.
-                        if let Some(ws) = self.workspaces.get(self.active_idx) {
-                            let _ = ws.focus_first(window, cx);
-                        }
-                    }
-                }
+                self.restore_pre_maximize_focus(previous_focus, window, cx);
                 full
             }
             None => {
                 self.diff_dock.maximized = Some(window.focused(cx));
-                self.focus_diff_tab(self.diff_dock.diff_active_tab, window, cx);
+                // The hidden grid must not keep the keyboard: a tab with its
+                // own handle (File, Terminal) takes it, and Changes, which has
+                // none, blurs the pane instead. Never the `focus_diff_tab`
+                // pane fallback, which would focus exactly the pane that is
+                // about to disappear.
+                match self.dock_tab_focus_handle(self.diff_dock.diff_active_tab, cx) {
+                    Some(focus) => window.focus(&focus, cx),
+                    None => window.blur(),
+                }
                 0.
             }
         };
@@ -722,10 +721,39 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// Hand the keyboard back to where it was before the dock was maximized:
+    /// the recorded handle, or the workspace's first pane when nothing was
+    /// focused. Shared by the restore toggle and the strip's close button, so
+    /// closing a maximized dock never strands the focus on a hidden surface.
+    pub(crate) fn restore_pre_maximize_focus(
+        &mut self,
+        previous_focus: Option<gpui::FocusHandle>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        match previous_focus {
+            Some(focus) => window.focus(&focus, cx),
+            None => {
+                // `false` is a zero-pane workspace: nothing to hand the
+                // focus back to.
+                if let Some(ws) = self.workspaces.get(self.active_idx) {
+                    let _ = ws.focus_first(window, cx);
+                }
+            }
+        }
+    }
+
     /// Whether the dock flexes to its container this frame: maximized, or
     /// sliding either way.
     pub(crate) fn diff_dock_fills_panel(&self) -> bool {
         self.diff_dock.maximized.is_some() || self.diff_dock.maximize_animation.is_some()
+    }
+
+    /// Whether the pane grid is behind a maximized dock this frame (#422 gate):
+    /// a pane that is not painted is not seen, so its agent's completion and
+    /// notifications must go out like a zoomed-away split's.
+    pub(crate) fn pane_grid_hidden_by_dock(&self) -> bool {
+        self.diff_dock.maximized.is_some() && self.diff_dock_visible()
     }
 
     /// The open slide's progress (0 to 1) this frame, or `None` once settled.
@@ -749,9 +777,13 @@ impl PaneFlowApp {
                 self.diff_dock.maximize_animation = None;
             } else {
                 window.request_animation_frame();
+                // `full` is the last Flex measurement, never the slide's
+                // endpoints: a toggle during a restore starts from the
+                // partly visible width, and laying the grid out at that
+                // width would resize every pane behind the dock.
                 return PaneGridLayout::Clipped {
                     visible: animation.width_at(now),
-                    full: animation.from_width.max(animation.to_width),
+                    full: self.diff_dock.pane_grid_width.get().max(1.),
                 };
             }
         }
@@ -1129,6 +1161,74 @@ mod tests {
             full: 800.,
         };
         assert_eq!(gone.dock_left_gutter(), gutter);
+    }
+
+    /// Review findings on #502: the clipped grid keeps the width the canvas
+    /// measured while it was flexing, so a toggle mid-slide never lays the
+    /// panes out narrower; maximizing takes the keyboard off the hidden grid
+    /// (a dock tab's own handle, or a blur, never the pane fallback); and the
+    /// strip's close button hands the saved focus back like the toggle does.
+    #[test]
+    fn maximize_never_resizes_or_strands_the_hidden_grid() {
+        let host = include_str!("cli_diff_dock.rs");
+        let layout = host
+            .split("fn rendered_pane_grid_layout(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("layout");
+        assert!(
+            layout.contains("full: self.diff_dock.pane_grid_width.get().max(1.),"),
+            "the clipped grid keeps its measured width: {layout}"
+        );
+        assert!(
+            !layout.contains("from_width.max("),
+            "the clipped width must not follow the slide's endpoints: {layout}"
+        );
+        let toggle = host
+            .split("pub(crate) fn toggle_diff_dock_maximize(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("toggle");
+        assert!(
+            toggle.contains("self.dock_tab_focus_handle(self.diff_dock.diff_active_tab, cx)")
+                && toggle.contains("None => window.blur(),"),
+            "maximizing blurs a pane when the dock tab has no handle: {toggle}"
+        );
+        assert!(
+            !toggle.contains("self.focus_diff_tab("),
+            "the pane fallback would focus the pane being hidden: {toggle}"
+        );
+        assert!(
+            toggle.contains("self.restore_pre_maximize_focus(previous_focus, window, cx);"),
+            "restore shares the focus handoff with the strip close: {toggle}"
+        );
+        let panel = include_str!("diff_dock/mod.rs");
+        let close = panel
+            .split("pub(crate) fn close_diff_dock_panel_from_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("strip close");
+        assert!(
+            close.contains("self.diff_dock.maximized.take()")
+                && close.contains("self.restore_pre_maximize_focus(")
+                && close.contains("self.close_diff_dock_panel(cx);"),
+            "the strip close restores the saved focus before closing: {close}"
+        );
+        let strip = include_str!("diff_dock/render.rs");
+        assert!(
+            strip.contains("this.close_diff_dock_panel_from_strip(window, cx);"),
+            "the close button goes through the focus-restoring closer: {strip}"
+        );
+        let eye = include_str!("agent_status.rs");
+        let under_eye = eye
+            .split("pub(crate) fn surfaces_under_user_eye(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .expect("under eye");
+        assert!(
+            under_eye.contains("self.pane_grid_hidden_by_dock()"),
+            "panes behind a maximized dock are not under the user's eye: {under_eye}"
+        );
     }
 
     #[test]

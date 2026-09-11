@@ -167,18 +167,27 @@ impl PaneFlowApp {
 
     /// Move keyboard focus onto whatever the tab at `index` hosts. The
     /// `Changes` tab owns no focus handle of its own, so it is a no-op there.
+    /// The focus handle a dock tab owns: File and Terminal tabs have one;
+    /// Changes, the pending file, and Setup do not.
+    pub(crate) fn dock_tab_focus_handle(
+        &self,
+        index: usize,
+        cx: &Context<Self>,
+    ) -> Option<gpui::FocusHandle> {
+        match self.diff_dock.diff_tabs.get(index) {
+            Some(DiffDockTab::File(view)) => Some(view.read(cx).focus_handle(cx)),
+            Some(DiffDockTab::Terminal(terminal)) => Some(terminal.read(cx).focus_handle(cx)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn focus_diff_tab(
         &mut self,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focus = match self.diff_dock.diff_tabs.get(index) {
-            Some(DiffDockTab::File(view)) => Some(view.read(cx).focus_handle(cx)),
-            Some(DiffDockTab::Terminal(terminal)) => Some(terminal.read(cx).focus_handle(cx)),
-            _ => None,
-        };
-        if let Some(focus) = focus {
+        if let Some(focus) = self.dock_tab_focus_handle(index, cx) {
             window.focus(&focus, cx);
         } else if self.files_tree_in_dock() {
             if let Some(pane) = self.focused_or_first_pane(window, cx) {

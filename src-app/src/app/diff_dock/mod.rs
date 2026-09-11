@@ -119,6 +119,22 @@ impl PaneFlowApp {
         }
     }
 
+    /// The strip's close button: the user's way off a maximized dock beside
+    /// the restore toggle, so the focus saved at maximize goes back to its
+    /// pane before the dock unmounts. [`Self::close_diff_dock_panel`] itself
+    /// leaves focus alone because a tab-switch park also goes through it, and
+    /// focusing the outgoing tab's pane during a switch would be wrong.
+    pub(crate) fn close_diff_dock_panel_from_strip(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous_focus) = self.diff_dock.maximized.take() {
+            self.restore_pre_maximize_focus(previous_focus, window, cx);
+        }
+        self.close_diff_dock_panel(cx);
+    }
+
     pub(crate) fn close_diff_dock_panel(&mut self, cx: &mut Context<Self>) {
         self.diff_dock.open = false;
         self.diff_dock.data = None;

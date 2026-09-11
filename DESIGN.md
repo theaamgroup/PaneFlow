@@ -673,9 +673,13 @@ agent running behind the dock never sees a PTY resize. The dock bypasses the
 fit (it renders even in a panel too narrow for dock plus grid), flexes to the
 container with no resize handle, and paints the grid's left gutter itself as
 the grid goes. Maximizing records the focus that was active and moves it onto
-the active dock tab; restoring hands it back, or to the workspace's first
-pane. The state is per-app, and a tab switch parks the dock through the
-closer, so the incoming tab always sees its grid. Both the open slide and the
+the active dock tab's own handle (a File or Terminal tab), or blurs the pane
+when the tab has none (Changes), so keystrokes never reach the hidden grid;
+restoring, or closing the maximized dock from its strip, hands it back, or to
+the workspace's first pane. Panes behind a maximized dock are not under the
+user's eye: their agents' completions and notifications go out as for a
+zoomed-away split. The state is per-app, and a tab switch parks the dock
+through the closer, so the incoming tab always sees its grid. Both the open slide and the
 maximize slide reuse the primary sidebar's 280 ms curve (4.8) and settle
 instantly under `reduce_motion`.
 
