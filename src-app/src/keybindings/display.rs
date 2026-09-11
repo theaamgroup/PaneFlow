@@ -11,9 +11,12 @@ use super::registry::{ACTIONS, action_description};
 /// A resolved shortcut entry for display in the settings page.
 pub struct ShortcutEntry {
     pub key: String,
+    /// Fixed contextual shortcuts are documented but cannot be rebound here.
+    pub fixed: bool,
     pub description: String,
     /// US-021: the action this row rebinds, as the canonical `&'static str`
-    /// from the registry. The settings editor MUST key its rebind off this,
+    /// from the registry (empty for fixed contextual rows). The settings editor
+    /// MUST key its rebind off this,
     /// not off the row's positional index: the displayed list chains
     /// `MACOS_ONLY_DEFAULTS`, skips unbound rows, and appends user-only
     /// actions, so `index → DEFAULTS[index]` is only correct in the trivial
@@ -107,7 +110,7 @@ pub fn format_keystroke(key: &str) -> String {
 ///
 /// Result is lowercase and space-separated, e.g. `secondary-shift-d` ->
 /// `"cmd+shift+d command+shift+d cmd-shift-d command-shift-d"`.
-fn ascii_key_forms(raw_key: &str) -> String {
+pub(super) fn ascii_key_forms(raw_key: &str) -> String {
     // The key itself can be `-` (font_size_decrease is `secondary--`), so the
     // final separator is split off explicitly instead of letting `split('-')`
     // turn the chord into empty tokens.
@@ -267,6 +270,7 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
 
         seen_actions.insert(meta.name);
         entries.push(ShortcutEntry {
+            fixed: false,
             key,
             description: meta.description.to_string(),
             action_name: meta.name,
@@ -289,6 +293,7 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
             && seen_actions.insert(meta.name)
         {
             entries.push(ShortcutEntry {
+                fixed: false,
                 key: format_keystroke(key),
                 description: meta.description.to_string(),
                 action_name: meta.name,
@@ -301,6 +306,7 @@ pub fn effective_shortcuts(user_shortcuts: &HashMap<String, String>) -> Vec<Shor
     for meta in ACTIONS {
         if seen_actions.insert(meta.name) {
             entries.push(ShortcutEntry {
+                fixed: false,
                 key: "Unassigned".to_string(),
                 description: action_description(meta.name).to_string(),
                 action_name: meta.name,
@@ -719,7 +725,10 @@ mod tests {
             );
         }
         // Every declared section is reachable from the page.
-        for group in super::super::registry::ShortcutGroup::ALL {
+        for group in super::super::registry::ShortcutGroup::ALL
+            .iter()
+            .filter(|group| **group != super::super::registry::ShortcutGroup::Contextual)
+        {
             assert!(
                 entries.iter().any(|e| e.group == *group),
                 "{group:?} has no rows, so its header would render empty"

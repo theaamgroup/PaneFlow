@@ -520,7 +520,12 @@ impl PaneFlowApp {
         // `DEFAULTS` (the displayed list chains macOS-only defaults, skips
         // unbound rows, and appends user-only actions, so a positional index
         // would rebind the wrong action and corrupt `paneflow.json`).
-        let Some(action_name) = self.effective_shortcuts.get(idx).map(|e| e.action_name) else {
+        let Some(action_name) = self
+            .effective_shortcuts
+            .get(idx)
+            .filter(|entry| !entry.fixed)
+            .map(|e| e.action_name)
+        else {
             self.recording_shortcut_idx = None;
             cx.notify();
             return;
@@ -553,7 +558,7 @@ impl PaneFlowApp {
         // Re-apply keybindings from the updated config.
         let config = paneflow_config::loader::load_config();
         keybindings::apply_keybindings(cx, &config.shortcuts);
-        self.effective_shortcuts = keybindings::effective_shortcuts(&config.shortcuts);
+        self.effective_shortcuts = keybindings::settings_shortcuts(&config.shortcuts);
         self.recording_shortcut_idx = None;
         // The rows carry indices into `effective_shortcuts` and render its key
         // text, so they are stale the moment it is replaced.
