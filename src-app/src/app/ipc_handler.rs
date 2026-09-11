@@ -2988,20 +2988,8 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == ws_id)
-            && let Some(session) = ws.agent_sessions.get_mut(&key)
-            && session.surface_id != Some(sid)
+            && bind_session_surface(&mut ws.agent_sessions, key, sid)
         {
-            session.surface_id = Some(sid);
-            // EP-004 US-010: a NEW session resolving this pane evicts a stale
-            // `Errored` row left by the previous (dead) agent on the same
-            // surface - "pas d'erreur collante": relaunching the agent in the
-            // pane replaces the crash signal with the live state. Deliberately
-            // NOT tool-scoped: launching codex where claude crashed also
-            // clears the dot - the surface is visibly back in use, whatever
-            // the tool, and the dead row has no further eviction path.
-            ws.agent_sessions.retain(|k, s| {
-                *k == key || s.surface_id != Some(sid) || s.state != ai_types::AgentState::Errored
-            });
             self.sync_attention(cx);
             // EP-001 US-003 (cli-cockpit): a late surface resolution can flip
             // a pane's busy verdict - refresh the Composer chip.
@@ -4613,6 +4601,74 @@ fn session_end_fallback_candidate(
 /// no real OS PID reaches on any supported platform, so the two keyspaces never
 /// overlap.
 const SYNTHETIC_SESSION_PID_BASE: u32 = 0xFFFF_0000;
+
+/// Bind the session at `key` to surface `sid`. Returns `true` when the map
+/// changed. Same-tool twins already bound to `sid` (a Claude Code pane keyed
+/// once by the shell pid and once by the agent pid, once the session registry
+/// resolves the second) are folded into the survivor, which inherits the
+/// first twin's `last_result` when it has none of its own (upstream
+/// `3c7c6004`), so a single agent is never counted twice on one surface.
+pub(crate) fn bind_session_surface(
+    sessions: &mut std::collections::HashMap<u32, AgentSession>,
+    key: u32,
+    sid: u64,
+) -> bool {
+    let Some(tool) = sessions.get(&key).map(|session| session.tool) else {
+        return false;
+    };
+    let twins: Vec<u32> = sessions
+        .iter()
+        .filter(|(k, s)| **k != key && s.tool == tool && s.surface_id == Some(sid))
+        .map(|(k, _)| *k)
+        .collect();
+    let bound = sessions
+        .get(&key)
+        .is_some_and(|session| session.surface_id == Some(sid));
+    if bound && twins.is_empty() {
+        return false;
+    }
+    // A stale row resolving late must not evict the live agent that replaced
+    // it: surface resolution is asynchronous and `bind_session_surface_if_child_current`
+    // pins the pane's shell pid, not the session pid, so a dead `Errored` row
+    // can still arrive after the relaunched agent is already bound. The live
+    // twin keeps the surface and the errored row stays unbound.
+    let incoming_errored = sessions
+        .get(&key)
+        .is_some_and(|session| session.state == ai_types::AgentState::Errored);
+    if incoming_errored
+        && twins
+            .iter()
+            .any(|k| sessions[k].state != ai_types::AgentState::Errored)
+    {
+        return false;
+    }
+    let mut inherited_result = None;
+    for twin in twins {
+        if let Some(twin) = sessions.remove(&twin)
+            && inherited_result.is_none()
+        {
+            inherited_result = twin.last_result;
+        }
+    }
+    let session = sessions
+        .get_mut(&key)
+        .expect("the bound session was just read");
+    session.surface_id = Some(sid);
+    if session.last_result.is_none() {
+        session.last_result = inherited_result;
+    }
+    // EP-004 US-010: a NEW session resolving this pane evicts a stale
+    // `Errored` row left by the previous (dead) agent on the same
+    // surface - "pas d'erreur collante": relaunching the agent in the
+    // pane replaces the crash signal with the live state. Deliberately
+    // NOT tool-scoped: launching codex where claude crashed also
+    // clears the dot - the surface is visibly back in use, whatever
+    // the tool, and the dead row has no further eviction path.
+    sessions.retain(|k, s| {
+        *k == key || s.surface_id != Some(sid) || s.state != ai_types::AgentState::Errored
+    });
+    true
+}
 
 /// True for a key this function allocated rather than one an OS handed out.
 fn is_synthetic_session_key(key: u32) -> bool {
@@ -7205,6 +7261,134 @@ mod tests {
     // -----------------------------------------------------------------
     // EP-004 US-015 (agent-control-plane) - last_result + context channel
     // -----------------------------------------------------------------
+
+    #[test]
+    fn binding_a_surface_leaves_one_session_per_tool_on_it() {
+        let mut sessions = std::collections::HashMap::new();
+        let mut by_shell = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Thinking,
+        );
+        by_shell.surface_id = Some(11);
+        by_shell.last_result = Some("earlier turn".into());
+        sessions.insert(4000, by_shell);
+        let by_registry = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Thinking,
+        );
+        sessions.insert(4242, by_registry);
+        let mut codex =
+            AgentSession::new(TerminalAgent::Codex, crate::ai_types::AgentState::Thinking);
+        codex.surface_id = Some(11);
+        sessions.insert(5000, codex);
+
+        assert!(super::bind_session_surface(&mut sessions, 4242, 11));
+        assert!(
+            !sessions.contains_key(&4000),
+            "the shell-keyed twin of the same agent on the same pane is folded away"
+        );
+        assert_eq!(
+            sessions[&4242].last_result.as_deref(),
+            Some("earlier turn"),
+            "what the twin knew is carried over"
+        );
+        assert!(
+            sessions.contains_key(&5000),
+            "another agent on the same pane is not a twin"
+        );
+        assert!(
+            !super::bind_session_surface(&mut sessions, 4242, 11),
+            "rebinding to the same pane with no twin left changes nothing"
+        );
+        assert!(!super::bind_session_surface(&mut sessions, 9, 11));
+    }
+
+    #[test]
+    fn binding_a_surface_still_evicts_errored_rows_after_folding_a_twin() {
+        // Fork divergence from upstream 3c7c6004: the EP-004 US-010 eviction
+        // of a dead `Errored` row on the same surface survives the twin fold,
+        // and stays NOT tool-scoped (codex where claude crashed clears the dot).
+        let mut sessions = std::collections::HashMap::new();
+        let mut crashed_claude = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        crashed_claude.surface_id = Some(11);
+        sessions.insert(3000, crashed_claude);
+        let mut codex_twin =
+            AgentSession::new(TerminalAgent::Codex, crate::ai_types::AgentState::Thinking);
+        codex_twin.surface_id = Some(11);
+        sessions.insert(4000, codex_twin);
+        let codex_by_registry =
+            AgentSession::new(TerminalAgent::Codex, crate::ai_types::AgentState::Thinking);
+        sessions.insert(4242, codex_by_registry);
+        let mut errored_elsewhere = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        errored_elsewhere.surface_id = Some(12);
+        sessions.insert(6000, errored_elsewhere);
+
+        assert!(super::bind_session_surface(&mut sessions, 4242, 11));
+        assert!(
+            !sessions.contains_key(&4000),
+            "the same-tool twin is folded"
+        );
+        assert!(
+            !sessions.contains_key(&3000),
+            "the dead Errored row of another tool on the same surface is still evicted"
+        );
+        assert!(
+            sessions.contains_key(&6000),
+            "an Errored row on a different surface is untouched"
+        );
+        assert_eq!(sessions[&4242].surface_id, Some(11));
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn a_stale_errored_row_binding_late_does_not_evict_the_live_twin() {
+        // Surface resolution is asynchronous: an `Errored` row of the dead
+        // previous agent can resolve after its live replacement (same tool)
+        // is already bound. The live twin must survive and stay bound.
+        let mut sessions = std::collections::HashMap::new();
+        let mut live = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Thinking,
+        );
+        live.surface_id = Some(11);
+        live.last_result = Some("live turn".into());
+        sessions.insert(4242, live);
+        let stale = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        sessions.insert(3000, stale);
+
+        assert!(
+            !super::bind_session_surface(&mut sessions, 3000, 11),
+            "a stale errored row never takes the surface from a live twin"
+        );
+        assert_eq!(sessions[&4242].surface_id, Some(11));
+        assert_eq!(sessions[&4242].last_result.as_deref(), Some("live turn"));
+        assert_eq!(sessions[&3000].surface_id, None);
+
+        // Two errored rows of one tool still fold as before: no live twin.
+        let mut dead = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        dead.surface_id = Some(12);
+        sessions.insert(5000, dead);
+        let also_dead = AgentSession::new(
+            TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Errored,
+        );
+        sessions.insert(5001, also_dead);
+        assert!(super::bind_session_surface(&mut sessions, 5001, 12));
+        assert!(!sessions.contains_key(&5000));
+        assert_eq!(sessions[&5001].surface_id, Some(12));
+    }
 
     #[test]
     fn read_last_result_best_effort_or_none() {
