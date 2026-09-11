@@ -139,6 +139,7 @@ impl PaneFlowApp {
             // dock, so it falls back to the workspace's first pane.
             let owned_by_dock = previous_focus
                 .as_ref()
+                .map(|saved| &saved.focus)
                 .is_some_and(|focus| self.dock_owns_focus(focus, window, cx));
             let previous_focus = if owned_by_dock { None } else { previous_focus };
             self.restore_pre_maximize_focus(previous_focus, window, cx);
@@ -160,6 +161,7 @@ impl PaneFlowApp {
         };
         let owned_by_dock = previous_focus
             .as_ref()
+            .map(|saved| &saved.focus)
             .is_some_and(|focus| self.dock_owns_focus(focus, window, cx));
         let previous_focus = if owned_by_dock { None } else { previous_focus };
         self.restore_pre_maximize_focus(previous_focus, window, cx);

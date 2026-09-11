@@ -1457,6 +1457,14 @@ impl Pane {
     // Pane header rendering - identity + action cluster, no tab strip
     // -----------------------------------------------------------------------
 
+    /// Whether `focus` belongs to this pane (#508): its surface, anything the
+    /// last frame rendered inside the surface (a find bar), or the header's
+    /// rename editor, which sits outside the surface.
+    pub(crate) fn owns_focus(&self, focus: &FocusHandle, window: &Window, cx: &App) -> bool {
+        let surface = self.focus_handle(cx);
+        surface == *focus || surface.contains(focus, window) || self.rename_focus == *focus
+    }
+
     /// Start the header editor. The context menu is the gesture; double-click
     /// on the name still only focuses, so a word-select in the header cannot
     /// drop the pane into edit mode.
