@@ -83,7 +83,10 @@ pub fn next_workspace_id() -> u64 {
 /// workspace card or its pane area.
 #[derive(Debug, Default)]
 pub(crate) struct AgentCompletionNotification {
-    unread: bool,
+    /// The surfaces whose completion is still unread (`None` for a session
+    /// whose pane was never resolved). Surface-keyed (upstream `9da2e4be`)
+    /// so a tab's own unread flag can be persisted (issue #489).
+    unread: std::collections::HashSet<Option<u64>>,
 }
 
 impl AgentCompletionNotification {
@@ -91,20 +94,32 @@ impl AgentCompletionNotification {
     /// workspace-level one: a turn that ends in a background tab of the
     /// active workspace is unread.
     ///
-    /// This is the workspace's one aggregate bit, so an unseen completion
-    /// stays unread until [`Self::acknowledge`]: a later turn finishing in
-    /// the tab the user is looking at says nothing about the background tab
-    /// they never visited (PR #478 review).
-    pub(crate) fn record_finished(&mut self, seen: bool) {
-        self.unread |= !seen;
+    /// An unseen completion stays unread until [`Self::clear`]; a seen turn
+    /// removes only its own surface's mark, so a later turn finishing in the
+    /// tab the user is looking at says nothing about the background tab they
+    /// never visited (PR #478 review).
+    pub(crate) fn record_finished(&mut self, seen: bool, surface: Option<u64>) {
+        if seen {
+            self.unread.remove(&surface);
+        } else {
+            self.unread.insert(surface);
+        }
     }
 
-    pub(crate) fn acknowledge(&mut self) {
-        self.unread = false;
+    /// Acknowledge every outstanding completion in the workspace.
+    pub(crate) fn clear(&mut self) {
+        self.unread.clear();
     }
 
     pub(crate) fn is_unread(&self) -> bool {
+        !self.unread.is_empty()
+    }
+
+    /// Whether any of `surfaces` (a tab's) carries an unread completion.
+    pub(crate) fn is_unread_for(&self, surfaces: &std::collections::HashSet<u64>) -> bool {
         self.unread
+            .iter()
+            .any(|key| key.is_some_and(|id| surfaces.contains(&id)))
     }
 }
 
@@ -200,6 +215,9 @@ pub struct Workspace {
     /// `WorkspaceSession::sidebar_collapsed` (written only when folded), so a
     /// fold survives a restart; a session without the key starts expanded.
     pub sidebar_expanded: bool,
+    /// Whether the user muted this workspace's notifications. Persisted as
+    /// `WorkspaceSession::muted` (issue #489).
+    pub muted: bool,
     /// Issue #107: whether the user pinned this workspace to the top of the
     /// sidebar. Persisted (as `WorkspaceSession::pinned`) - a pin is a
     /// deliberate choice about a project, not a transient view state, so it
@@ -282,6 +300,7 @@ impl Workspace {
             files_expanded: Vec::new(),
             managed_worktrees: Vec::new(),
             sidebar_expanded: true,
+            muted: false,
             pinned: false,
         }
     }
@@ -633,6 +652,11 @@ impl Workspace {
                     .worktree
                     .as_ref()
                     .map(|path| path.to_string_lossy().into_owned()),
+                unread: self
+                    .agent_completion_notification
+                    .is_unread_for(&tab.surface_ids(cx)),
+                // Filled in by `build_session_state`, which owns the PR cache.
+                pull_request: None,
             })
             .collect()
     }
@@ -1099,21 +1123,23 @@ mod tests {
         let mut notification = AgentCompletionNotification::default();
         assert!(!notification.is_unread());
 
-        notification.record_finished(true);
+        notification.record_finished(true, Some(1));
         assert!(!notification.is_unread(), "a seen turn raises nothing");
 
-        notification.record_finished(false);
+        notification.record_finished(false, Some(1));
         assert!(notification.is_unread(), "an unseen turn is unread");
+        assert!(notification.is_unread_for(&std::collections::HashSet::from([1])));
+        assert!(!notification.is_unread_for(&std::collections::HashSet::from([2])));
 
         // PR #478 review: a turn the user watched in another tab must not
         // clear the one they never visited; only acknowledging does.
-        notification.record_finished(true);
+        notification.record_finished(true, Some(2));
         assert!(
             notification.is_unread(),
             "a later seen completion keeps the outstanding unseen one"
         );
 
-        notification.acknowledge();
+        notification.clear();
         assert!(!notification.is_unread());
     }
 

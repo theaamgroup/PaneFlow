@@ -15,7 +15,37 @@ fn make_workspace(title: &str, cwd: &str, tabs: Vec<TabSession>) -> WorkspaceSes
         managed_worktrees: vec![],
         pinned: false,
         sidebar_collapsed: false,
+        muted: false,
     }
+}
+
+#[test]
+fn an_unread_tab_and_a_muted_workspace_survive_a_restart() {
+    let mut ws = make_workspace("main", "/home/user/project", vec![TabSession::empty()]);
+    ws.muted = true;
+    ws.tabs[0].unread = true;
+    ws.tabs[0].pull_request = Some(PullRequestSession {
+        branch: "feat/parser".to_string(),
+        number: 46,
+        state: "open".to_string(),
+    });
+    let json = serde_json::to_string(&ws).unwrap();
+    assert!(json.contains("\"muted\":true"));
+    assert!(json.contains("\"unread\":true"));
+    let back: WorkspaceSession = serde_json::from_str(&json).unwrap();
+    assert!(back.muted);
+    assert!(back.tabs[0].unread);
+    assert_eq!(back.tabs[0].pull_request, ws.tabs[0].pull_request);
+
+    let quiet = make_workspace("main", "/home/user/project", vec![TabSession::empty()]);
+    let json = serde_json::to_string(&quiet).unwrap();
+    assert!(!json.contains("muted") && !json.contains("unread"));
+    assert!(!json.contains("pull_request"));
+    let older: WorkspaceSession =
+        serde_json::from_str(r#"{"title":"main","cwd":"/home/user/project","tabs":[{}]}"#).unwrap();
+    assert!(!older.muted);
+    assert!(!older.tabs[0].unread);
+    assert!(older.tabs[0].pull_request.is_none());
 }
 
 #[test]
@@ -706,6 +736,7 @@ fn tab_worktree_needs_no_schema_bump() {
                 title_is_automatic: false,
                 layout: None,
                 worktree: Some("/home/user/project.worktrees/parser".to_string()),
+                ..Default::default()
             }],
         )],
         pending_worktree_teardowns: vec![],

@@ -172,7 +172,23 @@ impl PaneFlowApp {
                     // folder is a single tab with `layout: null`, which v2
                     // reads as "no pane" - the EP-003 `empty` marker existed
                     // only because v1 could not express that.
-                    tabs: ws.serialize_tabs_without_scrollback(cx),
+                    tabs: ws
+                        .serialize_tabs_without_scrollback(cx)
+                        .into_iter()
+                        .zip(ws.tabs())
+                        .map(|(mut tab_session, tab)| {
+                            // Issue #489: the tab's last known pull request,
+                            // drawn at launch and corrected in the background.
+                            tab_session.pull_request = self.tab_pull_request(ws, tab).map(|pr| {
+                                paneflow_config::schema::PullRequestSession {
+                                    branch: self.tab_row_branch(ws, tab),
+                                    number: pr.number,
+                                    state: pr.state.wire_str().to_string(),
+                                }
+                            });
+                            tab_session
+                        })
+                        .collect(),
                     active_tab: ws.active_tab_idx(),
                     legacy_layout: None,
                     legacy_empty: false,
@@ -204,6 +220,8 @@ impl PaneFlowApp {
                     // Written only when folded (`skip_serializing_if`), so a
                     // user who never folds a row gains no key.
                     sidebar_collapsed: !ws.sidebar_expanded,
+                    // Issue #489: a muted workspace stays muted.
+                    muted: ws.muted,
                 })
                 .collect(),
             pending_worktree_teardowns: persisted_pending_worktree_teardowns(
@@ -691,6 +709,7 @@ impl PaneFlowApp {
             );
         }
         let mut tabs = Vec::new();
+        let mut unread_surfaces: Vec<u64> = Vec::new();
         let mut workspace_terminals = 0usize;
         let mut warned_terminal_cap = false;
         for tab_session in ws_session.tabs.iter().take(MAX_TABS_PER_WORKSPACE) {
@@ -735,6 +754,13 @@ impl PaneFlowApp {
                 Tab::restored(tab_session.title.clone(), root, bound)
                     .with_automatic_title(tab_session.title_is_automatic),
             );
+            // Issue #489: an unread completion survives the restart, keyed on
+            // the surfaces of the tab it finished in.
+            if tab_session.unread
+                && let Some(tab) = tabs.last()
+            {
+                unread_surfaces.extend(tab.surface_ids(cx));
+            }
         }
         let mut workspace =
             Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
@@ -746,6 +772,14 @@ impl PaneFlowApp {
         // Issue #349: restore the rail fold. Additive on v2 - an older session
         // has no key and deserializes to `false` (unfolded, as always).
         workspace.sidebar_expanded = !ws_session.sidebar_collapsed;
+        // Issue #489: restore the mute and the unread completions. Additive on
+        // v2 - an older session has neither key and restores quiet and unmuted.
+        workspace.muted = ws_session.muted;
+        for surface_id in unread_surfaces {
+            workspace
+                .agent_completion_notification
+                .record_finished(false, Some(surface_id));
+        }
         // EP-002 (orchestration-v2): rehydrate worktree ownership so the
         // close-time teardown still applies after a restart.
         let mut restored_worktrees =
