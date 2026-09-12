@@ -250,10 +250,8 @@ const SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH: f32 =
 /// the gap before the title. The open/closed folder glyph is the whole
 /// disclosure affordance; there is deliberately no chevron next to it.
 ///
-/// A tab row reserves the icon width with an invisible placeholder and nothing
-/// more, so every title in the rail - folder and tab alike - starts on the same
-/// X. The folder icon is then the only thing that distinguishes a workspace
-/// from its tabs.
+/// Tab titles share the folder title's X. Without an agent badge, the indent
+/// guide replaces the blank icon slot with an equivalent inset on the row.
 const SIDEBAR_FOLDER_ICON_WIDTH: f32 = 14.0;
 /// US-013: geometry of the per-pane icon cluster carried by a tab row.
 ///
@@ -321,6 +319,51 @@ fn sidebar_row_shell() -> gpui::Div {
         .flex()
         .flex_col()
         .gap(px(SIDEBAR_ROW_GAP))
+}
+
+/// With the guide on, move blank rows past its column. Badge rows keep their
+/// full shell and interrupt the guide around the badge.
+fn sidebar_tab_row_shell(indent_guide: bool, has_badge: bool) -> (gpui::Div, f32) {
+    let row_inset = if indent_guide && !has_badge {
+        SIDEBAR_FOLDER_ICON_WIDTH + SIDEBAR_TITLE_ROW_GAP
+    } else {
+        0.
+    };
+    (sidebar_row_shell().ml(px(row_inset)), row_inset)
+}
+
+fn sidebar_tab_title_row(
+    row_inset: f32,
+    leading_slot: Option<AnyElement>,
+    title: impl IntoElement,
+) -> gpui::Div {
+    let content_width = SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH - row_inset;
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SIDEBAR_TITLE_ROW_GAP))
+        .w(px(content_width))
+        .max_w(px(content_width))
+        .min_w_0()
+        .when(row_inset == 0., |row| {
+            row.child(leading_slot.unwrap_or_else(|| {
+                div()
+                    .flex_none()
+                    .w(px(SIDEBAR_FOLDER_ICON_WIDTH))
+                    .into_any_element()
+            }))
+        })
+        .child(title)
+}
+
+fn sidebar_tab_branch_row(row_inset: f32) -> gpui::Div {
+    let title_indent = SIDEBAR_FOLDER_ICON_WIDTH + SIDEBAR_TITLE_ROW_GAP;
+    let content_width = SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH - row_inset;
+    div()
+        .pl(px(title_indent - row_inset))
+        .w(px(content_width))
+        .max_w(px(content_width))
 }
 
 /// A rail row: the shared continuous-corner skin, with `body` on top.
@@ -1916,23 +1959,22 @@ impl PaneFlowApp {
                 .child(title.clone())
         };
 
+        let (row_shell, row_inset) = sidebar_tab_row_shell(
+            self.cached_config.sidebar_show.indent_guide_enabled(),
+            row_agent_status.is_some(),
+        );
+
         // US-012: the activity badge leads the title, in the folder-icon slot.
-        // Without a running agent the same slot stays empty, so the flex gap
-        // lands the tab title on the same X as the workspace title above it -
-        // no extra indent, no per-tab icon, the folder glyph alone marks the
-        // level.
-        let leading_slot = match row_agent_status {
-            Some(status) => render_tab_agent_summary(
+        // With no badge, the title builder reserves a blank slot only when
+        // the shell is not already inset beneath the indent guide.
+        let leading_slot = row_agent_status.map(|status| {
+            render_tab_agent_summary(
                 status,
                 &format!("tab-{tab_id}"),
                 sidebar_agent_status_tooltip(status, &agent_status),
                 ui,
-            ),
-            None => div()
-                .flex_none()
-                .w(px(SIDEBAR_FOLDER_ICON_WIDTH))
-                .into_any_element(),
-        };
+            )
+        });
 
         // No `overflow_x_hidden()` here, deliberately. GPUI's `overflow_mask`
         // builds a mask as soon as *either* axis is hidden, and on the
@@ -1943,16 +1985,7 @@ impl PaneFlowApp {
         // they painted squashed. The row cannot overflow horizontally anyway:
         // its width is pinned, every child but the title is `flex_none`, and
         // the title carries its own `overflow_x_hidden` + `text_ellipsis`.
-        let mut title_row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(SIDEBAR_TITLE_ROW_GAP))
-            .w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
-            .max_w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
-            .min_w_0()
-            .child(leading_slot)
-            .child(title_el);
+        let mut title_row = sidebar_tab_title_row(row_inset, leading_slot, title_el);
         let tab_group = SharedString::from(format!("tab-row-group-{tab_id}"));
         // US-013: the cluster owns the trailing lane - the title is the only
         // thing that shrinks, so the icons are never pushed out of the row.
@@ -2050,7 +2083,7 @@ impl PaneFlowApp {
             ),
         );
 
-        let row_shell = sidebar_row_shell()
+        let row_shell = row_shell
             .id(SharedString::from(format!("tab-row-{tab_id}")))
             .group(tab_group.clone())
             .on_drag(
@@ -2207,11 +2240,8 @@ impl PaneFlowApp {
             };
             let tooltip: SharedString = format!("{title} — {branch}\n{cwd}").into();
             body = body.child(
-                div()
+                sidebar_tab_branch_row(row_inset)
                     .id(SharedString::from(format!("terminal-branch-{pane_id}")))
-                    .pl(px(SIDEBAR_FOLDER_ICON_WIDTH + SIDEBAR_TITLE_ROW_GAP))
-                    .w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
-                    .max_w(px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH))
                     .flex()
                     .items_center()
                     .gap(px(4.))
@@ -2903,15 +2933,17 @@ mod tests {
         IDLE_WORKSPACE_TEXT_OPACITY, PaneFlowApp, ROW_RADIUS, RenameKey, SIDEBAR_ACTION_BUTTON_GAP,
         SIDEBAR_ACTION_BUTTON_SIZE, SIDEBAR_ACTION_LANE_WIDTH, SIDEBAR_DROP_BAND_REACH,
         SIDEBAR_DROP_LINE_PX, SIDEBAR_FOLDER_ICON_WIDTH, SIDEBAR_ROW_LINE_HEIGHT,
-        SIDEBAR_ROW_MARGIN_X, SIDEBAR_ROW_PADDING_Y, SIDEBAR_ROW_SPACING, SIDEBAR_TAB_CARD_HEIGHT,
-        SIDEBAR_TAB_CARD_ICON_SIZE, SIDEBAR_TAB_CARD_WIDTH, SIDEBAR_TAB_ICON_CAP,
-        SIDEBAR_TAB_ICON_SIZE, SIDEBAR_TITLE_ROW_GAP, SIDEBAR_WIDTH, SidebarAgentState,
-        SidebarAgentSummary, SidebarDropSlot, SidebarRow, SidebarServiceSummary, WorkspaceOrderKey,
-        compute_auto_order, diffstat_visible, fold_all_target, folder_row_sessions,
-        rename_editor_skin, rename_key_action, reorder_target, sidebar_agent_summary,
-        sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary, sidebar_tab_title_opacity,
-        sidebar_workspace_tone, tab_display_title, tab_icon_cluster_split, tab_row_sessions,
-        tab_row_title, take_rename_selection, visible_service_ports,
+        SIDEBAR_ROW_MARGIN_X, SIDEBAR_ROW_PADDING_X, SIDEBAR_ROW_PADDING_Y, SIDEBAR_ROW_SPACING,
+        SIDEBAR_TAB_CARD_HEIGHT, SIDEBAR_TAB_CARD_ICON_SIZE, SIDEBAR_TAB_CARD_WIDTH,
+        SIDEBAR_TAB_ICON_CAP, SIDEBAR_TAB_ICON_SIZE, SIDEBAR_TITLE_ROW_GAP, SIDEBAR_WIDTH,
+        SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH, SidebarAgentState, SidebarAgentSummary,
+        SidebarDropSlot, SidebarRow, SidebarServiceSummary, WorkspaceOrderKey, compute_auto_order,
+        diffstat_visible, fold_all_target, folder_row_sessions, rename_editor_skin,
+        rename_key_action, reorder_target, sidebar_agent_summary, sidebar_drop_slots,
+        sidebar_row_shell, sidebar_service_summary, sidebar_tab_branch_row, sidebar_tab_row_shell,
+        sidebar_tab_title_opacity, sidebar_tab_title_row, sidebar_workspace_tone,
+        tab_display_title, tab_icon_cluster_split, tab_row_sessions, tab_row_title,
+        take_rename_selection, visible_service_ports,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
@@ -2919,8 +2951,8 @@ mod tests {
     use crate::terminal::ServiceInfo;
     use crate::workspace::Tab;
     use gpui::{
-        AppContext, AvailableSpace, InteractiveElement, Modifiers, ParentElement, Styled,
-        TestAppContext, div, point, px, size,
+        AppContext, AvailableSpace, InteractiveElement, IntoElement, Modifiers, ParentElement,
+        Styled, TestAppContext, div, point, px, size,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -3225,6 +3257,81 @@ mod tests {
             "row corner {ROW_RADIUS:?} exceeds half of a {:?} row",
             bounds.size.height
         );
+    }
+
+    #[gpui::test]
+    fn tab_indent_keeps_title_and_branch_inside_the_row(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        for guide in [false, true] {
+            for badge in [false, true] {
+                cx.draw(
+                    point(px(0.), px(0.)),
+                    size(
+                        AvailableSpace::Definite(px(SIDEBAR_WIDTH)),
+                        AvailableSpace::Definite(px(100.)),
+                    ),
+                    |_, _| {
+                        let (shell, inset) = sidebar_tab_row_shell(guide, badge);
+                        let leading = badge.then(|| {
+                            div().flex_none().size(px(SIDEBAR_FOLDER_ICON_WIDTH))
+                                .into_any_element()
+                        });
+                        let title = sidebar_tab_title_row(
+                            inset,
+                            leading,
+                            div().flex_1().min_w_0().overflow_hidden()
+                                .whitespace_nowrap().text_ellipsis()
+                                .debug_selector(|| "title-text".into())
+                                .child("A very long tab title that must truncate at the trailing lane"),
+                        )
+                        .debug_selector(|| "title-content".into())
+                        .child(div().flex_none().w(px(SIDEBAR_ACTION_BUTTON_SIZE))
+                            .debug_selector(|| "trailing-lane".into()));
+                        let branch = sidebar_tab_branch_row(inset)
+                            .flex().min_w_0().h(px(14.)).overflow_hidden()
+                            .debug_selector(|| "branch-content".into())
+                            .child(div().flex_1().min_w_0().overflow_hidden()
+                                .whitespace_nowrap().text_ellipsis()
+                                .debug_selector(|| "branch-label".into())
+                                .child("a-very-long-branch-name-that-must-truncate-at-the-right-edge"));
+                        div().w_full().flex().flex_col().child(
+                            div().flex().flex_col().mx(px(SIDEBAR_ROW_MARGIN_X))
+                                .child(shell.debug_selector(|| "tab-shell".into())
+                                    .child(title).child(branch)),
+                        )
+                    },
+                );
+                let shell = cx.debug_bounds("tab-shell").unwrap();
+                let title = cx.debug_bounds("title-content").unwrap();
+                let text = cx.debug_bounds("title-text").unwrap();
+                let branch = cx.debug_bounds("branch-content").unwrap();
+                let label = cx.debug_bounds("branch-label").unwrap();
+                let trailing = cx.debug_bounds("trailing-lane").unwrap();
+                let expected_inset = if guide && !badge { 22. } else { 0. };
+                assert_eq!(
+                    shell.origin.x,
+                    px(SIDEBAR_ROW_MARGIN_X + expected_inset),
+                    "guide={guide}, badge={badge}"
+                );
+                assert_eq!(
+                    title.size.width,
+                    px(SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH - expected_inset)
+                );
+                assert_eq!(branch.size.width, title.size.width);
+                assert_eq!(
+                    text.origin.x,
+                    px(SIDEBAR_ROW_MARGIN_X + SIDEBAR_ROW_PADDING_X + 22.)
+                );
+                assert_eq!(label.origin.x, text.origin.x);
+                let right = px(SIDEBAR_WIDTH - SIDEBAR_ROW_MARGIN_X - SIDEBAR_ROW_PADDING_X);
+                assert_eq!(shell.right(), right + px(SIDEBAR_ROW_PADDING_X));
+                assert_eq!(title.right(), right);
+                assert_eq!(branch.right(), right);
+                assert_eq!(trailing.right(), right);
+                assert_eq!(text.right() + px(SIDEBAR_TITLE_ROW_GAP), trailing.origin.x);
+                assert_eq!(label.right(), right);
+            }
+        }
     }
 
     #[gpui::test]
