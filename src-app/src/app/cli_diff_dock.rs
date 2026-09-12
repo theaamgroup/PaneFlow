@@ -1070,7 +1070,7 @@ impl PaneFlowApp {
 pub(crate) struct PreMaximizeFocus {
     pub(crate) focus: gpui::FocusHandle,
     /// The owning pane and its surface handle at maximize; `None` for a dock,
-    /// chrome or overlay handle.
+    /// chrome or pane-less overlay handle (the pane palette's).
     owner: Option<(gpui::WeakEntity<crate::pane::Pane>, gpui::FocusHandle)>,
 }
 
@@ -1107,9 +1107,9 @@ fn pre_maximize_focus(
 /// surface was swapped since; an ownerless handle goes back while the last
 /// frame rendered it under `app_root`, or while it is the open pane
 /// palette's (drawn at a pane's slot in the hidden grid, owned by no pane); anything else lands on the first
-/// pane. A find bar dismissed while the dock was maximized still goes back
-/// unrendered and ends on `app_root`: the terminal keeps its search flag
-/// private to its module.
+/// pane. An input dismissed by another route while the dock was maximized (a
+/// find bar, the Composer) still goes back unrendered and ends on `app_root`:
+/// a pane publishes neither its search flag nor a closed overlay's handle.
 fn restore_saved_focus(
     previous_focus: Option<PreMaximizeFocus>,
     workspace: Option<&Workspace>,
@@ -1594,11 +1594,12 @@ mod tests {
         )
     }
 
-    /// Issue #508 review: a find bar is mounted inside its pane's surface and
-    /// the rename editor in its header, and a maximized dock renders neither.
-    /// The owning pane is recorded while the grid is still on screen, so a
-    /// restore behind the hidden grid hands the keyboard back to that input of
-    /// a pane that is still open, not to the first pane.
+    /// Issue #508 review: a find bar is mounted inside its pane's surface, the
+    /// rename editor in its header and the Composer's prompt editor as a
+    /// sibling overlay on the pane card, and a maximized dock renders none of
+    /// them. The owning pane is recorded while the grid is still on screen, so
+    /// a restore behind the hidden grid hands the keyboard back to that input
+    /// of a pane that is still open, not to the first pane.
     #[gpui::test]
     fn a_live_panes_find_bar_or_rename_editor_keeps_the_focus_behind_a_hidden_grid(
         cx: &mut gpui::TestAppContext,
@@ -1623,20 +1624,43 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // Maximize from pane 2's find bar, and from its rename editor: each
-        // is recorded while the grid is on screen, then the dock takes the
-        // keyboard and the grid is unmounted.
-        let (saved_find_bar, saved_rename, rename) = cx.update(|window, cx| {
+        // The Composer is open on pane 2: its prompt editor is a real
+        // `TextArea` in a slot the app pushes onto the pane, drawn beside the
+        // surface rather than inside it.
+        let composer_input = cx.new(|cx| crate::widgets::text_area::TextArea::new("Prompt", cx));
+        let composer = cx.update(|_, cx| composer_input.read(cx).focus_handle.clone());
+        second_pane.update(cx, |pane, cx| {
+            pane.set_composer_slot(
+                Some(crate::app::composer::ComposerSlot {
+                    input: composer_input.clone(),
+                    broadcast: false,
+                    busy: false,
+                    group_label: None,
+                    pending_count: 0,
+                    dismiss: std::rc::Rc::new(|_| {}),
+                    toggle_broadcast: std::rc::Rc::new(|_| {}),
+                    cancel_pending: std::rc::Rc::new(|_| {}),
+                }),
+                cx,
+            )
+        });
+
+        // Maximize from pane 2's find bar, from its rename editor and from the
+        // Composer: each is recorded while the grid is on screen, then the
+        // dock takes the keyboard and the grid is unmounted.
+        let (saved_find_bar, saved_rename, saved_composer, rename) = cx.update(|window, cx| {
             let saved_find_bar = pre_maximize_focus(find_bar.clone(), Some(&ws), window, cx);
+            let saved_composer = pre_maximize_focus(composer.clone(), Some(&ws), window, cx);
             second_pane.update(cx, |pane, cx| pane.begin_rename(window, cx));
             let rename = window
                 .focused(cx)
                 .expect("the rename editor takes the focus");
             let saved_rename = pre_maximize_focus(rename.clone(), Some(&ws), window, cx);
             window.focus(&dock, cx);
-            (saved_find_bar, saved_rename, rename)
+            (saved_find_bar, saved_rename, saved_composer, rename)
         });
         assert_ne!(rename, second, "the rename editor is not the surface");
+        assert_ne!(composer, second, "the Composer editor is not the surface");
         view.update(cx, |harness, cx| {
             harness.grid_mounted = false;
             cx.notify();
@@ -1654,6 +1678,12 @@ mod tests {
             assert!(
                 rename.is_focused(window),
                 "the rename editor of a live pane keeps the keyboard"
+            );
+
+            restore_saved_focus(Some(saved_composer), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                composer.is_focused(window),
+                "the Composer of a live pane keeps the keyboard"
             );
             assert!(!first.is_focused(window), "not the first pane");
         });
