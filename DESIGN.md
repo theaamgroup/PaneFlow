@@ -678,9 +678,23 @@ the grid goes. Maximizing records the focus that was active and moves it onto
 the active dock tab's own handle (a File or Terminal tab), or blurs the pane
 when the tab has none (Changes), so keystrokes never reach the hidden grid;
 restoring, or closing the maximized dock from its strip or a pane header's
-dock toggle, hands it back, or to
-the workspace's first pane. A restore that slides hands it back only once the
-slide settles, so keys typed while the grid is still clipped away stay off it. Panes behind a maximized dock are not under the
+dock toggle, hands it back. What comes back is checked against the model, not
+against the frame: a maximized dock renders no grid, so maximize records the
+pane that owns the focus while the grid is still painted - its surface, an
+input the frame rendered inside it (a find bar), or one of the two editors
+mounted beside the surface on the pane card (the header rename field, the
+Composer prompt). On the way back that input returns when its pane is still a
+pane of the visible tab, the pane itself when its surface was swapped
+meanwhile, and a handle with no owning pane returns only while the last frame
+rendered it under the app root or it belongs to an open pane palette. Anything
+else - the handle of a pane closed while the dock was maximized, as with
+nothing recorded at all - focuses the workspace's first pane rather than
+leaving the keyboard parked on the window with no pane focused. One limit
+stands: an input dismissed by another route while the dock was maximized still
+gets its handle back and so lands on the window, because a pane does not
+publish whether its find bar is still open. A restore that slides hands the
+focus back only once the slide settles, so keys typed while the grid is still
+clipped away stay off it. Panes behind a maximized dock are not under the
 user's eye: their agents' completions and notifications go out as for a
 zoomed-away split. The state is per-app: a tab switch parks the dock through
 the closer, and a trip through Review or Settings drops it as the dock

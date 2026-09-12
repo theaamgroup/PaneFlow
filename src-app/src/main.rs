@@ -1216,21 +1216,24 @@ struct DiffDockState {
     pub(crate) rendered: bool,
     /// `Some` while the dock fills the cockpit and the pane grid is hidden
     /// (upstream e0ff7e21); the payload is the focus that was active before
-    /// maximizing, handed back on restore. Per-app, so a tab switch parks
-    /// the dock through `close_diff_dock_panel`, which resets it.
-    pub(crate) maximized: Option<Option<gpui::FocusHandle>>,
+    /// maximizing and the pane that owned it (#508), handed back on restore.
+    /// Per-app, so a tab switch parks the dock through
+    /// `close_diff_dock_panel`, which resets it.
+    pub(crate) maximized: Option<Option<crate::app::cli_diff_dock::PreMaximizeFocus>>,
     /// The pane grid's visible width sliding between its full width and 0
     /// while maximize toggles; `None` once settled.
     pub(crate) maximize_animation: Option<SidebarWidthAnimation>,
     /// The focus a sliding restore hands back once the pane grid is on screen
     /// again (#506), beside the focus the dock held when the slide started;
     /// `None` when no restore slide is waiting to settle.
-    pub(crate) restore_focus_after_slide:
-        Option<(Option<gpui::FocusHandle>, Option<gpui::FocusHandle>)>,
+    pub(crate) restore_focus_after_slide: Option<(
+        Option<crate::app::cli_diff_dock::PreMaximizeFocus>,
+        Option<gpui::FocusHandle>,
+    )>,
     /// The saved focus a pane header's dock toggle closed a maximized or
     /// still-restoring dock over (#506). That handler has no `Window`, so
     /// `drain_pending_window_actions` hands it back; `None` when nothing waits.
-    pub(crate) pending_focus_restore: Option<Option<gpui::FocusHandle>>,
+    pub(crate) pending_focus_restore: Option<Option<crate::app::cli_diff_dock::PreMaximizeFocus>>,
     /// The dock column's reveal progress (0 to 1) while it slides in on open;
     /// `None` once settled, and never set by a session-switch restore.
     pub(crate) reveal_animation: Option<SidebarWidthAnimation>,

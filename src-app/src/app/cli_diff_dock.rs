@@ -725,7 +725,11 @@ impl PaneFlowApp {
                 // focus is still the one to hand back, not the dock's own.
                 let previous_focus = match self.diff_dock.restore_focus_after_slide.take() {
                     Some((parked, focus_at_restore)) if focused == focus_at_restore => parked,
-                    _ => focused,
+                    // The last frame still shows the grid, so the pane that
+                    // owns the focus is found now (#508).
+                    _ => focused.map(|focus| {
+                        pre_maximize_focus(focus, self.workspaces.get(self.active_idx), window, cx)
+                    }),
                 };
                 self.diff_dock.maximized = Some(previous_focus);
                 // The hidden grid must not keep the keyboard: a tab with its
@@ -772,20 +776,23 @@ impl PaneFlowApp {
     /// closing a maximized dock never strands the focus on a hidden surface.
     pub(crate) fn restore_pre_maximize_focus(
         &mut self,
-        previous_focus: Option<gpui::FocusHandle>,
+        previous_focus: Option<PreMaximizeFocus>,
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        match previous_focus {
-            Some(focus) => window.focus(&focus, cx),
-            None => {
-                // `false` is a zero-pane workspace: nothing to hand the
-                // focus back to.
-                if let Some(ws) = self.workspaces.get(self.active_idx) {
-                    let _ = ws.focus_first(window, cx);
-                }
-            }
-        }
+        restore_saved_focus(
+            previous_focus,
+            self.workspaces.get(self.active_idx),
+            &self.empty_workspace_focus,
+            // An open pane palette is drawn in the grid at a pane's slot but
+            // belongs to no pane (#508): hidden behind a maximized dock, it
+            // is still where the keyboard goes back to.
+            self.pane_palette
+                .is_some()
+                .then_some(&self.pane_palette_focus),
+            window,
+            cx,
+        );
     }
 
     /// Whether the dock flexes to its container this frame: maximized, or
@@ -1053,6 +1060,91 @@ impl PaneFlowApp {
                 }
             })
             .into_any_element()
+    }
+}
+
+/// The focus a maximize saved, with the pane that owned it (#508). A
+/// maximized dock does not render the grid, so a restore cannot ask the frame
+/// whether a find bar still sits inside a live pane: the owner is found while
+/// the grid is still on screen and checked against the model on the way back.
+pub(crate) struct PreMaximizeFocus {
+    pub(crate) focus: gpui::FocusHandle,
+    /// The owning pane and its surface handle at maximize; `None` for a dock,
+    /// chrome or pane-less overlay handle (the pane palette's).
+    owner: Option<(gpui::WeakEntity<crate::pane::Pane>, gpui::FocusHandle)>,
+}
+
+/// Record `focus` at maximize, with the visible tab's pane that owns it in
+/// the last frame, which still shows the grid.
+fn pre_maximize_focus(
+    focus: gpui::FocusHandle,
+    workspace: Option<&Workspace>,
+    window: &gpui::Window,
+    cx: &App,
+) -> PreMaximizeFocus {
+    let owner = workspace
+        .and_then(|ws| ws.active_tab().root.as_ref())
+        .and_then(|root| {
+            root.collect_leaves()
+                .into_iter()
+                .find(|pane| pane.read(cx).owns_focus(&focus, window, cx))
+        })
+        .map(|pane| {
+            let surface = gpui::Focusable::focus_handle(pane.read(cx), cx);
+            (pane.downgrade(), surface)
+        });
+    PreMaximizeFocus { focus, owner }
+}
+
+/// The body of [`PaneFlowApp::restore_pre_maximize_focus`], free of the app so
+/// a test can drive it: `workspace` is the active one and `app_root` the
+/// `app_content` parking handle.
+///
+/// A saved handle outlives its view (#508): focusing the clone a closed pane
+/// left behind lands on nothing, and GPUI's focus-lost pass then parks the
+/// keyboard on `app_root`, not on a pane. In order: a handle whose pane is
+/// still a leaf of the visible tab goes back, or the pane itself when its
+/// surface was swapped since; an ownerless handle goes back while the last
+/// frame rendered it under `app_root`, or while it is the open pane
+/// palette's (drawn at a pane's slot in the hidden grid, owned by no pane); anything else lands on the first
+/// pane. An input dismissed by another route while the dock was maximized (a
+/// find bar, the Composer) still goes back unrendered and ends on `app_root`:
+/// a pane publishes neither its search flag nor a closed overlay's handle.
+fn restore_saved_focus(
+    previous_focus: Option<PreMaximizeFocus>,
+    workspace: Option<&Workspace>,
+    app_root: &gpui::FocusHandle,
+    open_palette: Option<&gpui::FocusHandle>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) {
+    if let Some(PreMaximizeFocus { focus, owner }) = previous_focus {
+        match owner {
+            Some((pane, surface)) => {
+                let live = pane.upgrade().filter(|pane| {
+                    workspace
+                        .and_then(|ws| ws.active_tab().root.as_ref())
+                        .is_some_and(|root| root.contains_leaf(pane))
+                });
+                if let Some(pane) = live {
+                    let current = gpui::Focusable::focus_handle(pane.read(cx), cx);
+                    let target = if current == surface { focus } else { current };
+                    window.focus(&target, cx);
+                    return;
+                }
+            }
+            None if app_root.contains(&focus, window)
+                || open_palette.is_some_and(|palette| *palette == focus) =>
+            {
+                window.focus(&focus, cx);
+                return;
+            }
+            None => {}
+        }
+    }
+    // `false` is a zero-pane workspace: nothing to hand the focus back to.
+    if let Some(ws) = workspace {
+        let _ = ws.focus_first(window, cx);
     }
 }
 
@@ -1439,6 +1531,259 @@ mod tests {
             !park.contains("pending_focus_restore") && !park.contains("restore_pre_maximize_focus"),
             "a tab-switch park drops the saved focus without touching the keyboard: {park}"
         );
+    }
+
+    /// Stands in for the cockpit: `app_root` over the dock and the pane grid,
+    /// each pane's surface handle with an optional child mounted inside it
+    /// (a find bar), and a switch that unmounts the grid like a maximized dock.
+    struct GridHarness {
+        app_root: gpui::FocusHandle,
+        dock: gpui::FocusHandle,
+        grid: Vec<(gpui::FocusHandle, Option<gpui::FocusHandle>)>,
+        grid_mounted: bool,
+    }
+
+    impl gpui::Render for GridHarness {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div()
+                .track_focus(&self.app_root)
+                .child(div().track_focus(&self.dock))
+                .when(self.grid_mounted, |root| {
+                    root.children(self.grid.iter().map(|(surface, child)| {
+                        div()
+                            .track_focus(surface)
+                            .when_some(child.as_ref(), |pane, child| {
+                                pane.child(div().track_focus(child))
+                            })
+                    }))
+                })
+        }
+    }
+
+    fn harness_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<GridHarness>, &mut gpui::VisualTestContext) {
+        cx.add_window_view(|_, cx| GridHarness {
+            app_root: cx.focus_handle(),
+            dock: cx.focus_handle(),
+            grid: Vec::new(),
+            grid_mounted: true,
+        })
+    }
+
+    fn test_pane(cx: &mut gpui::VisualTestContext) -> gpui::Entity<crate::pane::Pane> {
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+    }
+
+    fn surface(
+        pane: &gpui::Entity<crate::pane::Pane>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> gpui::FocusHandle {
+        cx.update(|_, cx| gpui::Focusable::focus_handle(pane.read(cx), cx))
+    }
+
+    fn split(panes: &[gpui::Entity<crate::pane::Pane>]) -> Option<crate::layout::LayoutTree> {
+        crate::layout::LayoutTree::from_panes_equal(
+            crate::layout::SplitDirection::Vertical,
+            panes.to_vec(),
+        )
+    }
+
+    /// Issue #508 review: a find bar is mounted inside its pane's surface, the
+    /// rename editor in its header and the Composer's prompt editor as a
+    /// sibling overlay on the pane card, and a maximized dock renders none of
+    /// them. The owning pane is recorded while the grid is still on screen, so
+    /// a restore behind the hidden grid hands the keyboard back to that input
+    /// of a pane that is still open, not to the first pane.
+    #[gpui::test]
+    fn a_live_panes_find_bar_or_rename_editor_keeps_the_focus_behind_a_hidden_grid(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = harness_window(cx);
+        let (first_pane, second_pane) = (test_pane(cx), test_pane(cx));
+        let mut ws = workspace_with_tabs(1, "/tmp/project", &[]);
+        assert!(ws.open_tab(Tab::new(
+            "split",
+            split(&[first_pane.clone(), second_pane.clone()])
+        )));
+        let (first, second) = (surface(&first_pane, cx), surface(&second_pane, cx));
+        let input = cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Search", cx));
+        let find_bar = cx.update(|_, cx| gpui::Focusable::focus_handle(input.read(cx), cx));
+        let (app_root, dock) = view.update(cx, |harness, cx| {
+            harness.grid = vec![
+                (first.clone(), None),
+                (second.clone(), Some(find_bar.clone())),
+            ];
+            cx.notify();
+            (harness.app_root.clone(), harness.dock.clone())
+        });
+        cx.run_until_parked();
+
+        // The Composer is open on pane 2: its prompt editor is a real
+        // `TextArea` in a slot the app pushes onto the pane, drawn beside the
+        // surface rather than inside it.
+        let composer_input = cx.new(|cx| crate::widgets::text_area::TextArea::new("Prompt", cx));
+        let composer = cx.update(|_, cx| composer_input.read(cx).focus_handle.clone());
+        second_pane.update(cx, |pane, cx| {
+            pane.set_composer_slot(
+                Some(crate::app::composer::ComposerSlot {
+                    input: composer_input.clone(),
+                    broadcast: false,
+                    busy: false,
+                    group_label: None,
+                    pending_count: 0,
+                    dismiss: std::rc::Rc::new(|_| {}),
+                    toggle_broadcast: std::rc::Rc::new(|_| {}),
+                    cancel_pending: std::rc::Rc::new(|_| {}),
+                }),
+                cx,
+            )
+        });
+
+        // Maximize from pane 2's find bar, from its rename editor and from the
+        // Composer: each is recorded while the grid is on screen, then the
+        // dock takes the keyboard and the grid is unmounted.
+        let (saved_find_bar, saved_rename, saved_composer, rename) = cx.update(|window, cx| {
+            let saved_find_bar = pre_maximize_focus(find_bar.clone(), Some(&ws), window, cx);
+            let saved_composer = pre_maximize_focus(composer.clone(), Some(&ws), window, cx);
+            second_pane.update(cx, |pane, cx| pane.begin_rename(window, cx));
+            let rename = window
+                .focused(cx)
+                .expect("the rename editor takes the focus");
+            let saved_rename = pre_maximize_focus(rename.clone(), Some(&ws), window, cx);
+            window.focus(&dock, cx);
+            (saved_find_bar, saved_rename, saved_composer, rename)
+        });
+        assert_ne!(rename, second, "the rename editor is not the surface");
+        assert_ne!(composer, second, "the Composer editor is not the surface");
+        view.update(cx, |harness, cx| {
+            harness.grid_mounted = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            restore_saved_focus(Some(saved_find_bar), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                find_bar.is_focused(window),
+                "the find bar of a live pane keeps the keyboard"
+            );
+
+            restore_saved_focus(Some(saved_rename), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                rename.is_focused(window),
+                "the rename editor of a live pane keeps the keyboard"
+            );
+
+            restore_saved_focus(Some(saved_composer), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                composer.is_focused(window),
+                "the Composer of a live pane keeps the keyboard"
+            );
+            assert!(!first.is_focused(window), "not the first pane");
+        });
+    }
+
+    /// Issue #508: a pane closed while the dock was maximized leaves its saved
+    /// handle behind, and focusing it lands on no view - GPUI's focus-lost
+    /// pass then parks the keyboard on the app root, not on a pane - so it
+    /// falls back to the first pane, as nothing saved does. A live pane's
+    /// terminal comes back, a dock handle the last frame rendered is kept, and
+    /// an ownerless handle nothing renders falls back too.
+    #[gpui::test]
+    fn handing_back_a_closed_panes_focus_lands_on_the_first_pane(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = harness_window(cx);
+        let (first_pane, second_pane, closed_pane) = (test_pane(cx), test_pane(cx), test_pane(cx));
+        let mut ws = workspace_with_tabs(1, "/tmp/project", &[]);
+        assert!(ws.open_tab(Tab::new(
+            "split",
+            split(&[first_pane.clone(), second_pane.clone(), closed_pane.clone()])
+        )));
+        let first = surface(&first_pane, cx);
+        let second = surface(&second_pane, cx);
+        let closed = surface(&closed_pane, cx);
+        let stray = cx.update(|_, cx| cx.focus_handle());
+        let (app_root, dock) = view.update(cx, |harness, cx| {
+            harness.grid = vec![
+                (first.clone(), None),
+                (second.clone(), None),
+                (closed.clone(), None),
+            ];
+            cx.notify();
+            (harness.app_root.clone(), harness.dock.clone())
+        });
+        cx.run_until_parked();
+
+        let [
+            saved_second,
+            saved_closed,
+            saved_dock,
+            saved_stray,
+            saved_palette,
+        ] = cx.update(|window, cx| {
+            [&second, &closed, &dock, &stray, &stray]
+                .map(|focus| pre_maximize_focus(focus.clone(), Some(&ws), window, cx))
+        });
+
+        // The pane closes while the dock is maximized.
+        ws.active_tab_mut().root = split(&[first_pane.clone(), second_pane.clone()]);
+        drop(closed_pane);
+        view.update(cx, |harness, cx| {
+            harness.grid.pop();
+            harness.grid_mounted = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            window.focus(&dock, cx);
+            restore_saved_focus(Some(saved_closed), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                first.is_focused(window),
+                "a closed pane's handle falls back to the first pane"
+            );
+            assert!(!closed.is_focused(window));
+
+            restore_saved_focus(Some(saved_second), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                second.is_focused(window),
+                "a live pane's terminal gets its focus back"
+            );
+
+            restore_saved_focus(Some(saved_dock), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                dock.is_focused(window),
+                "a dock handle the last frame rendered is kept"
+            );
+
+            restore_saved_focus(Some(saved_stray), Some(&ws), &app_root, None, window, cx);
+            assert!(
+                first.is_focused(window),
+                "an ownerless handle nothing renders falls back to the first pane"
+            );
+
+            restore_saved_focus(
+                Some(saved_palette),
+                Some(&ws),
+                &app_root,
+                Some(&stray),
+                window,
+                cx,
+            );
+            assert!(
+                stray.is_focused(window),
+                "an open pane palette keeps the keyboard behind a hidden grid"
+            );
+
+            window.focus(&dock, cx);
+            restore_saved_focus(None, Some(&ws), &app_root, None, window, cx);
+            assert!(first.is_focused(window), "nothing saved: the first pane");
+        });
     }
 
     #[test]
