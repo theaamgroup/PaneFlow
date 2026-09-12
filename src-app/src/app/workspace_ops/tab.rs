@@ -74,6 +74,31 @@ pub(crate) fn migrate_agent_sessions(
 }
 
 impl PaneFlowApp {
+    pub(crate) fn toggle_workspace_muted(&mut self, ws_idx: usize, cx: &mut Context<Self>) {
+        if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+            ws.muted = !ws.muted;
+            self.save_session(cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn workspace_is_muted(&self, ws_id: u64) -> bool {
+        self.workspaces
+            .iter()
+            .find(|ws| ws.id == ws_id)
+            .is_some_and(|ws| ws.muted)
+    }
+
+    /// Clear completion marks across all tabs; session attention badges have
+    /// their own tab-level Mark as read action.
+    pub(crate) fn mark_workspace_read(&mut self, ws_idx: usize, cx: &mut Context<Self>) {
+        if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+            ws.agent_completion_notification.clear();
+            self.save_session(cx);
+            cx.notify();
+        }
+    }
+
     /// US-008: toggle the sidebar folder row for `ws_idx`.
     ///
     /// Persisted since issue #349 (`WorkspaceSession::sidebar_collapsed`): a
@@ -1064,5 +1089,62 @@ mod tests {
             after_toast.contains("return;"),
             "the dirty branch must return before close_tab runs: {dirty_branch}"
         );
+    }
+    #[test]
+    fn workspace_notification_actions_persist_without_dismissing_session_badges() {
+        // App bootstrap opens real windows and PTYs; inspect these UI command
+        // bodies to pin persistence and separation from session badge state.
+        let src = include_str!("tab.rs");
+        let toggle = src
+            .split("pub(crate) fn toggle_workspace_muted(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn workspace_is_muted(")
+            .next()
+            .unwrap();
+        assert!(toggle.contains("ws.muted = !ws.muted;"));
+        assert!(toggle.contains("self.save_session(cx);"));
+        assert!(toggle.contains("cx.notify();"));
+        assert!(!toggle.contains("agent_completion_notification"));
+        let mark = src
+            .split("pub(crate) fn mark_workspace_read(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn toggle_workspace_expanded(")
+            .next()
+            .unwrap();
+        assert!(mark.contains("ws.agent_completion_notification.clear();"));
+        assert!(mark.contains("self.save_session(cx);"));
+        assert!(mark.contains("cx.notify();"));
+        assert!(!mark.contains("agent_sessions"));
+    }
+
+    #[test]
+    fn workspace_mute_gates_every_notification_source_after_state_updates() {
+        // These routes require the live GPUI app and PTYs. This wiring probe
+        // protects the shared mute gate at each actual delivery call; lower
+        // level notification and completion behavior have executable tests.
+        let compact = |src: &str| src.split_whitespace().collect::<String>();
+        let ipc = compact(include_str!("../ipc_handler.rs"));
+        assert_eq!(
+            ipc.matches("||self.workspace_is_muted(workspace_id)")
+                .count(),
+            3
+        );
+        assert!(ipc.contains("letseen=self.session_is_seen(workspace_id,session_key,cx)||self.workspace_is_muted(workspace_id);"));
+        assert!(ipc.contains(".record_finished_unless_muted(seen,finished_surface,ws.muted)"));
+        let observations = compact(include_str!("../agent_status.rs"));
+        assert!(observations.contains("completion_was_seen(visible.as_ref(),Some(surface_id))"));
+        assert!(
+            observations.contains(".record_finished_unless_muted(seen,Some(surface_id),ws.muted)")
+        );
+        let events = compact(include_str!("../event_handlers.rs"));
+        assert!(events.contains(".workspace_id_for_surface(surface_id,cx).is_some_and(|ws_id|self.workspace_is_muted(ws_id))"));
+        assert!(events.contains("self.hosted_surface_is_seen(surface_id,cx)||muted"));
+        assert!(events.contains("surface_id,)||self.workspace_is_muted(ws_id);super::ipc_handler::fire_stalled_notification("));
+        assert!(events.contains("session.state=ai_types::AgentState::Stalled;"));
+        let dock = compact(include_str!("../diff_dock/tabs.rs"));
+        assert!(dock.contains("this.workspace_is_muted(ws.id)&&this.diff_dock_terminals_for_workspace(ws.id).contains(&terminal)"));
+        assert!(dock.contains("this.dock_terminal_is_seen(&terminal)||muted"));
     }
 }

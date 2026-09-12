@@ -4246,7 +4246,8 @@ impl PaneFlowApp {
                         &ws_title,
                         message.as_deref(),
                         &notify_config,
-                        self.session_is_seen(workspace_id, key, cx),
+                        self.session_is_seen(workspace_id, key, cx)
+                            || self.workspace_is_muted(workspace_id),
                         cx.background_executor().clone(),
                     );
                     self.sync_attention(cx);
@@ -4316,8 +4317,9 @@ impl PaneFlowApp {
                     // Same answer as the needs-input, exited and stalled
                     // notifications: the pane the turn finished in, not the
                     // workspace. A turn ending in a background tab of the
-                    // active workspace notifies and stays unread.
-                    let seen = self.session_is_seen(workspace_id, session_key, cx);
+                    // active workspace notifies and stays unread unless muted.
+                    let seen = self.session_is_seen(workspace_id, session_key, cx)
+                        || self.workspace_is_muted(workspace_id);
                     // Counted only for a stop that actually applied, so a
                     // reordered frame can't inflate the completion tally.
                     if !interrupt_stop
@@ -4329,7 +4331,7 @@ impl PaneFlowApp {
                             .get(&session_key)
                             .and_then(|session| session.surface_id);
                         ws.agent_completion_notification
-                            .record_finished(seen, finished_surface);
+                            .record_finished_unless_muted(seen, finished_surface, ws.muted);
                     }
                     // EP-004 US-020: natural turn ends notify when the user is
                     // looking elsewhere. Ctrl+C stops only clear local state.
@@ -4458,7 +4460,8 @@ impl PaneFlowApp {
                             &ws_title,
                             exit_code,
                             &notify_config,
-                            self.session_is_seen(workspace_id, key, cx),
+                            self.session_is_seen(workspace_id, key, cx)
+                                || self.workspace_is_muted(workspace_id),
                             cx.background_executor().clone(),
                         );
                     }

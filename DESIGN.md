@@ -594,6 +594,16 @@ Drop placeholder while dragging: margin 6, radius 8, `text` at 0.10 with a
 0.22 border and a 2 px line. The row-reorder insertion line is a separate 2 px
 `text` at 0.5 rule.
 
+The workspace context menu groups **Mark as read** (only with unread
+completions) and **Mute notifications** / **Unmute notifications** above the
+close group. These use the existing 28 px select rows and a 9 px divider;
+the menu position accounts for the conditional row. Mark as read clears
+completion marks in every tab; the tab menu action still clears session
+attention badges. Mute persists across restarts, suppresses desktop notices
+(including Stalled and dock terminal notices) and new unread completions,
+and leaves agent lifecycle transitions intact. Toggling mute itself keeps
+existing completion marks; it adds no sidebar adornment.
+
 **The footer stacks, top to bottom**: the IPC offline banner when the socket is
 disabled (mx 6, mb 2, px 8, py 6, radius 6, 1 px `border` on `subtle`, a 14 px
 alert glyph and `IPC offline` at 12 px Medium); the MCP bridge callout (issue
@@ -1088,10 +1098,10 @@ its siblings fade. There is no focus ring (7.5). An agent that needs the user
 gets the `vc_conflict` border at 0.7 and a sidebar bell; clicking anywhere in
 the panel acknowledges visible completions. The attention queue lists those
 panes and `secondary-shift-j` jumps through them. A native notification is
-dropped only when its pane is under the user's eye: the window is focused and
+dropped when its workspace is muted or its pane is under the user's eye: the window is focused and
 the pane's workspace and tab are on screen (the same test as the completion
 dot, #408 / #422). A pane in another workspace, a background tab, a zoomed-away
-split, or an unmounted dock notifies even while the window is focused.
+split, or an unmounted dock in an unmuted workspace notifies even while the window is focused.
 
 ## 7. Accessibility
 

@@ -106,6 +106,18 @@ impl AgentCompletionNotification {
         }
     }
 
+    /// Muted turns neither create nor acknowledge completion marks.
+    pub(crate) fn record_finished_unless_muted(
+        &mut self,
+        seen: bool,
+        surface: Option<u64>,
+        muted: bool,
+    ) {
+        if !muted {
+            self.record_finished(seen, surface);
+        }
+    }
+
     /// Acknowledge every outstanding completion in the workspace.
     pub(crate) fn clear(&mut self) {
         self.unread.clear();
@@ -776,6 +788,22 @@ mod tests {
     /// all, so `git_branch` stays at its empty default and the call returns
     /// immediately - branch resolution happens off-thread afterward via
     /// `spawn_initial_git_stats`, the same deferral `git_stats` already uses.
+    #[test]
+    fn muted_completions_preserve_existing_marks_without_adding_new_ones() {
+        let mut notification = AgentCompletionNotification::default();
+        notification.record_finished(false, Some(1));
+        for seen in [false, true] {
+            notification.record_finished_unless_muted(seen, Some(1), true);
+            notification.record_finished_unless_muted(seen, Some(2), true);
+            assert!(notification.is_unread_for(&[1].into_iter().collect()));
+            assert!(!notification.is_unread_for(&[2].into_iter().collect()));
+        }
+        notification.record_finished_unless_muted(false, Some(2), false);
+        assert!(notification.is_unread_for(&[2].into_iter().collect()));
+        notification.clear();
+        assert!(!notification.is_unread());
+    }
+
     #[test]
     fn build_with_tab_does_not_open_git_head_and_returns_immediately() {
         let dir = tempfile::tempdir().unwrap();

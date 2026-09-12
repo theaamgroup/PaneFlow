@@ -28,15 +28,18 @@ fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
 }
 
 /// Fixed rows are pin/unpin, reveal, copy path, manage custom buttons, and
-/// close. The divider before Reveal only exists when an editor section does;
-/// otherwise the earlier workflow/service divider already separates groups.
+/// close, plus mute/unmute and an optional Mark as read row. The divider
+/// before Reveal only exists when an editor section does; otherwise the
+/// earlier workflow/service divider already separates groups.
 fn workspace_context_menu_counts(
     visible_editor_rows: usize,
     workflow_rows: usize,
     service_rows: usize,
+    has_unread: bool,
 ) -> (usize, usize) {
-    let menu_rows = visible_editor_rows + 5 + workflow_rows + service_rows;
-    let separator_rows = 2 + usize::from(service_rows > 0) + usize::from(visible_editor_rows > 0);
+    let menu_rows =
+        visible_editor_rows + 6 + workflow_rows + service_rows + usize::from(has_unread);
+    let separator_rows = 3 + usize::from(service_rows > 0) + usize::from(visible_editor_rows > 0);
     (menu_rows, separator_rows)
 }
 
@@ -236,14 +239,22 @@ impl PaneFlowApp {
             .unwrap_or_default();
 
         let is_pinned = self.workspaces.get(idx).is_some_and(|ws| ws.pinned);
+        let has_unread = self.workspaces[idx]
+            .agent_completion_notification
+            .is_unread();
+        let muted = self.workspaces[idx].muted;
         let workflow_rows = usize::from(workflow_template.is_some());
         let service_rows = services.len();
         let visible_editors: Vec<_> = WorkspaceEditor::ALL
             .into_iter()
             .filter(|editor| editor.is_visible(&self.cached_config))
             .collect();
-        let (menu_rows, separator_rows) =
-            workspace_context_menu_counts(visible_editors.len(), workflow_rows, service_rows);
+        let (menu_rows, separator_rows) = workspace_context_menu_counts(
+            visible_editors.len(),
+            workflow_rows,
+            service_rows,
+            has_unread,
+        );
         let menu_height = px(8. + menu_rows as f32 * 28. + separator_rows as f32 * 9.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
@@ -392,6 +403,36 @@ impl PaneFlowApp {
             }),
         ));
 
+        context_menu = context_menu.child(context_menu_divider(ui));
+
+        if has_unread {
+            context_menu = context_menu.child(self.render_select_menu_item(
+                "workspace-context-mark-read".into(),
+                "Mark as read",
+                None,
+                ui,
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.workspace_menu_open = None;
+                    this.mark_workspace_read(idx, cx);
+                    cx.stop_propagation();
+                }),
+            ));
+        }
+        context_menu = context_menu.child(self.render_select_menu_item(
+            "workspace-context-mute".into(),
+            if muted {
+                "Unmute notifications"
+            } else {
+                "Mute notifications"
+            },
+            None,
+            ui,
+            cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                this.workspace_menu_open = None;
+                this.toggle_workspace_muted(idx, cx);
+                cx.stop_propagation();
+            }),
+        ));
         context_menu = context_menu.child(context_menu_divider(ui));
 
         // Close workspace (conditionally disabled)
@@ -1079,14 +1120,40 @@ mod tests {
 
     #[test]
     fn workspace_menu_geometry_uses_filtered_editor_rows() {
-        assert_eq!(workspace_context_menu_counts(4, 0, 0), (9, 3));
-        assert_eq!(workspace_context_menu_counts(2, 1, 0), (8, 3));
-        assert_eq!(workspace_context_menu_counts(0, 0, 0), (5, 2));
+        assert_eq!(workspace_context_menu_counts(4, 0, 0, false), (10, 4));
+        assert_eq!(workspace_context_menu_counts(2, 1, 0, false), (9, 4));
+        assert_eq!(workspace_context_menu_counts(0, 0, 0, false), (6, 3));
     }
 
     #[test]
     fn workspace_menu_geometry_counts_service_and_editor_dividers_independently() {
-        assert_eq!(workspace_context_menu_counts(4, 0, 2), (11, 4));
-        assert_eq!(workspace_context_menu_counts(0, 0, 2), (7, 3));
+        assert_eq!(workspace_context_menu_counts(4, 0, 2, false), (12, 5));
+        assert_eq!(workspace_context_menu_counts(0, 0, 2, false), (8, 4));
+    }
+    #[test]
+    fn workspace_notification_menu_routes_are_separate_from_tab_badges() {
+        // PaneFlowApp bootstrap requires a real window and PTYs. Check the
+        // menu wiring here; geometry and completion state run in unit tests.
+        let src = include_str!("context_menu.rs");
+        let menu = &src[src
+            .find("pub(crate) fn render_workspace_context_menu(")
+            .unwrap()
+            ..src
+                .find("// Close workspace (conditionally disabled)")
+                .unwrap()];
+        assert!(menu.contains("this.mark_workspace_read(idx, cx)"));
+        assert!(menu.contains("this.toggle_workspace_muted(idx, cx)"));
+        assert!(menu.contains("if has_unread {"));
+        assert!(menu.contains("\"workspace-context-mark-read\""));
+        assert!(menu.contains("\"workspace-context-mute\""));
+    }
+
+    #[test]
+    fn workspace_menu_geometry_adds_only_one_row_for_unread_completions() {
+        for (editors, workflows, services) in [(0, 0, 0), (2, 1, 0), (4, 0, 2)] {
+            let read = workspace_context_menu_counts(editors, workflows, services, false);
+            let unread = workspace_context_menu_counts(editors, workflows, services, true);
+            assert_eq!(unread, (read.0 + 1, read.1));
+        }
     }
 }

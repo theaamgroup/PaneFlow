@@ -253,7 +253,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     `FilesSidebar` entity (#430): `worker.rs` thread owns the snapshot + watches,
 │   │                                     `projection.rs` builds rows off-thread, `view.rs` is a `uniform_list`
 │   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348;
-│   │                                     Mark as read row, #408, only on a tab with a waiting/errored/stalled session),
+│   │                                     tab Mark as read clears waiting/errored/stalled session badges, #408;
+│   │                                     workspace Mark as read clears completions, Mute/Unmute notifications persists, #493),
 │   │                                     Customize Sidebar menu (`customize_menu.rs`: `sidebar_show` toggles,
 │   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
