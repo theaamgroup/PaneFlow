@@ -1030,9 +1030,13 @@ impl PaneFlowApp {
             }
             terminal::TerminalEvent::ProgramNotification { title, body } => {
                 // The desktop notification goes out unless this pane is the
-                // one the user is looking at: same test as the completion
-                // dot, so "seen" means the same thing everywhere (#422).
-                let seen = self.hosted_surface_is_seen(terminal.entity_id().as_u64(), cx);
+                // one the user is looking at or its workspace is muted.
+                // Lifecycle observations below still apply when suppressed.
+                let surface_id = terminal.entity_id().as_u64();
+                let muted = self
+                    .workspace_id_for_surface(surface_id, cx)
+                    .is_some_and(|ws_id| self.workspace_is_muted(ws_id));
+                let seen = self.hosted_surface_is_seen(surface_id, cx) || muted;
                 let pane_title = terminal.read(cx).terminal.title.clone();
                 crate::agents::notifications::fire_program_notification(
                     crate::agents::notifications::program_notification(
@@ -1354,7 +1358,7 @@ impl PaneFlowApp {
             let seen = crate::app::agent_status::completion_was_seen(
                 self.surfaces_under_user_eye(ws_id, cx).as_ref(),
                 surface_id,
-            );
+            ) || self.workspace_is_muted(ws_id);
             super::ipc_handler::fire_stalled_notification(
                 agent,
                 &title,

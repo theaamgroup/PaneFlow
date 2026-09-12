@@ -236,11 +236,11 @@ impl PaneFlowApp {
             // it, and it is exactly what will not arrive. Raised here on the
             // same terms, keyed on the same surface.
             let visible = self.surfaces_under_user_eye(ws_id, cx);
-            let seen = completion_was_seen(visible.as_ref(), Some(surface_id));
+            let seen = completion_was_seen(visible.as_ref(), Some(surface_id))
+                || self.workspace_is_muted(ws_id);
             if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == ws_id) {
-                // The fork's completion mark is per workspace, not per surface;
-                // `seen` carries the same meaning (the pane was under the
-                // user's eyes as the turn ended).
+                // Muting uses the seen path so this surface gains no unread
+                // mark; sibling surfaces retain their existing marks.
                 ws.agent_completion_notification
                     .record_finished(seen, Some(surface_id));
             }
