@@ -236,13 +236,10 @@ impl PaneFlowApp {
             // it, and it is exactly what will not arrive. Raised here on the
             // same terms, keyed on the same surface.
             let visible = self.surfaces_under_user_eye(ws_id, cx);
-            let seen = completion_was_seen(visible.as_ref(), Some(surface_id))
-                || self.workspace_is_muted(ws_id);
+            let seen = completion_was_seen(visible.as_ref(), Some(surface_id));
             if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == ws_id) {
-                // Muting uses the seen path so this surface gains no unread
-                // mark; sibling surfaces retain their existing marks.
                 ws.agent_completion_notification
-                    .record_finished(seen, Some(surface_id));
+                    .record_finished_unless_muted(seen, Some(surface_id), ws.muted);
             }
             self.schedule_finished_sweep(ws_id, key, cx);
         }

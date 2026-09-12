@@ -4331,7 +4331,7 @@ impl PaneFlowApp {
                             .get(&session_key)
                             .and_then(|session| session.surface_id);
                         ws.agent_completion_notification
-                            .record_finished(seen, finished_surface);
+                            .record_finished_unless_muted(seen, finished_surface, ws.muted);
                     }
                     // EP-004 US-020: natural turn ends notify when the user is
                     // looking elsewhere. Ctrl+C stops only clear local state.

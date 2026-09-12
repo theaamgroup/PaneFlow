@@ -1132,12 +1132,12 @@ mod tests {
             3
         );
         assert!(ipc.contains("letseen=self.session_is_seen(workspace_id,session_key,cx)||self.workspace_is_muted(workspace_id);"));
-        assert!(ipc.contains(".record_finished(seen,finished_surface)"));
+        assert!(ipc.contains(".record_finished_unless_muted(seen,finished_surface,ws.muted)"));
         let observations = compact(include_str!("../agent_status.rs"));
-        assert!(observations.contains(
-            "completion_was_seen(visible.as_ref(),Some(surface_id))||self.workspace_is_muted(ws_id)"
-        ));
-        assert!(observations.contains(".record_finished(seen,Some(surface_id))"));
+        assert!(observations.contains("completion_was_seen(visible.as_ref(),Some(surface_id))"));
+        assert!(
+            observations.contains(".record_finished_unless_muted(seen,Some(surface_id),ws.muted)")
+        );
         let events = compact(include_str!("../event_handlers.rs"));
         assert!(events.contains(".workspace_id_for_surface(surface_id,cx).is_some_and(|ws_id|self.workspace_is_muted(ws_id))"));
         assert!(events.contains("self.hosted_surface_is_seen(surface_id,cx)||muted"));
