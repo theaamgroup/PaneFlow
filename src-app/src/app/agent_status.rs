@@ -238,11 +238,8 @@ impl PaneFlowApp {
             let visible = self.surfaces_under_user_eye(ws_id, cx);
             let seen = completion_was_seen(visible.as_ref(), Some(surface_id));
             if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == ws_id) {
-                // The fork's completion mark is per workspace, not per surface;
-                // `seen` carries the same meaning (the pane was under the
-                // user's eyes as the turn ended).
                 ws.agent_completion_notification
-                    .record_finished(seen, Some(surface_id));
+                    .record_finished_unless_muted(seen, Some(surface_id), ws.muted);
             }
             self.schedule_finished_sweep(ws_id, key, cx);
         }

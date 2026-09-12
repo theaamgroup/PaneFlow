@@ -140,6 +140,18 @@ tree opens in the sidebar, the active Git branch shows in the header,
 and new panes are scoped to that directory. It's the working context
 every session, split, and action runs inside.
 
+## Workspace notifications
+
+Right-click a workspace and choose **Mute notifications** to silence its
+macOS notices, including stalled agents and dock terminals, and stop new
+unread completion marks. Agent activity and attention states continue to
+update. **Unmute notifications** restores notices for future events. The
+setting survives a restart; toggling it does not clear existing marks.
+
+**Mark as read** appears in the workspace menu only when there are unread
+completions and clears them across all its tabs. The tab menu has its own
+**Mark as read**, which clears that tab’s waiting, error, and stalled badges.
+
 ## Multiple projects in one window
 
 Open several codebases as tabs in the same window and switch between

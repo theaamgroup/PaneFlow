@@ -65,7 +65,15 @@ impl PaneFlowApp {
             |this, terminal: Entity<TerminalView>, event: &TerminalEvent, cx| match event {
                 TerminalEvent::ChildExited => this.close_diff_terminal_tab(&terminal, cx),
                 TerminalEvent::ProgramNotification { title, body } => {
-                    let seen = this.dock_terminal_is_seen(&terminal);
+                    // Resolve current ownership: parked docks follow their tab
+                    // when it moves to another workspace.
+                    let muted = this.workspaces.iter().any(|ws| {
+                        this.workspace_is_muted(ws.id)
+                            && this
+                                .diff_dock_terminals_for_workspace(ws.id)
+                                .contains(&terminal)
+                    });
+                    let seen = this.dock_terminal_is_seen(&terminal) || muted;
                     let pane_title = terminal.read(cx).terminal.title.clone();
                     crate::agents::notifications::fire_program_notification(
                         crate::agents::notifications::program_notification(
