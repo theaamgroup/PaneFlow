@@ -392,7 +392,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Pane content inset | **3 horizontal, 0 vertical** (upstream paints 10 / 6; this fork keeps its 3 px gutter) |
 | Pane header | 28 content plus the vertical inset twice, **34 total**; gap 7 |
 | Sidebar header row | 36 tall, px 8, label 13 px `muted` with pl 8; two 20 px square buttons at radius 6 with 12 px glyphs, gap 2 |
-| Sidebar row | margin 8, padding 8 by 6, gap 4, line height 18, spacing 4 |
+| Sidebar row | margin 8, padding 8 by 6, gap 4, line height 18, spacing 4; guide-enabled tabs without an agent badge inset their shell 22 |
 | Sidebar tab icon stack | 16 px icons, cap 4, overlap 11, 24 by 24 icon card |
 | Sidebar action button | 20, gap 4; agent status slot 48 when an agent needs input, 28 when more than one agent, otherwise 20 |
 | Sidebar footer | padding 6 top and 8 bottom; mode buttons 30 tall on squircle 14, gap 3, margin 8; IPC banner mx 6 / mb 2 / px 8 / py 6 with no fixed height |
@@ -565,6 +565,15 @@ beneath** the tab title, not inline in it; a split tab prints one labeled line
 per terminal. `branch` defaults on; `diffstat`, `pr`, and `indent_guide`
 default off, all four toggled from the Customize Sidebar menu's `Show`
 submenu, whose parent also carries `Expand all` and `Collapse all`.
+
+With the indent guide enabled, a tab without an agent badge insets its shell
+22 px (the 14 px folder slot plus the 8 px title gap) and omits that blank
+slot. Title and branch content widths both shrink by 22 px, keeping their
+right edges inside the shell; branch padding subtracts the inset so its icon
+still aligns with the title. Agent badge rows deliberately keep their full
+shell and badge slot, with the guide interrupted around the badge. This gives
+two shell left edges but one title and branch alignment. Turning the guide
+off keeps the blank slot and the original full-width shell (#492).
 
 When a session changes its terminal title, a tab containing exactly one pane
 follows that pane's resolved name when its stored label was launch-generated.
