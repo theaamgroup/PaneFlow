@@ -575,6 +575,7 @@ impl PaneFlowApp {
                     &ws_session,
                     &mut self.workspaces,
                     &mut pending.worktree_owners,
+                    &mut self.pr_states,
                     cx,
                 )
             };
@@ -610,6 +611,7 @@ impl PaneFlowApp {
                 cx,
             );
         }
+        self.refresh_pull_requests(cx);
         self.resume_pending_worktree_teardowns(cx);
         self.focus_restored_session(window, cx);
         cx.notify();
@@ -684,6 +686,7 @@ impl PaneFlowApp {
         ws_session: &paneflow_config::schema::WorkspaceSession,
         workspaces: &mut [Workspace],
         worktree_owners: &mut std::collections::HashMap<PathBuf, usize>,
+        pr_states: &mut super::pull_request::PrStates,
         cx: &mut Context<Self>,
     ) -> Workspace {
         let mut cwd = restored_workspace_cwd(&ws_session.cwd);
@@ -709,6 +712,7 @@ impl PaneFlowApp {
             );
         }
         let mut tabs = Vec::new();
+        let mut pull_request_seeds = Vec::new();
         let mut unread_surfaces: Vec<u64> = Vec::new();
         let mut workspace_terminals = 0usize;
         let mut warned_terminal_cap = false;
@@ -750,6 +754,18 @@ impl PaneFlowApp {
                     Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)
                 })
             });
+            if let Some(pr) = tab_session.pull_request.as_ref()
+                && !pr.branch.is_empty()
+                && let Some(state) = super::pull_request::PrState::from_wire(&pr.state)
+            {
+                pull_request_seeds.push((
+                    pr.branch.clone(),
+                    super::pull_request::PullRequest {
+                        number: pr.number,
+                        state,
+                    },
+                ));
+            }
             tabs.push(
                 Tab::restored(tab_session.title.clone(), root, bound)
                     .with_automatic_title(tab_session.title_is_automatic),
@@ -765,6 +781,13 @@ impl PaneFlowApp {
         let mut workspace =
             Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
 
+        // The repository root is resolved synchronously by the constructor.
+        // Seed before publishing this workspace in the next restore frame (#494).
+        if let Some(repo_root) = workspace.repo_root.as_ref() {
+            for (branch, pr) in pull_request_seeds {
+                pr_states.seed(&repo_root.to_string_lossy(), &branch, pr);
+            }
+        }
         workspace.custom_buttons = ws_session.custom_buttons.clone();
         // Issue #107: restore the sidebar pin. Additive on v2 - an older
         // session has no key and deserializes to `false` (unpinned).

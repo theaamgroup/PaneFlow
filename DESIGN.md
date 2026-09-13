@@ -582,6 +582,12 @@ Names typed by the user take precedence and survive terminal title changes.
 Older saved labels without provenance are treated as manual. Split tabs keep
 their stored name, including when one of their panes is zoomed.
 
+With `sidebar_show.pr` enabled, restored tabs reuse the last known PR marker
+from `session.json` as soon as their checkout branch is available. Session
+answers are immediately stale: startup refreshes them in the background,
+then the normal five-minute cache window applies. Unknown saved states are
+ignored; a restored value never replaces a live lookup result (#494).
+
 Agent status occupies a 48 px slot when an agent needs input, 28 px when a row
 carries more than one agent, and 20 px otherwise, with 11 px glyphs: an amber
 bell when the agent needs input, a light blue 7 px dot when it finished, a
