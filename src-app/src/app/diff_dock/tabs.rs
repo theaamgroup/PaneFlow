@@ -126,6 +126,11 @@ impl PaneFlowApp {
         self.evict_oldest_diff_file_tab(cx);
 
         let view = cx.new(|cx| CodeView::new(path, cx));
+        let controls = view.read(cx).controls.clone();
+        cx.subscribe(&controls, |this, _, display, cx| {
+            this.persist_setting(false, "editor", display.to_config_value(), cx);
+        })
+        .detach();
         // Eviction may have shortened the strip under the placeholder's index,
         // so the slot is only honored while it still exists; otherwise the tab
         // appends, exactly as it did before the placeholder existed.

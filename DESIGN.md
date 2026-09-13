@@ -465,11 +465,11 @@ chrome only.
 | --- | --- |
 | 10 | Filter clear glyph, sidebar diff-header glyphs |
 | 11 | Sidebar agent state glyphs (bell, error, stalled) and the comet-trail loader |
-| 12 | Small icon button, select chevron, drag ghost, Editor Controls trigger |
+| 12 | Small icon button, select chevron, drag ghost |
 | 13 | Medium icon button, filter search, menu check mark, dock tab icon, diff file-header file-type icon |
 | 14 | Title bar sidebar toggle, editor and preset logos, sidebar folder, sidebar footer banner |
 | 15 | Toast icon |
-| 16 | Sidebar tab icon, callout icon, dock options trigger |
+| 16 | Sidebar tab icon, callout icon, dock options trigger, Editor Controls trigger |
 | 18 | Empty-state glyph |
 
 The pane card's close chip is the one glyph below the table: `CLOSE_GLYPH_SIZE`
@@ -842,14 +842,22 @@ text and colors when its tree lands off the render thread; each frame colors
 only the stale rows in view under a 2 ms budget, so a scrolled-to region may
 read plain for a frame before it colors. An unfocused editor, or one whose
 caret is scrolled out of view, does not repaint for the caret blink. Its right end
-carries the **Editor Controls trigger** — a 20 px `icon_button_sm` with a 12 px
-`icons/editor-controls.svg` glyph. That menu offers Minimap and Scrollbar
-toggles scoped to the open file tab; the minimap starts hidden and scrollbars
-start visible. It is **the one contextual exception to the shared menu skin**:
-a fixed 200 px width, 6 px corners, 1 px border, 4 px vertical padding, a 14 px
-left check slot, `.ZedSans` at 14 px, and a small two-layer shadow. Palette
-roles stay theme-aware. Escape, an outside click, or a second trigger click
-dismisses it.
+carries the **Editor Controls trigger** — matching the Files toggle's 28 px
+button, 8 px radius, 16 px glyph, and animated sidebar hover wash. This is a
+named size exception to the small/medium icon primitives; it keeps their
+Button role, accessible name, click activation, and delayed tooltip. While
+open, the glyph uses `ui.text` (formerly `ui.accent`); at rest it uses `ui.muted`.
+The menu uses `menu_surface` and `select_item`, 180 px wide with 4 px padding,
+13 px labels and a trailing 13 px check slot. It retains `menu_reveal` and
+settles immediately under `reduce_motion`. Escape, an outside click, or a
+second trigger click dismisses it; arrows, Tab, Enter and Space operate the
+checkbox rows, which announce their checked state.
+
+Minimap and Scrollbar persist in `editor.minimap` and `editor.scrollbar` in
+`paneflow.json`. Minimap defaults off and scrollbar on. Startup, menu changes,
+and config hot reload apply one process-wide preference to every file editor,
+including dock tabs parked in other sidebar tabs. Changes and Review diff
+viewers retain their own scrollbar contract.
 
 Editor scrollbars follow Zed's 15 px tracks with square thumbs, a 25 px
 vertical minimum and a 28 px horizontal one, and a 1 px left border on the
@@ -904,13 +912,13 @@ Selects use the shared keyboard and accessibility behavior.
 ### 5.6 Menus, selects, tooltips
 
 Popups share `menu_surface` — squircle 18, a surface lifted 0.035 in dark or
-`overlay` in light, and a `border` at 0.6 — except the Zed Editor Controls menu
-in 5.4. Items are 28 px `ROW_RADIUS` squircle rows with `text` washes for hover
+`overlay` in light, and a `border` at 0.6, including Editor Controls (5.4).
+Items are 28 px `ROW_RADIUS` squircle rows with `text` washes for hover
 (0.05) and selection (0.10), 12 px text, and a 12 px chevron on triggers.
 
 The 13 px check mark is **not** part of `select_item`: call sites render it,
 and they render a transparent placeholder when unselected so rows never
-reflow. Widths run 200 to 280 and the list scrolls past 320 px.
+reflow. Widths run 180 to 280 and the list scrolls past 320 px.
 `select_menu` is deliberately two elements — a non-scrolling shell that paints
 and clamps, plus an inner `overflow_y_scroll` list — because GPUI applies a
 scroll offset to absolute children.
