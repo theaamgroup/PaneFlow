@@ -7,7 +7,9 @@
 //! the git state, and only ever fetched while the `sidebar_show.pr` switch is
 //! on. With the switch off, [`PaneFlowApp::refresh_pull_requests`] returns
 //! before it can reach a process spawn: [`should_look_up`] is the whole
-//! decision, and it is pinned by a unit test.
+//! decision, and it is pinned by a unit test. Restored sessions seed the last
+//! known answer before their workspace is published; seeded answers are stale
+//! immediately so the first refresh corrects them (#494).
 //!
 //! `gh` rather than `api.github.com` directly: it already holds the user's
 //! credentials, follows GitHub Enterprise hosts, and resolves which repository
@@ -92,6 +94,25 @@ impl PrState {
         }
     }
 
+    pub(crate) fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "draft" => Some(PrState::Draft),
+            "open" => Some(PrState::Open),
+            "merged" => Some(PrState::Merged),
+            "closed" => Some(PrState::Closed),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn rank(self) -> u8 {
+        match self {
+            PrState::Open => 3,
+            PrState::Draft => 2,
+            PrState::Merged => 1,
+            PrState::Closed => 0,
+        }
+    }
+
     /// The Primer hex for this state on a light or a dark surface.
     fn hex(self, light: bool) -> u32 {
         match (self, light) {
@@ -119,6 +140,7 @@ struct Cached {
     /// answer worth caching, not a missing one.
     value: Option<PullRequest>,
     at: Instant,
+    seeded: bool,
 }
 
 /// Pull requests by `(repository root, branch)`.
@@ -175,7 +197,19 @@ impl PrStates {
         }
         self.entries
             .get(&key)
-            .is_none_or(|cached| now.duration_since(cached.at) > TTL)
+            .is_none_or(|cached| cached.seeded || now.duration_since(cached.at) > TTL)
+    }
+
+    /// Show the session's last answer immediately, but refresh on the first pass.
+    /// A later restored workspace must never overwrite an existing answer.
+    pub(crate) fn seed(&mut self, repo_root: &str, branch: &str, value: PullRequest) {
+        self.entries
+            .entry(Self::key(repo_root, branch))
+            .or_insert(Cached {
+                value: Some(value),
+                at: Instant::now(),
+                seeded: true,
+            });
     }
 
     fn mark_inflight(&mut self, repo_root: &str, branch: &str) {
@@ -240,7 +274,14 @@ impl PrStates {
         let key = Self::key(repo_root, branch);
         self.inflight.remove(&key);
         let changed = self.entries.get(&key).map(|c| c.value) != Some(value);
-        self.entries.insert(key, Cached { value, at });
+        self.entries.insert(
+            key,
+            Cached {
+                value,
+                at,
+                seeded: false,
+            },
+        );
         changed
     }
 
@@ -372,15 +413,7 @@ fn pick(rows: &[serde_json::Value]) -> Option<PullRequest> {
             };
             Some(PullRequest { number, state })
         })
-        .max_by_key(|pr| {
-            let rank = match pr.state {
-                PrState::Open => 3,
-                PrState::Draft => 2,
-                PrState::Merged => 1,
-                PrState::Closed => 0,
-            };
-            (rank, pr.number)
-        })
+        .max_by_key(|pr| (pr.state.rank(), pr.number))
 }
 
 impl PaneFlowApp {
@@ -596,6 +629,74 @@ mod tests {
                 .contains("Command::new("),
             "the only process spawn lives in `lookup`, behind the gate"
         );
+    }
+
+    #[test]
+    fn a_seeded_entry_answers_at_once_and_is_refreshed_on_the_first_pass() {
+        let mut states = super::PrStates::default();
+        let seeded = super::PullRequest {
+            number: 46,
+            state: PrState::Open,
+        };
+        states.seed("/repo", "feat/parser", seeded);
+        assert_eq!(states.get("/repo", "feat/parser"), Some(seeded));
+        assert!(
+            states.is_stale("/repo", "feat/parser"),
+            "a value restored from the session file is shown, then re-read"
+        );
+        states.store("/repo", "feat/parser", None);
+        assert_eq!(states.get("/repo", "feat/parser"), None);
+        assert!(!states.is_stale("/repo", "feat/parser"));
+
+        states.seed("/repo", "feat/parser", seeded);
+        assert_eq!(
+            states.get("/repo", "feat/parser"),
+            None,
+            "a seed never overwrites a live answer"
+        );
+        assert_eq!(
+            PrState::from_wire(PrState::Merged.wire_str()),
+            Some(PrState::Merged)
+        );
+        assert_eq!(PrState::from_wire("weird"), None);
+    }
+
+    #[test]
+    fn seeded_entries_respect_inflight_and_repository_backoff() {
+        let mut states = PrStates::default();
+        let pr = PullRequest {
+            number: 46,
+            state: PrState::Open,
+        };
+        states.seed("/repo", "feature", pr);
+        let now = Instant::now();
+        states.mark_inflight("/repo", "feature");
+        assert!(!states.is_stale_at("/repo", "feature", now));
+        states.mark_unavailable_at("/repo", "feature", now);
+        assert_eq!(states.get("/repo", "feature"), Some(pr));
+        assert!(!states.is_stale_at("/repo", "feature", now));
+        assert!(states.is_stale_at("/repo", "feature", now + FAILURE_BACKOFF));
+        let merged = PullRequest {
+            state: PrState::Merged,
+            ..pr
+        };
+        assert!(states.store("/repo", "feature", Some(merged)));
+        states.seed("/repo", "feature", pr);
+        assert_eq!(states.get("/repo", "feature"), Some(merged));
+    }
+
+    #[test]
+    fn every_saved_pr_state_round_trips() {
+        for state in [
+            PrState::Draft,
+            PrState::Open,
+            PrState::Merged,
+            PrState::Closed,
+        ] {
+            assert_eq!(PrState::from_wire(state.wire_str()), Some(state));
+        }
+        assert_eq!(PrState::from_wire(""), None);
+        assert_eq!(PrState::from_wire("OPEN"), None);
     }
 
     #[test]
