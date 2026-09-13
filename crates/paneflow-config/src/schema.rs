@@ -19,6 +19,28 @@ mod tests {
     use super::*;
     use std::collections::{BTreeSet, HashMap};
 
+    #[test]
+    fn editor_display_defaults_and_partial_config_are_lenient() {
+        for input in [
+            "{}",
+            r#"{"editor":null}"#,
+            r#"{"editor":{}}"#,
+            r#"{"editor":{"minimap":"invalid","scrollbar":42}}"#,
+        ] {
+            let config: PaneFlowConfig = serde_json::from_str(input).unwrap();
+            assert!(!config.editor.minimap_enabled());
+            assert!(config.editor.scrollbar_enabled());
+        }
+        let config: PaneFlowConfig =
+            serde_json::from_str(r#"{"editor":{"minimap":true}}"#).unwrap();
+        assert!(config.editor.minimap_enabled());
+        assert!(config.editor.scrollbar_enabled());
+        let config: PaneFlowConfig =
+            serde_json::from_str(r#"{"editor":{"scrollbar":false}}"#).unwrap();
+        assert!(!config.editor.minimap_enabled());
+        assert!(!config.editor.scrollbar_enabled());
+    }
+
     fn object_keys(value: &serde_json::Value) -> BTreeSet<String> {
         value
             .as_object()
@@ -88,6 +110,10 @@ mod tests {
                 diffstat: Some(true),
                 pr: Some(true),
                 indent_guide: Some(true),
+            },
+            editor: EditorDisplayConfig {
+                minimap: Some(true),
+                scrollbar: Some(false),
             },
             workspace_auto_sort: Some(false),
             new_tabs_on_main: Some(true),
@@ -178,6 +204,11 @@ mod tests {
             object_keys(&serialized["sidebar_show"]),
             object_keys(&schema["properties"]["sidebar_show"]["properties"]),
             "SidebarShow and public JSON Schema drifted"
+        );
+        assert_eq!(
+            object_keys(&serialized["editor"]),
+            object_keys(&schema["properties"]["editor"]["properties"]),
+            "EditorDisplayConfig and public JSON Schema drifted"
         );
         assert_eq!(
             object_keys(&serialized["terminal"]),
