@@ -895,6 +895,11 @@ impl PaneFlowApp {
         // Hydrate the motion switch from the config: it gates the
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
+        crate::app::diff_dock::code::controls::set_editor_display(
+            crate::app::diff_dock::code::controls::EditorDisplay::from_config(
+                &app.cached_config.editor,
+            ),
+        );
 
         // Issue #443: the sidebar's "Install MCP bridge" callout reads the
         // same status cache Settings does, so warm it once here instead of

@@ -27,6 +27,7 @@ fn test_serialization_roundtrip() {
         unfocused_pane_opacity: None,
         reduce_motion: None,
         sidebar_show: SidebarShow::default(),
+        editor: EditorDisplayConfig::default(),
         workspace_auto_sort: None,
         new_tabs_on_main: None,
         new_tab_branch: Some("main".to_string()),

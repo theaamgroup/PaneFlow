@@ -815,6 +815,43 @@ mod tests {
     }
 
     #[test]
+    fn editor_controls_persist_latest_choice_and_reload_without_changing_other_settings() {
+        use crate::app::diff_dock::code::controls::EditorDisplay;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        std::fs::write(&path, r#"{"font_size":17,"editor":{"minimap":true}}"#).unwrap();
+        let initial: PaneFlowConfig =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut display = EditorDisplay::from_config(&initial.editor);
+        assert!(display.minimap);
+        assert!(display.scrollbar);
+        display.scrollbar = false;
+        let older = display.to_config_value();
+        display.minimap = false;
+        let latest = display.to_config_value();
+        let cached = with_field(&initial, false, "editor", latest.clone()).unwrap();
+        let seqs = FieldPersistSeq::default();
+        let first = seqs.bump(FieldScope::TopLevel, "editor");
+        let second = seqs.bump(FieldScope::TopLevel, "editor");
+        for (value, seq) in [(latest, second), (older, first)] {
+            assert!(save_field_at_if_current(
+                &path,
+                FieldScope::TopLevel,
+                "editor",
+                value,
+                &seqs,
+                seq,
+            ));
+        }
+        let reloaded: PaneFlowConfig =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(EditorDisplay::from_config(&reloaded.editor), display);
+        assert_eq!(reloaded.editor, cached.editor);
+        assert_eq!(reloaded.font_size, Some(17.0));
+    }
+
+    #[test]
     fn with_field_round_trips_typed_config() {
         let base = PaneFlowConfig::default();
         let top = with_field(&base, false, "font_size", json!(14.0)).unwrap();

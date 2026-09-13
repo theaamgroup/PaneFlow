@@ -65,6 +65,9 @@ pub struct PaneFlowConfig {
     /// Everything off is the rail as it ships.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub sidebar_show: SidebarShow,
+    /// Display preferences shared by every code editor.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub editor: EditorDisplayConfig,
     /// Workspace Files tree layout; defaults to the standalone rail.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub files_tree_placement: FilesTreePlacement,
@@ -407,6 +410,25 @@ pub struct SidebarShow {
     /// `false` (issue #349).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub indent_guide: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorDisplayConfig {
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub minimap: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub scrollbar: Option<bool>,
+}
+
+impl EditorDisplayConfig {
+    pub fn minimap_enabled(&self) -> bool {
+        self.minimap.unwrap_or(false)
+    }
+
+    pub fn scrollbar_enabled(&self) -> bool {
+        self.scrollbar.unwrap_or(true)
+    }
 }
 
 impl SidebarShow {

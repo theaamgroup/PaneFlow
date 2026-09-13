@@ -259,6 +259,9 @@ impl PaneFlowApp {
         if !nested && key == "reduce_motion" {
             crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
         }
+        if !nested && key == "editor" {
+            self.apply_editor_display(cx);
+        }
         if !nested && key == "ai_unrestricted" {
             // Issue #283: `system.capabilities` reads this mirror on the
             // socket thread; flip it with the toggle, not at the next reload.

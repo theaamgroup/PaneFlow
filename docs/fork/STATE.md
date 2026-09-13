@@ -9,6 +9,35 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
 
+**2026-09-13 #495 / #487: editor display settings complete the v0.13.0 /
+v0.14.0 adoption.** Upstream `463673ed` and `03e2b181` add the `editor`
+config object: minimap defaults off, scrollbar on. The Editor Controls menu
+persists both choices through the generation-checked config writer; startup,
+menu changes, and the config watcher apply the same process-wide settings to
+live and parked file tabs. The fork's incremental highlighting reads the same
+minimap preference. The trigger matches the Files toggle (28 px / radius 8),
+uses neutral `ui.text` while open, and its menu uses `menu_surface` /
+`select_item` while preserving #491's motion-aware reveal and keyboard states.
+The schema, configuration guide, and DESIGN.md describe the contract.
+
+The other #487 ports (#488, #489, #490, #491, #492, #493, #494) were already
+closed when this final port began. The maintainer's SKIP decisions in #487
+remain in force. Completed user-visible changes are collected in
+`docs/releases/unreleased.md` for the next cut.
+
+Verification: `cargo build` exit 0; `cargo test --workspace` **3,426 passed,
+0 failed, 6 ignored** versus the clean baseline's 3,424 / 0 / 6. Executed test
+names: two additions (editor defaults/partial-config handling and persisted
+editor choices with stale-write rejection), no removals.
+`cargo clippy --workspace --all-targets` exit 0, **WARNING COUNT 1**
+(`block v0.1.6`); the same check with `-- -D warnings` exit 0;
+`cargo fmt --check` exit 0; `./target/debug/paneflow --version` →
+`paneflow 0.5.0`; `cargo deny check advisories licenses sources` exit 0 →
+`advisories ok, licenses ok, sources ok`. Tests and the audit ran outside the
+sandbox for process leases, filesystem watcher delivery, and the advisory DB.
+Manual visual/VoiceOver checks and captures were not run: macOS reported UI
+automation disabled; no theme/material/minimum-window variants are claimed.
+
 **2026-09-07: the 0.5.0 cut.** 85 non-merge commits since `v0.4.0`, a minor
 bump because the release adds a surface rather than only fixing one: Review
 mode's rails and diff-pane grid (#438), the editor's gutter markers, revert

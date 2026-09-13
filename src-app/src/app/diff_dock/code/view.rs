@@ -838,7 +838,7 @@ impl CodeView {
         let Some(line_count) = self.state.document().map(CodeDocument::line_count) else {
             return;
         };
-        let minimap = self.controls.read(cx).display.minimap;
+        let minimap = super::controls::editor_display().minimap;
         let (rows, minimap_rows) = Self::highlight_fill_rows(&self.scroll, line_count, minimap);
         let Some((doc, highlighter)) = self.state.editable() else {
             return;
