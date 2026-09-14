@@ -3738,6 +3738,25 @@ mod tests {
         name: &str,
         text: &str,
     ) -> (Entity<CodeView>, &'a mut VisualTestContext) {
+        view_named_with_parse(cx, name, text, true)
+    }
+
+    /// [`view_named`] whose highlighter is handed over treeless, the way
+    /// `open_blocking` does, so a test can drive the deferred initial parse.
+    fn view_named_unparsed<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+    ) -> (Entity<CodeView>, &'a mut VisualTestContext) {
+        view_named_with_parse(cx, name, text, false)
+    }
+
+    fn view_named_with_parse<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+        parse: bool,
+    ) -> (Entity<CodeView>, &'a mut VisualTestContext) {
         let path = PathBuf::from(name);
         let state = if text.is_empty() {
             CodeLoadState::Loading
@@ -3747,7 +3766,9 @@ mod tests {
                 &document,
                 DiffSyntax::from_theme(&crate::theme::paneflow_dark()),
             );
-            highlighter.parse_initial_blocking(&document);
+            if parse {
+                highlighter.parse_initial_blocking(&document);
+            }
             CodeLoadState::Ready(Box::new(LoadedCode {
                 document,
                 highlighter,
@@ -4844,7 +4865,7 @@ mod tests {
     /// #427: `open_blocking` hands the text over treeless, and the view's
     /// deferred initial parse colors it once it lands.
     #[gpui::test]
-    async fn opening_a_file_shows_its_text_first_and_colors_it_when_the_tree_lands(
+    fn opening_a_file_shows_its_text_first_and_colors_it_when_the_tree_lands(
         cx: &mut TestAppContext,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4863,18 +4884,7 @@ mod tests {
 
         let spawn_path = path.clone();
         let (view, cx) = cx.add_window_view(move |_window, cx| CodeView::new(spawn_path, cx));
-        cx.executor().allow_parking();
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if view.update(cx, |view, _cx| {
-                view.state
-                    .highlighter()
-                    .is_some_and(CodeHighlighter::has_tree)
-            }) {
-                break;
-            }
-            smol::Timer::after(Duration::from_millis(10)).await;
-        }
+        cx.run_until_parked();
 
         view.update(cx, |view, _cx| {
             let (doc, highlighter) = view.state.editable().expect("the file loaded");
@@ -4898,6 +4908,45 @@ mod tests {
             }
             view._watcher = None;
         });
+    }
+
+    #[gpui::test]
+    fn initial_parse_keeps_the_loaded_text_available_until_its_tree_arrives(
+        cx: &mut TestAppContext,
+    ) {
+        let text = "fn main() {\n    let value = 1;\n}\n";
+        let (view, cx) = view_named_unparsed(cx, "main.rs", text);
+
+        view.update(cx, |view, cx| {
+            view.start_initial_parse(cx);
+            assert_eq!(text_of(view), text);
+            assert!(!view.highlighter().expect("highlighter").has_tree());
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _cx| {
+            assert_eq!(text_of(view), text);
+            assert!(view.highlighter().expect("highlighter").has_tree());
+        });
+    }
+
+    #[gpui::test]
+    fn a_git_base_from_an_older_load_cannot_replace_the_current_base(cx: &mut TestAppContext) {
+        let (view, cx) = view(cx, "current\n");
+        view.update(cx, |view, cx| {
+            view.path = PathBuf::from("relative-only.rs");
+            view.base = Base::Untracked;
+            view.start_base_load(cx);
+            // The fork guards base loads on `base_generation`, not the load
+            // slot: a later request makes the in-flight one stale.
+            view.base_generation = view.base_generation.wrapping_add(1);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert_eq!(view.base, Base::Untracked);
+            view.start_base_load(cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _cx| assert_eq!(view.base, Base::None));
     }
 
     /// #427: an initial parse that ran past its timeout greys the file and
