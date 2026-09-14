@@ -173,6 +173,25 @@ fn tab_needs_palette(
     root_is_none && saved_layout_is_none && !palette_targets_this_tab
 }
 
+/// Whether the `Tab` picker is the only surface its workspace has left
+/// (upstream 9aa03d09, issue #522): the picker sits on the workspace's sole
+/// tab and that tab has no pane. Closing it would close the tab, push an
+/// undo entry for an empty tab, and have the next frame reinstall a fresh
+/// picker on a new tab, so the close is a no-op instead.
+///
+/// `palette_tab` is the picker's tab id for a `Tab` placement (`None` for a
+/// split picker or no picker); `tabs` is `(tab id, root_is_none)` for each
+/// tab of the picker's workspace.
+fn palette_holds_last_surface(palette_tab: Option<u64>, tabs: &[(u64, bool)]) -> bool {
+    let Some(tab_id) = palette_tab else {
+        return false;
+    };
+    match tabs {
+        [(id, root_is_none)] => *id == tab_id && *root_is_none,
+        _ => false,
+    }
+}
+
 /// Whether creating a picker should also open the Agent sessions sidebar.
 pub(crate) fn palette_should_open_sessions(
     setting_on: bool,
@@ -496,6 +515,25 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// `palette_holds_last_surface` over the live picker and its workspace.
+    fn pane_palette_holds_last_surface(&self) -> bool {
+        let Some(palette) = self.pane_palette.as_ref() else {
+            return false;
+        };
+        let PalettePlacement::Tab { tab_id } = &palette.placement else {
+            return false;
+        };
+        let Some(ws) = self.workspaces.iter().find(|ws| ws.id == palette.ws_id) else {
+            return false;
+        };
+        let tabs: Vec<(u64, bool)> = ws
+            .tabs()
+            .iter()
+            .map(|tab| (tab.id, tab.root.is_none()))
+            .collect();
+        palette_holds_last_surface(Some(*tab_id), &tabs)
+    }
+
     pub(crate) fn open_tab_palette_ids(&self) -> Option<(u64, u64)> {
         let palette = self.pane_palette.as_ref()?;
         match palette.placement {
@@ -529,6 +567,11 @@ impl PaneFlowApp {
     /// its own tab; a split picker only disappears, since it never split
     /// anything.
     pub(crate) fn close_pane_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The workspace's only surface: closing it would just reinstall a
+        // fresh picker on a new tab next frame (issue #522).
+        if self.pane_palette_holds_last_surface() {
+            return;
+        }
         let Some(palette) = self.pane_palette.take() else {
             return;
         };
@@ -1225,6 +1268,51 @@ mod tests {
             "sidebar is window-global: switching tabs must not fill the active empty tab"
         );
         assert_eq!(palette_resume_target_tab(None, active_tab_id), None);
+    }
+
+    #[test]
+    fn palette_holds_last_surface_only_on_the_sole_paneless_tab() {
+        // The picker's tab is the workspace's only tab and has no pane.
+        assert!(palette_holds_last_surface(Some(7), &[(7, true)]));
+        // A second tab survives the close.
+        assert!(!palette_holds_last_surface(
+            Some(7),
+            &[(7, true), (8, false)]
+        ));
+        assert!(!palette_holds_last_surface(
+            Some(7),
+            &[(8, false), (7, true)]
+        ));
+        // The picker's tab has a live tree.
+        assert!(!palette_holds_last_surface(Some(7), &[(7, false)]));
+        // The sole tab is not the picker's.
+        assert!(!palette_holds_last_surface(Some(7), &[(9, true)]));
+        // Split placement or no picker.
+        assert!(!palette_holds_last_surface(None, &[(7, true)]));
+        assert!(!palette_holds_last_surface(None, &[]));
+    }
+
+    /// Source-text assertion: `close_pane_palette` needs a live `Window`, so
+    /// the guard's position is pinned here. It must run before
+    /// `self.pane_palette.take()`, or the picker is dropped even when the
+    /// close is refused.
+    #[test]
+    fn close_pane_palette_checks_the_last_surface_guard_before_taking_the_picker() {
+        let src = include_str!("pane_palette.rs");
+        let body_start = src
+            .find("fn close_pane_palette(")
+            .expect("close_pane_palette exists");
+        let body = &src[body_start..];
+        let guard = body
+            .find("self.pane_palette_holds_last_surface()")
+            .expect("close_pane_palette calls the last-surface guard");
+        let take = body
+            .find("self.pane_palette.take()")
+            .expect("close_pane_palette takes the picker");
+        assert!(
+            guard < take,
+            "the last-surface guard must run before the picker is taken"
+        );
     }
 
     #[test]
