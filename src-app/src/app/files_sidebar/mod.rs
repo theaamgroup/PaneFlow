@@ -94,8 +94,9 @@ pub(crate) fn closes_with_last_file(
 pub(super) const ROW_HEIGHT: Pixels = px(28.);
 /// Per-depth indentation added to the row's left padding.
 pub(super) const INDENT_STEP: f32 = 18.;
-/// Width of the single leading slot. A directory fills it with its chevron, a
-/// file with its language icon; both therefore start on the same pixel.
+/// Width of the leading slot. A directory fills it with its chevron, a file
+/// with its language icon; both therefore start on the same pixel. The same
+/// width sizes the trailing git-status slot (`row.rs`) when a row carries one.
 pub(super) const ROW_SLOT: f32 = 14.;
 /// Gap between that slot and the name.
 pub(super) const ROW_GAP: f32 = 12.;
@@ -740,6 +741,29 @@ mod fork_tests {
         assert!(
             tree.contains(".take(MAX_DIRECTORY_ENTRIES)"),
             "read_dir_sorted keeps the #238 raw-entry cap"
+        );
+    }
+
+    /// Issue #539: a directory's status dot must be painted from
+    /// `label_color`, the ranking its name already uses, not from
+    /// `status_indicator`'s letter hue - a folder holding both a modified and
+    /// an untracked file ranks `vc_modified` for the label and `vc_added` for
+    /// the letter. Asserted on the source because that branch needs a live
+    /// `Window` to render.
+    #[test]
+    fn a_directory_status_dot_is_painted_with_the_label_color() {
+        let dot = between(
+            include_str!("row.rs"),
+            ".when_some(indicator, |el, (letter, color)| {",
+            "} else {",
+        );
+        assert!(
+            dot.contains("files_git::label_color(row.status, ui)"),
+            "the directory dot follows the label hue: {dot}"
+        );
+        assert!(
+            !dot.contains(".bg(color"),
+            "the directory dot must not take the indicator letter hue: {dot}"
         );
     }
 }

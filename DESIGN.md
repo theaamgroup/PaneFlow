@@ -398,7 +398,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Sidebar footer | padding 6 top and 8 bottom; mode buttons 30 tall on squircle 14, gap 3, margin 8; IPC banner mx 6 / mb 2 / px 8 / py 6 with no fixed height |
 | Review rail row | margin-x 8, padding-x 8, height 30, gap 4, child indent 18, icon 14, subject dot 6 |
 | Sessions row | height 30; 5 rows per agent group before **Show more** |
-| Files tree | rail 300, optional dock panel 250; rows 28, indent 18, leading slot 14, row gap 12; selection is a `ROW_RADIUS` squircle |
+| Files tree | rail 300, optional dock panel 250; rows 28, indent 18, leading slot 14, trailing status slot 14, row gap 12; selection is a `ROW_RADIUS` squircle |
 | Settings row | padding 12 by 10, gap 16; section header bottom padding 8 |
 | Select trigger | padding 10 by 6, width 190 to 260 |
 | Menu | list padding 4, item gap 1, item height 28, width 200 to 280, max height 320 |
@@ -751,8 +751,19 @@ per workspace tab (`Tab::files_sidebar_open`), mutually exclusive with the
 Sessions rail, unmounted in Review and Settings while staying warm, and
 toggled by `secondary-alt-f`. Its width is fixed and resizing it is an explicit
 non-goal. Rows are 28 tall with 18 px indentation, a 14 px leading slot, a
-12 px row gap, and a `ROW_RADIUS` squircle selection; the header is a 36 px
+12 px row gap, a 14 px trailing status slot on rows that carry one, and a
+`ROW_RADIUS` squircle selection; the header is a 36 px
 title row and the search field is the shared `filter_pill`.
+
+Tree rows carry Zed's version control decoration, summed from
+`git status` over the tree root. The label takes `vc_conflict`, then
+`vc_deleted`, then `vc_modified`, then `vc_added` for an addition or an
+untracked path, and falls back to `text`. A file also shows a status letter at
+the right of the row, 11 px bold in a 14 px slot: `!` for a conflict, `U` for
+untracked, then `D` and `M` for the worktree side before the same two for the
+index, and `A` for a staged addition. A directory shows a 6 px dot at 0.5
+opacity in that slot instead, rolling up every descendant. Ignored paths never
+reach the tree, so they never carry a status.
 
 With `files_tree_placement: "dock"`, the same panel renders at 250 px to the
 right of the editor, below a shared 40 px project/file breadcrumb toolbar.
