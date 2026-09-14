@@ -93,8 +93,13 @@ impl Scanner {
         // Issue #540: only listed directories are watched, so an edit under a
         // never-expanded directory raises no event and its roll-up dot goes
         // stale. Expanding something new is the moment that dot becomes
-        // visible, so the scan it triggers also re-reads the statuses.
-        if expanded != self.tree.expanded {
+        // visible, so the scan it triggers also re-reads the statuses. A
+        // collapse lists nothing new and cannot reveal a stale dot, so it
+        // must not cost a `git status` (each probe carries a 10 s deadline).
+        if expanded
+            .iter()
+            .any(|path| !self.tree.expanded.contains(path))
+        {
             self.git_dirty = true;
         }
         self.tree.expanded = expanded;

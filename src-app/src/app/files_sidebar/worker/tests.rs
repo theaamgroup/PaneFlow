@@ -459,6 +459,10 @@ fn expanding_a_directory_refreshes_git_statuses_for_its_unwatched_edits() {
     assert_eq!(scanner.git.summary(&file).worktree.modified, 1);
     // Re-sending the same expanded set is not a change: nothing new can be
     // stale, so it must not cost another `git status`.
-    scanner.set_expanded(vec![outer, inner]);
+    scanner.set_expanded(vec![outer.clone(), inner]);
     assert!(!scanner.git_dirty, "an unchanged expanded set stays clean");
+    // Collapsing lists nothing new either: every dot still visible was
+    // already refreshed, so a collapse must not cost a `git status`.
+    scanner.set_expanded(vec![outer]);
+    assert!(!scanner.git_dirty, "a collapse stays clean");
 }
