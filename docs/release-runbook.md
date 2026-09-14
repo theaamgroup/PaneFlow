@@ -228,7 +228,15 @@ checks do not block).
 ```bash
 # Tag the bump commit with an annotated tag
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
-git push origin vX.Y.Z
+
+# MANDATORY: prove the tag is yours before pushing. Upstream shipped v0.1.4
+# through v0.14.0 in this same namespace; a stray `git fetch upstream --tags`
+# puts them in the local repo, `git tag -a` then fails with "already exists",
+# and the push below would ship UPSTREAM's tag while printing "[new tag]".
+[[ "$(git rev-parse vX.Y.Z^{commit})" == "$(git rev-parse HEAD)" ]] \
+  || { echo "vX.Y.Z does not point at HEAD - it is not your tag"; exit 1; }
+
+git push origin refs/tags/vX.Y.Z
 ```
 
 **Pre-release convention:** if you want to validate on real hardware before

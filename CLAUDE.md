@@ -18,7 +18,7 @@ pass so you do not redo finished work or repeat a falsified finding. Open
 work lives on GitHub issues, not in that file.
 
 **Where this fork stands (2026-09-05):** product is PaneFlow (the PanesCLI
-rename was dropped). Version **0.5.0**. Origin `theaamgroup/paneflow` on
+rename was dropped). Version **0.6.0**. Origin `theaamgroup/paneflow` on
 `main`. Upstream v0.11.0 is adopted (#341: the `PublishGate` with DEC 2026
 synchronized output, per-tab worktree binding with a Remove worktree row,
 the Customize Sidebar menu, the `gh` pull-request marker), and the first
@@ -51,7 +51,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.5.0
+./target/debug/paneflow --version          # paneflow 0.6.0
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 
@@ -585,6 +585,18 @@ engineering summary, not the contract.
 - **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`bench_harness.rs`, moved there from `terminal/bench_corpus.rs` in #425; its two live-process tests moved with it).
 - **`scripts/create-dmg.sh` is allowed to fail `codesign --verify --deep --strict` on an unsigned smoke.** The script writes the `.dmg` first, then the strict check exits 1 because the enclosed binary is adhoc/linker-signed. That check is for a signed+notarized release. Local artifact: `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (~30M), `CFBundleIdentifier=com.theaamgroup.paneflow`. Gatekeeper will quarantine a copied copy.
 - **Comments still mention Windows and Linux.** `runtime_paths.rs` still documents a named-pipe fallback. That is leftover copy. Do not re-implement from a comment. Ghostty identifiers in `terminal/view.rs` and `pty_session.rs` are the opposite: they are the live engine (#184) and must not be pruned.
+- **Upstream's tags collide with the fork's version line.** Upstream released
+  `v0.1.4`-`v0.14.0` in the same bare `refs/tags/vX.Y.Z` namespace this fork
+  uses, and a `git fetch upstream --tags` drops all of them into the local repo.
+  `git tag -a v0.6.0` then fails with `tag 'v0.6.0' already exists`, and the
+  follow-up `git push origin v0.6.0` **silently pushes upstream's tag instead of
+  yours**, triggering `release.yml` on an upstream commit. That happened at the
+  0.6.0 cut on 2026-09-13 (run 34792486245, cancelled; no release published).
+  Guards now in place: the 76 upstream tags are deleted locally, and
+  `remote.upstream.tagOpt = --no-tags` stops a fetch from re-adding them. The
+  rule: **a bare `vX.Y.Z` tag is this fork's release iff it is on `origin`.**
+  Before every tag push, verify `git rev-parse <tag>^{commit}` equals `HEAD`,
+  and never read `git push`'s `[new tag]` line as proof you pushed your own.
 - **Never bind `secondary-tab`.** It is Cmd+Tab on macOS and the app switcher eats it. Next-workspace moved to `ctrl-tab` (issue #10) and `next_workspace_is_bound_to_ctrl_tab_and_nothing_binds_cmd_tab` guards the table.
 
 ## MCP bridge (`paneflow-mcp`)
