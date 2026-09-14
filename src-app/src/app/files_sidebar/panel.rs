@@ -9,6 +9,7 @@ use gpui::{
 
 use super::projection::FilesProjection;
 use super::worker::FilesWorker;
+use crate::app::files_git::GitStatuses;
 use crate::app::files_tree::FilesTreeState;
 use crate::widgets::text_input::TextInput;
 
@@ -28,6 +29,7 @@ pub(crate) enum FilesEvent {
 
 pub(crate) struct FilesSidebar {
     pub(super) tree: Arc<FilesTreeState>,
+    pub(super) git: Arc<GitStatuses>,
     pub(super) expanded: HashSet<PathBuf>,
     pub(super) projection: Arc<FilesProjection>,
     pub(super) selected: Option<PathBuf>,
@@ -78,6 +80,7 @@ impl FilesSidebar {
         }
         Self {
             tree: Arc::new(FilesTreeState::default()),
+            git: Arc::default(),
             expanded: HashSet::new(),
             projection: Arc::default(),
             selected: None,
@@ -110,6 +113,7 @@ impl FilesSidebar {
         self.active = true;
         self.revision = 0;
         self.tree = Arc::new(FilesTreeState::root_shell(root.clone()));
+        self.git = Arc::default();
         self.title = root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -160,11 +164,12 @@ impl FilesSidebar {
             return;
         }
         let tree = std::mem::take(&mut self.tree);
+        let git = std::mem::take(&mut self.git);
         let projection = std::mem::take(&mut self.projection);
         let expanded = std::mem::take(&mut self.expanded);
         self.selected = None;
         cx.background_spawn(async move {
-            drop((tree, projection, expanded));
+            drop((tree, git, projection, expanded));
         })
         .detach();
     }

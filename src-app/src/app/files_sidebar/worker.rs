@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use smol::channel::{Receiver, Sender};
 
+use crate::app::files_git::{self, GitStatuses};
 use crate::app::files_tree::{FilesTreeState, ListingAuthority, read_dir_listing};
 
 const DEBOUNCE: Duration = Duration::from_millis(40);
@@ -14,6 +16,7 @@ const FALLBACK_INTERVAL: Duration = Duration::from_secs(2);
 pub(super) struct TreeUpdate {
     pub revision: u64,
     pub tree: FilesTreeState,
+    pub git: Arc<GitStatuses>,
     pub watcher_available: bool,
 }
 
@@ -34,14 +37,7 @@ impl FilesWorker {
         if let Err(error) = std::thread::Builder::new()
             .name("files-tree".into())
             .spawn(move || {
-                let scanner = Scanner {
-                    tree: FilesTreeState::root_shell(root),
-                    watcher: None,
-                    watched: HashSet::new(),
-                    dirty: HashSet::new(),
-                    authority: HashMap::new(),
-                };
-                smol::block_on(run(scanner, expanded, incoming, updates, events));
+                smol::block_on(run(Scanner::new(root), expanded, incoming, updates, events));
             })
         {
             log::error!("files worker unavailable: {error}");
@@ -69,9 +65,25 @@ struct Scanner {
     dirty: HashSet<PathBuf>,
     /// How far each cached listing can be trusted about absent children.
     authority: HashMap<PathBuf, ListingAuthority>,
+    git: Arc<GitStatuses>,
+    git_dir: Option<PathBuf>,
+    git_dirty: bool,
 }
 
 impl Scanner {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            tree: FilesTreeState::root_shell(root),
+            watcher: None,
+            watched: HashSet::new(),
+            dirty: HashSet::new(),
+            authority: HashMap::new(),
+            git: Arc::default(),
+            git_dir: None,
+            git_dirty: true,
+        }
+    }
+
     fn set_expanded(&mut self, expanded: Vec<PathBuf>) {
         self.tree.expanded = expanded
             .into_iter()
@@ -84,6 +96,9 @@ impl Scanner {
         let root = &self.tree.root;
         let mut pending = vec![(root.clone(), true)];
         let mut active = HashSet::new();
+        if let Some(git_dir) = &self.git_dir {
+            active.insert(git_dir.clone());
+        }
         while let Some((dir, expanded_ancestors)) = pending.pop() {
             if cancelled() {
                 return false;
@@ -165,7 +180,32 @@ impl Scanner {
             false
         });
         self.dirty.clear();
+        if self.git_dirty {
+            self.refresh_git();
+        }
         !cancelled()
+    }
+
+    fn refresh_git(&mut self) {
+        self.git_dirty = false;
+        let git_dir = crate::workspace::find_git_dir(&self.tree.root.to_string_lossy());
+        if git_dir != self.git_dir {
+            if let Some(previous) = self.git_dir.take() {
+                if let Some(watcher) = self.watcher.as_mut() {
+                    let _ = watcher.unwatch(&previous);
+                }
+                self.watched.remove(&previous);
+            }
+            self.git_dir = git_dir;
+        }
+        if let Some(git_dir) = self.git_dir.clone()
+            && !self.watched.contains(&git_dir)
+            && let Some(watcher) = self.watcher.as_mut()
+            && watcher.watch(&git_dir, RecursiveMode::NonRecursive).is_ok()
+        {
+            self.watched.insert(git_dir);
+        }
+        self.git = Arc::new(files_git::read(&self.tree.root));
     }
 
     fn listing_is_complete(&self, dir: &std::path::Path) -> bool {
@@ -183,6 +223,7 @@ impl Scanner {
 
     fn rescan(&mut self) {
         self.dirty.extend(self.tree.children.keys().cloned());
+        self.git_dirty = true;
     }
 
     /// Mark every directory whose last listing failed or skipped an entry
@@ -248,7 +289,15 @@ impl Scanner {
         if matches!(event.kind, EventKind::Access(_)) {
             return false;
         }
+        self.git_dirty = true;
         for path in event.paths {
+            if self
+                .git_dir
+                .as_ref()
+                .is_some_and(|git_dir| path.starts_with(git_dir))
+            {
+                continue;
+            }
             if matches!(
                 event.kind,
                 EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_))
@@ -273,7 +322,7 @@ impl Scanner {
                 }
             }
         }
-        !self.dirty.is_empty()
+        !self.dirty.is_empty() || self.git_dirty
     }
 }
 
@@ -306,6 +355,7 @@ async fn run(
                 .try_send(TreeUpdate {
                     revision,
                     tree: scanner.tree.clone(),
+                    git: scanner.git.clone(),
                     watcher_available: scanner.watcher_available(),
                 })
                 .is_err()

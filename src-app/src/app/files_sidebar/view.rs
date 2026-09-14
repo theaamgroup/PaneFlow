@@ -219,7 +219,12 @@ mod dock_tests {
             );
             panel.active = true;
             panel.expanded = tree.expanded.clone();
-            panel.projection = Arc::new(FilesProjection::build(&tree, &panel.expanded, ""));
+            panel.projection = Arc::new(FilesProjection::build(
+                &tree,
+                &panel.expanded,
+                "",
+                &crate::app::files_git::GitStatuses::default(),
+            ));
             panel.tree = Arc::new(tree);
         });
         let opened = Rc::new(RefCell::new(Vec::new()));
