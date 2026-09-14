@@ -165,10 +165,18 @@ impl FilesSidebar {
                         .items_center()
                         .justify_center()
                         .child(if is_dir {
+                            // A directory's dot follows the label hue, not the
+                            // letter's: a roll-up summary ranks differently
+                            // under `label_color` (conflict > deleted >
+                            // modified > added) than under `status_indicator`
+                            // (which prefers untracked), and a folder whose
+                            // name and dot disagree reads as two states.
                             div()
                                 .size(px(6.))
                                 .rounded_full()
-                                .bg(color.opacity(0.5))
+                                .bg(files_git::label_color(row.status, ui)
+                                    .unwrap_or(color)
+                                    .opacity(0.5))
                                 .into_any_element()
                         } else {
                             div()

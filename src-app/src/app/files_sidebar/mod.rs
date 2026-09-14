@@ -743,6 +743,29 @@ mod fork_tests {
             "read_dir_sorted keeps the #238 raw-entry cap"
         );
     }
+
+    /// Issue #539: a directory's status dot must be painted from
+    /// `label_color`, the ranking its name already uses, not from
+    /// `status_indicator`'s letter hue - a folder holding both a modified and
+    /// an untracked file ranks `vc_modified` for the label and `vc_added` for
+    /// the letter. Asserted on the source because that branch needs a live
+    /// `Window` to render.
+    #[test]
+    fn a_directory_status_dot_is_painted_with_the_label_color() {
+        let dot = between(
+            include_str!("row.rs"),
+            ".when_some(indicator, |el, (letter, color)| {",
+            "} else {",
+        );
+        assert!(
+            dot.contains("files_git::label_color(row.status, ui)"),
+            "the directory dot follows the label hue: {dot}"
+        );
+        assert!(
+            !dot.contains(".bg(color"),
+            "the directory dot must not take the indicator letter hue: {dot}"
+        );
+    }
 }
 
 #[cfg(test)]

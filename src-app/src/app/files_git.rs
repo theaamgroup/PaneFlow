@@ -128,14 +128,21 @@ impl GitStatuses {
     }
 }
 
-pub(crate) fn read(root: &Path) -> GitStatuses {
-    let Some(prefix) = git_stdout(root, &["rev-parse", "--show-prefix"]) else {
-        return GitStatuses::default();
-    };
-    let prefix = String::from_utf8_lossy(&prefix).trim().to_string();
-    let Some(stdout) = git_stdout(
+/// The git status of everything under `root`.
+///
+/// `None` means git could not be consulted at all - a spawn failure, the
+/// deadline, the stdout cap, or a non-zero exit - and the caller must keep the
+/// statuses it already has: an empty map is indistinguishable from a clean
+/// tree, so storing one on a failed probe paints every row plain until a later
+/// probe succeeds. `--no-optional-locks` keeps the read from touching the
+/// index, so a concurrent `git add` holding `.git/index.lock` cannot fail it.
+pub(crate) fn read(root: &Path) -> Option<GitStatuses> {
+    let prefix = git_stdout(root, &["rev-parse", "--show-prefix"])?;
+    let prefix = strip_line_terminator(&prefix);
+    let stdout = git_stdout(
         root,
         &[
+            "--no-optional-locks",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
@@ -144,17 +151,44 @@ pub(crate) fn read(root: &Path) -> GitStatuses {
             "--",
             ".",
         ],
-    ) else {
-        return GitStatuses::default();
-    };
-    GitStatuses::parse(root, &prefix, &stdout)
+    )?;
+    Some(GitStatuses::parse(root, &prefix, &stdout))
+}
+
+/// The git directory that owns `root`, resolved by git itself on the same
+/// budget as the status read.
+///
+/// `workspace::find_git_dir` is deliberately not used: its stat probe is
+/// fail-closed at 250 ms (issue #403), and a slow or network mount answering
+/// `None` would leave the tree with no `.git` watch, so an index-only change
+/// (an agent's `git add` in another pane) would raise no watcher event at all.
+/// `--absolute-git-dir` also answers the per-worktree git directory of a
+/// linked worktree, which is where that worktree's `index` lives.
+pub(crate) fn git_dir(root: &Path) -> Option<PathBuf> {
+    let stdout = git_stdout(root, &["rev-parse", "--absolute-git-dir"])?;
+    let path = strip_line_terminator(&stdout);
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Drop only the line terminator git appends to a single-line answer. A path
+/// segment may legally begin or end with a space and the porcelain records
+/// keep those spaces, so trimming arbitrary whitespace off the prefix makes
+/// every record fail to strip it and silently uncolors the whole subtree.
+fn strip_line_terminator(stdout: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(stdout).into_owned();
+    if text.ends_with('\n') {
+        text.pop();
+        if text.ends_with('\r') {
+            text.pop();
+        }
+    }
+    text
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(args)
-        .current_dir(root)
-        .env("GIT_TERMINAL_PROMPT", "0");
+    let mut cmd = crate::workspace::worktree::git_command();
+    crate::workspace::worktree::git_subcommand(&mut cmd, args);
+    cmd.current_dir(root);
     let output =
         paneflow_process::run_with_timeout(cmd, GIT_STATUS_DEADLINE, GIT_STATUS_STDOUT_CAP).ok()?;
     output.status.success().then_some(output.stdout)
@@ -360,7 +394,7 @@ mod tests {
         std::fs::write(root.join("src").join("app").join("row.rs"), "two\n").expect("edit");
         std::fs::write(root.join("src").join("app").join("new.rs"), "new\n").expect("new file");
 
-        let statuses = read(root);
+        let statuses = read(root).expect("a repository answers Some");
 
         assert_eq!(
             statuses
@@ -392,7 +426,7 @@ mod tests {
         std::fs::write(root.join("src").join("app").join("row.rs"), "two\n").expect("edit");
         std::fs::write(root.join("README.md"), "changed\n").expect("readme edit");
 
-        let statuses = read(&root.join("src"));
+        let statuses = read(&root.join("src")).expect("a repository answers Some");
 
         assert_eq!(
             statuses
@@ -404,21 +438,94 @@ mod tests {
         assert!(statuses.summary(&root.join("README.md")).is_unchanged());
     }
 
+    /// Outside a repository `rev-parse --show-prefix` exits non-zero, so
+    /// `read` answers `None`: git could not be consulted, which the caller
+    /// must not confuse with a clean tree.
     #[test]
-    fn read_outside_a_repository_yields_no_statuses() {
+    fn read_outside_a_repository_answers_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         if test_git(dir.path(), &["rev-parse", "--git-dir"]) {
             return;
         }
         std::fs::write(dir.path().join("loose.txt"), "loose\n").expect("loose file");
 
-        let statuses = read(dir.path());
+        assert!(read(dir.path()).is_none());
+    }
 
-        assert!(
-            statuses
-                .summary(&dir.path().join("loose.txt"))
-                .is_unchanged()
+    #[test]
+    fn a_clean_repository_answers_some_with_no_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        if !committed_repo(root) {
+            return;
+        }
+
+        let statuses = read(root).expect("a clean repository still answers Some");
+
+        assert!(statuses.entries.is_empty());
+    }
+
+    #[test]
+    fn git_dir_answers_the_repository_git_directory_and_none_outside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        if !committed_repo(root) {
+            return;
+        }
+
+        let resolved = git_dir(root).expect("a repository answers its git directory");
+
+        assert_eq!(
+            resolved.canonicalize().expect("canonical git dir"),
+            root.join(".git").canonicalize().expect("canonical .git")
         );
+
+        let outside = tempfile::tempdir().expect("tempdir");
+        if test_git(outside.path(), &["rev-parse", "--git-dir"]) {
+            return;
+        }
+        assert_eq!(git_dir(outside.path()), None);
+    }
+
+    #[test]
+    fn the_prefix_keeps_path_whitespace_and_loses_only_its_line_terminator() {
+        assert_eq!(strip_line_terminator(b"has space /\n"), "has space /");
+        assert_eq!(strip_line_terminator(b"has space /\r\n"), "has space /");
+        assert_eq!(strip_line_terminator(b"has space /"), "has space /");
+
+        let statuses = GitStatuses::parse(
+            Path::new("/repo/has space "),
+            &strip_line_terminator(b"has space /\n"),
+            &porcelain(&[" M has space /main.rs"]),
+        );
+
+        assert_eq!(
+            statuses
+                .summary(Path::new("/repo/has space /main.rs"))
+                .worktree
+                .modified,
+            1
+        );
+    }
+
+    /// Finding 3 (#539): one summary ranks `vc_modified` for the label and
+    /// `vc_added` for the letter, which is why `row.rs` paints a directory's
+    /// dot from `label_color` instead of the indicator's own hue.
+    #[test]
+    fn a_mixed_directory_ranks_its_label_and_its_letter_differently() {
+        let ui = ui();
+        let mixed = GitSummary {
+            worktree: TrackedSummary {
+                modified: 1,
+                ..TrackedSummary::default()
+            },
+            untracked: 1,
+            ..GitSummary::default()
+        };
+
+        assert_eq!(label_color(mixed, ui), Some(ui.vc_modified));
+        assert_eq!(status_indicator(mixed, ui), Some(("U", ui.vc_added)));
+        assert_ne!(ui.vc_modified, ui.vc_added);
     }
 
     #[test]

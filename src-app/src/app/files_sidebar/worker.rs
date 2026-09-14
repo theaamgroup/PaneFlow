@@ -188,7 +188,7 @@ impl Scanner {
 
     fn refresh_git(&mut self) {
         self.git_dirty = false;
-        let git_dir = crate::workspace::find_git_dir(&self.tree.root.to_string_lossy());
+        let git_dir = files_git::git_dir(&self.tree.root);
         if git_dir != self.git_dir {
             if let Some(previous) = self.git_dir.take() {
                 if let Some(watcher) = self.watcher.as_mut() {
@@ -205,7 +205,9 @@ impl Scanner {
         {
             self.watched.insert(git_dir);
         }
-        self.git = Arc::new(files_git::read(&self.tree.root));
+        if let Some(statuses) = files_git::read(&self.tree.root) {
+            self.git = Arc::new(statuses);
+        }
     }
 
     fn listing_is_complete(&self, dir: &std::path::Path) -> bool {
@@ -214,10 +216,15 @@ impl Scanner {
             .is_none_or(|authority| *authority == ListingAuthority::Complete)
     }
 
+    /// A known git directory that is not watched counts as unavailable too:
+    /// an index-only change (`git add` from another pane) raises no event
+    /// under the tree, so without this the 2 s fallback poll never resumes and
+    /// nothing retries the watch. No repository stays vacuously available.
     fn watcher_available(&self) -> bool {
         self.tree
             .children
             .keys()
+            .chain(self.git_dir.iter())
             .all(|dir| self.watched.contains(dir))
     }
 

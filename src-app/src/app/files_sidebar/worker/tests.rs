@@ -376,3 +376,30 @@ fn incomplete_listings_are_retried_while_the_watcher_is_available() {
     assert_eq!(scanner.tree.children[&outer].len(), 1);
     assert!(!scanner.retry_incomplete_listings());
 }
+
+/// Issue #539: if every tree watch succeeds but the `.git` watch fails, the
+/// worker must still report the watcher unavailable, or `run`'s 2 s fallback
+/// never rescans and an index-only change leaves the tree stale for good.
+#[test]
+fn an_unwatched_git_directory_makes_the_watcher_unavailable() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().to_path_buf();
+    let mut scanner = Scanner::new(root.clone());
+    assert!(scanner.scan(|| false));
+    scanner.watched = scanner.tree.children.keys().cloned().collect();
+    scanner.git_dir = None;
+    assert!(
+        scanner.watcher_available(),
+        "no repository leaves the git watch vacuously available"
+    );
+
+    let git_dir = root.join(".git");
+    scanner.git_dir = Some(git_dir.clone());
+    assert!(
+        !scanner.watcher_available(),
+        "a known but unwatched git directory must resume the fallback poll"
+    );
+
+    scanner.watched.insert(git_dir);
+    assert!(scanner.watcher_available());
+}
