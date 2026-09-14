@@ -32,9 +32,14 @@ two executed and one `#[ignore]`); `cargo clippy --workspace --all-targets`
 exit 0, **WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0,
 re-run on the exact tagged commit; `./target/debug/paneflow --version` ->
 `paneflow 0.6.0`; `cargo deny check advisories licenses sources` exit 0 ->
-`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` was not
-re-run at this cut, so the CLAUDE.md `cfg(unix)` / `cfg(macos)` counts still
-carry their 2026-09-07 values.
+`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` exit 0,
+**STAGE 2c ZERO-CONDITION 0** with all six components at 0, and the negative
+control at **176** `cfg(unix)` / **93** `cfg(macos)` live sites - re-measured
+on 2026-09-14, unchanged from the 2026-09-07 count despite 23 commits landing
+between them, so the CLAUDE.md figures are re-attested rather than corrected.
+The script's non-blocking review lines read 75 different-term-space hits, 6
+orphaned `.rs` files, 0 comment-only references, and **30** ungated platform
+strings (issue #103, deliberately outside the STAGE 2c integer).
 
 Post-publish verification of the released artifacts: workflow run
 https://github.com/theaamgroup/PaneFlow/actions/runs/34792747822 green with no
