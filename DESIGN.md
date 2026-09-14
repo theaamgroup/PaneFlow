@@ -963,9 +963,13 @@ column: a 13 px Semibold title, an optional 28 px branch row whose select opens
 a 260 px menu, one 34 px row per preset with its 14 px agent mark and a `not
 installed` marker at 10 px, and an inline error in `vc_deleted` at 11 px.
 Escape folds the branch menu before it closes the palette; arrows move and
-scroll the selection into view. Split placement renders no branch row and never
-opens the sessions rail; Tab placement may, when `new_pane_shows_sessions` is
-on.
+scroll the selection into view. **Escape is inert while the palette is the
+workspace's last surface** (its Tab placement sits on the workspace's only tab
+and that tab has no pane, issue #522): closing it would only close the tab and
+have the next frame reinstall a fresh palette on a new one, so the palette stays
+put and the user picks a preset or closes the workspace instead. Split placement
+renders no branch row and never opens the sessions rail; Tab placement may, when
+`new_pane_shows_sessions` is on.
 
 ### 5.8 Feedback
 
@@ -1203,7 +1207,9 @@ Pad, the diff branch menu, close confirm, and About answer Escape and Enter
 only; Launch Pad additionally cycles its text fields with Tab, and its agent
 list is mouse-driven by design. **System Info is Escape-only** — it carries
 two footer buttons, Close and Copy, and neither is the default, so Enter is
-deliberately ignored.
+deliberately ignored. The pane palette's one exception is the last-surface case
+in §5.7: on a workspace's sole paneless tab Escape does nothing, because there is
+no other surface to return to.
 
 A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
