@@ -1,6 +1,7 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-07 at the **0.5.0 cut**, which ships
+Living handoff record. Updated 2026-09-13 at the **0.6.0 cut** (see the
+entry below). The prior header described the 0.5.0 cut, which shipped
 the Review grid port (#438) and the first v0.12.0 port batch (#417: the
 terminal rendering chain #418 / #419 / #420, the Zed highlight queries #433,
 and the editor benchmark harness #425). The prior
@@ -8,6 +9,59 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 #357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-13: the 0.6.0 cut.** 23 non-merge commits since `v0.5.0`, a minor
+bump because the release adds surfaces rather than only fixing them: the
+Cmd+Shift+F dock maximize (#490), the optional dock file tree (#437) and the
+opt-in Changes tab with every dock tab closable (#436), workspace notification
+controls (#493), per-workspace new-tab branches (#501), persisted editor
+display settings (#495), the restored unread / muted / pull-request session
+state (#489, #494), `terminal.minimum_contrast` with seen-gated desktop
+notifications (#421, #422), and motion-aware menu reveals (#491). Performance:
+viewport-bounded editor highlighting with an off-thread initial parse and a
+2 MB cap (#427), and the Files tree moved onto a worker thread (#430). The two
+issues open at the cut were fixed into it: unread completions now follow a
+moved pane (#515) and the tree-sitter memory probe installs its counting
+allocator in an isolated child process (#516). Curated notes live in
+`docs/releases/v0.6.0.md`.
+
+Pre-flight verification on `main` at the bump commit: `cargo build` exit 0;
+`cargo test --workspace` **3,428 passed, 0 failed, 7 ignored** (3,426 / 0 / 6
+at the #495 landing; the delta is exactly the three tests #515 and #516 add,
+two executed and one `#[ignore]`); `cargo clippy --workspace --all-targets`
+exit 0, **WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0,
+re-run on the exact tagged commit; `./target/debug/paneflow --version` ->
+`paneflow 0.6.0`; `cargo deny check advisories licenses sources` exit 0 ->
+`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` was not
+re-run at this cut, so the CLAUDE.md `cfg(unix)` / `cfg(macos)` counts still
+carry their 2026-09-07 values.
+
+Post-publish verification of the released artifacts: workflow run
+https://github.com/theaamgroup/PaneFlow/actions/runs/34792747822 green with no
+warning annotations; the three expected assets attached; the downloaded DMG's
+SHA-256 matched the published `.sha256`; `spctl --assess --type exec` on the
+mounted bundle returned `accepted`, `source=Notarized Developer ID`;
+`xcrun stapler validate` worked; `codesign --verify --deep --strict` reported
+valid on disk and satisfying its Designated Requirement, signed by
+`Developer ID Application: AAM USA INC (K7X6VGPFR8)`;
+`python3 scripts/verify-update-feed.py --expected-version 0.6.0` exit 0. Not
+validated: the Gatekeeper UI path (a `gh release download` carries no
+`com.apple.quarantine`, so it is not a realistic download) and a full
+installed-update replacement cycle.
+
+**The tag trap this cut hit, and the guard now in place.** `git tag -a v0.6.0`
+failed with `tag 'v0.6.0' already exists` because a past
+`git fetch upstream --tags` had seeded upstream's `v0.1.4`-`v0.14.0` into the
+same bare `refs/tags/` namespace this fork uses. The follow-up
+`git push origin v0.6.0` then pushed **upstream's** tag while printing
+`[new tag]`, starting release.yml on upstream commit `ae0d9f2c` (run
+34792486245, cancelled; no release object was created, and its Linux/Windows
+job names confirmed it was upstream's workflow). Recovery deleted the remote
+ref, removed all 76 upstream tags locally, and set
+`remote.upstream.tagOpt = --no-tags`. The rule, now in CLAUDE.md's gotchas: a
+bare `vX.Y.Z` tag is this fork's release iff it is on `origin`. Step 2 of the
+release runbook asserts `git rev-parse <tag>^{commit}` equals `HEAD` before
+pushing.
 
 **2026-09-13 #495 / #487: editor display settings complete the v0.13.0 /
 v0.14.0 adoption.** Upstream `463673ed` and `03e2b181` add the `editor`

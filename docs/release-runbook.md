@@ -9,11 +9,14 @@ spent waiting on Apple's notarization queue. If a step pushes you past its
 budget, check that step's troubleshooting box before plowing on. The runbook has
 probably already anticipated the failure.
 
-**Apple signing path last validated on:** 2026-08-26, tag `v0.1.0`
-(`44150ff`). Signed `paneflow-0.1.0-aarch64-apple-darwin.dmg` + `.sha256`.
-Workflow run https://github.com/theaamgroup/paneflow/actions/runs/33010849870.
-The Sparkle appcast path is new in #119 and must receive its first full
-installed-update validation on the first Sparkle-enabled release.
+**Apple signing path last validated on:** 2026-09-13, tag `v0.6.0`
+(`05f91c79`). Signed `paneflow-0.6.0-aarch64-apple-darwin.dmg` + `.sha256`
++ `appcast.xml`. Workflow run
+https://github.com/theaamgroup/PaneFlow/actions/runs/34792747822.
+The published bundle assessed `accepted / source=Notarized Developer ID`,
+its ticket stapled, and `scripts/verify-update-feed.py` verified the
+anonymous feed. A full installed-update cycle (an older app staging this
+release and replacing itself on quit) is still unvalidated.
 
 Related runbooks:
 
@@ -435,8 +438,16 @@ wrong.
 Keep the "Last validated on" line at the top current, so a maintainer returning
 after a long break knows whether the runbook still reflects reality.
 
-Last validated on: _never. Update after the first release with tag, date,
-workflow run, and smoke-test evidence._
+Last validated on: **2026-09-13, tag `v0.6.0`**, workflow run
+https://github.com/theaamgroup/PaneFlow/actions/runs/34792747822. Steps 1-4
+and the CLI half of Step 5 passed against the published DMG: checksum matched
+the published `.sha256`, `spctl --assess` returned
+`accepted / source=Notarized Developer ID`, `xcrun stapler validate` worked,
+and `codesign --verify --deep --strict` reported valid on disk and satisfying
+its Designated Requirement. **Not yet validated:** the Gatekeeper *UI* path.
+`gh release download` sets no `com.apple.quarantine` attribute, so a browser
+download on a Mac that never built this project remains the outstanding half
+of Step 5, along with the installed-update cycle.
 
 ## Verify automatic-update delivery
 
