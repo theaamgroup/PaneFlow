@@ -94,8 +94,9 @@ pub(crate) fn closes_with_last_file(
 pub(super) const ROW_HEIGHT: Pixels = px(28.);
 /// Per-depth indentation added to the row's left padding.
 pub(super) const INDENT_STEP: f32 = 18.;
-/// Width of the single leading slot. A directory fills it with its chevron, a
-/// file with its language icon; both therefore start on the same pixel.
+/// Width of the leading slot. A directory fills it with its chevron, a file
+/// with its language icon; both therefore start on the same pixel. The same
+/// width sizes the trailing git-status slot (`row.rs`) when a row carries one.
 pub(super) const ROW_SLOT: f32 = 14.;
 /// Gap between that slot and the name.
 pub(super) const ROW_GAP: f32 = 12.;
