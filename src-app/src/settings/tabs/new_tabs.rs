@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, IntoElement, MouseButton, ParentElement,
-    SharedString, Styled, Window, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, CursorStyle, FontWeight, IntoElement, MouseButton,
+    ParentElement, SharedString, Styled, Window, div, prelude::*, px,
 };
 use serde_json::Value;
 
@@ -91,7 +91,15 @@ impl PaneFlowApp {
                 this.toggle_new_tab_branch_menu(ws_id, is_open, window, cx);
             }
         }))
-        .child(div().flex_1().min_w_0().truncate().child(selected_label))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(ui.text)
+                .truncate()
+                .child(selected_label),
+        )
         .child(select_chevron(ui));
 
         if is_open {
@@ -134,6 +142,7 @@ impl PaneFlowApp {
                         branch == current,
                         ui,
                     )
+                    .cursor(CursorStyle::Arrow)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.workspace_template_dropdown = None;
                         if let Some(ws_id) = ws_id {
@@ -162,7 +171,14 @@ impl PaneFlowApp {
                             );
                         }
                     }))
-                    .child(div().flex_1().min_w_0().truncate().child(label)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(ui.text)
+                            .child(label),
+                    ),
                 );
             }
             trigger = trigger.child(deferred_select_menu(menu));
