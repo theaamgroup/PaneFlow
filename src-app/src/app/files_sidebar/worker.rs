@@ -85,11 +85,19 @@ impl Scanner {
     }
 
     fn set_expanded(&mut self, expanded: Vec<PathBuf>) {
-        self.tree.expanded = expanded
+        let mut expanded: HashSet<PathBuf> = expanded
             .into_iter()
             .filter(|path| path.starts_with(&self.tree.root))
             .collect();
-        self.tree.expanded.insert(self.tree.root.clone());
+        expanded.insert(self.tree.root.clone());
+        // Issue #540: only listed directories are watched, so an edit under a
+        // never-expanded directory raises no event and its roll-up dot goes
+        // stale. Expanding something new is the moment that dot becomes
+        // visible, so the scan it triggers also re-reads the statuses.
+        if expanded != self.tree.expanded {
+            self.git_dirty = true;
+        }
+        self.tree.expanded = expanded;
     }
 
     fn scan(&mut self, cancelled: impl Fn() -> bool) -> bool {

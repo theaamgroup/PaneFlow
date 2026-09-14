@@ -403,3 +403,62 @@ fn an_unwatched_git_directory_makes_the_watcher_unavailable() {
     scanner.watched.insert(git_dir);
     assert!(scanner.watcher_available());
 }
+
+fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Issue #540: a file edited two levels under a never-expanded directory
+/// raises no watcher event (only listed directories are watched), so the
+/// roll-up dot on that directory goes stale. Expanding it later must refresh
+/// the statuses in the same scan, or the dot stays wrong while the user is
+/// looking straight at the folder.
+#[test]
+fn expanding_a_directory_refreshes_git_statuses_for_its_unwatched_edits() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().to_path_buf();
+    let outer = root.join("outer");
+    let inner = outer.join("inner");
+    let file = inner.join("file.rs");
+    std::fs::create_dir_all(&inner).expect("nested directory");
+    std::fs::write(&file, "one\n").expect("file");
+    if !test_git(&root, &["init"])
+        || !test_git(&root, &["add", "."])
+        || !test_git(
+            &root,
+            &[
+                "-c",
+                "user.email=tests@paneflow.dev",
+                "-c",
+                "user.name=tests",
+                "commit",
+                "-m",
+                "init",
+            ],
+        )
+    {
+        return;
+    }
+    let mut scanner = scanner(root.clone(), Vec::new());
+    assert!(scanner.git_dir.is_some(), "the repository was recognised");
+    assert!(scanner.git.summary(&outer).is_unchanged());
+    assert!(!scanner.git_dirty, "the first scan consumed the refresh");
+    std::fs::write(&file, "two\n").expect("edit under a collapsed directory");
+
+    scanner.set_expanded(vec![outer.clone(), inner.clone()]);
+    assert!(scanner.scan(|| false));
+
+    assert!(scanner.tree.children.contains_key(&inner));
+    assert_eq!(scanner.git.summary(&outer).worktree.modified, 1);
+    assert_eq!(scanner.git.summary(&file).worktree.modified, 1);
+    // Re-sending the same expanded set is not a change: nothing new can be
+    // stale, so it must not cost another `git status`.
+    scanner.set_expanded(vec![outer, inner]);
+    assert!(!scanner.git_dirty, "an unchanged expanded set stays clean");
+}
