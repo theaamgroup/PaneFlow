@@ -1145,10 +1145,7 @@ mod tests {
         // checkout and only the checkout, and a refusal changes nothing.
         use crate::workspace::worktree::{list_worktrees, prepare_branch_checkout};
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Git records worktree paths resolved, and a macOS tempdir is a
-        // symlink: compare like with like.
-        let sandbox = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
-        let repo_root = sandbox.join("repo");
+        let repo_root = tmp.path().join("repo");
         std::fs::create_dir_all(&repo_root).expect("repo root");
         git(&repo_root, &["init", "-q"]);
         git(
@@ -1173,12 +1170,15 @@ mod tests {
             "the picker copies .env into its checkout; the test must exercise that"
         );
         std::fs::write(dirty.join("scratch.txt"), "wip\n").expect("dirty file");
-        let foreign = sandbox.join("foreign");
+        // The foreign checkout sits outside every PaneFlow root, so the
+        // listing keeps it as git reports it (symlinks resolved).
+        let foreign = tmp.path().join("foreign");
         let foreign_s = foreign.to_string_lossy().into_owned();
         git(
             &repo_root,
             &["worktree", "add", "-q", &foreign_s, "-b", "feat/foreign"],
         );
+        let foreign = std::fs::canonicalize(&foreign).expect("canonical foreign checkout");
         let before = list_worktrees(&repo_root).expect("listing");
         assert_eq!(before.len(), 4, "root, two picker checkouts, one foreign");
 

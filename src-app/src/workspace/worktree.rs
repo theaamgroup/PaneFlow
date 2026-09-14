@@ -634,6 +634,27 @@ fn worktrees_parent(repo_root: &Path) -> PathBuf {
     parent.join(format!("{repo_name}.worktrees"))
 }
 
+/// Map a path git reports (symlinks resolved: `/private/var/...` for a
+/// `/var/...` tempdir, the real volume behind a linked `~/Github`) back onto
+/// the unresolved form PaneFlow builds from `repo_root`, so a registered
+/// checkout compares equal to `worktree_dir` / `worktree_dir_hashed`. A path
+/// under no PaneFlow root is returned untouched.
+fn in_paneflow_path_form(repo_root: &Path, path: PathBuf) -> PathBuf {
+    let roots = [worktrees_parent(repo_root), repo_root.to_path_buf()];
+    for root in roots {
+        if path.starts_with(&root) {
+            return path;
+        }
+        let Ok(resolved) = std::fs::canonicalize(&root) else {
+            continue;
+        };
+        if let Ok(rest) = path.strip_prefix(&resolved) {
+            return root.join(rest);
+        }
+    }
+    path
+}
+
 /// Sibling worktree directory for a branch: `<repo>.worktrees/<slug>`, next to
 /// the repo (NOT inside it - recursive watchers must not descend into it).
 /// Total function: a branch whose slug is empty (dot-only - rejected upstream
@@ -715,7 +736,13 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<WorktreeEntry>, String> {
         &["worktree", "list", "--porcelain"],
         GIT_DEADLINE,
     )?;
-    Ok(parse_worktree_porcelain(&stdout))
+    Ok(parse_worktree_porcelain(&stdout)
+        .into_iter()
+        .map(|entry| WorktreeEntry {
+            path: in_paneflow_path_form(repo_root, entry.path),
+            ..entry
+        })
+        .collect())
 }
 
 /// Pure porcelain parser (unit-tested). Entries are blank-line separated;
@@ -2244,6 +2271,73 @@ mod tests {
             prepare_branch_checkout(&repo, "main").expect("main resolves"),
             repo
         );
+    }
+
+    /// Issue #529 (upstream e87a03ed), against a real repository under an
+    /// UN-canonicalized tempdir (`$TMPDIR` is `/var/folders/...`, a symlink
+    /// to `/private/var/...` on macOS): `git worktree list` reports resolved
+    /// paths, and the second pick of the same branch must still find its
+    /// checkout instead of refusing the slug path as unregistered.
+    #[test]
+    fn prepare_branch_checkout_recognises_its_checkout_through_a_symlinked_root() {
+        let sandbox = tempfile::tempdir().expect("tempdir");
+        let repo = sandbox.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+            vec!["branch", "feat/x"],
+        ] {
+            run_git(&repo, &args, GIT_DEADLINE).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        }
+
+        let first = prepare_branch_checkout(&repo, "feat/x").expect("first pick checks out");
+        assert_eq!(first, worktree_dir(&repo, "feat/x"));
+        let entries = list_worktrees(&repo).expect("worktree list");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == first && e.branch.as_deref() == Some("feat/x")),
+            "the listing must come back in PaneFlow path form: {entries:?}"
+        );
+
+        let again = prepare_branch_checkout(&repo, "feat/x").expect("second pick reuses");
+        assert_eq!(again, first, "the same branch reuses its checkout");
+        assert_eq!(
+            list_worktrees(&repo).expect("worktree list").len(),
+            entries.len(),
+            "reusing must not add a worktree"
+        );
+    }
+
+    #[test]
+    fn a_resolved_git_path_comes_back_in_paneflow_path_form() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        let dir = worktree_dir(&repo_root, "feat/x");
+        std::fs::create_dir_all(&dir).expect("worktree dir");
+
+        let parent = worktrees_parent(&repo_root);
+        let resolved = std::fs::canonicalize(&parent).expect("canonical");
+        let as_git_reports_it = resolved.join("feat-x");
+
+        assert_eq!(in_paneflow_path_form(&repo_root, as_git_reports_it), dir);
+        assert_eq!(
+            in_paneflow_path_form(&repo_root, dir.clone()),
+            dir,
+            "a path already in PaneFlow form is untouched"
+        );
+    }
+
+    #[test]
+    fn a_path_outside_every_paneflow_root_is_left_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        let outside = tmp.path().join("somewhere-else").join("checkout");
+
+        assert_eq!(in_paneflow_path_form(&repo_root, outside.clone()), outside);
     }
 
     #[test]
