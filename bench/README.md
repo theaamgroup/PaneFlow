@@ -139,7 +139,9 @@ file as the editor suite. It routes tree-sitter's own C allocator to a counting
 allocator through `tree_sitter::set_allocator`, so the bytes it reports are the
 tree and nothing else. That counter is deliberately kept out of the timed
 suite: installing it would change every parse timing, and freeing a block
-allocated before it was installed would corrupt the heap. Run it alone:
+allocated before it was installed would corrupt the heap. The test launches a
+fresh subprocess with an exact test filter before installing the counter
+(#516), so an earlier or concurrent parse cannot share its allocator. Run it with:
 
 ```bash
 cargo test --release --locked -p paneflow-app --bin paneflow \

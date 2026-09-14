@@ -103,10 +103,13 @@ unsafe extern "C" fn tree_sitter_free(ptr: *mut c_void) {
 
 /// Route tree-sitter's C allocator through a counting allocator, once per
 /// process, so [`tree_sitter_live_bytes`] reports the bytes its trees hold.
-/// Only the `tree_memory_probe` calls this, alone in its process: installing
+/// Only the `tree_memory_probe` calls this, in its isolated child: installing
 /// it changes every parse timing, and freeing a block allocated before it was
 /// installed would corrupt the heap.
-pub(crate) fn count_tree_sitter_allocations() {
+///
+/// # Safety
+/// Call before any tree-sitter allocations, with no concurrent tree-sitter use.
+pub(crate) unsafe fn count_tree_sitter_allocations() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| unsafe {
         tree_sitter::set_allocator(Some(tree_sitter::Allocator {

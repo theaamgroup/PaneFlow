@@ -652,15 +652,48 @@ fn tree_bytes_of(ext: &str, source: &str) -> (i64, i64) {
     (held, tree_sitter_live_bytes() - before)
 }
 
+/// An existing tree must remain safe to drop after the memory probe (#516).
+#[test]
+#[ignore = "runs the isolated tree memory probe after an existing parse"]
+fn tree_memory_probe_can_follow_existing_parses() {
+    let doc = document("existing.rs", "fn existing() {}\n");
+    let highlighter = parsed(&doc, dark());
+    assert!(highlighter.has_tree());
+    let parent_bytes = tree_sitter_live_bytes();
+    tree_memory_probe();
+    drop(highlighter);
+    assert_eq!(tree_sitter_live_bytes(), parent_bytes);
+}
+
 /// The measurement behind `MAX_HIGHLIGHT_BYTES` and
 /// `MAX_MARKDOWN_HIGHLIGHT_BYTES` (#427): tree bytes per source byte per
 /// grammar, the second tree a deferred parse holds in flight, and the caps
-/// themselves against the 128 MiB budget. Installs the counting allocator,
-/// so it runs alone and never inside the timed suite.
+/// themselves against the 128 MiB budget. The counting allocator runs in a
+/// fresh test process so other tests cannot leave incompatible allocations.
 #[test]
 #[ignore = "tree memory probe: cargo test --release -p paneflow-app --bin paneflow app::diff_dock::code::perf_bench::tree_memory_probe -- --ignored --exact --nocapture --test-threads=1"]
 fn tree_memory_probe() {
-    count_tree_sitter_allocations();
+    const CHILD: &str = "PANEFLOW_TREE_MEMORY_PROBE_CHILD";
+    if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "app::diff_dock::code::perf_bench::tree_memory_probe",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("start isolated tree memory probe");
+        assert!(
+            status.success(),
+            "isolated tree memory probe failed: {status}"
+        );
+        return;
+    }
+    // SAFETY: the child runs this test alone, before any tree-sitter use.
+    unsafe { count_tree_sitter_allocations() };
     let cases = [
         ("rust_300kb", "rs", rust_source(HIGHLIGHTED_RUST_BYTES)),
         ("rust_2mb", "rs", rust_source(RELOAD_RUST_BYTES)),
