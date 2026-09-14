@@ -21,7 +21,6 @@ mod tab;
 
 use gpui::{App, AppContext, ClipboardItem, Context, Entity, Focusable, PathPromptOptions, Window};
 use paneflow_config::schema::{LayoutNode, TerminalSurfaceProfile};
-use paneflow_process::spawn_detached;
 
 use crate::layout::{LayoutTree, MAX_PANES, SplitDirection};
 use crate::terminal::TerminalView;
@@ -2326,10 +2325,18 @@ impl PaneFlowApp {
         let cwd = ws.cwd.clone();
         self.workspace_menu_open = None;
 
-        if let Err(msg) = reveal_in_file_manager(std::path::Path::new(&cwd)) {
-            log::warn!("failed to reveal workspace path in file manager: {msg}");
-            self.show_toast(msg, cx);
-        }
+        // The spawn and the wait for `open`'s exit both leave the render
+        // thread (issue #530); only the failure toast comes back to it.
+        let task = cx
+            .background_executor()
+            .spawn(async move { reveal_in_file_manager(std::path::Path::new(&cwd)).await });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            if let Err(message) = task.await {
+                log::warn!("failed to reveal workspace path in file manager: {message}");
+                let _ = this.update(cx, |app, cx| app.show_toast(message, cx));
+            }
+        })
+        .detach();
 
         cx.notify();
     }
@@ -2346,19 +2353,40 @@ impl PaneFlowApp {
         };
         let cwd = ws.cwd.clone();
 
-        // GUI launchers (.desktop on Linux, Finder on macOS, Start menu on
-        // Windows) frequently strip user bin directories from PATH, so editors
-        // installed under ~/.local/bin or ~/.cargo/bin can't be found by
-        // Command::new alone - even though they resolve fine from a terminal.
-        let bin = resolve_editor_binary(command);
-
-        let toast_label = editor_toast_label(label);
-        let mut cmd = std::process::Command::new(&bin);
-        cmd.current_dir(&cwd).arg(".");
-        if let Err(err) = spawn_detached(&mut cmd) {
-            log::warn!("failed to open workspace in {toast_label}: {err}");
-            self.show_toast(format!("Couldn't open in {toast_label}: {err}"), cx);
-        }
+        let command = command.to_owned();
+        let toast_label = editor_toast_label(label).to_owned();
+        // Finder launches frequently strip user bin directories from PATH,
+        // so editors installed under ~/.local/bin or ~/.cargo/bin can't be
+        // found by Command::new alone - even though they resolve fine from a
+        // terminal. That `which` walk, the spawn, and the wait for the
+        // launcher's exit all run on the background executor (issue #530);
+        // a spawn error or a non-zero exit comes back as a toast.
+        let task = cx.background_executor().spawn(async move {
+            let cmd = smol::unblock(move || {
+                let bin = resolve_editor_binary(&command);
+                log::info!(
+                    "workspace editor resolved: editor={command:?} binary={bin:?} cwd={cwd:?}"
+                );
+                let mut cmd = std::process::Command::new(bin);
+                cmd.current_dir(cwd).arg(".");
+                cmd
+            })
+            .await;
+            match crate::external_open::run_workspace_command(cmd).await {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(format!(
+                    "Couldn't open in {toast_label}: launcher exited with {status}"
+                )),
+                Err(error) => Err(format!("Couldn't open in {toast_label}: {error}")),
+            }
+        });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            if let Err(message) = task.await {
+                log::warn!("{message}");
+                let _ = this.update(cx, |app, cx| app.show_toast(message, cx));
+            }
+        })
+        .detach();
 
         self.workspace_menu_open = None;
         cx.notify();
@@ -2554,12 +2582,22 @@ impl PaneFlowApp {
 /// `open` has no legitimate user-install story to justify honoring a shadow
 /// there (issue #206). `open_is_spawned_by_absolute_path_only` pins this.
 ///
-/// Returns `Err(message)` on spawn failure where `message` is already
-/// phrased for a user-visible toast (US-011 AC7, AC9).
-pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+/// Returns `Err(message)` on spawn failure or a non-zero `open` exit, where
+/// `message` is already phrased for a user-visible toast (US-011 AC7, AC9).
+/// Runs the spawn and the wait through
+/// [`crate::external_open::run_workspace_command`], so it must be awaited off
+/// the render thread (issue #530).
+pub(crate) async fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
     validate_reveal_path(path)?;
-    spawn_detached(std::process::Command::new("/usr/bin/open").arg(path))
-        .map_err(|err| format!("Could not open Finder: {err}"))
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    cmd.arg(path);
+    let status = crate::external_open::run_workspace_command(cmd)
+        .await
+        .map_err(|err| format!("Could not open Finder: {err}"))?;
+    if !status.success() {
+        return Err(format!("Could not open Finder: open exited with {status}"));
+    }
+    Ok(())
 }
 
 /// Reject a path Finder could not show before spawning `open`: a missing
@@ -3079,6 +3117,80 @@ mod tests {
             std::fs::set_permissions(&path, perm).unwrap();
         }
         path
+    }
+
+    /// Issue #530 (upstream c0253550, macOS half): the editor launch used to
+    /// walk PATH with `which` and spawn on the render thread, inherit the
+    /// app's stdio, and discard the launcher's exit status. Both launches
+    /// must resolve and spawn on the background executor, route through
+    /// `external_open::run_workspace_command`, and report a failed exit back
+    /// as a toast from a `cx.spawn` task.
+    #[test]
+    fn editor_and_finder_launches_run_off_thread_and_report_exit_status() {
+        let src = include_str!("mod.rs");
+        let editor = source_slice(
+            src,
+            "pub(crate) fn open_workspace_in_editor(",
+            "pub(crate) fn commit_rename(",
+        );
+        let reveal = source_slice(
+            src,
+            "pub(crate) fn reveal_workspace_in_file_manager(",
+            "pub(crate) fn open_workspace_in_editor(",
+        );
+        // rustfmt may break a method chain across lines; compare without
+        // whitespace so the guard pins the calls, not the line layout.
+        let squash = |body: &str| body.split_whitespace().collect::<String>();
+        for (label, body) in [("editor", editor), ("reveal", reveal)] {
+            let body = squash(body);
+            assert!(
+                !body.contains("spawn_detached("),
+                "{label}: spawn_detached inherits stdio and discards the exit status: {body}"
+            );
+            assert!(
+                body.contains("cx.background_executor().spawn("),
+                "{label}: the resolve and spawn must leave the render thread: {body}"
+            );
+            assert!(
+                body.contains("cx.spawn("),
+                "{label}: the failure toast must come back through cx.spawn: {body}"
+            );
+            assert!(
+                body.contains("show_toast("),
+                "{label}: a failed launch must toast: {body}"
+            );
+        }
+        let editor = squash(source_slice(
+            src,
+            "pub(crate) fn open_workspace_in_editor(",
+            "pub(crate) fn commit_rename(",
+        ));
+        let resolve_at = editor
+            .find("resolve_editor_binary(")
+            .expect("editor launch still resolves the binary");
+        let executor_at = editor
+            .find("cx.background_executor().spawn(")
+            .expect("background executor");
+        assert!(
+            executor_at < resolve_at,
+            "resolve_editor_binary must run inside the background task, not before it: {editor}"
+        );
+        assert!(
+            editor.contains("run_workspace_command("),
+            "editor launch must observe the launcher's exit status: {editor}"
+        );
+        let reveal_impl = source_slice(
+            src,
+            "pub(crate) async fn reveal_in_file_manager(",
+            "fn validate_reveal_path(",
+        );
+        let validate_at = reveal_impl
+            .find("validate_reveal_path(path)")
+            .expect("#206 validation stays in front of the spawn");
+        let open_at = reveal_impl
+            .find("run_workspace_command(")
+            .expect("Finder reveal must observe open's exit status");
+        assert!(validate_at < open_at, "{reveal_impl}");
     }
 
     #[test]

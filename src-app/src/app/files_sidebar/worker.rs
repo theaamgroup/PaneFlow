@@ -85,11 +85,24 @@ impl Scanner {
     }
 
     fn set_expanded(&mut self, expanded: Vec<PathBuf>) {
-        self.tree.expanded = expanded
+        let mut expanded: HashSet<PathBuf> = expanded
             .into_iter()
             .filter(|path| path.starts_with(&self.tree.root))
             .collect();
-        self.tree.expanded.insert(self.tree.root.clone());
+        expanded.insert(self.tree.root.clone());
+        // Issue #540: only listed directories are watched, so an edit under a
+        // never-expanded directory raises no event and its roll-up dot goes
+        // stale. Expanding something new is the moment that dot becomes
+        // visible, so the scan it triggers also re-reads the statuses. A
+        // collapse lists nothing new and cannot reveal a stale dot, so it
+        // must not cost a `git status` (each probe carries a 10 s deadline).
+        if expanded
+            .iter()
+            .any(|path| !self.tree.expanded.contains(path))
+        {
+            self.git_dirty = true;
+        }
+        self.tree.expanded = expanded;
     }
 
     fn scan(&mut self, cancelled: impl Fn() -> bool) -> bool {
