@@ -441,6 +441,8 @@ pub fn select_trigger_with_hover(
         .min_w(px(190.))
         .max_w(px(260.))
         .rounded(SETTINGS_CONTROL_CORNER_RADIUS)
+        .text_size(px(12.))
+        .text_color(ui.text)
         .bg(ui.subtle)
         .animated_hover_bg(ui.subtle, hover_bg)
 }
@@ -598,7 +600,10 @@ impl IntoElement for SelectMenu {
 }
 
 /// One menu row with whisper highlights (selected slightly stronger than hover).
-/// The caller adds the leading logo + label children and the `on_click`.
+/// The caller adds the leading logo + label children and the `on_click`. The
+/// row sets the 12 px theme text itself: menus are deferred popovers, which
+/// GPUI paints against the root text style, so a bare label child would come
+/// out black on a dark theme (the New tabs select shipped that way).
 pub fn select_item(
     id: impl Into<ElementId>,
     selected: bool,
@@ -634,7 +639,8 @@ pub fn select_item(
             .items_center()
             .gap(px(8.))
             .cursor(CursorStyle::PointingHand)
-            .text_size(px(12.)),
+            .text_size(px(12.))
+            .text_color(ui.text),
         group,
         ROW_RADIUS,
         (resting_bg.a > f32::EPSILON).then_some(resting_bg),
@@ -769,6 +775,45 @@ mod tests {
              themselves (the wrapper has no switch role):\n{}",
             violations.join("\n")
         );
+    }
+
+    /// A menu row and a select trigger paint their own text color. Nothing
+    /// above them supplies one: the settings panel, `menu_surface`,
+    /// `select_menu` and the deferred popover all leave the text style alone,
+    /// and a deferred subtree is painted against the window's root text style
+    /// anyway (`Window::paint_deferred_draws` restores everything except the
+    /// text-style stack). So a label that set no color rendered in the root
+    /// default - black on a dark theme - which is how the New tabs branch
+    /// select and the pane header's "Review with agent" menu shipped. The
+    /// primitives own the color now, so a caller cannot forget it; this fails
+    /// if either one stops.
+    #[test]
+    fn select_primitives_paint_the_theme_text_color() {
+        let this_file = include_str!("components.rs");
+        let body_of = |signature: &str| -> String {
+            this_file
+                .split(signature)
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .expect("components.rs defines the select primitive")
+                .to_string()
+        };
+        for (signature, needles) in [
+            ("pub fn select_item(", vec![".text_color(ui.text)"]),
+            (
+                "pub fn select_trigger_with_hover(",
+                vec![".text_color(ui.text)", ".text_size(px(12.))"],
+            ),
+        ] {
+            let body = body_of(signature);
+            for needle in needles {
+                assert!(
+                    body.contains(needle),
+                    "`{signature}` lost `{needle}`; a deferred menu paints against the root \
+                     text style, so the primitive must set its own"
+                );
+            }
+        }
     }
 
     /// Issue #361: the Settings selects were a bare `Role::ComboBox` div that

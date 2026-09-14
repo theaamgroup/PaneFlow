@@ -915,6 +915,13 @@ Popups share `menu_surface` — squircle 18, a surface lifted 0.035 in dark or
 `overlay` in light, and a `border` at 0.6, including Editor Controls (5.4).
 Items are 28 px `ROW_RADIUS` squircle rows with `text` washes for hover
 (0.05) and selection (0.10), 12 px text, and a 12 px chevron on triggers.
+`select_item` and `select_trigger` set that 12 px `text` themselves. A popup
+is a deferred draw, and GPUI paints a deferred subtree against the window's
+root text style, so a label that relied on an ancestor color came out black
+on a dark theme (the New tabs branch select shipped that way). A call site
+may still narrow a label to `muted`; it never has to remember `text`.
+`select_primitives_paint_the_theme_text_color` in `settings/components.rs`
+fails if either primitive drops it.
 
 The 13 px check mark is **not** part of `select_item`: call sites render it,
 and they render a transparent placeholder when unselected so rows never
