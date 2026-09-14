@@ -25,9 +25,10 @@ use super::capture_closed_tab_record;
 /// keyed by the pane's workspace, and a pane move used to leave them behind:
 /// closing the source workspace then dropped a live agent's state, and the
 /// sidebar kept the badge on the workspace the pane had left. Returns how
-/// many rows moved. A key already present in the destination (a synthetic
-/// band key, or a recycled PID) keeps the destination's row and drops the
-/// mover, which the next hook frame recreates in place.
+/// many rows moved. Unread completions follow their surfaces independently of
+/// session rows, which may already have expired (#515). A key already present
+/// in the destination (a synthetic band key, or a recycled PID) keeps its row
+/// and drops the mover, which the next hook frame recreates in place.
 pub(crate) fn migrate_agent_sessions(
     workspaces: &mut [crate::workspace::Workspace],
     src_ws_idx: usize,
@@ -41,6 +42,12 @@ pub(crate) fn migrate_agent_sessions(
     {
         return 0;
     }
+    let completions = workspaces[src_ws_idx]
+        .agent_completion_notification
+        .take_surfaces(surface_ids);
+    workspaces[dest_ws_idx]
+        .agent_completion_notification
+        .extend(completions);
     let source = &mut workspaces[src_ws_idx].agent_sessions;
     let keys: Vec<u32> = source
         .iter()
@@ -874,6 +881,91 @@ pub(crate) fn worktree_binding_for_cwd(
 mod tests {
     use super::{migrate_agent_sessions, worktree_binding_for_cwd};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_tab_move_transfers_all_its_completions_and_keeps_unresolved_marks() {
+        use crate::workspace::Workspace;
+        let mut source = Workspace::empty_with_cwd_and_id(1, "source", PathBuf::new());
+        let destination = Workspace::empty_with_cwd_and_id(2, "destination", PathBuf::new());
+        for surface in [Some(7), Some(8), None] {
+            source
+                .agent_completion_notification
+                .record_finished(false, surface);
+        }
+        let mut workspaces = vec![source, destination];
+        let moved = [7, 8].into_iter().collect();
+        // Invalid destinations and moves within a workspace must leave marks alone.
+        for destination in [0, 2] {
+            assert_eq!(
+                migrate_agent_sessions(&mut workspaces, 0, destination, &moved),
+                0
+            );
+            assert!(
+                workspaces[0]
+                    .agent_completion_notification
+                    .is_unread_for(&moved)
+            );
+        }
+        assert_eq!(migrate_agent_sessions(&mut workspaces, 0, 1, &moved), 0);
+        assert!(
+            !workspaces[0]
+                .agent_completion_notification
+                .is_unread_for(&moved)
+        );
+        assert!(workspaces[0].agent_completion_notification.is_unread());
+        for surface in [7, 8] {
+            assert!(
+                workspaces[1]
+                    .agent_completion_notification
+                    .is_unread_for(&[surface].into_iter().collect())
+            );
+        }
+        workspaces[0]
+            .agent_completion_notification
+            .record_finished(true, None);
+        assert!(!workspaces[0].agent_completion_notification.is_unread());
+    }
+
+    #[test]
+    fn a_pane_move_carries_unread_completions_after_session_rows_expire() {
+        use crate::workspace::Workspace;
+        let mut source = Workspace::empty_with_cwd_and_id(1, "source", PathBuf::new());
+        let mut destination = Workspace::empty_with_cwd_and_id(2, "destination", PathBuf::new());
+        source
+            .agent_completion_notification
+            .record_finished(false, Some(7));
+        source
+            .agent_completion_notification
+            .record_finished(false, Some(8));
+        destination
+            .agent_completion_notification
+            .record_finished(false, Some(9));
+        destination.muted = true;
+        let mut workspaces = vec![source, destination];
+        let moved = [7].into_iter().collect();
+        assert_eq!(migrate_agent_sessions(&mut workspaces, 0, 1, &moved), 0);
+        assert!(
+            !workspaces[0]
+                .agent_completion_notification
+                .is_unread_for(&moved)
+        );
+        assert!(
+            workspaces[1]
+                .agent_completion_notification
+                .is_unread_for(&moved)
+        );
+        assert!(
+            workspaces[0]
+                .agent_completion_notification
+                .is_unread_for(&[8].into_iter().collect())
+        );
+        assert!(
+            workspaces[1]
+                .agent_completion_notification
+                .is_unread_for(&[9].into_iter().collect())
+        );
+        assert!(workspaces.iter().all(|ws| ws.agent_sessions.is_empty()));
+    }
 
     #[test]
     fn a_pane_move_carries_its_agent_session_rows_to_the_destination() {

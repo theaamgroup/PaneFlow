@@ -123,6 +123,24 @@ impl AgentCompletionNotification {
         self.unread.clear();
     }
 
+    /// Transfer only the completions belonging to surfaces that changed workspace.
+    pub(crate) fn take_surfaces(&mut self, surfaces: &std::collections::HashSet<u64>) -> Self {
+        let mut moved = Self::default();
+        self.unread.retain(|surface| {
+            if surface.is_some_and(|id| surfaces.contains(&id)) {
+                moved.unread.insert(*surface);
+                false
+            } else {
+                true
+            }
+        });
+        moved
+    }
+
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.unread.extend(other.unread);
+    }
+
     pub(crate) fn is_unread(&self) -> bool {
         !self.unread.is_empty()
     }
