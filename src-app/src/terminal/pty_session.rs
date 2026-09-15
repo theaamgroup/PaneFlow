@@ -2034,7 +2034,53 @@ fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
     // identify its own dir if a later code path routes into it.
     env.insert("PANEFLOW_BIN_DIR".into(), bin_dir.display().to_string());
 
+    // Issue #542: hand the shim the stable, non-versioned ai-hook path so the
+    // managed hook commands it writes into agent configs keep resolving after
+    // the next upgrade prunes `bin_dir` above. Only advertise a path this
+    // build actually verified (`verified_ai_hook_path`, not the merely
+    // computed one): if launch extraction could not replace an older
+    // release's binary, the stale file is still present and runnable, and
+    // advertising it would pin panes to that version's hook behaviour. It
+    // must also still be runnable here - a copy stripped of `+x` after
+    // extraction would otherwise shadow the executable sibling and turn every
+    // hook into `Permission denied`.
+    match crate::ai_hooks::extract::verified_ai_hook_path() {
+        Some(path) if is_executable_file(&path) => {
+            env.insert(AI_HOOK_PATH_ENV.into(), path.display().to_string());
+        }
+        _ => log::debug!(
+            "paneflow: no verified stable ai-hook copy; hooks will use the version-pinned cache path"
+        ),
+    }
+
     prepend_bin_dir_to_path(env, &bin_dir);
+}
+
+/// Env var the shim reads for the stable `paneflow-ai-hook` path (#542).
+/// Mirrors `paneflow_shim::hooks::AI_HOOK_PATH_ENV`; the two crates do not
+/// share a dependency edge, so the spelling is duplicated deliberately.
+const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
+
+/// Whether `path` is a regular file this process may execute.
+///
+/// Mirrors the shim's own candidate test (`hooks::is_executable`) so both ends
+/// agree on what counts as a usable hook binary: `access(2)` with `X_OK`
+/// rather than a `mode & 0o111` bitmask, because Unix applies only the first
+/// matching permission class - a file owned by this user with mode `0o001`
+/// carries an execute bit yet cannot be executed by its owner. The `is_file`
+/// check stays because `X_OK` on a directory tests traversability.
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated C string that outlives the
+    // call, and `access` only reads it.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
 }
 
 fn reassert_paneflow_bin_dir_first(env: &mut std::collections::HashMap<String, String>) {
@@ -2122,6 +2168,24 @@ fn is_inherited_agent_session_env_key(key: &str) -> bool {
     INHERITED_AGENT_SESSION_ENV.contains(&key)
 }
 
+/// True if `key` names a PaneFlow-owned variable that must never reach a pane
+/// by **inheritance** (#542).
+///
+/// `AI_HOOK_PATH_ENV` names a binary the shim executes and writes into the
+/// agent's hook configuration, so only a value this instance vouched for may
+/// reach a pane. `PROTECTED` in `assemble_pty_env` guards the `terminal.env` /
+/// session merge, but it cannot unset a variable PaneFlow was itself launched
+/// with - a release instance started from another PaneFlow pane inherits that
+/// pane's path, and `inject_ai_hook_env` deliberately advertises nothing when
+/// its own stable copy is missing or unrunnable. Stripping it at the spawn
+/// boundary makes "no trusted value" mean absent rather than inherited.
+///
+/// Removal runs before the override loop in `ghostty_session.rs`, so the
+/// trusted value still wins whenever there is one.
+fn is_paneflow_owned_inherited_env_key(key: &str) -> bool {
+    key == AI_HOOK_PATH_ENV
+}
+
 fn is_forbidden_child_env_key(key: &str) -> bool {
     is_inherited_agent_session_env_key(key)
         || key == ZDOTDIR_ENV
@@ -2166,7 +2230,9 @@ pub(super) fn inherited_env_keys_to_strip() -> Vec<std::ffi::OsString> {
         .map(|(key, _)| key)
         .filter(|key| {
             key.to_str().is_some_and(|key| {
-                is_inherited_host_terminal_env_key(key) || is_inherited_agent_session_env_key(key)
+                is_inherited_host_terminal_env_key(key)
+                    || is_inherited_agent_session_env_key(key)
+                    || is_paneflow_owned_inherited_env_key(key)
             })
         })
         .collect()
@@ -2370,6 +2436,7 @@ fn assemble_pty_env(
             "PANEFLOW_SURFACE_ID",
             "PANEFLOW_SOCKET_PATH",
             "PANEFLOW_BIN_DIR",
+            AI_HOOK_PATH_ENV,
             ZDOTDIR_ENV,
             PANEFLOW_ORIG_ZDOTDIR_ENV,
         ];
@@ -2746,6 +2813,18 @@ impl Drop for TerminalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #542: the shim reads this env var to render hook commands that
+    /// survive an upgrade. The two crates share no dependency edge, so the
+    /// only thing keeping the spellings together is this test.
+    #[test]
+    fn the_shim_reads_the_same_ai_hook_path_env_var() {
+        let shim = include_str!("../../../crates/paneflow-shim/src/hooks.rs");
+        assert!(
+            shim.contains(&format!("AI_HOOK_PATH_ENV: &str = \"{AI_HOOK_PATH_ENV}\"")),
+            "paneflow-shim must read `{AI_HOOK_PATH_ENV}`; update both sides together"
+        );
+    }
 
     /// `RUST_LOG=info` must show the resolved shell next to the configured
     /// one: both values, in one line, whether or not a shell was configured.
@@ -3407,8 +3486,21 @@ mod tests {
         user.insert("TERM_PROGRAM".to_string(), "spoofed".to_string());
         user.insert("TERM_PROGRAM_VERSION".to_string(), "0.0.0".to_string());
         user.insert("SHLVL".to_string(), "99".to_string());
+        // #542: the shim runs whatever this names and persists it into the
+        // agent's hook config, so an imported surface env or `terminal.env`
+        // must never be able to point it at another executable.
+        user.insert(
+            AI_HOOK_PATH_ENV.to_string(),
+            "/evil/paneflow-ai-hook".to_string(),
+        );
         user.insert("KEEP_ME".to_string(), "yes".to_string());
         let env = assemble_pty_env(HashMap::new(), 1, 1, Some(user));
+
+        assert_ne!(
+            env.get(AI_HOOK_PATH_ENV).map(String::as_str),
+            Some("/evil/paneflow-ai-hook"),
+            "{AI_HOOK_PATH_ENV} must stay PaneFlow-owned: the shim writes it into hook commands"
+        );
 
         assert_eq!(
             env.get("TERM").map(String::as_str),
@@ -3592,6 +3684,31 @@ mod tests {
                 && !is_inherited_host_terminal_env_key("PANEFLOW_SURFACE_ID"),
             "the strip must not reach a variable Paneflow sets for the pane"
         );
+    }
+
+    /// Issue #542: `PROTECTED` guards the `terminal.env` / session merge, but a
+    /// `retain` cannot unset a variable PaneFlow itself was launched with. A
+    /// release instance started from another PaneFlow pane would otherwise
+    /// inherit that pane's hook path, and `inject_ai_hook_env` advertises
+    /// nothing when its own stable copy is missing - so "no trusted value"
+    /// must mean absent, not inherited.
+    #[test]
+    fn the_inherited_hook_path_is_stripped_at_the_spawn_boundary() {
+        assert!(
+            is_paneflow_owned_inherited_env_key(AI_HOOK_PATH_ENV),
+            "{AI_HOOK_PATH_ENV} must be removed from the inherited env, not just the map"
+        );
+        for key in [
+            "PANEFLOW_SURFACE_ID",
+            "PANEFLOW_WORKSPACE_ID",
+            "PANEFLOW_SOCKET_PATH",
+            "PANEFLOW_BIN_DIR",
+        ] {
+            assert!(
+                !is_paneflow_owned_inherited_env_key(key),
+                "{key} is re-set per pane; the strip must not widen to it here"
+            );
+        }
     }
 
     #[test]

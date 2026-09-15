@@ -316,8 +316,82 @@ pub(crate) fn cleanup_hook_config_file(
     }
 }
 
+/// Env var carrying the stable, non-versioned `paneflow-ai-hook` path, set on
+/// every pane by `pty_session::inject_ai_hook_env` (#542). Preferred over the
+/// computed fallback because the app knows its own build namespace
+/// (`paneflow` vs `paneflow-dev`), which a `release-min` shim cannot infer.
+pub(crate) const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
+
+/// Absolute path to write into a managed hook command.
+///
+/// Two candidates, first runnable one wins:
+///
+/// 1. `PANEFLOW_AI_HOOK_PATH` from the pane env - the stable, non-versioned
+///    copy, advertised only when the running app verified that the bytes there
+///    are its own (`ai_hooks::extract::verified_ai_hook_path`).
+/// 2. The version-pinned sibling next to this shim.
+///
+/// Issue #542: (1) is what survives an upgrade. A managed block that outlives
+/// the process that wrote it keeps naming the version directory that wrote it,
+/// and the next launch prunes that directory because its `.paneflow-live`
+/// lease died with the old app - after which every agent tool call fails with
+/// "No such file or directory".
+///
+/// The shim deliberately does **not** compute the stable path itself. Only the
+/// app knows whether the file there is current: when launch extraction cannot
+/// replace a previous release's binary, that stale copy is still present and
+/// still runnable, and a locally computed candidate would select it over the
+/// sibling and pin panes to the old hook behaviour and IPC protocol. Absence
+/// of the env var is therefore meaningful: it means "no verified stable copy",
+/// and the sibling, which always matches the shim being executed, is the
+/// correct answer. A shim in a pane from an app too old to advertise the
+/// variable never had a verified stable copy either, so it loses nothing.
+fn locate_hook_binary() -> Option<PathBuf> {
+    first_executable([advertised_hook_binary()]).or_else(locate_sibling_hook_binary)
+}
+
+fn advertised_hook_binary() -> Option<PathBuf> {
+    env::var_os(AI_HOOK_PATH_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Pure core of the preference order, so the ordering is testable without
+/// mutating process env. A candidate that is missing **or not executable** is
+/// skipped, never written into a hook command: a stable copy stripped of `+x`
+/// (a backup restore, a stray `chmod`) would otherwise shadow the runnable
+/// sibling and turn every hook into `Permission denied`.
+fn first_executable(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.is_file() && is_executable(candidate))
+}
+
+/// Whether **this process** may execute `path`.
+///
+/// `access(2)` with `X_OK`, not a `mode & 0o111` bitmask: Unix applies only
+/// the first matching permission class, so a file owned by this user with mode
+/// `0o001` has an execute bit yet cannot be executed by its owner. A bitmask
+/// would accept it, let it shadow the runnable sibling, and turn every
+/// generated hook into `Permission denied`. `access` also honours ACLs and a
+/// `noexec` mount, which no bitmask can see.
+///
+/// The caller pairs this with an `is_file()` check: `X_OK` on a directory
+/// tests traversability and would otherwise succeed.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated C string that outlives the call,
+    // and `access` only reads it.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+}
+
 pub(crate) fn resolve_hook_command(event: &str) -> String {
-    locate_sibling_hook_binary().map_or_else(
+    locate_hook_binary().map_or_else(
         || render_bare_hook_command(event),
         |path| render_hook_command(&path, event),
     )
@@ -376,6 +450,104 @@ fn hook_config_error(error: HookConfigError) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #542: an advertised path that is gone must fall through to the
+    /// sibling rather than be written into a hook command.
+    #[test]
+    fn a_missing_advertised_path_falls_through() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let advertised = temp.path().join("env-paneflow-ai-hook");
+
+        assert_eq!(first_executable([Some(advertised.clone())]), None);
+        create_executable(&advertised);
+        assert_eq!(
+            first_executable([Some(advertised.clone())]),
+            Some(advertised)
+        );
+        assert_eq!(first_executable([None]), None);
+    }
+
+    /// The shim must never compute the stable path itself. Only the app knows
+    /// whether the file there is current; a locally computed candidate would
+    /// select a previous release's binary when launch extraction could not
+    /// replace it, in exactly the case where the app deliberately advertised
+    /// nothing. Absence of the env var has to mean "use the sibling".
+    #[test]
+    fn the_shim_does_not_compute_a_stable_path_of_its_own() {
+        // Split so the needle does not appear literally in this file, which
+        // `include_str!` would otherwise match against the assertion itself.
+        let needle = concat!("stable_ai_hook", "_binary_path");
+        let source = include_str!("hooks.rs");
+        assert!(
+            !source.contains(needle),
+            "the shim must not recompute the stable ai-hook path (#542)"
+        );
+    }
+
+    /// A stable copy stripped of `+x` must fall through to the runnable
+    /// sibling rather than pin every hook command to `Permission denied`.
+    #[test]
+    fn a_non_executable_candidate_is_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let stripped = temp.path().join("stripped-paneflow-ai-hook");
+        create_executable(&stripped);
+        std::fs::set_permissions(&stripped, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let usable = temp.path().join("usable-paneflow-ai-hook");
+        create_executable(&usable);
+
+        assert_eq!(
+            first_executable([Some(stripped.clone()), Some(usable.clone())]),
+            Some(usable)
+        );
+        assert_eq!(first_executable([Some(stripped)]), None);
+    }
+
+    /// `mode & 0o111` is not the same question as "can this process run it":
+    /// Unix consults only the first matching permission class, so an
+    /// owner-readable file with just the other-execute bit is unrunnable by
+    /// its owner despite having an execute bit set.
+    #[test]
+    fn an_execute_bit_for_the_wrong_class_does_not_count() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: `geteuid` reads process state and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skip: root bypasses the X_OK permission check");
+            return;
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let wrong_class = temp.path().join("wrong-class-paneflow-ai-hook");
+        std::fs::File::create(&wrong_class).unwrap();
+        std::fs::set_permissions(&wrong_class, std::fs::Permissions::from_mode(0o601)).unwrap();
+        assert_ne!(
+            std::fs::metadata(&wrong_class)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0,
+            "precondition: the file must carry an execute bit a bitmask would accept"
+        );
+
+        let usable = temp.path().join("usable-paneflow-ai-hook");
+        create_executable(&usable);
+
+        assert_eq!(
+            first_executable([Some(wrong_class.clone()), Some(usable.clone())]),
+            Some(usable)
+        );
+        assert_eq!(first_executable([Some(wrong_class)]), None);
+    }
+
+    fn create_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::File::create(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     #[test]
     fn socket_reachability_rejects_absent_values() {

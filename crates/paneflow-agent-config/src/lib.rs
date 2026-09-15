@@ -16,7 +16,7 @@ pub mod lock;
 
 pub use agent_dirs::{
     claude_config_dir, claude_config_dir_from, claude_settings_json, codex_config_dir,
-    codex_config_dir_from, codex_config_toml,
+    codex_config_dir_from, codex_config_toml, linked_worktree_main_checkout,
 };
 pub use io::{config_dir, home_dir, read_optional_text, write_json_atomic, write_text_atomic};
 pub use lease::{ConfigLease, LastConfigLease};
