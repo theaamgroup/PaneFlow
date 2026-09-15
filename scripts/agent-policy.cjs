@@ -53,7 +53,10 @@ async function sync({ github, context, core }) {
   if (!number || event.issue?.pull_request) return;
   // Re-fetch instead of trusting stale label-event snapshots.
   const { data: item } = await github.rest.issues.get({ ...repo, issue_number: number });
-  if (item.state !== 'open') return;
+  if (item.state !== 'open') {
+    if (event.issue) await syncOpenPulls({ github, core, repo });
+    return;
+  }
   let paths = [];
   let inherited = [];
   if (event.pull_request) {
@@ -61,11 +64,13 @@ async function sync({ github, context, core }) {
     paths = files.flatMap(f => [f.filename, f.previous_filename].filter(Boolean));
     // Same-repository closing references only; full URLs are also supported.
     const escaped = `${repo.owner}/${repo.repo}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const refs = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+(?:#|https://github\\.com/${escaped}/issues/)(\\d+)`, 'gi');
+    const refs = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?[\\s]+(?:#|${escaped}#|https://github\\.com/${escaped}/issues/)(\\d+)`, 'gi');
+    let linkedIssues = 0;
     for (const id of new Set([...String(item.body || '').matchAll(refs)].map(m => Number(m[1])))) {
       try {
         const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
         if (issue.pull_request) continue;
+        linkedIssues++;
         inherited.push(...issue.labels.map(l => l.name));
         if (issue.state !== 'open' || !route(issue.labels.map(l => l.name), issue.assignees || []).includes('ready-for-agent')) {
           inherited.push('needs-human-review');
@@ -78,6 +83,9 @@ async function sync({ github, context, core }) {
         if (error.status !== 404) core.setFailed(`Linked issue #${id} could not be read.`);
       }
     }
+    // Unsupported, absent, and PR-only references are unknown scope, never
+    // evidence that this PR has an eligible issue for unattended work.
+    if (linkedIssues === 0) inherited.push('needs-human-review');
   }
   const before = item.labels.map(l => l.name);
   const after = route(before, item.assignees, paths, inherited);
@@ -91,9 +99,13 @@ async function sync({ github, context, core }) {
   core.info(`Safety routing checked #${number}; no review or merge performed.`);
   if (event.issue) {
     // A newly flagged issue must also flag its already-open linked PRs.
-    const pulls = await github.paginate(github.rest.pulls.list, { ...repo, state: 'open', per_page: 100 });
-    for (const pull of pulls) await sync({ github, core, context: { repo, payload: { pull_request: { number: pull.number } } } });
+    await syncOpenPulls({ github, core, repo });
   }
+}
+
+async function syncOpenPulls({ github, core, repo }) {
+  const pulls = await github.paginate(github.rest.pulls.list, { ...repo, state: 'open', per_page: 100 });
+  for (const pull of pulls) await sync({ github, core, context: { repo, payload: { pull_request: { number: pull.number } } } });
 }
 
 module.exports = { pathRisks, route, sync };

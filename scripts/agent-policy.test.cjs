@@ -48,7 +48,7 @@ test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
 });
 
-for (const variant of ['eligible', 'missing-safety', 'missing-owner', 'needs-info', 'closed']) {
+for (const variant of ['eligible', 'qualified', 'colon', 'missing-link', 'foreign-link', 'pr-link', 'missing-safety', 'missing-owner', 'needs-info', 'closed']) {
   test(`linked issue eligibility: ${variant}`, async () => {
     const additions = [], removals = [];
     const issueLabels = variant === 'missing-safety' ? base.filter(l => l !== 'safety:none')
@@ -59,16 +59,17 @@ for (const variant of ['eligible', 'missing-safety', 'missing-owner', 'needs-inf
         pulls: { listFiles: {} },
         issues: {
           get: async ({ issue_number }) => ({ data: issue_number === 7
-            ? { state: 'open', body: 'Closes #9', labels: base.map(name => ({ name })), assignees: owner }
-            : { state: variant === 'closed' ? 'closed' : 'open', labels: issueLabels.map(name => ({ name })), assignees: variant === 'missing-owner' ? [] : owner } }),
+            ? { state: 'open', body: variant === 'qualified' ? 'Fixes org/repo#9' : variant === 'colon' ? 'Closes: #9' : variant === 'missing-link' ? '' : variant === 'foreign-link' ? 'Fixes other/project#9' : 'Closes #9', labels: base.map(name => ({ name })), assignees: owner }
+            : { state: variant === 'closed' ? 'closed' : 'open', pull_request: variant === 'pr-link' ? {} : undefined, labels: issueLabels.map(name => ({ name })), assignees: variant === 'missing-owner' ? [] : owner } }),
           addLabels: async ({ labels }) => additions.push(...labels),
           removeLabel: async ({ name }) => removals.push(name),
         },
       },
     };
     await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {} } });
-    assert.equal(additions.includes('needs-human-review'), variant !== 'eligible');
-    assert.equal(removals.includes('ready-for-agent'), variant !== 'eligible');
+    const eligible = ['eligible', 'qualified', 'colon'].includes(variant);
+    assert.equal(additions.includes('needs-human-review'), !eligible);
+    assert.equal(removals.includes('ready-for-agent'), !eligible);
   });
 }
 test('routing is idempotent and never promotes needs-info', () => {
@@ -101,7 +102,8 @@ test('sync reads current state, inherits risk and writes only label deltas', asy
   assert.ok(removed.includes('ready-for-agent'));
 });
 
-test('issue label changes propagate to an existing linked PR', async () => {
+for (const issueState of ['open', 'closed']) {
+test(`issue ${issueState} event propagates to an existing linked PR`, async () => {
   const writes = [];
   const github = {
     paginate: async (method) => method === 'pulls' ? [{ number: 7 }] : [],
@@ -112,7 +114,7 @@ test('issue label changes propagate to an existing linked PR', async () => {
           assert.equal(repoOwner, 'org');
           assert.equal(repo, 'repo');
           return { data: {
-          state: 'open', assignees: owner,
+          state: issue_number === 7 ? 'open' : issueState, assignees: owner,
           body: issue_number === 7 ? 'Fixes https://github.com/org/repo/issues/9' : '',
           labels: (issue_number === 7 ? base : [...base, 'safety:access']).map(name => ({ name })),
           } };
@@ -129,6 +131,14 @@ test('issue label changes propagate to an existing linked PR', async () => {
   context.payload = { issue: { number: 9 } };
   await sync({ github, context, core: { info() {} } });
   assert.ok(writes.some(w => w.issue_number === 7 && w.labels.includes('needs-human-review')));
+  if (issueState === 'closed') assert.ok(writes.every(w => w.issue_number !== 9));
+});
+}
+
+test('issue closure is subscribed in the actual workflow', () => {
+  const { readFileSync } = require('node:fs');
+  const workflow = readFileSync(require('node:path').join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
+  assert.match(workflow, /issues:\s*\n\s*types: \[[^\]]*\bclosed\b/);
 });
 
 for (const status of [404, 403, 500]) {
