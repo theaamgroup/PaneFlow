@@ -2047,14 +2047,26 @@ fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
 /// share a dependency edge, so the spelling is duplicated deliberately.
 const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
 
-/// Whether `path` is a regular file with at least one execute bit set.
-/// Mirrors the shim's own candidate test so both ends agree on what counts
-/// as a usable hook binary.
+/// Whether `path` is a regular file this process may execute.
+///
+/// Mirrors the shim's own candidate test (`hooks::is_executable`) so both ends
+/// agree on what counts as a usable hook binary: `access(2)` with `X_OK`
+/// rather than a `mode & 0o111` bitmask, because Unix applies only the first
+/// matching permission class - a file owned by this user with mode `0o001`
+/// carries an execute bit yet cannot be executed by its owner. The `is_file`
+/// check stays because `X_OK` on a directory tests traversability.
 fn is_executable_file(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::ffi::OsStrExt;
 
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated C string that outlives the
+    // call, and `access` only reads it.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
 }
 
 fn reassert_paneflow_bin_dir_first(env: &mut std::collections::HashMap<String, String>) {

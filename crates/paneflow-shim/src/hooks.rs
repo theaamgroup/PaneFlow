@@ -362,10 +362,26 @@ fn first_executable(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Op
         .find(|candidate| candidate.is_file() && is_executable(candidate))
 }
 
+/// Whether **this process** may execute `path`.
+///
+/// `access(2)` with `X_OK`, not a `mode & 0o111` bitmask: Unix applies only
+/// the first matching permission class, so a file owned by this user with mode
+/// `0o001` has an execute bit yet cannot be executed by its owner. A bitmask
+/// would accept it, let it shadow the runnable sibling, and turn every
+/// generated hook into `Permission denied`. `access` also honours ACLs and a
+/// `noexec` mount, which no bitmask can see.
+///
+/// The caller pairs this with an `is_file()` check: `X_OK` on a directory
+/// tests traversability and would otherwise succeed.
 fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::ffi::OsStrExt;
 
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated C string that outlives the call,
+    // and `access` only reads it.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
 }
 
 pub(crate) fn resolve_hook_command(event: &str) -> String {
@@ -473,6 +489,44 @@ mod tests {
             Some(usable)
         );
         assert_eq!(first_executable([Some(stripped)]), None);
+    }
+
+    /// `mode & 0o111` is not the same question as "can this process run it":
+    /// Unix consults only the first matching permission class, so an
+    /// owner-readable file with just the other-execute bit is unrunnable by
+    /// its owner despite having an execute bit set.
+    #[test]
+    fn an_execute_bit_for_the_wrong_class_does_not_count() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: `geteuid` reads process state and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skip: root bypasses the X_OK permission check");
+            return;
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let wrong_class = temp.path().join("wrong-class-paneflow-ai-hook");
+        std::fs::File::create(&wrong_class).unwrap();
+        std::fs::set_permissions(&wrong_class, std::fs::Permissions::from_mode(0o601)).unwrap();
+        assert_ne!(
+            std::fs::metadata(&wrong_class)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0,
+            "precondition: the file must carry an execute bit a bitmask would accept"
+        );
+
+        let usable = temp.path().join("usable-paneflow-ai-hook");
+        create_executable(&usable);
+
+        assert_eq!(
+            first_executable([Some(wrong_class.clone()), Some(usable.clone())]),
+            Some(usable)
+        );
+        assert_eq!(first_executable([Some(wrong_class)]), None);
     }
 
     fn create_executable(path: &Path) {
