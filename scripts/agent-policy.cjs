@@ -77,7 +77,8 @@ async function sync({ github, context, core }) {
         if (issue.pull_request) continue;
         linkedIssues++;
         inherited.push(...issue.labels.map(l => l.name));
-        if (issue.state !== 'open' || !route(issue.labels.map(l => l.name), issue.assignees || []).includes('ready-for-agent')) {
+        const moved = issue.repository_url && !issue.repository_url.toLowerCase().endsWith(`/repos/${repo.owner}/${repo.repo}`.toLowerCase());
+        if (moved || issue.state !== 'open' || !route(issue.labels.map(l => l.name), issue.assignees || []).includes('ready-for-agent')) {
           inherited.push('needs-human-review');
         }
       } catch (error) {
