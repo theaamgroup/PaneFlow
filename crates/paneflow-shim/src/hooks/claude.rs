@@ -260,24 +260,53 @@ mod tests {
     use serde_json::json;
 
     /// Issue #543: a pane whose cwd is a linked worktree must install into the
-    /// main checkout's `.claude/`, the only file Claude Code opens.
+    /// main checkout's `.claude/`, the only file Claude Code opens. Driven
+    /// against a real `git worktree` so the redirect is checked end to end,
+    /// verification included, rather than against a hand-built fixture.
     #[test]
     fn worktree_panes_target_the_main_checkout_dot_claude() {
         let temp = tempfile::TempDir::new().unwrap();
         let main = temp.path().join("repo");
-        std::fs::create_dir_all(main.join(".git").join("worktrees").join("feature")).unwrap();
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if !git(&["init", "-q", "-b", "main", "."], &main) {
+            eprintln!("skip: git is unavailable in this environment");
+            return;
+        }
+        std::fs::write(main.join("seed"), b"seed").unwrap();
+        assert!(git(&["add", "seed"], &main));
+        assert!(git(&["commit", "-qm", "seed"], &main));
         let worktree = temp.path().join("repo.worktrees").join("feature");
-        std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(
-            worktree.join(".git"),
-            format!(
-                "gitdir: {}\n",
-                main.join(".git/worktrees/feature").display()
-            ),
-        )
-        .unwrap();
+        assert!(git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap()
+            ],
+            &main
+        ));
 
-        assert_eq!(claude_project_dir(&worktree), main.join(".claude"));
+        assert_eq!(
+            claude_project_dir(&std::fs::canonicalize(&worktree).unwrap()),
+            std::fs::canonicalize(&main).unwrap().join(".claude")
+        );
 
         let plain = temp.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
