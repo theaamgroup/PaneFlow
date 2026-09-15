@@ -29,6 +29,16 @@ for (const category of ['database', 'ui', 'money', 'access', 'integration', 'pla
 test('missing or bot-only owner blocks unattended work', () => {
   for (const owners of [[], [{ type: 'Bot' }]]) assert.ok(route(base, owners).includes('needs-info'));
 });
+
+test('incomplete risky items retain needs-info and their human hold', () => {
+  for (const labels of [base.filter(l => l !== 'severity:high'), base]) {
+    const result = route([...labels, 'safety:release'], []);
+    assert.ok(result.includes('needs-info'));
+    assert.ok(result.includes('needs-human-review'));
+    assert.ok(!result.includes('ready-for-agent'));
+    assert.ok(!result.includes('ready-for-human'));
+  }
+});
 test('unknown, missing, and conflicting metadata fail closed', () => {
   for (const labels of [base.filter(l => l !== 'safety:none'), base.filter(l => l !== 'severity:high'), [...base, 'safety:unknown'], [...base, 'severity:low'], [...base, 'ready-for-human']]) {
     const result = route(labels, owner);
@@ -41,6 +51,9 @@ test('existing human hold is never automatically cleared', () => {
   assert.ok(!route([...base, 'needs-human-review'], owner).includes('ready-for-agent'));
 });
 test('paths and linked issue flags add risk; renames handled by caller', () => {
+  assert.deepEqual(pathRisks(['packaging/macos/paneflow.entitlements']), ['safety:release']);
+  assert.deepEqual(pathRisks(['mcps/paneflow/tools/read_pane.json']), ['safety:integration']);
+  for (const path of ['deny.toml', 'clippy.toml', '.cursor/rules/review.mdc', '.claude/settings.json']) assert.deepEqual(pathRisks([path]), ['safety:release']);
   assert.deepEqual(pathRisks(['skills/paneflow-conductor/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['.agents/skills/example/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['src-app/src/main.rs', '.github/workflows/test.yml', 'crates/x/src/lib.rs', 'native/a']), ['safety:ui', 'safety:release', 'safety:integration', 'safety:platform-wide']);

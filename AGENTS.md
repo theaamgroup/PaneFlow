@@ -91,17 +91,19 @@ destructive operations), `ui` (visible behavior/accessibility), `money`
 only after checking all categories.
 
 Any risk category mechanically adds `needs-human-review`, removes
-`ready-for-agent`, and routes to `ready-for-human`. Missing classification,
-owner, or metadata blocks unattended work. Tests and agent confidence never
+`ready-for-agent`, and routes fully classified items to `ready-for-human`.
+Missing classification, owner, or metadata keeps the item in `needs-info`
+with any safety hold intact and blocks unattended work. Tests and agent confidence never
 clear the hold. A human may direct flagged implementation; the flag remains
 through human verification and merge. Only a human corrects mistaken safety
 classifications. Carry issue risk categories to its PR.
 
 The workflow derives additional conservative path flags:
 `src-app/`, `assets/`, `DESIGN.md` → ui;
-`crates/`, `schemas/`, `examples/` → integration;
+`crates/`, `schemas/`, `examples/`, `mcps/` → integration;
 `native/` → platform-wide;
-`.github/`, `scripts/`, `skills/`, manifests/lockfiles, toolchains, and agent instructions
+`.github/`, `.agents/`, `.claude/`, `.cursor/`, `scripts/`, `skills/`, `packaging/`,
+manifests/lockfiles, toolchains, deny/clippy configuration, and agent instructions
 → release. These are minimum flags, not exhaustive behavior classification.
 
 Legacy labels are renamed: major → high, minor → medium, trivial → low,
