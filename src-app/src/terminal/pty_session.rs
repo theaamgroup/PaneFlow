@@ -2154,6 +2154,24 @@ fn is_inherited_agent_session_env_key(key: &str) -> bool {
     INHERITED_AGENT_SESSION_ENV.contains(&key)
 }
 
+/// True if `key` names a PaneFlow-owned variable that must never reach a pane
+/// by **inheritance** (#542).
+///
+/// `AI_HOOK_PATH_ENV` names a binary the shim executes and writes into the
+/// agent's hook configuration, so only a value this instance vouched for may
+/// reach a pane. `PROTECTED` in `assemble_pty_env` guards the `terminal.env` /
+/// session merge, but it cannot unset a variable PaneFlow was itself launched
+/// with - a release instance started from another PaneFlow pane inherits that
+/// pane's path, and `inject_ai_hook_env` deliberately advertises nothing when
+/// its own stable copy is missing or unrunnable. Stripping it at the spawn
+/// boundary makes "no trusted value" mean absent rather than inherited.
+///
+/// Removal runs before the override loop in `ghostty_session.rs`, so the
+/// trusted value still wins whenever there is one.
+fn is_paneflow_owned_inherited_env_key(key: &str) -> bool {
+    key == AI_HOOK_PATH_ENV
+}
+
 fn is_forbidden_child_env_key(key: &str) -> bool {
     is_inherited_agent_session_env_key(key)
         || key == ZDOTDIR_ENV
@@ -2198,7 +2216,9 @@ pub(super) fn inherited_env_keys_to_strip() -> Vec<std::ffi::OsString> {
         .map(|(key, _)| key)
         .filter(|key| {
             key.to_str().is_some_and(|key| {
-                is_inherited_host_terminal_env_key(key) || is_inherited_agent_session_env_key(key)
+                is_inherited_host_terminal_env_key(key)
+                    || is_inherited_agent_session_env_key(key)
+                    || is_paneflow_owned_inherited_env_key(key)
             })
         })
         .collect()
@@ -3650,6 +3670,31 @@ mod tests {
                 && !is_inherited_host_terminal_env_key("PANEFLOW_SURFACE_ID"),
             "the strip must not reach a variable Paneflow sets for the pane"
         );
+    }
+
+    /// Issue #542: `PROTECTED` guards the `terminal.env` / session merge, but a
+    /// `retain` cannot unset a variable PaneFlow itself was launched with. A
+    /// release instance started from another PaneFlow pane would otherwise
+    /// inherit that pane's hook path, and `inject_ai_hook_env` advertises
+    /// nothing when its own stable copy is missing - so "no trusted value"
+    /// must mean absent, not inherited.
+    #[test]
+    fn the_inherited_hook_path_is_stripped_at_the_spawn_boundary() {
+        assert!(
+            is_paneflow_owned_inherited_env_key(AI_HOOK_PATH_ENV),
+            "{AI_HOOK_PATH_ENV} must be removed from the inherited env, not just the map"
+        );
+        for key in [
+            "PANEFLOW_SURFACE_ID",
+            "PANEFLOW_WORKSPACE_ID",
+            "PANEFLOW_SOCKET_PATH",
+            "PANEFLOW_BIN_DIR",
+        ] {
+            assert!(
+                !is_paneflow_owned_inherited_env_key(key),
+                "{key} is re-set per pane; the strip must not widen to it here"
+            );
+        }
     }
 
     #[test]
