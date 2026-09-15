@@ -316,8 +316,52 @@ pub(crate) fn cleanup_hook_config_file(
     }
 }
 
+/// Env var carrying the stable, non-versioned `paneflow-ai-hook` path, set on
+/// every pane by `pty_session::inject_ai_hook_env` (#542). Preferred over the
+/// computed fallback because the app knows its own build namespace
+/// (`paneflow` vs `paneflow-dev`), which a `release-min` shim cannot infer.
+pub(crate) const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
+
+/// Absolute path to write into a managed hook command.
+///
+/// Preference order, first existing file wins:
+///
+/// 1. `PANEFLOW_AI_HOOK_PATH` from the pane env.
+/// 2. The computed stable path under `data_dir()/paneflow/bin/`.
+/// 3. The version-pinned sibling next to this shim.
+///
+/// (1) and (2) are stable across upgrades; (3) is not. Issue #542: a managed
+/// block that outlives the process that wrote it - a leaked block, or one
+/// installed into a config another session still reads - keeps naming the
+/// version directory that wrote it, and the next launch prunes that directory
+/// because its `.paneflow-live` lease died with the old app. Every subsequent
+/// agent tool call then fails with "No such file or directory". The sibling
+/// stays as a fallback so a pane launched by an older app still gets hooks.
+fn locate_hook_binary() -> Option<PathBuf> {
+    first_existing(stable_hook_binary_candidates()).or_else(locate_sibling_hook_binary)
+}
+
+fn stable_hook_binary_candidates() -> [Option<PathBuf>; 2] {
+    [
+        env::var_os(AI_HOOK_PATH_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        paneflow_agent_config::stable_ai_hook_binary_path(),
+    ]
+}
+
+/// Pure core of the preference order, so the ordering is testable without
+/// mutating process env. A candidate that does not exist is skipped, never
+/// written into a hook command.
+fn first_existing(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.is_file())
+}
+
 pub(crate) fn resolve_hook_command(event: &str) -> String {
-    locate_sibling_hook_binary().map_or_else(
+    locate_hook_binary().map_or_else(
         || render_bare_hook_command(event),
         |path| render_hook_command(&path, event),
     )
@@ -376,6 +420,32 @@ fn hook_config_error(error: HookConfigError) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #542: the stable path must win over the version-pinned sibling,
+    /// and an env value naming a file that is gone must fall through rather
+    /// than be written into a hook command.
+    #[test]
+    fn stable_hook_paths_are_preferred_in_order() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let from_env = temp.path().join("env-paneflow-ai-hook");
+        let stable = temp.path().join("stable-paneflow-ai-hook");
+        std::fs::File::create(&stable).unwrap();
+
+        assert_eq!(
+            first_existing([Some(from_env.clone()), Some(stable.clone())]),
+            Some(stable.clone()),
+            "a missing env candidate must not shadow the stable path"
+        );
+
+        std::fs::File::create(&from_env).unwrap();
+        assert_eq!(
+            first_existing([Some(from_env.clone()), Some(stable)]),
+            Some(from_env),
+            "the app-supplied path wins - only it knows the build namespace"
+        );
+
+        assert_eq!(first_existing([None, None]), None);
+    }
 
     #[test]
     fn socket_reachability_rejects_absent_values() {

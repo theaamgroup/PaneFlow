@@ -2024,8 +2024,27 @@ fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
     // identify its own dir if a later code path routes into it.
     env.insert("PANEFLOW_BIN_DIR".into(), bin_dir.display().to_string());
 
+    // Issue #542: hand the shim the stable, non-versioned ai-hook path so the
+    // managed hook commands it writes into agent configs keep resolving after
+    // the next upgrade prunes `bin_dir` above. Only advertise a path that is
+    // on disk - the shim falls back to the version-pinned sibling otherwise,
+    // which is still better than a command naming a file that never existed.
+    match crate::runtime_paths::ai_hook_binary_path() {
+        Some(path) if path.is_file() => {
+            env.insert(AI_HOOK_PATH_ENV.into(), path.display().to_string());
+        }
+        _ => log::debug!(
+            "paneflow: stable ai-hook copy is absent; hooks will use the version-pinned cache path"
+        ),
+    }
+
     prepend_bin_dir_to_path(env, &bin_dir);
 }
+
+/// Env var the shim reads for the stable `paneflow-ai-hook` path (#542).
+/// Mirrors `paneflow_shim::hooks::AI_HOOK_PATH_ENV`; the two crates do not
+/// share a dependency edge, so the spelling is duplicated deliberately.
+const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
 
 fn reassert_paneflow_bin_dir_first(env: &mut std::collections::HashMap<String, String>) {
     let Some(bin_dir) = env.get("PANEFLOW_BIN_DIR").cloned() else {
@@ -2736,6 +2755,18 @@ impl Drop for TerminalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #542: the shim reads this env var to render hook commands that
+    /// survive an upgrade. The two crates share no dependency edge, so the
+    /// only thing keeping the spellings together is this test.
+    #[test]
+    fn the_shim_reads_the_same_ai_hook_path_env_var() {
+        let shim = include_str!("../../../crates/paneflow-shim/src/hooks.rs");
+        assert!(
+            shim.contains(&format!("AI_HOOK_PATH_ENV: &str = \"{AI_HOOK_PATH_ENV}\"")),
+            "paneflow-shim must read `{AI_HOOK_PATH_ENV}`; update both sides together"
+        );
+    }
 
     /// `RUST_LOG=info` must show the resolved shell next to the configured
     /// one: both values, in one line, whether or not a shell was configured.

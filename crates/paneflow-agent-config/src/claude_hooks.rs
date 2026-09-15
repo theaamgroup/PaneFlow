@@ -249,6 +249,95 @@ fn reconcile_valid_matcher_hooks(
     })
 }
 
+/// Strip PaneFlow-owned handlers whose hook program no longer exists (#544).
+///
+/// A leaked managed block - a pane killed by Sparkle's install-on-quit, a force
+/// close, a crash - is never reaped by the session-scoped guard, and after an
+/// upgrade prunes the version directory it named, every single agent tool call
+/// errors on a missing binary. Lease ownership is deliberately NOT consulted:
+/// a managed group naming a nonexistent program has no legitimate reading, so
+/// removing it can never destroy live configuration.
+///
+/// `program_missing` receives the command's program token (already confirmed
+/// to be a `paneflow-ai-hook` spelling). Neighboring user handlers in a shared
+/// matcher group survive, exactly as in [`remove_hooks_lenient`]. Returns
+/// whether anything was removed.
+pub fn remove_dead_hooks(root: &mut Value, program_missing: &dyn Fn(&str) -> bool) -> bool {
+    let Some(object) = root.as_object_mut() else {
+        return false;
+    };
+    let Some(hooks) = object.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let mut removed = false;
+    for event in CLAUDE_HOOK_EVENTS {
+        let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let removed_from_event = strip_dead_handlers(groups, program_missing);
+        removed |= removed_from_event;
+        if removed_from_event && groups.is_empty() {
+            hooks.remove(*event);
+        }
+    }
+    if removed && hooks.is_empty() {
+        object.remove("hooks");
+    }
+    removed
+}
+
+fn strip_dead_handlers(groups: &mut Vec<Value>, program_missing: &dyn Fn(&str) -> bool) -> bool {
+    let mut removed = false;
+    let mut index = 0;
+    while index < groups.len() {
+        let Some(group) = groups[index].as_object_mut() else {
+            index += 1;
+            continue;
+        };
+        let stripped = match group.get_mut("hooks").and_then(Value::as_array_mut) {
+            Some(handlers) => {
+                let before = handlers.len();
+                handlers.retain(|handler| !is_dead_managed_handler(handler, program_missing));
+                handlers.len() != before
+            }
+            None => false,
+        };
+        if !stripped {
+            index += 1;
+            continue;
+        }
+        removed = true;
+        // The marker claims ownership of the group. Once the last managed
+        // handler is gone it would orphan the surviving user handlers into a
+        // group a later cleanup deletes wholesale, so drop it with them.
+        let managed_remains = group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|handlers| handlers.iter().any(is_managed_handler));
+        if !managed_remains {
+            group.remove(MANAGED_MARKER);
+        }
+        let empty = group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        if empty || group.is_empty() {
+            groups.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    removed
+}
+
+fn is_dead_managed_handler(handler: &Value, program_missing: &dyn Fn(&str) -> bool) -> bool {
+    handler
+        .get("command")
+        .and_then(Value::as_str)
+        .and_then(paneflow_hook_program_token)
+        .is_some_and(|program| program_missing(&program))
+}
+
 pub fn remove_hooks(root: &mut Value) -> Result<bool, HookConfigError> {
     validate_shape(root)?;
     Ok(remove_hooks_lenient(root))
@@ -405,6 +494,89 @@ mod tests {
 
     fn command_for(path: &Path) -> impl Fn(&str) -> String + '_ {
         move |event| render_hook_command(path, event)
+    }
+
+    /// Issue #544: a leaked managed block whose binary is gone errors on every
+    /// tool call forever. Reaping it must not touch a live managed block or a
+    /// user handler that happens to share the matcher group.
+    #[test]
+    fn dead_managed_hooks_are_reaped_and_live_ones_are_not() {
+        let dead = "/Users/a/Library/Caches/paneflow/bin/0.5.0/paneflow-ai-hook";
+        let live = "/Users/a/Library/Application Support/paneflow/bin/paneflow-ai-hook";
+        let mut root = json!({
+            "permissions": { "allow": ["Bash"] },
+            "hooks": {
+                "PreToolUse": [{
+                    MANAGED_MARKER: true,
+                    "hooks": [{ "type": "command", "command": format!("{dead} PreToolUse") }]
+                }],
+                "Stop": [
+                    {
+                        MANAGED_MARKER: true,
+                        "hooks": [
+                            { "type": "command", "command": format!("{dead} Stop") },
+                            { "type": "command", "command": "my-own-hook" }
+                        ]
+                    },
+                    {
+                        MANAGED_MARKER: true,
+                        "hooks": [{ "type": "command", "command": format!("{live} Stop") }]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_dead_hooks(&mut root, &|program| program != live));
+
+        assert_eq!(
+            root,
+            json!({
+                "permissions": { "allow": ["Bash"] },
+                "hooks": {
+                    "Stop": [
+                        { "hooks": [{ "type": "command", "command": "my-own-hook" }] },
+                        {
+                            MANAGED_MARKER: true,
+                            "hooks": [{ "type": "command", "command": format!("{live} Stop") }]
+                        }
+                    ]
+                }
+            }),
+            "the dead group goes, the emptied event key goes, the user handler \
+             and the live managed group stay"
+        );
+    }
+
+    #[test]
+    fn reaping_dead_hooks_is_a_no_op_when_every_program_exists() {
+        let live = "/opt/paneflow/bin/paneflow-ai-hook";
+        let mut root = json!({
+            "hooks": {
+                "Stop": [{
+                    MANAGED_MARKER: true,
+                    "hooks": [{ "type": "command", "command": format!("{live} Stop") }]
+                }]
+            }
+        });
+        let before = root.clone();
+
+        assert!(!remove_dead_hooks(&mut root, &|_| false));
+        assert_eq!(root, before);
+    }
+
+    /// Only PaneFlow-owned commands are ever considered. A user hook naming a
+    /// missing program is their business, not ours.
+    #[test]
+    fn reaping_dead_hooks_ignores_unmanaged_commands() {
+        let mut root = json!({
+            "hooks": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "/nope/their-hook" }] }]
+            }
+        });
+        let before = root.clone();
+
+        assert!(!remove_dead_hooks(&mut root, &|_| true));
+        assert_eq!(root, before);
     }
 
     #[test]

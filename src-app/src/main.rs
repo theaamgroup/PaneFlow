@@ -3287,6 +3287,19 @@ fn main() {
         ),
     }
 
+    // Issue #542: materialize `paneflow-ai-hook` at the same stable,
+    // non-versioned path so the shim can render hook commands that survive an
+    // upgrade. Until this ran on a normal launch, the stable copy existed only
+    // after `paneflow hooks setup`, so every managed block was pinned to the
+    // version-scoped cache directory the next launch prunes. Same SHA-compared
+    // atomic write as the bridge, and equally non-fatal.
+    match ai_hooks::extract::ensure_ai_hook_extracted() {
+        Ok(path) => log::info!("paneflow: AI hook ready at {}", path.display()),
+        Err(e) => log::warn!(
+            "paneflow: AI hook extraction failed ({e:#}); agent hooks will fall back to the version-pinned cache copy"
+        ),
+    }
+
     application()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
