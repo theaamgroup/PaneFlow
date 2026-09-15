@@ -19,10 +19,11 @@ jobs:
   safety:
     runs-on: ubuntu-latest
     steps:
-      # Never check out or execute the PR head with this write-enabled token.
+      # Both PR heads and stacked PR bases are untrusted. Execute policy only
+      # from protected main, never from either PR-supplied revision.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: refs/heads/main
           persist-credentials: false
       - name: Test trusted policy
         run: node --test scripts/agent-policy.test.cjs

@@ -4,6 +4,16 @@ const { route, pathRisks, sync } = require('./agent-policy.cjs');
 const owner = [{ type: 'User', login: 'maintainer' }];
 const base = ['severity:high', 'area:app', 'lens:correctness', 'safety:none', 'ready-for-agent'];
 
+test('privileged policy checkout uses protected main, including stacked PRs', () => {
+  const { readFileSync } = require('node:fs');
+  const workflow = readFileSync(require('node:path').join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
+  const refs = workflow.split('\n').filter(line => /^\s+ref:/.test(line));
+  assert.deepEqual(refs, ['          ref: refs/heads/main']);
+  assert.ok(!workflow.includes('pull_request.base.sha'));
+  assert.ok(!workflow.includes('pull_request.head.sha'));
+  assert.ok(workflow.includes('persist-credentials: false'));
+});
+
 test('complete safe issue remains eligible; unrelated labels survive', () => {
   assert.deepEqual(route([...base, 'bug'], owner), [...base, 'bug'].sort());
 });
