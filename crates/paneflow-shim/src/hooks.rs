@@ -338,7 +338,7 @@ pub(crate) const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
 /// agent tool call then fails with "No such file or directory". The sibling
 /// stays as a fallback so a pane launched by an older app still gets hooks.
 fn locate_hook_binary() -> Option<PathBuf> {
-    first_existing(stable_hook_binary_candidates()).or_else(locate_sibling_hook_binary)
+    first_executable(stable_hook_binary_candidates()).or_else(locate_sibling_hook_binary)
 }
 
 fn stable_hook_binary_candidates() -> [Option<PathBuf>; 2] {
@@ -351,13 +351,21 @@ fn stable_hook_binary_candidates() -> [Option<PathBuf>; 2] {
 }
 
 /// Pure core of the preference order, so the ordering is testable without
-/// mutating process env. A candidate that does not exist is skipped, never
-/// written into a hook command.
-fn first_existing(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Option<PathBuf> {
+/// mutating process env. A candidate that is missing **or not executable** is
+/// skipped, never written into a hook command: a stable copy stripped of `+x`
+/// (a backup restore, a stray `chmod`) would otherwise shadow the runnable
+/// sibling and turn every hook into `Permission denied`.
+fn first_executable(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Option<PathBuf> {
     candidates
         .into_iter()
         .flatten()
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| candidate.is_file() && is_executable(candidate))
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
 }
 
 pub(crate) fn resolve_hook_command(event: &str) -> String {
@@ -429,22 +437,49 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let from_env = temp.path().join("env-paneflow-ai-hook");
         let stable = temp.path().join("stable-paneflow-ai-hook");
-        std::fs::File::create(&stable).unwrap();
+        create_executable(&stable);
 
         assert_eq!(
-            first_existing([Some(from_env.clone()), Some(stable.clone())]),
+            first_executable([Some(from_env.clone()), Some(stable.clone())]),
             Some(stable.clone()),
             "a missing env candidate must not shadow the stable path"
         );
 
-        std::fs::File::create(&from_env).unwrap();
+        create_executable(&from_env);
         assert_eq!(
-            first_existing([Some(from_env.clone()), Some(stable)]),
+            first_executable([Some(from_env.clone()), Some(stable)]),
             Some(from_env),
             "the app-supplied path wins - only it knows the build namespace"
         );
 
-        assert_eq!(first_existing([None, None]), None);
+        assert_eq!(first_executable([None, None]), None);
+    }
+
+    /// A stable copy stripped of `+x` must fall through to the runnable
+    /// sibling rather than pin every hook command to `Permission denied`.
+    #[test]
+    fn a_non_executable_candidate_is_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let stripped = temp.path().join("stripped-paneflow-ai-hook");
+        create_executable(&stripped);
+        std::fs::set_permissions(&stripped, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let usable = temp.path().join("usable-paneflow-ai-hook");
+        create_executable(&usable);
+
+        assert_eq!(
+            first_executable([Some(stripped.clone()), Some(usable.clone())]),
+            Some(usable)
+        );
+        assert_eq!(first_executable([Some(stripped)]), None);
+    }
+
+    fn create_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::File::create(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]

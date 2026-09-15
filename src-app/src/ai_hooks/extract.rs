@@ -317,8 +317,13 @@ pub(crate) fn extract_into(entries: &[Entry<'_>], target_dir: &Path) -> Result<(
         // Idempotency fast-path: existing file with matching digest is
         // kept as-is - avoids rewriting the file on every launch and
         // therefore avoids bumping its mtime, which can trip
-        // code-signing / notarization verifiers.
+        // code-signing / notarization verifiers. The mode is still
+        // repaired: the bytes matching says nothing about the permission
+        // bits, and a copy stripped of `+x` (a backup restore, a stray
+        // `chmod`) would otherwise stay unrunnable forever, because this
+        // path is the only one a correct-bytes file ever takes.
         if file_matches_digest(&final_path, entry.bytes)? {
+            ensure_executable(&final_path)?;
             continue;
         }
 
@@ -343,6 +348,25 @@ pub(crate) fn extract_into(entries: &[Entry<'_>], target_dir: &Path) -> Result<(
     }
 
     Ok(())
+}
+
+/// Restore mode `0o755` on an already-correct extracted binary when the
+/// execute bit has gone missing. A no-op when the file is already
+/// executable, so the common launch path does no write at all and the
+/// mtime stays put for code-signing verifiers.
+#[cfg(unix)]
+fn ensure_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(path)
+        .with_context(|| format!("US-008: stat {} failed", path.display()))?
+        .permissions()
+        .mode();
+    if mode & 0o111 == 0o111 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("US-008: chmod 0o755 on {} failed", path.display()))
 }
 
 /// Compute the SHA256 of `bytes`.
@@ -515,6 +539,31 @@ mod tests {
         assert_eq!(
             claude, codex,
             "US-008 AC: claude and codex are both copies of paneflow-shim"
+        );
+    }
+
+    /// The digest fast-path is the only branch a correct-bytes file ever
+    /// takes, so it has to repair the mode too. Without this, a copy whose
+    /// `+x` was stripped (backup restore, stray `chmod`) stays unrunnable
+    /// across every future launch while its bytes keep matching.
+    #[test]
+    fn re_extraction_restores_a_stripped_execute_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let entries = synthetic_entries();
+        extract_into(&entries, dir.path()).unwrap();
+
+        let victim = dir.path().join(&entries[0].filename);
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        extract_into(&entries, dir.path()).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the fast-path must repair a stripped execute bit on {}",
+            victim.display()
         );
     }
 

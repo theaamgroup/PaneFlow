@@ -2027,14 +2027,15 @@ fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
     // Issue #542: hand the shim the stable, non-versioned ai-hook path so the
     // managed hook commands it writes into agent configs keep resolving after
     // the next upgrade prunes `bin_dir` above. Only advertise a path that is
-    // on disk - the shim falls back to the version-pinned sibling otherwise,
-    // which is still better than a command naming a file that never existed.
+    // on disk AND runnable - a copy stripped of `+x` would otherwise shadow
+    // the executable sibling and turn every hook into `Permission denied`.
+    // Launch extraction repairs the mode, so this should not normally reject.
     match crate::runtime_paths::ai_hook_binary_path() {
-        Some(path) if path.is_file() => {
+        Some(path) if is_executable_file(&path) => {
             env.insert(AI_HOOK_PATH_ENV.into(), path.display().to_string());
         }
         _ => log::debug!(
-            "paneflow: stable ai-hook copy is absent; hooks will use the version-pinned cache path"
+            "paneflow: stable ai-hook copy is absent or not executable; hooks will use the version-pinned cache path"
         ),
     }
 
@@ -2045,6 +2046,16 @@ fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
 /// Mirrors `paneflow_shim::hooks::AI_HOOK_PATH_ENV`; the two crates do not
 /// share a dependency edge, so the spelling is duplicated deliberately.
 const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
+
+/// Whether `path` is a regular file with at least one execute bit set.
+/// Mirrors the shim's own candidate test so both ends agree on what counts
+/// as a usable hook binary.
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
 
 fn reassert_paneflow_bin_dir_first(env: &mut std::collections::HashMap<String, String>) {
     let Some(bin_dir) = env.get("PANEFLOW_BIN_DIR").cloned() else {
