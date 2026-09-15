@@ -51,9 +51,29 @@ macOS only. Metal, AppKit, vendored `libghostty-vt` (the one and only terminal e
 ## Deeper reference
 `CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. Open work lives in GitHub issues. `docs/fork/STATE.md` is the living handoff (landed work, verification commands, method rules). `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and the traps register. Read those before touching platform code. `DESIGN.md` is the design contract for the native UI - visual thesis, color roles, geometry, motion, component contracts, accessibility floors, and the UI delivery gate; read it before changing any surface, and update it in the same pull request as the change. Do not duplicate their content here.
 
+## Pull requests
+
+Agent-opened pull requests start with these two fields, nothing above them:
+
+What changed: Two sentences explaining the change and why.
+Needs your attention: Outstanding decisions, risks, or untested behavior. Say “None” when appropriate.
+
+Then the rest of the body (Closes, Testing, and anything else this file or `CLAUDE.md` requires).
+
+Reviewers keep exactly one conversation comment that starts with `[grok-review-handoff]`:
+
+N fixed · N declined · N unresolved
+Human decision: None | Agent declined the <finding> because <reason>. | Needs human: <question>
+Checks: Passed on the latest commit. | Pending. | Failed: <name>
+Details: <url of the latest review>
+
+fixed = confirmed defects addressed with a SHA. declined = skipped because it failed the Code Review Rules bar. unresolved = open confirmed defects still to fix.
+
+Do not merge while Human decision starts with “Needs human” or unresolved is greater than 0. Agent-declined findings do not hold merge.
+
 ## Code Review Rules
 
-Codex GitHub code review (`chatgpt-codex-connector`) reads this section. Every posted finding uses the same bar as the Grok reviewers.
+GitHub code review (Codex `chatgpt-codex-connector`, Grok automations, and any other agent that posts findings) follows this section. Every posted finding uses this bar.
 
 Report actionable issues introduced by this change. Explain the triggering condition, the consequence, and the relevant code. Avoid style preferences covered by tooling, speculative improvements, repeated findings, and narration. Distinguish confirmed defects from questions requiring human judgment.
 
