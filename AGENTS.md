@@ -51,41 +51,137 @@ macOS only. Metal, AppKit, vendored `libghostty-vt` (the one and only terminal e
 ## Deeper reference
 `CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. Open work lives in GitHub issues. `docs/fork/STATE.md` is the living handoff (landed work, verification commands, method rules). `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and the traps register. Read those before touching platform code. `DESIGN.md` is the design contract for the native UI - visual thesis, color roles, geometry, motion, component contracts, accessibility floors, and the UI delivery gate; read it before changing any surface, and update it in the same pull request as the change. Do not duplicate their content here.
 
-## Pull requests
+## Shared agent workflow
 
-Agent-opened pull requests start with these two fields, nothing above them:
+These rules apply to Grok, Cursor, Claude, Codex, and all scheduled automations.
 
-What changed: Two sentences explaining the change and why.
-Needs your attention: Outstanding decisions, risks, or untested behavior. Say “None” when appropriate.
+1. Confirm the defect, search for duplicates, then file an issue with trigger,
+   impact, expected behavior, and file/line evidence.
+2. Set severity, area, lens, safety categories, and a human assignee. Assign the
+   last substantive human author (line history/originating PR, skipping bots
+   and formatting-only changes). Fall back to a human code owner; never guess.
+3. The assignee confirms, corrects, reassigns, or closes it on the issue.
+4. One issue, one PR. Combine only inseparable fixes and explain the exception.
+5. Incomplete PRs stay draft. Drafts get CI but no automated review.
+6. Run applicable checks on the current commit; missing verification is not a pass.
+7. Codex is the only automatic PR reviewer of record. Other agents discover,
+   implement, and answer findings; additional code reviews require a human request.
+8. The author replies to each thread with `Fixed in <sha>: <verification>` or
+   `Declined: <reason and evidence>`, then resolves it. Reviewers never resolve
+   their own findings. A human resolves threads on flagged agent-authored PRs.
+9. A human signs off and executes every merge. Agents never self-approve, merge,
+   enable auto-merge, bypass protection, or directly push main.
 
-Then the rest of the body (Closes, Testing, and anything else this file or `CLAUDE.md` requires).
+### Metadata and safety
 
-Reviewers keep exactly one conversation comment that starts with `[grok-review-handoff]`:
+Use exactly one severity, area, lens, and state:
+- Severity: `severity:critical` (serious security/data/core-use impact),
+  `severity:high` (material failure), `severity:medium` (demonstrated narrower
+  defect), `severity:low` (minor actionable defect).
+- Area: `area:app`, `area:terminal`, `area:agents`, `area:config`, `area:platform`.
+- Lens: `lens:correctness`, `lens:security`, `lens:perf`, `lens:a11y`,
+  `lens:arch`, `lens:data`.
+- State: `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
 
-N fixed · N declined · N unresolved
-Human decision: None | Agent declined the <finding> because <reason>. | Needs human: <question>
-Checks: Passed on the latest commit. | Pending. | Failed: <name>
-Details: <url of the latest review>
+Record every applicable `safety:<category>`: `database` (stored data/schema/
+destructive operations), `ui` (visible behavior/accessibility), `money`
+(financial logic), `access` (credentials/auth/ownership), `integration`
+(external services/API contracts), `platform-wide` (shared ungated behavior),
+`release` (versions, CI, packaging, signing, deployment). Use `safety:none`
+only after checking all categories.
 
-fixed = confirmed defects addressed with a SHA. declined = skipped because it failed the Code Review Rules bar. unresolved = open confirmed defects still to fix.
+Any risk category mechanically adds `needs-human-review`, removes
+`ready-for-agent`, and routes fully classified items to `ready-for-human`.
+Missing classification, owner, or metadata keeps the item in `needs-info`
+with any safety hold intact and blocks unattended work. Tests and agent confidence never
+clear the hold. A human may direct flagged implementation; the flag remains
+through human verification and merge. Only a human corrects mistaken safety
+classifications. Carry issue risk categories to its PR.
 
-Do not merge while Human decision starts with “Needs human” or unresolved is greater than 0. Agent-declined findings do not hold merge.
+To promote a fully classified item from `needs-info`, add `ready-for-agent`
+or `ready-for-human`; routing removes the previous state. Missing metadata
+and safety holds still take precedence. Open `wontfix` items also require
+complete metadata; otherwise they remain in `needs-info`. PRs with more than
+20 resolved issue links receive a human-review hold without individual issue
+fetches. GitHub’s resolved closing references, including manual links, define
+the linked issues; raw Markdown examples do not establish eligibility.
+
+The workflow derives additional conservative path flags:
+`src-app/`, `assets/`, `DESIGN.md` → ui;
+`crates/`, `schemas/`, `examples/`, `mcps/` → integration;
+`native/` → platform-wide;
+`.github/`, `.agents/`, `.claude/`, `.cursor/`, `scripts/`, `skills/`, `packaging/`,
+manifests/lockfiles, toolchains, deny/clippy configuration, and agent instructions
+→ release. These are minimum flags, not exhaustive behavior classification.
+
+Legacy labels are renamed: major → high, minor → medium, trivial → low,
+blocked-human-review → needs-human-review. Do not recreate them.
+
+### Automation responsibilities
+
+- Find: create/update evidence-backed issues with the metadata above. Missing
+  evidence or ownership means `needs-info`; no speculative finding dumps.
+- Fix: recheck eligibility immediately before starting. Unattended work needs
+  complete metadata, a human owner, `ready-for-agent`, `safety:none`, and no
+  human-review hold. Stop if scope adds risk unless a human authorizes the work.
+- Review: Codex reviews non-draft PRs and refreshes coverage after changes.
+  Grok's review automation checks handoff readiness and responds as author
+  where appropriate; it does not post a competing code review.
+- Merge: prepare the handoff below, then stop for a human. Never invoke
+  `gh pr merge`, merge APIs, auto-merge, or direct pushes to main.
+
+### Pull requests and handoff
+
+Start with two plain paragraphs under 150 words combined, nothing above them:
+
+What changed: Explain the final change and why. Link the issue with `Closes #N`.
+
+Needs your attention: State verification performed and gaps, the human decision
+or inspection needed, and deployment/rollback requirements. Say “None” when no
+special decision remains; human sign-off is still required.
+
+Link detailed evidence below if necessary. No file inventories, repeated fix
+histories, copied logs, generic checklists, or progress-comment streams.
+
+The handoff automation edits at most one top-level summary. Retain the existing
+`[grok-review-handoff]` marker for compatibility (reporter, not second reviewer):
+
+> Reviewed <sha> · N fixed · N declined · N open · CI <status>
+> Human action: <decision or sign-off>
+> Details: <review/evidence links>
+
+Count fixed findings only with a commit SHA. Keep declines and blockers visible,
+including blockers tracked in issues. No empty reviews or “no findings” comments.
+Ready for handoff requires current-head Codex review, current required checks,
+zero unresolved threads, and no outstanding blockers. Pending, cancelled,
+failed, or stale review is not clean. New commits need refreshed verification.
+A human inspects declines/gaps and directly verifies flagged work.
+
+### Verification and enforcement
+
+Never weaken checks to get green. Behavior changes need tests executing the
+affected behavior; access rules need allowed/denied cases. UI changes require
+visual evidence and human inspection. Report unavailable verification honestly.
+For policy-only changes run `node --test scripts/agent-policy.test.cjs` and
+`actionlint .github/workflows/agent-safety.yml`. Rust checks above remain
+applicable when Rust behavior changes.
+
+The required aggregate CI check is `tests_pass`; its path-selected lanes live
+in `.github/workflows/run_tests.yml`. GitHub protection enforces approvals,
+current checks, and resolved conversations. Reviewer identity and human-only
+merging also require these agent instructions; labels alone do not enforce them.
+The safety workflow activates when merged to main.
 
 ## Code Review Rules
 
-GitHub code review (Codex `chatgpt-codex-connector`, Grok automations, and any other agent that posts findings) follows this section. Every posted finding uses this bar.
+Report actionable defects introduced by this diff: specific trigger, consequence,
+and file/line supported by a test or clear code path. State uncertainty honestly.
+Check existing threads before posting. Use canonical severity words; prioritize
+critical/high inline, summarize meaningful medium findings with links, and omit
+low-priority nits. Never inflate severity to fit a tool's priority filter.
 
-Report actionable issues introduced by this change. Explain the triggering condition, the consequence, and the relevant code. Avoid style preferences covered by tooling, speculative improvements, repeated findings, and narration. Distinguish confirmed defects from questions requiring human judgment.
-
-A useful comment sounds like:
-
-> When the customer changes stores, the previous store’s inventory remains cached, so unavailable products can appear purchasable.
-
-That gives a maintainer something specific to assess. “Consider improving cache handling” does not. Do not post the latter shape.
-
-- Post only confirmed defects: a specific input or condition in this diff that produces a wrong or unsafe result. Name the triggering condition, the consequence, and `file:line`. If you cannot name all three, drop it.
-- On GitHub, Codex flags P0 and P1 only. Map blocker (security, data loss, crash or wrong result on a main path) to P0 and should-fix (specific failure path before merge) to P1. Do not invent a lower severity to sneak style through.
-- Leave rustfmt, clippy, naming, import order, comment density, coverage-as-a-note, and docs typos to CI. Do not treat them as P1.
-- Do not post speculative improvements, “consider improving…”, “you might want to…”, restatements of the diff, or a finding already open on the PR.
-- Questions that need human judgment (product intent, two valid designs) are not defects. Do not post them as P0/P1. If they must be asked, one question with the options and what breaks if we guess wrong.
-- A finding that contradicts this file or `CLAUDE.md` is not a finding. Claims are facts (no may/might/could/seems).
+One concise thread per defect; target at most ten by grouping related occurrences
+and linking overflow blockers in the maintained summary. Never hide a blocker to
+meet the limit. No formatting preferences, speculative improvements, duplicates,
+or narration. Re-review adds only new findings/evidence. Ask product/design
+questions separately from defects, once, with the decision needed.
