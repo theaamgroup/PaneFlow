@@ -101,7 +101,7 @@ The workflow derives additional conservative path flags:
 `src-app/`, `assets/`, `DESIGN.md` → ui;
 `crates/`, `schemas/`, `examples/` → integration;
 `native/` → platform-wide;
-`.github/`, `scripts/`, manifests/lockfiles, toolchains, and agent instructions
+`.github/`, `scripts/`, `skills/`, manifests/lockfiles, toolchains, and agent instructions
 → release. These are minimum flags, not exhaustive behavior classification.
 
 Legacy labels are renamed: major → high, minor → medium, trivial → low,

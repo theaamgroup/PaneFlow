@@ -41,10 +41,36 @@ test('existing human hold is never automatically cleared', () => {
   assert.ok(!route([...base, 'needs-human-review'], owner).includes('ready-for-agent'));
 });
 test('paths and linked issue flags add risk; renames handled by caller', () => {
+  assert.deepEqual(pathRisks(['skills/paneflow-conductor/SKILL.md']), ['safety:release']);
+  assert.deepEqual(pathRisks(['.agents/skills/example/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['src-app/src/main.rs', '.github/workflows/test.yml', 'crates/x/src/lib.rs', 'native/a']), ['safety:ui', 'safety:release', 'safety:integration', 'safety:platform-wide']);
   assert.ok(route(base, owner, [], ['safety:access']).includes('needs-human-review'));
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
 });
+
+for (const variant of ['eligible', 'missing-safety', 'missing-owner', 'needs-info', 'closed']) {
+  test(`linked issue eligibility: ${variant}`, async () => {
+    const additions = [], removals = [];
+    const issueLabels = variant === 'missing-safety' ? base.filter(l => l !== 'safety:none')
+      : variant === 'needs-info' ? base.map(l => l === 'ready-for-agent' ? 'needs-info' : l) : base;
+    const github = {
+      paginate: async () => [{ filename: 'docs/guide.md' }],
+      rest: {
+        pulls: { listFiles: {} },
+        issues: {
+          get: async ({ issue_number }) => ({ data: issue_number === 7
+            ? { state: 'open', body: 'Closes #9', labels: base.map(name => ({ name })), assignees: owner }
+            : { state: variant === 'closed' ? 'closed' : 'open', labels: issueLabels.map(name => ({ name })), assignees: variant === 'missing-owner' ? [] : owner } }),
+          addLabels: async ({ labels }) => additions.push(...labels),
+          removeLabel: async ({ name }) => removals.push(name),
+        },
+      },
+    };
+    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {} } });
+    assert.equal(additions.includes('needs-human-review'), variant !== 'eligible');
+    assert.equal(removals.includes('ready-for-agent'), variant !== 'eligible');
+  });
+}
 test('routing is idempotent and never promotes needs-info', () => {
   const first = route([...base, 'safety:ui'], owner);
   assert.deepEqual(route(first, owner), first);

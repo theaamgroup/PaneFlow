@@ -13,7 +13,7 @@ function pathRisks(paths) {
     if (/^(src-app\/|assets\/|DESIGN\.md$)/.test(path)) result.add('safety:ui');
     if (/^(crates\/|schemas\/|examples\/)/.test(path)) result.add('safety:integration');
     if (/^native\//.test(path)) result.add('safety:platform-wide');
-    if (/^(\.github\/|scripts\/)|(^|\/)(Cargo\.(toml|lock)|rust-toolchain(\.toml)?|AGENTS\.md|CLAUDE\.md)$/.test(path)) result.add('safety:release');
+    if (/^(\.github\/|scripts\/|skills\/)|(^|\/)(Cargo\.(toml|lock)|rust-toolchain(\.toml)?|AGENTS\.md|CLAUDE\.md|SKILL\.md)$/.test(path)) result.add('safety:release');
   }
   return [...result];
 }
@@ -67,6 +67,9 @@ async function sync({ github, context, core }) {
         const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
         if (issue.pull_request) continue;
         inherited.push(...issue.labels.map(l => l.name));
+        if (issue.state !== 'open' || !route(issue.labels.map(l => l.name), issue.assignees || []).includes('ready-for-agent')) {
+          inherited.push('needs-human-review');
+        }
       } catch (error) {
         // Unknown issue classification cannot make a PR eligible. Preserve
         // path routing even when a closing reference is missing/inaccessible.
