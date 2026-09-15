@@ -1,5 +1,8 @@
 # CLAUDE.md - PaneFlow
 
+Read `AGENTS.md` first. Its shared agent workflow governs issue metadata,
+safety routing, PR reviews, and human-only merge handoff for every agent.
+
 Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework; VT emulation is Ghostty's `libghostty-vt`, statically linked from a vendored archive (`native/libghostty/`), with PaneFlow owning the PTY through `portable-pty`. **This fork is macOS only.**
 
 Fork context, decisions, the upstream leak register, and the traps register live in `docs/fork/2026-08-25-mac-only-fork-design.md`. **Read it before touching platform code.** It records which `#[cfg]` sites are load-bearing on macOS, which look like cruft and are not, and which upstream endpoints still point at the original author's repo.

@@ -1,0 +1,33 @@
+name: Agent safety routing
+
+on:
+  issues:
+    types: [opened, reopened, edited, labeled, unlabeled, assigned, unassigned]
+  pull_request_target:
+    types: [opened, reopened, edited, synchronize, labeled, unlabeled, assigned, unassigned, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: agent-safety-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    steps:
+      # Never check out or execute the PR head with this write-enabled token.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - name: Test trusted policy
+        run: node --test scripts/agent-policy.test.cjs
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { sync } = require('./scripts/agent-policy.cjs');
+            await sync({ github, context, core });

@@ -133,7 +133,7 @@ jobs:
             } > issue-body.md
             gh issue create \
               --title "${TITLE}" \
-              --label "security,automated" \
+              --label "lens:security,area:platform,safety:release,needs-human-review,needs-info" \
               --body-file issue-body.md
           else
             gh issue comment "${EXISTING}" \

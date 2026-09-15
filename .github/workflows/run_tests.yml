@@ -38,6 +38,17 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  agent_policy_tests:
+    name: Agent policy tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: node --test scripts/agent-policy.test.cjs
+
   # Mirrors Zed's `orchestrate` job pattern (run_tests.yml in
   # zed-industries/zed): a cheap path filter that gates every
   # expensive downstream leg on what the PR actually touched.
@@ -698,6 +709,7 @@ jobs:
   tests_pass:
     name: tests_pass
     needs:
+      - agent_policy_tests
       - orchestrate
       - platform_census
       - macos_check
@@ -720,6 +732,7 @@ jobs:
       - name: Aggregate upstream results
         env:
           RESULT_ORCHESTRATE: ${{ needs.orchestrate.result }}
+          RESULT_AGENT_POLICY: ${{ needs.agent_policy_tests.result }}
           RESULT_PLATFORM_CENSUS: ${{ needs.platform_census.result }}
           RESULT_MACOS_CHECK: ${{ needs.macos_check.result }}
           RESULT_MACOS_RENDER_SMOKE: ${{ needs.macos_render_smoke.result }}
@@ -727,6 +740,10 @@ jobs:
         run: |
           set +x
           EXIT_CODE=0
+          if [[ "$RESULT_AGENT_POLICY" != "success" ]]; then
+            echo "Agent policy tests must succeed: $RESULT_AGENT_POLICY"
+            EXIT_CODE=1
+          fi
 
           check_result() {
             echo "* $1: $2"
