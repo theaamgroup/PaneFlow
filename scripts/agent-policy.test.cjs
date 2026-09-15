@@ -72,19 +72,52 @@ test('issue label changes propagate to an existing linked PR', async () => {
     rest: {
       pulls: { list: 'pulls', listFiles: 'files' },
       issues: {
-        get: async ({ issue_number }) => ({ data: {
+        get: async ({ owner: repoOwner, repo, issue_number }) => {
+          assert.equal(repoOwner, 'org');
+          assert.equal(repo, 'repo');
+          return { data: {
           state: 'open', assignees: owner,
           body: issue_number === 7 ? 'Fixes https://github.com/org/repo/issues/9' : '',
           labels: (issue_number === 7 ? base : [...base, 'safety:access']).map(name => ({ name })),
-        } }),
+          } };
+        },
         addLabels: async (args) => writes.push(args),
         removeLabel: async () => {},
       },
     },
   };
-  await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { issue: { number: 9 } } }, core: { info() {} } });
+  class Context {
+    get repo() { return { owner: 'org', repo: 'repo' }; }
+  }
+  const context = new Context();
+  context.payload = { issue: { number: 9 } };
+  await sync({ github, context, core: { info() {} } });
   assert.ok(writes.some(w => w.issue_number === 7 && w.labels.includes('needs-human-review')));
 });
+
+for (const status of [404, 403, 500]) {
+  test(`unreadable linked issue (${status}) retains path and human holds`, async () => {
+    const additions = [], failures = [];
+    const github = {
+      paginate: async () => [{ filename: 'src-app/main.rs' }],
+      rest: {
+        pulls: { listFiles: {} },
+        issues: {
+          get: async ({ issue_number }) => {
+            if (issue_number === 999) throw Object.assign(new Error('unavailable'), { status });
+            return { data: { state: 'open', body: 'Closes #999', labels: base.map(name => ({ name })), assignees: owner } };
+          },
+          addLabels: async ({ labels }) => additions.push(...labels),
+          removeLabel: async () => {},
+        },
+      },
+    };
+    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } } });
+    assert.ok(additions.includes('safety:ui'));
+    assert.ok(additions.includes('needs-human-review'));
+    assert.equal(failures.length, status === 404 ? 0 : 1);
+  });
+}
 
 test('all four fork-runner guards from b227ca1 remain intact', () => {
   const { readFileSync } = require('node:fs');

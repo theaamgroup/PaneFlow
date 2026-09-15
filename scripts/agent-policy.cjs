@@ -63,9 +63,17 @@ async function sync({ github, context, core }) {
     const escaped = `${repo.owner}/${repo.repo}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const refs = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+(?:#|https://github\\.com/${escaped}/issues/)(\\d+)`, 'gi');
     for (const id of new Set([...String(item.body || '').matchAll(refs)].map(m => Number(m[1])))) {
-      const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
-      if (issue.pull_request) continue;
-      inherited.push(...issue.labels.map(l => l.name));
+      try {
+        const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
+        if (issue.pull_request) continue;
+        inherited.push(...issue.labels.map(l => l.name));
+      } catch (error) {
+        // Unknown issue classification cannot make a PR eligible. Preserve
+        // path routing even when a closing reference is missing/inaccessible.
+        inherited.push('needs-human-review');
+        core.warning(`Cannot classify linked issue #${id}; retaining a human-review hold.`);
+        if (error.status !== 404) core.setFailed(`Linked issue #${id} could not be read.`);
+      }
     }
   }
   const before = item.labels.map(l => l.name);
@@ -81,7 +89,7 @@ async function sync({ github, context, core }) {
   if (event.issue) {
     // A newly flagged issue must also flag its already-open linked PRs.
     const pulls = await github.paginate(github.rest.pulls.list, { ...repo, state: 'open', per_page: 100 });
-    for (const pull of pulls) await sync({ github, core, context: { ...context, payload: { pull_request: { number: pull.number } } } });
+    for (const pull of pulls) await sync({ github, core, context: { repo, payload: { pull_request: { number: pull.number } } } });
   }
 }
 
