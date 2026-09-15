@@ -120,6 +120,18 @@ pub fn linked_worktree_main_checkout(cwd: &Path) -> Option<PathBuf> {
         .ancestors()
         .map(|ancestor| ancestor.join(".git"))
         .find(|candidate| candidate.exists())?;
+    // A symlinked `.git` is an alias, not membership. Pointed at another
+    // worktree's real `.git` file it passes every check below - reading
+    // follows the link and canonicalizing collapses the alias onto the
+    // legitimate target - so an untrusted directory would inherit that
+    // worktree's main checkout and have PaneFlow write into its
+    // `.claude/settings.local.json`, with no control over the victim's git
+    // metadata required. Same policy the project-local hook files already
+    // apply (#234): a link inside a checkout is the checkout's to control,
+    // not the user's.
+    if std::fs::symlink_metadata(&pointer).ok()?.is_symlink() {
+        return None;
+    }
     if pointer.is_dir() {
         return None;
     }
@@ -465,6 +477,32 @@ mod tests {
             linked_worktree_main_checkout(&hostile),
             None,
             "an admin dir outside <common>/worktrees/ must not select that common dir"
+        );
+    }
+
+    /// A `.git` that is a symlink to another worktree's real `.git` file
+    /// passes every content check - reading follows the link, and
+    /// canonicalizing collapses the alias onto the genuine target - so it must
+    /// be rejected on the link itself. This needs no control over the victim's
+    /// git metadata, only a symlink in a directory someone launches an agent in.
+    #[test]
+    fn a_symlinked_git_pointer_cannot_borrow_another_worktree() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let Some((main, worktree)) = real_worktree(temp.path(), &[]) else {
+            eprintln!("skip: git is unavailable in this environment");
+            return;
+        };
+        // Precondition: the genuine worktree really does resolve.
+        assert_eq!(linked_worktree_main_checkout(&worktree), Some(main));
+
+        let hostile = temp.path().join("hostile");
+        std::fs::create_dir_all(&hostile).unwrap();
+        std::os::unix::fs::symlink(worktree.join(".git"), hostile.join(".git")).unwrap();
+
+        assert_eq!(
+            linked_worktree_main_checkout(&hostile),
+            None,
+            "a symlinked .git must not borrow another worktree's main checkout"
         );
     }
 
