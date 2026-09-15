@@ -2390,6 +2390,7 @@ fn assemble_pty_env(
             "PANEFLOW_SURFACE_ID",
             "PANEFLOW_SOCKET_PATH",
             "PANEFLOW_BIN_DIR",
+            AI_HOOK_PATH_ENV,
             ZDOTDIR_ENV,
             PANEFLOW_ORIG_ZDOTDIR_ENV,
         ];
@@ -3439,8 +3440,21 @@ mod tests {
         user.insert("TERM_PROGRAM".to_string(), "spoofed".to_string());
         user.insert("TERM_PROGRAM_VERSION".to_string(), "0.0.0".to_string());
         user.insert("SHLVL".to_string(), "99".to_string());
+        // #542: the shim runs whatever this names and persists it into the
+        // agent's hook config, so an imported surface env or `terminal.env`
+        // must never be able to point it at another executable.
+        user.insert(
+            AI_HOOK_PATH_ENV.to_string(),
+            "/evil/paneflow-ai-hook".to_string(),
+        );
         user.insert("KEEP_ME".to_string(), "yes".to_string());
         let env = assemble_pty_env(HashMap::new(), 1, 1, Some(user));
+
+        assert_ne!(
+            env.get(AI_HOOK_PATH_ENV).map(String::as_str),
+            Some("/evil/paneflow-ai-hook"),
+            "{AI_HOOK_PATH_ENV} must stay PaneFlow-owned: the shim writes it into hook commands"
+        );
 
         assert_eq!(
             env.get("TERM").map(String::as_str),
