@@ -141,6 +141,12 @@ pub fn linked_worktree_main_checkout(cwd: &Path) -> Option<PathBuf> {
 /// created, so this is the check that ties an administrative directory to the
 /// worktree claiming it. A missing, unreadable, or non-matching backlink fails
 /// closed.
+///
+/// The stored value is relative to the administrative directory when the
+/// worktree was created or repaired with `--relative-paths`
+/// (`worktree.useRelativePaths`), so it resolves against `gitdir` - never
+/// against the shim's process cwd, which would fail every such repository and
+/// silently put the hooks back under the worktree.
 fn backlink_points_at(gitdir: &Path, pointer: &Path) -> bool {
     let Ok(Some(backlink)) = crate::io::read_optional_text(&gitdir.join("gitdir")) else {
         return false;
@@ -149,8 +155,9 @@ fn backlink_points_at(gitdir: &Path, pointer: &Path) -> bool {
     if backlink.is_empty() {
         return false;
     }
+    let backlink = resolve_against(PathBuf::from(backlink), gitdir);
     let (Ok(backlink), Ok(pointer)) = (
-        std::fs::canonicalize(Path::new(backlink)),
+        std::fs::canonicalize(backlink),
         std::fs::canonicalize(pointer),
     ) else {
         return false;
@@ -160,8 +167,16 @@ fn backlink_points_at(gitdir: &Path, pointer: &Path) -> bool {
 
 /// Main checkout root from a verified administrative directory, via its
 /// `commondir` (git's own indirection) with the conventional `../..` layout as
-/// the fallback. The common dir must be a real `.git` directory, which is what
-/// excludes a bare repository's worktree.
+/// the fallback.
+///
+/// Two conditions, and the second is the load-bearing one. The common dir must
+/// be a real `.git` **directory**, which excludes a bare repository's worktree
+/// (its common dir is the bare repo, not a `.git`). And the administrative
+/// directory must actually live in that common dir's `worktrees/`: a backlink
+/// only proves an administrative directory and a worktree agree about each
+/// other, so without containment an attacker-built pair could still name any
+/// unrelated `<victim>/.git` as its common dir and redirect the config write
+/// there.
 fn main_checkout_from_common_dir(gitdir: &Path) -> Option<PathBuf> {
     let common = match crate::io::read_optional_text(&gitdir.join("commondir")).ok()? {
         Some(text) if !text.trim().is_empty() => {
@@ -173,8 +188,18 @@ fn main_checkout_from_common_dir(gitdir: &Path) -> Option<PathBuf> {
     if common.file_name()? != ".git" || !common.is_dir() {
         return None;
     }
+    if !admin_dir_belongs_to(gitdir, &common) {
+        return None;
+    }
     let root = common.parent()?;
     root.is_dir().then(|| root.to_path_buf())
+}
+
+/// Whether `gitdir` is one of `<common>/worktrees/*`. Both sides are already
+/// canonical, so this is a plain parent comparison.
+fn admin_dir_belongs_to(gitdir: &Path, common: &Path) -> bool {
+    std::fs::canonicalize(common.join("worktrees"))
+        .is_ok_and(|worktrees| gitdir.parent() == Some(worktrees.as_path()))
 }
 
 /// Absolute paths stand; relative ones resolve against `base`. Pure.
@@ -286,7 +311,7 @@ mod tests {
     /// is verified against git's actual on-disk layout rather than a fixture
     /// that encodes the same assumptions the code makes. Returns
     /// `(main checkout, worktree)`, or `None` when git is unavailable.
-    fn real_worktree(temp: &Path) -> Option<(PathBuf, PathBuf)> {
+    fn real_worktree(temp: &Path, extra: &[&str]) -> Option<(PathBuf, PathBuf)> {
         let main = temp.join("repo");
         std::fs::create_dir_all(&main).ok()?;
         let git = |args: &[&str], cwd: &Path| -> Option<()> {
@@ -310,10 +335,10 @@ mod tests {
         git(&["add", "seed"], &main)?;
         git(&["commit", "-qm", "seed"], &main)?;
         let worktree = temp.join("repo.worktrees").join("feature");
-        git(
-            &["worktree", "add", "-q", "-b", "feature", worktree.to_str()?],
-            &main,
-        )?;
+        let mut args = vec!["worktree", "add", "-q"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["-b", "feature", worktree.to_str()?]);
+        git(&args, &main)?;
         Some((
             std::fs::canonicalize(main).ok()?,
             std::fs::canonicalize(worktree).ok()?,
@@ -325,7 +350,7 @@ mod tests {
     #[test]
     fn linked_worktree_resolves_to_the_main_checkout() {
         let temp = tempfile::TempDir::new().unwrap();
-        let Some((main, worktree)) = real_worktree(temp.path()) else {
+        let Some((main, worktree)) = real_worktree(temp.path(), &[]) else {
             eprintln!("skip: git is unavailable in this environment");
             return;
         };
@@ -345,6 +370,29 @@ mod tests {
             None,
             "the main checkout is an ordinary checkout and keeps its own .claude"
         );
+    }
+
+    /// `git worktree add --relative-paths` (and `worktree.useRelativePaths`)
+    /// stores the backlink relative to the administrative directory. Resolving
+    /// it against the process cwd instead would fail validation on every such
+    /// repository and silently put the hooks back under the worktree - the
+    /// exact bug #543 is about.
+    #[test]
+    fn a_relative_backlink_resolves_against_the_admin_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let Some((main, worktree)) = real_worktree(temp.path(), &["--relative-paths"]) else {
+            eprintln!("skip: git is unavailable or too old for --relative-paths");
+            return;
+        };
+
+        let admin = main.join(".git/worktrees/feature");
+        let backlink = std::fs::read_to_string(admin.join("gitdir")).unwrap();
+        assert!(
+            Path::new(backlink.trim()).is_relative(),
+            "precondition: git must have stored a relative backlink, got {backlink:?}"
+        );
+
+        assert_eq!(linked_worktree_main_checkout(&worktree), Some(main));
     }
 
     #[test]
@@ -395,6 +443,29 @@ mod tests {
         // Pointing at a gitdir that does not exist at all.
         std::fs::write(&pointer, "gitdir: /nonexistent/.git/worktrees/x\n").unwrap();
         assert_eq!(linked_worktree_main_checkout(&hostile), None);
+
+        // A backlink only proves an admin dir and a worktree agree about each
+        // other - an attacker can build both. Here the pair is fully
+        // self-consistent and the admin dir simply names an unrelated
+        // `<victim>/.git` as its common dir; only containment rejects it.
+        let attacker_admin = temp.path().join("attacker/worktrees/fake");
+        std::fs::create_dir_all(&attacker_admin).unwrap();
+        std::fs::write(&pointer, format!("gitdir: {}\n", attacker_admin.display())).unwrap();
+        std::fs::write(
+            attacker_admin.join("gitdir"),
+            format!("{}\n", pointer.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            attacker_admin.join("commondir"),
+            format!("{}\n", victim.join(".git").display()),
+        )
+        .unwrap();
+        assert_eq!(
+            linked_worktree_main_checkout(&hostile),
+            None,
+            "an admin dir outside <common>/worktrees/ must not select that common dir"
+        );
     }
 
     /// A bare repository's worktree has no main checkout to redirect into, so
