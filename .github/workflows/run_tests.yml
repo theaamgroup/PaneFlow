@@ -67,7 +67,17 @@ jobs:
     # Self-hosted Linux. Path filtering, a git diff and `cargo metadata --no-deps` (workspace manifests only, no
     # dependency resolution, so no target enters into it). Nothing here compiles anything or
     # touches an Apple SDK, and it was billing at the macOS 10x multiplier.
-    runs-on: self-hosted
+    # Same-repo only. This repo is PUBLIC and forking cannot be disabled on a public repo,
+    # so `on: pull_request` can carry code from a stranger's fork. This job checks out the
+    # PR merge commit and runs scripts from it; on the old ephemeral VM that was contained,
+    # on a persistent runner it would execute as the runner user on a machine that survives
+    # the job. A fork PR therefore falls back to a GitHub-hosted VM. Every PR from a
+    # collaborator - which is all of them today - still runs on the self-hosted runner.
+    #
+    # The event_name arm is load-bearing: this workflow also runs on push to main, where the
+    # pull_request context is null. Testing only the fork condition would send every push to
+    # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       pull-requests: read
@@ -258,7 +268,17 @@ jobs:
   platform_census:
     name: Platform census (linux / windows residue)
     # Self-hosted Linux. scripts/linux-census.sh and scripts/win-census.sh are bash and grep over the tree.
-    runs-on: self-hosted
+    # Same-repo only. This repo is PUBLIC and forking cannot be disabled on a public repo,
+    # so `on: pull_request` can carry code from a stranger's fork. This job checks out the
+    # PR merge commit and runs scripts from it; on the old ephemeral VM that was contained,
+    # on a persistent runner it would execute as the runner user on a machine that survives
+    # the job. A fork PR therefore falls back to a GitHub-hosted VM. Every PR from a
+    # collaborator - which is all of them today - still runs on the self-hosted runner.
+    #
+    # The event_name arm is load-bearing: this workflow also runs on push to main, where the
+    # pull_request context is null. Testing only the fork condition would send every push to
+    # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -305,7 +325,17 @@ jobs:
     # Self-hosted Linux. cargo-deny reads Cargo.lock and the RustSec advisory DB. deny.toml sets no `targets`, so
     # cargo-deny considers every target's dependencies regardless of host - the verdict is
     # identical off macOS. Worst ratio of the lot: ~0.8 min of work billed as ~8.
-    runs-on: self-hosted
+    # Same-repo only. This repo is PUBLIC and forking cannot be disabled on a public repo,
+    # so `on: pull_request` can carry code from a stranger's fork. This job checks out the
+    # PR merge commit and runs scripts from it; on the old ephemeral VM that was contained,
+    # on a persistent runner it would execute as the runner user on a machine that survives
+    # the job. A fork PR therefore falls back to a GitHub-hosted VM. Every PR from a
+    # collaborator - which is all of them today - still runs on the self-hosted runner.
+    #
+    # The event_name arm is load-bearing: this workflow also runs on push to main, where the
+    # pull_request context is null. Testing only the fork condition would send every push to
+    # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -675,7 +705,17 @@ jobs:
       - security_audit
     if: always()
     # Self-hosted Linux. Aggregates the other jobs' results in bash. It never needed a macOS runner.
-    runs-on: self-hosted
+    # Same-repo only. This repo is PUBLIC and forking cannot be disabled on a public repo,
+    # so `on: pull_request` can carry code from a stranger's fork. This job checks out the
+    # PR merge commit and runs scripts from it; on the old ephemeral VM that was contained,
+    # on a persistent runner it would execute as the runner user on a machine that survives
+    # the job. A fork PR therefore falls back to a GitHub-hosted VM. Every PR from a
+    # collaborator - which is all of them today - still runs on the self-hosted runner.
+    #
+    # The event_name arm is load-bearing: this workflow also runs on push to main, where the
+    # pull_request context is null. Testing only the fork condition would send every push to
+    # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     steps:
       - name: Aggregate upstream results
         env:
