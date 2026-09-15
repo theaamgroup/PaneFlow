@@ -2026,16 +2026,20 @@ fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
 
     // Issue #542: hand the shim the stable, non-versioned ai-hook path so the
     // managed hook commands it writes into agent configs keep resolving after
-    // the next upgrade prunes `bin_dir` above. Only advertise a path that is
-    // on disk AND runnable - a copy stripped of `+x` would otherwise shadow
-    // the executable sibling and turn every hook into `Permission denied`.
-    // Launch extraction repairs the mode, so this should not normally reject.
-    match crate::runtime_paths::ai_hook_binary_path() {
+    // the next upgrade prunes `bin_dir` above. Only advertise a path this
+    // build actually verified (`verified_ai_hook_path`, not the merely
+    // computed one): if launch extraction could not replace an older
+    // release's binary, the stale file is still present and runnable, and
+    // advertising it would pin panes to that version's hook behaviour. It
+    // must also still be runnable here - a copy stripped of `+x` after
+    // extraction would otherwise shadow the executable sibling and turn every
+    // hook into `Permission denied`.
+    match crate::ai_hooks::extract::verified_ai_hook_path() {
         Some(path) if is_executable_file(&path) => {
             env.insert(AI_HOOK_PATH_ENV.into(), path.display().to_string());
         }
         _ => log::debug!(
-            "paneflow: stable ai-hook copy is absent or not executable; hooks will use the version-pinned cache path"
+            "paneflow: no verified stable ai-hook copy; hooks will use the version-pinned cache path"
         ),
     }
 

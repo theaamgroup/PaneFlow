@@ -250,6 +250,28 @@ pub fn ensure_bridge_extracted() -> Result<PathBuf> {
 /// Unhappy path: `data_dir()` unresolvable -> `ai_hook_binary_path()` is `None`
 /// -> `Err`; `paneflow hooks setup` then refuses cleanly rather than writing a
 /// config pointing at a non-existent path.
+/// Stable ai-hook path whose bytes **this** process verified against the
+/// binary it embeds. `None` until `ensure_ai_hook_extracted` succeeds.
+static VERIFIED_AI_HOOK: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// The stable ai-hook path, but only once this app has confirmed the file
+/// there carries its own embedded bytes (#542).
+///
+/// Existence and executability are not enough to advertise a path that gets
+/// written into an agent's hook configuration. If launch-time extraction could
+/// not replace an older release's binary - a read-only `data_dir()`, say -
+/// the stale file is still present and still runnable, and advertising it
+/// would pin panes to the previous version's hook behaviour and IPC protocol
+/// while the log claims a fallback took place. Gating on the extraction result
+/// makes that log true: with no verified path, panes fall back to the
+/// version-pinned sibling, which does match this build.
+pub fn verified_ai_hook_path() -> Option<PathBuf> {
+    VERIFIED_AI_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 pub fn ensure_ai_hook_extracted() -> Result<PathBuf> {
     let hook_path = crate::runtime_paths::ai_hook_binary_path().ok_or_else(|| {
         anyhow!(
@@ -283,6 +305,11 @@ pub fn ensure_ai_hook_extracted() -> Result<PathBuf> {
         bytes: bytes.as_ref(),
     };
     extract_into(std::slice::from_ref(&entry), &target_dir)?;
+    // Only now is the file known to carry THIS build's bytes, which is what
+    // `verified_ai_hook_path` promises its callers.
+    *VERIFIED_AI_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook_path.clone());
     Ok(hook_path)
 }
 
@@ -540,6 +567,43 @@ mod tests {
             claude, codex,
             "US-008 AC: claude and codex are both copies of paneflow-shim"
         );
+    }
+
+    /// #542: a path is advertised to panes only after this build verified the
+    /// bytes at it. Existence plus `+x` is not enough - a stale binary from a
+    /// previous release satisfies both, and advertising it would pin panes to
+    /// that version's hook behaviour while the launch log claims a fallback.
+    #[test]
+    fn the_verified_ai_hook_path_is_empty_until_extraction_succeeds() {
+        // Serialized against nothing else: this is the only test touching the
+        // slot, and it restores whatever it found.
+        let previous = verified_ai_hook_path();
+
+        *VERIFIED_AI_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        assert_eq!(
+            verified_ai_hook_path(),
+            None,
+            "an unverified stable path must not be advertised, however runnable"
+        );
+
+        match ensure_ai_hook_extracted() {
+            Ok(path) => assert_eq!(
+                verified_ai_hook_path(),
+                Some(path),
+                "a successful extraction must publish exactly the path it wrote"
+            ),
+            Err(_) => assert_eq!(
+                verified_ai_hook_path(),
+                None,
+                "a failed extraction must leave the slot empty, not stale"
+            ),
+        }
+
+        *VERIFIED_AI_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous;
     }
 
     /// The digest fast-path is the only branch a correct-bytes file ever
