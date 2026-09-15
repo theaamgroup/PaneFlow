@@ -9,14 +9,21 @@ spent waiting on Apple's notarization queue. If a step pushes you past its
 budget, check that step's troubleshooting box before plowing on. The runbook has
 probably already anticipated the failure.
 
-**Apple signing path last validated on:** 2026-09-13, tag `v0.6.0`
-(`05f91c79`). Signed `paneflow-0.6.0-aarch64-apple-darwin.dmg` + `.sha256`
+**Apple signing path last validated on:** 2026-09-15, tag `v0.6.1`
+(`a34569f0`). Signed `paneflow-0.6.1-aarch64-apple-darwin.dmg` + `.sha256`
 + `appcast.xml`. Workflow run
-https://github.com/theaamgroup/PaneFlow/actions/runs/34792747822.
-The published bundle assessed `accepted / source=Notarized Developer ID`,
-its ticket stapled, and `scripts/verify-update-feed.py` verified the
-anonymous feed. A full installed-update cycle (an older app staging this
-release and replacing itself on quit) is still unvalidated.
+https://github.com/theaamgroup/PaneFlow/actions/runs/34994566263, both jobs
+green after a re-run of the `build` job (see the hdiutil note in Step 3's
+troubleshooting). Signing, notarization, stapling and the in-DMG
+`codesign` / `stapler` / `spctl` checks all passed inside the run, and the
+`release` job published, which it only does once its appcast-signature and
+public-feed delivery checks pass. **Not done at this cut:** the local
+post-publish pass - no DMG was downloaded and re-checked by hand and
+`scripts/verify-update-feed.py` was not run locally. The last cut that did
+that by hand was 2026-09-13, tag `v0.6.0` (`05f91c79`, run 34792747822),
+where the published bundle assessed `accepted / source=Notarized Developer
+ID` and the anonymous feed verified. A full installed-update cycle (an older
+app staging a release and replacing itself on quit) is still unvalidated.
 
 Related runbooks:
 
@@ -318,6 +325,7 @@ a near-miss that would have shipped something users cannot open.
 | `::error title=macOS signing required::One or more APPLE_* secrets are missing` | 1. The run log names which check failed. Re-populate from the password manager per [`docs/release/macos-signing.md`](./release/macos-signing.md) §6. 2. Secrets are routed through `env:` so an empty secret reads as empty rather than as a literal expression: an empty value and an absent value behave the same. 3. Re-run the failed job. Do not re-tag. |
 | `error: signing identity team ID does not match APPLE_TEAM_ID` | 1. `APPLE_TEAM_ID` does not appear as `(TEAMID)` inside the certificate's common name. 2. Either the secret is stale or the `.p12` was minted under a different team. 3. Fix the mismatched half and re-run the job. |
 | Notarization hits the 90-minute ceiling | 1. The script prints the submission ID and the exact `xcrun notarytool info` recovery command. Poll the existing submission rather than re-tagging. 2. If it eventually reports `Accepted`, staple by hand with `xcrun stapler staple` and re-run only the DMG and publish steps. 3. Apple queue backlogs over an hour do happen and are not a repo problem. |
+| `Produce .dmg` fails with `hdiutil: verify: unable to recognize ... as a disk image. (Resource temporarily unavailable)` | 1. **Re-run the failed job; do not re-tag.** This is `EAGAIN` from a wedged `diskimages-helper`, not ENOSPC and not a corrupt image - job cleanup will show `Terminate orphan process: ... (diskimages-help)`. It hit the v0.6.1 cut and a no-change re-run packaged fine. 2. Before assuming a packaging regression, diff `create-dmg.sh` / `release.yml` / `bundle-macos.sh` and the runner image version against the last good run; if they are identical it is the runner, not the repo. 3. `hdiutil create` exits 0 in this mode (the image is written; `verify` cannot get a helper to probe it), so do not go looking for a truncation bug. Issue #547 tracks adding a bounded retry. |
 | Notarization returns `Invalid` | 1. The step dumps `xcrun notarytool log`. Read the actual rejection reason before changing anything. 2. `The binary is not signed` means a nested binary escaped the walk: run `codesign --verify --deep --strict --verbose=2` on the local bundle. 3. `requests the com.apple.security.get-task-allow entitlement` means a dev-entitlements build reached Apple. |
 
 ---
@@ -438,7 +446,10 @@ wrong.
 Keep the "Last validated on" line at the top current, so a maintainer returning
 after a long break knows whether the runbook still reflects reality.
 
-Last validated on: **2026-09-13, tag `v0.6.0`**, workflow run
+Last validated on: **2026-09-15, tag `v0.6.1`**, workflow run
+https://github.com/theaamgroup/PaneFlow/actions/runs/34994566263 (Steps 1-3;
+the local post-publish pass was skipped at that cut). The last full
+hand-verified pass was **2026-09-13, tag `v0.6.0`**, workflow run
 https://github.com/theaamgroup/PaneFlow/actions/runs/34792747822. Steps 1-4
 and the CLI half of Step 5 passed against the published DMG: checksum matched
 the published `.sha256`, `spctl --assess` returned

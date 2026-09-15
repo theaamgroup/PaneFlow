@@ -1,7 +1,8 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-13 at the **0.6.0 cut** (see the
-entry below). The prior header described the 0.5.0 cut, which shipped
+Living handoff record. Updated 2026-09-15 at the **0.6.1 cut** (see the
+entry below). The prior header described the 0.6.0 cut; the one before that
+the 0.5.0 cut, which shipped
 the Review grid port (#438) and the first v0.12.0 port batch (#417: the
 terminal rendering chain #418 / #419 / #420, the Zed highlight queries #433,
 and the editor benchmark harness #425). The prior
@@ -9,6 +10,69 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 #357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-15: the 0.6.1 cut.** 20 non-merge commits since `v0.6.0`, a patch
+bump because the release is mostly fixes: the Files sidebar colored by git
+status (#525) and the pane palette surviving a workspace with no pane (#522)
+are the only added surfaces. The rest are fixes: editor and Finder launches
+moved off the render thread with a toast on a failed exit (#530), worktree
+paths mapped back onto the fork's sibling `<repo>.worktrees` form (#529), the
+Files tree's git status refreshed when a directory is newly expanded (#540),
+Settings select rows painted in the theme text color, and the agent-hook path
+batch (#542, #543, #544) that landed on `main` mid-cut: managed hook blocks
+were pinned to a version-scoped `ai-hook` cache path, so every hook died on
+the first self-update. Curated notes live in `docs/releases/v0.6.1.md`.
+
+Pre-flight verification on `main` at the bump commit (`a34569f0`, the tagged
+commit): `cargo build` exit 0; `cargo test --workspace` **3,481 passed, 0
+failed, 7 ignored** (3,460 / 0 / 7 before the #545 merge landed; the delta is
+exactly the 21 tests that PR adds, with 0 removed - counted by diffing
+`#[test]` additions across `98558acd..0d52bf7a`, not by trusting the integer);
+`cargo clippy --workspace --all-targets` exit 0, **WARNING COUNT 1**
+(`block v0.1.6`); `cargo fmt --check` exit 0; `./target/debug/paneflow
+--version` -> `paneflow 0.6.1`; `cargo deny check advisories licenses sources`
+exit 0 -> `advisories ok, licenses ok, sources ok`. The full set was run
+twice: once before #545 landed, and again from scratch after rebasing onto it.
+`./scripts/linux-census.sh` exit 0, **STAGE 2c ZERO-CONDITION 0** with all six
+components at 0, and the negative control at **177** `cfg(unix)` / **93**
+`cfg(macos)` live sites. The `cfg(unix)` figure **moved** 176 -> 177: #545 adds
+one `#[cfg(unix)]` site in the hook code, so CLAUDE.md's number is corrected
+rather than re-attested. `cfg(macos)` is unchanged. The script's non-blocking
+review lines read 75 different-term-space hits, 6 orphaned `.rs` files, 0
+comment-only references, and **30** ungated platform strings (issue #103).
+
+Release: workflow run
+https://github.com/theaamgroup/PaneFlow/actions/runs/34994566263, both jobs
+green, DMG `paneflow-0.6.1-aarch64-apple-darwin.dmg` (31M) with
+`hdiutil: verify: checksum ... is VALID`. Signing, notarization, stapling, and
+the in-DMG `codesign --verify --deep --strict` / `stapler validate` /
+`spctl --assess` checks all passed inside the run, and the `release` job
+published, which it only does after its own appcast-signature and public-feed
+delivery checks pass (it returns the release to draft otherwise).
+**Not verified this cut:** the local post-publish pass - no DMG was downloaded
+and re-checked by hand, and `scripts/verify-update-feed.py` was not run
+locally. Still unvalidated from previous cuts: the Gatekeeper **UI** path (a
+`gh release download` carries no `com.apple.quarantine`) and a full
+installed-update replacement cycle.
+
+**The release-path trap this cut hit.** `Produce .dmg` failed on the first
+attempt with `hdiutil: verify: unable to recognize ... as a disk image.
+(Resource temporarily unavailable)` - **after** signing and notarization had
+succeeded, so it burned the full Apple queue wait. It is not a repo defect:
+`create-dmg.sh`, `release.yml` and `bundle-macos.sh` were byte-identical to
+the successful 0.6.0 run, the runner image was the same
+`macos-15-arm64 20260907.0337.1`, the source was the same 66M, and 40 GiB were
+free - so it is neither the ENOSPC mode the script's header designs around nor
+a checksum failure. `hdiutil create` exited 0 (under `set -euo pipefail` a
+non-zero create aborts there), the error is `EAGAIN`, and job cleanup reported
+`Terminate orphan process: pid (47329) (diskimages-help)`: a wedged
+`diskimages-helper` that `verify` could not obtain, leaving it unable to probe
+an image that had been written correctly. Re-running the identical job with no
+changes packaged fine, which is what confirmed the diagnosis. The script has
+no retry around `hdiutil`; issue #547 tracks a bounded retry. The rule: on
+this error, **re-run the failed job, do not re-tag**, and do not treat it as a
+packaging regression without first diffing the script and the runner image
+version against the last good run.
 
 **2026-09-13: the 0.6.0 cut.** 23 non-merge commits since `v0.5.0`, a minor
 bump because the release adds surfaces rather than only fixing them: the
