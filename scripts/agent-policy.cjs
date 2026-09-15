@@ -1,5 +1,6 @@
 // Shared, deterministic safety routing. No dependencies or code from PR heads.
 const categories = ['database', 'ui', 'money', 'access', 'integration', 'platform-wide', 'release'];
+const maxClosingReferences = 20;
 const states = ['needs-info', 'ready-for-agent', 'ready-for-human', 'wontfix'];
 const vocabulary = {
   severity: ['critical', 'high', 'medium', 'low'],
@@ -18,7 +19,7 @@ function pathRisks(paths) {
   return [...result];
 }
 
-function route(labels, assignees = [], paths = [], inherited = []) {
+function route(labels, assignees = [], paths = [], inherited = [], requestedState) {
   const next = new Set(labels);
   for (const label of [...pathRisks(paths), ...inherited]) {
     if (categories.some(c => label === `safety:${c}`) || label === 'needs-human-review') next.add(label);
@@ -35,9 +36,10 @@ function route(labels, assignees = [], paths = [], inherited = []) {
   if (held) next.add('needs-human-review');
   const stateCount = states.filter(s => next.has(s)).length;
   let state;
-  if (next.has('wontfix')) state = 'wontfix';
-  else if (!complete) state = 'needs-info';
+  if (!complete) state = 'needs-info';
+  else if (next.has('wontfix')) state = 'wontfix';
   else if (held) state = 'ready-for-human';
+  else if (['ready-for-agent', 'ready-for-human'].includes(requestedState) && next.has(requestedState)) state = requestedState;
   else if (stateCount !== 1) state = 'needs-info';
   if (state) {
     for (const name of states) next.delete(name);
@@ -71,7 +73,14 @@ async function sync({ github, context, core }) {
     const escaped = `${repo.owner}/${repo.repo}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const refs = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?[\\s]+(?:#|${escaped}#|https://github\\.com/${escaped}/issues/)(\\d+)`, 'gi');
     let linkedIssues = 0;
-    for (const id of new Set([...String(item.body || '').matchAll(refs)].map(m => Number(m[1])))) {
+    const ids = [...new Set([...String(item.body || '').matchAll(refs)].map(m => Number(m[1])))];
+    // Oversized bodies get no linked-issue requests: reserve API budget for
+    // writing the hold and removing stale eligibility, even on repeated events.
+    if (ids.length > maxClosingReferences) {
+      inherited.push('needs-human-review');
+      core.warning(`More than ${maxClosingReferences} closing references; retaining a human-review hold.`);
+    }
+    for (const id of ids.length > maxClosingReferences ? [] : ids) {
       try {
         const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
         if (issue.pull_request) continue;
@@ -86,7 +95,10 @@ async function sync({ github, context, core }) {
         // path routing even when a closing reference is missing/inaccessible.
         inherited.push('needs-human-review');
         core.warning(`Cannot classify linked issue #${id}; retaining a human-review hold.`);
-        if (error.status !== 404) core.setFailed(`Linked issue #${id} could not be read.`);
+        if (error.status !== 404) {
+          core.setFailed(`Linked issue #${id} could not be read.`);
+          break; // Do not compound throttling or service failures.
+        }
       }
     }
     // Unsupported, absent, and PR-only references are unknown scope, never
@@ -94,7 +106,8 @@ async function sync({ github, context, core }) {
     if (linkedIssues === 0) inherited.push('needs-human-review');
   }
   const before = item.labels.map(l => l.name);
-  const after = route(before, item.assignees, paths, inherited);
+  const requestedState = event.action === 'labeled' ? event.label?.name : undefined;
+  const after = route(before, item.assignees, paths, inherited, requestedState);
   const additions = after.filter(l => !before.includes(l));
   if (additions.length) await github.rest.issues.addLabels({ ...repo, issue_number: number, labels: additions });
   // Remove only policy-owned labels; never overwrite concurrent unrelated labels.

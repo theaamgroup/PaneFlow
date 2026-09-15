@@ -98,6 +98,13 @@ clear the hold. A human may direct flagged implementation; the flag remains
 through human verification and merge. Only a human corrects mistaken safety
 classifications. Carry issue risk categories to its PR.
 
+To promote a fully classified item from `needs-info`, add `ready-for-agent`
+or `ready-for-human`; routing removes the previous state. Missing metadata
+and safety holds still take precedence. Open `wontfix` items also require
+complete metadata; otherwise they remain in `needs-info`. PRs with more than
+20 distinct closing references receive a human-review hold without fetching
+the linked issues.
+
 The workflow derives additional conservative path flags:
 `src-app/`, `assets/`, `DESIGN.md` → ui;
 `crates/`, `schemas/`, `examples/`, `mcps/` → integration;

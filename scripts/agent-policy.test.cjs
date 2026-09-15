@@ -211,3 +211,95 @@ test('all four fork-runner guards from b227ca1 remain intact', () => {
   const expected = "    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}";
   assert.deepEqual(guards, Array(4).fill(expected));
 });
+
+for (const state of ['ready-for-agent', 'ready-for-human']) {
+  for (const variant of ['complete', 'missing-owner', 'held', 'stale']) {
+    test(`explicit ${state} promotion: ${variant}`, async () => {
+      const labels = new Set(base.filter(l => l !== 'ready-for-agent'));
+      labels.add('needs-info');
+      if (variant !== 'stale') labels.add(state);
+      if (variant === 'held') labels.add('needs-human-review');
+      const github = {
+        paginate: async () => [],
+        rest: {
+          pulls: { list: 'pulls' },
+          issues: {
+            get: async () => ({ data: { state: 'open', labels: [...labels].map(name => ({ name })), assignees: variant === 'missing-owner' ? [] : owner } }),
+            addLabels: async ({ labels: added }) => added.forEach(l => labels.add(l)),
+            removeLabel: async ({ name }) => labels.delete(name),
+          },
+        },
+      };
+      const context = { repo: { owner: 'org', repo: 'repo' }, payload: { action: 'labeled', label: { name: state }, issue: { number: 9 } } };
+      await sync({ github, context, core: { info() {} } });
+      const expected = variant === 'held' ? 'ready-for-human' : ['missing-owner', 'stale'].includes(variant) ? 'needs-info' : state;
+      assert.deepEqual([...labels].filter(l => ['needs-info', 'ready-for-agent', 'ready-for-human', 'wontfix'].includes(l)), [expected]);
+      assert.equal(labels.has('needs-human-review'), variant === 'held');
+    });
+  }
+}
+
+test('open wontfix requires complete metadata and a human owner', () => {
+  for (const missing of ['severity:high', 'area:app', 'lens:correctness', 'safety:none', 'owner']) {
+    const result = route([...base.filter(l => l !== missing), 'wontfix', 'needs-info'], missing === 'owner' ? [] : owner);
+    assert.ok(result.includes('needs-info'), missing);
+    assert.ok(!result.includes('wontfix'), missing);
+    assert.ok(!result.includes('ready-for-agent'), missing);
+  }
+  const complete = route([...base, 'wontfix', 'needs-info'], owner);
+  assert.ok(complete.includes('wontfix'));
+  assert.ok(!complete.includes('needs-info'));
+  const held = route(['wontfix', 'safety:release'], []);
+  assert.ok(held.includes('needs-info'));
+  assert.ok(held.includes('needs-human-review'));
+});
+
+for (const count of [20, 21, 3000]) {
+  test(`${count} closing references have bounded requests and preserve path holds`, async () => {
+    const reads = [], added = [], removed = [];
+    const github = {
+      paginate: async () => [{ filename: 'src-app/main.rs' }],
+      rest: {
+        pulls: { listFiles: 'files' },
+        issues: {
+          get: async ({ issue_number }) => {
+            reads.push(issue_number);
+            if (issue_number !== 7) throw Object.assign(new Error('missing'), { status: 404 });
+            return { data: { state: 'open', body: Array.from({ length: count }, (_, i) => `Closes #${i + 100}`).join('\n'), labels: base.map(name => ({ name })), assignees: owner } };
+          },
+          addLabels: async ({ labels }) => added.push(...labels),
+          removeLabel: async ({ name }) => removed.push(name),
+        },
+      },
+    };
+    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, warning() {} } });
+    assert.equal(reads.length, count > 20 ? 1 : 21);
+    assert.ok(added.includes('needs-human-review'));
+    assert.ok(added.includes('safety:ui'));
+    assert.ok(removed.includes('ready-for-agent'));
+  });
+}
+
+test('throttled lookups stop at the first failure and still attempt the hold', async () => {
+  const reads = [], added = [], removed = [], failures = [];
+  const github = {
+    paginate: async () => [],
+    rest: {
+      pulls: { listFiles: 'files' },
+      issues: {
+        get: async ({ issue_number }) => {
+          reads.push(issue_number);
+          if (issue_number !== 7) throw Object.assign(new Error('throttled'), { status: 429 });
+          return { data: { state: 'open', body: 'Closes #9\nCloses #10', labels: base.map(name => ({ name })), assignees: owner } };
+        },
+        addLabels: async ({ labels }) => added.push(...labels),
+        removeLabel: async ({ name }) => removed.push(name),
+      },
+    },
+  };
+  await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } } });
+  assert.deepEqual(reads, [7, 9]);
+  assert.equal(failures.length, 1);
+  assert.ok(added.includes('needs-human-review'));
+  assert.ok(removed.includes('ready-for-agent'));
+});
