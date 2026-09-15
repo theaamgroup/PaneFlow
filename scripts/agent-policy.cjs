@@ -51,6 +51,11 @@ async function sync({ github, context, core }) {
   const event = context.payload;
   const number = event.issue?.number || event.pull_request?.number;
   if (!number || event.issue?.pull_request) return;
+  if (event.issue && ['deleted', 'transferred'].includes(event.action)) {
+    // The original issue is no longer addressable in this repository.
+    await syncOpenPulls({ github, core, repo });
+    return;
+  }
   // Re-fetch instead of trusting stale label-event snapshots.
   const { data: item } = await github.rest.issues.get({ ...repo, issue_number: number });
   if (item.state !== 'open') {

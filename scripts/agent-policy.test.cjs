@@ -139,7 +139,33 @@ test('issue closure is subscribed in the actual workflow', () => {
   const { readFileSync } = require('node:fs');
   const workflow = readFileSync(require('node:path').join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
   assert.match(workflow, /issues:\s*\n\s*types: \[[^\]]*\bclosed\b/);
+  assert.match(workflow, /issues:\s*\n\s*types: \[[^\]]*\bdeleted\b/);
+  assert.match(workflow, /issues:\s*\n\s*types: \[[^\]]*\btransferred\b/);
 });
+
+for (const action of ['deleted', 'transferred']) {
+  test(`issue ${action} event routes PRs without fetching the event issue`, async () => {
+    const calls = [], additions = [];
+    const github = {
+      paginate: async method => method === 'pulls' ? [{ number: 7 }] : [],
+      rest: {
+        pulls: { list: 'pulls', listFiles: 'files' },
+        issues: {
+          get: async ({ issue_number }) => {
+            calls.push(issue_number);
+            if (issue_number === 9) throw Object.assign(new Error('missing'), { status: 404 });
+            return { data: { state: 'open', body: 'Closes #9', labels: base.map(name => ({ name })), assignees: owner } };
+          },
+          addLabels: async ({ labels }) => additions.push(...labels),
+          removeLabel: async () => {},
+        },
+      },
+    };
+    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { action, issue: { number: 9 } } }, core: { info() {}, warning() {} } });
+    assert.deepEqual(calls, [7, 9]);
+    assert.ok(additions.includes('needs-human-review'));
+  });
+}
 
 for (const status of [404, 403, 500]) {
   test(`unreadable linked issue (${status}) retains path and human holds`, async () => {

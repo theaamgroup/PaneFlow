@@ -2,7 +2,7 @@ name: Agent safety routing
 
 on:
   issues:
-    types: [opened, reopened, closed, edited, labeled, unlabeled, assigned, unassigned]
+    types: [opened, reopened, closed, deleted, transferred, edited, labeled, unlabeled, assigned, unassigned]
   pull_request_target:
     types: [opened, reopened, edited, synchronize, labeled, unlabeled, assigned, unassigned, ready_for_review]
 
