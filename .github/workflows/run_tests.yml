@@ -64,7 +64,10 @@ jobs:
   # green. Rust jobs still skip for docs-only changes.
   orchestrate:
     name: Detect changed paths
-    runs-on: macos-15
+    # Self-hosted Linux. Path filtering, a git diff and `cargo metadata --no-deps` (workspace manifests only, no
+    # dependency resolution, so no target enters into it). Nothing here compiles anything or
+    # touches an Apple SDK, and it was billing at the macOS 10x multiplier.
+    runs-on: self-hosted
     permissions:
       contents: read
       pull-requests: read
@@ -254,7 +257,8 @@ jobs:
   # filter, so an unconditional run cannot self-skip into a false green.
   platform_census:
     name: Platform census (linux / windows residue)
-    runs-on: ubuntu-24.04
+    # Self-hosted Linux. scripts/linux-census.sh and scripts/win-census.sh are bash and grep over the tree.
+    runs-on: self-hosted
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -298,7 +302,10 @@ jobs:
       needs.orchestrate.outputs.rust == 'true' ||
       needs.orchestrate.outputs.security == 'true' ||
       needs.orchestrate.outputs.ci == 'true'
-    runs-on: macos-15
+    # Self-hosted Linux. cargo-deny reads Cargo.lock and the RustSec advisory DB. deny.toml sets no `targets`, so
+    # cargo-deny considers every target's dependencies regardless of host - the verdict is
+    # identical off macOS. Worst ratio of the lot: ~0.8 min of work billed as ~8.
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -667,7 +674,8 @@ jobs:
       - macos_render_smoke
       - security_audit
     if: always()
-    runs-on: macos-15
+    # Self-hosted Linux. Aggregates the other jobs' results in bash. It never needed a macOS runner.
+    runs-on: self-hosted
     steps:
       - name: Aggregate upstream results
         env:
