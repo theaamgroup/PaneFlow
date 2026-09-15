@@ -50,3 +50,22 @@ macOS only. Metal, AppKit, vendored `libghostty-vt` (the one and only terminal e
 
 ## Deeper reference
 `CLAUDE.md` is the detailed engineering reference: annotated module tree, thread model, keystroke-to-pixel flow, GPUI Entity/Element patterns, hard-won scroll and wheel gotchas, the keybinding table, IPC methods, config shape, and gotchas. Open work lives in GitHub issues. `docs/fork/STATE.md` is the living handoff (landed work, verification commands, method rules). `docs/fork/2026-08-25-mac-only-fork-design.md` records this fork's decisions, its leak register, and the traps register. Read those before touching platform code. `DESIGN.md` is the design contract for the native UI - visual thesis, color roles, geometry, motion, component contracts, accessibility floors, and the UI delivery gate; read it before changing any surface, and update it in the same pull request as the change. Do not duplicate their content here.
+
+## Code Review Rules
+
+Codex GitHub code review (`chatgpt-codex-connector`) reads this section. Every posted finding uses the same bar as the Grok reviewers.
+
+Report actionable issues introduced by this change. Explain the triggering condition, the consequence, and the relevant code. Avoid style preferences covered by tooling, speculative improvements, repeated findings, and narration. Distinguish confirmed defects from questions requiring human judgment.
+
+A useful comment sounds like:
+
+> When the customer changes stores, the previous store’s inventory remains cached, so unavailable products can appear purchasable.
+
+That gives a maintainer something specific to assess. “Consider improving cache handling” does not. Do not post the latter shape.
+
+- Post only confirmed defects: a specific input or condition in this diff that produces a wrong or unsafe result. Name the triggering condition, the consequence, and `file:line`. If you cannot name all three, drop it.
+- On GitHub, Codex flags P0 and P1 only. Map blocker (security, data loss, crash or wrong result on a main path) to P0 and should-fix (specific failure path before merge) to P1. Do not invent a lower severity to sneak style through.
+- Leave rustfmt, clippy, naming, import order, comment density, coverage-as-a-note, and docs typos to CI. Do not treat them as P1.
+- Do not post speculative improvements, “consider improving…”, “you might want to…”, restatements of the diff, or a finding already open on the PR.
+- Questions that need human judgment (product intent, two valid designs) are not defects. Do not post them as P0/P1. If they must be asked, one question with the options and what breaks if we guess wrong.
+- A finding that contradicts this file or `CLAUDE.md` is not a finding. Claims are facts (no may/might/could/seems).
