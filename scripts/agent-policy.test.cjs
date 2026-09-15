@@ -4,6 +4,18 @@ const { route, pathRisks, sync } = require('./agent-policy.cjs');
 const owner = [{ type: 'User', login: 'maintainer' }];
 const base = ['severity:high', 'area:app', 'lens:correctness', 'safety:none', 'ready-for-agent'];
 
+function linkedReferences(ids = [9], hasNextPage = false) {
+  return async (_query, variables) => {
+    assert.equal(variables.limit, 21);
+    assert.equal(variables.owner, 'org');
+    assert.equal(variables.repo, 'repo');
+    return { repository: { pullRequest: { closingIssuesReferences: {
+      pageInfo: { hasNextPage },
+      nodes: ids.map(number => ({ number, repository: { nameWithOwner: 'org/repo' } })),
+    } } } };
+  };
+}
+
 test('privileged policy checkout uses protected main, including stacked PRs', () => {
   const { readFileSync } = require('node:fs');
   const workflow = readFileSync(require('node:path').join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
@@ -67,6 +79,7 @@ for (const variant of ['eligible', 'qualified', 'colon', 'hidden', 'hidden-unclo
     const issueLabels = variant === 'missing-safety' ? base.filter(l => l !== 'safety:none')
       : variant === 'needs-info' ? base.map(l => l === 'ready-for-agent' ? 'needs-info' : l) : base;
     const github = {
+      graphql: linkedReferences(['hidden', 'hidden-unclosed', 'missing-link', 'foreign-link', 'pr-link'].includes(variant) ? [] : [9]),
       paginate: async () => [{ filename: 'docs/guide.md' }],
       rest: {
         pulls: { listFiles: {} },
@@ -96,6 +109,7 @@ test('closed/wontfix issues are not reopened for agent work', () => {
 test('sync reads current state, inherits risk and writes only label deltas', async () => {
   const added = [], removed = [];
   const github = {
+      graphql: linkedReferences(),
     paginate: async () => [{ filename: 'docs/new.md', previous_filename: 'src-app/old.rs' }],
     rest: {
       pulls: { listFiles: {} },
@@ -119,6 +133,7 @@ for (const issueState of ['open', 'closed']) {
 test(`issue ${issueState} event propagates to an existing linked PR`, async () => {
   const writes = [];
   const github = {
+      graphql: linkedReferences(),
     paginate: async (method) => method === 'pulls' ? [{ number: 7 }] : [],
     rest: {
       pulls: { list: 'pulls', listFiles: 'files' },
@@ -160,6 +175,7 @@ for (const action of ['deleted', 'transferred']) {
   test(`issue ${action} event routes PRs without fetching the event issue`, async () => {
     const calls = [], additions = [];
     const github = {
+      graphql: linkedReferences(),
       paginate: async method => method === 'pulls' ? [{ number: 7 }] : [],
       rest: {
         pulls: { list: 'pulls', listFiles: 'files' },
@@ -184,6 +200,7 @@ for (const status of [404, 403, 500]) {
   test(`unreadable linked issue (${status}) retains path and human holds`, async () => {
     const additions = [], failures = [];
     const github = {
+      graphql: linkedReferences([999]),
       paginate: async () => [{ filename: 'src-app/main.rs' }],
       rest: {
         pulls: { listFiles: {} },
@@ -220,6 +237,7 @@ for (const state of ['ready-for-agent', 'ready-for-human']) {
       if (variant !== 'stale') labels.add(state);
       if (variant === 'held') labels.add('needs-human-review');
       const github = {
+      graphql: linkedReferences(),
         paginate: async () => [],
         rest: {
           pulls: { list: 'pulls' },
@@ -258,6 +276,7 @@ for (const count of [20, 21, 3000]) {
   test(`${count} closing references have bounded requests and preserve path holds`, async () => {
     const reads = [], added = [], removed = [];
     const github = {
+      graphql: linkedReferences(Array.from({ length: Math.min(count, 21) }, (_, i) => i + 100), count > 21),
       paginate: async () => [{ filename: 'src-app/main.rs' }],
       rest: {
         pulls: { listFiles: 'files' },
@@ -283,6 +302,7 @@ for (const count of [20, 21, 3000]) {
 test('throttled lookups stop at the first failure and still attempt the hold', async () => {
   const reads = [], added = [], removed = [], failures = [];
   const github = {
+      graphql: linkedReferences([9, 10]),
     paginate: async () => [],
     rest: {
       pulls: { listFiles: 'files' },
@@ -303,3 +323,36 @@ test('throttled lookups stop at the first failure and still attempt the hold', a
   assert.ok(added.includes('needs-human-review'));
   assert.ok(removed.includes('ready-for-agent'));
 });
+
+for (const variant of ['inline-code', 'fenced-code', 'query-failure', 'foreign-issue']) {
+  test(`resolved GitHub references fail closed: ${variant}`, async () => {
+    const added = [], removed = [], reads = [], failures = [];
+    const github = {
+      graphql: async () => {
+        if (variant === 'query-failure') throw new Error('API unavailable');
+        return { repository: { pullRequest: { closingIssuesReferences: {
+          pageInfo: { hasNextPage: false },
+          nodes: variant === 'foreign-issue' ? [{ number: 9, repository: { nameWithOwner: 'other/repo' } }] : [],
+        } } } };
+      },
+      paginate: async () => [{ filename: 'src-app/main.rs' }],
+      rest: {
+        pulls: { listFiles: 'files' },
+        issues: {
+          get: async ({ issue_number }) => {
+            reads.push(issue_number);
+            return { data: { state: 'open', body: variant === 'fenced-code' ? '```\nCloses #9\n```' : '`Closes #9`', labels: base.map(name => ({ name })), assignees: owner } };
+          },
+          addLabels: async ({ labels }) => added.push(...labels),
+          removeLabel: async ({ name }) => removed.push(name),
+        },
+      },
+    };
+    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, setFailed(message) { failures.push(message); } } });
+    assert.deepEqual(reads, [7]);
+    assert.ok(added.includes('needs-human-review'));
+    assert.ok(added.includes('safety:ui'));
+    assert.ok(removed.includes('ready-for-agent'));
+    assert.equal(failures.length, variant === 'query-failure' ? 1 : 0);
+  });
+}

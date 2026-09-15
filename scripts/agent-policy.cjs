@@ -69,20 +69,40 @@ async function sync({ github, context, core }) {
   if (event.pull_request) {
     const files = await github.paginate(github.rest.pulls.listFiles, { ...repo, pull_number: number, per_page: 100 });
     paths = files.flatMap(f => [f.filename, f.previous_filename].filter(Boolean));
-    // Same-repository closing references only; full URLs are also supported.
-    const escaped = `${repo.owner}/${repo.repo}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const refs = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?[\\s]+(?:#|${escaped}#|https://github\\.com/${escaped}/issues/)(\\d+)`, 'gi');
+    // GitHub resolves Markdown and manual links; examples in code/comments
+    // cannot establish eligibility. Fetch one bounded page, never raw body IDs.
+    let ids = [];
+    let oversized = false;
     let linkedIssues = 0;
-    // Hidden examples are not closing references, including unclosed comments.
-    const visibleBody = String(item.body || '').replace(/<!--[\s\S]*?(?:-->|$)/g, '');
-    const ids = [...new Set([...visibleBody.matchAll(refs)].map(m => Number(m[1])))];
-    // Oversized bodies get no linked-issue requests: reserve API budget for
+    try {
+      const result = await github.graphql(`query($owner:String!,$repo:String!,$number:Int!,$limit:Int!) {
+        repository(owner:$owner,name:$repo) {
+          pullRequest(number:$number) {
+            closingIssuesReferences(first:$limit) {
+              pageInfo { hasNextPage }
+              nodes { number repository { nameWithOwner } }
+            }
+          }
+        }
+      }`, { ...repo, number, limit: maxClosingReferences + 1 });
+      const links = result.repository.pullRequest.closingIssuesReferences;
+      oversized = links.pageInfo.hasNextPage || links.nodes.length > maxClosingReferences;
+      const localRepo = `${repo.owner}/${repo.repo}`.toLowerCase();
+      for (const issue of links.nodes) {
+        if (issue.repository.nameWithOwner.toLowerCase() === localRepo) ids.push(issue.number);
+        else inherited.push('needs-human-review');
+      }
+    } catch (error) {
+      inherited.push('needs-human-review');
+      core.setFailed('Closing issue references could not be read.');
+    }
+    // Oversized link sets get no per-issue requests: reserve API budget for
     // writing the hold and removing stale eligibility, even on repeated events.
-    if (ids.length > maxClosingReferences) {
+    if (oversized) {
       inherited.push('needs-human-review');
       core.warning(`More than ${maxClosingReferences} closing references; retaining a human-review hold.`);
     }
-    for (const id of ids.length > maxClosingReferences ? [] : ids) {
+    for (const id of oversized ? [] : ids) {
       try {
         const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
         if (issue.pull_request) continue;
@@ -103,7 +123,7 @@ async function sync({ github, context, core }) {
         }
       }
     }
-    // Unsupported, absent, and PR-only references are unknown scope, never
+    // Absent or unreadable issue links are unknown scope, never
     // evidence that this PR has an eligible issue for unattended work.
     if (linkedIssues === 0) inherited.push('needs-human-review');
   }
