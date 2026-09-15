@@ -324,30 +324,36 @@ pub(crate) const AI_HOOK_PATH_ENV: &str = "PANEFLOW_AI_HOOK_PATH";
 
 /// Absolute path to write into a managed hook command.
 ///
-/// Preference order, first existing file wins:
+/// Two candidates, first runnable one wins:
 ///
-/// 1. `PANEFLOW_AI_HOOK_PATH` from the pane env.
-/// 2. The computed stable path under `data_dir()/paneflow/bin/`.
-/// 3. The version-pinned sibling next to this shim.
+/// 1. `PANEFLOW_AI_HOOK_PATH` from the pane env - the stable, non-versioned
+///    copy, advertised only when the running app verified that the bytes there
+///    are its own (`ai_hooks::extract::verified_ai_hook_path`).
+/// 2. The version-pinned sibling next to this shim.
 ///
-/// (1) and (2) are stable across upgrades; (3) is not. Issue #542: a managed
-/// block that outlives the process that wrote it - a leaked block, or one
-/// installed into a config another session still reads - keeps naming the
-/// version directory that wrote it, and the next launch prunes that directory
-/// because its `.paneflow-live` lease died with the old app. Every subsequent
-/// agent tool call then fails with "No such file or directory". The sibling
-/// stays as a fallback so a pane launched by an older app still gets hooks.
+/// Issue #542: (1) is what survives an upgrade. A managed block that outlives
+/// the process that wrote it keeps naming the version directory that wrote it,
+/// and the next launch prunes that directory because its `.paneflow-live`
+/// lease died with the old app - after which every agent tool call fails with
+/// "No such file or directory".
+///
+/// The shim deliberately does **not** compute the stable path itself. Only the
+/// app knows whether the file there is current: when launch extraction cannot
+/// replace a previous release's binary, that stale copy is still present and
+/// still runnable, and a locally computed candidate would select it over the
+/// sibling and pin panes to the old hook behaviour and IPC protocol. Absence
+/// of the env var is therefore meaningful: it means "no verified stable copy",
+/// and the sibling, which always matches the shim being executed, is the
+/// correct answer. A shim in a pane from an app too old to advertise the
+/// variable never had a verified stable copy either, so it loses nothing.
 fn locate_hook_binary() -> Option<PathBuf> {
-    first_executable(stable_hook_binary_candidates()).or_else(locate_sibling_hook_binary)
+    first_executable([advertised_hook_binary()]).or_else(locate_sibling_hook_binary)
 }
 
-fn stable_hook_binary_candidates() -> [Option<PathBuf>; 2] {
-    [
-        env::var_os(AI_HOOK_PATH_ENV)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from),
-        paneflow_agent_config::stable_ai_hook_binary_path(),
-    ]
+fn advertised_hook_binary() -> Option<PathBuf> {
+    env::var_os(AI_HOOK_PATH_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Pure core of the preference order, so the ordering is testable without
@@ -445,30 +451,37 @@ fn hook_config_error(error: HookConfigError) -> std::io::Error {
 mod tests {
     use super::*;
 
-    /// Issue #542: the stable path must win over the version-pinned sibling,
-    /// and an env value naming a file that is gone must fall through rather
-    /// than be written into a hook command.
+    /// Issue #542: an advertised path that is gone must fall through to the
+    /// sibling rather than be written into a hook command.
     #[test]
-    fn stable_hook_paths_are_preferred_in_order() {
+    fn a_missing_advertised_path_falls_through() {
         let temp = tempfile::TempDir::new().unwrap();
-        let from_env = temp.path().join("env-paneflow-ai-hook");
-        let stable = temp.path().join("stable-paneflow-ai-hook");
-        create_executable(&stable);
+        let advertised = temp.path().join("env-paneflow-ai-hook");
 
+        assert_eq!(first_executable([Some(advertised.clone())]), None);
+        create_executable(&advertised);
         assert_eq!(
-            first_executable([Some(from_env.clone()), Some(stable.clone())]),
-            Some(stable.clone()),
-            "a missing env candidate must not shadow the stable path"
+            first_executable([Some(advertised.clone())]),
+            Some(advertised)
         );
+        assert_eq!(first_executable([None]), None);
+    }
 
-        create_executable(&from_env);
-        assert_eq!(
-            first_executable([Some(from_env.clone()), Some(stable)]),
-            Some(from_env),
-            "the app-supplied path wins - only it knows the build namespace"
+    /// The shim must never compute the stable path itself. Only the app knows
+    /// whether the file there is current; a locally computed candidate would
+    /// select a previous release's binary when launch extraction could not
+    /// replace it, in exactly the case where the app deliberately advertised
+    /// nothing. Absence of the env var has to mean "use the sibling".
+    #[test]
+    fn the_shim_does_not_compute_a_stable_path_of_its_own() {
+        // Split so the needle does not appear literally in this file, which
+        // `include_str!` would otherwise match against the assertion itself.
+        let needle = concat!("stable_ai_hook", "_binary_path");
+        let source = include_str!("hooks.rs");
+        assert!(
+            !source.contains(needle),
+            "the shim must not recompute the stable ai-hook path (#542)"
         );
-
-        assert_eq!(first_executable([None, None]), None);
     }
 
     /// A stable copy stripped of `+x` must fall through to the runnable

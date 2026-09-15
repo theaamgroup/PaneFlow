@@ -44,43 +44,6 @@ pub fn codex_config_toml() -> Option<PathBuf> {
     codex_config_dir().map(|dir| dir.join("config.toml"))
 }
 
-/// Application directory namespace, mirroring `runtime_paths::APP_SUBDIR` in
-/// the app crate. The shim ships as a `release-min` build, so this resolves to
-/// `paneflow` in every binary that actually writes agent configs.
-const APP_SUBDIR: &str = if cfg!(debug_assertions) {
-    "paneflow-dev"
-} else {
-    "paneflow"
-};
-
-/// Stable, **non-versioned** path of the extracted `paneflow-ai-hook` callback
-/// (issue #542).
-///
-/// The app materializes this copy at launch
-/// (`ai_hooks::extract::ensure_ai_hook_extracted`, the byte-for-byte mirror of
-/// `runtime_paths::ai_hook_binary_path`). The shim renders hook commands from
-/// it in preference to the version-pinned cache sibling
-/// (`<cache_dir>/paneflow/bin/<VERSION>/`), because a managed block that
-/// outlives the process that wrote it must keep resolving after the next
-/// upgrade prunes that version directory.
-///
-/// macOS: `~/Library/Application Support/paneflow/bin/paneflow-ai-hook`.
-///
-/// Computes only; it never creates the directory or extracts anything.
-pub fn stable_ai_hook_binary_path() -> Option<PathBuf> {
-    stable_ai_hook_binary_path_in(dirs::data_local_dir())
-}
-
-/// Pure core, so the layout is testable without a real data directory.
-pub fn stable_ai_hook_binary_path_in(data_local_dir: Option<PathBuf>) -> Option<PathBuf> {
-    Some(
-        data_local_dir?
-            .join(APP_SUBDIR)
-            .join("bin")
-            .join("paneflow-ai-hook"),
-    )
-}
-
 /// Main-checkout root when `cwd` sits inside a **linked git worktree** (issue
 /// #543), else `None`.
 ///
@@ -304,19 +267,6 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
             }
         }
-    }
-
-    #[test]
-    fn stable_ai_hook_path_is_non_versioned_under_data_local() {
-        assert_eq!(
-            stable_ai_hook_binary_path_in(Some(PathBuf::from(
-                "/home/alice/Library/Application Support"
-            ))),
-            Some(PathBuf::from(format!(
-                "/home/alice/Library/Application Support/{APP_SUBDIR}/bin/paneflow-ai-hook"
-            ))),
-        );
-        assert_eq!(stable_ai_hook_binary_path_in(None), None);
     }
 
     /// Build a real repository with a real linked worktree, so the resolver
