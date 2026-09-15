@@ -61,7 +61,7 @@ test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
 });
 
-for (const variant of ['eligible', 'qualified', 'colon', 'missing-link', 'foreign-link', 'foreign-redirect', 'pr-link', 'missing-safety', 'missing-owner', 'needs-info', 'closed']) {
+for (const variant of ['eligible', 'qualified', 'colon', 'hidden', 'hidden-unclosed', 'hidden-mixed', 'missing-link', 'foreign-link', 'foreign-redirect', 'pr-link', 'missing-safety', 'missing-owner', 'needs-info', 'closed']) {
   test(`linked issue eligibility: ${variant}`, async () => {
     const additions = [], removals = [];
     const issueLabels = variant === 'missing-safety' ? base.filter(l => l !== 'safety:none')
@@ -72,7 +72,7 @@ for (const variant of ['eligible', 'qualified', 'colon', 'missing-link', 'foreig
         pulls: { listFiles: {} },
         issues: {
           get: async ({ issue_number }) => ({ data: issue_number === 7
-            ? { state: 'open', body: variant === 'qualified' ? 'Fixes org/repo#9' : variant === 'colon' ? 'Closes: #9' : variant === 'missing-link' ? '' : variant === 'foreign-link' ? 'Fixes other/project#9' : 'Closes #9', labels: base.map(name => ({ name })), assignees: owner }
+            ? { state: 'open', body: variant === 'hidden' ? '<!-- Closes #9 -->' : variant === 'hidden-unclosed' ? '<!-- example\nCloses #9' : variant === 'hidden-mixed' ? '<!-- Closes #10 -->\nCloses #9' : variant === 'qualified' ? 'Fixes org/repo#9' : variant === 'colon' ? 'Closes: #9' : variant === 'missing-link' ? '' : variant === 'foreign-link' ? 'Fixes other/project#9' : 'Closes #9', labels: base.map(name => ({ name })), assignees: owner }
             : { repository_url: variant === 'foreign-redirect' ? 'https://api.github.com/repos/other/project' : 'https://api.github.com/repos/org/repo', state: variant === 'closed' ? 'closed' : 'open', pull_request: variant === 'pr-link' ? {} : undefined, labels: issueLabels.map(name => ({ name })), assignees: variant === 'missing-owner' ? [] : owner } }),
           addLabels: async ({ labels }) => additions.push(...labels),
           removeLabel: async ({ name }) => removals.push(name),
@@ -80,7 +80,7 @@ for (const variant of ['eligible', 'qualified', 'colon', 'missing-link', 'foreig
       },
     };
     await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {} } });
-    const eligible = ['eligible', 'qualified', 'colon'].includes(variant);
+    const eligible = ['eligible', 'qualified', 'colon', 'hidden-mixed'].includes(variant);
     assert.equal(additions.includes('needs-human-review'), !eligible);
     assert.equal(removals.includes('ready-for-agent'), !eligible);
   });

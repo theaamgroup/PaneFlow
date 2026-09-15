@@ -73,7 +73,9 @@ async function sync({ github, context, core }) {
     const escaped = `${repo.owner}/${repo.repo}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const refs = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?[\\s]+(?:#|${escaped}#|https://github\\.com/${escaped}/issues/)(\\d+)`, 'gi');
     let linkedIssues = 0;
-    const ids = [...new Set([...String(item.body || '').matchAll(refs)].map(m => Number(m[1])))];
+    // Hidden examples are not closing references, including unclosed comments.
+    const visibleBody = String(item.body || '').replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+    const ids = [...new Set([...visibleBody.matchAll(refs)].map(m => Number(m[1])))];
     // Oversized bodies get no linked-issue requests: reserve API budget for
     // writing the hold and removing stale eligibility, even on repeated events.
     if (ids.length > maxClosingReferences) {
