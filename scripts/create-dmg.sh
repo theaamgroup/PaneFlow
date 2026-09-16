@@ -131,17 +131,63 @@ create_and_verify_dmg() {
     return 1
 }
 
-# Sets _HDIUTIL_ATTACH_OUTPUT to hdiutil attach's stdout on success.
+# First device (/dev/diskN) in hdiutil attach's stdout. attach prints a
+# checksum line (`expected   CRC32 $...`) before the device table, so the
+# first line's first field is not the device.
+attach_output_device() {
+    printf '%s\n' "$1" | awk '$1 ~ /^\/dev\/disk/ {print $1; exit}'
+}
+
+# True when a filesystem is mounted at the given directory.
+mounted_at() {
+    mount | grep -qF " on $1 ("
+}
+
+# Detach whatever a failed `hdiutil attach` left behind: every /dev/diskN
+# it printed before failing, and anything still mounted at the mountpoint.
+# Without this the retry attaches the image a second time and macOS mounts
+# it beside the first one (`PaneFlow 1`), so verification either dies on a
+# missing path or inspects a stale volume from an earlier run.
+detach_attach_leftovers() {
+    local mountpoint="$1"
+    local output="${2:-}"
+    local dev seen=""
+    while read -r dev _; do
+        case "$dev" in
+            /dev/disk*)
+                case " $seen " in *" $dev "*) continue ;; esac
+                seen="$seen $dev"
+                echo "Detaching leftover attachment $dev..." >&2
+                hdiutil detach "$dev" -force >/dev/null 2>&1 || true
+                ;;
+        esac
+    done <<< "$output"
+    if [ -n "$mountpoint" ] && mounted_at "$mountpoint"; then
+        echo "Detaching volume still mounted at $mountpoint..." >&2
+        hdiutil detach "$mountpoint" -force >/dev/null 2>&1 || true
+    fi
+}
+
+# Attach $1 read-only at the explicit mountpoint $2 (created if missing).
+# Sets _HDIUTIL_ATTACH_OUTPUT to hdiutil attach's stdout on success. A
+# failed attempt is detached before the retry (see detach_attach_leftovers).
 hdiutil_attach_with_retry() {
     local image="$1"
+    local mountpoint="${2:-}"
     local attempt=1
     local max="${HDIUTIL_RETRY_ATTEMPTS}"
     _HDIUTIL_ATTACH_OUTPUT=""
+    [ -n "$mountpoint" ] || die "hdiutil_attach_with_retry needs a mountpoint"
+    mkdir -p "$mountpoint"
     while [ "$attempt" -le "$max" ]; do
-        if _HDIUTIL_ATTACH_OUTPUT="$(hdiutil attach -nobrowse -readonly -noautoopen "$image")"; then
+        # The assignment keeps attach's partial stdout even when it fails,
+        # which is how the device of a half-finished attempt is recovered.
+        if _HDIUTIL_ATTACH_OUTPUT="$(hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mountpoint" "$image")"; then
             return 0
         fi
         echo "warning: hdiutil attach failed (attempt ${attempt}/${max})" >&2
+        detach_attach_leftovers "$mountpoint" "$_HDIUTIL_ATTACH_OUTPUT"
+        _HDIUTIL_ATTACH_OUTPUT=""
         if [ "$attempt" -eq "$max" ]; then
             return 1
         fi
@@ -149,6 +195,17 @@ hdiutil_attach_with_retry() {
         attempt=$((attempt + 1))
     done
     return 1
+}
+
+# EXIT trap for create_dmg_main. Detaches the verification volume if it is
+# still attached, then removes the temp mountpoint and staging directories.
+# The globals are expanded at process exit, after main's locals are gone.
+cleanup_create_dmg() {
+    if [ -n "${VERIFY_PT:-}" ]; then
+        detach_attach_leftovers "$VERIFY_PT" "${_HDIUTIL_ATTACH_OUTPUT:-}"
+    fi
+    [ -z "${MOUNT_ROOT:-}" ] || rm -rf "$MOUNT_ROOT"
+    [ -z "${STAGING:-}" ] || rm -rf "$STAGING"
 }
 
 create_dmg_main() {
@@ -179,8 +236,9 @@ create_dmg_main() {
     # other OSes rather than producing a broken DMG.
     command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (this script only runs on macOS)"
 
-    # STAGING is intentionally global: the EXIT trap expands it at process
-    # exit, after this function's locals would already be gone.
+    # STAGING, MOUNT_ROOT, VERIFY_PT and _HDIUTIL_ATTACH_OUTPUT are
+    # intentionally global: the EXIT trap expands them at process exit,
+    # after this function's locals would already be gone.
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
     REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
@@ -191,7 +249,12 @@ create_dmg_main() {
     # Every DMG run starts from a clean staging directory so stale symlinks or
     # leftover `.Trash-*` files can't leak into the image.
     STAGING="$(mktemp -d)"
-    trap 'rm -rf "$STAGING"' EXIT
+    # The verification volume mounts under its own temp directory, never
+    # /Volumes/$VOLNAME: an explicit mountpoint cannot collide with a stale
+    # volume from an earlier run or with a `PaneFlow 1` from a retried attach.
+    MOUNT_ROOT="$(mktemp -d)"
+    VERIFY_PT="$MOUNT_ROOT/$VOLNAME"
+    trap cleanup_create_dmg EXIT
 
     # The enclosed app bundle - `cp -R` preserves the embedded code signature
     # and extended attributes (notarization ticket). `ditto` would also work
@@ -231,28 +294,29 @@ create_dmg_main() {
     # drift (e.g., from a buggy hdiutil that rewrote extended attributes)
     # would surface here, not at Gatekeeper time on a user's Mac.
     # Retry covers a wedged diskimages-helper, not the checks below.
-    if ! hdiutil_attach_with_retry "$FINAL_DMG"; then
+    if ! hdiutil_attach_with_retry "$FINAL_DMG" "$VERIFY_PT"; then
         die "hdiutil attach failed after ${HDIUTIL_RETRY_ATTEMPTS} attempts; not shipping an unverified image"
     fi
-    local VERIFY_MOUNT VERIFY_DEV VERIFY_PT
-    VERIFY_MOUNT="$_HDIUTIL_ATTACH_OUTPUT"
-    VERIFY_DEV="$(echo "$VERIFY_MOUNT" | awk 'NR==1 {print $1}')"
-    VERIFY_PT="/Volumes/$VOLNAME"
+    local VERIFY_DEV
+    VERIFY_DEV="$(attach_output_device "$_HDIUTIL_ATTACH_OUTPUT")"
+    [ -n "$VERIFY_DEV" ] || die "hdiutil attach printed no device: $_HDIUTIL_ATTACH_OUTPUT"
+    [ -d "$VERIFY_PT/$BUNDLE_NAME" ] || die "attached image has no $BUNDLE_NAME at $VERIFY_PT"
+    # Each failure below exits through the EXIT trap, which detaches the volume.
     if ! codesign --verify --deep --strict "$VERIFY_PT/$BUNDLE_NAME"; then
-        hdiutil detach "$VERIFY_DEV" -force 2>/dev/null || true
         die "codesign verification failed on enclosed bundle"
     fi
     if ! xcrun stapler validate "$VERIFY_PT/$BUNDLE_NAME"; then
-        hdiutil detach "$VERIFY_DEV" -force 2>/dev/null || true
         die "stapled notarization ticket validation failed on enclosed bundle"
     fi
     if ! spctl --assess --type exec --verbose "$VERIFY_PT/$BUNDLE_NAME"; then
-        hdiutil detach "$VERIFY_DEV" -force 2>/dev/null || true
         die "Gatekeeper assessment failed on enclosed bundle"
     fi
     hdiutil detach "$VERIFY_DEV" -quiet 2>/dev/null \
         || hdiutil detach "$VERIFY_DEV" -force 2>/dev/null \
         || true
+    # Cleared so the EXIT trap does not chase a device number that may be
+    # reused by another image between here and process exit.
+    _HDIUTIL_ATTACH_OUTPUT=""
 
     echo "Created: $FINAL_DMG ($(du -h "$FINAL_DMG" | awk '{print $1}'))"
 }
