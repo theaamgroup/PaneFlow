@@ -1,7 +1,7 @@
 //! Terminal-agent launcher: the CLI coding agents Paneflow starts in a
 //! terminal pane (Claude Code, Codex, OpenCode, Pi, Hermes, plus the
 //! cmux-derived set: Grok, Amp, Cursor, Gemini, Kiro, Antigravity,
-//! Copilot, CodeBuddy, Factory, Qoder, plus Openclaw). Both the tab-bar
+//! Copilot, CodeBuddy, Factory, Qoder, Openclaw, plus DeepSeek Harness). Both the tab-bar
 //! launcher buttons
 //! (`pane.rs`) and the launch pad iterate this single
 //! source of truth so the per-agent visibility gate and the "respect
@@ -37,13 +37,14 @@ pub enum TerminalAgent {
     Factory,
     Qoder,
     Openclaw,
+    DeepSeekHarness,
 }
 
 impl TerminalAgent {
     /// Every variant, in display order (matches the tab-bar button row).
     /// The original five lead; the cmux-derived launchers follow so the
     /// button order is stable for users who upgraded from a 5-agent build.
-    pub const ALL: [TerminalAgent; 16] = [
+    pub const ALL: [TerminalAgent; 17] = [
         TerminalAgent::ClaudeCode,
         TerminalAgent::Codex,
         TerminalAgent::OpenCode,
@@ -60,6 +61,7 @@ impl TerminalAgent {
         TerminalAgent::Factory,
         TerminalAgent::Qoder,
         TerminalAgent::Openclaw,
+        TerminalAgent::DeepSeekHarness,
     ];
 
     /// Stable display rank - index in [`Self::ALL`]. Used by the sidebar to
@@ -90,6 +92,7 @@ impl TerminalAgent {
             TerminalAgent::Factory => "Factory",
             TerminalAgent::Qoder => "Qoder",
             TerminalAgent::Openclaw => "Openclaw",
+            TerminalAgent::DeepSeekHarness => "DeepSeek Harness",
         }
     }
 
@@ -111,6 +114,7 @@ impl TerminalAgent {
             TerminalAgent::Factory => "agents/factory.svg",
             TerminalAgent::Qoder => "agents/qoder-color.svg",
             TerminalAgent::Openclaw => "agents/openclaw-color.svg",
+            TerminalAgent::DeepSeekHarness => "agents/deepseek-color.svg",
         }
     }
 
@@ -125,6 +129,7 @@ impl TerminalAgent {
             // mask, so the silhouette is painted in this brand color.
             TerminalAgent::Amp => Some(0xF34E3F),
             TerminalAgent::Qoder => Some(0x2ADB5C),
+            TerminalAgent::DeepSeekHarness => Some(0x4D6BFE),
             // The rest are either monochrome `currentColor` logos (tinted
             // with the theme's primary text color so they stay readable on
             // every theme) or multi-color logos rendered in their native
@@ -184,6 +189,7 @@ impl TerminalAgent {
             TerminalAgent::Factory => "factory",
             TerminalAgent::Qoder => "qoder",
             TerminalAgent::Openclaw => "openclaw",
+            TerminalAgent::DeepSeekHarness => "deepseek_harness",
         }
     }
 
@@ -244,6 +250,7 @@ impl TerminalAgent {
             "factory" => Some(TerminalAgent::Factory),
             "qoder" => Some(TerminalAgent::Qoder),
             "openclaw" => Some(TerminalAgent::Openclaw),
+            "deepseek_harness" => Some(TerminalAgent::DeepSeekHarness),
             _ => None,
         }
     }
@@ -285,6 +292,7 @@ impl TerminalAgent {
             TerminalAgent::Factory => config.factory_button_visible,
             TerminalAgent::Qoder => config.qoder_button_visible,
             TerminalAgent::Openclaw => config.openclaw_button_visible,
+            TerminalAgent::DeepSeekHarness => config.deepseek_harness_button_visible,
         };
         explicit.unwrap_or_else(|| self.is_default_enabled() && is_installed(self))
     }
@@ -318,6 +326,7 @@ impl TerminalAgent {
             TerminalAgent::Factory => "factory_button_visible",
             TerminalAgent::Qoder => "qoder_button_visible",
             TerminalAgent::Openclaw => "openclaw_button_visible",
+            TerminalAgent::DeepSeekHarness => "deepseek_harness_button_visible",
         }
     }
 
@@ -342,7 +351,8 @@ impl TerminalAgent {
             | TerminalAgent::CodeBuddy
             | TerminalAgent::Factory
             | TerminalAgent::Qoder
-            | TerminalAgent::Openclaw => None,
+            | TerminalAgent::Openclaw
+            | TerminalAgent::DeepSeekHarness => None,
         }
     }
 
@@ -366,6 +376,7 @@ impl TerminalAgent {
             TerminalAgent::Factory => "droid",
             TerminalAgent::Qoder => "qodercli",
             TerminalAgent::Openclaw => "openclaw",
+            TerminalAgent::DeepSeekHarness => "dsh",
         }
     }
 
@@ -388,6 +399,7 @@ impl TerminalAgent {
         match self {
             TerminalAgent::Kiro => &["chat"],
             TerminalAgent::Openclaw => &["tui"],
+            TerminalAgent::DeepSeekHarness => &["--profile", "tui"],
             _ => &[],
         }
     }
@@ -1039,6 +1051,7 @@ mod tests {
         assert_eq!(TerminalAgent::Factory.session_agent(), None);
         assert_eq!(TerminalAgent::Qoder.session_agent(), None);
         assert_eq!(TerminalAgent::Openclaw.session_agent(), None);
+        assert_eq!(TerminalAgent::DeepSeekHarness.session_agent(), None);
     }
 
     #[test]
@@ -1046,6 +1059,10 @@ mod tests {
         let cfg = PaneFlowConfig::default();
         assert_eq!(TerminalAgent::Kiro.command(&cfg), "kiro-cli chat");
         assert_eq!(TerminalAgent::Openclaw.command(&cfg), "openclaw tui");
+        assert_eq!(
+            TerminalAgent::DeepSeekHarness.command(&cfg),
+            "dsh --profile tui"
+        );
     }
 
     #[test]

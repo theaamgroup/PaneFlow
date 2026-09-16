@@ -174,7 +174,7 @@ perf number you did not measure, and do not publish a run that printed
 refuses such a run for the editor suite.
 
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
-holds the 16 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
+holds the 17 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
 running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
 whoami` / `paneflow mcp install` work inside a pane without the user linking the
 bundle binary onto their login PATH. The link is re-pointed at launch when
@@ -393,7 +393,7 @@ KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
 | `paneflow-mcp` | `crates/paneflow-mcp/` | Binary | Read-only stdio MCP server (see below) |
 | `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | GPU-free per-agent MCP config merge engine |
 | `paneflow-agent-setup` | `crates/paneflow-agent-setup/` | Library | GPU-free rulebook inventory (instruction files, skills, rules, hooks, MCP) behind the dock's Agent setup tab (#331) |
-| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 16 agent CLIs |
+| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 17 agent CLIs |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
 | `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |

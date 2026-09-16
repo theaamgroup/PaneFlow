@@ -29,7 +29,7 @@ focused library crates:
 |---|---|---|
 | `paneflow-app` | `src-app/` | The GPUI application and `paneflow` CLI entrypoint: UI, panes, PTY sessions, IPC server |
 | `paneflow-config` | `crates/paneflow-config/` | Config schema, tolerant JSON loader, file watcher |
-| `paneflow-shim` | `crates/paneflow-shim/` | PATH shim wrapping 16 known agent CLIs so Paneflow can observe their lifecycle |
+| `paneflow-shim` | `crates/paneflow-shim/` | PATH shim wrapping 17 known agent CLIs so Paneflow can observe their lifecycle |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | The hook binary agent CLIs invoke to report session events back over IPC |
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Blocking JSON-RPC client for the local IPC socket (shared by the MCP bridge and the CLI) |
 | `paneflow-mcp` | `crates/paneflow-mcp/` | Stdio MCP server exposing read-only pane access (`list_panes`, `read_pane`, `search_pane`) |

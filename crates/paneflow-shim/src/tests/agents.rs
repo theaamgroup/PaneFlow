@@ -1,3 +1,4 @@
+use crate::hooks::dsh::{render_overlay, DSH_HOOKS_BASENAME, DSH_OVERLAY_BASENAME};
 use crate::hooks::{
     enable_codex_feature_flag, CodexHookConfigGuard, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER,
 };
@@ -5,9 +6,9 @@ use crate::hooks::{
     hermes_managed_block, is_paneflow_hook_command, merge_codebuddy_hooks, merge_cursor_hooks,
     merge_gemini_hooks, merge_qoder_hooks, remove_cursor_hooks, remove_gemini_hooks,
     remove_paneflow_hooks, remove_qoder_hooks, resolve_hook_command, strip_hermes_managed_block,
-    GrokHookFileGuard, HermesHookConfigGuard, InvalidJsonPolicy, ManagedHookConfigGuard,
-    ManagedHookSpec, OpenCodePluginGuard, PiExtensionGuard, CLAUDE_HOOK_EVENTS, HERMES_BLOCK_BEGIN,
-    PANEFLOW_TS_BASENAME,
+    DshOverlayGuard, GrokHookFileGuard, HermesHookConfigGuard, InvalidJsonPolicy,
+    ManagedHookConfigGuard, ManagedHookSpec, OpenCodePluginGuard, PiExtensionGuard,
+    CLAUDE_HOOK_EVENTS, HERMES_BLOCK_BEGIN, PANEFLOW_TS_BASENAME,
 };
 use serde_json::json;
 
@@ -835,4 +836,273 @@ fn resolve_hook_command_output_is_recognized_by_detector() {
             "resolve_hook_command output must preserve the event name: {cmd:?}"
         );
     }
+}
+
+#[test]
+fn dsh_guard_writes_hooks_and_overlay_and_removes_both_on_drop() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    // The guard keys its files on the canonical directory (macOS temp dirs
+    // sit behind the /var -> /private/var symlink).
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+
+    let root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"] {
+        assert!(
+            root["hooks"][event].is_array(),
+            "{event} must be registered for the DeepSeek Harness bridge"
+        );
+    }
+    assert!(
+        root["hooks"].get("Notification").is_none(),
+        "dsh-hooks-claude-code emits no Notification event"
+    );
+    let cmd = root["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(command_preserves_event_arg(cmd, "Stop"));
+
+    let overlay = std::fs::read_to_string(&overlay_path).unwrap();
+    assert!(overlay.starts_with("- insert:"));
+    assert!(overlay.contains("name: '@deepseek-ai/dsh-hooks-claude-code'"));
+    assert!(overlay.contains(&hooks_path.to_string_lossy().to_string()));
+    assert_eq!(guard.overlay_path(), overlay_path);
+
+    drop(guard);
+    assert!(!overlay_path.exists(), "drop must delete the overlay");
+    assert!(!hooks_path.exists(), "drop must delete the hook config");
+}
+
+#[test]
+fn dsh_overlay_escapes_a_single_quote_in_the_config_path() {
+    let overlay = render_overlay(std::path::Path::new("/it's/hooks.json"));
+    assert!(
+        overlay.contains("configPath: '/it''s/hooks.json'"),
+        "a single quote must be doubled inside a single-quoted YAML scalar, got {overlay}"
+    );
+}
+
+#[test]
+fn dsh_patch_overlay_leads_the_launcher_flags() {
+    let overlay = std::path::Path::new("/tmp/overlay.yml");
+    for argv in [
+        vec!["--profile", "tui"],
+        vec!["--profile=tui"],
+        vec!["--profile", "tui", "--resume", "abc"],
+    ] {
+        let args: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
+        let patched = crate::with_dsh_patch_overlay(args.clone(), overlay);
+        assert_eq!(patched[0], "--patch", "{argv:?}");
+        assert_eq!(patched[1], overlay.as_os_str(), "{argv:?}");
+        assert_eq!(&patched[2..], args, "{argv:?}");
+    }
+}
+
+#[test]
+fn dsh_patch_overlay_stays_out_of_plugin_help_version_and_dumps() {
+    let overlay = std::path::Path::new("/tmp/overlay.yml");
+    for argv in [
+        vec!["plugin", "--profile", "tui", "add", "pkg"],
+        vec!["--profile", "tui", "plugin", "add", "pkg"],
+        vec!["--profile=tui", "plugin", "add", "pkg"],
+        vec!["--from-default-profile", "web", "plugin", "add", "pkg"],
+        vec!["--patch", "extra.yml", "plugin", "add", "pkg"],
+        vec!["--help"],
+        vec!["-h"],
+        vec!["--version"],
+        vec!["-V"],
+        vec!["--profile", "tui", "--dump-config"],
+        vec!["--profile", "tui", "--dump-default-config"],
+    ] {
+        let args: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
+        assert_eq!(
+            crate::with_dsh_patch_overlay(args.clone(), overlay),
+            args,
+            "{argv:?} must reach dsh untouched"
+        );
+    }
+}
+
+#[test]
+fn dsh_drop_refuses_a_directory_swapped_for_a_symlink() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let hooks_source = std::fs::read_to_string(dir.join(DSH_HOOKS_BASENAME)).unwrap();
+    let overlay_source = std::fs::read_to_string(dir.join(DSH_OVERLAY_BASENAME)).unwrap();
+
+    // Swap the overlay directory for a symlink to a user-managed directory
+    // holding byte-identical files.
+    let elsewhere = td.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join(DSH_HOOKS_BASENAME), &hooks_source).unwrap();
+    std::fs::write(elsewhere.join(DSH_OVERLAY_BASENAME), &overlay_source).unwrap();
+    let parked = td.path().join("parked");
+    std::fs::rename(&dir, &parked).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+
+    drop(guard);
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join(DSH_HOOKS_BASENAME)).unwrap(),
+        hooks_source,
+        "drop must not delete through a swapped-in directory symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join(DSH_OVERLAY_BASENAME)).unwrap(),
+        overlay_source
+    );
+}
+
+#[test]
+fn dsh_drop_refuses_an_ancestor_swapped_for_a_symlink() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dsh_home = td.path().join(".dsh");
+    let dir = dsh_home.join("paneflow");
+    let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let hooks_source = std::fs::read_to_string(dir.join(DSH_HOOKS_BASENAME)).unwrap();
+    let overlay_source = std::fs::read_to_string(dir.join(DSH_OVERLAY_BASENAME)).unwrap();
+
+    // Swap the `.dsh` ancestor for a symlink; the final `paneflow` component
+    // behind it is a real directory holding byte-identical user files.
+    let elsewhere = td.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("paneflow")).unwrap();
+    std::fs::write(
+        elsewhere.join("paneflow").join(DSH_HOOKS_BASENAME),
+        &hooks_source,
+    )
+    .unwrap();
+    std::fs::write(
+        elsewhere.join("paneflow").join(DSH_OVERLAY_BASENAME),
+        &overlay_source,
+    )
+    .unwrap();
+    std::fs::rename(&dsh_home, td.path().join("parked")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &dsh_home).unwrap();
+
+    drop(guard);
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join("paneflow").join(DSH_HOOKS_BASENAME)).unwrap(),
+        hooks_source,
+        "drop must not delete through a swapped-in ancestor symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join("paneflow").join(DSH_OVERLAY_BASENAME)).unwrap(),
+        overlay_source
+    );
+}
+
+#[test]
+fn dsh_preexisting_files_survive_install() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    std::fs::write(&hooks_path, "{\"user\": true}\n").unwrap();
+    std::fs::write(&overlay_path, "- insert:\n    - id: user\n").unwrap();
+
+    let error = match DshOverlayGuard::install_at(&dir) {
+        Ok(_) => panic!("pre-existing DSH files must not be overwritten"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        "{\"user\": true}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&overlay_path).unwrap(),
+        "- insert:\n    - id: user\n"
+    );
+}
+
+#[test]
+fn dsh_preexisting_overlay_survives_when_hooks_would_be_created() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    std::fs::write(&overlay_path, "- insert:\n    - id: user\n").unwrap();
+
+    let error = match DshOverlayGuard::install_at(&dir) {
+        Ok(_) => panic!("a pre-existing overlay must not be overwritten"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(
+        !hooks_path.exists(),
+        "a failed overlay install must roll back a hooks.json this session created"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&overlay_path).unwrap(),
+        "- insert:\n    - id: user\n"
+    );
+}
+
+#[test]
+fn dsh_mid_session_edits_survive_drop() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    std::fs::write(&hooks_path, "user hooks").unwrap();
+    std::fs::write(&overlay_path, "user overlay").unwrap();
+
+    drop(guard);
+    assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), "user hooks");
+    assert_eq!(
+        std::fs::read_to_string(&overlay_path).unwrap(),
+        "user overlay"
+    );
+}
+
+#[test]
+fn dsh_symlink_file_is_refused_and_target_is_unchanged() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = td.path().join("user-hooks.json");
+    std::fs::write(&target, "{\"keep\": true}\n").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join(DSH_HOOKS_BASENAME)).unwrap();
+
+    let error = match DshOverlayGuard::install_at(&dir) {
+        Ok(_) => panic!("a symlinked hooks.json must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "{\"keep\": true}\n"
+    );
+}
+
+#[test]
+fn dsh_created_files_are_removed_by_the_last_session() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    let first = DshOverlayGuard::install_at(&dir).unwrap();
+    let second = DshOverlayGuard::install_at(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    assert!(hooks_path.exists());
+    assert!(overlay_path.exists());
+
+    drop(first);
+    assert!(
+        hooks_path.exists() && overlay_path.exists(),
+        "an earlier session must leave the files for the last one"
+    );
+    drop(second);
+    assert!(
+        !hooks_path.exists() && !overlay_path.exists(),
+        "the last session must remove the files PaneFlow created"
+    );
 }

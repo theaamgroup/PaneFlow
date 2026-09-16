@@ -145,6 +145,7 @@ preserved; an invalid config is left untouched.
 | `factory_button_visible` | Factory | Off |
 | `qoder_button_visible` | Qoder | Off |
 | `openclaw_button_visible` | Openclaw | Off |
+| `deepseek_harness_button_visible` | DeepSeek Harness | Off |
 
 ## Terminal block
 
@@ -373,7 +374,8 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "codebuddy_button_visible": null,
   "factory_button_visible": null,
   "qoder_button_visible": null,
-  "openclaw_button_visible": null
+  "openclaw_button_visible": null,
+  "deepseek_harness_button_visible": null
 }
 ```
 

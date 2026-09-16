@@ -50,9 +50,9 @@ use exec::run_real;
 use hooks::{
     merge_codebuddy_hooks, merge_cursor_hooks, merge_gemini_hooks, merge_qoder_hooks,
     remove_cursor_hooks, remove_gemini_hooks, remove_paneflow_hooks, remove_qoder_hooks,
-    CodexHookConfigGuard, GrokHookFileGuard, HermesHookConfigGuard, HookConfigGuard, HookInstall,
-    HookInstallSkip, ManagedHookConfigGuard, ManagedHookSpec, OpenCodePluginGuard,
-    PiExtensionGuard,
+    CodexHookConfigGuard, DshOverlayGuard, GrokHookFileGuard, HermesHookConfigGuard,
+    HookConfigGuard, HookInstall, HookInstallSkip, ManagedHookConfigGuard, ManagedHookSpec,
+    OpenCodePluginGuard, PiExtensionGuard,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ fn main() -> ExitCode {
     // read-only FS / missing permissions (PRD C4) - and for every wrapped
     // tool with no hook integration yet (the shim still provides the
     // universal `ai.exit`/`ai.session_end` lifecycle below).
-    let _hook_guard = match install_hook_guard(tool) {
+    let hook_guard = match install_hook_guard(tool) {
         Ok(HookInstall::Installed(guard)) => {
             diagnose(&format!("install_hook_guard({tool}) = installed"));
             Some(guard)
@@ -135,6 +135,10 @@ fn main() -> ExitCode {
     };
 
     let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let args = match hook_guard.as_ref() {
+        Some(ToolHookGuard::Dsh(guard)) => with_dsh_patch_overlay(args, guard.overlay_path()),
+        _ => args,
+    };
 
     let (code, agent_exit) = run_real(tool, &real, &args);
 
@@ -180,6 +184,7 @@ enum ToolHookGuard {
     OpenCode(OpenCodePluginGuard),
     Hermes(HermesHookConfigGuard),
     Grok(GrokHookFileGuard),
+    Dsh(DshOverlayGuard),
 }
 
 fn install_hook_guard(tool: &str) -> std::io::Result<HookInstall<ToolHookGuard>> {
@@ -235,6 +240,7 @@ fn install_hook_guard(tool: &str) -> std::io::Result<HookInstall<ToolHookGuard>>
         }
         // Dedicated merged hook file - wholly Paneflow-owned, zero RMW.
         "grok" => GrokHookFileGuard::install().map(|outcome| outcome.map(ToolHookGuard::Grok)),
+        "dsh" => DshOverlayGuard::install().map(|outcome| outcome.map(ToolHookGuard::Dsh)),
         // Deliberately ABSENT (documented, not forgotten):
         // - "copilot": no hook/JSON-stream surface exists at all.
         // - "kiro-cli": hooks live inside PER-AGENT definition files
@@ -348,6 +354,62 @@ pub(crate) fn locate_sibling_hook_binary() -> Option<PathBuf> {
     let name = "paneflow-ai-hook";
     let candidate = dir.join(name);
     candidate.is_file().then_some(candidate)
+}
+
+const DSH_LAUNCHER_OPT_OUT: &[&str] = &[
+    "--help",
+    "-h",
+    "--version",
+    "-V",
+    "--dump-config",
+    "--dump-default-config",
+];
+
+/// Launcher flags that consume the following argv token. `--profile=tui`
+/// stays a single token and is skipped as a dash option instead.
+const DSH_VALUE_OPTIONS: &[&str] = &["--profile", "--from-default-profile", "--patch"];
+
+pub(crate) fn with_dsh_patch_overlay(
+    args: Vec<OsString>,
+    overlay: &std::path::Path,
+) -> Vec<OsString> {
+    if !dsh_accepts_patch_overlay(&args) {
+        return args;
+    }
+    let mut patched = Vec::with_capacity(args.len() + 2);
+    patched.push(OsString::from("--patch"));
+    patched.push(overlay.as_os_str().to_owned());
+    patched.extend(args);
+    patched
+}
+
+fn dsh_accepts_patch_overlay(args: &[OsString]) -> bool {
+    if dsh_first_subcommand(args).is_some_and(|arg| arg == "plugin") {
+        return false;
+    }
+    !args
+        .iter()
+        .any(|arg| DSH_LAUNCHER_OPT_OUT.iter().any(|opt| arg == opt))
+}
+
+fn dsh_first_subcommand(args: &[OsString]) -> Option<&OsString> {
+    let mut index = 0;
+    while index < args.len() {
+        let text = args[index].to_string_lossy();
+        if text == "--" {
+            return args.get(index + 1);
+        }
+        if text.starts_with('-') {
+            if DSH_VALUE_OPTIONS.iter().any(|opt| text == *opt) {
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        return Some(&args[index]);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

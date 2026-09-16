@@ -130,6 +130,12 @@ const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
         description: "Show the Openclaw launcher button in every tab bar.",
         agent: TerminalAgent::Openclaw,
     },
+    AgentToggleRow {
+        id: "row-deepseek-harness-visible",
+        title: "DeepSeek Harness",
+        description: "Show the DeepSeek Harness launcher button in every tab bar.",
+        agent: TerminalAgent::DeepSeekHarness,
+    },
 ];
 
 impl PaneFlowApp {

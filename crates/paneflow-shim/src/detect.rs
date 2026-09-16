@@ -39,6 +39,7 @@ pub(crate) const WRAPPED_TOOLS: &[&str] = &[
     "droid",
     "qodercli",
     "openclaw",
+    "dsh",
 ];
 
 /// Testable inner: map a filename stem to the tool identity. Only exact
