@@ -103,51 +103,39 @@ pub(crate) fn dsh_home() -> Option<PathBuf> {
         .map(normalize_existing_prefix)
 }
 
-/// Canonicalizes the longest existing prefix of `path` and re-appends the
-/// rest, so `/tmp/dsh`, `/tmp/x/../dsh`, and a symlinked spelling all derive
-/// the same overlay and lease paths even before the directory exists.
+/// Resolves `path` component by component: while the prefix exists it is
+/// canonicalized (so a symlink followed by `..` climbs from the symlink's
+/// target, as the filesystem would), and once a component is missing the
+/// rest is normalized lexically (`.` dropped, `..` popped, never above the
+/// root). Aliased spellings of one directory therefore derive the same
+/// overlay and lease paths even before the directory exists.
 fn normalize_existing_prefix(path: PathBuf) -> PathBuf {
-    let path = lexically_normalize(&path);
-    let mut missing = Vec::new();
-    let mut probe = path.as_path();
-    loop {
-        if let Ok(canonical) = std::fs::canonicalize(probe) {
-            return missing
-                .iter()
-                .rev()
-                .fold(canonical, |acc, segment| acc.join(segment));
-        }
-        match (probe.file_name(), probe.parent()) {
-            (Some(name), Some(parent)) => {
-                missing.push(name.to_os_string());
-                probe = parent;
-            }
-            _ => return path,
-        }
-    }
-}
-
-/// Resolves `.` and `..` components lexically so a missing suffix such as
-/// `new/../dsh` collapses to `dsh` before the existing prefix is
-/// canonicalized; `..` never climbs above the root.
-fn lexically_normalize(path: &Path) -> PathBuf {
     use std::path::Component;
-    let mut out = PathBuf::new();
+    let mut resolved = PathBuf::new();
+    let mut prefix_exists = true;
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
                 if !matches!(
-                    out.components().next_back(),
+                    resolved.components().next_back(),
                     None | Some(Component::RootDir) | Some(Component::Prefix(_))
                 ) {
-                    out.pop();
+                    resolved.pop();
                 }
             }
-            other => out.push(other.as_os_str()),
+            other => {
+                resolved.push(other.as_os_str());
+                if prefix_exists {
+                    match std::fs::canonicalize(&resolved) {
+                        Ok(canonical) => resolved = canonical,
+                        Err(_) => prefix_exists = false,
+                    }
+                }
+            }
         }
     }
-    out
+    resolved
 }
 
 /// A relative `DSH_HOME` is anchored on the shim's working directory before
@@ -227,7 +215,7 @@ fn sweep_overlay(directory: &Path) {
 
 #[cfg(test)]
 mod dsh_home_tests {
-    use super::{lexically_normalize, normalize_existing_prefix, resolve_dsh_home};
+    use super::{normalize_existing_prefix, resolve_dsh_home};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -298,10 +286,22 @@ mod dsh_home_tests {
     }
 
     #[test]
-    fn lexical_normalization_never_climbs_above_the_root() {
+    fn dot_dot_after_a_symlink_climbs_from_the_symlink_target() {
+        let root = std::env::temp_dir().join(format!("dsh-link-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("srv").join("profile")).unwrap();
+        std::os::unix::fs::symlink(root.join("srv").join("profile"), root.join("link")).unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        let resolved = normalize_existing_prefix(root.join("link").join("..").join("dsh"));
+        assert_eq!(resolved, canonical_root.join("srv").join("dsh"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn normalization_never_climbs_above_the_root() {
+        assert!(normalize_existing_prefix(PathBuf::from("/../..")).has_root());
         assert_eq!(
-            lexically_normalize(std::path::Path::new("/../a/./b/../c")),
-            PathBuf::from("/a/c")
+            normalize_existing_prefix(PathBuf::from("/../no-such-dir-xyz/./a/../b")),
+            PathBuf::from("/no-such-dir-xyz/b")
         );
     }
 }
