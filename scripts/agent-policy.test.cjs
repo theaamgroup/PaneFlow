@@ -373,7 +373,9 @@ for (const status of [404, 403, 500]) {
 test('all four fork-runner guards from b227ca1 remain intact', () => {
   const workflow = readFileSync(path.join(__dirname, '../.github/workflows/run_tests.yml'), 'utf8');
   const guards = workflow.split('\n').filter(line => line.includes('runs-on:') && line.includes('head.repo.full_name'));
-  const expected = "    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}";
+  // The self-hosted arm names the runner's full label set so a future
+  // self-hosted runner on another OS cannot pick these jobs up.
+  const expected = "    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\",\"Linux\",\"X64\"]') || 'ubuntu-24.04' }}";
   assert.deepEqual(guards, Array(4).fill(expected));
 });
 
