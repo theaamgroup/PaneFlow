@@ -176,16 +176,41 @@ fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::V
 fn same_paneflow_hook_event(actual: &str, expected: &str) -> bool {
     is_paneflow_hook_command(expected)
         && hook_command_event(actual) == hook_command_event(expected)
-        && paneflow_hook_program_token(actual)
-            .is_some_and(|program: String| hook_program_is_runnable(&program))
+        && paneflow_hook_program_token(actual).is_some_and(|program: String| {
+            let program = Path::new(&program);
+            hook_program_is_runnable(program)
+                && !hook_program_is_prunable(program, own_version_dir().as_deref())
+        })
 }
 
-fn hook_program_is_runnable(program: &str) -> bool {
+fn hook_program_is_runnable(program: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    let path = Path::new(program);
-    path.is_absolute()
-        && std::fs::metadata(path)
+    program.is_absolute()
+        && std::fs::metadata(program)
             .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+/// The version-pinned `bin/<version>/` directory this shim was launched
+/// from: `PANEFLOW_BIN_DIR` when the app advertised it, else the shim's own
+/// location.
+fn own_version_dir() -> Option<PathBuf> {
+    std::env::var_os("PANEFLOW_BIN_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(std::env::current_exe().ok()?.parent()?.to_path_buf()))
+}
+
+/// True when `program` sits in another version's `bin/<version>/` beside
+/// this shim's own, the one layout the app prunes once the process that
+/// staged it is gone. A sibling instance's hook there is runnable today and
+/// can vanish mid-session after that instance exits, so it is never adopted;
+/// the durable copy under the data directory, or this shim's own leased
+/// version directory, is fine.
+fn hook_program_is_prunable(program: &Path, own_version_dir: Option<&Path>) -> bool {
+    let (Some(own), Some(parent)) = (own_version_dir, program.parent()) else {
+        return false;
+    };
+    parent != own && parent.parent() == own.parent()
 }
 
 fn hook_command_event(command: &str) -> Option<&str> {
@@ -335,6 +360,50 @@ pub(crate) fn sibling_hook_program(directory: &Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hook_in_another_versions_bin_dir_is_prunable_and_never_adopted() {
+        let own = Path::new("/cache/paneflow/bin/0.6.1");
+        assert!(hook_program_is_prunable(
+            Path::new("/cache/paneflow/bin/0.6.0/paneflow-ai-hook"),
+            Some(own)
+        ));
+        assert!(!hook_program_is_prunable(
+            Path::new("/cache/paneflow/bin/0.6.1/paneflow-ai-hook"),
+            Some(own)
+        ));
+        assert!(!hook_program_is_prunable(
+            Path::new("/data/paneflow/bin/paneflow-ai-hook"),
+            Some(own)
+        ));
+        assert!(!hook_program_is_prunable(
+            Path::new("/cache/paneflow/bin/0.6.0/paneflow-ai-hook"),
+            None
+        ));
+
+        // End to end: a runnable sibling hook under a prunable version dir is
+        // still refused, while the same file under a durable path is adopted.
+        let temp = tempfile::TempDir::new().unwrap();
+        let versioned = temp.path().join("bin");
+        let source = grok_source().unwrap();
+        let prunable = sibling_hook_program(&versioned.join("0.6.0"));
+        let own_dir = versioned.join("0.6.1");
+        std::fs::create_dir_all(&own_dir).unwrap();
+        let rendering = render_as_sibling_instance(&source, &prunable);
+        let program = paneflow_hook_program_token(
+            rendering
+                .lines()
+                .find(|line| line.contains("paneflow-ai-hook"))
+                .and_then(|line| line.split('"').nth(3))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(hook_program_is_runnable(Path::new(&program)));
+        assert!(hook_program_is_prunable(
+            Path::new(&program),
+            Some(&own_dir)
+        ));
+    }
 
     #[test]
     fn sibling_rendering_differs_only_in_the_hook_program() {
