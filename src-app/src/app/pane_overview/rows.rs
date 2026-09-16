@@ -15,7 +15,7 @@ use crate::ai_types::AgentState;
 ///
 /// The eight-pane perf gate (`layout/render.rs`) already spends a whole 60 Hz
 /// frame on eight painted terminals, and the theoretical worst case here is
-/// 20 workspaces x 32 tabs x 32 panes = 20,480 panes. Off-screen cards cull
+/// 32 workspaces x 32 tabs x 32 panes = 32,768 panes. Off-screen cards cull
 /// themselves in prepaint; this cap bounds what is left when a very large
 /// grid IS on screen.
 pub(crate) const MAX_LIVE_THUMBNAILS: usize = 24;
