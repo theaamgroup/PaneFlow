@@ -19,6 +19,8 @@ const BRIDGE_ROW_ID: &str = "paneflow-hooks";
 pub(crate) struct DshOverlayGuard {
     hooks_path: PathBuf,
     overlay_path: PathBuf,
+    /// Device and inode of the overlay directory at install time.
+    directory_identity: (u64, u64),
     hooks_source: String,
     overlay_source: String,
     hooks_lease: HookLease,
@@ -46,6 +48,7 @@ impl DshOverlayGuard {
         // The directory exists now, so the leases and ownership markers are
         // keyed on its one canonical spelling, whatever alias reached here.
         let directory = &std::fs::canonicalize(directory)?;
+        let directory_identity = directory_identity(directory)?;
         let hooks_path = directory.join(DSH_HOOKS_BASENAME);
         let overlay_path = directory.join(DSH_OVERLAY_BASENAME);
         let mut hooks_lease = HookLease::acquire(&hooks_path)?;
@@ -64,6 +67,7 @@ impl DshOverlayGuard {
         Ok(Self {
             hooks_path,
             overlay_path,
+            directory_identity,
             hooks_source,
             overlay_source,
             hooks_lease,
@@ -78,10 +82,11 @@ impl DshOverlayGuard {
 
 impl Drop for DshOverlayGuard {
     fn drop(&mut self) {
-        // The directory was a real directory at install time. If it has
-        // since been swapped for a symlink, the files behind it are not the
-        // ones this guard created, so leave them alone (lease and all).
-        if !overlay_directory_is_intact(&self.overlay_path) {
+        // Cleanup is anchored to the directory opened at install time: if
+        // it, or any ancestor, has since been swapped so the path resolves
+        // to a different directory, the files behind it are not the ones
+        // this guard created, so leave them alone (lease and all).
+        if !overlay_directory_is_intact(&self.overlay_path, self.directory_identity) {
             return;
         }
         cleanup_matching_owned_file(
@@ -189,12 +194,22 @@ fn yaml_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// True when the overlay file's parent is still a real directory, not a
-/// symlink that could redirect a cleanup into user-managed data.
-fn overlay_directory_is_intact(file: &Path) -> bool {
+/// Device and inode of a directory, the identity a later cleanup is
+/// checked against so no swap along the path can redirect it.
+fn directory_identity(directory: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(directory)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// True when the overlay file's parent is still the very directory that was
+/// installed into: not itself a symlink, and resolving (through every
+/// ancestor) to the same device and inode recorded at install time.
+fn overlay_directory_is_intact(file: &Path, installed: (u64, u64)) -> bool {
     file.parent().is_some_and(|directory| {
         std::fs::symlink_metadata(directory)
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && directory_identity(directory).is_ok_and(|identity| identity == installed)
     })
 }
 

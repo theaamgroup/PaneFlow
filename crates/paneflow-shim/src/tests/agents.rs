@@ -959,6 +959,45 @@ fn dsh_drop_refuses_a_directory_swapped_for_a_symlink() {
 }
 
 #[test]
+fn dsh_drop_refuses_an_ancestor_swapped_for_a_symlink() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dsh_home = td.path().join(".dsh");
+    let dir = dsh_home.join("paneflow");
+    let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let hooks_source = std::fs::read_to_string(dir.join(DSH_HOOKS_BASENAME)).unwrap();
+    let overlay_source = std::fs::read_to_string(dir.join(DSH_OVERLAY_BASENAME)).unwrap();
+
+    // Swap the `.dsh` ancestor for a symlink; the final `paneflow` component
+    // behind it is a real directory holding byte-identical user files.
+    let elsewhere = td.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("paneflow")).unwrap();
+    std::fs::write(
+        elsewhere.join("paneflow").join(DSH_HOOKS_BASENAME),
+        &hooks_source,
+    )
+    .unwrap();
+    std::fs::write(
+        elsewhere.join("paneflow").join(DSH_OVERLAY_BASENAME),
+        &overlay_source,
+    )
+    .unwrap();
+    std::fs::rename(&dsh_home, td.path().join("parked")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &dsh_home).unwrap();
+
+    drop(guard);
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join("paneflow").join(DSH_HOOKS_BASENAME)).unwrap(),
+        hooks_source,
+        "drop must not delete through a swapped-in ancestor symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join("paneflow").join(DSH_OVERLAY_BASENAME)).unwrap(),
+        overlay_source
+    );
+}
+
+#[test]
 fn dsh_preexisting_files_survive_install() {
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".dsh/paneflow");
