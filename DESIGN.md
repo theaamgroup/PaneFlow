@@ -117,8 +117,8 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 4. Every rounded surface takes its radius from section 4.4, which is the
    closed set. New radii are not introduced.
 5. Motion explains state: hover, focus dim, the sidebar slide, the menu
-   reveal, the toast lifecycle. Nothing animates for decoration except the startup splash
-   shimmer and the status spinners. Any new animation MUST read
+   reveal, the toast lifecycle. Nothing animates for decoration except the
+   status spinners. Any new animation MUST read
    `reduce_motion`; section 4.8 lists which existing ones do.
 6. Color carries meaning first: added, modified, deleted, conflict, error,
    stalled, and the eight broadcast groups keep their hues across presets.
@@ -424,7 +424,6 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Title | Geist | 14 Semibold | Pane header, empty-state titles, callout titles, System Info title |
 | Page heading | Geist | 26 Semibold | Settings page title |
 | Dialog title | Geist | 16 | About only — System Info uses `TITLE` (14) |
-| Splash | Geist | 34 Medium | Startup wordmark |
 | Terminal | User choice among fixed-pitch families; default the bundled JetBrainsMono Nerd Font | 13 pt default (range 8–32); `line_height` and `cell_width` are multipliers of the measured cell, both defaulting to 1.0 (ranges 0.8–2.5 and 0.8–2.0). At 13 pt the cell measures 10 by 23 px | Panes |
 | Code and diff | `resolve_font_family(None)`, the terminal default | 12 | Diff dock, editor, theme preview |
 | Minimap | `.ZedMono`, which resolves to the bundled Nerd Font | 2 px Black, 1.618 line height | Dock code editor |
@@ -501,7 +500,6 @@ text color. Do not invent a brand tint for a mark that returns `None`.
 | Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift |
 | Status spinner | 1 s loop | linear rotate | Empty states while scanning |
 | Sidebar comet-trail loader | 720 ms cycle | stepped | 3 by 3 perimeter of 3 px dots, gap 1, trailing opacities 0.81, 0.49, 0.26 over a 0.06 base |
-| Startup splash | 2600 ms shimmer, 900 ms minimum on screen | linear | Letters at 0.54 alpha, shimmering to 0.82 |
 | Tooltip | 800 ms delay | none | `delayed_tooltip` |
 
 `reduce_motion` is a PaneFlow-owned process-wide `AtomicBool`, not a GPUI
@@ -516,7 +514,7 @@ restart, and it defaults to `false`.
 `app/cli_diff_dock.rs::toggle_diff_dock_maximize`), `panel_empty_state`'s
 scanning spinner does not start (`ui_primitives.rs:859`), and `menu_reveal`
 mounts every menu at rest (`ui_primitives.rs::menu_reveal`). Still ignoring it: the pane header button hover, the
-drop-overlay glide, toasts, the comet-trail loader, and the splash shimmer.
+drop-overlay glide, toasts, and the comet-trail loader.
 The config description promises a static frame for decorative animations; that
 promise is **Proposed** until the rest read the flag. Feedback is never
 removed, only its interpolation.
