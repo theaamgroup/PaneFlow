@@ -3,7 +3,7 @@ use super::{
     paneflow_ipc_reachable, refuse_symlink, with_last_lease, with_orphan_lease, HookInstall,
     HookInstallResult, HookInstallSkip, HookLease,
 };
-use paneflow_agent_config::claude_hooks::paneflow_hook_program_token;
+use paneflow_agent_config::claude_hooks::{paneflow_hook_program_token, render_hook_command};
 use paneflow_agent_config::{home_dir, read_optional_text, with_config_lock};
 use std::path::{Path, PathBuf};
 
@@ -174,13 +174,19 @@ fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::V
 /// this session hooks that invoke a missing executable, so a sibling program
 /// must be an existing executable file, not merely the right basename.
 fn same_paneflow_hook_event(actual: &str, expected: &str) -> bool {
-    is_paneflow_hook_command(expected)
-        && hook_command_event(actual) == hook_command_event(expected)
-        && paneflow_hook_program_token(actual).is_some_and(|program: String| {
-            let program = Path::new(&program);
-            hook_program_is_runnable(program)
-                && !hook_program_is_prunable(program, own_version_dir().as_deref())
-        })
+    let Some(event) = hook_command_event(expected).filter(|_| is_paneflow_hook_command(expected))
+    else {
+        return false;
+    };
+    paneflow_hook_program_token(actual).is_some_and(|program: String| {
+        let program = Path::new(&program);
+        // The whole command must be the canonical rendering for that
+        // program and event: `<program> Stop; touch /tmp/x Stop` shares the
+        // first and last tokens with a hook and is not one.
+        actual == render_hook_command(program, event)
+            && hook_program_is_runnable(program)
+            && !hook_program_is_prunable(program, own_version_dir().as_deref())
+    })
 }
 
 /// `access(X_OK)` through [`super::is_executable`], not a mode bitmask: a
@@ -448,6 +454,15 @@ mod tests {
         std::fs::remove_file(&program).unwrap();
         assert!(!is_sibling_instance_rendering(&sibling, &source));
         let _ = sibling_hook_program(&temp.path().join("elsewhere"));
+
+        // A command that merely starts and ends like a hook is not one.
+        let augmented = sibling.replacen(
+            &format!("{program_text} Stop"),
+            &format!("{program_text} Stop; touch /tmp/pwn Stop"),
+            1,
+        );
+        assert_ne!(augmented, sibling);
+        assert!(!is_sibling_instance_rendering(&augmented, &source));
 
         // Same program, different event: not the same hook.
         let swapped = sibling.replacen("paneflow-ai-hook Stop", "paneflow-ai-hook Notification", 1);
