@@ -817,6 +817,33 @@ fn restore_closed_surface_record(
 /// uses for a persisted cwd. A local folder answers in microseconds.
 const RECENT_OPEN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The recent folders whose click-time probe is still outstanding (issue
+/// #521). `probe_persisted_dir_within` spawns a helper thread per call and
+/// leaves a timed-out `stat` to unwind on its own, so a held `Cmd+N` on a
+/// mount that is not responding must coalesce into one probe rather than
+/// one thread per repeat.
+#[derive(Debug, Default)]
+pub(crate) struct RecentProbes {
+    in_flight: Vec<std::path::PathBuf>,
+}
+
+impl RecentProbes {
+    /// Claim a probe for `path`: `true` when the caller should start one,
+    /// `false` while an earlier probe of the same path is still pending.
+    pub(crate) fn begin(&mut self, path: &std::path::Path) -> bool {
+        if self.in_flight.iter().any(|pending| pending == path) {
+            return false;
+        }
+        self.in_flight.push(path.to_path_buf());
+        true
+    }
+
+    /// Release the claim once the probe has answered (or not).
+    pub(crate) fn finish(&mut self, path: &std::path::Path) {
+        self.in_flight.retain(|pending| pending != path);
+    }
+}
+
 impl PaneFlowApp {
     // Issue #438: the four Review-terminal sweeps that used to live here are
     // gone. Review no longer embeds terminals inside a `DiffView` (upstream
@@ -1492,7 +1519,9 @@ impl PaneFlowApp {
     /// re-enters with the window. No answer within
     /// [`RECENT_OPEN_PROBE_TIMEOUT`] keeps the row (the mount may come back)
     /// and does not reach `open_workspace_folders`, whose own `is_dir` is
-    /// pre-existing behaviour shared with the picker and drop paths.
+    /// pre-existing behaviour shared with the picker and drop paths. A
+    /// repeat click or held shortcut while that path's probe is outstanding
+    /// is a no-op (`RecentProbes`), so a dead mount cannot pile up threads.
     pub(crate) fn open_recent_workspace(
         &mut self,
         idx: usize,
@@ -1502,6 +1531,13 @@ impl PaneFlowApp {
         let Some(entry) = crate::recents::current(cx).get(idx).cloned() else {
             return;
         };
+        if !self.recent_probes.begin(&entry.path) {
+            log::debug!(
+                "recent folder {} is already being probed; coalescing the repeat",
+                entry.path.display()
+            );
+            return;
+        }
         let probed = entry.path.clone();
         cx.spawn_in(window, async move |this, cx| {
             let answer = smol::unblock(move || {
@@ -1525,6 +1561,7 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.recent_probes.finish(&path);
         match answer {
             Some(true) => {}
             Some(false) => {
@@ -2838,6 +2875,43 @@ mod tests {
             body.contains("Some(false) => {") && body.contains("crate::recents::forget("),
             "only a definite miss forgets the row"
         );
+        assert!(
+            body.contains("if !self.recent_probes.begin(&entry.path) {"),
+            "a repeat while the probe is outstanding must coalesce"
+        );
+        assert!(
+            body.contains("self.recent_probes.finish(&path);")
+                && body.find("self.recent_probes.finish(&path);") < body.find("match answer {"),
+            "every outcome must release the claim before it is handled"
+        );
+    }
+
+    /// Issue #521: one outstanding probe per path; a different path is not
+    /// blocked, and the claim is released by `finish` whatever the answer.
+    #[test]
+    fn recent_probes_coalesce_repeats_for_one_path_only() {
+        let mut probes = RecentProbes::default();
+        let stalled = std::path::Path::new("/Volumes/dead/project");
+        let other = std::path::Path::new("/Users/me/project");
+        assert!(probes.begin(stalled), "the first request starts a probe");
+        assert!(
+            !probes.begin(stalled),
+            "a repeat while pending must not start another"
+        );
+        assert!(probes.begin(other), "a different path is not blocked");
+        assert!(!probes.begin(other), "and it is pending in its own right");
+        probes.finish(stalled);
+        assert!(
+            probes.begin(stalled),
+            "after finish the path can be probed again"
+        );
+        assert!(
+            !probes.begin(other),
+            "finishing one path releases only that path"
+        );
+        probes.finish(other);
+        probes.finish(other);
+        assert!(probes.begin(other), "finish is idempotent");
     }
 
     use super::*;

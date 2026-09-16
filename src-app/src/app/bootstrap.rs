@@ -755,6 +755,7 @@ impl PaneFlowApp {
             tab_menu_open: None,
             pane_menu_open: None,
             pending_pane_focus: None,
+            recent_probes: crate::app::workspace_ops::RecentProbes::default(),
             profile_menu_open: None,
             agent_sessions: crate::AgentSessionsState {
                 sessions_sidebar_open: false,
