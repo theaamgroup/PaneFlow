@@ -183,11 +183,12 @@ fn same_paneflow_hook_event(actual: &str, expected: &str) -> bool {
         })
 }
 
+/// `access(X_OK)` through [`super::is_executable`], not a mode bitmask: a
+/// file with only an other-class execute bit, an ACL denial, or a `noexec`
+/// mount would pass the bitmask and then fail every hook with
+/// `Permission denied`.
 fn hook_program_is_runnable(program: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    program.is_absolute()
-        && std::fs::metadata(program)
-            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    program.is_absolute() && program.is_file() && super::is_executable(program)
 }
 
 /// The version-pinned `bin/<version>/` directory this shim was launched
@@ -403,6 +404,24 @@ mod tests {
             Path::new(&program),
             Some(&own_dir)
         ));
+    }
+
+    #[test]
+    fn a_hook_the_current_user_cannot_execute_is_not_runnable() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::TempDir::new().unwrap();
+        let program = sibling_hook_program(temp.path());
+        assert!(hook_program_is_runnable(&program));
+        // Only the "other" class may execute: the owner cannot, although the
+        // mode has an execute bit.
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o001)).unwrap();
+        assert!(!hook_program_is_runnable(&program));
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!hook_program_is_runnable(&program));
+        assert!(
+            !hook_program_is_runnable(temp.path()),
+            "a directory is not a program"
+        );
     }
 
     #[test]

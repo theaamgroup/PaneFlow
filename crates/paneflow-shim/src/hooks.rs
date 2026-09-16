@@ -384,7 +384,7 @@ fn first_executable(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Op
 ///
 /// The caller pairs this with an `is_file()` check: `X_OK` on a directory
 /// tests traversability and would otherwise succeed.
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
 
     let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
