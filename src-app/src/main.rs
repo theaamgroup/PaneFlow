@@ -704,6 +704,56 @@ mod native_material_tests {
 }
 
 #[cfg(test)]
+mod empty_app_tests {
+    use super::EMPTY_APP_WORKSPACE_HINT;
+    use crate::source_probe::source_slice;
+
+    #[test]
+    fn empty_app_workspace_hint_names_live_entry_points() {
+        let hint = EMPTY_APP_WORKSPACE_HINT;
+        let lowered = hint.to_ascii_lowercase();
+        assert!(
+            !lowered.contains("click +")
+                && !lowered.contains("+ in the sidebar")
+                && !lowered.contains("sidebar +"),
+            "empty-app copy must not refer to a sidebar +: {hint}"
+        );
+        assert!(
+            hint.contains("Cmd+Shift+N"),
+            "empty-app copy must name Cmd+Shift+N: {hint}"
+        );
+        assert!(
+            hint.contains("Window") && hint.contains("New Workspace"),
+            "empty-app copy must name Window menu New Workspace: {hint}"
+        );
+        assert!(
+            hint.contains("Open folder"),
+            "empty-app copy must name the Open folder button: {hint}"
+        );
+        assert!(
+            !lowered.contains("profile")
+                && !lowered.contains("command palette")
+                && !hint.contains("Cmd+Shift+O")
+                && !lowered.contains("clone"),
+            "empty-app copy must not mention the unreachable profile menu, command palette, or Clone: {hint}"
+        );
+
+        let render_anchor = format!("impl Render for {} {{", "PaneFlowApp");
+        let render = source_slice(include_str!("main.rs"), &render_anchor, "\n}\n");
+        let empty_id = format!(".id(\"{}\")", "empty-app");
+        let empty_app = source_slice(render, &empty_id, ".into_any_element()");
+        assert!(
+            empty_app.contains("EMPTY_APP_WORKSPACE_HINT"),
+            "empty-app render must use EMPTY_APP_WORKSPACE_HINT"
+        );
+        assert!(
+            !empty_app.contains("Click +") && !empty_app.contains("+ in the sidebar"),
+            "empty-app render still contains a sidebar + hint: {empty_app}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod help_tests {
     use super::{global_help_text, unknown_verb_error};
 
@@ -1916,6 +1966,11 @@ impl PaneFlowApp {
     // --- Sidebar rendering ---
 }
 
+// Issue #533: live New Workspace entry points (DESIGN.md §5.2); no sidebar
+// `+` since #105. The profile menu is unreachable and has no New Workspace row.
+const EMPTY_APP_WORKSPACE_HINT: &str = "Create your first workspace with Cmd+Shift+N, Window ▸ New Workspace, \
+     or the Open folder button.";
+
 impl Render for PaneFlowApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = crate::theme::ui_colors();
@@ -2165,7 +2220,7 @@ impl Render for PaneFlowApp {
                                 .mt(px(6.))
                                 .text_color(ui.muted)
                                 .text_size(px(12.))
-                                .child("Click + in the sidebar to create your first workspace."),
+                                .child(EMPTY_APP_WORKSPACE_HINT),
                         ),
                 )
                 .into_any_element()
