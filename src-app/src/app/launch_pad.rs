@@ -50,6 +50,12 @@ pub(crate) struct LaunchPadState {
     pub(crate) target: WeakEntity<Pane>,
     /// Index into [`TerminalAgent::ALL`].
     pub(crate) agent_idx: usize,
+    /// `true` while `agent_idx` is the row 0 fallback chosen because the
+    /// first PATH walk had not published when the pad opened (issue #518),
+    /// and the user has not picked a row since. The boot warm's completion
+    /// settles it onto the first installed agent through
+    /// [`settle_default_agent`].
+    pub(crate) agent_default_pending: bool,
     pub(crate) branch_input: Entity<TextInput>,
     pub(crate) prompt_input: Entity<TextArea>,
     pub(crate) issue_input: Entity<TextInput>,
@@ -183,15 +189,17 @@ impl PaneFlowApp {
 
         // Default to the first installed agent so confirm works out of the
         // box; fall back to 0 (the row renders grayed, confirm rejects).
-        let agent_idx = TerminalAgent::ALL
-            .iter()
-            .position(|a| a.is_installed())
-            .unwrap_or(0);
+        // Issue #518: while the first PATH walk is pending every row reads
+        // as not installed, so remember that the fallback was provisional
+        // and let the boot warm's completion pick the real default.
+        let agent_idx = default_agent_idx(|a| a.is_installed());
+        let agent_default_pending = crate::agent_launcher::installed_binary_scan_pending();
 
         self.launch_pad = Some(LaunchPadState {
             ws_id,
             target,
             agent_idx,
+            agent_default_pending,
             branch_input,
             prompt_input,
             issue_input,
@@ -201,6 +209,19 @@ impl PaneFlowApp {
         });
         window.focus(&branch_focus, cx);
         cx.notify();
+    }
+
+    /// Issue #518: the boot warm has published the installed-agent
+    /// snapshot. A pad that opened during the walk defaulted to row 0
+    /// provisionally; move it to the first installed agent unless the user
+    /// picked a row meanwhile. Returns `true` when the selection moved.
+    pub(crate) fn launch_pad_settle_default_agent(&mut self) -> bool {
+        let Some(lp) = self.launch_pad.as_mut() else {
+            return false;
+        };
+        settle_default_agent(&mut lp.agent_idx, &mut lp.agent_default_pending, |a| {
+            a.is_installed()
+        })
     }
 
     /// Escape path - only honored before confirmation (US-005 AC8: the
@@ -735,6 +756,7 @@ impl PaneFlowApp {
                                 && !lp.running
                             {
                                 lp.agent_idx = idx;
+                                lp.agent_default_pending = false;
                                 cx.notify();
                             }
                             cx.stop_propagation();
@@ -936,9 +958,82 @@ impl PaneFlowApp {
     }
 }
 
+/// First installed row of [`TerminalAgent::ALL`], or 0 when none is (the
+/// row renders grayed and confirm rejects).
+fn default_agent_idx(installed: impl Fn(TerminalAgent) -> bool) -> usize {
+    TerminalAgent::ALL
+        .iter()
+        .position(|a| installed(*a))
+        .unwrap_or(0)
+}
+
+/// Settle a provisional default once the first PATH walk has published
+/// (issue #518). Only a pad still flagged `pending` moves, and only when a
+/// different installed agent exists; the flag clears either way, so a
+/// later user click is never overridden. Returns `true` when `agent_idx`
+/// changed.
+fn settle_default_agent(
+    agent_idx: &mut usize,
+    pending: &mut bool,
+    installed: impl Fn(TerminalAgent) -> bool,
+) -> bool {
+    if !*pending {
+        return false;
+    }
+    *pending = false;
+    let settled = default_agent_idx(installed);
+    if settled == *agent_idx {
+        return false;
+    }
+    *agent_idx = settled;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #518: a pad opened during the first PATH walk defaults to row
+    /// 0 provisionally; the boot warm's completion moves it to the first
+    /// installed agent, and a user pick made in the meantime is kept.
+    #[test]
+    fn pending_default_agent_settles_on_first_installed_once_the_walk_publishes() {
+        let installed = |a: TerminalAgent| a == TerminalAgent::Codex;
+        let codex = TerminalAgent::ALL
+            .iter()
+            .position(|a| *a == TerminalAgent::Codex)
+            .expect("codex row");
+        assert_ne!(
+            codex, 0,
+            "the fixture must not coincide with the fallback row"
+        );
+
+        // Cold open: nothing installed yet, row 0 is provisional.
+        let mut idx = default_agent_idx(|_| false);
+        let mut pending = true;
+        assert_eq!(idx, 0);
+        assert!(settle_default_agent(&mut idx, &mut pending, installed));
+        assert_eq!(idx, codex);
+        assert!(!pending);
+
+        // A second settle is a no-op: the flag is spent.
+        assert!(!settle_default_agent(&mut idx, &mut pending, |_| false));
+        assert_eq!(idx, codex);
+
+        // The user clicked a row while the walk ran: keep it.
+        let (mut idx, mut pending) = (3, false);
+        assert!(!settle_default_agent(&mut idx, &mut pending, installed));
+        assert_eq!(idx, 3);
+
+        // The walk found nothing: row 0 stays, the flag still clears.
+        let (mut idx, mut pending) = (0, true);
+        assert!(!settle_default_agent(&mut idx, &mut pending, |_| false));
+        assert_eq!(idx, 0);
+        assert!(!pending);
+
+        // A warm open never flags: the default is already the real one.
+        assert_eq!(default_agent_idx(installed), codex);
+    }
 
     #[test]
     fn launch_pad_refuses_split_when_zoomed() {

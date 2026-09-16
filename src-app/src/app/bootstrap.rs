@@ -912,9 +912,14 @@ impl PaneFlowApp {
         // off-thread so the first launch pad / pane palette frame never
         // walks PATH on the GPUI thread, and repaint once the walk lands
         // so rows stop saying "looking" (`installed_binary_scan_pending`).
+        // A launch pad opened during the walk defaulted to row 0
+        // provisionally; settle it onto the first installed agent now.
         cx.spawn(async move |this, cx| {
             smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;
-            let _ = this.update(cx, |_app, cx| cx.notify());
+            let _ = this.update(cx, |app, cx| {
+                app.launch_pad_settle_default_agent();
+                cx.notify();
+            });
         })
         .detach();
 
