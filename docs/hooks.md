@@ -65,7 +65,7 @@ Only **Claude Code** exposes a verified, file-based user-scope notification-hook
 surface, so it is the only agent that receives a persistent install
 (`paneflow hooks setup`). Every other integration is EPHEMERAL: injected by
 the shim when the agent launches inside a PaneFlow terminal, removed when it
-exits. The shim wraps all 16 `TerminalAgent` binaries; whatever has no hook
+exits. The shim wraps all 17 `TerminalAgent` binaries; whatever has no hook
 surface below still gets the universal lifecycle (`ai.exit` on crash,
 `ai.session_end` on quit) plus the sidebar's "running" row from the process
 scan.
@@ -82,6 +82,7 @@ scan.
 | Pi | TS extension (auto-loaded) | `~/.pi/agent/extensions/paneflow-status.ts` | agent_start/end, tool_execution_start/end |
 | Hermes | marked YAML block | `~/.hermes/config.yaml` | pre/post_llm_call, pre/post_tool_call, pre_approval_request |
 | Grok | dedicated merged hook file (wholly PaneFlow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse |
+| DeepSeek Harness | `--patch` overlay + Claude-compatible bridge | `~/.dsh/paneflow/{hooks.json,paneflow-overlay.yml}` | UserPromptSubmit, Pre/PostToolUse, Stop |
 
 Safety properties shared by every ephemeral installer: idempotent merge,
 ownership detection by command basename (`paneflow-ai-hook`), orphan sweep on

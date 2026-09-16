@@ -337,6 +337,10 @@ pub struct PaneFlowConfig {
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub openclaw_button_visible: Option<bool>,
+    /// Show the built-in "DeepSeek Harness" command button in the tab bar.
+    /// Explicit booleans override; `None` defaults hidden even when installed.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub deepseek_harness_button_visible: Option<bool>,
     /// Terminal-scoped settings block for renderer and PTY behavior.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub terminal: Option<TerminalConfig>,

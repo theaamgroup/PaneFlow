@@ -570,6 +570,7 @@ mod tests {
                 "Factory",
                 "Qoder",
                 "Openclaw",
+                "DeepSeek Harness",
             ]
         );
     }

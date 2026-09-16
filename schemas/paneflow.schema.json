@@ -450,6 +450,11 @@
       "description": "Show the built-in 'Openclaw' command button. True/false always wins; null/omitted defaults off even when installed.",
       "default": null
     },
+    "deepseek_harness_button_visible": {
+      "type": ["boolean", "null"],
+      "description": "Show the built-in 'DeepSeek Harness' command button. True/false always wins; null/omitted defaults off even when installed.",
+      "default": null
+    },
     "agent_panel": {
       "type": ["object", "null"],
       "description": "Agents-view display, profile, and notification settings.",

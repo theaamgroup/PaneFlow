@@ -162,6 +162,7 @@ mod tests {
             factory_button_visible: Some(true),
             qoder_button_visible: Some(true),
             openclaw_button_visible: Some(true),
+            deepseek_harness_button_visible: Some(true),
             terminal: Some(TerminalConfig {
                 ligatures: Some(false),
                 integrated_glyphs: Some(true),
