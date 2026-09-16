@@ -126,6 +126,43 @@ run_logged "$TMP/pair-ok.out" create_and_verify_dmg "$STAGE" "PaneFlowRetryTest"
 [ "$VERIFY_CALLS" -eq 1 ] || fail "create+verify happy path should verify once, got $VERIFY_CALLS"
 pass "create+verify pair succeeds on a tiny unsigned folder"
 
+# --- create+verify pair: first verify fails (EAGAIN), second succeeds -----
+# Production uses create_and_verify_dmg, not the standalone verify helper.
+# A first-attempt helper failure must recreate the image, not only retry
+# verify against the leftover dest.
+PAIR_RETRY="$TMP/pair-retry.dmg"
+CREATE_CALLS=0
+VERIFY_CALLS=0
+hdiutil() {
+    if [ "${1:-}" = "create" ]; then
+        CREATE_CALLS=$((CREATE_CALLS + 1))
+    fi
+    if [ "${1:-}" = "verify" ]; then
+        VERIFY_CALLS=$((VERIFY_CALLS + 1))
+        if [ "$VERIFY_CALLS" -eq 1 ]; then
+            echo "hdiutil: verify failed - Resource temporarily unavailable" >&2
+            return 1
+        fi
+    fi
+    command hdiutil "$@"
+}
+run_logged "$TMP/pair-retry.out" create_and_verify_dmg "$STAGE" "PaneFlowRetryTest" "$PAIR_RETRY"
+[ "$rc" -eq 0 ] || fail "create+verify did not recover after a first-attempt EAGAIN: $(cat "$TMP/pair-retry.out")"
+[ -s "$PAIR_RETRY" ] || fail "create+verify retry did not leave a verified image"
+[ "$CREATE_CALLS" -eq 2 ] || fail "create+verify EAGAIN-then-success: expected 2 creates, got $CREATE_CALLS"
+[ "$VERIFY_CALLS" -eq 2 ] || fail "create+verify EAGAIN-then-success: expected 2 verifies, got $VERIFY_CALLS"
+grep -q "attempt 1/${HDIUTIL_RETRY_ATTEMPTS}" "$TMP/pair-retry.out" \
+    || fail "create+verify EAGAIN-then-success missing attempt 1 log"
+pass "create+verify pair recovers when the first verify fails and the second succeeds"
+
+# Restore the counting wrapper for later tests.
+hdiutil() {
+    if [ "${1:-}" = "verify" ]; then
+        VERIFY_CALLS=$((VERIFY_CALLS + 1))
+    fi
+    command hdiutil "$@"
+}
+
 # --- create+verify pair: planted non-image still fails, dest removed ------
 PLANTED="$TMP/planted.dmg"
 printf 'stale\n' > "$PLANTED"
