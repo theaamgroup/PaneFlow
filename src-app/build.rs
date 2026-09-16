@@ -61,7 +61,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use embed_staging::{
-    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, should_enforce_embed_size_limit,
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, embed_slot_for_cfg,
+    should_enforce_embed_size_limit,
 };
 
 /// Hard cap on the total bytes staged under
@@ -95,6 +96,11 @@ fn main() {
     // PROFILE is already per cargo unit, but emit the dep so a custom
     // profile rename restages instead of reusing the previous slot.
     println!("cargo:rerun-if-env-changed=PROFILE");
+    // The ingest slot follows cfg(debug_assertions), the same signal
+    // `assets::Bins` compiles against, so a profile override such as
+    // CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true stages the slot that
+    // rust-embed will actually read.
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_DEBUG_ASSERTIONS");
 
     // 1. One engine, one archive (#184): libghostty-vt is vendored for
     //    aarch64-apple-darwin only, so any other target has nothing to link.
@@ -122,12 +128,13 @@ fn main() {
     // `release-min`.
     let outer_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let embed_profile = embed_profile_for_outer(&outer_profile);
+    let embed_slot = embed_slot_for_cfg(std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some());
 
     // Create both ingest slots so rust-analyzer / cfg-checking of the
     // unused `assets::Bins` arm does not panic on a missing folder.
     // Only the current slot is populated below.
-    for slot_profile in ["debug", "release"] {
-        let dir = embed_ingest_dir(&manifest_dir, &target, slot_profile);
+    for slot in ["debug", "release"] {
+        let dir = embed_ingest_dir(&manifest_dir, &target, slot);
         fs::create_dir_all(&dir).unwrap_or_else(|e| {
             panic!(
                 "US-008: cannot create embed staging dir {}: {e}",
@@ -138,7 +145,7 @@ fn main() {
 
     // The folder `RustEmbed` points at, relative to CARGO_MANIFEST_DIR.
     // Keep the in-memory/on-disk folder layout aligned with the macro.
-    let embed_dir = embed_ingest_dir(&manifest_dir, &target, &outer_profile);
+    let embed_dir = embed_ingest_dir(&manifest_dir, &target, embed_slot);
 
     // Rerun when a helper crate's sources or manifest change. Watching
     // `src/` + `Cargo.toml` (not the crate directory) avoids a fat-LTO

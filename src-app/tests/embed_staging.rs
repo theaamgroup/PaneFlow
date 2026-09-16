@@ -9,7 +9,7 @@ mod embed_staging;
 use std::path::Path;
 
 use embed_staging::{
-    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, embed_slot_for_outer,
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, embed_slot_for_cfg,
     should_enforce_embed_size_limit,
 };
 
@@ -44,15 +44,19 @@ fn dev_profile_artifacts_live_under_debug() {
 }
 
 #[test]
-fn debug_and_release_outer_use_distinct_embed_slots() {
-    assert_eq!(embed_slot_for_outer("debug"), "debug");
-    assert_eq!(embed_slot_for_outer("dev"), "debug");
-    assert_eq!(embed_slot_for_outer("release"), "release");
-    assert_eq!(embed_slot_for_outer("release-min"), "release");
-    assert_ne!(
-        embed_slot_for_outer("debug"),
-        embed_slot_for_outer("release")
-    );
+fn embed_slot_follows_the_debug_assertions_cfg() {
+    assert_eq!(embed_slot_for_cfg(true), "debug");
+    assert_eq!(embed_slot_for_cfg(false), "release");
+    assert_ne!(embed_slot_for_cfg(true), embed_slot_for_cfg(false));
+}
+
+#[test]
+fn release_outer_with_debug_assertions_stages_release_min_into_the_debug_slot() {
+    // CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true keeps PROFILE=release but
+    // compiles assets.rs with cfg(debug_assertions): the nested profile is
+    // still release-min while the slot is the one rust-embed will read.
+    assert_eq!(embed_profile_for_outer("release"), "release-min");
+    assert_eq!(embed_slot_for_cfg(true), "debug");
 }
 
 #[test]

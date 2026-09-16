@@ -8,7 +8,8 @@
 //! Staged bytes are isolated per rust-embed ingest slot (`debug` vs
 //! `release`) so a debug restage cannot overwrite the helpers a later
 //! `--release` compile bakes in. `assets::Bins` reads
-//! `target/embed/<slot>/bin` under the matching `cfg(debug_assertions)`.
+//! `target/embed/<slot>/bin` under the matching `cfg(debug_assertions)`,
+//! and the build script picks the slot from that same cfg.
 
 use std::path::{Path, PathBuf};
 
@@ -22,25 +23,25 @@ pub fn embed_profile_for_outer(profile: &str) -> &'static str {
 
 /// On-disk slot under `src-app/target/embed/<slot>/bin`.
 ///
-/// `debug` matches `cfg(debug_assertions)` in `assets.rs`; `release`
-/// matches `cfg(not(debug_assertions))`. Outer `release` / `release-min`
-/// share the `release` slot because both stage `release-min` helpers.
-pub fn embed_slot_for_outer(profile: &str) -> &'static str {
-    match embed_profile_for_outer(profile) {
-        "release-min" => "release",
-        _ => "debug",
-    }
+/// The slot is chosen from the same signal `assets.rs` compiles against:
+/// `cfg(debug_assertions)` (`CARGO_CFG_DEBUG_ASSERTIONS` in the build
+/// script) selects `debug`, its absence selects `release`. Keying off the
+/// outer `PROFILE` instead would stage the `release` slot for
+/// `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true` while rust-embed ingests
+/// the (empty) `debug` folder, shipping a binary with no helpers.
+pub fn embed_slot_for_cfg(debug_assertions: bool) -> &'static str {
+    if debug_assertions { "debug" } else { "release" }
 }
 
 /// `CARGO_MANIFEST_DIR/target/embed/<slot>/bin/<target>`.
 ///
 /// rust-embed's `#[folder]` is `target/embed/<slot>/bin`; keys stay
 /// `bin/<target>/<binary>` via `#[prefix = "bin/"]`.
-pub fn embed_ingest_dir(manifest_dir: &Path, target: &str, outer_profile: &str) -> PathBuf {
+pub fn embed_ingest_dir(manifest_dir: &Path, target: &str, slot: &str) -> PathBuf {
     manifest_dir
         .join("target")
         .join("embed")
-        .join(embed_slot_for_outer(outer_profile))
+        .join(slot)
         .join("bin")
         .join(target)
 }
