@@ -843,6 +843,9 @@ fn dsh_guard_writes_hooks_and_overlay_and_removes_both_on_drop() {
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".dsh/paneflow");
     let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    // The guard keys its files on the canonical directory (macOS temp dirs
+    // sit behind the /var -> /private/var symlink).
+    let dir = std::fs::canonicalize(&dir).unwrap();
     let hooks_path = dir.join(DSH_HOOKS_BASENAME);
     let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
 

@@ -43,6 +43,9 @@ impl DshOverlayGuard {
     pub(crate) fn install_at(directory: &Path) -> std::io::Result<Self> {
         refuse_symlink(directory, "DeepSeek Harness overlay")?;
         std::fs::create_dir_all(directory)?;
+        // The directory exists now, so the leases and ownership markers are
+        // keyed on its one canonical spelling, whatever alias reached here.
+        let directory = &std::fs::canonicalize(directory)?;
         let hooks_path = directory.join(DSH_HOOKS_BASENAME);
         let overlay_path = directory.join(DSH_OVERLAY_BASENAME);
         let mut hooks_lease = HookLease::acquire(&hooks_path)?;
@@ -93,6 +96,7 @@ pub(crate) fn dsh_home() -> Option<PathBuf> {
 /// rest, so `/tmp/dsh`, `/tmp/x/../dsh`, and a symlinked spelling all derive
 /// the same overlay and lease paths even before the directory exists.
 fn normalize_existing_prefix(path: PathBuf) -> PathBuf {
+    let path = lexically_normalize(&path);
     let mut missing = Vec::new();
     let mut probe = path.as_path();
     loop {
@@ -110,6 +114,29 @@ fn normalize_existing_prefix(path: PathBuf) -> PathBuf {
             _ => return path,
         }
     }
+}
+
+/// Resolves `.` and `..` components lexically so a missing suffix such as
+/// `new/../dsh` collapses to `dsh` before the existing prefix is
+/// canonicalized; `..` never climbs above the root.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !matches!(
+                    out.components().next_back(),
+                    None | Some(Component::RootDir) | Some(Component::Prefix(_))
+                ) {
+                    out.pop();
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// A relative `DSH_HOME` is anchored on the shim's working directory before
@@ -167,7 +194,7 @@ fn sweep_overlay(directory: &Path) {
 
 #[cfg(test)]
 mod dsh_home_tests {
-    use super::{normalize_existing_prefix, resolve_dsh_home};
+    use super::{lexically_normalize, normalize_existing_prefix, resolve_dsh_home};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -224,5 +251,24 @@ mod dsh_home_tests {
         let resolved = normalize_existing_prefix(root.join("a").join("b"));
         assert_eq!(resolved, canonical_root.join("a").join("b"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dot_dot_after_a_missing_component_collapses_lexically() {
+        let root = std::env::temp_dir().join(format!("dsh-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        let aliased = normalize_existing_prefix(root.join("new").join("..").join("dsh"));
+        assert_eq!(aliased, canonical_root.join("dsh"));
+        assert_eq!(aliased, normalize_existing_prefix(root.join("dsh")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn lexical_normalization_never_climbs_above_the_root() {
+        assert_eq!(
+            lexically_normalize(std::path::Path::new("/../a/./b/../c")),
+            PathBuf::from("/a/c")
+        );
     }
 }
