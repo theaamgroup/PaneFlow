@@ -141,6 +141,10 @@ async function sync({ github, context, core }) {
     let ids = [];
     let oversized = false;
     let linkedIssues = 0;
+    // Fail closed: one resolved reference that cannot classify (foreign,
+    // unreadable, a PR, closed, moved, wontfix, or an unreadable link set)
+    // keeps the whole PR on needs-info, however eligible its siblings are.
+    let unclassifiable = false;
     try {
       const result = await github.graphql(`query($owner:String!,$repo:String!,$number:Int!,$limit:Int!) {
         repository(owner:$owner,name:$repo) {
@@ -156,21 +160,23 @@ async function sync({ github, context, core }) {
       oversized = links.pageInfo.hasNextPage || links.nodes.length > maxClosingReferences;
       const localRepo = `${repo.owner}/${repo.repo}`.toLowerCase();
       for (const issue of links.nodes) {
-        // A foreign issue cannot classify the PR; it stays needs-info.
         if (issue.repository.nameWithOwner.toLowerCase() === localRepo) ids.push(issue.number);
+        else unclassifiable = true;
       }
     } catch (error) {
+      unclassifiable = true;
       core.setFailed('Closing issue references could not be read.');
     }
     // Oversized link sets get no per-issue requests: reserve API budget for
     // removing stale eligibility, even on repeated events.
     if (oversized) {
+      unclassifiable = true;
       core.warning(`More than ${maxClosingReferences} closing references; the pull request stays needs-info.`);
     }
     for (const id of oversized ? [] : ids) {
       try {
         const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
-        if (issue.pull_request) continue;
+        if (issue.pull_request) { unclassifiable = true; continue; }
         linkedIssues++;
         const labels = issue.labels.map(l => l.name);
         inherited.push(...labels);
@@ -182,10 +188,13 @@ async function sync({ github, context, core }) {
         const routed = route(labels, issue.assignees || []);
         if (!moved && issue.state === 'open' && !routed.includes('wontfix')) {
           linked.push({ labels, assignees: issue.assignees || [], humanOnly: routed.includes('ready-for-human') });
+        } else {
+          unclassifiable = true;
         }
       } catch (error) {
         // Unknown issue classification cannot make a PR eligible. Preserve
         // path routing even when a closing reference is missing/inaccessible.
+        unclassifiable = true;
         core.warning(`Cannot classify linked issue #${id}; the pull request stays needs-info.`);
         if (error.status !== 404) {
           core.setFailed(`Linked issue #${id} could not be read.`);
@@ -197,6 +206,7 @@ async function sync({ github, context, core }) {
     // that this PR has an eligible issue for unattended work: `linked` stays
     // empty and routing lands on needs-info without a human hold.
     if (linkedIssues === 0) core.info(`#${number} links no classifiable issue.`);
+    if (unclassifiable) linked = [];
   }
   const before = item.labels.map(l => l.name);
   const requestedState = event.action === 'labeled' ? event.label?.name : undefined;

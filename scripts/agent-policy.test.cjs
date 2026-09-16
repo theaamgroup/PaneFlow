@@ -217,6 +217,30 @@ test('realistic PR: a linked issue a human kept (ready-for-human, no hold) route
   assert.deepEqual(mixed, ['ready-for-human']);
 });
 
+test('realistic PR: one eligible issue beside an unclassifiable reference keeps needs-info', async () => {
+  // A foreign resolved reference next to an eligible local one.
+  const foreign = async (query, variables) => {
+    if (query.includes('closedByPullRequestsReferences')) return linkedReferences()(query, variables);
+    return { repository: { pullRequest: { closingIssuesReferences: { pageInfo: { hasNextPage: false }, nodes: [
+      { number: 9, repository: { nameWithOwner: 'org/repo' } },
+      { number: 3, repository: { nameWithOwner: 'other/repo' } },
+    ] } } } };
+  };
+  const { labels: withForeign } = await routePull({ pull: pullFixture(['ready-for-agent']), graphql: foreign });
+  assert.deepEqual(withForeign, ['needs-info']);
+  // An eligible issue followed by an unreadable, closed, wontfix, or PR reference.
+  const siblings = {
+    unreadable: Object.assign(new Error('unavailable'), { status: 404 }),
+    closed: issueFixture(base, owner, { state: 'closed' }),
+    wontfix: issueFixture([...base.filter(l => l !== 'ready-for-agent'), 'wontfix']),
+    pr: issueFixture(base, owner, { pull_request: {} }),
+  };
+  for (const [name, sibling] of Object.entries(siblings)) {
+    const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: issueFixture(), 10: sibling } });
+    assert.deepEqual(labels, ['needs-info'], name);
+  }
+});
+
 test('realistic PR: docs-only with no linked issue is needs-info without a hold', async () => {
   const { labels, added } = await routePull({ pull: pullFixture([]), graphql: linkedReferences([]) });
   assert.deepEqual(labels, ['needs-info']);

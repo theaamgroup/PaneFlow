@@ -109,9 +109,11 @@ risk categories to its PR.
 To promote a fully classified item from `needs-info`, add `ready-for-agent`
 or `ready-for-human`; routing removes the previous state. Missing metadata
 and safety holds still take precedence. Open `wontfix` items also require
-complete metadata; otherwise they remain in `needs-info`. PRs with more than
-20 resolved issue links stay in `needs-info` without individual issue
-fetches. GitHub’s resolved closing references, including manual links, define
+complete metadata; otherwise they remain in `needs-info`. A PR stays in
+`needs-info` when any of its resolved references cannot classify it (foreign,
+unreadable, closed, moved, `wontfix`, or a pull request), however eligible
+the others are; more than 20 resolved links stay in `needs-info` without
+individual issue fetches. GitHub’s resolved closing references, including manual links, define
 the linked issues; raw Markdown examples do not establish eligibility.
 
 The workflow derives additional conservative path flags:
