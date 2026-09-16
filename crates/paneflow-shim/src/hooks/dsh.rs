@@ -1,5 +1,7 @@
 use super::owned_files::{
-    cleanup_matching_owned_file, install_owned_file, sweep_matching_owned_file,
+    cleanup_accepted_owned_file, cleanup_matching_owned_file, install_accepted_owned_file,
+    install_owned_file, is_own_or_sibling_rendering, sweep_accepted_owned_file,
+    sweep_matching_owned_file,
 };
 use super::{
     home_unavailable, merge_strict_matcher_hooks_for_events, paneflow_ipc_reachable,
@@ -55,13 +57,24 @@ impl DshOverlayGuard {
         let mut overlay_lease = HookLease::acquire(&overlay_path)?;
         let hooks_source = hooks_source()?;
         let overlay_source = render_overlay(&hooks_path);
+        // hooks.json embeds this instance's ai-hook path, so a sibling
+        // PaneFlow instance (a different `PANEFLOW_BIN_DIR`) renders
+        // different bytes for the same hooks. That file serves this session
+        // too: it is left alone, never taken ownership of, and the overlay
+        // (which only names the hooks path) is byte-identical anyway.
+        let accepts_hooks = |existing: &str| is_own_or_sibling_rendering(existing, &hooks_source);
         with_config_lock(&hooks_path, || {
-            install_owned_file(&hooks_path, &hooks_source, &mut hooks_lease)
+            install_accepted_owned_file(
+                &hooks_path,
+                &hooks_source,
+                &mut hooks_lease,
+                &accepts_hooks,
+            )
         })?;
         if let Err(error) = with_config_lock(&overlay_path, || {
             install_owned_file(&overlay_path, &overlay_source, &mut overlay_lease)
         }) {
-            cleanup_matching_owned_file(&hooks_path, &mut hooks_lease, &hooks_source);
+            cleanup_accepted_owned_file(&hooks_path, &mut hooks_lease, &accepts_hooks);
             return Err(error);
         }
         Ok(Self {
@@ -94,7 +107,10 @@ impl Drop for DshOverlayGuard {
             &mut self.overlay_lease,
             &self.overlay_source,
         );
-        cleanup_matching_owned_file(&self.hooks_path, &mut self.hooks_lease, &self.hooks_source);
+        let hooks_source = std::mem::take(&mut self.hooks_source);
+        cleanup_accepted_owned_file(&self.hooks_path, &mut self.hooks_lease, &|existing| {
+            is_own_or_sibling_rendering(existing, &hooks_source)
+        });
     }
 }
 
@@ -168,7 +184,7 @@ fn bridge_is_resolvable(dsh_home: &Path) -> bool {
         .is_dir()
 }
 
-fn hooks_source() -> std::io::Result<String> {
+pub(crate) fn hooks_source() -> std::io::Result<String> {
     let mut root = serde_json::json!({});
     merge_strict_matcher_hooks_for_events(&mut root, DSH_HOOK_EVENTS)?;
     Ok(serde_json::to_string_pretty(&root).map_err(std::io::Error::other)? + "\n")
@@ -211,7 +227,9 @@ fn sweep_overlay(directory: &Path) {
     let hooks_path = directory.join(DSH_HOOKS_BASENAME);
     let overlay_path = directory.join(DSH_OVERLAY_BASENAME);
     if let Ok(source) = hooks_source() {
-        sweep_matching_owned_file(&hooks_path, &source);
+        sweep_accepted_owned_file(&hooks_path, &|existing| {
+            is_own_or_sibling_rendering(existing, &source)
+        });
     }
     sweep_matching_owned_file(&overlay_path, &render_overlay(&hooks_path));
 }

@@ -44,10 +44,13 @@
 # can be exercised without a signed .app.
 set -euo pipefail
 
-# Tests set HDIUTIL_RETRY_SLEEP_SEC=0. Production keeps a short backoff
-# so a dying diskimages-helper can exit before the next attempt.
+# The wait between attempts is exponential: HDIUTIL_RETRY_SLEEP_SEC after
+# the first failure, doubling after each one (2, 4, 8, ... by default) and
+# capped at HDIUTIL_RETRY_SLEEP_MAX_SEC, so a wedged diskimages-helper gets
+# a longer window to exit before each later attempt. Tests set a tiny base.
 : "${HDIUTIL_RETRY_ATTEMPTS:=3}"
 : "${HDIUTIL_RETRY_SLEEP_SEC:=2}"
+: "${HDIUTIL_RETRY_SLEEP_MAX_SEC:=60}"
 
 usage() {
     cat >&2 <<EOF
@@ -60,12 +63,30 @@ die() {
     exit 1
 }
 
-# Log leftover attachments (do not detach foreign volumes) and wait.
+# Seconds to wait after failed attempt $1: base * 2^(attempt-1), capped.
+# awk so a fractional base (tests) and a fractional cap both work.
+retry_sleep_seconds() {
+    local attempt="${1:-1}"
+    awk -v base="${HDIUTIL_RETRY_SLEEP_SEC}" \
+        -v cap="${HDIUTIL_RETRY_SLEEP_MAX_SEC}" \
+        -v attempt="$attempt" \
+        'BEGIN {
+            if (attempt < 1) attempt = 1
+            s = base * (2 ^ (attempt - 1))
+            if (s > cap) s = cap
+            printf "%g", s
+        }'
+}
+
+# Log leftover attachments (do not detach foreign volumes) and wait with
+# exponential backoff keyed on the attempt that just failed.
 settle_diskimages_helper() {
-    local attempt="${1:-}"
-    echo "Settling diskimages-helper${attempt:+ after attempt ${attempt}}..." >&2
+    local attempt="${1:-1}"
+    local wait
+    wait="$(retry_sleep_seconds "$attempt")"
+    echo "Settling diskimages-helper after attempt ${attempt} (sleeping ${wait}s)..." >&2
     hdiutil info >&2 || true
-    sleep "${HDIUTIL_RETRY_SLEEP_SEC}"
+    sleep "$wait"
 }
 
 create_udzo_dmg() {

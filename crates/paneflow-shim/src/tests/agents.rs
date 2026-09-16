@@ -1,4 +1,4 @@
-use crate::hooks::dsh::{render_overlay, DSH_HOOKS_BASENAME, DSH_OVERLAY_BASENAME};
+use crate::hooks::dsh::{hooks_source, render_overlay, DSH_HOOKS_BASENAME, DSH_OVERLAY_BASENAME};
 use crate::hooks::{
     enable_codex_feature_flag, CodexHookConfigGuard, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER,
 };
@@ -10,6 +10,7 @@ use crate::hooks::{
     ManagedHookConfigGuard, ManagedHookSpec, OpenCodePluginGuard, PiExtensionGuard,
     CLAUDE_HOOK_EVENTS, HERMES_BLOCK_BEGIN, PANEFLOW_TS_BASENAME,
 };
+use crate::hooks::{render_as_sibling_instance, sibling_hook_program};
 use serde_json::json;
 
 fn command_preserves_event_arg(command: &str, event: &str) -> bool {
@@ -893,6 +894,9 @@ fn dsh_patch_overlay_leads_the_launcher_flags() {
         vec!["--profile", "tui"],
         vec!["--profile=tui"],
         vec!["--profile", "tui", "--resume", "abc"],
+        vec!["-p", "tui"],
+        vec!["-p", "tui", "chat"],
+        vec!["-p", "tui", "--resume", "abc"],
     ] {
         let args: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
         let patched = crate::with_dsh_patch_overlay(args.clone(), overlay);
@@ -909,6 +913,8 @@ fn dsh_patch_overlay_stays_out_of_plugin_help_version_and_dumps() {
         vec!["plugin", "--profile", "tui", "add", "pkg"],
         vec!["--profile", "tui", "plugin", "add", "pkg"],
         vec!["--profile=tui", "plugin", "add", "pkg"],
+        vec!["-p", "tui", "plugin", "add", "pkg"],
+        vec!["-p", "tui", "--patch", "extra.yml", "plugin", "add", "pkg"],
         vec!["--from-default-profile", "web", "plugin", "add", "pkg"],
         vec!["--patch", "extra.yml", "plugin", "add", "pkg"],
         vec!["--help"],
@@ -924,6 +930,27 @@ fn dsh_patch_overlay_stays_out_of_plugin_help_version_and_dumps() {
             args,
             "{argv:?} must reach dsh untouched"
         );
+    }
+}
+
+#[test]
+fn dsh_patch_overlay_ignores_opt_out_flags_after_a_double_dash() {
+    // After `--` every token is a positional for the subcommand, so
+    // `dsh chat -- --version` is a chat session and still gets the overlay.
+    let overlay = std::path::Path::new("/tmp/overlay.yml");
+    for argv in [
+        vec!["chat", "--", "--version"],
+        vec!["chat", "--", "-V"],
+        vec!["chat", "--", "--help"],
+        vec!["chat", "--", "-h"],
+        vec!["-p", "tui", "chat", "--", "--dump-config"],
+        vec!["--", "--dump-default-config"],
+    ] {
+        let args: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
+        let patched = crate::with_dsh_patch_overlay(args.clone(), overlay);
+        assert_eq!(patched[0], "--patch", "{argv:?}");
+        assert_eq!(patched[1], overlay.as_os_str(), "{argv:?}");
+        assert_eq!(&patched[2..], args, "{argv:?}");
     }
 }
 
@@ -1045,6 +1072,107 @@ fn dsh_preexisting_files_survive_install() {
         std::fs::read_to_string(&overlay_path).unwrap(),
         "- insert:\n    - id: user\n"
     );
+}
+
+#[test]
+fn dsh_sibling_instance_hooks_file_is_shared_not_owned() {
+    // Two PaneFlow instances (different `PANEFLOW_BIN_DIR`) render different
+    // hooks.json bytes for the same hooks. The second one must still get its
+    // overlay (and so its `--patch`), and must never delete the first one's
+    // file.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    let program = sibling_hook_program(&td.path().join("elsewhere"));
+    let sibling = render_as_sibling_instance(&hooks_source().unwrap(), &program);
+    assert_ne!(sibling, hooks_source().unwrap());
+    std::fs::write(&hooks_path, &sibling).unwrap();
+
+    let guard = DshOverlayGuard::install_at(&dir)
+        .expect("a sibling instance's hooks.json must serve this session");
+    assert!(overlay_path.exists(), "the overlay must be installed");
+    assert_eq!(
+        guard.overlay_path(),
+        std::fs::canonicalize(&overlay_path).unwrap()
+    );
+    assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), sibling);
+
+    drop(guard);
+    assert!(!overlay_path.exists(), "drop must delete the overlay");
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        sibling,
+        "the sibling instance's hooks.json is not ours to delete"
+    );
+}
+
+#[test]
+fn dsh_last_session_removes_a_sibling_rendering_paneflow_created() {
+    // Instance A created hooks.json (ownership bit set) and exits first;
+    // instance B adopted it and exits last, so B removes it: the bit proves
+    // PaneFlow wrote it and the shape check proves nobody added to it.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    let mut instance_a = crate::hooks::HookLease::acquire(&hooks_path).unwrap();
+    let program = sibling_hook_program(&td.path().join("elsewhere"));
+    std::fs::write(
+        &hooks_path,
+        render_as_sibling_instance(&hooks_source().unwrap(), &program),
+    )
+    .unwrap();
+    instance_a.mark_created().unwrap();
+
+    let instance_b = DshOverlayGuard::install_at(&dir).unwrap();
+    drop(instance_a);
+    assert!(hooks_path.exists() && overlay_path.exists());
+    drop(instance_b);
+    assert!(!overlay_path.exists());
+    assert!(
+        !hooks_path.exists(),
+        "the last session must remove a hooks.json PaneFlow created"
+    );
+}
+
+#[test]
+fn dsh_hooks_file_with_a_user_command_is_refused() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    let program = sibling_hook_program(&td.path().join("elsewhere"));
+    let sibling = render_as_sibling_instance(&hooks_source().unwrap(), &program);
+    let mut with_user: serde_json::Value = serde_json::from_str(&sibling).unwrap();
+    with_user["hooks"]["Stop"][0]["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type": "command", "command": "my-hook Stop"}));
+    for user in [
+        sibling.replacen(
+            &format!("{} Stop", program.to_string_lossy()),
+            "my-hook Stop",
+            1,
+        ),
+        with_user.to_string(),
+    ] {
+        std::fs::write(&hooks_path, &user).unwrap();
+        let error = match DshOverlayGuard::install_at(&dir) {
+            Ok(_) => panic!("a hooks.json with a user command must be refused: {user}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), user);
+        assert!(
+            !overlay_path.exists(),
+            "a refused install must not leave an overlay behind"
+        );
+    }
 }
 
 #[test]

@@ -179,6 +179,9 @@ and file/line supported by a test or clear code path. State uncertainty honestly
 Check existing threads before posting. Use canonical severity words; prioritize
 critical/high inline, summarize meaningful medium findings with links, and omit
 low-priority nits. Never inflate severity to fit a tool's priority filter.
+The GitHub reviewer of record (`chatgpt-codex-connector`) posts P0 and P1
+inline only: critical maps to P0 and high maps to P1, while medium findings go
+in the maintained summary.
 
 One concise thread per defect; target at most ten by grouping related occurrences
 and linking overflow blockers in the maintained summary. Never hide a blocker to

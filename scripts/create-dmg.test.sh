@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# GPU-free tests for scripts/create-dmg.sh retry/verify helpers (issue #547).
+# GPU-free tests for scripts/create-dmg.sh (issue #547): the retry/verify
+# helpers against the real hdiutil, then create_dmg_main end-to-end against
+# a fake .app with stubbed hdiutil/codesign/xcrun/spctl on PATH.
 # No signed .app and no notarization: truncated/non-image files must still
 # fail after the bounded retry, and a tiny valid image must still verify.
 set -euo pipefail
@@ -16,7 +18,9 @@ CREATE_DMG_LIB=1
 . "$SCRIPT_DIR/create-dmg.sh"
 
 HDIUTIL_RETRY_ATTEMPTS=3
-HDIUTIL_RETRY_SLEEP_SEC=0
+# Tiny base so the exponential backoff (0.01, 0.02, ...) keeps the suite fast.
+HDIUTIL_RETRY_SLEEP_SEC=0.01
+HDIUTIL_RETRY_SLEEP_MAX_SEC=60
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/create-dmg-test.XXXXXX")"
 # A failed assertion must not strand a volume mounted under $TMP.
@@ -52,6 +56,44 @@ run_logged() {
     shift
     rc=0
     "$@" >"$log" 2>&1 || rc=$?
+}
+
+# --- backoff schedule: base doubles per attempt, capped ---------------------
+# The pure helper with the production defaults (base 2, cap 60).
+sched=""
+for a in 1 2 3 4 5 6; do
+    sched="$sched$(HDIUTIL_RETRY_SLEEP_SEC=2 HDIUTIL_RETRY_SLEEP_MAX_SEC=60 retry_sleep_seconds "$a") "
+done
+[ "$sched" = "2 4 8 16 32 60 " ] || fail "backoff schedule with base 2 / cap 60 is '$sched', expected '2 4 8 16 32 60 '"
+frac="$(HDIUTIL_RETRY_SLEEP_SEC=0.25 retry_sleep_seconds 3)"
+[ "$frac" = "1" ] || fail "fractional base 0.25 at attempt 3 gave '$frac', expected 1"
+# The retry loop sleeps that schedule between attempts: record the sleeps of
+# an exhausting verify with base 2 and a stubbed sleep, expect 2 then 4.
+SLEEPS=""
+sleep() { SLEEPS="$SLEEPS$1 "; }
+hdiutil() {
+    case "${1:-}" in
+        verify) return 1 ;;
+        info) return 0 ;;
+    esac
+    return 0
+}
+SLEEPS=""
+HDIUTIL_RETRY_SLEEP_SEC=2 hdiutil_verify_with_retry "$TMP/no-such.dmg" >"$TMP/backoff.out" 2>&1 || true
+[ "$SLEEPS" = "2 4 " ] || fail "verify retry slept '$SLEEPS', expected '2 4 ' (exponential backoff)"
+grep -q "after attempt 1 (sleeping 2s)" "$TMP/backoff.out" \
+    || fail "backoff log missing the attempt-1 wait: $(cat "$TMP/backoff.out")"
+grep -q "after attempt 2 (sleeping 4s)" "$TMP/backoff.out" \
+    || fail "backoff log missing the attempt-2 wait: $(cat "$TMP/backoff.out")"
+unset -f sleep
+pass "retry wait is exponential: base doubles per attempt (2, 4, 8, ...) and is capped"
+
+# Counting wrapper over the real hdiutil for the verify tests below.
+hdiutil() {
+    if [ "${1:-}" = "verify" ]; then
+        VERIFY_CALLS=$((VERIFY_CALLS + 1))
+    fi
+    command hdiutil "$@"
 }
 
 # --- non-image: verify still fails after exhausting retries ---------------
@@ -318,5 +360,215 @@ cleanup_create_dmg
 grep -q "^detach" "$HDIUTIL_LOG" && fail "cleanup detached with no attach output: $(cat "$HDIUTIL_LOG")"
 unset VERIFY_PT MOUNT_ROOT STAGING
 pass "cleanup trap detaches the verification volume and removes temp dirs"
+
+# === create_dmg_main end-to-end =============================================
+# The script derives dist/ from its own location, `die` calls `exit`, and the
+# EXIT trap must fire, so main runs as a real process from a copy of the
+# script inside a fake repo root. hdiutil, codesign, xcrun (stapler) and
+# spctl are executables on a PATH prefix that append every call to
+# $TOOL_LOG. Nothing is ever really attached: the stub attach only creates
+# <mountpoint>/PaneFlow.app. macOS `mktemp -d` ignores TMPDIR, so the
+# mountpoint main creates lands in the per-user temp dir ($SYS_TMP), which
+# the happy-path test measures the same way rather than assuming.
+FAKE_REPO="$TMP/fake-repo"
+mkdir -p "$FAKE_REPO/scripts" "$FAKE_REPO/dist"
+cp "$SCRIPT_DIR/create-dmg.sh" "$FAKE_REPO/scripts/create-dmg.sh"
+SCRIPT_COPY="$FAKE_REPO/scripts/create-dmg.sh"
+FAKE_APP="$TMP/PaneFlow.app"
+mkdir -p "$FAKE_APP/Contents/MacOS"
+printf 'not a real binary\n' > "$FAKE_APP/Contents/MacOS/paneflow"
+printf '<plist/>\n' > "$FAKE_APP/Contents/Info.plist"
+
+STUB_BIN="$TMP/bin"
+mkdir -p "$STUB_BIN"
+TOOL_LOG="$TMP/tools.log"
+export TOOL_LOG
+cat > "$STUB_BIN/hdiutil" <<'EOF'
+#!/usr/bin/env bash
+# Stub hdiutil: logs every call; create touches the dest; attach fakes a
+# mount by creating <mountpoint>/PaneFlow.app and printing a device table.
+echo "hdiutil $*" >> "$TOOL_LOG"
+case "${1:-}" in
+    create)
+        dest=""
+        while [ "$#" -gt 0 ]; do dest="$1"; shift; done
+        printf 'fake udzo\n' > "$dest"
+        ;;
+    verify) ;;
+    attach)
+        mp=""
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "-mountpoint" ]; then mp="$2"; fi
+            shift
+        done
+        mkdir -p "$mp/PaneFlow.app/Contents"
+        echo "expected   CRC32 \$DEADBEEF"
+        echo "/dev/disk99            GUID_partition_scheme"
+        echo "/dev/disk99s1          Apple_HFS                      $mp"
+        ;;
+    detach) ;;
+    info) ;;
+esac
+exit 0
+EOF
+cat > "$STUB_BIN/codesign" <<'EOF'
+#!/usr/bin/env bash
+echo "codesign $*" >> "$TOOL_LOG"
+if [ "${STUB_CODESIGN_FAIL:-}" = "1" ]; then
+    echo "codesign: invalid signature (stub)" >&2
+    exit 1
+fi
+exit 0
+EOF
+cat > "$STUB_BIN/xcrun" <<'EOF'
+#!/usr/bin/env bash
+echo "xcrun $*" >> "$TOOL_LOG"
+exit 0
+EOF
+cat > "$STUB_BIN/spctl" <<'EOF'
+#!/usr/bin/env bash
+echo "spctl $*" >> "$TOOL_LOG"
+exit 0
+EOF
+chmod +x "$STUB_BIN"/hdiutil "$STUB_BIN"/codesign "$STUB_BIN"/xcrun "$STUB_BIN"/spctl
+
+# Run the copied script as a process with the stubs first on PATH.
+run_main() {
+    local log="$1"
+    shift
+    : > "$TOOL_LOG"
+    rc=0
+    env PATH="$STUB_BIN:$PATH" \
+        HDIUTIL_RETRY_ATTEMPTS=3 HDIUTIL_RETRY_SLEEP_SEC=0.01 \
+        bash "$SCRIPT_COPY" "$@" >"$log" 2>&1 || rc=$?
+}
+# Where the script's bare `mktemp -d` will put MOUNT_ROOT and STAGING.
+SYS_TMP_PROBE="$(mktemp -d)"
+SYS_TMP="$(dirname "$SYS_TMP_PROBE")"
+SYS_TMP_REAL="$(cd "$SYS_TMP" && pwd -P)"
+rmdir "$SYS_TMP_PROBE"
+
+# --- sourcing guard: no args prints usage, exits non-zero, no hdiutil ------
+run_main "$TMP/main-noargs.out"
+[ "$rc" -ne 0 ] || fail "create-dmg.sh with no arguments exited 0"
+grep -q "^Usage: " "$TMP/main-noargs.out" || fail "no-args run did not print usage: $(cat "$TMP/main-noargs.out")"
+grep -q "error: --version is required" "$TMP/main-noargs.out" \
+    || fail "no-args run did not name the missing --version: $(cat "$TMP/main-noargs.out")"
+[ ! -s "$TOOL_LOG" ] || fail "no-args run invoked a tool: $(cat "$TOOL_LOG")"
+pass "bash create-dmg.sh with no args prints usage, exits $rc, and runs no hdiutil"
+
+# CREATE_DMG_LIB=1 (the test-sourcing guard) makes the script inert even
+# when executed directly with no arguments.
+: > "$TOOL_LOG"
+rc=0
+env PATH="$STUB_BIN:$PATH" CREATE_DMG_LIB=1 bash "$SCRIPT_COPY" >"$TMP/main-lib.out" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] || fail "CREATE_DMG_LIB=1 run exited $rc: $(cat "$TMP/main-lib.out")"
+[ ! -s "$TMP/main-lib.out" ] || fail "CREATE_DMG_LIB=1 run printed output: $(cat "$TMP/main-lib.out")"
+[ ! -s "$TOOL_LOG" ] || fail "CREATE_DMG_LIB=1 run invoked a tool: $(cat "$TOOL_LOG")"
+# And this very file sourced the script without main running: dist/ untouched.
+[ -z "$(ls -A "$FAKE_REPO/dist")" ] || fail "sourcing the script produced output in dist/"
+pass "CREATE_DMG_LIB=1 / BASH_SOURCE guard leaves main unrun"
+
+# --- argv parsing errors ---------------------------------------------------
+run_main "$TMP/main-noarch.out" --version 9.9.9 --app "$FAKE_APP"
+[ "$rc" -ne 0 ] || fail "missing --arch exited 0"
+grep -q "error: --arch is required" "$TMP/main-noarch.out" || fail "missing --arch not reported: $(cat "$TMP/main-noarch.out")"
+[ ! -s "$TOOL_LOG" ] || fail "missing --arch still invoked a tool: $(cat "$TOOL_LOG")"
+
+run_main "$TMP/main-nover.out" --arch aarch64 --app "$FAKE_APP"
+[ "$rc" -ne 0 ] || fail "missing --version exited 0"
+grep -q "error: --version is required" "$TMP/main-nover.out" || fail "missing --version not reported: $(cat "$TMP/main-nover.out")"
+
+run_main "$TMP/main-noapp.out" --version 9.9.9 --arch aarch64 --app "$TMP/does-not-exist.app"
+[ "$rc" -ne 0 ] || fail "missing --app bundle exited 0"
+grep -q "error: bundle not found: $TMP/does-not-exist.app" "$TMP/main-noapp.out" \
+    || fail "missing --app bundle not reported: $(cat "$TMP/main-noapp.out")"
+[ ! -s "$TOOL_LOG" ] || fail "missing --app still invoked a tool: $(cat "$TOOL_LOG")"
+
+run_main "$TMP/main-badarch.out" --version 9.9.9 --arch armv7 --app "$FAKE_APP"
+[ "$rc" -ne 0 ] || fail "bad --arch exited 0"
+grep -q "error: --arch must be 'aarch64' or 'x86_64' (got 'armv7')" "$TMP/main-badarch.out" \
+    || fail "bad --arch not reported: $(cat "$TMP/main-badarch.out")"
+
+run_main "$TMP/main-dangling.out" --version
+[ "$rc" -ne 0 ] || fail "dangling --version exited 0"
+grep -q "error: --version requires an argument" "$TMP/main-dangling.out" \
+    || fail "dangling --version not reported: $(cat "$TMP/main-dangling.out")"
+
+run_main "$TMP/main-unknown.out" --version 9.9.9 --arch aarch64 --bogus
+[ "$rc" -ne 0 ] || fail "unknown argument exited 0"
+grep -q "error: unknown argument: --bogus" "$TMP/main-unknown.out" \
+    || fail "unknown argument not reported: $(cat "$TMP/main-unknown.out")"
+
+run_main "$TMP/main-help.out" --help
+[ "$rc" -eq 0 ] || fail "--help exited $rc"
+grep -q "^Usage: " "$TMP/main-help.out" || fail "--help did not print usage"
+[ ! -s "$TOOL_LOG" ] || fail "--help invoked a tool: $(cat "$TOOL_LOG")"
+pass "argv parsing rejects missing --version/--arch/--app, bad arch, dangling and unknown flags; --help exits 0"
+
+# --- happy path: tool order, temp mountpoint, advertised output ------------
+# The script resolves its repo root with `pwd -P`, so the advertised path is
+# the symlink-free form (/private/var/... on macOS), not $TMP as spelled.
+FAKE_REPO_REAL="$(cd "$FAKE_REPO" && pwd -P)"
+EXPECTED_DMG="$FAKE_REPO_REAL/dist/paneflow-9.9.9-aarch64-apple-darwin.dmg"
+rm -f "$EXPECTED_DMG"
+run_main "$TMP/main-ok.out" --version 9.9.9 --arch aarch64 --app "$FAKE_APP"
+[ "$rc" -eq 0 ] || fail "happy path exited $rc: $(cat "$TMP/main-ok.out")
+--- tools ---
+$(cat "$TOOL_LOG")"
+[ -s "$EXPECTED_DMG" ] || fail "happy path did not produce $EXPECTED_DMG"
+grep -qF "Created: $EXPECTED_DMG (" "$TMP/main-ok.out" \
+    || fail "happy path did not advertise the output path: $(cat "$TMP/main-ok.out")"
+# Exact call sequence (tool + subcommand), in order.
+seq="$(awk '{print $1, $2}' "$TOOL_LOG" | tr '\n' ';')"
+expected_seq="hdiutil create;hdiutil verify;hdiutil attach;codesign --verify;xcrun stapler;spctl --assess;hdiutil detach;"
+[ "$seq" = "$expected_seq" ] || fail "happy path tool order was '$seq', expected '$expected_seq'"
+# hdiutil create targets the advertised dmg with the UDZO flags.
+grep -q "^hdiutil create -volname PaneFlow -srcfolder .* -ov -format UDZO $EXPECTED_DMG\$" "$TOOL_LOG" \
+    || fail "hdiutil create did not target the advertised path: $(cat "$TOOL_LOG")"
+grep -q "^hdiutil verify $EXPECTED_DMG\$" "$TOOL_LOG" || fail "hdiutil verify did not target the dmg"
+# attach mounts at <mktemp dir>/PaneFlow in the per-user temp dir, never /Volumes.
+attach_line="$(grep '^hdiutil attach ' "$TOOL_LOG")"
+mp="$(printf '%s\n' "$attach_line" | sed -E 's/.* -mountpoint ([^ ]+) .*/\1/')"
+case "$mp" in
+    /Volumes/*) fail "attach mountpoint '$mp' is under /Volumes: $attach_line" ;;
+    "$SYS_TMP"/*/PaneFlow|"$SYS_TMP_REAL"/*/PaneFlow) ;;
+    *) fail "attach mountpoint '$mp' is not a mktemp dir under $SYS_TMP: $attach_line" ;;
+esac
+printf '%s\n' "$attach_line" | grep -q -- "-nobrowse -readonly -noautoopen -mountpoint $mp $EXPECTED_DMG" \
+    || fail "attach flags/target unexpected: $attach_line"
+# Every verification step runs against the bundle inside that mountpoint.
+grep -qF "codesign --verify --deep --strict $mp/PaneFlow.app" "$TOOL_LOG" || fail "codesign target: $(cat "$TOOL_LOG")"
+grep -qF "xcrun stapler validate $mp/PaneFlow.app" "$TOOL_LOG" || fail "stapler target: $(cat "$TOOL_LOG")"
+grep -qF "spctl --assess --type exec --verbose $mp/PaneFlow.app" "$TOOL_LOG" || fail "spctl target: $(cat "$TOOL_LOG")"
+# Detach uses the device attach printed, once (the trap must not detach again).
+grep -q "^hdiutil detach /dev/disk99 -quiet\$" "$TOOL_LOG" || fail "detach did not use the attached device: $(cat "$TOOL_LOG")"
+[ "$(grep -c '^hdiutil detach' "$TOOL_LOG")" -eq 1 ] || fail "expected exactly one detach: $(cat "$TOOL_LOG")"
+# The trap removed the temp mount root and staging dir.
+[ ! -e "$(dirname "$mp")" ] || fail "temp mount root $(dirname "$mp") survived the EXIT trap"
+pass "create_dmg_main happy path: create, verify, attach at temp mountpoint, codesign, stapler, spctl, detach; output $(basename "$EXPECTED_DMG")"
+
+# --- failing codesign --verify: main dies, trap still detaches -------------
+rm -f "$EXPECTED_DMG"
+: > "$TOOL_LOG"
+rc=0
+env PATH="$STUB_BIN:$PATH" STUB_CODESIGN_FAIL=1 \
+    HDIUTIL_RETRY_ATTEMPTS=3 HDIUTIL_RETRY_SLEEP_SEC=0.01 \
+    bash "$SCRIPT_COPY" --version 9.9.9 --arch aarch64 --app "$FAKE_APP" >"$TMP/main-codesign-fail.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "failing codesign --verify still exited 0"
+grep -q "error: codesign verification failed on enclosed bundle" "$TMP/main-codesign-fail.out" \
+    || fail "codesign failure not reported: $(cat "$TMP/main-codesign-fail.out")"
+grep -q '^xcrun ' "$TOOL_LOG" && fail "stapler ran after codesign failed: $(cat "$TOOL_LOG")"
+grep -q '^spctl ' "$TOOL_LOG" && fail "spctl ran after codesign failed: $(cat "$TOOL_LOG")"
+codesign_line="$(grep -n '^codesign ' "$TOOL_LOG" | cut -d: -f1)"
+trap_detach="$(grep -n '^hdiutil detach /dev/disk99 -force' "$TOOL_LOG" | sed -n '1p' | cut -d: -f1)"
+[ -n "$trap_detach" ] || fail "EXIT trap did not detach the verification device: $(cat "$TOOL_LOG")"
+[ "$codesign_line" -lt "$trap_detach" ] || fail "trap detach did not follow the codesign failure: $(cat "$TOOL_LOG")"
+grep -q "Detaching leftover attachment /dev/disk99" "$TMP/main-codesign-fail.out" \
+    || fail "trap detach not logged: $(cat "$TMP/main-codesign-fail.out")"
+grep -q "Created: " "$TMP/main-codesign-fail.out" && fail "a failed verification still advertised Created:"
+fail_mp="$(grep '^hdiutil attach ' "$TOOL_LOG" | sed -E 's/.* -mountpoint ([^ ]+) .*/\1/')"
+[ ! -e "$(dirname "$fail_mp")" ] || fail "temp mount root $(dirname "$fail_mp") survived the EXIT trap after die"
+pass "a failing codesign --verify makes main die (exit $rc) and the EXIT trap still detaches"
 
 echo "All tests passed."

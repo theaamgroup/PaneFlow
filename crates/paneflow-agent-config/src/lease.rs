@@ -1,10 +1,9 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const LOCK_RETRY: Duration = Duration::from_millis(25);
 
 /// Crash-safe lifetime lease for an agent configuration resource.
 ///
@@ -37,25 +36,13 @@ impl ConfigLease {
             .create(true)
             .truncate(false)
             .open(path)?;
-        let deadline = Instant::now() + LOCK_TIMEOUT;
-        loop {
-            match file.try_lock_shared() {
-                Ok(()) => break,
-                Err(TryLockError::WouldBlock) => {
-                    if Instant::now() >= deadline {
-                        return Err(Error::new(
-                            ErrorKind::TimedOut,
-                            format!(
-                                "timed out waiting for the PaneFlow config lease for {}",
-                                resource.display()
-                            ),
-                        ));
-                    }
-                    std::thread::sleep(LOCK_RETRY);
-                }
-                Err(TryLockError::Error(error)) => return Err(error),
-            }
-        }
+        let file =
+            crate::lock::lock_within(file, crate::lock::LockKind::Shared, LOCK_TIMEOUT, || {
+                format!(
+                    "timed out waiting for the PaneFlow config lease for {}",
+                    resource.display()
+                )
+            })?;
         Ok(Self {
             file: Some(file),
             marker,

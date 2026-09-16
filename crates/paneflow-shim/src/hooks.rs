@@ -22,7 +22,9 @@ pub(crate) use hermes::HermesHookConfigGuard;
 pub(crate) use hermes::{hermes_managed_block, strip_hermes_managed_block, HERMES_BLOCK_BEGIN};
 pub(crate) use opencode::OpenCodePluginGuard;
 #[cfg(test)]
-pub(crate) use owned_files::PANEFLOW_TS_BASENAME;
+pub(crate) use owned_files::{
+    render_as_sibling_instance, sibling_hook_program, PANEFLOW_TS_BASENAME,
+};
 pub(crate) use owned_files::{GrokHookFileGuard, PiExtensionGuard};
 
 use crate::locate_sibling_hook_binary;
@@ -382,7 +384,7 @@ fn first_executable(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Op
 ///
 /// The caller pairs this with an `is_file()` check: `X_OK` on a directory
 /// tests traversability and would otherwise succeed.
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
 
     let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
