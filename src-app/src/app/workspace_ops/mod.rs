@@ -812,6 +812,11 @@ fn restore_closed_surface_record(
     }
 }
 
+/// Longest a click on an `Open recent` row (issue #521) waits for `stat` on
+/// the folder before giving up on the mount: the same bound session restore
+/// uses for a persisted cwd. A local folder answers in microseconds.
+const RECENT_OPEN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl PaneFlowApp {
     // Issue #438: the four Review-terminal sweeps that used to live here are
     // gone. Review no longer embeds terminals inside a `DiffView` (upstream
@@ -1478,6 +1483,16 @@ impl PaneFlowApp {
     /// both land here, and both go through `open_workspace_folders` so the
     /// folder is filed exactly like a picked one. A folder deleted since the
     /// list was loaded is forgotten instead of opened.
+    ///
+    /// The existence check never runs on the GPUI thread: this is an action
+    /// handler, and `stat` on a recent folder whose SMB/NFS/iCloud mount went
+    /// dead after the background load would pin the window for the mount's
+    /// own timeout. The probe runs on the unblock pool through the bounded
+    /// session-restore helper; the handler returns at once and the answer
+    /// re-enters with the window. No answer within
+    /// [`RECENT_OPEN_PROBE_TIMEOUT`] keeps the row (the mount may come back)
+    /// and does not reach `open_workspace_folders`, whose own `is_dir` is
+    /// pre-existing behaviour shared with the picker and drop paths.
     pub(crate) fn open_recent_workspace(
         &mut self,
         idx: usize,
@@ -1487,13 +1502,44 @@ impl PaneFlowApp {
         let Some(entry) = crate::recents::current(cx).get(idx).cloned() else {
             return;
         };
-        if !entry.path.is_dir() {
-            crate::recents::forget(&entry.path, cx);
-            self.show_toast("That folder is gone", cx);
-            cx.notify();
-            return;
+        let probed = entry.path.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = smol::unblock(move || {
+                super::session::probe_persisted_dir_within(&probed, RECENT_OPEN_PROBE_TIMEOUT)
+            })
+            .await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.finish_open_recent_workspace(entry.path, answer, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The second half of `open_recent_workspace`, back on the GPUI thread
+    /// with the probe's verdict: `Some(true)` opens, `Some(false)` forgets
+    /// the row, `None` (no answer in time) leaves it alone.
+    fn finish_open_recent_workspace(
+        &mut self,
+        path: std::path::PathBuf,
+        answer: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match answer {
+            Some(true) => {}
+            Some(false) => {
+                crate::recents::forget(&path, cx);
+                self.show_toast("That folder is gone", cx);
+                cx.notify();
+                return;
+            }
+            None => {
+                self.show_toast("That folder is not responding", cx);
+                cx.notify();
+                return;
+            }
         }
-        self.open_workspace_folders(std::slice::from_ref(&entry.path), cx);
+        self.open_workspace_folders(std::slice::from_ref(&path), cx);
         let active = self.active_idx;
         if active < self.workspaces.len() {
             self.select_workspace(active, window, cx);
@@ -2748,6 +2794,52 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// Issue #521: the click on a recent row must not `stat` on the GPUI
+    /// thread. `PaneFlowApp` cannot be built in a unit test, so the body is
+    /// pinned: the only probe sits inside `smol::unblock`, no bare `is_dir`
+    /// appears in either half, and a timeout keeps the row.
+    #[test]
+    fn open_recent_workspace_probes_the_folder_off_thread() {
+        let src = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half");
+        let start = src
+            .find("pub(crate) fn open_recent_workspace(")
+            .expect("open_recent_workspace");
+        let end = src[start..]
+            .find("pub(crate) fn create_workspace_with_picker(")
+            .expect("next fn")
+            + start;
+        let body = &src[start..end];
+        let unblock = body
+            .find("smol::unblock(")
+            .expect("the probe runs on the unblock pool");
+        let probe = body
+            .find("probe_persisted_dir_within(&probed, RECENT_OPEN_PROBE_TIMEOUT)")
+            .expect("the bounded session-restore probe");
+        assert!(
+            unblock < probe && probe < body.find(".await").expect("await"),
+            "the probe must be the unblock closure's body"
+        );
+        assert!(
+            body.contains("cx.spawn_in(window,"),
+            "the handler must return at once and re-enter with the window"
+        );
+        assert!(
+            !body.contains(".is_dir()"),
+            "no stat on the GPUI thread anywhere in the click path"
+        );
+        assert!(
+            body.contains("None => {") && body.contains("That folder is not responding"),
+            "a timeout must keep the row and tell the user"
+        );
+        assert!(
+            body.contains("Some(false) => {") && body.contains("crate::recents::forget("),
+            "only a definite miss forgets the row"
+        );
+    }
+
     use super::*;
     use crate::source_probe::source_slice;
 
