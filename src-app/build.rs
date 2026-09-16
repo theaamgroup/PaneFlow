@@ -12,8 +12,9 @@
 //! 1. **US-008 / EP-001 - embedded binary staging.** Build the
 //!    `paneflow-shim`, `paneflow-ai-hook` and `paneflow-mcp` workspace
 //!    binaries for the current target triple and stage them into
-//!    `src-app/target/embed/bin/<target>/` so the `Bins` `RustEmbed` struct
-//!    in `src-app/src/assets.rs` picks them up at compile time. A nested
+//!    `src-app/target/embed/{debug,release}/bin/<target>/` so the `Bins`
+//!    `RustEmbed` struct in `src-app/src/assets.rs` picks them up at
+//!    compile time. A nested
 //!    `cargo build` is used rather than relying on workspace build ordering
 //!    because `paneflow-app` does not directly depend on any of those
 //!    crates - without this step they would not be guaranteed to exist when
@@ -31,10 +32,12 @@
 //!
 //!    Nested staging uses `--profile release-min` when the outer PROFILE
 //!    is `release` or `release-min`, and a cheap `dev` profile otherwise,
-//!    so an ordinary `cargo build` does not fat-LTO the helpers. The size
-//!    budget is enforced only against release-min artifacts: a debug
-//!    outer build that embeds debug-profile helpers must not change what
-//!    `--release` ships.
+//!    so an ordinary `cargo build` does not fat-LTO the helpers. Staged
+//!    bytes land in `src-app/target/embed/{debug,release}/bin/<target>/`
+//!    so a debug restage cannot overwrite the files a later `--release`
+//!    rust-embed expansion bakes in. The size budget is enforced only
+//!    against release-min artifacts: a debug outer build that embeds
+//!    debug-profile helpers must not change what `--release` ships.
 //!
 //!    Size budget: total embedded bytes per target triple must stay
 //!    ≤ the documented cap on `EMBED_SIZE_LIMIT_BYTES`. The check fails the
@@ -43,10 +46,11 @@
 //!
 //!    Escape hatch: setting `PANEFLOW_SKIP_EMBED_BUILD=1` skips the nested
 //!    build - useful in CI pre-stages that build the nested crates
-//!    separately and pre-populate `target/embed/bin/<target>/`, and for
-//!    fast iteration on the main crate when the nested binaries have not
-//!    changed. The staging dir must still be populated when the `Bins`
-//!    `RustEmbed` macro expands - rust-embed 8.x panics on missing folders.
+//!    separately and pre-populate
+//!    `target/embed/{debug,release}/bin/<target>/`, and for fast iteration
+//!    on the main crate when the nested binaries have not changed. The
+//!    staging dir must still be populated when the `Bins` `RustEmbed`
+//!    macro expands - rust-embed 8.x panics on missing folders.
 
 #[path = "build/embed_staging.rs"]
 mod embed_staging;
@@ -56,9 +60,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use embed_staging::{cargo_profile_dir, embed_profile_for_outer, should_enforce_embed_size_limit};
+use embed_staging::{
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, should_enforce_embed_size_limit,
+};
 
-/// Hard cap on the total bytes staged under `target/embed/bin/<target>/`.
+/// Hard cap on the total bytes staged under
+/// `target/embed/{debug,release}/bin/<target>/`.
 /// Enforced to keep the main PaneFlow binary slim.
 ///
 /// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-08-27):
@@ -85,6 +92,9 @@ const EMBED_BINARIES: [&str; 3] = ["paneflow-shim", "paneflow-ai-hook", "paneflo
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PANEFLOW_SKIP_EMBED_BUILD");
+    // PROFILE is already per cargo unit, but emit the dep so a custom
+    // profile rename restages instead of reusing the previous slot.
+    println!("cargo:rerun-if-env-changed=PROFILE");
 
     // 1. One engine, one archive (#184): libghostty-vt is vendored for
     //    aarch64-apple-darwin only, so any other target has nothing to link.
@@ -107,16 +117,28 @@ fn main() {
         .expect("src-app manifest dir has a parent (the workspace root)")
         .to_path_buf();
 
+    // Cargo sets PROFILE to `debug` for the `dev` profile (historical) and
+    // to the profile name for `release` / custom profiles such as
+    // `release-min`.
+    let outer_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    let embed_profile = embed_profile_for_outer(&outer_profile);
+
+    // Create both ingest slots so rust-analyzer / cfg-checking of the
+    // unused `assets::Bins` arm does not panic on a missing folder.
+    // Only the current slot is populated below.
+    for slot_profile in ["debug", "release"] {
+        let dir = embed_ingest_dir(&manifest_dir, &target, slot_profile);
+        fs::create_dir_all(&dir).unwrap_or_else(|e| {
+            panic!(
+                "US-008: cannot create embed staging dir {}: {e}",
+                dir.display()
+            )
+        });
+    }
+
     // The folder `RustEmbed` points at, relative to CARGO_MANIFEST_DIR.
     // Keep the in-memory/on-disk folder layout aligned with the macro.
-    let embed_root = manifest_dir.join("target").join("embed").join("bin");
-    let embed_dir = embed_root.join(&target);
-    fs::create_dir_all(&embed_dir).unwrap_or_else(|e| {
-        panic!(
-            "US-008: cannot create embed staging dir {}: {e}",
-            embed_dir.display()
-        )
-    });
+    let embed_dir = embed_ingest_dir(&manifest_dir, &target, &outer_profile);
 
     // Rerun when a helper crate's sources or manifest change. Watching
     // `src/` + `Cargo.toml` (not the crate directory) avoids a fat-LTO
@@ -160,11 +182,6 @@ fn main() {
         std::env::var("PANEFLOW_SKIP_EMBED_BUILD").ok().as_deref(),
         Some("1")
     );
-    // Cargo sets PROFILE to `debug` for the `dev` profile (historical) and
-    // to the profile name for `release` / custom profiles such as
-    // `release-min`.
-    let outer_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-    let embed_profile = embed_profile_for_outer(&outer_profile);
     if !skip_nested_build {
         stage_ai_hook_binaries(&workspace_root, &target, &embed_dir, embed_profile);
     } else {
@@ -254,7 +271,7 @@ fn stage_ai_hook_binaries(workspace_root: &Path, target: &str, embed_dir: &Path,
         }
         // `fs::copy` preserves mode on Unix; embedded bytes don't need
         // the executable bit (the extractor sets it), but a 0o755 here
-        // keeps `ls -l target/embed/bin/<triple>/` self-documenting.
+        // keeps `ls -l target/embed/<slot>/bin/<triple>/` self-documenting.
         fs::copy(&src, &dst).unwrap_or_else(|e| {
             panic!(
                 "US-008: copy {} → {} failed: {e}",

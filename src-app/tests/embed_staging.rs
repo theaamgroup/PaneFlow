@@ -6,7 +6,12 @@
 #[path = "../build/embed_staging.rs"]
 mod embed_staging;
 
-use embed_staging::{cargo_profile_dir, embed_profile_for_outer, should_enforce_embed_size_limit};
+use std::path::Path;
+
+use embed_staging::{
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, embed_slot_for_outer,
+    should_enforce_embed_size_limit,
+};
 
 #[test]
 fn release_outer_stages_release_min() {
@@ -36,4 +41,27 @@ fn dev_profile_artifacts_live_under_debug() {
     assert_eq!(cargo_profile_dir("release-min"), "release-min");
     assert_eq!(cargo_profile_dir("release"), "release");
     assert_eq!(cargo_profile_dir("bench"), "release");
+}
+
+#[test]
+fn debug_and_release_outer_use_distinct_embed_slots() {
+    assert_eq!(embed_slot_for_outer("debug"), "debug");
+    assert_eq!(embed_slot_for_outer("dev"), "debug");
+    assert_eq!(embed_slot_for_outer("release"), "release");
+    assert_eq!(embed_slot_for_outer("release-min"), "release");
+    assert_ne!(
+        embed_slot_for_outer("debug"),
+        embed_slot_for_outer("release")
+    );
+}
+
+#[test]
+fn debug_restage_cannot_clobber_release_ingest_dir() {
+    let manifest = Path::new("/app");
+    let target = "aarch64-apple-darwin";
+    let debug_dir = embed_ingest_dir(manifest, target, "debug");
+    let release_dir = embed_ingest_dir(manifest, target, "release");
+    assert_ne!(debug_dir, release_dir);
+    assert!(debug_dir.ends_with("target/embed/debug/bin/aarch64-apple-darwin"));
+    assert!(release_dir.ends_with("target/embed/release/bin/aarch64-apple-darwin"));
 }
