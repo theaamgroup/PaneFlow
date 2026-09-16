@@ -908,6 +908,16 @@ impl PaneFlowApp {
         // not know about.
         app.refresh_mcp_status(cx);
 
+        // Issue #518 (upstream df375ba5): warm the installed-agent cache
+        // off-thread so the first launch pad / pane palette frame never
+        // walks PATH on the GPUI thread, and repaint once the walk lands
+        // so rows stop saying "looking" (`installed_binary_scan_pending`).
+        cx.spawn(async move |this, cx| {
+            smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;
+            let _ = this.update(cx, |_app, cx| cx.notify());
+        })
+        .detach();
+
         app
     }
 }

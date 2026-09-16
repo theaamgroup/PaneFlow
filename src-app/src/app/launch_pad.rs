@@ -35,6 +35,11 @@ use crate::widgets::text_area::TextArea;
 use crate::widgets::text_input::TextInput;
 use crate::workspace::worktree::{self, ManagedWorktree};
 
+/// Shown in place of a "not installed" verdict while the first PATH walk
+/// for agent CLIs is still running (issue #518, upstream df375ba5). The
+/// launch pad and the pane palette share it.
+pub(crate) const AGENT_SCAN_PENDING_COPY: &str = "Looking for agent CLIs on this machine.";
+
 /// Live Launch Pad modal state, owned by `PaneFlowApp`.
 pub(crate) struct LaunchPadState {
     /// Workspace the launch targets, by stable id (survives reorders and
@@ -240,7 +245,14 @@ impl PaneFlowApp {
             return;
         };
         if !agent.is_installed() {
-            self.launch_pad_set_error(format!("{} is not installed", agent.display_name()), cx);
+            // Issue #518: a cold cache answers `false` before the PATH walk
+            // has published; say so instead of claiming the agent is absent.
+            let error = if crate::agent_launcher::installed_binary_scan_pending() {
+                AGENT_SCAN_PENDING_COPY.to_string()
+            } else {
+                format!("{} is not installed", agent.display_name())
+            };
+            self.launch_pad_set_error(error, cx);
             return;
         }
         if branch.is_empty() {
@@ -662,6 +674,10 @@ impl PaneFlowApp {
             .border_1()
             .border_color(ui.border)
             .rounded(px(6.));
+        // Issue #518: while the first PATH walk is still running every row
+        // reads as not installed; mark them as pending instead, and the boot
+        // warm's `cx.notify()` repaints them once the walk publishes.
+        let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
         for (idx, agent) in TerminalAgent::ALL.iter().enumerate() {
             let installed = agent.is_installed();
             let is_selected = idx == lp.agent_idx;
@@ -731,12 +747,15 @@ impl PaneFlowApp {
                             .flex_none()
                             .text_size(px(10.))
                             .text_color(ui.muted)
-                            .child("not installed"),
+                            .child(if scan_pending {
+                                "looking"
+                            } else {
+                                "not installed"
+                            }),
                     ),
                 );
             }
         }
-
         let field_label =
             |label: &'static str| div().text_size(px(11.)).text_color(ui.muted).child(label);
 
@@ -748,6 +767,14 @@ impl PaneFlowApp {
             .py(px(10.))
             .child(field_label("Agent"))
             .child(agent_list)
+            // Issue #518: a sibling of the scrolling list, not its last row,
+            // so the pending copy is visible without scrolling 17 rows.
+            .children(scan_pending.then(|| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(ui.muted)
+                    .child(AGENT_SCAN_PENDING_COPY)
+            }))
             .child(field_label("Start from GitHub issue"))
             .child(
                 div()
