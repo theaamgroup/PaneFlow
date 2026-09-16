@@ -9,6 +9,9 @@
 //! fallback read it, `open_workspace_folders` and the session restore write
 //! it, and none of them needs more than a snapshot.
 //!
+//! Neither the read nor the `is_dir` prune ever runs on the GPUI thread: the
+//! one load runs on the background pool (`warm` at boot, or the first reader)
+//! and publishes into the cache, which reads as empty until then.
 //! Reads are bounded by [`crate::limits::MAX_RECENTS_SIZE_BYTES`] and
 //! non-fatal: a corrupt, oversized, or non-regular file is ignored with a log
 //! line. Writes go through `smol::unblock` off the render thread, the same
@@ -44,11 +47,36 @@ struct RecentsFile {
     workspaces: Vec<RecentWorkspace>,
 }
 
-/// `None` until the first read; a load that finds nothing caches `Some(vec![])`
-/// so the sidebar does not re-read the file every frame.
-static RECENTS: Mutex<Option<Vec<RecentWorkspace>>> = Mutex::new(None);
+/// The process-wide list and where its first load stands. The file is read
+/// and pruned (`Path::is_dir` per entry) on the background pool, never on the
+/// GPUI thread: a recent folder on a stalled network mount must not block
+/// startup or freeze the empty-state sidebar. Until that load lands the list
+/// reads as empty and promotions queue in `Loading::pending`, replayed on
+/// publish so nothing recorded during the window is lost.
+enum Cache {
+    Unloaded,
+    /// Each queued `record` call is its own batch: `promote` gives one
+    /// slice multi-folder-open semantics (the first path wins the head), so
+    /// two sequential records must not be flattened into one slice.
+    Loading {
+        pending: Vec<Vec<PathBuf>>,
+    },
+    Loaded(Vec<RecentWorkspace>),
+}
 
-fn cache() -> MutexGuard<'static, Option<Vec<RecentWorkspace>>> {
+/// What a cache transition asks its caller to do next.
+#[derive(Debug, PartialEq, Eq)]
+enum CacheAction {
+    Nothing,
+    /// Start the one background load; the request was queued behind it.
+    SpawnLoad,
+    /// Write this snapshot to disk (off-thread).
+    Persist(Vec<RecentWorkspace>),
+}
+
+static RECENTS: Mutex<Cache> = Mutex::new(Cache::Unloaded);
+
+fn cache() -> MutexGuard<'static, Cache> {
     RECENTS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -67,47 +95,147 @@ fn title_for(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// The current list, newest first. Loads and prunes the file on first use.
-pub(crate) fn current() -> Vec<RecentWorkspace> {
-    let mut guard = cache();
-    guard
-        .get_or_insert_with(|| recents_path().map(|p| load_pruned(&p)).unwrap_or_default())
-        .clone()
+/// Pure: what a reader sees (empty until the load has published) and
+/// whether that reader has to start the load.
+fn cache_read(state: &mut Cache) -> (Vec<RecentWorkspace>, CacheAction) {
+    match state {
+        Cache::Loaded(list) => (list.clone(), CacheAction::Nothing),
+        Cache::Loading { .. } => (Vec::new(), CacheAction::Nothing),
+        Cache::Unloaded => {
+            *state = Cache::Loading {
+                pending: Vec::new(),
+            };
+            (Vec::new(), CacheAction::SpawnLoad)
+        }
+    }
+}
+
+/// Pure: promote `paths` in memory when the list is loaded, otherwise queue
+/// them behind the load (starting it if nothing has yet).
+fn cache_record(state: &mut Cache, paths: &[PathBuf]) -> CacheAction {
+    match state {
+        Cache::Loaded(list) => {
+            if promote(list, paths) {
+                CacheAction::Persist(list.clone())
+            } else {
+                CacheAction::Nothing
+            }
+        }
+        Cache::Loading { pending } => {
+            pending.push(paths.to_vec());
+            CacheAction::Nothing
+        }
+        Cache::Unloaded => {
+            *state = Cache::Loading {
+                pending: vec![paths.to_vec()],
+            };
+            CacheAction::SpawnLoad
+        }
+    }
+}
+
+/// Pure: drop `path` from a loaded list; a list still loading has nothing
+/// the user could have clicked.
+fn cache_forget(state: &mut Cache, path: &Path) -> CacheAction {
+    let Cache::Loaded(list) = state else {
+        return CacheAction::Nothing;
+    };
+    let before = list.len();
+    list.retain(|entry| entry.path != path);
+    if list.len() == before {
+        CacheAction::Nothing
+    } else {
+        CacheAction::Persist(list.clone())
+    }
+}
+
+/// Pure: install the loaded list and replay the promotions queued while it
+/// was in flight, in the order they were recorded. Returns the snapshot to
+/// persist when the replay changed the list. A publish onto a cache that is
+/// already loaded is ignored, so a second load can never roll back a
+/// promotion.
+fn cache_publish(state: &mut Cache, loaded: Vec<RecentWorkspace>) -> CacheAction {
+    let pending = match std::mem::replace(state, Cache::Unloaded) {
+        Cache::Loading { pending } => pending,
+        Cache::Unloaded => Vec::new(),
+        Cache::Loaded(existing) => {
+            *state = Cache::Loaded(existing);
+            return CacheAction::Nothing;
+        }
+    };
+    let mut list = loaded;
+    let mut changed = false;
+    for batch in &pending {
+        changed |= promote(&mut list, batch);
+    }
+    *state = Cache::Loaded(list.clone());
+    if changed {
+        CacheAction::Persist(list)
+    } else {
+        CacheAction::Nothing
+    }
+}
+
+/// Run the one background load: read and prune `recents.json` on the pool,
+/// then publish on the GPUI thread and repaint so the empty-state rows show.
+fn spawn_load(cx: &App) {
+    let path = recents_path();
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        let loaded = smol::unblock(move || path.map(|p| load_pruned(&p)).unwrap_or_default()).await;
+        cx.update(|cx| {
+            let action = cache_publish(&mut cache(), loaded);
+            let has_rows = matches!(&*cache(), Cache::Loaded(list) if !list.is_empty());
+            if let CacheAction::Persist(snapshot) = action {
+                persist(snapshot, cx);
+            }
+            if has_rows {
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Start the background load at boot so the empty state fills within
+/// milliseconds on a local disk. Idempotent: only the first call loads.
+pub(crate) fn warm(cx: &App) {
+    if cache_read(&mut cache()).1 == CacheAction::SpawnLoad {
+        spawn_load(cx);
+    }
+}
+
+/// The current list, newest first. Never touches the disk on the caller's
+/// thread: empty until the background load has published, and the first
+/// reader starts that load if `warm` has not already.
+pub(crate) fn current(cx: &App) -> Vec<RecentWorkspace> {
+    let (list, action) = cache_read(&mut cache());
+    if action == CacheAction::SpawnLoad {
+        spawn_load(cx);
+    }
+    list
 }
 
 /// Promote `paths` (left to right, so the first ends up at the head) and
-/// persist the list off the render thread when it changed.
+/// persist the list off the render thread when it changed. Before the load
+/// has published the promotion is queued and replayed on publish.
 pub(crate) fn record(paths: &[PathBuf], cx: &App) {
     if paths.is_empty() {
         return;
     }
-    let snapshot = {
-        let mut guard = cache();
-        let list = guard
-            .get_or_insert_with(|| recents_path().map(|p| load_pruned(&p)).unwrap_or_default());
-        if !promote(list, paths) {
-            return;
-        }
-        list.clone()
-    };
-    persist(snapshot, cx);
+    apply(cache_record(&mut cache(), paths), cx);
 }
 
 /// Drop one folder (the user clicked a row whose directory vanished).
 pub(crate) fn forget(path: &Path, cx: &App) {
-    let snapshot = {
-        let mut guard = cache();
-        let Some(list) = guard.as_mut() else {
-            return;
-        };
-        let before = list.len();
-        list.retain(|entry| entry.path != path);
-        if list.len() == before {
-            return;
-        }
-        list.clone()
-    };
-    persist(snapshot, cx);
+    apply(cache_forget(&mut cache(), path), cx);
+}
+
+fn apply(action: CacheAction, cx: &App) {
+    match action {
+        CacheAction::Nothing => {}
+        CacheAction::SpawnLoad => spawn_load(cx),
+        CacheAction::Persist(snapshot) => persist(snapshot, cx),
+    }
 }
 
 fn persist(workspaces: Vec<RecentWorkspace>, cx: &App) {
@@ -450,6 +578,120 @@ mod tests {
         if cfg!(debug_assertions) {
             assert!(path.to_string_lossy().contains("paneflow-dev"));
         }
+    }
+
+    #[test]
+    fn a_cold_cache_reads_empty_and_starts_exactly_one_load() {
+        let mut state = Cache::Unloaded;
+        let (list, action) = cache_read(&mut state);
+        assert!(
+            list.is_empty(),
+            "nothing is shown before the load publishes"
+        );
+        assert_eq!(action, CacheAction::SpawnLoad);
+        let (list, action) = cache_read(&mut state);
+        assert!(list.is_empty());
+        assert_eq!(
+            action,
+            CacheAction::Nothing,
+            "a second reader must not load again"
+        );
+        assert_eq!(
+            cache_publish(&mut state, vec![entry("/a")]),
+            CacheAction::Nothing
+        );
+        assert_eq!(cache_read(&mut state).0, vec![entry("/a")]);
+    }
+
+    #[test]
+    fn promotions_recorded_during_the_load_are_replayed_in_order_on_publish() {
+        let mut state = Cache::Unloaded;
+        assert_eq!(
+            cache_record(&mut state, &[PathBuf::from("/first")]),
+            CacheAction::SpawnLoad,
+            "the first record on a cold cache starts the load"
+        );
+        assert_eq!(
+            cache_record(&mut state, &[PathBuf::from("/second")]),
+            CacheAction::Nothing,
+            "a record while loading queues"
+        );
+        let action = cache_publish(&mut state, vec![entry("/old")]);
+        let CacheAction::Persist(list) = action else {
+            panic!("replaying queued promotions must persist, got {action:?}");
+        };
+        let paths: Vec<PathBuf> = list.into_iter().map(|e| e.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/second"),
+                PathBuf::from("/first"),
+                PathBuf::from("/old")
+            ],
+            "later records win the head, the loaded file trails"
+        );
+        assert_eq!(
+            cache_publish(&mut state, vec![entry("/stale")]),
+            CacheAction::Nothing,
+            "a publish onto a loaded cache never rolls back a promotion"
+        );
+        assert_eq!(cache_read(&mut state).0[0].path, PathBuf::from("/second"));
+    }
+
+    #[test]
+    fn record_and_forget_on_a_loaded_cache_persist_only_real_changes() {
+        let mut state = Cache::Loaded(vec![entry("/a"), entry("/b")]);
+        assert_eq!(
+            cache_record(&mut state, &[PathBuf::from("/a")]),
+            CacheAction::Nothing
+        );
+        assert!(matches!(
+            cache_record(&mut state, &[PathBuf::from("/b")]),
+            CacheAction::Persist(_)
+        ));
+        assert_eq!(
+            cache_forget(&mut state, Path::new("/nope")),
+            CacheAction::Nothing
+        );
+        assert!(matches!(
+            cache_forget(&mut state, Path::new("/a")),
+            CacheAction::Persist(_)
+        ));
+        assert_eq!(cache_read(&mut state).0, vec![entry("/b")]);
+        let mut loading = Cache::Loading {
+            pending: Vec::new(),
+        };
+        assert_eq!(
+            cache_forget(&mut loading, Path::new("/a")),
+            CacheAction::Nothing,
+            "nothing to forget before the load publishes"
+        );
+    }
+
+    /// The load, and the `is_dir` prune inside it, run only on the
+    /// background pool: the sole production call to `load_pruned` sits in
+    /// the `smol::unblock` closure of `spawn_load`.
+    #[test]
+    fn the_file_is_only_ever_read_inside_the_background_load() {
+        let production = include_str!("recents.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half");
+        let calls: Vec<&str> = production
+            .lines()
+            .filter(|line| line.contains("load_pruned(&"))
+            .collect();
+        assert_eq!(calls.len(), 1, "exactly one load call site: {calls:?}");
+        assert!(
+            calls[0].contains("smol::unblock("),
+            "the load must run inside smol::unblock, got {:?}",
+            calls[0]
+        );
+        let is_dir_sites = production
+            .lines()
+            .filter(|line| line.contains(".is_dir()"))
+            .count();
+        assert_eq!(is_dir_sites, 1, "is_dir belongs to prune alone");
     }
 
     #[test]

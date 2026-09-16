@@ -907,6 +907,11 @@ impl PaneFlowApp {
         // pane scan re-probes when a pane resolves an agent the cache does
         // not know about.
         app.refresh_mcp_status(cx);
+        // Issue #521: read and prune recents.json on the background pool now,
+        // so the empty state's Open recent rows fill within milliseconds on
+        // a local disk and a stalled network folder can never block startup
+        // (the cache reads as empty until the load publishes).
+        crate::recents::warm(cx);
 
         app
     }

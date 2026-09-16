@@ -1484,7 +1484,7 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = crate::recents::current().get(idx).cloned() else {
+        let Some(entry) = crate::recents::current(cx).get(idx).cloned() else {
             return;
         };
         if !entry.path.is_dir() {

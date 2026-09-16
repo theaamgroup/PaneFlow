@@ -1333,7 +1333,7 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let recents = crate::recents::current();
+        let recents = crate::recents::current(cx);
         if recents.is_empty() {
             return None;
         }
@@ -4256,7 +4256,7 @@ mod tests {
             "fn sidebar_rows(",
         );
         assert!(
-            recents.contains("crate::recents::current()"),
+            recents.contains("crate::recents::current(cx)"),
             "the rows must come from the recents module, not a second list"
         );
         assert!(
