@@ -457,6 +457,7 @@ mod tests {
             factory_button_visible: Some(true),
             qoder_button_visible: Some(true),
             openclaw_button_visible: Some(true),
+            deepseek_harness_button_visible: Some(true),
             ..Default::default()
         }
     }
@@ -485,6 +486,7 @@ mod tests {
                 TerminalAgent::Factory,
                 TerminalAgent::Qoder,
                 TerminalAgent::Openclaw,
+                TerminalAgent::DeepSeekHarness,
             ]
         );
         assert!(
@@ -531,6 +533,7 @@ mod tests {
             TerminalAgent::Factory => &mut config.factory_button_visible,
             TerminalAgent::Qoder => &mut config.qoder_button_visible,
             TerminalAgent::Openclaw => &mut config.openclaw_button_visible,
+            TerminalAgent::DeepSeekHarness => &mut config.deepseek_harness_button_visible,
         };
         *slot = Some(visible);
     }

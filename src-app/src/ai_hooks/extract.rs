@@ -72,7 +72,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// callback. `(basename, source)` where `source` is the name inside the
 /// embed folder.
 ///
-/// Wrapping is UNCONDITIONAL for all 16 agents (not gated on the real CLI
+/// Wrapping is UNCONDITIONAL for all 17 agents (not gated on the real CLI
 /// being installed): probing Paneflow's own `$PATH` would silently disable
 /// hooks whenever the app is launched from a desktop entry with a minimal
 /// PATH while the PTY's login shell resolves the agent fine. The cost is
@@ -1572,6 +1572,7 @@ mod tests {
                 "droid",
                 "qodercli",
                 "openclaw",
+                "dsh",
             ],
         );
     }
