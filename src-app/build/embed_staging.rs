@@ -67,7 +67,17 @@ pub fn cargo_profile_dir(profile: &str) -> &str {
     }
 }
 
-/// Size cap applies only to `release-min` artifacts, never to debug helpers.
-pub fn should_enforce_embed_size_limit(embed_profile: &str) -> bool {
-    embed_profile == "release-min"
+/// Byte cap for the staged helpers of a nested profile.
+///
+/// `release-min` keeps the shipped-size budget. `dev` helpers are not
+/// stripped or LTO'd (measured 2026-09-15 on aarch64-apple-darwin:
+/// shim 2_973_616 B + ai-hook 1_353_680 B + mcp 2_494_224 B = 6_821_520 B)
+/// and every launch writes one shim copy per agent, so they get a looser
+/// but still bounded cap instead of none.
+pub fn embed_size_limit_for(embed_profile: &str, release_limit: u64, debug_limit: u64) -> u64 {
+    if embed_profile == "release-min" {
+        release_limit
+    } else {
+        debug_limit
+    }
 }

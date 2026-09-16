@@ -512,8 +512,11 @@ jobs:
         run: cargo check --workspace --locked --target aarch64-apple-darwin
 
   # Release paneflow-app binary for artifact consumers (render smoke).
-  # Parallel to macos_check on the same rust-cache prefix-key so the
-  # clippy/test graph and the release graph overlap (#554).
+  # Runs in parallel with macos_check (#554). rust-cache appends the job
+  # id to its key when no shared-key is set, so this job keeps its own
+  # cache entry: the clippy/test graph and the release graph do not
+  # overlap, and the second macos-15 job is a wall-clock trade, not a
+  # cache one.
   macos_release_build:
     name: macOS aarch64 release build
     needs: orchestrate

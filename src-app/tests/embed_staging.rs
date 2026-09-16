@@ -9,8 +9,8 @@ mod embed_staging;
 use std::path::Path;
 
 use embed_staging::{
-    cargo_profile_dir, embed_ingest_dir, embed_profile_for_cfg, embed_slot_for_cfg,
-    should_enforce_embed_size_limit,
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_cfg, embed_size_limit_for,
+    embed_slot_for_cfg,
 };
 
 #[test]
@@ -24,11 +24,19 @@ fn a_build_with_debug_assertions_stages_dev() {
 }
 
 #[test]
-fn size_cap_only_on_release_min() {
-    assert!(should_enforce_embed_size_limit("release-min"));
-    assert!(!should_enforce_embed_size_limit("dev"));
-    assert!(!should_enforce_embed_size_limit("debug"));
-    assert!(!should_enforce_embed_size_limit("release"));
+fn size_cap_follows_the_staged_profile() {
+    assert_eq!(
+        embed_size_limit_for("release-min", 1_400_000, 10_000_000),
+        1_400_000
+    );
+    assert_eq!(
+        embed_size_limit_for("dev", 1_400_000, 10_000_000),
+        10_000_000
+    );
+    assert!(
+        embed_size_limit_for("dev", 1_400_000, 10_000_000)
+            > embed_size_limit_for("release-min", 1_400_000, 10_000_000)
+    );
 }
 
 #[test]
