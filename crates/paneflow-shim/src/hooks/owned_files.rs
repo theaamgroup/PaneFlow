@@ -98,7 +98,11 @@ fn grok_source() -> std::io::Result<String> {
     Ok(serde_json::to_string_pretty(&root).map_err(std::io::Error::other)? + "\n")
 }
 
-fn install_owned_file(path: &Path, source: &str, lease: &mut HookLease) -> std::io::Result<()> {
+pub(super) fn install_owned_file(
+    path: &Path,
+    source: &str,
+    lease: &mut HookLease,
+) -> std::io::Result<()> {
     refuse_symlink(path, "managed hook")?;
     match read_optional_text(path)? {
         Some(existing) if existing == source => Ok(()),
@@ -136,31 +140,15 @@ fn remove_unchanged_file(path: &Path, created: bool, source: &str) -> std::io::R
     Ok(())
 }
 
-fn sweep_matching_owned_file(path: &Path, source: &str) {
+pub(super) fn sweep_matching_owned_file(path: &Path, source: &str) {
     let _ = with_orphan_lease(path, path, |created| {
         remove_unchanged_file(path, created, source)
     });
 }
 
-fn cleanup_matching_owned_file(path: &Path, lease: &mut HookLease, source: &str) {
+pub(super) fn cleanup_matching_owned_file(path: &Path, lease: &mut HookLease, source: &str) {
     let _ = with_last_lease(path, lease, |created| {
         remove_unchanged_file(path, created, source)
-    });
-}
-
-pub(super) fn sweep_owned_file(path: &Path) {
-    let _ = with_orphan_lease(path, path, |_| match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    });
-}
-
-pub(super) fn cleanup_owned_file(path: &Path, lease: &mut HookLease) {
-    let _ = with_last_lease(path, lease, |_| match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
     });
 }
 

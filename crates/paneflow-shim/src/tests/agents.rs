@@ -917,3 +917,113 @@ fn dsh_patch_overlay_stays_out_of_plugin_help_version_and_dumps() {
         );
     }
 }
+
+#[test]
+fn dsh_preexisting_files_survive_install() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    std::fs::write(&hooks_path, "{\"user\": true}\n").unwrap();
+    std::fs::write(&overlay_path, "- insert:\n    - id: user\n").unwrap();
+
+    let error = match DshOverlayGuard::install_at(&dir) {
+        Ok(_) => panic!("pre-existing DSH files must not be overwritten"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        "{\"user\": true}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&overlay_path).unwrap(),
+        "- insert:\n    - id: user\n"
+    );
+}
+
+#[test]
+fn dsh_preexisting_overlay_survives_when_hooks_would_be_created() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    std::fs::write(&overlay_path, "- insert:\n    - id: user\n").unwrap();
+
+    let error = match DshOverlayGuard::install_at(&dir) {
+        Ok(_) => panic!("a pre-existing overlay must not be overwritten"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(
+        !hooks_path.exists(),
+        "a failed overlay install must roll back a hooks.json this session created"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&overlay_path).unwrap(),
+        "- insert:\n    - id: user\n"
+    );
+}
+
+#[test]
+fn dsh_mid_session_edits_survive_drop() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    std::fs::write(&hooks_path, "user hooks").unwrap();
+    std::fs::write(&overlay_path, "user overlay").unwrap();
+
+    drop(guard);
+    assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), "user hooks");
+    assert_eq!(
+        std::fs::read_to_string(&overlay_path).unwrap(),
+        "user overlay"
+    );
+}
+
+#[test]
+fn dsh_symlink_file_is_refused_and_target_is_unchanged() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = td.path().join("user-hooks.json");
+    std::fs::write(&target, "{\"keep\": true}\n").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join(DSH_HOOKS_BASENAME)).unwrap();
+
+    let error = match DshOverlayGuard::install_at(&dir) {
+        Ok(_) => panic!("a symlinked hooks.json must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "{\"keep\": true}\n"
+    );
+}
+
+#[test]
+fn dsh_created_files_are_removed_by_the_last_session() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    let first = DshOverlayGuard::install_at(&dir).unwrap();
+    let second = DshOverlayGuard::install_at(&dir).unwrap();
+    let hooks_path = dir.join(DSH_HOOKS_BASENAME);
+    let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
+    assert!(hooks_path.exists());
+    assert!(overlay_path.exists());
+
+    drop(first);
+    assert!(
+        hooks_path.exists() && overlay_path.exists(),
+        "an earlier session must leave the files for the last one"
+    );
+    drop(second);
+    assert!(
+        !hooks_path.exists() && !overlay_path.exists(),
+        "the last session must remove the files PaneFlow created"
+    );
+}
