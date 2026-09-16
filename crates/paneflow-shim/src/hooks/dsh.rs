@@ -86,6 +86,30 @@ impl Drop for DshOverlayGuard {
 
 pub(crate) fn dsh_home() -> Option<PathBuf> {
     resolve_dsh_home(env::var_os("DSH_HOME"), env::current_dir().ok())
+        .map(normalize_existing_prefix)
+}
+
+/// Canonicalizes the longest existing prefix of `path` and re-appends the
+/// rest, so `/tmp/dsh`, `/tmp/x/../dsh`, and a symlinked spelling all derive
+/// the same overlay and lease paths even before the directory exists.
+fn normalize_existing_prefix(path: PathBuf) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut probe = path.as_path();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(probe) {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |acc, segment| acc.join(segment));
+        }
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) => {
+                missing.push(name.to_os_string());
+                probe = parent;
+            }
+            _ => return path,
+        }
+    }
 }
 
 /// A relative `DSH_HOME` is anchored on the shim's working directory before
@@ -143,7 +167,7 @@ fn sweep_overlay(directory: &Path) {
 
 #[cfg(test)]
 mod dsh_home_tests {
-    use super::resolve_dsh_home;
+    use super::{normalize_existing_prefix, resolve_dsh_home};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -179,5 +203,26 @@ mod dsh_home_tests {
     fn empty_dsh_home_falls_back_to_the_home_directory_default() {
         let resolved = resolve_dsh_home(Some(OsString::new()), Some(PathBuf::from("/work")));
         assert_eq!(resolved.map(|p| p.ends_with(".dsh")), Some(true));
+    }
+
+    #[test]
+    fn aliased_spellings_of_one_directory_normalize_to_the_same_path() {
+        let root = std::env::temp_dir().join(format!("dsh-home-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("x")).unwrap();
+        let direct = normalize_existing_prefix(root.join("dsh"));
+        let aliased = normalize_existing_prefix(root.join("x").join("..").join("dsh"));
+        assert_eq!(direct, aliased);
+        assert!(direct.ends_with("dsh"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_tail_is_re_appended_to_the_canonical_prefix() {
+        let root = std::env::temp_dir().join(format!("dsh-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        let resolved = normalize_existing_prefix(root.join("a").join("b"));
+        assert_eq!(resolved, canonical_root.join("a").join("b"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
