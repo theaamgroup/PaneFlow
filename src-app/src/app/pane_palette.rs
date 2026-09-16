@@ -224,6 +224,25 @@ pub(crate) fn palette_resume_target_tab(
     bound_palette
 }
 
+/// Whether a `prepare_branch_checkout` error means git could not resolve the
+/// configured new-tab branch (issue #549). Other failures (path collisions,
+/// a blocked worktree add) stay hard errors so a tab is not opened anyway.
+fn new_tab_checkout_unresolved(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    (lower.contains("local branch ") && lower.contains(" does not exist"))
+        || lower.contains("invalid reference")
+        || lower.contains("unknown revision")
+        || lower.contains("not a literal branch name")
+}
+
+/// Toast for a failed new-tab checkout. Keeps git's own reason; the Settings
+/// hint is how the user stops hitting a missing default like `main`.
+fn new_tab_checkout_failure_toast(branch: &str, error: &str) -> String {
+    format!(
+        "Could not check out {branch}: {error}. Choose a new-tab branch in Settings → Workspaces."
+    )
+}
+
 impl PaneFlowApp {
     /// Build the picker catalogue for `ws_idx` (US-015): Terminal first, then
     /// the visible agents in `TerminalAgent::ALL` order, then the workspace's
@@ -330,9 +349,12 @@ impl PaneFlowApp {
                         Err(error) => {
                             log::warn!("new tab on {branch}: {error}");
                             app.show_toast(
-                                format!("Could not check out {branch}. Choose a new-tab branch in Settings → Workspaces."),
+                                new_tab_checkout_failure_toast(&branch, &error),
                                 cx,
                             );
+                            if new_tab_checkout_unresolved(&error) {
+                                app.open_pane_palette_at_checkout(ws_idx, None, window, cx);
+                            }
                         }
                     }
                 })
@@ -1322,6 +1344,65 @@ mod tests {
         assert!(
             !src.contains(&forbidden),
             "a paneless tab must render the picker, not a dead-end message"
+        );
+    }
+
+    /// Issue #549: a repo without `main` must still open a New pane tab on the
+    /// workspace checkout, and the toast must keep git's reason.
+    #[test]
+    fn missing_new_tab_branch_opens_on_the_workspace_checkout_and_keeps_gits_reason() {
+        assert!(
+            new_tab_checkout_unresolved("Local branch main does not exist"),
+            "prepare_branch_checkout's missing-branch error"
+        );
+        assert!(new_tab_checkout_unresolved(
+            "git worktree add /tmp/repo.worktrees/main main failed: fatal: invalid reference: main"
+        ));
+        assert!(new_tab_checkout_unresolved(
+            "git rev-parse --verify refs/heads/main failed: fatal: ambiguous argument 'main': unknown revision or path not in the working tree."
+        ));
+        assert!(new_tab_checkout_unresolved(
+            "Not a literal branch name: HEAD"
+        ));
+        assert!(
+            !new_tab_checkout_unresolved(
+                "/tmp/repo.worktrees/main exists but is not a registered worktree; remove it first"
+            ),
+            "a real checkout collision must not silently fall back"
+        );
+        assert!(!new_tab_checkout_unresolved(
+            "/tmp/repo.worktrees/main exists but holds another branch (feat)"
+        ));
+        let toast = new_tab_checkout_failure_toast("main", "Local branch main does not exist");
+        assert!(
+            toast.contains("Local branch main does not exist"),
+            "toast must include git's reason: {toast}"
+        );
+        assert!(toast.contains("Settings → Workspaces"), "{toast}");
+
+        let src = include_str!("pane_palette.rs");
+        let start = src
+            .find("pub(crate) fn open_pane_palette(")
+            .expect("open_pane_palette");
+        let rest = &src[start..];
+        let end = rest
+            .find("\n    fn open_pane_palette_at_checkout(")
+            .expect("open_pane_palette_at_checkout follows");
+        let err = rest[..end]
+            .split("Err(error) => {")
+            .nth(1)
+            .expect("Err arm");
+        assert!(
+            err.contains("new_tab_checkout_failure_toast"),
+            "the Err arm must surface git's reason"
+        );
+        assert!(
+            err.contains("new_tab_checkout_unresolved"),
+            "the Err arm must classify a missing branch"
+        );
+        assert!(
+            err.contains("open_pane_palette_at_checkout(ws_idx, None, window, cx)"),
+            "an unresolved branch must open the picker on the workspace checkout"
         );
     }
 }
