@@ -415,6 +415,11 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      # GPU-free; needs hdiutil on the macos-15 runner. Run before the
+      # Rust toolchain so a retry-regression fails without a 20 min build.
+      - name: create-dmg retry/verify tests
+        run: bash scripts/create-dmg.test.sh
+
       # Fail fast if the runner image drifts away from the pinned Xcode
       # or the Metal compiler. GPUI compiles .metal shaders at build
       # time; `xcrun metal --version` is the proof (path lookup succeeds
