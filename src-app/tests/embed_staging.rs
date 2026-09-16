@@ -9,21 +9,18 @@ mod embed_staging;
 use std::path::Path;
 
 use embed_staging::{
-    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, embed_slot_for_cfg,
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_cfg, embed_slot_for_cfg,
     should_enforce_embed_size_limit,
 };
 
 #[test]
-fn release_outer_stages_release_min() {
-    assert_eq!(embed_profile_for_outer("release"), "release-min");
-    assert_eq!(embed_profile_for_outer("release-min"), "release-min");
+fn a_build_without_debug_assertions_stages_release_min() {
+    assert_eq!(embed_profile_for_cfg(false), "release-min");
 }
 
 #[test]
-fn debug_outer_stages_dev() {
-    assert_eq!(embed_profile_for_outer("debug"), "dev");
-    assert_eq!(embed_profile_for_outer("dev"), "dev");
-    assert_eq!(embed_profile_for_outer(""), "dev");
+fn a_build_with_debug_assertions_stages_dev() {
+    assert_eq!(embed_profile_for_cfg(true), "dev");
 }
 
 #[test]
@@ -51,12 +48,22 @@ fn embed_slot_follows_the_debug_assertions_cfg() {
 }
 
 #[test]
-fn release_outer_with_debug_assertions_stages_release_min_into_the_debug_slot() {
-    // CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true keeps PROFILE=release but
-    // compiles assets.rs with cfg(debug_assertions): the nested profile is
-    // still release-min while the slot is the one rust-embed will read.
-    assert_eq!(embed_profile_for_outer("release"), "release-min");
-    assert_eq!(embed_slot_for_cfg(true), "debug");
+fn profile_and_slot_are_decided_by_one_signal() {
+    // Whatever PROFILE says, a release slot only ever receives release-min
+    // bytes and a debug slot only ever receives dev bytes, so neither
+    // CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true nor
+    // CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false can leave unmeasured helpers
+    // in the slot a later build embeds.
+    for debug_assertions in [true, false] {
+        let pair = (
+            embed_profile_for_cfg(debug_assertions),
+            embed_slot_for_cfg(debug_assertions),
+        );
+        assert!(
+            matches!(pair, ("dev", "debug") | ("release-min", "release")),
+            "{pair:?}"
+        );
+    }
 }
 
 #[test]

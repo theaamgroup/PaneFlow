@@ -1,9 +1,9 @@
 //! Nested-embed profile selection for `src-app/build.rs` (issue #554).
 //!
-//! Release (and the dedicated `release-min` profile) keep fat-LTO
-//! `release-min` so `EMBED_SIZE_LIMIT_BYTES` still measures shipped Mach-O
-//! sizes. Every other outer profile uses `dev` so a debug `cargo build`
-//! does not fat-LTO the shim, hook, and MCP binaries.
+//! A build without `cfg(debug_assertions)` (release, `release-min`) keeps
+//! fat-LTO `release-min` so `EMBED_SIZE_LIMIT_BYTES` still measures shipped
+//! Mach-O sizes. A build with it (dev, test) uses `dev` so a debug
+//! `cargo build` does not fat-LTO the shim, hook, and MCP binaries.
 //!
 //! Staged bytes are isolated per rust-embed ingest slot (`debug` vs
 //! `release`) so a debug restage cannot overwrite the helpers a later
@@ -13,11 +13,20 @@
 
 use std::path::{Path, PathBuf};
 
-/// Nested cargo profile used to stage embedded helpers for an outer `PROFILE`.
-pub fn embed_profile_for_outer(profile: &str) -> &'static str {
-    match profile {
-        "release" | "release-min" => "release-min",
-        _ => "dev",
+/// Nested cargo profile used to stage embedded helpers.
+///
+/// Decided by the same `cfg(debug_assertions)` signal as the ingest slot,
+/// never by the outer `PROFILE`: a release slot only ever holds fat-LTO
+/// `release-min` bytes that the shipped-size cap measured, and a debug
+/// slot only ever holds `dev` bytes. Keying the profile off `PROFILE`
+/// while the slot followed the cfg let `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false`
+/// write unoptimized helpers into the release slot for a later `--release`
+/// to embed without restaging.
+pub fn embed_profile_for_cfg(debug_assertions: bool) -> &'static str {
+    if debug_assertions {
+        "dev"
+    } else {
+        "release-min"
     }
 }
 

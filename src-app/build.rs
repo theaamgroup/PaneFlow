@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use embed_staging::{
-    cargo_profile_dir, embed_ingest_dir, embed_profile_for_outer, embed_slot_for_cfg,
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_cfg, embed_slot_for_cfg,
     should_enforce_embed_size_limit,
 };
 
@@ -93,13 +93,11 @@ const EMBED_BINARIES: [&str; 3] = ["paneflow-shim", "paneflow-ai-hook", "paneflo
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PANEFLOW_SKIP_EMBED_BUILD");
-    // PROFILE is already per cargo unit, but emit the dep so a custom
-    // profile rename restages instead of reusing the previous slot.
+    // PROFILE only gates the release size warning; the staging profile and
+    // ingest slot both follow cfg(debug_assertions), the signal
+    // `assets::Bins` compiles against, so an assertion override in either
+    // direction restages the slot rust-embed will actually read.
     println!("cargo:rerun-if-env-changed=PROFILE");
-    // The ingest slot follows cfg(debug_assertions), the same signal
-    // `assets::Bins` compiles against, so a profile override such as
-    // CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true stages the slot that
-    // rust-embed will actually read.
     println!("cargo:rerun-if-env-changed=CARGO_CFG_DEBUG_ASSERTIONS");
 
     // 1. One engine, one archive (#184): libghostty-vt is vendored for
@@ -123,12 +121,13 @@ fn main() {
         .expect("src-app manifest dir has a parent (the workspace root)")
         .to_path_buf();
 
-    // Cargo sets PROFILE to `debug` for the `dev` profile (historical) and
-    // to the profile name for `release` / custom profiles such as
-    // `release-min`.
-    let outer_profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-    let embed_profile = embed_profile_for_outer(&outer_profile);
-    let embed_slot = embed_slot_for_cfg(std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some());
+    // Both the nested helper profile and the ingest slot follow
+    // cfg(debug_assertions), the signal `assets::Bins` compiles against, so
+    // the release slot only ever holds release-min bytes and the debug slot
+    // only ever holds dev bytes, whatever PROFILE says.
+    let debug_assertions = std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some();
+    let embed_profile = embed_profile_for_cfg(debug_assertions);
+    let embed_slot = embed_slot_for_cfg(debug_assertions);
 
     // Create both ingest slots so rust-analyzer / cfg-checking of the
     // unused `assets::Bins` arm does not panic on a missing folder.
