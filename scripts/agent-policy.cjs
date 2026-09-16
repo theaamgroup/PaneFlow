@@ -1,5 +1,13 @@
 // Shared, deterministic safety routing. No dependencies or code from PR heads.
 const categories = ['database', 'ui', 'money', 'access', 'integration', 'platform-wide', 'release'];
+// Only these mechanically demand a human (`needs-human-review`). The other
+// categories are recorded for routing but do not hold: nearly every change in
+// this repository touches `src-app/` or `crates/`, so holding on `ui`,
+// `integration` or `release` held every pull request.
+const holdCategories = ['database', 'money', 'access', 'platform-wide'];
+// Files where an unattended change is itself the risk: the release pipeline
+// and signing, and this policy (an agent must not loosen it unattended).
+const criticalPaths = /^(\.github\/workflows\/(release|agent-safety)\.yml|scripts\/agent-policy(\.test)?\.cjs|scripts\/(sparkle-dist|bundle-macos|create-dmg)\.sh|packaging\/)/;
 const maxClosingReferences = 20;
 const maxLinkedPulls = 50;
 const states = ['needs-info', 'ready-for-agent', 'ready-for-human', 'wontfix'];
@@ -18,6 +26,10 @@ function pathRisks(paths) {
     if (/^(\.github\/|\.agents\/|\.claude\/|\.cursor\/|scripts\/|skills\/|packaging\/)|(^|\/)(Cargo\.(toml|lock)|rust-toolchain(\.toml)?|deny\.toml|clippy\.toml|AGENTS\.md|CLAUDE\.md|SKILL\.md)$/.test(path)) result.add('safety:release');
   }
   return [...result];
+}
+
+function pathHolds(paths) {
+  return paths.some(path => criticalPaths.test(path));
 }
 
 function hasHumanOwner(assignees) {
@@ -64,7 +76,13 @@ function route(labels, assignees = [], paths = [], inherited = [], requestedStat
     if (categories.some(c => label === `safety:${c}`) || label === 'needs-human-review') next.add(label);
   }
   const risk = categories.some(c => next.has(`safety:${c}`));
-  const held = risk || next.has('needs-human-review');
+  // A hold needs a critical signal: a holding category, `severity:critical`
+  // on the item or a linked issue, a critical path, or a hold a human already
+  // placed (on the item or a linked issue; never cleared automatically).
+  const critical = holdCategories.some(c => next.has(`safety:${c}`))
+    || next.has('severity:critical') || inherited.includes('severity:critical')
+    || pathHolds(paths);
+  const held = critical || next.has('needs-human-review');
   const isPull = linked !== undefined;
   const derived = isPull ? deriveClassification(linked) : undefined;
   const safetyValid = [...next].filter(l => l.startsWith('safety:')).every(l => l === 'safety:none' || categories.some(c => l === `safety:${c}`));
@@ -133,18 +151,16 @@ async function sync({ github, context, core }) {
       oversized = links.pageInfo.hasNextPage || links.nodes.length > maxClosingReferences;
       const localRepo = `${repo.owner}/${repo.repo}`.toLowerCase();
       for (const issue of links.nodes) {
+        // A foreign issue cannot classify the PR; it stays needs-info.
         if (issue.repository.nameWithOwner.toLowerCase() === localRepo) ids.push(issue.number);
-        else inherited.push('needs-human-review');
       }
     } catch (error) {
-      inherited.push('needs-human-review');
       core.setFailed('Closing issue references could not be read.');
     }
     // Oversized link sets get no per-issue requests: reserve API budget for
-    // writing the hold and removing stale eligibility, even on repeated events.
+    // removing stale eligibility, even on repeated events.
     if (oversized) {
-      inherited.push('needs-human-review');
-      core.warning(`More than ${maxClosingReferences} closing references; retaining a human-review hold.`);
+      core.warning(`More than ${maxClosingReferences} closing references; the pull request stays needs-info.`);
     }
     for (const id of oversized ? [] : ids) {
       try {
@@ -154,25 +170,24 @@ async function sync({ github, context, core }) {
         const labels = issue.labels.map(l => l.name);
         inherited.push(...labels);
         const moved = issue.repository_url && !issue.repository_url.toLowerCase().endsWith(`/repos/${repo.owner}/${repo.repo}`.toLowerCase());
-        if (moved || issue.state !== 'open' || !route(labels, issue.assignees || []).includes('ready-for-agent')) {
-          inherited.push('needs-human-review');
-        }
-        // Only open local issues classify the PR; closed or moved ones hold it.
+        // Only open local issues classify the PR; a closed or moved one
+        // leaves it needs-info (its labels, including any human hold or
+        // severity:critical, were still inherited above).
         if (!moved && issue.state === 'open') linked.push({ labels, assignees: issue.assignees || [] });
       } catch (error) {
         // Unknown issue classification cannot make a PR eligible. Preserve
         // path routing even when a closing reference is missing/inaccessible.
-        inherited.push('needs-human-review');
-        core.warning(`Cannot classify linked issue #${id}; retaining a human-review hold.`);
+        core.warning(`Cannot classify linked issue #${id}; the pull request stays needs-info.`);
         if (error.status !== 404) {
           core.setFailed(`Linked issue #${id} could not be read.`);
           break; // Do not compound throttling or service failures.
         }
       }
     }
-    // Absent or unreadable issue links are unknown scope, never
-    // evidence that this PR has an eligible issue for unattended work.
-    if (linkedIssues === 0) inherited.push('needs-human-review');
+    // Absent or unreadable issue links are unknown scope, never evidence
+    // that this PR has an eligible issue for unattended work: `linked` stays
+    // empty and routing lands on needs-info without a human hold.
+    if (linkedIssues === 0) core.info(`#${number} links no classifiable issue.`);
   }
   const before = item.labels.map(l => l.name);
   const requestedState = event.action === 'labeled' ? event.label?.name : undefined;
@@ -228,4 +243,4 @@ async function syncOpenPulls({ github, core, repo, issueNumber }) {
   for (const number of numbers) await sync({ github, core, context: { repo, payload: { pull_request: { number } } } });
 }
 
-module.exports = { pathRisks, route, deriveClassification, sync, syncOpenPulls };
+module.exports = { pathRisks, pathHolds, holdCategories, route, deriveClassification, sync, syncOpenPulls };

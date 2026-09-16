@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
-const { route, pathRisks, deriveClassification, sync } = require('./agent-policy.cjs');
+const { route, pathRisks, pathHolds, holdCategories, deriveClassification, sync } = require('./agent-policy.cjs');
 const owner = [{ type: 'User', login: 'maintainer' }];
 const base = ['severity:high', 'area:app', 'lens:correctness', 'safety:none', 'ready-for-agent'];
 const repo = { owner: 'org', repo: 'repo' };
@@ -78,7 +78,8 @@ test('privileged policy checkout uses protected main, including stacked PRs', ()
 test('complete safe issue remains eligible; unrelated labels survive', () => {
   assert.deepEqual(route([...base, 'bug'], owner), [...base, 'bug'].sort());
 });
-for (const category of ['database', 'ui', 'money', 'access', 'integration', 'platform-wide', 'release']) {
+assert.deepEqual(holdCategories, ['database', 'money', 'access', 'platform-wide']);
+for (const category of holdCategories) {
   test(`${category} always holds unattended work`, () => {
     const result = route([...base, `safety:${category}`], owner);
     assert.ok(result.includes('needs-human-review'));
@@ -87,13 +88,30 @@ for (const category of ['database', 'ui', 'money', 'access', 'integration', 'pla
     assert.ok(!result.includes('safety:none'));
   });
 }
+// The routine categories are recorded but never demand a human on their own:
+// nearly every change touches src-app/ or crates/, so they would hold all work.
+for (const category of ['ui', 'integration', 'release']) {
+  test(`${category} is recorded without a human hold`, () => {
+    const result = route([...base, `safety:${category}`], owner);
+    assert.ok(!result.includes('needs-human-review'));
+    assert.ok(result.includes('ready-for-agent'));
+    assert.ok(result.includes(`safety:${category}`));
+    assert.ok(!result.includes('safety:none'));
+  });
+}
+test('severity:critical always holds unattended work', () => {
+  const result = route(base.map(l => l === 'severity:high' ? 'severity:critical' : l), owner);
+  assert.ok(result.includes('needs-human-review'));
+  assert.ok(result.includes('ready-for-human'));
+  assert.ok(!result.includes('ready-for-agent'));
+});
 test('missing or bot-only owner blocks unattended work', () => {
   for (const owners of [[], [{ type: 'Bot' }]]) assert.ok(route(base, owners).includes('needs-info'));
 });
 
 test('incomplete risky items retain needs-info and their human hold', () => {
   for (const labels of [base.filter(l => l !== 'severity:high'), base]) {
-    const result = route([...labels, 'safety:release'], []);
+    const result = route([...labels, 'safety:access'], []);
     assert.ok(result.includes('needs-info'));
     assert.ok(result.includes('needs-human-review'));
     assert.ok(!result.includes('ready-for-agent'));
@@ -120,6 +138,18 @@ test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['src-app/src/main.rs', '.github/workflows/test.yml', 'crates/x/src/lib.rs', 'native/a']), ['safety:ui', 'safety:release', 'safety:integration', 'safety:platform-wide']);
   assert.ok(route(base, owner, [], ['safety:access']).includes('needs-human-review'));
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
+});
+test('only release-pipeline, signing, and policy paths hold; routine paths only label', () => {
+  const critical = ['.github/workflows/release.yml', '.github/workflows/agent-safety.yml', 'scripts/agent-policy.cjs', 'scripts/agent-policy.test.cjs', 'scripts/sparkle-dist.sh', 'scripts/bundle-macos.sh', 'scripts/create-dmg.sh', 'packaging/macos/paneflow.entitlements'];
+  for (const p of critical) assert.ok(pathHolds([p]), p);
+  const routine = ['src-app/src/main.rs', 'crates/x/src/lib.rs', '.github/workflows/run_tests.yml', 'scripts/bench-terminal.sh', 'Cargo.lock', 'CLAUDE.md', 'AGENTS.md', '.claude/settings.json', 'docs/guide.md'];
+  for (const p of routine) assert.ok(!pathHolds([p]), p);
+  assert.ok(pathHolds([...routine, 'scripts/create-dmg.sh']));
+  assert.ok(route(base, owner, ['.github/workflows/release.yml']).includes('needs-human-review'));
+  const ui = route(base, owner, ['src-app/src/main.rs']);
+  assert.ok(!ui.includes('needs-human-review'));
+  assert.ok(ui.includes('safety:ui'));
+  assert.ok(ui.includes('ready-for-agent'));
 });
 
 // --- Pull requests inherit classification from their linked issues ---------
@@ -152,9 +182,25 @@ test('realistic PR: one classified safety:none issue with a human owner and no p
   assert.ok(removed.includes('needs-info'));
 });
 
-test('realistic PR: the same issue with a path risk routes to ready-for-human with the hold', async () => {
+test('realistic PR: the same issue touching src-app is labelled safety:ui and stays ready-for-agent', async () => {
   const { labels } = await routePull({ pull: pullFixture(['needs-info']), files: [{ filename: 'src-app/src/main.rs' }] });
-  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human', 'safety:ui']);
+  assert.deepEqual(labels, ['ready-for-agent', 'safety:ui']);
+});
+
+test('realistic PR: a linked severity:critical issue holds the PR', async () => {
+  const { labels } = await routePull({ issues: { 9: issueFixture(base.map(l => l === 'severity:high' ? 'severity:critical' : l)) } });
+  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human']);
+});
+
+test('realistic PR: a critical path holds even with a safe linked issue', async () => {
+  const { labels } = await routePull({ files: [{ filename: '.github/workflows/release.yml' }] });
+  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human', 'safety:release']);
+});
+
+test('realistic PR: docs-only with no linked issue is needs-info without a hold', async () => {
+  const { labels, added } = await routePull({ pull: pullFixture([]), graphql: linkedReferences([]) });
+  assert.deepEqual(labels, ['needs-info']);
+  assert.deepEqual(added, ['needs-info']);
 });
 
 test('realistic PR: two linked issues that agree still classify the PR', async () => {
@@ -173,14 +219,14 @@ test('realistic PR: a linked issue lacking a human assignee keeps needs-info', a
   for (const assignees of [[], [{ type: 'Bot', login: 'bot' }]]) {
     const { labels } = await routePull({ issues: { 9: issueFixture(base, assignees) } });
     assert.ok(labels.includes('needs-info'), JSON.stringify(assignees));
-    assert.ok(labels.includes('needs-human-review'));
+    assert.ok(!labels.includes('needs-human-review'));
     assert.ok(!labels.includes('ready-for-agent'));
   }
 });
 
 test('realistic PR: a stale ready-for-agent is withdrawn when the linked issue loses its metadata', async () => {
   const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: issueFixture(base.filter(l => l !== 'area:app')) } });
-  assert.deepEqual(labels, ['needs-human-review', 'needs-info']);
+  assert.deepEqual(labels, ['needs-info']);
 });
 
 test('realistic PR: a human hold on the PR itself survives a fully classified issue', async () => {
@@ -198,7 +244,8 @@ for (const variant of ['unlinked', 'foreign-redirect', 'pr-link', 'missing-safet
       : variant === 'foreign-redirect' ? issueFixture(base, owner, { repository_url: 'https://api.github.com/repos/other/project' })
       : issueFixture();
     const { labels } = await routePull({ issues: { 9: issue }, graphql: linkedReferences(variant === 'unlinked' ? [] : [9]) });
-    assert.ok(labels.includes('needs-human-review'), variant);
+    // Ineligible for unattended work, but not a critical change: no human hold.
+    assert.ok(!labels.includes('needs-human-review'), variant);
     assert.ok(labels.includes('needs-info'), variant);
     assert.ok(!labels.includes('ready-for-agent'), variant);
   });
@@ -212,7 +259,7 @@ test('closing keywords in the PR body never establish a link', async () => {
   const body = 'Closes #9\nFixes org/repo#9\nCloses: #9\n<!-- Closes #9 -->\n`Closes #9`\n```\nCloses #9\n```';
   const { labels, reads } = await routePull({ pull: pullFixture(['ready-for-agent'], { body }), graphql: linkedReferences([]), files: [{ filename: 'src-app/main.rs' }] });
   assert.deepEqual(reads, [7]);
-  assert.deepEqual(labels, ['needs-human-review', 'needs-info', 'safety:ui']);
+  assert.deepEqual(labels, ['needs-info', 'safety:ui']);
 });
 
 test('routing is idempotent and never promotes needs-info', () => {
@@ -351,12 +398,13 @@ for (const action of ['deleted', 'transferred']) {
     await sync({ github, context: { repo, payload: { action, issue: { number: 9 } } }, core: quiet });
     assert.deepEqual(paginated.filter(m => m === 'pulls'), ['pulls']);
     assert.deepEqual(calls, [7, 9]);
-    assert.ok(additions.includes('needs-human-review'));
+    assert.ok(additions.includes('needs-info'));
+    assert.ok(!additions.includes('needs-human-review'));
   });
 }
 
 for (const status of [404, 403, 500]) {
-  test(`unreadable linked issue (${status}) retains path and human holds`, async () => {
+  test(`unreadable linked issue (${status}) retains path labels and withdraws eligibility`, async () => {
     const failures = [];
     const { added, labels } = await routePull({
       issues: { 999: Object.assign(new Error('unavailable'), { status }) },
@@ -364,7 +412,7 @@ for (const status of [404, 403, 500]) {
       core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } },
     });
     assert.ok(added.includes('safety:ui'));
-    assert.ok(added.includes('needs-human-review'));
+    assert.ok(!added.includes('needs-human-review'));
     assert.ok(labels.includes('needs-info'));
     assert.equal(failures.length, status === 404 ? 0 : 1);
   });
@@ -417,13 +465,13 @@ test('open wontfix requires complete metadata and a human owner', () => {
   const complete = route([...base, 'wontfix', 'needs-info'], owner);
   assert.ok(complete.includes('wontfix'));
   assert.ok(!complete.includes('needs-info'));
-  const held = route(['wontfix', 'safety:release'], []);
+  const held = route(['wontfix', 'safety:access'], []);
   assert.ok(held.includes('needs-info'));
   assert.ok(held.includes('needs-human-review'));
 });
 
 for (const count of [20, 21, 3000]) {
-  test(`${count} closing references have bounded requests and preserve path holds`, async () => {
+  test(`${count} closing references have bounded requests and withdraw eligibility`, async () => {
     const ids = Array.from({ length: Math.min(count, 21) }, (_, i) => i + 100);
     const { reads, added, labels } = await routePull({
       pull: pullFixture(['ready-for-agent']),
@@ -432,13 +480,14 @@ for (const count of [20, 21, 3000]) {
       graphql: linkedReferences(ids, count > 21),
     });
     assert.equal(reads.length, count > 20 ? 1 : 21);
-    assert.ok(added.includes('needs-human-review'));
+    assert.ok(added.includes('needs-info'));
+    assert.ok(!added.includes('needs-human-review'));
     assert.ok(added.includes('safety:ui'));
     assert.ok(!labels.includes('ready-for-agent'));
   });
 }
 
-test('throttled lookups stop at the first failure and still attempt the hold', async () => {
+test('throttled lookups stop at the first failure and still withdraw eligibility', async () => {
   const failures = [];
   const throttled = () => Object.assign(new Error('throttled'), { status: 429 });
   const { reads, added, labels } = await routePull({
@@ -449,7 +498,8 @@ test('throttled lookups stop at the first failure and still attempt the hold', a
   });
   assert.deepEqual(reads, [7, 9]);
   assert.equal(failures.length, 1);
-  assert.ok(added.includes('needs-human-review'));
+  assert.ok(added.includes('needs-info'));
+  assert.ok(!added.includes('needs-human-review'));
   assert.ok(!labels.includes('ready-for-agent'));
 });
 
@@ -469,7 +519,8 @@ for (const variant of ['query-failure', 'foreign-issue']) {
       core: { info() {}, setFailed(message) { failures.push(message); } },
     });
     assert.deepEqual(reads, [7]);
-    assert.ok(added.includes('needs-human-review'));
+    assert.ok(added.includes('needs-info'));
+    assert.ok(!added.includes('needs-human-review'));
     assert.ok(added.includes('safety:ui'));
     assert.ok(!labels.includes('ready-for-agent'));
     assert.equal(failures.length, variant === 'query-failure' ? 1 : 0);

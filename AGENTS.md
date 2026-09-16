@@ -90,19 +90,25 @@ destructive operations), `ui` (visible behavior/accessibility), `money`
 `release` (versions, CI, packaging, signing, deployment). Use `safety:none`
 only after checking all categories.
 
-Any risk category mechanically adds `needs-human-review`, removes
-`ready-for-agent`, and routes fully classified items to `ready-for-human`.
-Missing classification, owner, or metadata keeps the item in `needs-info`
-with any safety hold intact and blocks unattended work. Tests and agent confidence never
-clear the hold. A human may direct flagged implementation; the flag remains
-through human verification and merge. Only a human corrects mistaken safety
-classifications. Carry issue risk categories to its PR.
+`needs-human-review` is reserved for critical changes. Routing adds it
+mechanically only for `safety:database`, `safety:money`, `safety:access`,
+`safety:platform-wide`, `severity:critical` (on the item or a linked issue),
+or a change to the release pipeline, signing, or this policy
+(`.github/workflows/release.yml`, `agent-safety.yml`, `scripts/agent-policy*`,
+the bundling and DMG scripts, `packaging/`). `safety:ui`, `safety:integration`,
+and `safety:release` are recorded but do not hold: nearly every change here
+touches `src-app/` or `crates/`. A hold removes `ready-for-agent` and routes
+fully classified items to `ready-for-human`. Missing classification, owner,
+or metadata keeps the item in `needs-info`, which blocks unattended work
+without demanding a human review. Tests and agent confidence never clear a
+hold; a human may place one by hand, and only a human removes it. Carry issue
+risk categories to its PR.
 
 To promote a fully classified item from `needs-info`, add `ready-for-agent`
 or `ready-for-human`; routing removes the previous state. Missing metadata
 and safety holds still take precedence. Open `wontfix` items also require
 complete metadata; otherwise they remain in `needs-info`. PRs with more than
-20 resolved issue links receive a human-review hold without individual issue
+20 resolved issue links stay in `needs-info` without individual issue
 fetches. GitHub’s resolved closing references, including manual links, define
 the linked issues; raw Markdown examples do not establish eligibility.
 
