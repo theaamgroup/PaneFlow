@@ -238,14 +238,51 @@ fn apply(action: CacheAction, cx: &App) {
     }
 }
 
+/// Snapshot order. Every `persist` call runs on the GPUI thread (record,
+/// forget, and the load's publish all do), so a generation taken here is
+/// the order the snapshots were produced in, whatever order the pool
+/// writes them.
+static PERSIST_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Serializes the writers and remembers the newest generation on disk, so
+/// an older snapshot whose pool task ran late can never rename over a
+/// newer one (a stale ordering or a resurrected forgotten row on the next
+/// launch).
+static WRITE_GATE: Mutex<u64> = Mutex::new(0);
+
 fn persist(workspaces: Vec<RecentWorkspace>, cx: &App) {
     let Some(path) = recents_path() else {
         return;
     };
+    let generation = PERSIST_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     cx.background_spawn(async move {
-        smol::unblock(move || write_to_disk(&path, &workspaces)).await;
+        smol::unblock(move || write_ordered(&WRITE_GATE, &path, generation, &workspaces)).await;
     })
     .detach();
+}
+
+/// Write `workspaces` unless a newer generation already reached the disk.
+/// Holding `gate` across the write is what orders publication; returns
+/// whether this snapshot was the one written. A failed write still
+/// advances the gate: the newer snapshot must not be replaced by an older
+/// one that happens to succeed afterwards.
+fn write_ordered(
+    gate: &Mutex<u64>,
+    path: &Path,
+    generation: u64,
+    workspaces: &[RecentWorkspace],
+) -> bool {
+    let mut newest = gate.lock().unwrap_or_else(PoisonError::into_inner);
+    if generation <= *newest {
+        log::debug!(
+            "recents: skipping stale snapshot {generation} (generation {} already written)",
+            *newest
+        );
+        return false;
+    }
+    write_to_disk(path, workspaces);
+    *newest = generation;
+    true
 }
 
 /// Pure: move each of `paths` to the head, dropping duplicates and anything
@@ -562,6 +599,92 @@ mod tests {
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].path, a);
         assert_eq!(reloaded[0].title, "a");
+    }
+
+    #[test]
+    fn an_older_snapshot_that_writes_late_never_replaces_a_newer_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("recents.json");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir(&a).expect("mkdir");
+        std::fs::create_dir(&b).expect("mkdir");
+        let gate = Mutex::new(0);
+        let newer = vec![RecentWorkspace {
+            path: b.clone(),
+            title: "b".into(),
+        }];
+        let older = vec![
+            RecentWorkspace {
+                path: a.clone(),
+                title: "a".into(),
+            },
+            RecentWorkspace {
+                path: b.clone(),
+                title: "b".into(),
+            },
+        ];
+        assert!(
+            write_ordered(&gate, &path, 2, &newer),
+            "generation 2 writes"
+        );
+        assert!(
+            !write_ordered(&gate, &path, 1, &older),
+            "generation 1 arriving late is refused"
+        );
+        assert_eq!(
+            load_pruned(&path),
+            newer,
+            "the forgotten row must not be resurrected"
+        );
+        assert!(
+            write_ordered(&gate, &path, 3, &older),
+            "a newer generation writes"
+        );
+        assert_eq!(load_pruned(&path), older);
+    }
+
+    #[test]
+    fn concurrent_writers_leave_the_highest_generation_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("recents.json");
+        let folders: Vec<PathBuf> = (0..8).map(|i| dir.path().join(format!("f{i}"))).collect();
+        for folder in &folders {
+            std::fs::create_dir(folder).expect("mkdir");
+        }
+        let gate = std::sync::Arc::new(Mutex::new(0));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(folders.len()));
+        let handles: Vec<_> = folders
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(generation, folder)| {
+                let gate = gate.clone();
+                let start = start.clone();
+                let path = path.clone();
+                let snapshot = vec![RecentWorkspace {
+                    path: folder.clone(),
+                    title: format!("f{generation}"),
+                }];
+                std::thread::spawn(move || {
+                    start.wait();
+                    write_ordered(&gate, &path, generation as u64 + 1, &snapshot)
+                })
+            })
+            .collect();
+        let written = handles
+            .into_iter()
+            .map(|h| h.join().expect("writer"))
+            .filter(|wrote| *wrote)
+            .count();
+        assert!(written >= 1);
+        let on_disk = load_pruned(&path);
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(
+            on_disk[0].path,
+            folders[folders.len() - 1],
+            "whatever the scheduling, the newest snapshot is what the next launch reads"
+        );
     }
 
     #[test]
