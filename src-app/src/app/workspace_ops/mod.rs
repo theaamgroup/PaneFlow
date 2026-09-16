@@ -1519,9 +1519,13 @@ impl PaneFlowApp {
     /// re-enters with the window. No answer within
     /// [`RECENT_OPEN_PROBE_TIMEOUT`] keeps the row (the mount may come back)
     /// and does not reach `open_workspace_folders`, whose own `is_dir` is
-    /// pre-existing behaviour shared with the picker and drop paths. A
-    /// repeat click or held shortcut while that path's probe is outstanding
-    /// is a no-op (`RecentProbes`), so a dead mount cannot pile up threads.
+    /// pre-existing behaviour shared with the picker and drop paths.
+    ///
+    /// One probe per path (`RecentProbes`): a repeat click or held shortcut
+    /// while that path's claim is held is a no-op with a toast, and on a
+    /// timeout the claim stays held until the blocked worker has actually
+    /// answered (`ProbeOutcome::TimedOut` hands back its receiver), so a
+    /// retry after the toast cannot start a second permanently stuck thread.
     pub(crate) fn open_recent_workspace(
         &mut self,
         idx: usize,
@@ -1536,45 +1540,59 @@ impl PaneFlowApp {
                 "recent folder {} is already being probed; coalescing the repeat",
                 entry.path.display()
             );
+            self.show_toast("Still checking that folder", cx);
+            cx.notify();
             return;
         }
         let probed = entry.path.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let answer = smol::unblock(move || {
-                super::session::probe_persisted_dir_within(&probed, RECENT_OPEN_PROBE_TIMEOUT)
+            let outcome = smol::unblock(move || {
+                super::session::start_persisted_dir_probe(&probed, RECENT_OPEN_PROBE_TIMEOUT)
             })
             .await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.finish_open_recent_workspace(entry.path, answer, window, cx);
+            let rx = match outcome {
+                super::session::ProbeOutcome::Answered(is_dir) => {
+                    let _ = this.update_in(cx, |app, window, cx| {
+                        app.recent_probes.finish(&entry.path);
+                        app.finish_open_recent_workspace(entry.path, is_dir, window, cx);
+                    });
+                    return;
+                }
+                super::session::ProbeOutcome::TimedOut(rx) => rx,
+            };
+            let _ = this.update_in(cx, |app, _window, cx| {
+                app.show_toast("That folder is not responding", cx);
+                cx.notify();
+            });
+            // Hold the claim until the stat thread really exits: block on
+            // the pool, never on the GPUI thread.
+            let late = smol::unblock(move || rx.recv()).await;
+            let _ = this.update_in(cx, |app, _window, cx| {
+                app.recent_probes.finish(&entry.path);
+                if late == Ok(false) {
+                    crate::recents::forget(&entry.path, cx);
+                    cx.notify();
+                }
             });
         })
         .detach();
     }
 
     /// The second half of `open_recent_workspace`, back on the GPUI thread
-    /// with the probe's verdict: `Some(true)` opens, `Some(false)` forgets
-    /// the row, `None` (no answer in time) leaves it alone.
+    /// with a definite verdict: `true` opens and selects, `false` forgets
+    /// the row.
     fn finish_open_recent_workspace(
         &mut self,
         path: std::path::PathBuf,
-        answer: Option<bool>,
+        is_dir: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.recent_probes.finish(&path);
-        match answer {
-            Some(true) => {}
-            Some(false) => {
-                crate::recents::forget(&path, cx);
-                self.show_toast("That folder is gone", cx);
-                cx.notify();
-                return;
-            }
-            None => {
-                self.show_toast("That folder is not responding", cx);
-                cx.notify();
-                return;
-            }
+        if !is_dir {
+            crate::recents::forget(&path, cx);
+            self.show_toast("That folder is gone", cx);
+            cx.notify();
+            return;
         }
         self.open_workspace_folders(std::slice::from_ref(&path), cx);
         let active = self.active_idx;
@@ -2834,7 +2852,8 @@ mod tests {
     /// Issue #521: the click on a recent row must not `stat` on the GPUI
     /// thread. `PaneFlowApp` cannot be built in a unit test, so the body is
     /// pinned: the only probe sits inside `smol::unblock`, no bare `is_dir`
-    /// appears in either half, and a timeout keeps the row.
+    /// appears in either half, a timeout keeps the row, and the per-path
+    /// claim is released only after the worker has answered.
     #[test]
     fn open_recent_workspace_probes_the_folder_off_thread() {
         let src = include_str!("mod.rs")
@@ -2853,7 +2872,7 @@ mod tests {
             .find("smol::unblock(")
             .expect("the probe runs on the unblock pool");
         let probe = body
-            .find("probe_persisted_dir_within(&probed, RECENT_OPEN_PROBE_TIMEOUT)")
+            .find("start_persisted_dir_probe(&probed, RECENT_OPEN_PROBE_TIMEOUT)")
             .expect("the bounded session-restore probe");
         assert!(
             unblock < probe && probe < body.find(".await").expect("await"),
@@ -2868,21 +2887,39 @@ mod tests {
             "no stat on the GPUI thread anywhere in the click path"
         );
         assert!(
-            body.contains("None => {") && body.contains("That folder is not responding"),
-            "a timeout must keep the row and tell the user"
-        );
-        assert!(
-            body.contains("Some(false) => {") && body.contains("crate::recents::forget("),
-            "only a definite miss forgets the row"
-        );
-        assert!(
             body.contains("if !self.recent_probes.begin(&entry.path) {"),
             "a repeat while the probe is outstanding must coalesce"
         );
+        let timed_out = body
+            .find("ProbeOutcome::TimedOut(rx) => rx,")
+            .expect("the timeout keeps the worker's receiver");
+        let not_responding = body
+            .find("That folder is not responding")
+            .expect("a timeout tells the user");
+        let late = body
+            .find("smol::unblock(move || rx.recv()).await")
+            .expect("the late answer is awaited on the pool");
+        let releases: Vec<usize> = body
+            .match_indices("app.recent_probes.finish(&entry.path);")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(releases.len(), 2, "one release per outcome: {releases:?}");
         assert!(
-            body.contains("self.recent_probes.finish(&path);")
-                && body.find("self.recent_probes.finish(&path);") < body.find("match answer {"),
-            "every outcome must release the claim before it is handled"
+            releases[0] < timed_out && timed_out < not_responding && not_responding < late,
+            "the answered branch releases at once; the timeout toasts and waits"
+        );
+        assert!(
+            late < releases[1],
+            "on a timeout the claim is released only after the late answer"
+        );
+        assert!(
+            body[late..].contains("if late == Ok(false) {")
+                && body[late..].contains("crate::recents::forget("),
+            "a late definite miss still forgets the row"
+        );
+        assert!(
+            body.contains("if !is_dir {") && body.contains("That folder is gone"),
+            "only a definite miss forgets the row with a toast"
         );
     }
 
