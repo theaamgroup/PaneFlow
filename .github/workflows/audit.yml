@@ -42,7 +42,8 @@ jobs:
     name: cargo-deny check (cron)
     # Advisory-cron runner (not a compile lane); ubuntu-22.04 is deprecated.
     # Self-hosted Linux. Same cargo-deny reasoning as run_tests.yml::security_audit, on a nightly cron.
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 

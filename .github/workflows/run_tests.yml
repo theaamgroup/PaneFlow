@@ -88,7 +88,8 @@ jobs:
     # The event_name arm is load-bearing: this workflow also runs on push to main, where the
     # pull_request context is null. Testing only the fork condition would send every push to
     # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
@@ -289,7 +290,7 @@ jobs:
     # The event_name arm is load-bearing: this workflow also runs on push to main, where the
     # pull_request context is null. Testing only the fork condition would send every push to
     # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -346,7 +347,8 @@ jobs:
     # The event_name arm is load-bearing: this workflow also runs on push to main, where the
     # pull_request context is null. Testing only the fork condition would send every push to
     # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -722,17 +724,18 @@ jobs:
       - security_audit
     if: always()
     # Self-hosted Linux. Aggregates the other jobs' results in bash. It never needed a macOS runner.
-    # Same-repo only. This repo is PUBLIC and forking cannot be disabled on a public repo,
-    # so `on: pull_request` can carry code from a stranger's fork. This job checks out the
-    # PR merge commit and runs scripts from it; on the old ephemeral VM that was contained,
-    # on a persistent runner it would execute as the runner user on a machine that survives
-    # the job. A fork PR therefore falls back to a GitHub-hosted VM. Every PR from a
-    # collaborator - which is all of them today - still runs on the self-hosted runner.
+    # This job has NO checkout step and runs nothing from the PR: its only input is the
+    # `needs.*.result` strings. The same-repo ternary is still applied for consistency with
+    # the jobs above (one fork-PR routing rule per workflow, not one per job) and so the
+    # aggregator never occupies the persistent runner for a stranger's fork PR. A fork PR
+    # therefore falls back to a GitHub-hosted VM. Every PR from a collaborator - which is all
+    # of them today - still runs on the self-hosted runner.
     #
     # The event_name arm is load-bearing: this workflow also runs on push to main, where the
     # pull_request context is null. Testing only the fork condition would send every push to
     # a hosted VM - the opposite of the point - so a non-pull_request event is trusted here.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 5
     steps:
       - name: Aggregate upstream results
         env:
