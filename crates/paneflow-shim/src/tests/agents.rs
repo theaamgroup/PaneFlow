@@ -998,6 +998,31 @@ fn dsh_drop_refuses_an_ancestor_swapped_for_a_symlink() {
 }
 
 #[test]
+fn dsh_patch_overlay_yields_to_a_user_supplied_patch() {
+    let overlay = std::path::Path::new("/tmp/overlay.yml");
+    for argv in [
+        vec!["--patch", "mine.yml", "chat"],
+        vec!["--patch=mine.yml", "chat"],
+        vec!["--profile", "tui", "--patch", "mine.yml"],
+    ] {
+        let args: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
+        assert_eq!(
+            crate::with_dsh_patch_overlay(args.clone(), overlay),
+            args,
+            "{argv:?} must keep the user's --patch alone"
+        );
+    }
+    // A `--patch` after `--` is a positional for the subcommand, not dsh's.
+    let args: Vec<std::ffi::OsString> = ["chat", "--", "--patch"]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    let patched = crate::with_dsh_patch_overlay(args.clone(), overlay);
+    assert_eq!(patched[0], "--patch");
+    assert_eq!(&patched[2..], args);
+}
+
+#[test]
 fn dsh_preexisting_files_survive_install() {
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".dsh/paneflow");

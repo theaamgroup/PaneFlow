@@ -61,8 +61,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use embed_staging::{
-    cargo_profile_dir, embed_ingest_dir, embed_profile_for_cfg, embed_slot_for_cfg,
-    should_enforce_embed_size_limit,
+    cargo_profile_dir, embed_ingest_dir, embed_profile_for_cfg, embed_size_limit_for,
+    embed_slot_for_cfg,
 };
 
 /// Hard cap on the total bytes staged under
@@ -89,6 +89,12 @@ use embed_staging::{
 /// release-min) outer build; the cap is enforced against those artifacts
 /// and is skipped when the staged profile is `dev`.
 const EMBED_SIZE_LIMIT_BYTES: u64 = 1_400_000;
+
+/// Cap for `dev`-profile helpers staged by a debug outer build. Measured
+/// 2026-09-15: 6_821_520 B total (see `embed_staging::embed_size_limit_for`);
+/// the cap leaves ~45% headroom so a dev bloat regression still fails
+/// `cargo build` instead of silently growing every launch's extraction.
+const EMBED_SIZE_LIMIT_DEBUG_BYTES: u64 = 10_000_000;
 const EMBED_BINARIES: [&str; 3] = ["paneflow-shim", "paneflow-ai-hook", "paneflow-mcp"];
 
 fn main() {
@@ -198,10 +204,17 @@ fn main() {
     }
 
     // Required helpers must exist so rust-embed 8.x does not panic on an
-    // empty folder. The byte cap is release-min only: debug-profile
-    // helpers are larger and must not fail a debug outer build or rewrite
-    // the shipped `--release` budget.
-    enforce_embed_size_budget(&embed_dir, should_enforce_embed_size_limit(embed_profile));
+    // empty folder. The byte cap follows the staged profile: release-min
+    // keeps the shipped budget, dev helpers get their own looser cap so a
+    // debug outer build stays bounded without rewriting the release figure.
+    enforce_embed_size_budget(
+        &embed_dir,
+        embed_size_limit_for(
+            embed_profile,
+            EMBED_SIZE_LIMIT_BYTES,
+            EMBED_SIZE_LIMIT_DEBUG_BYTES,
+        ),
+    );
 }
 
 /// Invoke a child `cargo build` against the workspace to produce the
@@ -291,7 +304,7 @@ fn stage_ai_hook_binaries(workspace_root: &Path, target: &str, embed_dir: &Path,
 /// Enforce the `EMBED_SIZE_LIMIT_BYTES` total embedded-bytes cap.
 /// Inspects only top-level files in `embed_dir` - there are no subdirs
 /// in the per-target staging layout so a recursive walk is not warranted.
-fn enforce_embed_size_budget(embed_dir: &Path, enforce_size_limit: bool) {
+fn enforce_embed_size_budget(embed_dir: &Path, size_limit: u64) {
     let mut total: u64 = 0;
     let mut per_file: BTreeMap<String, u64> = BTreeMap::new();
     let iter = match fs::read_dir(embed_dir) {
@@ -337,13 +350,13 @@ fn enforce_embed_size_budget(embed_dir: &Path, enforce_size_limit: bool) {
         );
     }
 
-    if enforce_size_limit && total > EMBED_SIZE_LIMIT_BYTES {
+    if total > size_limit {
         let mut details = String::new();
         for (name, size) in &per_file {
             details.push_str(&format!("  {name}: {size} bytes\n"));
         }
         panic!(
-            "US-008/EP-001: embedded binaries exceed the {EMBED_SIZE_LIMIT_BYTES}-byte cap ({total} bytes).\n\
+            "US-008/EP-001: embedded binaries exceed the {size_limit}-byte cap ({total} bytes).\n\
              Staging dir: {}\n\
              Per-file:\n{details}\
              Shrink shim/ai-hook/paneflow-mcp via smaller deps or a tighter release-min profile, \
