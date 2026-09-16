@@ -131,16 +131,35 @@ pub(super) fn is_own_or_sibling_rendering(existing: &str, source: &str) -> bool 
 /// other command, event, or key is not a sibling rendering, whatever else it
 /// shares with `source`.
 pub(super) fn is_sibling_instance_rendering(existing: &str, source: &str) -> bool {
+    is_paneflow_rendering_shape(existing, source, &|program| {
+        hook_program_is_runnable(program)
+            && !hook_program_is_prunable(program, own_version_dir().as_deref())
+    })
+}
+
+/// True when `existing` is a PaneFlow rendering of `source` whose hook
+/// commands may name any program `accept_program` allows: the structural
+/// half of [`is_sibling_instance_rendering`], used to recognise a stale
+/// PaneFlow-owned file that should be repaired rather than refused.
+fn is_paneflow_rendering_shape(
+    existing: &str,
+    source: &str,
+    accept_program: &dyn Fn(&Path) -> bool,
+) -> bool {
     let (Ok(existing), Ok(expected)) = (
         serde_json::from_str::<serde_json::Value>(existing),
         serde_json::from_str::<serde_json::Value>(source),
     ) else {
         return false;
     };
-    equal_up_to_hook_program(&existing, &expected)
+    equal_up_to_hook_program(&existing, &expected, accept_program)
 }
 
-fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+fn equal_up_to_hook_program(
+    actual: &serde_json::Value,
+    expected: &serde_json::Value,
+    accept_program: &dyn Fn(&Path) -> bool,
+) -> bool {
     use serde_json::Value;
     match (actual, expected) {
         (Value::Object(actual), Value::Object(expected)) => {
@@ -148,7 +167,7 @@ fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::V
                 && expected.iter().all(|(key, value)| {
                     actual
                         .get(key)
-                        .is_some_and(|other| equal_up_to_hook_program(other, value))
+                        .is_some_and(|other| equal_up_to_hook_program(other, value, accept_program))
                 })
         }
         (Value::Array(actual), Value::Array(expected)) => {
@@ -156,10 +175,10 @@ fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::V
                 && actual
                     .iter()
                     .zip(expected)
-                    .all(|(other, value)| equal_up_to_hook_program(other, value))
+                    .all(|(other, value)| equal_up_to_hook_program(other, value, accept_program))
         }
         (Value::String(actual), Value::String(expected)) => {
-            actual == expected || same_paneflow_hook_event(actual, expected)
+            actual == expected || same_paneflow_hook_event(actual, expected, accept_program)
         }
         _ => actual == expected,
     }
@@ -173,7 +192,11 @@ fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::V
 /// binary that a later launch pruned; accepting that rendering would hand
 /// this session hooks that invoke a missing executable, so a sibling program
 /// must be an existing executable file, not merely the right basename.
-fn same_paneflow_hook_event(actual: &str, expected: &str) -> bool {
+fn same_paneflow_hook_event(
+    actual: &str,
+    expected: &str,
+    accept_program: &dyn Fn(&Path) -> bool,
+) -> bool {
     let Some(event) = hook_command_event(expected).filter(|_| is_paneflow_hook_command(expected))
     else {
         return false;
@@ -183,9 +206,7 @@ fn same_paneflow_hook_event(actual: &str, expected: &str) -> bool {
         // The whole command must be the canonical rendering for that
         // program and event: `<program> Stop; touch /tmp/x Stop` shares the
         // first and last tokens with a hook and is not one.
-        actual == render_hook_command(program, event)
-            && hook_program_is_runnable(program)
-            && !hook_program_is_prunable(program, own_version_dir().as_deref())
+        actual == render_hook_command(program, event) && accept_program(program)
     })
 }
 
@@ -246,13 +267,18 @@ pub(super) fn install_accepted_owned_file(
     refuse_symlink(path, "managed hook")?;
     match read_optional_text(path)? {
         Some(existing) if accepts(&existing) => Ok(()),
-        Some(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "{} contains user changes; refusing to overwrite it",
-                path.display()
-            ),
-        )),
+        Some(existing) => {
+            if repair_stale_owned_file(path, &existing, source, lease)? {
+                return Ok(());
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} contains user changes; refusing to overwrite it",
+                    path.display()
+                ),
+            ))
+        }
         None => {
             use std::io::Write;
             let parent = path
@@ -267,6 +293,51 @@ pub(super) fn install_accepted_owned_file(
             lease.mark_created()
         }
     }
+}
+
+/// Replace a stale file PaneFlow itself wrote with this instance's
+/// rendering. Three proofs are required, and a miss on any of them leaves
+/// the file alone: the content is still a PaneFlow rendering of `source`
+/// (only the hook program differs, so nobody edited it), no other session
+/// holds the lease (a live sibling is using that program), and the durable
+/// `.created` marker says PaneFlow created it. A crashed session that named
+/// a since-pruned version-pinned hook binary otherwise left hooks disabled
+/// until the user deleted the file by hand. Returns whether it repaired.
+fn repair_stale_owned_file(
+    path: &Path,
+    existing: &str,
+    source: &str,
+    lease: &mut HookLease,
+) -> std::io::Result<bool> {
+    if !is_paneflow_rendering_shape(existing, source, &|_| true) {
+        return Ok(false);
+    }
+    let Some(mut last) = lease.try_take_last()? else {
+        // `try_take_last` released the shared lease; hold one again so the
+        // refusal below leaves this session where it started.
+        *lease = HookLease::acquire(path)?;
+        return Ok(false);
+    };
+    let owned = last.take_created()?;
+    let repaired = if owned {
+        use std::io::Write;
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("hook path has no parent"))?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(source.as_bytes())?;
+        file.as_file().sync_all()?;
+        file.persist(path).map_err(|error| error.error)?;
+        true
+    } else {
+        false
+    };
+    drop(last);
+    *lease = HookLease::acquire(path)?;
+    if repaired {
+        lease.mark_created()?;
+    }
+    Ok(repaired)
 }
 
 fn remove_unchanged_file(
@@ -428,6 +499,52 @@ mod tests {
             !hook_program_is_runnable(temp.path()),
             "a directory is not a program"
         );
+    }
+
+    #[test]
+    fn a_stale_paneflow_owned_grok_file_is_repaired_and_a_user_file_is_not() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("hooks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("paneflow.json");
+        let source = grok_source().unwrap();
+        // A crashed session's rendering names a hook binary that no longer
+        // exists, and left the durable ownership marker behind.
+        let stale = render_as_sibling_instance(&source, Path::new("/gone/paneflow-ai-hook"));
+        std::fs::write(&path, &stale).unwrap();
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
+
+        let guard = GrokHookFileGuard::install_at(&directory)
+            .expect("a stale PaneFlow-owned file must be repaired");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "the repaired file is owned and removed by the last session"
+        );
+
+        // Without the marker the same stale bytes are a user's file: refused
+        // and untouched.
+        std::fs::write(&path, &stale).unwrap();
+        let error = GrokHookFileGuard::install_at(&directory)
+            .err()
+            .expect("an unowned stale file must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stale);
+
+        // A PaneFlow-owned file the user edited is never repaired either.
+        let edited = stale.replacen("paneflow-ai-hook Stop", "my-hook Stop", 1);
+        std::fs::write(&path, &edited).unwrap();
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
+        let error = GrokHookFileGuard::install_at(&directory)
+            .err()
+            .expect("an edited file must be refused even when PaneFlow created it");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     }
 
     #[test]
