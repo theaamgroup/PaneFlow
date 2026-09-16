@@ -727,18 +727,15 @@ mod empty_app_tests {
             "empty-app copy must name Window menu New Workspace: {hint}"
         );
         assert!(
-            hint.contains("profile menu"),
-            "empty-app copy must name the profile menu: {hint}"
-        );
-        assert!(
             hint.contains("Open folder"),
             "empty-app copy must name the Open folder button: {hint}"
         );
         assert!(
-            !lowered.contains("command palette")
+            !lowered.contains("profile")
+                && !lowered.contains("command palette")
                 && !hint.contains("Cmd+Shift+O")
                 && !lowered.contains("clone"),
-            "empty-app copy must not mention command palette or Clone: {hint}"
+            "empty-app copy must not mention the unreachable profile menu, command palette, or Clone: {hint}"
         );
 
         let render_anchor = format!("impl Render for {} {{", "PaneFlowApp");
@@ -1969,9 +1966,10 @@ impl PaneFlowApp {
     // --- Sidebar rendering ---
 }
 
-// Issue #533: live New Workspace entry points; no sidebar `+` since #105.
+// Issue #533: live New Workspace entry points (DESIGN.md §5.2); no sidebar
+// `+` since #105. The profile menu is unreachable and has no New Workspace row.
 const EMPTY_APP_WORKSPACE_HINT: &str = "Create your first workspace with Cmd+Shift+N, Window ▸ New Workspace, \
-     the profile menu, or the Open folder button.";
+     or the Open folder button.";
 
 impl Render for PaneFlowApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
