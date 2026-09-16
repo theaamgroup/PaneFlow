@@ -7,6 +7,7 @@ use super::{
 };
 use paneflow_agent_config::{home_dir, with_config_lock};
 use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 const DSH_HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
@@ -84,8 +85,23 @@ impl Drop for DshOverlayGuard {
 }
 
 pub(crate) fn dsh_home() -> Option<PathBuf> {
-    match env::var_os("DSH_HOME") {
-        Some(value) if !value.is_empty() => Some(PathBuf::from(value)),
+    resolve_dsh_home(env::var_os("DSH_HOME"), env::current_dir().ok())
+}
+
+/// A relative `DSH_HOME` is anchored on the shim's working directory before
+/// any lease or ownership marker is derived from it: `ConfigLease` hashes the
+/// path's spelling, so two shims launched from different directories with
+/// `DSH_HOME=.dsh` would otherwise share locks for different files.
+fn resolve_dsh_home(configured: Option<OsString>, cwd: Option<PathBuf>) -> Option<PathBuf> {
+    match configured {
+        Some(value) if !value.is_empty() => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                Some(path)
+            } else {
+                cwd.map(|cwd| cwd.join(path))
+            }
+        }
         _ => home_dir().map(|home| home.join(".dsh")),
     }
 }
@@ -123,4 +139,45 @@ fn sweep_overlay(directory: &Path) {
         sweep_matching_owned_file(&hooks_path, &source);
     }
     sweep_matching_owned_file(&overlay_path, &render_overlay(&hooks_path));
+}
+
+#[cfg(test)]
+mod dsh_home_tests {
+    use super::resolve_dsh_home;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn relative_dsh_home_is_anchored_on_the_working_directory() {
+        let resolved = resolve_dsh_home(
+            Some(OsString::from(".dsh")),
+            Some(PathBuf::from("/work/project-a")),
+        );
+        assert_eq!(resolved, Some(PathBuf::from("/work/project-a/.dsh")));
+        let other = resolve_dsh_home(
+            Some(OsString::from(".dsh")),
+            Some(PathBuf::from("/work/project-b")),
+        );
+        assert_ne!(resolved, other);
+    }
+
+    #[test]
+    fn absolute_dsh_home_is_kept_as_spelled() {
+        let resolved = resolve_dsh_home(
+            Some(OsString::from("/srv/dsh")),
+            Some(PathBuf::from("/work/project-a")),
+        );
+        assert_eq!(resolved, Some(PathBuf::from("/srv/dsh")));
+    }
+
+    #[test]
+    fn relative_dsh_home_without_a_working_directory_is_unavailable() {
+        assert_eq!(resolve_dsh_home(Some(OsString::from(".dsh")), None), None);
+    }
+
+    #[test]
+    fn empty_dsh_home_falls_back_to_the_home_directory_default() {
+        let resolved = resolve_dsh_home(Some(OsString::new()), Some(PathBuf::from("/work")));
+        assert_eq!(resolved.map(|p| p.ends_with(".dsh")), Some(true));
+    }
 }
