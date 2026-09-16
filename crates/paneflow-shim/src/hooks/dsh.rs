@@ -78,6 +78,12 @@ impl DshOverlayGuard {
 
 impl Drop for DshOverlayGuard {
     fn drop(&mut self) {
+        // The directory was a real directory at install time. If it has
+        // since been swapped for a symlink, the files behind it are not the
+        // ones this guard created, so leave them alone (lease and all).
+        if !overlay_directory_is_intact(&self.overlay_path) {
+            return;
+        }
         cleanup_matching_owned_file(
             &self.overlay_path,
             &mut self.overlay_lease,
@@ -183,7 +189,19 @@ fn yaml_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+/// True when the overlay file's parent is still a real directory, not a
+/// symlink that could redirect a cleanup into user-managed data.
+fn overlay_directory_is_intact(file: &Path) -> bool {
+    file.parent().is_some_and(|directory| {
+        std::fs::symlink_metadata(directory)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    })
+}
+
 fn sweep_overlay(directory: &Path) {
+    if refuse_symlink(directory, "DeepSeek Harness overlay").is_err() {
+        return;
+    }
     let hooks_path = directory.join(DSH_HOOKS_BASENAME);
     let overlay_path = directory.join(DSH_OVERLAY_BASENAME);
     if let Ok(source) = hooks_source() {

@@ -928,6 +928,37 @@ fn dsh_patch_overlay_stays_out_of_plugin_help_version_and_dumps() {
 }
 
 #[test]
+fn dsh_drop_refuses_a_directory_swapped_for_a_symlink() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".dsh/paneflow");
+    let guard = DshOverlayGuard::install_at(&dir).expect("install must succeed");
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let hooks_source = std::fs::read_to_string(dir.join(DSH_HOOKS_BASENAME)).unwrap();
+    let overlay_source = std::fs::read_to_string(dir.join(DSH_OVERLAY_BASENAME)).unwrap();
+
+    // Swap the overlay directory for a symlink to a user-managed directory
+    // holding byte-identical files.
+    let elsewhere = td.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join(DSH_HOOKS_BASENAME), &hooks_source).unwrap();
+    std::fs::write(elsewhere.join(DSH_OVERLAY_BASENAME), &overlay_source).unwrap();
+    let parked = td.path().join("parked");
+    std::fs::rename(&dir, &parked).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+
+    drop(guard);
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join(DSH_HOOKS_BASENAME)).unwrap(),
+        hooks_source,
+        "drop must not delete through a swapped-in directory symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join(DSH_OVERLAY_BASENAME)).unwrap(),
+        overlay_source
+    );
+}
+
+#[test]
 fn dsh_preexisting_files_survive_install() {
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".dsh/paneflow");
