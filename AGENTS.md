@@ -93,14 +93,16 @@ only after checking all categories.
 `needs-human-review` is reserved for critical changes. Routing adds it
 mechanically only for `safety:database`, `safety:money`, `safety:access`,
 `safety:platform-wide`, `severity:critical` (on the item or a linked issue),
-or a change to the release pipeline, signing, or this policy
+or a change to the release pipeline or this policy
 (`.github/workflows/release.yml`, `agent-safety.yml`, `scripts/agent-policy*`,
-the bundling and DMG scripts, `packaging/`). `safety:ui`, `safety:integration`,
-and `safety:release` are recorded but do not hold: nearly every change here
-touches `src-app/` or `crates/`. A hold removes `ready-for-agent` and routes
-fully classified items to `ready-for-human`. Missing classification, owner,
-or metadata keeps the item in `needs-info`, which blocks unattended work
-without demanding a human review. Tests and agent confidence never clear a
+every script `release.yml` executes including signing and notarization,
+`packaging/`). `safety:ui`, `safety:integration`, and `safety:release` are
+recorded but do not hold: nearly every change here touches `src-app/` or
+`crates/`. A hold removes `ready-for-agent` and routes fully classified items
+to `ready-for-human`. A PR whose linked issue a human kept as
+`ready-for-human` is `ready-for-human` too, and a `wontfix` issue never
+classifies a PR. Missing classification, owner, or metadata keeps the item in
+`needs-info`, which blocks unattended work without demanding a human review. Tests and agent confidence never clear a
 hold; a human may place one by hand, and only a human removes it. Carry issue
 risk categories to its PR.
 

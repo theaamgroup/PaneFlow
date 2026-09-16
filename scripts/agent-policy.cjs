@@ -6,8 +6,9 @@ const categories = ['database', 'ui', 'money', 'access', 'integration', 'platfor
 // `integration` or `release` held every pull request.
 const holdCategories = ['database', 'money', 'access', 'platform-wide'];
 // Files where an unattended change is itself the risk: the release pipeline
-// and signing, and this policy (an agent must not loosen it unattended).
-const criticalPaths = /^(\.github\/workflows\/(release|agent-safety)\.yml|scripts\/agent-policy(\.test)?\.cjs|scripts\/(sparkle-dist|bundle-macos|create-dmg)\.sh|packaging\/)/;
+// (every script release.yml executes, signing and notarization included), and
+// this policy (an agent must not loosen it unattended).
+const criticalPaths = /^(\.github\/workflows\/(release|agent-safety)\.yml|scripts\/agent-policy(\.test)?\.cjs|scripts\/(sparkle-dist|bundle-macos|create-dmg|sign-macos|notarize-macos|release-notes)\.sh|scripts\/verify-update-feed\.py|scripts\/verify-update\.swift|packaging\/)/;
 const maxClosingReferences = 20;
 const maxLinkedPulls = 50;
 const states = ['needs-info', 'ready-for-agent', 'ready-for-human', 'wontfix'];
@@ -64,6 +65,9 @@ function deriveClassification(linked) {
   // Every complete issue without safety:none carries a risk category, which
   // the caller inherits onto the PR; so `every` and `some` agree here.
   picks.safetyNone = linked.every(issue => (issue.labels || []).includes('safety:none'));
+  // An issue a human kept for themselves (`ready-for-human` without a hold)
+  // carries that state to its PR: it never becomes `ready-for-agent`.
+  picks.humanOnly = linked.some(issue => issue.humanOnly === true);
   return picks;
 }
 
@@ -96,6 +100,7 @@ function route(labels, assignees = [], paths = [], inherited = [], requestedStat
   if (!complete) state = 'needs-info';
   else if (next.has('wontfix')) state = 'wontfix';
   else if (held) state = 'ready-for-human';
+  else if (isPull && derived.humanOnly) state = 'ready-for-human';
   else if (['ready-for-agent', 'ready-for-human'].includes(requestedState) && next.has(requestedState)) state = requestedState;
   // A complete, unheld PR inherits eligibility from its ready-for-agent
   // issues: nobody promotes a PR by hand, so a stale needs-info must not stick.
@@ -170,10 +175,14 @@ async function sync({ github, context, core }) {
         const labels = issue.labels.map(l => l.name);
         inherited.push(...labels);
         const moved = issue.repository_url && !issue.repository_url.toLowerCase().endsWith(`/repos/${repo.owner}/${repo.repo}`.toLowerCase());
-        // Only open local issues classify the PR; a closed or moved one
-        // leaves it needs-info (its labels, including any human hold or
-        // severity:critical, were still inherited above).
-        if (!moved && issue.state === 'open') linked.push({ labels, assignees: issue.assignees || [] });
+        // Only open local issues classify the PR; a closed, moved, or wontfix
+        // one leaves it needs-info (its labels, including any human hold or
+        // severity:critical, were still inherited above). An issue routed to
+        // ready-for-human keeps its PR out of ready-for-agent.
+        const routed = route(labels, issue.assignees || []);
+        if (!moved && issue.state === 'open' && !routed.includes('wontfix')) {
+          linked.push({ labels, assignees: issue.assignees || [], humanOnly: routed.includes('ready-for-human') });
+        }
       } catch (error) {
         // Unknown issue classification cannot make a PR eligible. Preserve
         // path routing even when a closing reference is missing/inaccessible.

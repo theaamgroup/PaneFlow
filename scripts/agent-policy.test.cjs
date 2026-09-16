@@ -140,8 +140,11 @@ test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
 });
 test('only release-pipeline, signing, and policy paths hold; routine paths only label', () => {
-  const critical = ['.github/workflows/release.yml', '.github/workflows/agent-safety.yml', 'scripts/agent-policy.cjs', 'scripts/agent-policy.test.cjs', 'scripts/sparkle-dist.sh', 'scripts/bundle-macos.sh', 'scripts/create-dmg.sh', 'packaging/macos/paneflow.entitlements'];
+  const critical = ['.github/workflows/release.yml', '.github/workflows/agent-safety.yml', 'scripts/agent-policy.cjs', 'scripts/agent-policy.test.cjs', 'scripts/sparkle-dist.sh', 'scripts/bundle-macos.sh', 'scripts/create-dmg.sh', 'scripts/sign-macos.sh', 'scripts/notarize-macos.sh', 'scripts/release-notes.sh', 'scripts/verify-update-feed.py', 'scripts/verify-update.swift', 'packaging/macos/paneflow.entitlements'];
   for (const p of critical) assert.ok(pathHolds([p]), p);
+  // Every script release.yml executes is a critical path.
+  const release = readFileSync(path.join(__dirname, '../.github/workflows/release.yml'), 'utf8');
+  for (const p of new Set(release.match(/scripts\/[\w.-]+/g))) assert.ok(pathHolds([p]), `${p} runs in release.yml but does not hold`);
   const routine = ['src-app/src/main.rs', 'crates/x/src/lib.rs', '.github/workflows/run_tests.yml', 'scripts/bench-terminal.sh', 'Cargo.lock', 'CLAUDE.md', 'AGENTS.md', '.claude/settings.json', 'docs/guide.md'];
   for (const p of routine) assert.ok(!pathHolds([p]), p);
   assert.ok(pathHolds([...routine, 'scripts/create-dmg.sh']));
@@ -156,7 +159,8 @@ test('only release-pipeline, signing, and policy paths hold; routine paths only 
 
 test('deriveClassification agrees on one value per prefix and needs a human owner', () => {
   const issue = { labels: base, assignees: owner };
-  assert.deepEqual(deriveClassification([issue]), { severity: 'severity:high', area: 'area:app', lens: 'lens:correctness', safetyNone: true });
+  assert.deepEqual(deriveClassification([issue]), { severity: 'severity:high', area: 'area:app', lens: 'lens:correctness', safetyNone: true, humanOnly: false });
+  assert.equal(deriveClassification([{ ...issue, humanOnly: true }]).humanOnly, true);
   assert.deepEqual(deriveClassification([issue, issue]), deriveClassification([issue]));
   assert.equal(deriveClassification([]), undefined);
   assert.equal(deriveClassification([{ labels: base, assignees: [] }]), undefined);
@@ -195,6 +199,22 @@ test('realistic PR: a linked severity:critical issue holds the PR', async () => 
 test('realistic PR: a critical path holds even with a safe linked issue', async () => {
   const { labels } = await routePull({ files: [{ filename: '.github/workflows/release.yml' }] });
   assert.deepEqual(labels, ['needs-human-review', 'ready-for-human', 'safety:release']);
+});
+
+test('realistic PR: a linked wontfix issue never classifies the PR', async () => {
+  const wontfix = issueFixture([...base.filter(l => l !== 'ready-for-agent'), 'wontfix']);
+  const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: wontfix } });
+  assert.deepEqual(labels, ['needs-info']);
+});
+
+test('realistic PR: a linked issue a human kept (ready-for-human, no hold) routes the PR to ready-for-human', async () => {
+  const kept = issueFixture(base.map(l => l === 'ready-for-agent' ? 'ready-for-human' : l));
+  assert.deepEqual(route(kept.labels.map(l => l.name), owner).filter(l => /^(ready|needs)/.test(l)), ['ready-for-human']);
+  const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: kept } });
+  assert.deepEqual(labels, ['ready-for-human']);
+  // Alongside an agent-ready issue the human-kept one still wins.
+  const { labels: mixed } = await routePull({ issues: { 9: kept, 10: issueFixture() } });
+  assert.deepEqual(mixed, ['ready-for-human']);
 });
 
 test('realistic PR: docs-only with no linked issue is needs-info without a hold', async () => {
