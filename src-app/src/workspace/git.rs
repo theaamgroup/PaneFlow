@@ -299,7 +299,17 @@ fn git_dir_probes() -> std::sync::MutexGuard<'static, GitDirProbeMap> {
 }
 
 fn wait_git_dir_probe(probe: &GitDirSharedProbe) -> Option<std::path::PathBuf> {
-    let remaining = GIT_DIR_PROBE_TIMEOUT.saturating_sub(probe.started.elapsed());
+    wait_git_dir_probe_within(probe, GIT_DIR_PROBE_TIMEOUT)
+}
+
+/// [`wait_git_dir_probe`] with the deadline as a parameter, so a test that
+/// only cares *how* the wait ends (published answer vs. deadline) can use a
+/// budget that scheduler jitter under `cargo test --workspace` cannot eat.
+fn wait_git_dir_probe_within(
+    probe: &GitDirSharedProbe,
+    timeout: std::time::Duration,
+) -> Option<std::path::PathBuf> {
+    let remaining = timeout.saturating_sub(probe.started.elapsed());
     let slot = probe
         .result
         .lock()
@@ -320,7 +330,7 @@ fn wait_git_dir_probe(probe: &GitDirSharedProbe) -> Option<std::path::PathBuf> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if timed_out.timed_out() {
         log::warn!(
-            "git: cwd probe did not answer stat within {GIT_DIR_PROBE_TIMEOUT:?}; treating it as not a repo"
+            "git: cwd probe did not answer stat within {timeout:?}; treating it as not a repo"
         );
     }
     slot.as_ref().cloned().flatten()
@@ -989,8 +999,15 @@ mod tests {
             waker.cond.notify_all();
         });
 
+        // Issue #562: the real 250 ms budget is not what this test is about,
+        // and a loaded `cargo test --workspace` can hold either thread past
+        // it (the notifier is not scheduled in time, or the waiter wakes
+        // late), which read as a missing repo or a ~300 ms wait. A budget no
+        // scheduler stall reaches keeps the assertions about the mechanism:
+        // the wait ends on the published answer, not on the deadline.
+        let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let answer = wait_git_dir_probe(&probe);
+        let answer = wait_git_dir_probe_within(&probe, budget);
         let elapsed = started.elapsed();
         notifier.join().expect("notifier");
 
@@ -1000,8 +1017,8 @@ mod tests {
             "a spurious wakeup must not report a real repo as missing"
         );
         assert!(
-            elapsed < GIT_DIR_PROBE_TIMEOUT,
-            "the real answer arrived well inside the budget: {elapsed:?}"
+            elapsed < budget,
+            "the wait must end on the published answer, not the deadline: {elapsed:?}"
         );
     }
 
