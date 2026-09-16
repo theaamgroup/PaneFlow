@@ -3,6 +3,7 @@ use super::{
     paneflow_ipc_reachable, refuse_symlink, with_last_lease, with_orphan_lease, HookInstall,
     HookInstallResult, HookInstallSkip, HookLease,
 };
+use paneflow_agent_config::claude_hooks::paneflow_hook_program_token;
 use paneflow_agent_config::{home_dir, read_optional_text, with_config_lock};
 use std::path::{Path, PathBuf};
 
@@ -165,11 +166,26 @@ fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::V
 }
 
 /// Both strings are PaneFlow hook commands (`<program> <event>`, the program
-/// possibly quoted) that name the same event.
+/// possibly quoted) that name the same event, and the program `actual`
+/// names is still runnable.
+///
+/// A crashed session can leave an owned file naming a version-pinned hook
+/// binary that a later launch pruned; accepting that rendering would hand
+/// this session hooks that invoke a missing executable, so a sibling program
+/// must be an existing executable file, not merely the right basename.
 fn same_paneflow_hook_event(actual: &str, expected: &str) -> bool {
-    is_paneflow_hook_command(actual)
-        && is_paneflow_hook_command(expected)
+    is_paneflow_hook_command(expected)
         && hook_command_event(actual) == hook_command_event(expected)
+        && paneflow_hook_program_token(actual)
+            .is_some_and(|program: String| hook_program_is_runnable(&program))
+}
+
+fn hook_program_is_runnable(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let path = Path::new(program);
+    path.is_absolute()
+        && std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 fn hook_command_event(command: &str) -> Option<&str> {
@@ -281,23 +297,39 @@ pub(super) fn remove_created_file(path: &Path, created: bool) -> std::io::Result
 }
 
 /// Test fixture: `source` as a sibling PaneFlow instance would render it,
-/// every PaneFlow hook command re-pointed at `/elsewhere/bin/paneflow-ai-hook`.
+/// every PaneFlow hook command re-pointed at `program` (an executable stub from `sibling_hook_program`).
 #[cfg(test)]
-pub(crate) fn render_as_sibling_instance(source: &str) -> String {
-    fn repoint(value: &mut serde_json::Value) {
+pub(crate) fn render_as_sibling_instance(source: &str, program: &Path) -> String {
+    fn repoint(value: &mut serde_json::Value, program: &str) {
         match value {
-            serde_json::Value::Object(object) => object.values_mut().for_each(repoint),
-            serde_json::Value::Array(array) => array.iter_mut().for_each(repoint),
+            serde_json::Value::Object(object) => object
+                .values_mut()
+                .for_each(|value| repoint(value, program)),
+            serde_json::Value::Array(array) => {
+                array.iter_mut().for_each(|value| repoint(value, program))
+            }
             serde_json::Value::String(command) if is_paneflow_hook_command(command) => {
                 let event = hook_command_event(command).unwrap_or_default().to_owned();
-                *command = format!("/elsewhere/bin/paneflow-ai-hook {event}");
+                *command = format!("{program} {event}");
             }
             _ => {}
         }
     }
     let mut root: serde_json::Value = serde_json::from_str(source).unwrap();
-    repoint(&mut root);
+    repoint(&mut root, &program.to_string_lossy());
     serde_json::to_string_pretty(&root).unwrap() + "\n"
+}
+
+/// Writes an executable stub named `paneflow-ai-hook` under `directory` and
+/// returns its path, the program a sibling-instance fixture points at.
+#[cfg(test)]
+pub(crate) fn sibling_hook_program(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(directory).unwrap();
+    let program = directory.join("paneflow-ai-hook");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    program
 }
 
 #[cfg(test)]
@@ -306,25 +338,34 @@ mod tests {
 
     #[test]
     fn sibling_rendering_differs_only_in_the_hook_program() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let program = sibling_hook_program(&temp.path().join("elsewhere"));
+        let program_text = program.to_string_lossy().into_owned();
         let source = grok_source().unwrap();
-        let sibling = render_as_sibling_instance(&source);
+        let sibling = render_as_sibling_instance(&source, &program);
         assert_ne!(sibling, source, "the fixture must change the bytes");
         assert!(is_sibling_instance_rendering(&sibling, &source));
         assert!(is_own_or_sibling_rendering(&source, &source));
 
         // A quoted program path (spaces) is still the same hook.
-        let quoted = sibling.replace(
-            "/elsewhere/bin/paneflow-ai-hook",
-            "'/my dir/paneflow-ai-hook'",
-        );
+        let spaced = sibling_hook_program(&temp.path().join("my dir"));
+        let quoted = sibling.replace(&program_text, &format!("'{}'", spaced.to_string_lossy()));
         assert_ne!(quoted, sibling);
         assert!(is_sibling_instance_rendering(&quoted, &source));
+
+        // A sibling whose hook binary was pruned is not accepted: this
+        // session would inherit hooks that invoke a missing executable.
+        let pruned = sibling.replace(&program_text, "/elsewhere/gone/paneflow-ai-hook");
+        assert!(!is_sibling_instance_rendering(&pruned, &source));
+        std::fs::remove_file(&program).unwrap();
+        assert!(!is_sibling_instance_rendering(&sibling, &source));
+        let _ = sibling_hook_program(&temp.path().join("elsewhere"));
 
         // Same program, different event: not the same hook.
         let swapped = sibling.replacen("paneflow-ai-hook Stop", "paneflow-ai-hook Notification", 1);
         assert!(!is_sibling_instance_rendering(&swapped, &source));
         // A user command in place of a PaneFlow hook.
-        let user = sibling.replacen("/elsewhere/bin/paneflow-ai-hook Stop", "my-hook Stop", 1);
+        let user = sibling.replacen(&format!("{program_text} Stop"), "my-hook Stop", 1);
         assert!(!is_sibling_instance_rendering(&user, &source));
         // Extra content beyond the rendered shape.
         let mut extended: serde_json::Value = serde_json::from_str(&sibling).unwrap();
@@ -355,7 +396,8 @@ mod tests {
         let directory = temp.path().join("hooks");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("paneflow.json");
-        let sibling = render_as_sibling_instance(&grok_source().unwrap());
+        let program = sibling_hook_program(&temp.path().join("elsewhere"));
+        let sibling = render_as_sibling_instance(&grok_source().unwrap(), &program);
         std::fs::write(&path, &sibling).unwrap();
 
         let guard = GrokHookFileGuard::install_at(&directory)
@@ -375,8 +417,9 @@ mod tests {
         let directory = temp.path().join("hooks");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("paneflow.json");
-        let user = render_as_sibling_instance(&grok_source().unwrap()).replacen(
-            "/elsewhere/bin/paneflow-ai-hook Stop",
+        let program = sibling_hook_program(&temp.path().join("elsewhere"));
+        let user = render_as_sibling_instance(&grok_source().unwrap(), &program).replacen(
+            &format!("{} Stop", program.to_string_lossy()),
             "my-hook Stop",
             1,
         );

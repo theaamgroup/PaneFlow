@@ -1,5 +1,4 @@
 use crate::hooks::dsh::{hooks_source, render_overlay, DSH_HOOKS_BASENAME, DSH_OVERLAY_BASENAME};
-use crate::hooks::render_as_sibling_instance;
 use crate::hooks::{
     enable_codex_feature_flag, CodexHookConfigGuard, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER,
 };
@@ -11,6 +10,7 @@ use crate::hooks::{
     ManagedHookConfigGuard, ManagedHookSpec, OpenCodePluginGuard, PiExtensionGuard,
     CLAUDE_HOOK_EVENTS, HERMES_BLOCK_BEGIN, PANEFLOW_TS_BASENAME,
 };
+use crate::hooks::{render_as_sibling_instance, sibling_hook_program};
 use serde_json::json;
 
 fn command_preserves_event_arg(command: &str, event: &str) -> bool {
@@ -1085,7 +1085,8 @@ fn dsh_sibling_instance_hooks_file_is_shared_not_owned() {
     std::fs::create_dir_all(&dir).unwrap();
     let hooks_path = dir.join(DSH_HOOKS_BASENAME);
     let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
-    let sibling = render_as_sibling_instance(&hooks_source().unwrap());
+    let program = sibling_hook_program(&td.path().join("elsewhere"));
+    let sibling = render_as_sibling_instance(&hooks_source().unwrap(), &program);
     assert_ne!(sibling, hooks_source().unwrap());
     std::fs::write(&hooks_path, &sibling).unwrap();
 
@@ -1119,9 +1120,10 @@ fn dsh_last_session_removes_a_sibling_rendering_paneflow_created() {
     let hooks_path = dir.join(DSH_HOOKS_BASENAME);
     let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
     let mut instance_a = crate::hooks::HookLease::acquire(&hooks_path).unwrap();
+    let program = sibling_hook_program(&td.path().join("elsewhere"));
     std::fs::write(
         &hooks_path,
-        render_as_sibling_instance(&hooks_source().unwrap()),
+        render_as_sibling_instance(&hooks_source().unwrap(), &program),
     )
     .unwrap();
     instance_a.mark_created().unwrap();
@@ -1144,14 +1146,19 @@ fn dsh_hooks_file_with_a_user_command_is_refused() {
     std::fs::create_dir_all(&dir).unwrap();
     let hooks_path = dir.join(DSH_HOOKS_BASENAME);
     let overlay_path = dir.join(DSH_OVERLAY_BASENAME);
-    let sibling = render_as_sibling_instance(&hooks_source().unwrap());
+    let program = sibling_hook_program(&td.path().join("elsewhere"));
+    let sibling = render_as_sibling_instance(&hooks_source().unwrap(), &program);
     let mut with_user: serde_json::Value = serde_json::from_str(&sibling).unwrap();
     with_user["hooks"]["Stop"][0]["hooks"]
         .as_array_mut()
         .unwrap()
         .push(json!({"type": "command", "command": "my-hook Stop"}));
     for user in [
-        sibling.replacen("/elsewhere/bin/paneflow-ai-hook Stop", "my-hook Stop", 1),
+        sibling.replacen(
+            &format!("{} Stop", program.to_string_lossy()),
+            "my-hook Stop",
+            1,
+        ),
         with_user.to_string(),
     ] {
         std::fs::write(&hooks_path, &user).unwrap();
