@@ -387,9 +387,27 @@ fn dsh_accepts_patch_overlay(args: &[OsString]) -> bool {
     if dsh_first_subcommand(args).is_some_and(|arg| arg == "plugin") {
         return false;
     }
+    // A user-supplied overlay wins: dsh's `--patch` arity is not something
+    // this shim can assume, so never stack a second one in front of it.
+    if dsh_user_supplies_patch(args) {
+        return false;
+    }
     !args
         .iter()
         .any(|arg| DSH_LAUNCHER_OPT_OUT.iter().any(|opt| arg == opt))
+}
+
+fn dsh_user_supplies_patch(args: &[OsString]) -> bool {
+    for arg in args {
+        let text = arg.to_string_lossy();
+        if text == "--" {
+            return false;
+        }
+        if text == "--patch" || text.starts_with("--patch=") {
+            return true;
+        }
+    }
+    false
 }
 
 fn dsh_first_subcommand(args: &[OsString]) -> Option<&OsString> {
