@@ -1,8 +1,8 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-15 at the **0.6.1 cut** (see the
-entry below). The prior header described the 0.6.0 cut; the one before that
-the 0.5.0 cut, which shipped
+Living handoff record. Updated 2026-09-16 after the post-0.6.1 review
+follow-ups (see the entry below). The prior header described the 0.6.1 cut;
+the one before that the 0.6.0 cut, and before that the 0.5.0 cut, which shipped
 the Review grid port (#438) and the first v0.12.0 port batch (#417: the
 terminal rendering chain #418 / #419 / #420, the Zed highlight queries #433,
 and the editor benchmark harness #425). The prior
@@ -10,6 +10,40 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 #357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-16: post-0.6.1 gate run on `main`.** Six PRs landed after the
+0.6.1 tag, all squash-merged: the bounded `hdiutil` retry for #547 (#557),
+the empty-state New Workspace copy for #533 (#558), the DeepSeek Harness
+(`dsh`) agent with live state for #527 (#559), cheaper debug embeds and a
+parallel CI release job for #554 (#560), the review follow-ups across the
+last ten PRs (#561), and the review leftovers - DSH argv and sibling
+overlays, `hdiutil` backoff, fair config lock (#563). No release was cut;
+`main` is `05839a5f`.
+
+Verification on `main` at `05839a5f`, run from a cold `target/` (the
+21-minute build is the dependency tree, not a regression): `cargo build`
+exit 0; `cargo test --workspace --no-fail-fast` **3,523 passed, 0 failed, 7
+ignored** (3,481 / 0 / 7 at the 0.6.1 cut; the seven ignored are the two
+perf benches, the two `tree_memory_probe` tests, the two `layout::render`
+frame gates, and the ghostty stress test, unchanged). The +42 is exactly the
+`#[test]` additions across those six PRs (#559 +21, #563 +12, #560 +7, #558
++1, #561 +1, #557 +0; 0 removed), counted from `git show` on each squash
+commit; executed test names were **not** diffed against the 0.6.1 log this
+run. `cargo clippy
+--workspace --all-targets` exit 0, **WARNING COUNT 1** (`block v0.1.6`);
+`cargo fmt --check` exit 0; `./target/debug/paneflow --version` ->
+`paneflow 0.6.1`; `cargo deny check advisories licenses sources` exit 0 ->
+`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` was
+not run this pass; the 177 / 93 figures in CLAUDE.md stand as of 0.6.1.
+
+Housekeeping the same day: the merged `fix/547-dmg-hdiutil-retry` branch
+and three stale worktrees (two `paneflow.worktrees/main*` checkouts from an
+earlier session and a finished autopilot baseline) were removed; the
+hourly-autopilot worktree under `.worktrees/` is live and was left alone.
+The `cargo test` gate waited several minutes on the build-directory lock
+because a second session's `cargo test` was compiling in the same `target/`;
+per the fan-out rule that is a lock fight to kill, not wait out, but it was
+another session's run and it was left to finish.
 
 **2026-09-15: the 0.6.1 cut.** 20 non-merge commits since `v0.6.0`, a patch
 bump because the release is mostly fixes: the Files sidebar colored by git
