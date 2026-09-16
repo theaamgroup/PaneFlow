@@ -1,14 +1,37 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { route, pathRisks, sync } = require('./agent-policy.cjs');
+const { readFileSync } = require('node:fs');
+const path = require('node:path');
+const { route, pathRisks, deriveClassification, sync } = require('./agent-policy.cjs');
 const owner = [{ type: 'User', login: 'maintainer' }];
 const base = ['severity:high', 'area:app', 'lens:correctness', 'safety:none', 'ready-for-agent'];
+const repo = { owner: 'org', repo: 'repo' };
+const quiet = { info() {}, warning() {} };
 
-function linkedReferences(ids = [9], hasNextPage = false) {
-  return async (_query, variables) => {
-    assert.equal(variables.limit, 21);
+// A pull request as GitHub actually delivers it: no vocabulary labels and no
+// assignee. `labels` defaults to what a previous routing run left behind.
+function pullFixture(labels = ['needs-info'], extra = {}) {
+  return { state: 'open', labels: labels.map(name => ({ name })), assignees: [], ...extra };
+}
+function issueFixture(labels = base, assignees = owner, extra = {}) {
+  return { repository_url: 'https://api.github.com/repos/org/repo', state: 'open', labels: labels.map(name => ({ name })), assignees, ...extra };
+}
+
+// GraphQL stub answering both resolved-reference queries: the PR's closing
+// issues (`ids`) and an issue's open linked PRs (`pulls`).
+function linkedReferences(ids = [9], hasNextPage = false, pulls = [7], pullsHasNextPage = false) {
+  return async (query, variables) => {
     assert.equal(variables.owner, 'org');
     assert.equal(variables.repo, 'repo');
+    if (query.includes('closedByPullRequestsReferences')) {
+      assert.equal(variables.limit, 50);
+      assert.match(query, /includeClosedPrs:\s*false/);
+      return { repository: { issue: { closedByPullRequestsReferences: {
+        pageInfo: { hasNextPage: pullsHasNextPage },
+        nodes: pulls.map(number => ({ number })),
+      } } } };
+    }
+    assert.equal(variables.limit, 21);
     return { repository: { pullRequest: { closingIssuesReferences: {
       pageInfo: { hasNextPage },
       nodes: ids.map(number => ({ number, repository: { nameWithOwner: 'org/repo' } })),
@@ -16,9 +39,35 @@ function linkedReferences(ids = [9], hasNextPage = false) {
   };
 }
 
+// Routes PR #7 against `issues` (number -> issue fixture) and returns the
+// label set the PR ends with plus the raw writes.
+async function routePull({ issues = { 9: issueFixture() }, pull = pullFixture(), files = [{ filename: 'docs/guide.md' }], graphql = linkedReferences(Object.keys(issues).map(Number)), core = quiet } = {}) {
+  const labels = new Set(pull.labels.map(l => l.name));
+  const added = [], removed = [], reads = [];
+  const github = {
+    graphql,
+    paginate: async () => files,
+    rest: {
+      pulls: { listFiles: 'files' },
+      issues: {
+        get: async ({ issue_number }) => {
+          reads.push(issue_number);
+          if (issue_number === 7) return { data: pull };
+          if (issues[issue_number] instanceof Error) throw issues[issue_number];
+          if (!issues[issue_number]) throw Object.assign(new Error('missing'), { status: 404 });
+          return { data: issues[issue_number] };
+        },
+        addLabels: async ({ labels: names }) => { added.push(...names); names.forEach(l => labels.add(l)); },
+        removeLabel: async ({ name }) => { removed.push(name); labels.delete(name); },
+      },
+    },
+  };
+  await sync({ github, context: { repo, payload: { pull_request: { number: 7 } } }, core });
+  return { labels: [...labels].sort(), added, removed, reads };
+}
+
 test('privileged policy checkout uses protected main, including stacked PRs', () => {
-  const { readFileSync } = require('node:fs');
-  const workflow = readFileSync(require('node:path').join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
+  const workflow = readFileSync(path.join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
   const refs = workflow.split('\n').filter(line => /^\s+ref:/.test(line));
   assert.deepEqual(refs, ['          ref: refs/heads/main']);
   assert.ok(!workflow.includes('pull_request.base.sha'));
@@ -65,7 +114,7 @@ test('existing human hold is never automatically cleared', () => {
 test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['packaging/macos/paneflow.entitlements']), ['safety:release']);
   assert.deepEqual(pathRisks(['mcps/paneflow/tools/read_pane.json']), ['safety:integration']);
-  for (const path of ['deny.toml', 'clippy.toml', '.cursor/rules/review.mdc', '.claude/settings.json']) assert.deepEqual(pathRisks([path]), ['safety:release']);
+  for (const p of ['deny.toml', 'clippy.toml', '.cursor/rules/review.mdc', '.claude/settings.json']) assert.deepEqual(pathRisks([p]), ['safety:release']);
   assert.deepEqual(pathRisks(['skills/paneflow-conductor/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['.agents/skills/example/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['src-app/src/main.rs', '.github/workflows/test.yml', 'crates/x/src/lib.rs', 'native/a']), ['safety:ui', 'safety:release', 'safety:integration', 'safety:platform-wide']);
@@ -73,124 +122,234 @@ test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
 });
 
-for (const variant of ['eligible', 'qualified', 'colon', 'hidden', 'hidden-unclosed', 'hidden-mixed', 'missing-link', 'foreign-link', 'foreign-redirect', 'pr-link', 'missing-safety', 'missing-owner', 'needs-info', 'closed']) {
-  test(`linked issue eligibility: ${variant}`, async () => {
-    const additions = [], removals = [];
-    const issueLabels = variant === 'missing-safety' ? base.filter(l => l !== 'safety:none')
-      : variant === 'needs-info' ? base.map(l => l === 'ready-for-agent' ? 'needs-info' : l) : base;
-    const github = {
-      graphql: linkedReferences(['hidden', 'hidden-unclosed', 'missing-link', 'foreign-link', 'pr-link'].includes(variant) ? [] : [9]),
-      paginate: async () => [{ filename: 'docs/guide.md' }],
-      rest: {
-        pulls: { listFiles: {} },
-        issues: {
-          get: async ({ issue_number }) => ({ data: issue_number === 7
-            ? { state: 'open', body: variant === 'hidden' ? '<!-- Closes #9 -->' : variant === 'hidden-unclosed' ? '<!-- example\nCloses #9' : variant === 'hidden-mixed' ? '<!-- Closes #10 -->\nCloses #9' : variant === 'qualified' ? 'Fixes org/repo#9' : variant === 'colon' ? 'Closes: #9' : variant === 'missing-link' ? '' : variant === 'foreign-link' ? 'Fixes other/project#9' : 'Closes #9', labels: base.map(name => ({ name })), assignees: owner }
-            : { repository_url: variant === 'foreign-redirect' ? 'https://api.github.com/repos/other/project' : 'https://api.github.com/repos/org/repo', state: variant === 'closed' ? 'closed' : 'open', pull_request: variant === 'pr-link' ? {} : undefined, labels: issueLabels.map(name => ({ name })), assignees: variant === 'missing-owner' ? [] : owner } }),
-          addLabels: async ({ labels }) => additions.push(...labels),
-          removeLabel: async ({ name }) => removals.push(name),
-        },
-      },
-    };
-    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {} } });
-    const eligible = ['eligible', 'qualified', 'colon', 'hidden-mixed'].includes(variant);
-    assert.equal(additions.includes('needs-human-review'), !eligible);
-    assert.equal(removals.includes('ready-for-agent'), !eligible);
+// --- Pull requests inherit classification from their linked issues ---------
+
+test('deriveClassification agrees on one value per prefix and needs a human owner', () => {
+  const issue = { labels: base, assignees: owner };
+  assert.deepEqual(deriveClassification([issue]), { severity: 'severity:high', area: 'area:app', lens: 'lens:correctness', safetyNone: true });
+  assert.deepEqual(deriveClassification([issue, issue]), deriveClassification([issue]));
+  assert.equal(deriveClassification([]), undefined);
+  assert.equal(deriveClassification([{ labels: base, assignees: [] }]), undefined);
+  assert.equal(deriveClassification([{ labels: base, assignees: [{ type: 'Bot' }] }]), undefined);
+  assert.equal(deriveClassification([issue, { labels: base.map(l => l === 'severity:high' ? 'severity:low' : l), assignees: owner }]), undefined);
+  assert.equal(deriveClassification([issue, { labels: base.filter(l => l !== 'lens:correctness'), assignees: owner }]), undefined);
+  const risky = { labels: [...base.filter(l => l !== 'safety:none'), 'safety:ui'], assignees: owner };
+  assert.equal(deriveClassification([risky]).safetyNone, false);
+  assert.equal(deriveClassification([issue, risky]).safetyNone, false);
+});
+
+test('a PR never receives vocabulary labels of its own', async () => {
+  const { labels, added } = await routePull();
+  assert.ok(!added.some(l => /^(severity|area|lens):/.test(l)));
+  assert.ok(!added.includes('safety:none'));
+  assert.deepEqual(labels, ['ready-for-agent']);
+});
+
+test('realistic PR: one classified safety:none issue with a human owner and no path risk is ready-for-agent', async () => {
+  const { labels, added, removed } = await routePull({ pull: pullFixture(['needs-info']) });
+  assert.deepEqual(labels, ['ready-for-agent']);
+  assert.ok(!added.includes('needs-human-review'));
+  assert.ok(removed.includes('needs-info'));
+});
+
+test('realistic PR: the same issue with a path risk routes to ready-for-human with the hold', async () => {
+  const { labels } = await routePull({ pull: pullFixture(['needs-info']), files: [{ filename: 'src-app/src/main.rs' }] });
+  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human', 'safety:ui']);
+});
+
+test('realistic PR: two linked issues that agree still classify the PR', async () => {
+  const { labels } = await routePull({ issues: { 9: issueFixture(), 10: issueFixture() } });
+  assert.deepEqual(labels, ['ready-for-agent']);
+});
+
+test('realistic PR: two linked issues disagreeing on severity keep needs-info', async () => {
+  const { labels } = await routePull({ issues: { 9: issueFixture(), 10: issueFixture(base.map(l => l === 'severity:high' ? 'severity:low' : l)) } });
+  assert.ok(labels.includes('needs-info'));
+  assert.ok(!labels.includes('ready-for-agent'));
+  assert.ok(!labels.includes('ready-for-human'));
+});
+
+test('realistic PR: a linked issue lacking a human assignee keeps needs-info', async () => {
+  for (const assignees of [[], [{ type: 'Bot', login: 'bot' }]]) {
+    const { labels } = await routePull({ issues: { 9: issueFixture(base, assignees) } });
+    assert.ok(labels.includes('needs-info'), JSON.stringify(assignees));
+    assert.ok(labels.includes('needs-human-review'));
+    assert.ok(!labels.includes('ready-for-agent'));
+  }
+});
+
+test('realistic PR: a stale ready-for-agent is withdrawn when the linked issue loses its metadata', async () => {
+  const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: issueFixture(base.filter(l => l !== 'area:app')) } });
+  assert.deepEqual(labels, ['needs-human-review', 'needs-info']);
+});
+
+test('realistic PR: a human hold on the PR itself survives a fully classified issue', async () => {
+  const { labels } = await routePull({ pull: pullFixture(['needs-human-review']) });
+  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human']);
+});
+
+for (const variant of ['unlinked', 'foreign-redirect', 'pr-link', 'missing-safety', 'missing-owner', 'needs-info', 'closed']) {
+  test(`linked issue eligibility fails closed: ${variant}`, async () => {
+    const issue = variant === 'missing-safety' ? issueFixture(base.filter(l => l !== 'safety:none'))
+      : variant === 'needs-info' ? issueFixture(base.map(l => l === 'ready-for-agent' ? 'needs-info' : l))
+      : variant === 'missing-owner' ? issueFixture(base, [])
+      : variant === 'closed' ? issueFixture(base, owner, { state: 'closed' })
+      : variant === 'pr-link' ? issueFixture(base, owner, { pull_request: {} })
+      : variant === 'foreign-redirect' ? issueFixture(base, owner, { repository_url: 'https://api.github.com/repos/other/project' })
+      : issueFixture();
+    const { labels } = await routePull({ issues: { 9: issue }, graphql: linkedReferences(variant === 'unlinked' ? [] : [9]) });
+    assert.ok(labels.includes('needs-human-review'), variant);
+    assert.ok(labels.includes('needs-info'), variant);
+    assert.ok(!labels.includes('ready-for-agent'), variant);
   });
 }
+
+test('closing keywords in the PR body never establish a link', async () => {
+  // Static guard: the policy must not read `body` at all.
+  const source = readFileSync(path.join(__dirname, 'agent-policy.cjs'), 'utf8');
+  assert.ok(!/\bbody\b/.test(source.replace(/\/\/.*$/gm, '')), 'agent-policy.cjs reads item.body');
+  // Behavioural guard: a body full of closing keywords with no resolved reference is unlinked.
+  const body = 'Closes #9\nFixes org/repo#9\nCloses: #9\n<!-- Closes #9 -->\n`Closes #9`\n```\nCloses #9\n```';
+  const { labels, reads } = await routePull({ pull: pullFixture(['ready-for-agent'], { body }), graphql: linkedReferences([]), files: [{ filename: 'src-app/main.rs' }] });
+  assert.deepEqual(reads, [7]);
+  assert.deepEqual(labels, ['needs-human-review', 'needs-info', 'safety:ui']);
+});
+
 test('routing is idempotent and never promotes needs-info', () => {
   const first = route([...base, 'safety:ui'], owner);
   assert.deepEqual(route(first, owner), first);
   assert.ok(route(base.map(l => l === 'ready-for-agent' ? 'needs-info' : l), owner).includes('needs-info'));
 });
+test('PR routing is idempotent', async () => {
+  const first = await routePull({ files: [{ filename: 'src-app/main.rs' }] });
+  const second = await routePull({ pull: pullFixture(first.labels), files: [{ filename: 'src-app/main.rs' }] });
+  assert.deepEqual(second.labels, first.labels);
+  assert.deepEqual(second.added, []);
+  assert.deepEqual(second.removed, []);
+});
 test('closed/wontfix issues are not reopened for agent work', () => {
   assert.ok(!route([...base, 'wontfix'], owner).includes('ready-for-agent'));
 });
 test('sync reads current state, inherits risk and writes only label deltas', async () => {
-  const added = [], removed = [];
-  const github = {
-      graphql: linkedReferences(),
-    paginate: async () => [{ filename: 'docs/new.md', previous_filename: 'src-app/old.rs' }],
-    rest: {
-      pulls: { listFiles: {} },
-      issues: {
-        get: async ({ issue_number }) => ({ data: issue_number === 7
-          ? { state: 'open', body: 'Closes #9', labels: base.map(name => ({ name })), assignees: owner }
-          : { labels: [{ name: 'safety:access' }] } }),
-        addLabels: async ({ labels }) => added.push(...labels),
-        removeLabel: async ({ name }) => removed.push(name),
-      },
-    },
-  };
-  await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {} } });
+  const { added, labels } = await routePull({
+    pull: pullFixture(['needs-info']),
+    files: [{ filename: 'docs/new.md', previous_filename: 'src-app/old.rs' }],
+    issues: { 9: issueFixture([...base.filter(l => l !== 'safety:none'), 'safety:access']) },
+  });
   assert.ok(added.includes('safety:ui'));
   assert.ok(added.includes('safety:access'));
   assert.ok(added.includes('needs-human-review'));
-  assert.ok(removed.includes('ready-for-agent'));
+  assert.ok(!added.includes('needs-info'));
+  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human', 'safety:access', 'safety:ui']);
 });
 
-for (const issueState of ['open', 'closed']) {
-test(`issue ${issueState} event propagates to an existing linked PR`, async () => {
-  const writes = [];
+// --- Issue events sweep only the PRs that link the issue -------------------
+
+function issueEventGithub({ issueState = 'open', issueLabels = [...base, 'safety:access'], graphql = linkedReferences(), pulls = [{ number: 7 }, { number: 8 }] } = {}) {
+  const writes = [], reads = [], paginated = [], warnings = [];
   const github = {
-      graphql: linkedReferences(),
-    paginate: async (method) => method === 'pulls' ? [{ number: 7 }] : [],
+    graphql,
+    paginate: async (method) => { paginated.push(method); return method === 'pulls' ? pulls : []; },
     rest: {
       pulls: { list: 'pulls', listFiles: 'files' },
       issues: {
-        get: async ({ owner: repoOwner, repo, issue_number }) => {
+        get: async ({ owner: repoOwner, repo: name, issue_number }) => {
           assert.equal(repoOwner, 'org');
-          assert.equal(repo, 'repo');
-          return { data: {
-          state: issue_number === 7 ? 'open' : issueState, assignees: owner,
-          body: issue_number === 7 ? 'Fixes https://github.com/org/repo/issues/9' : '',
-          labels: (issue_number === 7 ? base : [...base, 'safety:access']).map(name => ({ name })),
-          } };
+          assert.equal(name, 'repo');
+          reads.push(issue_number);
+          if (issue_number === 9) return { data: issueFixture(issueLabels, owner, { state: issueState }) };
+          return { data: pullFixture(['ready-for-agent']) };
         },
         addLabels: async (args) => writes.push(args),
         removeLabel: async () => {},
       },
     },
   };
-  class Context {
-    get repo() { return { owner: 'org', repo: 'repo' }; }
-  }
-  const context = new Context();
-  context.payload = { issue: { number: 9 } };
-  await sync({ github, context, core: { info() {} } });
-  assert.ok(writes.some(w => w.issue_number === 7 && w.labels.includes('needs-human-review')));
-  if (issueState === 'closed') assert.ok(writes.every(w => w.issue_number !== 9));
-});
+  return { github, writes, reads, paginated, core: { info() {}, warning: m => warnings.push(m) }, warnings };
 }
 
+for (const issueState of ['open', 'closed']) {
+  test(`issue ${issueState} event propagates to an existing linked PR`, async () => {
+    const { github, writes, core } = issueEventGithub({ issueState });
+    class Context {
+      get repo() { return repo; }
+    }
+    const context = new Context();
+    context.payload = { action: 'labeled', label: { name: 'safety:access' }, issue: { number: 9 } };
+    await sync({ github, context, core });
+    assert.ok(writes.some(w => w.issue_number === 7 && w.labels.includes('needs-human-review')));
+    if (issueState === 'closed') assert.ok(writes.every(w => w.issue_number !== 9));
+  });
+}
+
+test('issue event sweeps only the open PRs that link the issue, never the whole list', async () => {
+  const { github, writes, reads, paginated, core } = issueEventGithub();
+  await sync({ github, context: { repo, payload: { action: 'labeled', label: { name: 'safety:access' }, issue: { number: 9 } } }, core });
+  assert.ok(!paginated.includes('pulls'), 'pulls.list was paginated');
+  assert.deepEqual(reads, [9, 7, 9]);
+  assert.ok(writes.some(w => w.issue_number === 7 && w.labels.includes('needs-human-review')));
+  assert.ok(writes.every(w => w.issue_number !== 8));
+});
+
+test('issue edited event routes the issue but skips the PR sweep', async () => {
+  const graphqlCalls = [];
+  const { github, writes, reads, paginated, core } = issueEventGithub({ graphql: async (query) => { graphqlCalls.push(query); throw new Error('must not be called'); } });
+  await sync({ github, context: { repo, payload: { action: 'edited', issue: { number: 9 } } }, core });
+  assert.deepEqual(reads, [9]);
+  assert.deepEqual(graphqlCalls, []);
+  assert.deepEqual(paginated, []);
+  assert.ok(writes.every(w => w.issue_number === 9));
+});
+
+test('issue sweep falls back to every open PR when the linked-PR query fails', async () => {
+  const { github, writes, reads, paginated, core, warnings } = issueEventGithub({
+    graphql: async (query, variables) => {
+      if (query.includes('closedByPullRequestsReferences')) throw new Error('API unavailable');
+      return linkedReferences()(query, variables);
+    },
+  });
+  await sync({ github, context: { repo, payload: { action: 'labeled', label: { name: 'safety:access' }, issue: { number: 9 } } }, core });
+  assert.deepEqual(paginated.filter(m => m === 'pulls'), ['pulls']);
+  assert.deepEqual(reads, [9, 7, 9, 8, 9]);
+  assert.ok(writes.some(w => w.issue_number === 7 && w.labels.includes('needs-human-review')));
+  assert.ok(writes.some(w => w.issue_number === 8 && w.labels.includes('needs-human-review')));
+  assert.equal(warnings.length, 1);
+});
+
+test('issue sweep falls back to every open PR when more than 50 PRs link the issue', async () => {
+  const { github, paginated, core } = issueEventGithub({ graphql: linkedReferences([9], false, [7], true) });
+  await sync({ github, context: { repo, payload: { action: 'labeled', label: { name: 'safety:access' }, issue: { number: 9 } } }, core });
+  assert.deepEqual(paginated.filter(m => m === 'pulls'), ['pulls']);
+});
+
 test('issue closure is subscribed in the actual workflow', () => {
-  const { readFileSync } = require('node:fs');
-  const workflow = readFileSync(require('node:path').join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
+  const workflow = readFileSync(path.join(__dirname, '../.github/workflows/agent-safety.yml'), 'utf8');
   assert.match(workflow, /issues:\s*\n\s*types: \[[^\]]*\bclosed\b/);
   assert.match(workflow, /issues:\s*\n\s*types: \[[^\]]*\bdeleted\b/);
   assert.match(workflow, /issues:\s*\n\s*types: \[[^\]]*\btransferred\b/);
 });
 
 for (const action of ['deleted', 'transferred']) {
-  test(`issue ${action} event routes PRs without fetching the event issue`, async () => {
-    const calls = [], additions = [];
+  test(`issue ${action} event sweeps every open PR without fetching the event issue`, async () => {
+    const calls = [], additions = [], paginated = [];
     const github = {
       graphql: linkedReferences(),
-      paginate: async method => method === 'pulls' ? [{ number: 7 }] : [],
+      paginate: async method => { paginated.push(method); return method === 'pulls' ? [{ number: 7 }] : []; },
       rest: {
         pulls: { list: 'pulls', listFiles: 'files' },
         issues: {
           get: async ({ issue_number }) => {
             calls.push(issue_number);
             if (issue_number === 9) throw Object.assign(new Error('missing'), { status: 404 });
-            return { data: { state: 'open', body: 'Closes #9', labels: base.map(name => ({ name })), assignees: owner } };
+            return { data: pullFixture(['ready-for-agent']) };
           },
           addLabels: async ({ labels }) => additions.push(...labels),
           removeLabel: async () => {},
         },
       },
     };
-    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { action, issue: { number: 9 } } }, core: { info() {}, warning() {} } });
+    await sync({ github, context: { repo, payload: { action, issue: { number: 9 } } }, core: quiet });
+    assert.deepEqual(paginated.filter(m => m === 'pulls'), ['pulls']);
     assert.deepEqual(calls, [7, 9]);
     assert.ok(additions.includes('needs-human-review'));
   });
@@ -198,32 +357,21 @@ for (const action of ['deleted', 'transferred']) {
 
 for (const status of [404, 403, 500]) {
   test(`unreadable linked issue (${status}) retains path and human holds`, async () => {
-    const additions = [], failures = [];
-    const github = {
-      graphql: linkedReferences([999]),
-      paginate: async () => [{ filename: 'src-app/main.rs' }],
-      rest: {
-        pulls: { listFiles: {} },
-        issues: {
-          get: async ({ issue_number }) => {
-            if (issue_number === 999) throw Object.assign(new Error('unavailable'), { status });
-            return { data: { state: 'open', body: 'Closes #999', labels: base.map(name => ({ name })), assignees: owner } };
-          },
-          addLabels: async ({ labels }) => additions.push(...labels),
-          removeLabel: async () => {},
-        },
-      },
-    };
-    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } } });
-    assert.ok(additions.includes('safety:ui'));
-    assert.ok(additions.includes('needs-human-review'));
+    const failures = [];
+    const { added, labels } = await routePull({
+      issues: { 999: Object.assign(new Error('unavailable'), { status }) },
+      files: [{ filename: 'src-app/main.rs' }],
+      core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } },
+    });
+    assert.ok(added.includes('safety:ui'));
+    assert.ok(added.includes('needs-human-review'));
+    assert.ok(labels.includes('needs-info'));
     assert.equal(failures.length, status === 404 ? 0 : 1);
   });
 }
 
 test('all four fork-runner guards from b227ca1 remain intact', () => {
-  const { readFileSync } = require('node:fs');
-  const workflow = readFileSync(require('node:path').join(__dirname, '../.github/workflows/run_tests.yml'), 'utf8');
+  const workflow = readFileSync(path.join(__dirname, '../.github/workflows/run_tests.yml'), 'utf8');
   const guards = workflow.split('\n').filter(line => line.includes('runs-on:') && line.includes('head.repo.full_name'));
   const expected = "    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}";
   assert.deepEqual(guards, Array(4).fill(expected));
@@ -237,7 +385,7 @@ for (const state of ['ready-for-agent', 'ready-for-human']) {
       if (variant !== 'stale') labels.add(state);
       if (variant === 'held') labels.add('needs-human-review');
       const github = {
-      graphql: linkedReferences(),
+        graphql: linkedReferences([9], false, []),
         paginate: async () => [],
         rest: {
           pulls: { list: 'pulls' },
@@ -248,8 +396,8 @@ for (const state of ['ready-for-agent', 'ready-for-human']) {
           },
         },
       };
-      const context = { repo: { owner: 'org', repo: 'repo' }, payload: { action: 'labeled', label: { name: state }, issue: { number: 9 } } };
-      await sync({ github, context, core: { info() {} } });
+      const context = { repo, payload: { action: 'labeled', label: { name: state }, issue: { number: 9 } } };
+      await sync({ github, context, core: quiet });
       const expected = variant === 'held' ? 'ready-for-human' : ['missing-owner', 'stale'].includes(variant) ? 'needs-info' : state;
       assert.deepEqual([...labels].filter(l => ['needs-info', 'ready-for-agent', 'ready-for-human', 'wontfix'].includes(l)), [expected]);
       assert.equal(labels.has('needs-human-review'), variant === 'held');
@@ -274,85 +422,54 @@ test('open wontfix requires complete metadata and a human owner', () => {
 
 for (const count of [20, 21, 3000]) {
   test(`${count} closing references have bounded requests and preserve path holds`, async () => {
-    const reads = [], added = [], removed = [];
-    const github = {
-      graphql: linkedReferences(Array.from({ length: Math.min(count, 21) }, (_, i) => i + 100), count > 21),
-      paginate: async () => [{ filename: 'src-app/main.rs' }],
-      rest: {
-        pulls: { listFiles: 'files' },
-        issues: {
-          get: async ({ issue_number }) => {
-            reads.push(issue_number);
-            if (issue_number !== 7) throw Object.assign(new Error('missing'), { status: 404 });
-            return { data: { state: 'open', body: Array.from({ length: count }, (_, i) => `Closes #${i + 100}`).join('\n'), labels: base.map(name => ({ name })), assignees: owner } };
-          },
-          addLabels: async ({ labels }) => added.push(...labels),
-          removeLabel: async ({ name }) => removed.push(name),
-        },
-      },
-    };
-    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, warning() {} } });
+    const ids = Array.from({ length: Math.min(count, 21) }, (_, i) => i + 100);
+    const { reads, added, labels } = await routePull({
+      pull: pullFixture(['ready-for-agent']),
+      issues: {},
+      files: [{ filename: 'src-app/main.rs' }],
+      graphql: linkedReferences(ids, count > 21),
+    });
     assert.equal(reads.length, count > 20 ? 1 : 21);
     assert.ok(added.includes('needs-human-review'));
     assert.ok(added.includes('safety:ui'));
-    assert.ok(removed.includes('ready-for-agent'));
+    assert.ok(!labels.includes('ready-for-agent'));
   });
 }
 
 test('throttled lookups stop at the first failure and still attempt the hold', async () => {
-  const reads = [], added = [], removed = [], failures = [];
-  const github = {
-      graphql: linkedReferences([9, 10]),
-    paginate: async () => [],
-    rest: {
-      pulls: { listFiles: 'files' },
-      issues: {
-        get: async ({ issue_number }) => {
-          reads.push(issue_number);
-          if (issue_number !== 7) throw Object.assign(new Error('throttled'), { status: 429 });
-          return { data: { state: 'open', body: 'Closes #9\nCloses #10', labels: base.map(name => ({ name })), assignees: owner } };
-        },
-        addLabels: async ({ labels }) => added.push(...labels),
-        removeLabel: async ({ name }) => removed.push(name),
-      },
-    },
-  };
-  await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } } });
+  const failures = [];
+  const throttled = () => Object.assign(new Error('throttled'), { status: 429 });
+  const { reads, added, labels } = await routePull({
+    pull: pullFixture(['ready-for-agent']),
+    issues: { 9: throttled(), 10: throttled() },
+    files: [],
+    core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } },
+  });
   assert.deepEqual(reads, [7, 9]);
   assert.equal(failures.length, 1);
   assert.ok(added.includes('needs-human-review'));
-  assert.ok(removed.includes('ready-for-agent'));
+  assert.ok(!labels.includes('ready-for-agent'));
 });
 
-for (const variant of ['inline-code', 'fenced-code', 'query-failure', 'foreign-issue']) {
+for (const variant of ['query-failure', 'foreign-issue']) {
   test(`resolved GitHub references fail closed: ${variant}`, async () => {
-    const added = [], removed = [], reads = [], failures = [];
-    const github = {
+    const failures = [];
+    const { added, labels, reads } = await routePull({
+      pull: pullFixture(['ready-for-agent']),
+      files: [{ filename: 'src-app/main.rs' }],
       graphql: async () => {
         if (variant === 'query-failure') throw new Error('API unavailable');
         return { repository: { pullRequest: { closingIssuesReferences: {
           pageInfo: { hasNextPage: false },
-          nodes: variant === 'foreign-issue' ? [{ number: 9, repository: { nameWithOwner: 'other/repo' } }] : [],
+          nodes: [{ number: 9, repository: { nameWithOwner: 'other/repo' } }],
         } } } };
       },
-      paginate: async () => [{ filename: 'src-app/main.rs' }],
-      rest: {
-        pulls: { listFiles: 'files' },
-        issues: {
-          get: async ({ issue_number }) => {
-            reads.push(issue_number);
-            return { data: { state: 'open', body: variant === 'fenced-code' ? '```\nCloses #9\n```' : '`Closes #9`', labels: base.map(name => ({ name })), assignees: owner } };
-          },
-          addLabels: async ({ labels }) => added.push(...labels),
-          removeLabel: async ({ name }) => removed.push(name),
-        },
-      },
-    };
-    await sync({ github, context: { repo: { owner: 'org', repo: 'repo' }, payload: { pull_request: { number: 7 } } }, core: { info() {}, setFailed(message) { failures.push(message); } } });
+      core: { info() {}, setFailed(message) { failures.push(message); } },
+    });
     assert.deepEqual(reads, [7]);
     assert.ok(added.includes('needs-human-review'));
     assert.ok(added.includes('safety:ui'));
-    assert.ok(removed.includes('ready-for-agent'));
+    assert.ok(!labels.includes('ready-for-agent'));
     assert.equal(failures.length, variant === 'query-failure' ? 1 : 0);
   });
 }
