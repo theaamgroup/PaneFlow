@@ -72,8 +72,11 @@ impl Assets {
 /// US-008 - embedded AI-hook binaries.
 ///
 /// `paneflow-shim` (mapped at extraction time to `claude` + `codex`) and
-/// `paneflow-ai-hook` are staged into `src-app/target/embed/bin/<target>/`
-/// by `build.rs` before rust-embed's proc-macro expands. Entries look like
+/// `paneflow-ai-hook` are staged into
+/// `src-app/target/embed/{debug,release}/bin/<target>/` by `build.rs`
+/// before rust-embed's proc-macro expands. Debug and release use distinct
+/// folders so a `cargo build` cannot overwrite the helpers a later
+/// `cargo build --release` bakes in. Entries look like
 /// `bin/<target-triple>/paneflow-shim` and
 /// `bin/<target-triple>/paneflow-ai-hook`.
 ///
@@ -85,7 +88,18 @@ impl Assets {
 ///
 /// Consumers: `ai_hooks::extract::ensure_binaries_extracted` at runtime
 /// (wired into `terminal::pty_session::inject_ai_hook_env` by US-009).
+#[cfg(debug_assertions)]
 #[derive(RustEmbed)]
-#[folder = "target/embed/bin"]
+#[folder = "target/embed/debug/bin"]
+#[prefix = "bin/"]
+pub struct Bins;
+
+/// US-008 - embedded AI-hook binaries (release ingest slot).
+///
+/// Same keys as the debug arm (`bin/<target-triple>/<name>`); the
+/// folder is isolated so a debug restage cannot clobber these bytes.
+#[cfg(not(debug_assertions))]
+#[derive(RustEmbed)]
+#[folder = "target/embed/release/bin"]
 #[prefix = "bin/"]
 pub struct Bins;
