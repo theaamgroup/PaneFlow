@@ -100,7 +100,7 @@ impl Drop for DshOverlayGuard {
 
 pub(crate) fn dsh_home() -> Option<PathBuf> {
     resolve_dsh_home(env::var_os("DSH_HOME"), env::current_dir().ok())
-        .map(normalize_existing_prefix)
+        .and_then(normalize_existing_prefix)
 }
 
 /// Resolves `path` component by component: while the prefix exists it is
@@ -108,8 +108,10 @@ pub(crate) fn dsh_home() -> Option<PathBuf> {
 /// target, as the filesystem would), and once a component is missing the
 /// rest is normalized lexically (`.` dropped, `..` popped, never above the
 /// root). Aliased spellings of one directory therefore derive the same
-/// overlay and lease paths even before the directory exists.
-fn normalize_existing_prefix(path: PathBuf) -> PathBuf {
+/// overlay and lease paths even before the directory exists. An existing
+/// prefix that is not a directory (a file, or a symlink to one) is `None`:
+/// the filesystem would refuse to traverse it, so `..` must not pop it.
+fn normalize_existing_prefix(path: PathBuf) -> Option<PathBuf> {
     use std::path::Component;
     let mut resolved = PathBuf::new();
     let mut prefix_exists = true;
@@ -128,14 +130,15 @@ fn normalize_existing_prefix(path: PathBuf) -> PathBuf {
                 resolved.push(other.as_os_str());
                 if prefix_exists {
                     match std::fs::canonicalize(&resolved) {
-                        Ok(canonical) => resolved = canonical,
+                        Ok(canonical) if canonical.is_dir() => resolved = canonical,
+                        Ok(_) => return None,
                         Err(_) => prefix_exists = false,
                     }
                 }
             }
         }
     }
-    resolved
+    Some(resolved)
 }
 
 /// A relative `DSH_HOME` is anchored on the shim's working directory before
@@ -257,8 +260,8 @@ mod dsh_home_tests {
     fn aliased_spellings_of_one_directory_normalize_to_the_same_path() {
         let root = std::env::temp_dir().join(format!("dsh-home-{}", std::process::id()));
         std::fs::create_dir_all(root.join("x")).unwrap();
-        let direct = normalize_existing_prefix(root.join("dsh"));
-        let aliased = normalize_existing_prefix(root.join("x").join("..").join("dsh"));
+        let direct = normalize_existing_prefix(root.join("dsh")).unwrap();
+        let aliased = normalize_existing_prefix(root.join("x").join("..").join("dsh")).unwrap();
         assert_eq!(direct, aliased);
         assert!(direct.ends_with("dsh"));
         std::fs::remove_dir_all(&root).unwrap();
@@ -269,7 +272,7 @@ mod dsh_home_tests {
         let root = std::env::temp_dir().join(format!("dsh-tail-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let canonical_root = std::fs::canonicalize(&root).unwrap();
-        let resolved = normalize_existing_prefix(root.join("a").join("b"));
+        let resolved = normalize_existing_prefix(root.join("a").join("b")).unwrap();
         assert_eq!(resolved, canonical_root.join("a").join("b"));
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -279,9 +282,12 @@ mod dsh_home_tests {
         let root = std::env::temp_dir().join(format!("dsh-missing-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let canonical_root = std::fs::canonicalize(&root).unwrap();
-        let aliased = normalize_existing_prefix(root.join("new").join("..").join("dsh"));
+        let aliased = normalize_existing_prefix(root.join("new").join("..").join("dsh")).unwrap();
         assert_eq!(aliased, canonical_root.join("dsh"));
-        assert_eq!(aliased, normalize_existing_prefix(root.join("dsh")));
+        assert_eq!(
+            aliased,
+            normalize_existing_prefix(root.join("dsh")).unwrap()
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -291,17 +297,37 @@ mod dsh_home_tests {
         std::fs::create_dir_all(root.join("srv").join("profile")).unwrap();
         std::os::unix::fs::symlink(root.join("srv").join("profile"), root.join("link")).unwrap();
         let canonical_root = std::fs::canonicalize(&root).unwrap();
-        let resolved = normalize_existing_prefix(root.join("link").join("..").join("dsh"));
+        let resolved = normalize_existing_prefix(root.join("link").join("..").join("dsh")).unwrap();
         assert_eq!(resolved, canonical_root.join("srv").join("dsh"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn normalization_never_climbs_above_the_root() {
-        assert!(normalize_existing_prefix(PathBuf::from("/../..")).has_root());
+        assert!(normalize_existing_prefix(PathBuf::from("/../.."))
+            .unwrap()
+            .has_root());
         assert_eq!(
             normalize_existing_prefix(PathBuf::from("/../no-such-dir-xyz/./a/../b")),
-            PathBuf::from("/no-such-dir-xyz/b")
+            Some(PathBuf::from("/no-such-dir-xyz/b"))
         );
+    }
+
+    #[test]
+    fn a_file_in_the_existing_prefix_is_rejected_instead_of_popped() {
+        let root = std::env::temp_dir().join(format!("dsh-file-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("srv")).unwrap();
+        std::fs::write(root.join("srv").join("profile.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(root.join("srv").join("profile.json"), root.join("link"))
+            .unwrap();
+        assert_eq!(
+            normalize_existing_prefix(root.join("link").join("..").join("dsh")),
+            None
+        );
+        assert_eq!(
+            normalize_existing_prefix(root.join("srv").join("profile.json").join("dsh")),
+            None
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
