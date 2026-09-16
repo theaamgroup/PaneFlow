@@ -62,7 +62,7 @@ impl CodexHookConfigGuard {
         if !paneflow_ipc_reachable() {
             sweep_orphan_hook_config(&project_dir.join("hooks.json"), remove_codex_hooks);
             if let Some(path) = global_config_toml() {
-                sweep_orphan_codex_feature_flag(&path);
+                let _ = sweep_orphan_codex_feature_flag(&path);
             }
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
@@ -118,8 +118,12 @@ impl Drop for CodexHookConfigGuard {
     }
 }
 
-fn sweep_orphan_codex_feature_flag(path: &Path) {
-    let _ = with_orphan_lease(path, path, |_| disable_codex_feature_flag_unlocked(path));
+/// `Ok(None)` while another live session still holds the feature lease;
+/// `Ok(Some(()))` once the flag was swept. A lock error (the machine-wide
+/// config lock is polled with a bounded timeout) surfaces as `Err`, so a
+/// caller that cares can tell "held back" from "could not run".
+fn sweep_orphan_codex_feature_flag(path: &Path) -> std::io::Result<Option<()>> {
+    with_orphan_lease(path, path, |_| disable_codex_feature_flag_unlocked(path))
 }
 
 fn cleanup_codex_feature_flag(path: &Path, lease: &mut HookLease) {
@@ -353,11 +357,21 @@ mod tests {
         enable_codex_feature_flag(&feature).unwrap();
         let live = HookLease::acquire(&feature).unwrap();
 
-        sweep_orphan_codex_feature_flag(&feature);
+        // Each sweep's `Result` is unwrapped on purpose: the sweep runs under
+        // the machine-wide agent-config lock, whose bounded polled wait can
+        // time out while other sessions (or test threads) hold it, and a
+        // swallowed `TimedOut` would otherwise read as a wrong lease decision.
+        let held_back = sweep_orphan_codex_feature_flag(&feature).unwrap();
+        assert_eq!(held_back, None, "a live lease must hold the sweep back");
         assert!(feature.exists());
 
         drop(live);
-        sweep_orphan_codex_feature_flag(&feature);
+        let swept = sweep_orphan_codex_feature_flag(&feature).unwrap();
+        assert_eq!(
+            swept,
+            Some(()),
+            "the last lease holder gone, the sweep runs"
+        );
         assert!(!feature.exists());
     }
 

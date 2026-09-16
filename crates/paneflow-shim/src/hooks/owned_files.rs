@@ -1,7 +1,7 @@
 use super::{
-    home_unavailable, merge_strict_matcher_hooks_for_events, paneflow_ipc_reachable,
-    refuse_symlink, with_last_lease, with_orphan_lease, HookInstall, HookInstallResult,
-    HookInstallSkip, HookLease,
+    home_unavailable, is_paneflow_hook_command, merge_strict_matcher_hooks_for_events,
+    paneflow_ipc_reachable, refuse_symlink, with_last_lease, with_orphan_lease, HookInstall,
+    HookInstallResult, HookInstallSkip, HookLease,
 };
 use paneflow_agent_config::{home_dir, read_optional_text, with_config_lock};
 use std::path::{Path, PathBuf};
@@ -65,7 +65,10 @@ impl GrokHookFileGuard {
         let directory = home.join(".grok").join("hooks");
         let path = directory.join("paneflow.json");
         if !paneflow_ipc_reachable() {
-            sweep_matching_owned_file(&path, &grok_source()?);
+            let source = grok_source()?;
+            sweep_accepted_owned_file(&path, &|existing| {
+                is_own_or_sibling_rendering(existing, &source)
+            });
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
         Self::install_at(&directory).map(HookInstall::Installed)
@@ -77,7 +80,14 @@ impl GrokHookFileGuard {
         let path = directory.join("paneflow.json");
         let mut lease = HookLease::acquire(&path)?;
         let source = grok_source()?;
-        with_config_lock(&path, || install_owned_file(&path, &source, &mut lease))?;
+        // The file embeds this instance's hook path; another PaneFlow
+        // instance (a different `PANEFLOW_BIN_DIR`) renders different bytes
+        // for the same hooks, and that file serves this session as well.
+        with_config_lock(&path, || {
+            install_accepted_owned_file(&path, &source, &mut lease, &|existing| {
+                is_own_or_sibling_rendering(existing, &source)
+            })
+        })?;
         Ok(Self {
             path,
             lease,
@@ -88,7 +98,10 @@ impl GrokHookFileGuard {
 
 impl Drop for GrokHookFileGuard {
     fn drop(&mut self) {
-        cleanup_matching_owned_file(&self.path, &mut self.lease, &self.source);
+        let source = std::mem::take(&mut self.source);
+        cleanup_accepted_owned_file(&self.path, &mut self.lease, &|existing| {
+            is_own_or_sibling_rendering(existing, &source)
+        });
     }
 }
 
@@ -98,14 +111,93 @@ fn grok_source() -> std::io::Result<String> {
     Ok(serde_json::to_string_pretty(&root).map_err(std::io::Error::other)? + "\n")
 }
 
+/// True when `existing` is `source` byte for byte, or the same hooks as
+/// rendered by a sibling PaneFlow instance (see
+/// [`is_sibling_instance_rendering`]).
+pub(super) fn is_own_or_sibling_rendering(existing: &str, source: &str) -> bool {
+    existing == source || is_sibling_instance_rendering(existing, source)
+}
+
+/// True when `existing` is the JSON `source` renders, differing only in the
+/// PaneFlow hook program each command names.
+///
+/// A managed hook file embeds the absolute `paneflow-ai-hook` path, so two
+/// PaneFlow instances with different `PANEFLOW_BIN_DIR` /
+/// `PANEFLOW_AI_HOOK_PATH` values render different bytes for the same hooks.
+/// The comparison walks both documents in lockstep: every key, array length,
+/// number and boolean must match, and a string may differ only where both
+/// sides are a PaneFlow hook command for the same event. A file carrying any
+/// other command, event, or key is not a sibling rendering, whatever else it
+/// shares with `source`.
+pub(super) fn is_sibling_instance_rendering(existing: &str, source: &str) -> bool {
+    let (Ok(existing), Ok(expected)) = (
+        serde_json::from_str::<serde_json::Value>(existing),
+        serde_json::from_str::<serde_json::Value>(source),
+    ) else {
+        return false;
+    };
+    equal_up_to_hook_program(&existing, &expected)
+}
+
+fn equal_up_to_hook_program(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (actual, expected) {
+        (Value::Object(actual), Value::Object(expected)) => {
+            actual.len() == expected.len()
+                && expected.iter().all(|(key, value)| {
+                    actual
+                        .get(key)
+                        .is_some_and(|other| equal_up_to_hook_program(other, value))
+                })
+        }
+        (Value::Array(actual), Value::Array(expected)) => {
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(other, value)| equal_up_to_hook_program(other, value))
+        }
+        (Value::String(actual), Value::String(expected)) => {
+            actual == expected || same_paneflow_hook_event(actual, expected)
+        }
+        _ => actual == expected,
+    }
+}
+
+/// Both strings are PaneFlow hook commands (`<program> <event>`, the program
+/// possibly quoted) that name the same event.
+fn same_paneflow_hook_event(actual: &str, expected: &str) -> bool {
+    is_paneflow_hook_command(actual)
+        && is_paneflow_hook_command(expected)
+        && hook_command_event(actual) == hook_command_event(expected)
+}
+
+fn hook_command_event(command: &str) -> Option<&str> {
+    command.trim_end().rsplit(char::is_whitespace).next()
+}
+
 pub(super) fn install_owned_file(
     path: &Path,
     source: &str,
     lease: &mut HookLease,
 ) -> std::io::Result<()> {
+    install_accepted_owned_file(path, source, lease, &|existing| existing == source)
+}
+
+/// Publish `source` at `path` unless a file is already there. An existing
+/// file that `accepts` (this instance's own bytes, or a sibling instance's
+/// rendering of the same content) is left exactly as it is and never marked
+/// created, so cleanup can only ever delete what PaneFlow itself wrote; any
+/// other existing file is refused with `AlreadyExists`.
+pub(super) fn install_accepted_owned_file(
+    path: &Path,
+    source: &str,
+    lease: &mut HookLease,
+    accepts: &dyn Fn(&str) -> bool,
+) -> std::io::Result<()> {
     refuse_symlink(path, "managed hook")?;
     match read_optional_text(path)? {
-        Some(existing) if existing == source => Ok(()),
+        Some(existing) if accepts(&existing) => Ok(()),
         Some(_) => Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!(
@@ -129,26 +221,47 @@ pub(super) fn install_owned_file(
     }
 }
 
-fn remove_unchanged_file(path: &Path, created: bool, source: &str) -> std::io::Result<()> {
+fn remove_unchanged_file(
+    path: &Path,
+    created: bool,
+    accepts: &dyn Fn(&str) -> bool,
+) -> std::io::Result<()> {
     if !created {
         return Ok(());
     }
     refuse_symlink(path, "managed hook")?;
-    if read_optional_text(path)?.as_deref() == Some(source) {
+    if read_optional_text(path)?.is_some_and(|existing| accepts(&existing)) {
         remove_created_file(path, true)?;
     }
     Ok(())
 }
 
 pub(super) fn sweep_matching_owned_file(path: &Path, source: &str) {
+    sweep_accepted_owned_file(path, &|existing| existing == source);
+}
+
+pub(super) fn sweep_accepted_owned_file(path: &Path, accepts: &dyn Fn(&str) -> bool) {
     let _ = with_orphan_lease(path, path, |created| {
-        remove_unchanged_file(path, created, source)
+        remove_unchanged_file(path, created, accepts)
     });
 }
 
 pub(super) fn cleanup_matching_owned_file(path: &Path, lease: &mut HookLease, source: &str) {
+    cleanup_accepted_owned_file(path, lease, &|existing| existing == source);
+}
+
+/// Last-session cleanup: remove the file only when the lease's durable
+/// ownership bit says a PaneFlow session created it and its content still
+/// `accepts` (unchanged by the user; a sibling instance's rendering counts,
+/// since the bit proves PaneFlow wrote the file and the shape check proves
+/// nothing else was added).
+pub(super) fn cleanup_accepted_owned_file(
+    path: &Path,
+    lease: &mut HookLease,
+    accepts: &dyn Fn(&str) -> bool,
+) {
     let _ = with_last_lease(path, lease, |created| {
-        remove_unchanged_file(path, created, source)
+        remove_unchanged_file(path, created, accepts)
     });
 }
 
@@ -167,9 +280,112 @@ pub(super) fn remove_created_file(path: &Path, created: bool) -> std::io::Result
     }
 }
 
+/// Test fixture: `source` as a sibling PaneFlow instance would render it,
+/// every PaneFlow hook command re-pointed at `/elsewhere/bin/paneflow-ai-hook`.
+#[cfg(test)]
+pub(crate) fn render_as_sibling_instance(source: &str) -> String {
+    fn repoint(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => object.values_mut().for_each(repoint),
+            serde_json::Value::Array(array) => array.iter_mut().for_each(repoint),
+            serde_json::Value::String(command) if is_paneflow_hook_command(command) => {
+                let event = hook_command_event(command).unwrap_or_default().to_owned();
+                *command = format!("/elsewhere/bin/paneflow-ai-hook {event}");
+            }
+            _ => {}
+        }
+    }
+    let mut root: serde_json::Value = serde_json::from_str(source).unwrap();
+    repoint(&mut root);
+    serde_json::to_string_pretty(&root).unwrap() + "\n"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sibling_rendering_differs_only_in_the_hook_program() {
+        let source = grok_source().unwrap();
+        let sibling = render_as_sibling_instance(&source);
+        assert_ne!(sibling, source, "the fixture must change the bytes");
+        assert!(is_sibling_instance_rendering(&sibling, &source));
+        assert!(is_own_or_sibling_rendering(&source, &source));
+
+        // A quoted program path (spaces) is still the same hook.
+        let quoted = sibling.replace(
+            "/elsewhere/bin/paneflow-ai-hook",
+            "'/my dir/paneflow-ai-hook'",
+        );
+        assert_ne!(quoted, sibling);
+        assert!(is_sibling_instance_rendering(&quoted, &source));
+
+        // Same program, different event: not the same hook.
+        let swapped = sibling.replacen("paneflow-ai-hook Stop", "paneflow-ai-hook Notification", 1);
+        assert!(!is_sibling_instance_rendering(&swapped, &source));
+        // A user command in place of a PaneFlow hook.
+        let user = sibling.replacen("/elsewhere/bin/paneflow-ai-hook Stop", "my-hook Stop", 1);
+        assert!(!is_sibling_instance_rendering(&user, &source));
+        // Extra content beyond the rendered shape.
+        let mut extended: serde_json::Value = serde_json::from_str(&sibling).unwrap();
+        extended["hooks"]["Stop"][0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type": "command", "command": "my-hook Stop"}));
+        assert!(!is_sibling_instance_rendering(
+            &extended.to_string(),
+            &source
+        ));
+        extended["hooks"]["Stop"][0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        extended["permissions"] = serde_json::json!({});
+        assert!(!is_sibling_instance_rendering(
+            &extended.to_string(),
+            &source
+        ));
+        // Not JSON at all.
+        assert!(!is_sibling_instance_rendering("- insert:", &source));
+    }
+
+    #[test]
+    fn sibling_instance_grok_hook_file_is_shared_not_owned() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("hooks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("paneflow.json");
+        let sibling = render_as_sibling_instance(&grok_source().unwrap());
+        std::fs::write(&path, &sibling).unwrap();
+
+        let guard = GrokHookFileGuard::install_at(&directory)
+            .expect("a sibling instance's hook file must serve this session");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), sibling);
+        drop(guard);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            sibling,
+            "the sibling instance's file is not ours to delete"
+        );
+    }
+
+    #[test]
+    fn grok_hook_file_with_a_user_command_is_refused() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("hooks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("paneflow.json");
+        let user = render_as_sibling_instance(&grok_source().unwrap()).replacen(
+            "/elsewhere/bin/paneflow-ai-hook Stop",
+            "my-hook Stop",
+            1,
+        );
+        std::fs::write(&path, &user).unwrap();
+
+        let error = GrokHookFileGuard::install_at(&directory).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), user);
+    }
 
     #[test]
     fn pi_plugin_frames_are_notifications() {

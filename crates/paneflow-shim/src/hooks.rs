@@ -22,7 +22,7 @@ pub(crate) use hermes::HermesHookConfigGuard;
 pub(crate) use hermes::{hermes_managed_block, strip_hermes_managed_block, HERMES_BLOCK_BEGIN};
 pub(crate) use opencode::OpenCodePluginGuard;
 #[cfg(test)]
-pub(crate) use owned_files::PANEFLOW_TS_BASENAME;
+pub(crate) use owned_files::{render_as_sibling_instance, PANEFLOW_TS_BASENAME};
 pub(crate) use owned_files::{GrokHookFileGuard, PiExtensionGuard};
 
 use crate::locate_sibling_hook_binary;

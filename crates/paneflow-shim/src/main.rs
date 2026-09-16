@@ -365,9 +365,12 @@ const DSH_LAUNCHER_OPT_OUT: &[&str] = &[
     "--dump-default-config",
 ];
 
-/// Launcher flags that consume the following argv token. `--profile=tui`
-/// stays a single token and is skipped as a dash option instead.
-const DSH_VALUE_OPTIONS: &[&str] = &["--profile", "--from-default-profile", "--patch"];
+/// Launcher flags that consume the following argv token, so the token after
+/// them is a value and never the subcommand. `--profile=tui` stays a single
+/// token and is skipped as a dash option instead. The list mirrors dsh's root
+/// options as understood on 2026-09-16: `--profile` has the short spelling
+/// `-p`; `--from-default-profile` and `--patch` have no short form.
+const DSH_VALUE_OPTIONS: &[&str] = &["--profile", "-p", "--from-default-profile", "--patch"];
 
 pub(crate) fn with_dsh_patch_overlay(
     args: Vec<OsString>,
@@ -392,8 +395,12 @@ fn dsh_accepts_patch_overlay(args: &[OsString]) -> bool {
     if dsh_user_supplies_patch(args) {
         return false;
     }
+    // The opt-out flags are dsh's own root options: after `--` every token
+    // is a positional for the subcommand (`dsh chat -- --version`), so the
+    // scan stops there, like the `--patch` scan below.
     !args
         .iter()
+        .take_while(|arg| *arg != "--")
         .any(|arg| DSH_LAUNCHER_OPT_OUT.iter().any(|opt| arg == opt))
 }
 
