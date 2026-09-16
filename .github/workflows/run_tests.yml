@@ -388,9 +388,9 @@ jobs:
             fi
           fi
 
-  # Apple Silicon quality gate: fmt, clippy, test, check, and a
-  # release build of paneflow-app. Style checks that used to live on a
-  # separate runner run here so this is the only compile leg.
+  # Apple Silicon quality gate: fmt, clippy, test, check. The release
+  # paneflow-app binary is produced by the parallel `macos_release_build`
+  # job so wall clock is the max of the two compile graphs, not the sum.
   #
   # Runner: macos-15 (Apple Silicon). GitHub-hosted macos-15 defaults
   # to Xcode 16.4; DEVELOPER_DIR pins that so an image refresh cannot
@@ -504,13 +504,79 @@ jobs:
       - name: cargo check (aarch64-apple-darwin)
         run: cargo check --workspace --locked --target aarch64-apple-darwin
 
-      # release build produces the expected binary path.
+  # Release paneflow-app binary for artifact consumers (render smoke).
+  # Parallel to macos_check on the same rust-cache prefix-key so the
+  # clippy/test graph and the release graph overlap (#554).
+  macos_release_build:
+    name: macOS aarch64 release build
+    needs: orchestrate
+    if: >-
+      needs.orchestrate.outputs.rust == 'true' ||
+      needs.orchestrate.outputs.ci == 'true' ||
+      needs.orchestrate.outputs.release_packaging == 'true'
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Same Xcode + Metal proof as macos_check: GPUI compiles .metal
+      # shaders at build time.
+      - name: Verify Xcode + Metal toolchain
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "${DEVELOPER_DIR}" ]; then
+            echo "::error::Pinned Xcode not found at ${DEVELOPER_DIR}. macos-15 should ship Xcode 16.4; this indicates a runner image drift."
+            exit 1
+          fi
+          sudo xcode-select -s "${DEVELOPER_DIR}"
+
+          CLT_PATH="$(xcode-select -p 2>/dev/null || true)"
+          if [ -z "$CLT_PATH" ] || [ ! -d "$CLT_PATH" ]; then
+            echo "::error::Xcode developer directory not found (xcode-select -p returned '$CLT_PATH'). GitHub macos-15 runners should ship Xcode preinstalled - this indicates a runner image drift or a misconfigured self-hosted runner."
+            exit 1
+          fi
+          echo "Xcode developer dir: $CLT_PATH"
+
+          SDK_PATH="$(xcrun --show-sdk-path 2>/dev/null || true)"
+          if [ -z "$SDK_PATH" ] || [ ! -d "$SDK_PATH" ]; then
+            echo "::error::macOS SDK not found (xcrun --show-sdk-path returned '$SDK_PATH')."
+            exit 1
+          fi
+          echo "macOS SDK path: $SDK_PATH"
+
+          if ! xcrun metal --version; then
+            echo "::warning::xcrun metal --version failed; downloading MetalToolchain"
+            xcodebuild -downloadComponent MetalToolchain
+            if ! xcrun metal --version; then
+              echo "::error::Metal compiler still missing after MetalToolchain download. gpui compiles .metal shaders at build time and cannot proceed."
+              exit 1
+            fi
+          fi
+
+          METAL_HEADERS="$SDK_PATH/System/Library/Frameworks/Metal.framework/Headers"
+          if [ ! -d "$METAL_HEADERS" ]; then
+            echo "::error::Metal framework headers not found at $METAL_HEADERS. gpui Objective-C bridging will fail with header-not-found errors."
+            exit 1
+          fi
+          echo "Metal framework headers: $METAL_HEADERS"
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 (master as of 2026-08-05)
+        with:
+          toolchain: "1.98.0"
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          prefix-key: "v1-rust"
+          key: aarch64-apple-darwin
+
       # src-app/build.rs enforces EMBED_SIZE_LIMIT_BYTES on this build;
       # there is no separate YAML size-budget step.
       - name: cargo build --release (aarch64-apple-darwin)
         run: cargo build --release -p paneflow-app --locked --target aarch64-apple-darwin
 
-      # verify the produced binary is a Mach-O arm64 executable.
       - name: Verify Mach-O arm64 binary
         run: |
           BIN=target/aarch64-apple-darwin/release/paneflow
@@ -518,9 +584,6 @@ jobs:
           file "$BIN"
           file "$BIN" | grep -q 'Mach-O 64-bit executable arm64'
 
-      # on failure the job logs already capture the failing crate and
-      # error; uploading the binary on success gives reviewers an artifact
-      # they can `file`/`otool` locally if something downstream misbehaves.
       - name: Upload aarch64 binary artifact
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -543,7 +606,7 @@ jobs:
   # compile/sign/notarize, none was visual. This job closes that hole at
   # the PR gate so the regression cannot reach `main`.
   #
-  # Pipeline: download the binary built by `macos_check` → wrap it in
+  # Pipeline: download the binary built by `macos_release_build` → wrap it in
   # the same `.app` skeleton `release.yml` ships → launch the binary
   # inside the bundle (so Core Text sees the bundle context, exactly
   # like an end-user install) → screencapture → soft OCR sanity check.
@@ -565,7 +628,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────
   macos_render_smoke:
     name: macOS aarch64 render smoke (visual)
-    needs: [orchestrate, macos_check]
+    needs: [orchestrate, macos_release_build]
     # Gate on the `rendering` sub-filter (not the broad `rust` filter):
     # the c3e2331-class regression this job exists to catch can only
     # ride in on edits to the rendering paths declared by the
@@ -713,6 +776,7 @@ jobs:
       - orchestrate
       - platform_census
       - macos_check
+      - macos_release_build
       - macos_render_smoke
       - security_audit
     if: always()
@@ -735,6 +799,7 @@ jobs:
           RESULT_AGENT_POLICY: ${{ needs.agent_policy_tests.result }}
           RESULT_PLATFORM_CENSUS: ${{ needs.platform_census.result }}
           RESULT_MACOS_CHECK: ${{ needs.macos_check.result }}
+          RESULT_MACOS_RELEASE_BUILD: ${{ needs.macos_release_build.result }}
           RESULT_MACOS_RENDER_SMOKE: ${{ needs.macos_render_smoke.result }}
           RESULT_SECURITY_AUDIT: ${{ needs.security_audit.result }}
         run: |
@@ -755,6 +820,7 @@ jobs:
           check_result "orchestrate"          "$RESULT_ORCHESTRATE"
           check_result "platform_census"      "$RESULT_PLATFORM_CENSUS"
           check_result "macos_check"          "$RESULT_MACOS_CHECK"
+          check_result "macos_release_build"  "$RESULT_MACOS_RELEASE_BUILD"
           check_result "macos_render_smoke"   "$RESULT_MACOS_RENDER_SMOKE"
           check_result "security_audit"       "$RESULT_SECURITY_AUDIT"
 
