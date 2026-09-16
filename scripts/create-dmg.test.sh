@@ -90,6 +90,33 @@ run_logged "$TMP/valid.out" hdiutil_verify_with_retry "$VALID"
 grep -q "attempt " "$TMP/valid.out" && fail "valid image should not log retries: $(cat "$TMP/valid.out")"
 pass "valid image verifies on the first attempt"
 
+# --- verify: first call fails (EAGAIN), second succeeds -------------------
+VERIFY_CALLS=0
+hdiutil() {
+    if [ "${1:-}" = "verify" ]; then
+        VERIFY_CALLS=$((VERIFY_CALLS + 1))
+        if [ "$VERIFY_CALLS" -eq 1 ]; then
+            echo "hdiutil: verify failed - Resource temporarily unavailable" >&2
+            return 1
+        fi
+    fi
+    command hdiutil "$@"
+}
+run_logged "$TMP/retry-ok.out" hdiutil_verify_with_retry "$VALID"
+[ "$rc" -eq 0 ] || fail "verify did not recover after a first-attempt EAGAIN: $(cat "$TMP/retry-ok.out")"
+[ "$VERIFY_CALLS" -eq 2 ] || fail "EAGAIN-then-success verify: expected 2 calls, got $VERIFY_CALLS"
+grep -q "attempt 1/${HDIUTIL_RETRY_ATTEMPTS}" "$TMP/retry-ok.out" \
+    || fail "EAGAIN-then-success verify missing attempt 1 log"
+pass "verify recovers when the first call fails and the second succeeds"
+
+# Restore the counting wrapper for later tests.
+hdiutil() {
+    if [ "${1:-}" = "verify" ]; then
+        VERIFY_CALLS=$((VERIFY_CALLS + 1))
+    fi
+    command hdiutil "$@"
+}
+
 # --- create+verify pair, happy path (no signed .app) ----------------------
 PAIR_DEST="$TMP/pair-valid.dmg"
 VERIFY_CALLS=0
@@ -124,5 +151,31 @@ attach_attempts="$(grep -c "hdiutil attach failed (attempt " "$TMP/attach.out" |
 grep -q "attempt ${HDIUTIL_RETRY_ATTEMPTS}/${HDIUTIL_RETRY_ATTEMPTS}" "$TMP/attach.out" \
     || fail "non-image attach missing final-attempt log"
 pass "non-image attach exhausts retries and fails (attempts=$attach_attempts)"
+
+# --- attach: first call fails (EAGAIN), second succeeds -------------------
+# attach captures stdout in a subshell, so the attempt counter must be a file.
+ATTACH_N="$TMP/attach-n"
+echo 0 > "$ATTACH_N"
+hdiutil() {
+    if [ "${1:-}" = "attach" ]; then
+        n="$(cat "$ATTACH_N")"
+        n=$((n + 1))
+        echo "$n" > "$ATTACH_N"
+        if [ "$n" -eq 1 ]; then
+            echo "hdiutil: attach failed - Resource temporarily unavailable" >&2
+            return 1
+        fi
+    fi
+    command hdiutil "$@"
+}
+run_logged "$TMP/attach-retry.out" hdiutil_attach_with_retry "$VALID"
+[ "$rc" -eq 0 ] || fail "attach did not recover after a first-attempt EAGAIN: $(cat "$TMP/attach-retry.out")"
+attach_calls="$(cat "$ATTACH_N")"
+[ "$attach_calls" -eq 2 ] || fail "EAGAIN-then-success attach: expected 2 calls, got $attach_calls"
+if [ -n "${_HDIUTIL_ATTACH_OUTPUT:-}" ]; then
+    attach_dev="$(echo "$_HDIUTIL_ATTACH_OUTPUT" | awk 'NR==1 {print $1}')"
+    command hdiutil detach "$attach_dev" -force >/dev/null 2>&1 || true
+fi
+pass "attach recovers when the first call fails and the second succeeds"
 
 echo "All tests passed."
