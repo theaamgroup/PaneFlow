@@ -718,24 +718,68 @@ mod empty_app_tests {
                 && !lowered.contains("sidebar +"),
             "empty-app copy must not refer to a sidebar +: {hint}"
         );
+        // Cmd+Shift+N: the chord is real only while `secondary-shift-n` (Cmd on
+        // macOS, `keybindings/defaults.rs`) still binds `new_workspace`. The
+        // region is one `DefaultBinding { .. }` literal, so a rebinding or a
+        // renamed action fails here instead of leaving stale copy behind.
+        let chord_binding = source_slice(
+            include_str!("keybindings/defaults.rs"),
+            "key: \"secondary-shift-n\",",
+            "},",
+        );
+        assert!(
+            chord_binding.contains("action_name: \"new_workspace\""),
+            "secondary-shift-n must bind new_workspace: {chord_binding}"
+        );
         assert!(
             hint.contains("Cmd+Shift+N"),
             "empty-app copy must name Cmd+Shift+N: {hint}"
         );
+
+        // Window ▸ New Workspace: the label the copy quotes must be the one
+        // the Window menu carries (`app/bootstrap.rs::install_macos_menu_bar`).
+        let window_menu = source_slice(
+            include_str!("app/bootstrap.rs"),
+            "Menu::new(\"Window\").items(vec![",
+            "]),",
+        );
+        let menu_row = "MenuItem::action(\"New Workspace\", NewWorkspace)";
         assert!(
-            hint.contains("Window") && hint.contains("New Workspace"),
-            "empty-app copy must name Window menu New Workspace: {hint}"
+            window_menu.contains(menu_row),
+            "Window menu must carry the New Workspace row: {window_menu}"
         );
         assert!(
-            hint.contains("Open folder"),
-            "empty-app copy must name the Open folder button: {hint}"
+            hint.contains("Window ▸ New Workspace"),
+            "empty-app copy must name Window ▸ New Workspace: {hint}"
         );
+
+        // Open folder: the button is the sidebar's `empty-new-ws` row
+        // (`app/sidebar/mod.rs`), not part of the empty-app block, and the
+        // sidebar can be collapsed, so the copy has to say where it lives.
+        let sidebar_button = source_slice(
+            include_str!("app/sidebar/mod.rs"),
+            ".id(\"empty-new-ws\")",
+            "}),",
+        );
+        assert!(
+            sidebar_button.contains(".child(\"Open folder\")"),
+            "sidebar empty-new-ws must be labelled Open folder: {sidebar_button}"
+        );
+        assert!(
+            sidebar_button.contains("create_workspace_with_picker("),
+            "sidebar Open folder must create a workspace: {sidebar_button}"
+        );
+        assert!(
+            hint.contains("Open folder") && lowered.contains("sidebar"),
+            "empty-app copy must locate the Open folder button in the sidebar: {hint}"
+        );
+
         assert!(
             !lowered.contains("profile")
                 && !lowered.contains("command palette")
                 && !hint.contains("Cmd+Shift+O")
                 && !lowered.contains("clone"),
-            "empty-app copy must not mention the unreachable profile menu, command palette, or Clone: {hint}"
+            "empty-app copy must not mention the profile menu (no New Workspace row), command palette, or Clone: {hint}"
         );
 
         let render_anchor = format!("impl Render for {} {{", "PaneFlowApp");
@@ -749,6 +793,13 @@ mod empty_app_tests {
         assert!(
             !empty_app.contains("Click +") && !empty_app.contains("+ in the sidebar"),
             "empty-app render still contains a sidebar + hint: {empty_app}"
+        );
+        // The block renders no button of its own; if one lands here the copy
+        // (and this cross-check) should move with it.
+        let button_label = format!(".child(\"{}\")", "Open folder");
+        assert!(
+            !empty_app.contains(&button_label),
+            "empty-app block now renders its own Open folder button; update the hint: {empty_app}"
         );
     }
 }
@@ -1967,9 +2018,12 @@ impl PaneFlowApp {
 }
 
 // Issue #533: live New Workspace entry points (DESIGN.md §5.2); no sidebar
-// `+` since #105. The profile menu is unreachable and has no New Workspace row.
+// `+` since #105. The title-bar profile menu is reachable but carries no New
+// Workspace row, so it is not named here. The Open folder button is the
+// sidebar's `empty-new-ws` row, not part of this block, and the sidebar can be
+// collapsed (Cmd+Alt+B, persisted), so the copy says where the button lives.
 const EMPTY_APP_WORKSPACE_HINT: &str = "Create your first workspace with Cmd+Shift+N, Window ▸ New Workspace, \
-     or the Open folder button.";
+     or the Open folder button in the sidebar.";
 
 impl Render for PaneFlowApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

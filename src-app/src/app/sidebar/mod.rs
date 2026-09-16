@@ -4115,9 +4115,10 @@ mod tests {
     }
 
     /// Issue #105: the "Workspaces" header no longer carries a `+`. Creating
-    /// a workspace already has four other entry points (`Cmd+Shift+N`, the
-    /// Window menu, the profile menu, and the empty-state "Open folder"
-    /// button), and the header glyph was the redundant fifth. Read from
+    /// a workspace already has three other entry points (`Cmd+Shift+N`, the
+    /// Window menu, and this sidebar's empty-state "Open folder" button,
+    /// `empty-new-ws`; the title-bar profile menu is reachable but carries no
+    /// New Workspace row), and the header glyph was the redundant extra. Read from
     /// source because `PaneFlowApp` cannot be built in a unit test (bootstrap
     /// opens a window and does real I/O), so the rendered element tree is
     /// unreachable from here.
