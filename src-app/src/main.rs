@@ -52,6 +52,7 @@ mod pane;
 mod pane_drag;
 mod pi_sessions;
 mod pricing;
+mod recents;
 mod runtime_paths;
 mod search;
 mod settings;

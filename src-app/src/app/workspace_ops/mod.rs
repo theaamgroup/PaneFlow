@@ -1418,6 +1418,10 @@ impl PaneFlowApp {
             return;
         }
         let mut opened = false;
+        // Issue #521: only the folders that actually became (or re-selected)
+        // a workspace are promoted in recents.json, so a stray file in a drop
+        // never lands in the list.
+        let mut recent_paths: Vec<std::path::PathBuf> = Vec::with_capacity(paths.len());
         for path in paths {
             if self.workspaces.len() >= MAX_WORKSPACES {
                 break;
@@ -1438,6 +1442,7 @@ impl PaneFlowApp {
             if let Some(at) = self.workspaces.iter().position(|ws| ws.cwd == cwd) {
                 self.active_idx = at;
                 opened = true;
+                recent_paths.push(path.clone());
                 continue;
             }
             let n = self.workspaces.len() + 1;
@@ -1455,15 +1460,44 @@ impl PaneFlowApp {
             self.workspaces.push(ws);
             self.active_idx = self.workspaces.len() - 1;
             opened = true;
+            recent_paths.push(path.clone());
         }
         if !opened {
             return;
         }
+        crate::recents::record(&recent_paths, cx);
         self.save_session(cx);
         cx.notify();
         // US-016 (prd-git-diff-mode-2026-Q3.md): a new repo must surface in
         // Multi-project / re-target the diff.
         self.reconcile_diff_after_workspace_change(cx);
+    }
+
+    /// Open the `idx`-th entry of the recent-folders list (issue #521): the
+    /// sidebar's empty-state `Open recent` rows and the `Cmd+1..5` fallback
+    /// both land here, and both go through `open_workspace_folders` so the
+    /// folder is filed exactly like a picked one. A folder deleted since the
+    /// list was loaded is forgotten instead of opened.
+    pub(crate) fn open_recent_workspace(
+        &mut self,
+        idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = crate::recents::current().get(idx).cloned() else {
+            return;
+        };
+        if !entry.path.is_dir() {
+            crate::recents::forget(&entry.path, cx);
+            self.show_toast("That folder is gone", cx);
+            cx.notify();
+            return;
+        }
+        self.open_workspace_folders(std::slice::from_ref(&entry.path), cx);
+        let active = self.active_idx;
+        if active < self.workspaces.len() {
+            self.select_workspace(active, window, cx);
+        }
     }
 
     pub(crate) fn create_workspace_with_picker(
@@ -2485,6 +2519,13 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Issue #521: with no workspace open the chord has nothing to select,
+        // so `Cmd+1..5` open the matching row of the sidebar's `Open recent`
+        // list instead (`recents::shortcut_fallback` keeps 6..9 inert).
+        if let Some(recent) = crate::recents::shortcut_fallback(self.workspaces.len(), idx) {
+            self.open_recent_workspace(recent, window, cx);
+            return;
+        }
         let display_order = self.workspace_display_order(cx);
         if let Some(storage_idx) = workspace_at_display_position(&display_order, idx) {
             self.activate_workspace_at(

@@ -589,7 +589,8 @@ impl PaneFlowApp {
 
     fn finish_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pending = self.session_restore.take();
-        if self.workspaces.is_empty() {
+        let restored_workspaces = !self.workspaces.is_empty();
+        if !restored_workspaces {
             log::warn!(
                 "session restore: session contained no restorable workspaces; creating default workspace"
             );
@@ -601,6 +602,15 @@ impl PaneFlowApp {
             self.active_idx = pending
                 .active_workspace
                 .min(self.workspaces.len().saturating_sub(1));
+        }
+        // Issue #521: a restored session counts as opening its folders, the
+        // active one first, so recents.json tracks what the user last had up.
+        // The substituted `default_workspace` (the implicit launch cwd) is
+        // not something the user opened, so it is never recorded.
+        if pending.is_some() && restored_workspaces {
+            let restored =
+                crate::recents::restored_session_paths(&self.workspaces, self.active_idx);
+            crate::recents::record(&restored, cx);
         }
         spawn_restored_worktree_prune(&self.workspaces, cx);
         if let Some(pending) = pending {
