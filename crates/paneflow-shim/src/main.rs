@@ -365,6 +365,10 @@ const DSH_LAUNCHER_OPT_OUT: &[&str] = &[
     "--dump-default-config",
 ];
 
+/// Launcher flags that consume the following argv token. `--profile=tui`
+/// stays a single token and is skipped as a dash option instead.
+const DSH_VALUE_OPTIONS: &[&str] = &["--profile", "--from-default-profile", "--patch"];
+
 pub(crate) fn with_dsh_patch_overlay(
     args: Vec<OsString>,
     overlay: &std::path::Path,
@@ -380,15 +384,32 @@ pub(crate) fn with_dsh_patch_overlay(
 }
 
 fn dsh_accepts_patch_overlay(args: &[OsString]) -> bool {
-    let first_positional = args
-        .iter()
-        .find(|arg| !arg.to_string_lossy().starts_with('-'));
-    if first_positional.is_some_and(|arg| arg == "plugin") {
+    if dsh_first_subcommand(args).is_some_and(|arg| arg == "plugin") {
         return false;
     }
     !args
         .iter()
         .any(|arg| DSH_LAUNCHER_OPT_OUT.iter().any(|opt| arg == opt))
+}
+
+fn dsh_first_subcommand(args: &[OsString]) -> Option<&OsString> {
+    let mut index = 0;
+    while index < args.len() {
+        let text = args[index].to_string_lossy();
+        if text == "--" {
+            return args.get(index + 1);
+        }
+        if text.starts_with('-') {
+            if DSH_VALUE_OPTIONS.iter().any(|opt| text == *opt) {
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        return Some(&args[index]);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

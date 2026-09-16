@@ -886,15 +886,17 @@ fn dsh_overlay_escapes_a_single_quote_in_the_config_path() {
 #[test]
 fn dsh_patch_overlay_leads_the_launcher_flags() {
     let overlay = std::path::Path::new("/tmp/overlay.yml");
-    let args = vec![
-        std::ffi::OsString::from("--profile"),
-        std::ffi::OsString::from("tui"),
-    ];
-    let patched = crate::with_dsh_patch_overlay(args, overlay);
-    assert_eq!(patched[0], "--patch");
-    assert_eq!(patched[1], overlay.as_os_str());
-    assert_eq!(patched[2], "--profile");
-    assert_eq!(patched[3], "tui");
+    for argv in [
+        vec!["--profile", "tui"],
+        vec!["--profile=tui"],
+        vec!["--profile", "tui", "--resume", "abc"],
+    ] {
+        let args: Vec<std::ffi::OsString> = argv.iter().map(std::ffi::OsString::from).collect();
+        let patched = crate::with_dsh_patch_overlay(args.clone(), overlay);
+        assert_eq!(patched[0], "--patch", "{argv:?}");
+        assert_eq!(patched[1], overlay.as_os_str(), "{argv:?}");
+        assert_eq!(&patched[2..], args, "{argv:?}");
+    }
 }
 
 #[test]
@@ -902,6 +904,10 @@ fn dsh_patch_overlay_stays_out_of_plugin_help_version_and_dumps() {
     let overlay = std::path::Path::new("/tmp/overlay.yml");
     for argv in [
         vec!["plugin", "--profile", "tui", "add", "pkg"],
+        vec!["--profile", "tui", "plugin", "add", "pkg"],
+        vec!["--profile=tui", "plugin", "add", "pkg"],
+        vec!["--from-default-profile", "web", "plugin", "add", "pkg"],
+        vec!["--patch", "extra.yml", "plugin", "add", "pkg"],
         vec!["--help"],
         vec!["-h"],
         vec!["--version"],
