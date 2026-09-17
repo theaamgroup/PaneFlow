@@ -1360,6 +1360,11 @@ impl PaneFlowApp {
             block = block.child(
                 div()
                     .id(SharedString::from(format!("empty-recent-{idx}")))
+                    // The #340 contract: AccessKit only exposes activation for
+                    // a named button role, so a VoiceOver user can reach the
+                    // row; the full path is the name, the basename the label.
+                    .role(Role::Button)
+                    .aria_label(full_path.clone())
                     .flex()
                     .flex_row()
                     .items_center()
@@ -4653,6 +4658,35 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(1));
         cx.run_until_parked();
         assert!(cx.debug_bounds("paneflow-text-tooltip").is_some());
+    }
+
+    /// Issue #521: the empty state's `Open recent` rows are activated with
+    /// `on_click`, which AccessKit exposes only for a named button role, so
+    /// each row carries `Role::Button` and its full path as the accessible
+    /// name (rows six through eight have no `Cmd+N` fallback at all).
+    #[test]
+    fn empty_state_recent_rows_are_accessible_named_buttons() {
+        let source = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production sidebar source");
+        let body = source_slice(source, "fn render_empty_state_recents(", "\n    }\n");
+        let id_at = body
+            .find("format!(\"empty-recent-{idx}\")")
+            .expect("the empty state builds the `empty-recent-` rows");
+        let row = &body[id_at..];
+        let click_at = row
+            .find(".on_click(")
+            .expect("a recent row activates on click");
+        let head = &row[..click_at];
+        assert!(
+            head.contains(".role(Role::Button)"),
+            "a recent row must carry the button role before its click handler: {head}"
+        );
+        assert!(
+            head.contains(".aria_label(full_path.clone())"),
+            "a recent row's accessible name is its full path: {head}"
+        );
     }
 
     /// Issue #340: the rail's hover actions (new pane, close workspace, close

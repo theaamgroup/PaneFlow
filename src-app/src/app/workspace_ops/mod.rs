@@ -842,6 +842,8 @@ impl RecentProbes {
     pub(crate) fn finish(&mut self, path: &std::path::Path) {
         self.in_flight.retain(|pending| pending != path);
     }
+}
+
 /// The toast every UI workspace-create path shows once [`MAX_WORKSPACES`] is
 /// reached.
 ///

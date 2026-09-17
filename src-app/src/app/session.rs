@@ -1144,7 +1144,10 @@ fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bo
 /// answer: `Some(is_dir)` when `stat` replied in time, `None` when it did
 /// not. Restore folds `None` into "unavailable"; the worker, if any, is
 /// left to unwind on its own.
-fn probe_persisted_dir_within(path: &Path, timeout: std::time::Duration) -> Option<bool> {
+pub(crate) fn probe_persisted_dir_within(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Option<bool> {
     match start_persisted_dir_probe(path, timeout) {
         ProbeOutcome::Answered(is_dir) => Some(is_dir),
         ProbeOutcome::TimedOut(_) => None,

@@ -304,15 +304,38 @@ pub(crate) fn promote(workspaces: &mut Vec<RecentWorkspace>, paths: &[PathBuf]) 
     *workspaces != before
 }
 
-/// Pure: keep only entries whose directory still exists, deduplicated, capped.
+/// Longest the load waits on `stat` for one stored folder. A local folder
+/// answers in microseconds; only an SMB/NFS/iCloud mount that is not
+/// responding runs it out. The bound is what lets the sole load future reach
+/// `cache_publish` no matter what `recents.json` holds: while the cache is
+/// `Loading`, `cache_record` only queues, so an unbounded probe would keep
+/// every newly opened folder unshown and unsaved for the whole run.
+const RECENT_PRUNE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Keep only entries whose directory still exists, deduplicated, capped.
+/// Each existence check is the bounded session-restore probe: a folder whose
+/// `stat` does not answer within [`RECENT_PRUNE_PROBE_TIMEOUT`] is kept (the
+/// mount may come back, and the click path re-probes it), only a definite
+/// "not a directory" drops it.
 pub(crate) fn prune(stored: Vec<RecentWorkspace>) -> Vec<RecentWorkspace> {
+    prune_with(stored, |path| {
+        crate::app::session::probe_persisted_dir_within(path, RECENT_PRUNE_PROBE_TIMEOUT)
+    })
+}
+
+/// Pure half of [`prune`]: `probe` answers `Some(is_dir)` or `None` when it
+/// could not tell in time.
+pub(crate) fn prune_with(
+    stored: Vec<RecentWorkspace>,
+    probe: impl Fn(&Path) -> Option<bool>,
+) -> Vec<RecentWorkspace> {
     let mut kept: Vec<RecentWorkspace> =
         Vec::with_capacity(stored.len().min(MAX_RECENT_WORKSPACES));
     for entry in stored {
         if kept.len() >= MAX_RECENT_WORKSPACES {
             break;
         }
-        if entry.path.as_os_str().is_empty() || !entry.path.is_dir() {
+        if entry.path.as_os_str().is_empty() || probe(&entry.path) == Some(false) {
             continue;
         }
         if kept.iter().any(|k| k.path == entry.path) {
@@ -537,6 +560,39 @@ mod tests {
         );
         assert_eq!(recents[0].path, PathBuf::from("/first"));
         assert_eq!(recents[1].path, PathBuf::from("/second"));
+    }
+
+    /// A stored folder on a mount whose `stat` never answers must not hold
+    /// the load: the probe times out (`None`), the entry is kept for the
+    /// click path to re-probe, and only a definite `Some(false)` drops it.
+    #[test]
+    fn prune_keeps_a_folder_whose_probe_times_out_and_drops_a_definite_miss() {
+        let stalled = PathBuf::from("/Volumes/never-answers/project");
+        let gone = PathBuf::from("/tmp/definitely-gone");
+        let live = PathBuf::from("/tmp/live");
+        let stored = vec![
+            RecentWorkspace {
+                path: stalled.clone(),
+                title: "project".into(),
+            },
+            RecentWorkspace {
+                path: gone.clone(),
+                title: "gone".into(),
+            },
+            RecentWorkspace {
+                path: live.clone(),
+                title: "live".into(),
+            },
+        ];
+        let kept = prune_with(stored, |path| {
+            if path == stalled {
+                None
+            } else {
+                Some(path == live)
+            }
+        });
+        let paths: Vec<&Path> = kept.iter().map(|entry| entry.path.as_path()).collect();
+        assert_eq!(paths, vec![stalled.as_path(), live.as_path()]);
     }
 
     #[test]
@@ -893,7 +949,20 @@ mod tests {
             .lines()
             .filter(|line| line.contains(".is_dir()"))
             .count();
-        assert_eq!(is_dir_sites, 1, "is_dir belongs to prune alone");
+        assert_eq!(
+            is_dir_sites, 0,
+            "no unbounded stat in the recents module: prune probes through the bounded \
+             session helper so the load always publishes"
+        );
+        let prune_body = production
+            .split("pub(crate) fn prune(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("prune exists");
+        assert!(
+            prune_body.contains("probe_persisted_dir_within(path, RECENT_PRUNE_PROBE_TIMEOUT)"),
+            "prune must use the bounded probe: {prune_body}"
+        );
     }
 
     #[test]
