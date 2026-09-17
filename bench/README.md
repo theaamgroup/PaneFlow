@@ -274,6 +274,19 @@ once the frame it was launched to measure has been presented, and quits. The
 probe ships in release builds so the shipping profile is what gets measured;
 without the variable every mark is one `OnceLock` read.
 
+While tracing, the app also pumps its own frames. GPUI requests frames from
+a per-window display link that macOS only starts once the window is key or
+its occlusion state changes, and a benchmark launches the app from a process
+that is not the active application, so macOS refuses the activation and the
+window would get exactly one frame (AppKit's initial layer display) and then
+none: a staged restore, one batch per frame, would stall on its first batch.
+The probe therefore sends `displayLayer:` to the GPUI view every 8 ms from a
+foreground task until the trace is written, which is the same path the first
+frame comes through (it runs the pending next-frame callbacks, draws, and
+presents with a transaction, so AppKit still paces it at the display
+refresh). The launched windows may open behind the terminal running the
+script; that is fine, and nothing needs to be clicked.
+
 Two scenarios run back to back, each against its own seeded `PANEFLOW_HOME`
 under the system temp directory (see `docs/user/configuration/schema.md` for
 that variable) and a fixture `PANEFLOW_SOCKET_PATH`, so the launches never
