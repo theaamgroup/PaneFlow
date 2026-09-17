@@ -288,14 +288,22 @@ impl PaneFlowApp {
             self.launch_pad_set_error("No agent selected", cx);
             return;
         };
+        // The pending flag is read before the snapshot: a walk that publishes
+        // between the two reads then shows up as installed and proceeds,
+        // while the other order could refuse an installed agent.
+        let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
         if !agent.is_installed() {
             // Issue #518: the first PATH walk has not published. Never wait
             // for it here (this is the GPUI thread; a slow PATH entry would
             // freeze the window): queue the confirm, say so, and let the
-            // boot warm's completion replay it with the real answer.
-            if crate::agent_launcher::installed_binary_scan_pending() {
+            // boot warm's completion replay it with the real answer. The
+            // confirm commits the row the user sees, so the provisional
+            // default is no longer pending: the settle must not move it
+            // before the replay.
+            if scan_pending {
                 if let Some(lp) = self.launch_pad.as_mut() {
                     lp.confirm_queued = true;
+                    lp.agent_default_pending = false;
                 }
                 self.launch_pad_set_error(AGENT_SCAN_PENDING_COPY, cx);
                 return;
@@ -1039,6 +1047,26 @@ mod tests {
         assert!(
             confirm.contains("lp.confirm_queued = true;"),
             "launch_pad_confirm queues a confirm made during the walk: {confirm}"
+        );
+        assert!(
+            confirm.contains("lp.agent_default_pending = false;"),
+            "a queued confirm commits the selected row, so the settle must not move it: {confirm}"
+        );
+        let pending_at = confirm
+            .find("installed_binary_scan_pending()")
+            .expect("confirm reads the pending flag");
+        let snapshot_at = confirm
+            .find("agent.is_installed()")
+            .expect("confirm reads the snapshot");
+        assert!(
+            pending_at < snapshot_at,
+            "the pending flag is read before the snapshot: {confirm}"
+        );
+
+        let settings = include_str!("../settings/tabs/workspaces.rs");
+        assert!(
+            !settings.contains("visible_now("),
+            "Settings click handlers read the snapshot, never the blocking lookup"
         );
 
         let palette = include_str!("pane_palette.rs");

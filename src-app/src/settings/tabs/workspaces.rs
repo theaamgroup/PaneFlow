@@ -1109,10 +1109,19 @@ impl PaneFlowApp {
             focus: panes.is_empty().then_some(true),
             ..Default::default()
         };
-        if let Some(agent) = TerminalAgent::visible_now(&self.cached_config)
-            .first()
-            .copied()
-        {
+        // Issue #518: a click handler runs on the GPUI thread, so this reads
+        // the installed-agent snapshot and never waits for the first PATH
+        // walk; while the walk is pending and the snapshot is still empty
+        // the click is refused with the looking copy rather than recording
+        // a pane with no agent.
+        let visible = TerminalAgent::visible(&self.cached_config);
+        if visible.is_empty() && crate::agent_launcher::installed_binary_scan_pending() {
+            self.workspace_template_status =
+                Some(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
+            cx.notify();
+            return;
+        }
+        if let Some(agent) = visible.first().copied() {
             pane.agent = Some(agent.tag().to_string());
             pane.prompt = Some(String::new());
         }
@@ -1643,10 +1652,14 @@ impl PaneFlowApp {
                 pane.command = None;
                 pane.prompt = (!prompt.is_empty()).then_some(prompt);
                 if pane.agent.is_none() {
-                    let Some(agent) = TerminalAgent::visible_now(&self.cached_config)
-                        .first()
-                        .copied()
+                    // Issue #518: the snapshot, never the blocking read (this
+                    // is the GPUI thread); a pending walk is reported, not
+                    // waited for.
+                    let Some(agent) = TerminalAgent::visible(&self.cached_config).first().copied()
                     else {
+                        if crate::agent_launcher::installed_binary_scan_pending() {
+                            return Err(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
+                        }
                         return Err("enable at least one AI Agent first".to_string());
                     };
                     pane.agent = Some(agent.tag().to_string());
