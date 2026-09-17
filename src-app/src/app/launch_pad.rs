@@ -1068,6 +1068,22 @@ mod tests {
             !settings.contains("visible_now("),
             "Settings click handlers read the snapshot, never the blocking lookup"
         );
+        for site in [
+            "fn add_workspace_template_pane(",
+            "fn set_workspace_template_pane_kind(",
+            "PaneKind::Agent => {\n                pane.command = None;\n                pane.prompt = (!prompt.is_empty())",
+        ] {
+            let body = settings
+                .split(site)
+                .nth(1)
+                .and_then(|rest| rest.split("\n    }\n").next())
+                .unwrap_or_else(|| panic!("`{site}` exists"));
+            assert!(
+                body.contains("installed_binary_scan_pending()")
+                    && body.contains("AGENT_SCAN_PENDING_COPY"),
+                "`{site}` must refuse with the looking copy while the walk is pending: {body}"
+            );
+        }
 
         let palette = include_str!("pane_palette.rs");
         let launchable = palette

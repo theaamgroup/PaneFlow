@@ -1203,10 +1203,25 @@ impl PaneFlowApp {
                 }
             }
             PaneKind::Agent => {
+                // Issue #518: the snapshot, never the blocking read (this is
+                // the GPUI thread). While the first PATH walk is pending and
+                // the snapshot is still empty the change is refused with the
+                // looking copy, or the pane would lose its command and be
+                // persisted as Empty.
+                let visible = TerminalAgent::visible(&self.cached_config);
+                if pane.agent.is_none()
+                    && visible.is_empty()
+                    && crate::agent_launcher::installed_binary_scan_pending()
+                {
+                    self.workspace_template_status =
+                        Some(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
+                    cx.notify();
+                    return;
+                }
                 pane.command = None;
                 pane.prompt.get_or_insert_with(String::new);
                 if pane.agent.is_none()
-                    && let Some(agent) = TerminalAgent::visible(&self.cached_config).first()
+                    && let Some(agent) = visible.first()
                 {
                     pane.agent = Some(agent.tag().to_string());
                 }
