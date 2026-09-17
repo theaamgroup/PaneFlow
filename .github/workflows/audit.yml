@@ -134,7 +134,7 @@ jobs:
             } > issue-body.md
             gh issue create \
               --title "${TITLE}" \
-              --label "lens:security,area:platform,safety:release,needs-human-review,needs-info" \
+              --label "lens:security,area:platform,safety:release,needs-info" \
               --body-file issue-body.md
           else
             gh issue comment "${EXISTING}" \
