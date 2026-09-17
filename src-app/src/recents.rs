@@ -312,6 +312,13 @@ pub(crate) fn promote(workspaces: &mut Vec<RecentWorkspace>, paths: &[PathBuf]) 
 /// every newly opened folder unshown and unsaved for the whole run.
 const RECENT_PRUNE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How many stored entries the load will examine at all. The app never
+/// writes more than [`MAX_RECENT_WORKSPACES`], so anything past twice that
+/// is a hand-edited or corrupt file, and the load must not spend a probe
+/// timeout per row on it: the total wait is bounded by this times
+/// [`RECENT_PRUNE_PROBE_TIMEOUT`] no matter what the 64 KiB file holds.
+const MAX_RECENT_PRUNE_PROBES: usize = MAX_RECENT_WORKSPACES * 2;
+
 /// Keep only entries whose directory still exists, deduplicated, capped.
 /// Each existence check is the bounded session-restore probe: a folder whose
 /// `stat` does not answer within [`RECENT_PRUNE_PROBE_TIMEOUT`] is kept (the
@@ -331,14 +338,16 @@ pub(crate) fn prune_with(
 ) -> Vec<RecentWorkspace> {
     let mut kept: Vec<RecentWorkspace> =
         Vec::with_capacity(stored.len().min(MAX_RECENT_WORKSPACES));
-    for entry in stored {
+    for entry in stored.into_iter().take(MAX_RECENT_PRUNE_PROBES) {
         if kept.len() >= MAX_RECENT_WORKSPACES {
             break;
         }
-        if entry.path.as_os_str().is_empty() || probe(&entry.path) == Some(false) {
+        // Duplicates are dropped before the probe, so a repeated path costs
+        // one probe, not one per repeat.
+        if entry.path.as_os_str().is_empty() || kept.iter().any(|k| k.path == entry.path) {
             continue;
         }
-        if kept.iter().any(|k| k.path == entry.path) {
+        if probe(&entry.path) == Some(false) {
             continue;
         }
         kept.push(entry);
@@ -593,6 +602,48 @@ mod tests {
         });
         let paths: Vec<&Path> = kept.iter().map(|entry| entry.path.as_path()).collect();
         assert_eq!(paths, vec![stalled.as_path(), live.as_path()]);
+    }
+
+    /// A hand-edited file full of dead entries must not cost a probe timeout
+    /// per row: the load examines at most `MAX_RECENT_PRUNE_PROBES` entries,
+    /// and a repeated path is dropped before it is probed again.
+    #[test]
+    fn prune_examines_a_bounded_number_of_entries_and_probes_each_path_once() {
+        let dead: Vec<RecentWorkspace> = (0..100)
+            .map(|i| RecentWorkspace {
+                path: PathBuf::from(format!("/gone/{i}")),
+                title: format!("{i}"),
+            })
+            .collect();
+        let probes = std::cell::Cell::new(0usize);
+        let kept = prune_with(dead, |_| {
+            probes.set(probes.get() + 1);
+            Some(false)
+        });
+        assert!(kept.is_empty());
+        assert_eq!(
+            probes.get(),
+            MAX_RECENT_PRUNE_PROBES,
+            "one probe per examined row, then stop"
+        );
+
+        let repeated: Vec<RecentWorkspace> = (0..5)
+            .map(|_| RecentWorkspace {
+                path: PathBuf::from("/same"),
+                title: "same".into(),
+            })
+            .collect();
+        probes.set(0);
+        let kept = prune_with(repeated, |_| {
+            probes.set(probes.get() + 1);
+            Some(true)
+        });
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            probes.get(),
+            1,
+            "a duplicate is dropped before it is probed"
+        );
     }
 
     #[test]
