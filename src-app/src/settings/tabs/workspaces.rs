@@ -1109,7 +1109,10 @@ impl PaneFlowApp {
             focus: panes.is_empty().then_some(true),
             ..Default::default()
         };
-        if let Some(agent) = TerminalAgent::visible(&self.cached_config).first().copied() {
+        if let Some(agent) = TerminalAgent::visible_now(&self.cached_config)
+            .first()
+            .copied()
+        {
             pane.agent = Some(agent.tag().to_string());
             pane.prompt = Some(String::new());
         }
@@ -1640,7 +1643,9 @@ impl PaneFlowApp {
                 pane.command = None;
                 pane.prompt = (!prompt.is_empty()).then_some(prompt);
                 if pane.agent.is_none() {
-                    let Some(agent) = TerminalAgent::visible(&self.cached_config).first().copied()
+                    let Some(agent) = TerminalAgent::visible_now(&self.cached_config)
+                        .first()
+                        .copied()
                     else {
                         return Err("enable at least one AI Agent first".to_string());
                     };

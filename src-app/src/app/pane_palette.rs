@@ -135,15 +135,11 @@ impl Preset {
     /// instead of an empty terminal (US-015 AC4).
     fn ensure_launchable(&self) -> Result<(), String> {
         match &self.source {
-            // Issue #518: a cold cache answers `false` before the PATH walk
-            // has published; say so instead of claiming the agent is absent.
-            PresetSource::Agent(agent)
-                if !agent.is_installed()
-                    && crate::agent_launcher::installed_binary_scan_pending() =>
-            {
-                Err(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string())
-            }
-            PresetSource::Agent(agent) if !agent.is_installed() => Err(format!(
+            // Issue #518: a confirm is a user action, not a render frame. A
+            // cold cache waits for the first PATH walk to publish (well under
+            // a second) rather than refusing an agent that is installed; the
+            // rows say "looking" meanwhile, the confirm itself never lies.
+            PresetSource::Agent(agent) if !agent.is_installed_now() => Err(format!(
                 "{} is not installed - install its CLI, or hide it in Settings > AI Agent",
                 agent.display_name()
             )),

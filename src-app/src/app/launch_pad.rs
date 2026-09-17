@@ -265,15 +265,12 @@ impl PaneFlowApp {
             self.launch_pad_set_error("No agent selected", cx);
             return;
         };
-        if !agent.is_installed() {
-            // Issue #518: a cold cache answers `false` before the PATH walk
-            // has published; say so instead of claiming the agent is absent.
-            let error = if crate::agent_launcher::installed_binary_scan_pending() {
-                AGENT_SCAN_PENDING_COPY.to_string()
-            } else {
-                format!("{} is not installed", agent.display_name())
-            };
-            self.launch_pad_set_error(error, cx);
+        // Issue #518: a confirm is a user action, not a render frame. A cold
+        // cache waits for the first PATH walk to publish (well under a
+        // second) rather than dropping the Enter with a "looking" error that
+        // nothing re-arms once the walk lands.
+        if !agent.is_installed_now() {
+            self.launch_pad_set_error(format!("{} is not installed", agent.display_name()), cx);
             return;
         }
         if branch.is_empty() {
@@ -992,6 +989,45 @@ fn settle_default_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #518: render frames read the non-blocking snapshot, but a
+    /// confirm is a user action. Before the cold read stopped blocking, an
+    /// Enter pressed during the first PATH walk launched correctly; refusing
+    /// it with the "looking" copy drops the action and nothing re-arms it
+    /// once the walk lands. Both confirm paths must wait for the real answer.
+    #[test]
+    fn confirm_paths_wait_for_the_real_installed_answer() {
+        let pad = include_str!("launch_pad.rs");
+        let confirm = pad
+            .split("pub(crate) fn launch_pad_confirm(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("launch_pad_confirm exists");
+        assert!(
+            confirm.contains("agent.is_installed_now()"),
+            "launch_pad_confirm must block for the answer: {confirm}"
+        );
+        assert!(
+            !confirm.contains("installed_binary_scan_pending()")
+                && !confirm.contains("AGENT_SCAN_PENDING_COPY"),
+            "launch_pad_confirm must never refuse with the pending copy: {confirm}"
+        );
+
+        let palette = include_str!("pane_palette.rs");
+        let launchable = palette
+            .split("fn ensure_launchable(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("ensure_launchable exists");
+        assert!(
+            launchable.contains("agent.is_installed_now()"),
+            "ensure_launchable must block for the answer: {launchable}"
+        );
+        assert!(
+            !launchable.contains("installed_binary_scan_pending()"),
+            "ensure_launchable must never refuse with the pending copy: {launchable}"
+        );
+    }
 
     /// Issue #518: a pad opened during the first PATH walk defaults to row
     /// 0 provisionally; the boot warm's completion moves it to the first

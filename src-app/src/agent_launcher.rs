@@ -476,6 +476,18 @@ impl TerminalAgent {
             .filter(|a| a.is_visible(config))
             .collect()
     }
+
+    /// [`Self::visible`] for a user action that records its answer (the
+    /// workspace template's default agent): a cold cache waits for the first
+    /// PATH walk instead of picking from a list that is missing every
+    /// default-enabled agent until the walk publishes (issue #518). Never
+    /// call it from a render frame.
+    pub fn visible_now(config: &PaneFlowConfig) -> Vec<TerminalAgent> {
+        TerminalAgent::ALL
+            .into_iter()
+            .filter(|a| a.is_visible_with(config, TerminalAgent::is_installed_now))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
