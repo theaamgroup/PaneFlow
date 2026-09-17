@@ -264,8 +264,8 @@ pub fn ensure_binaries_extracted() -> Result<PathBuf> {
 }
 
 fn ensure_binaries_extracted_uncached() -> Result<PathBuf> {
-    let cache_root = dirs::cache_dir()
-        .ok_or_else(|| anyhow!("US-008: dirs::cache_dir() returned None; cannot extract"))?;
+    let cache_root = crate::runtime_paths::cache_dir()
+        .ok_or_else(|| anyhow!("US-008: the cache root is unresolvable; cannot extract"))?;
     let exe = std::env::current_exe().context("#440: current_exe() unresolvable")?;
     ensure_binaries_extracted_into(&cache_root, &exe)
 }

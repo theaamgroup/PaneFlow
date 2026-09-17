@@ -80,9 +80,10 @@ fn cache() -> MutexGuard<'static, Cache> {
     RECENTS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// `recents.json` beside `session.json`: `dirs::config_dir()/APP_SUBDIR/`.
+/// `recents.json` beside `session.json`: `<config root>/APP_SUBDIR/`, where
+/// the root follows `PANEFLOW_HOME` (#519).
 pub(crate) fn recents_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|directory| {
+    crate::runtime_paths::config_dir().map(|directory| {
         directory
             .join(paneflow_config::loader::APP_SUBDIR)
             .join("recents.json")

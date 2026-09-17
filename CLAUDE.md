@@ -157,21 +157,41 @@ scripts/bench-terminal.sh --set-baseline # same run, then make it the baseline
 scripts/bench-editor.sh                  # code editor benchmark: writes bench/results/editor-<stamp>-<sha>.json,
                                          # compares against bench/editor-baseline.json (plain results table without one)
 scripts/bench-editor.sh --set-baseline   # same run, then make it the baseline; refused when cpu_share < 0.90
+scripts/bench-startup.sh                 # time to first frame: builds the release binary, launches it against two
+                                         # seeded PANEFLOW_HOME fixtures, writes bench/results/startup-<stamp>-<sha>.json,
+                                         # compares against bench/startup-baseline.json
+scripts/bench-startup.sh --set-baseline  # same run, then make it the baseline; refused when the core-share probe < 0.90
 cargo test -p paneflow-app --release -- --ignored layout::render --test-threads=1
                                          # editor scroll frame beside 0/2/6 terminal panes (scroll_frame_p95_us_panes_N)
 ```
 
-Performance claims about the terminal pipeline or the code editor need
-evidence from those suites: the ignored `terminal_pipeline_benchmark` in
+Performance claims about the terminal pipeline, the code editor, or startup
+need evidence from those suites: the ignored `terminal_pipeline_benchmark` in
 `src-app/src/terminal/perf_bench.rs` and `editor_pipeline_benchmark` in
 `src-app/src/app/diff_dock/code/perf_bench.rs` measure them GPU-free under
 the release profile through the shared `src-app/src/bench_harness.rs` and
 print the comparison table `bench/README.md` documents; the ignored
 `layout::render::tests::editor_scroll_frame_by_pane_count` measures one
-wheel notch on the editor with terminal panes in the frame. Do not ship a
-perf number you did not measure, and do not publish a run that printed
-`PANEFLOW_BENCH_WARNING` (another workload was competing); `--set-baseline`
-refuses such a run for the editor suite.
+wheel notch on the editor with terminal panes in the frame; the ignored
+`startup_bench::startup_first_frame_benchmark` (#519) launches the release
+binary with `PANEFLOW_STARTUP_TRACE=<file>` set, which makes
+`src-app/src/startup_trace.rs` record a mark per launch stage, write the
+timeline once the measured frame is presented (the first frame, or the frame
+after the last #156 restore batch when a session was restored), and quit.
+Do not ship a perf number you did not measure, and do not publish a run that
+printed `PANEFLOW_BENCH_WARNING` (another workload was competing);
+`--set-baseline` refuses such a run for the editor and startup suites.
+
+`PANEFLOW_HOME=<absolute dir>` (#519, `paneflow_config::loader::HOME_ENV`)
+relocates every per-user directory the app owns: the config root becomes
+`<home>/config`, the data root `<home>/data`, and the cache root
+`<home>/cache`, each still joined with `APP_SUBDIR`, so a release binary
+reads `<home>/config/paneflow/paneflow.json` and `session.json` beside it.
+`runtime_paths::{config_dir, cache_dir, data_dir}` are the app-side
+resolvers; every `dirs::config_dir()` / `dirs::cache_dir()` site for
+app-owned state goes through them. The IPC socket does not follow it:
+`PANEFLOW_SOCKET_PATH` keeps its own precedence, and the startup bench sets
+both.
 
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
 holds the 17 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
@@ -348,6 +368,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── config_writer.rs                   ← read-modify-write paneflow.json
 ├── window_state.rs / editor.rs / external_open.rs
 ├── sidebar_title.rs                   ← sidebar label cleanup
+├── startup_trace.rs / startup_bench.rs ← PANEFLOW_STARTUP_TRACE probe (marks in main / mount / new / render, writes
+│                                         JSON at the measured frame, quits); cfg(test) first-frame bench (#519)
 ├── system_info.rs                     ← Help ▸ System Info… collection: sysctl, Metal devices, install format, libghostty identity
 ├── bench_harness.rs                   ← cfg(test): Metric, measure, comparison table, publish(), libproc counters shared by both benches
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)

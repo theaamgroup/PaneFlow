@@ -1,19 +1,20 @@
 # Performance benchmarks
 
 `bench/` holds the reproducible measurements behind PaneFlow's performance
-claims. Every number published about the terminal pipeline or the code
-editor comes from one of the suites below, run with the script described
-here, and the raw result of each run is archived next to the baseline it is
-compared against.
+claims. Every number published about the terminal pipeline, the code
+editor, or the time to first frame comes from one of the suites below, run
+with the script described here, and the raw result of each run is archived
+next to the baseline it is compared against.
 
-There are two suites, two baselines, and two result prefixes:
+There are three suites, three baselines, and three result prefixes:
 
 | Suite | Test | Script | Baseline | Result files |
 |---|---|---|---|---|
 | `paneflow-terminal-bench` | `terminal::perf_bench::terminal_pipeline_benchmark` | `scripts/bench-terminal.sh` | `bench/baseline.json` | `bench/results/<stamp>-<sha>.json` |
 | `paneflow-editor-bench` | `app::diff_dock::code::perf_bench::editor_pipeline_benchmark` | `scripts/bench-editor.sh` | `bench/editor-baseline.json` | `bench/results/editor-<stamp>-<sha>.json` |
+| `paneflow-startup-bench` | `startup_bench::startup_first_frame_benchmark` | `scripts/bench-startup.sh` | `bench/startup-baseline.json` | `bench/results/startup-<stamp>-<sha>.json` |
 
-Both suites share one harness, `src-app/src/bench_harness.rs`: the metric
+All three suites share one harness, `src-app/src/bench_harness.rs`: the metric
 type, the timing helpers, the JSON document, the comparison table, and the
 libproc process counters (RSS, CPU time converted from Mach ticks through
 `mach_timebase_info`). Allocations are counted by the test binary's one
@@ -259,15 +260,81 @@ decision gate for caching the terminal panes behind `ViewElement::cached`
 (#429): it is worth doing only if the share reaches 0.30, and below that the
 measured value is recorded and the idea is dropped.
 
+## Startup suite
+
+The benchmark is the ignored test `startup_first_frame_benchmark` in
+`src-app/src/startup_bench.rs`. Unlike the other two suites it launches the
+real release binary, because the cost it measures is the GPU window, the
+platform text system, and the state the app builds before its first frame,
+none of which exist in a window-free test. The app cooperates through the
+startup trace in `src-app/src/startup_trace.rs`: when `PANEFLOW_STARTUP_TRACE`
+names a file, the app records a mark at each stage of `main`,
+`mount_paneflow_app`, and `PaneFlowApp::new`, writes the timeline as JSON
+once the frame it was launched to measure has been presented, and quits. The
+probe ships in release builds so the shipping profile is what gets measured;
+without the variable every mark is one `OnceLock` read.
+
+Two scenarios run back to back, each against its own seeded `PANEFLOW_HOME`
+under the system temp directory (see `docs/user/configuration/schema.md` for
+that variable) and a fixture `PANEFLOW_SOCKET_PATH`, so the launches never
+read the developer's session, never bind the installed app's socket, and
+never write into the real per-user directories:
+
+| Scenario | Prefix | Home contents | Measured frame |
+|---|---|---|---|
+| Fresh | `fresh_` | An empty session. The app builds its default workspace, one shell in the fixture directory, before the first frame. | The first presented frame. |
+| Restore | `restore3_` | A session of three workspaces with one terminal pane each, all in the fixture directory. The daily case: a restored layout whose panes spawn shells. | The frame after the last restore batch (`restored_frame`). The fork restores one batch per frame after the first frame (issue #156), so the first frame alone would show an empty root. |
+
+The seed writes `session.json`, `paneflow.json` (`{}`) and
+`window-state.json` (a fixed 1400x900 window) under the config root's
+`APP_SUBDIR` namespace before the first launch. One untimed warm-up launch
+per scenario absorbs the first-exec Gatekeeper scan of a freshly linked
+binary and the helper extraction into the scratch cache; the timed launches
+that follow (`PANEFLOW_BENCH_STARTUP_RUNS`, default 10) therefore measure a
+second launch. The suite refuses a debug binary unless
+`PANEFLOW_BENCH_ALLOW_DEBUG` is set, and refuses an app binary whose profile
+differs from the test binary's, because the fixture is seeded under the test
+binary's namespace. `PANEFLOW_BENCH_EXE` overrides the binary path, which
+otherwise resolves to `paneflow` next to the test binary's profile directory.
+
+| Metric | Unit | What it captures |
+|---|---|---|
+| `<scenario>_first_frame_total` | ns | From the first line of `main` to the measured frame of the app window. The headline number of each scenario. |
+| `<scenario>_step_<mark>` | ns | The time between one trace mark and the previous one, one metric per mark in launch order. |
+
+The marks, in launch order: `login_shell_env_loaded` (the login shell's PATH
+adopted), `crash_reporting_ready` (the first config read and the Sentry
+guard), `editor_cache_ready` (the installed-editor snapshot),
+`bridge_extracted` and `ai_hook_extracted` (the two stable helper copies),
+`gpui_app_ready` (platform and text system initialization inside GPUI),
+`config_loaded`, `fonts_loaded` (the embedded fonts registered),
+`window_requested` and `window_created` (the GPU window), `session_loaded`
+(the capped `session.json` read), `ipc_server_started` (the singleton guard
+and IPC thread), then either `default_workspace_built` (Fresh: the shell
+spawned) or `session_restore_scheduled` (Restore), `app_fields_prepared`,
+`app_state_built`, `app_mounted` (the observers and the staged restore
+armed), `window_open_returned`, `first_render`, `first_render_built` (the
+element tree exists; layout and paint have not run), `first_frame`, and for
+Restore `session_restored` (the last batch applied) and `restored_frame`.
+
+The mark names are the metric names, so adding a mark adds a metric and the
+comparison table reports it as new. The timed work happens in a child
+process, so the harness cannot attribute a core share to it; instead the
+suite spins one thread for 250 ms before each scenario and records the
+lowest share of a core it got as `cpu_share`. Below 0.90 it prints
+`PANEFLOW_BENCH_WARNING` and `scripts/bench-startup.sh --set-baseline`
+refuses the run, exactly as the editor script does.
+
 ## Running
 
 ```bash
 scripts/bench-terminal.sh
 scripts/bench-editor.sh
+scripts/bench-startup.sh
 ```
 
-`scripts/bench-editor.sh --help` prints the options and the environment
-variables both suites honor.
+`scripts/bench-editor.sh --help` and `scripts/bench-startup.sh --help` print
+the options and the environment variables the suites honor.
 
 Each script builds the `paneflow` test binary under the release profile,
 records the short commit SHA, whether the worktree is dirty, and a UTC stamp,
@@ -286,20 +353,22 @@ which commit and machine. The editor baseline is recorded the same way, with
 the PaneFlow app closed: the running app is enough to trip the CPU-share
 check below.
 
-`scripts/bench-editor.sh` refuses `--set-baseline` when the run reports a
-`cpu_share` below 0.90: a contended run inflates every timing it would freeze,
-and every later comparison against it would read as a false improvement. Close
-the competing workload and run again.
+`scripts/bench-editor.sh` and `scripts/bench-startup.sh` refuse
+`--set-baseline` when the run reports a `cpu_share` below 0.90: a contended
+run inflates every timing it would freeze, and every later comparison against
+it would read as a false improvement. Close the competing workload and run
+again. The startup baseline is measured on the same machine with the
+installed PaneFlow app closed.
 
 **A change that moves a metric updates the baseline in the same pull request.**
 A baseline older than the code it is compared against turns every table into
 fiction.
 
-Both suites refuse to run under the debug profile, which would measure the
-compiler rather than the code, and exit non-zero with an explicit message. Set
-`PANEFLOW_BENCH_ALLOW_DEBUG=1` to override while developing a suite itself.
+All three suites refuse to run under the debug profile, which would measure
+the compiler rather than the code, and exit non-zero with an explicit message.
+Set `PANEFLOW_BENCH_ALLOW_DEBUG=1` to override while developing a suite itself.
 
-Neither suite runs in CI. They are local artifacts compared against a local
+No suite runs in CI. They are local artifacts compared against a local
 baseline, which is what makes the comparison meaningful.
 
 ## Fairness rules
@@ -368,5 +437,8 @@ reads `unavailable`.
 ```
 
 The editor suite writes the same document with `"suite":
-"paneflow-editor-bench"` and its own `corpus_seed`. A metric with
+"paneflow-editor-bench"` and its own `corpus_seed`. The startup suite writes
+`"suite": "paneflow-startup-bench"`, a `corpus_seed` of `0x0` (it has no
+corpus), null allocation columns (the allocations happen in the child
+process), and the core-share probe as `cpu_share`. A metric with
 `"available": false` carries a null `value`.
