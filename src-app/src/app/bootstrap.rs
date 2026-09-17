@@ -148,7 +148,8 @@ impl PaneFlowApp {
             }
         }
 
-        // Session bytes were read off-thread while the splash was mounted.
+        // Session bytes were read by `mount_paneflow_app` before this entity
+        // was built (#517: no splash any more).
         // Forensic context from an unparseable `session.json` (US-006) is
         // kept on the app and toasted after the first frame; the log stays
         // so headless launches still have a record.
