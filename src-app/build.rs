@@ -250,6 +250,13 @@ fn build_summarizer_sidecar(workspace_root: &Path) {
         return;
     };
     let output = bin_dir.join("paneflow-summarize");
+    // Compile to a scratch path and install only on success. `swiftc -o`
+    // writes the destination directly and does NOT roll it back on failure,
+    // so compiling straight to `output` would leave the PREVIOUS binary in
+    // place after a failed edit - and `bundle-macos.sh` would happily ship
+    // that stale Mach-O. Better to have no sidecar (an explanatory line in
+    // the overlay) than a silently outdated one.
+    let staged = out_dir.join("paneflow-summarize");
 
     // Deployment target stays low: the binary itself runs anywhere, and the
     // `if #available(macOS 26, *)` guard inside it reports unavailability at
@@ -259,18 +266,31 @@ fn build_summarizer_sidecar(workspace_root: &Path) {
         .arg("-target")
         .arg("arm64-apple-macos13.0")
         .arg("-o")
-        .arg(&output)
+        .arg(&staged)
         .arg(&source)
         .status();
 
-    match result {
-        Ok(status) if status.success() => {}
-        Ok(status) => println!(
-            "cargo:warning=#576: swiftc failed ({status}); agent summaries will be unavailable"
-        ),
-        Err(e) => println!(
-            "cargo:warning=#576: could not run swiftc ({e}); agent summaries will be unavailable"
-        ),
+    let failure = match result {
+        Ok(status) if status.success() => match fs::rename(&staged, &output) {
+            Ok(()) => None,
+            // A cross-device rename cannot happen here (OUT_DIR and the
+            // profile dir share a target directory), but a copy fallback
+            // costs one line and keeps this from being the thing that breaks
+            // an exotic setup.
+            Err(_) => match fs::copy(&staged, &output) {
+                Ok(_) => None,
+                Err(e) => Some(format!("could not install the sidecar: {e}")),
+            },
+        },
+        Ok(status) => Some(format!("swiftc failed ({status})")),
+        Err(e) => Some(format!("could not run swiftc ({e})")),
+    };
+
+    if let Some(reason) = failure {
+        // Remove any sidecar from an earlier build so packaging cannot pick
+        // up a stale one, then degrade: the app reports the absence itself.
+        let _ = fs::remove_file(&output);
+        println!("cargo:warning=#576: {reason}; agent summaries will be unavailable");
     }
 }
 

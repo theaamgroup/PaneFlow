@@ -269,6 +269,24 @@ if [ -d "$SPARKLE_FRAMEWORK" ]; then
         --sign "$IDENTITY" "$SPARKLE_FRAMEWORK"
 fi
 
+# Issue #576: the on-device summariser sidecar sits in Contents/MacOS, which
+# the NESTED_PATTERNS walk above deliberately does not visit (that walk is for
+# Frameworks/Helpers/PlugIns/XPCServices). The parent signature below omits
+# --deep, so without this explicit pass the sidecar ships unsigned and
+# notarytool rejects the bundle with "The binary is not signed".
+#
+# Signed WITHOUT --entitlements: it is a standalone helper that talks to
+# FoundationModels and nothing else, and it must not inherit PaneFlow's
+# JIT / Apple-events entitlements.
+SUMMARIZER_BIN="$APP/Contents/MacOS/paneflow-summarize"
+if [ -f "$SUMMARIZER_BIN" ]; then
+    codesign --force --options runtime --timestamp \
+        --sign "$IDENTITY" "$SUMMARIZER_BIN" || {
+        printf 'error: failed to sign %s\n' "$SUMMARIZER_BIN" >&2
+        exit 1
+    }
+fi
+
 codesign \
     --force \
     --options runtime \

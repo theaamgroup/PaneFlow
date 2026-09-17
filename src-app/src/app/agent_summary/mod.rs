@@ -25,8 +25,19 @@ use gpui::{Context, Window};
 use crate::PaneFlowApp;
 use crate::limits::clamp_untrusted_label;
 
+use std::sync::Arc;
+
 use model::SummaryError;
 use summarize::PaneContext;
+
+/// Model calls in flight at once.
+///
+/// Each one is a subprocess that loads the Foundation Models runtime, and the
+/// on-device model serializes internally anyway, so spawning one per pane just
+/// costs memory and blocking-pool threads without finishing any sooner. Four
+/// keeps the pipeline full on a large fleet - `MAX_PANES` is 32 per workspace
+/// and `MAX_WORKSPACES` is 32 - while rows still land progressively.
+const MAX_CONCURRENT_SUMMARIES: usize = 4;
 
 /// Per-pane row state in the overlay.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +195,13 @@ impl PaneFlowApp {
             return;
         };
 
+        // A pane that closed between `collect_pane_overview_cards` and here
+        // has no terminal to read. Those rows must be SETTLED, not dropped:
+        // an entry silently removed from the dispatch list keeps
+        // `SummaryStatus::Pending` forever, so its row reads "Reading the
+        // pane…" and `progress()` pins the header on "Summarising… n/N" for
+        // as long as the overlay stays open.
+        let mut unresolved: Vec<u64> = Vec::new();
         let targets: Vec<(u64, PaneContext, _)> = self
             .agent_summary
             .as_ref()
@@ -193,12 +211,15 @@ impl PaneFlowApp {
             .filter_map(|entry| {
                 // An exited pane has nothing live to describe; its last screen
                 // is still worth a summary, so it is kept, but a pane whose
-                // terminal has gone away entirely is dropped.
-                let terminal = crate::app::ipc_handler::find_terminal_by_surface_id(
+                // terminal has gone away entirely cannot be read at all.
+                let Some(terminal) = crate::app::ipc_handler::find_terminal_by_surface_id(
                     &self.workspaces,
                     entry.surface_id,
                     cx,
-                )?;
+                ) else {
+                    unresolved.push(entry.surface_id);
+                    return None;
+                };
                 let view = terminal.read(cx);
                 let reader = view.terminal.scrollback_reader();
                 let context = PaneContext {
@@ -218,9 +239,23 @@ impl PaneFlowApp {
             })
             .collect();
 
+        for surface_id in unresolved {
+            self.apply_agent_summary(
+                surface_id,
+                generation,
+                Err(SummaryError::Failed("Pane is gone".into())),
+                cx,
+            );
+        }
+
+        let permits = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT_SUMMARIES));
         for (surface_id, mut context, reader) in targets {
             let sidecar = sidecar.clone();
+            let permits = Arc::clone(&permits);
             cx.spawn(async move |app, cx| {
+                // Held across the blocking section and released on drop, so a
+                // cancelled or panicking task cannot leak a permit.
+                let _permit = permits.acquire_arc().await;
                 // Both halves block: the transcript read parks on the runtime
                 // thread's reply, and the model call waits on a child. Neither
                 // may run on the GPUI thread (issue #363).
@@ -507,6 +542,30 @@ mod tests {
         assert_ne!(empty, failed);
         assert_eq!(failed, "timeout");
         assert_eq!(row_summary_text(&ready_status), "x");
+    }
+
+    #[test]
+    fn only_pending_can_hang_the_progress_header() {
+        // The invariant behind the "pane is gone" fix: every terminal state
+        // settles, so a row that is never dispatched MUST NOT be left Pending.
+        for status in [
+            SummaryStatus::Ready("x".into()),
+            SummaryStatus::Empty,
+            SummaryStatus::Failed("Pane is gone".into()),
+        ] {
+            assert_eq!(state(vec![status.clone()]).progress(), None, "{status:?}");
+        }
+        assert!(state(vec![SummaryStatus::Pending]).progress().is_some());
+    }
+
+    #[test]
+    fn a_gone_pane_settles_only_its_own_row() {
+        // A pane closing between collection and dispatch is an ordinary
+        // per-row outcome; it must not read as "the model is unavailable" and
+        // condemn the whole overlay.
+        let gone = SummaryError::Failed("Pane is gone".into());
+        assert!(!gone.is_terminal());
+        assert_eq!(gone.user_message(), "Pane is gone");
     }
 
     #[test]
