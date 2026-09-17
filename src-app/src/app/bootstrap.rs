@@ -824,6 +824,9 @@ impl PaneFlowApp {
             // Issue #339: Pane Overview closed.
             pane_overview: None,
             pane_overview_focus: cx.focus_handle(),
+            agent_summary: None,
+            agent_summary_focus: cx.focus_handle(),
+            agent_summary_generation: 0,
             work_review: None,
             work_review_focus: cx.focus_handle(),
             pane_palette: None,
@@ -1300,6 +1303,12 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     cx.on_action(|_: &OpenPaneOverview, cx| {
         with_active_paneflow_window(cx, |app, window, cx| {
             app.handle_open_pane_overview(&OpenPaneOverview, window, cx);
+        });
+    });
+    // Issue #576: same greying rule as the overview above.
+    cx.on_action(|_: &crate::OpenAgentSummary, cx| {
+        with_active_paneflow_window(cx, |app, window, cx| {
+            app.handle_open_agent_summary(&crate::OpenAgentSummary, window, cx);
         });
     });
 

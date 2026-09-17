@@ -1489,7 +1489,7 @@ fn neutralize_sentinel(body: &str) -> String {
 /// on BOTH tags plus body sentinel neutralization (defense in depth). The pane
 /// content cannot emit a matching `</untrusted_terminal_output id="…">` to break
 /// out because it cannot predict the id.
-fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
+pub(crate) fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
     let id = fence_id();
     let body = neutralize_sentinel(body);
     format!(

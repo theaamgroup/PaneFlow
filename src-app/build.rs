@@ -215,6 +215,63 @@ fn main() {
             EMBED_SIZE_LIMIT_DEBUG_BYTES,
         ),
     );
+
+    // 3. Issue #576 - the on-device summariser sidecar. Unlike the three
+    //    helpers above this is NOT embedded: it ships beside the executable
+    //    and never reaches `EMBED_SIZE_LIMIT_BYTES`.
+    build_summarizer_sidecar(&workspace_root);
+}
+
+/// Compile the Swift summariser sidecar next to the crate's own binary.
+///
+/// `FoundationModels` is Swift-only, so this is the one non-Rust artifact in
+/// the tree. It is placed in the outer `target/<profile>/` directory, which is
+/// both where `cargo run` looks for it and where the packaging script picks it
+/// up to copy into `Contents/MacOS/`.
+///
+/// **Failure here is a warning, never a build break.** The app degrades to an
+/// explanatory line in the overlay when the sidecar is absent, and a missing
+/// or broken `swiftc` must not stop someone building the terminal.
+fn build_summarizer_sidecar(workspace_root: &Path) {
+    let source = workspace_root
+        .join("native")
+        .join("agent-summary")
+        .join("paneflow-summarize.swift");
+    println!("cargo:rerun-if-changed={}", source.display());
+
+    // OUT_DIR is `<target-dir>/<profile>/build/<pkg>-<hash>/out`, so the
+    // binary directory is three levels up. This is the only handle a build
+    // script gets on the outer profile directory.
+    let out_dir = PathBuf::from(
+        std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR for build scripts"),
+    );
+    let Some(bin_dir) = out_dir.ancestors().nth(3) else {
+        println!("cargo:warning=#576: could not derive the target directory from OUT_DIR");
+        return;
+    };
+    let output = bin_dir.join("paneflow-summarize");
+
+    // Deployment target stays low: the binary itself runs anywhere, and the
+    // `if #available(macOS 26, *)` guard inside it reports unavailability at
+    // runtime rather than failing to launch on an older system.
+    let result = Command::new("swiftc")
+        .arg("-O")
+        .arg("-target")
+        .arg("arm64-apple-macos13.0")
+        .arg("-o")
+        .arg(&output)
+        .arg(&source)
+        .status();
+
+    match result {
+        Ok(status) if status.success() => {}
+        Ok(status) => println!(
+            "cargo:warning=#576: swiftc failed ({status}); agent summaries will be unavailable"
+        ),
+        Err(e) => println!(
+            "cargo:warning=#576: could not run swiftc ({e}); agent summaries will be unavailable"
+        ),
+    }
 }
 
 /// Invoke a child `cargo build` against the workspace to produce the

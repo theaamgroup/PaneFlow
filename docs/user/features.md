@@ -20,6 +20,21 @@ pane with a branch-aware workspace badge. The "AI agent" pane is a UI
 affordance, not a dependency: PaneFlow runs whatever is on your `PATH`,
 with no login, no API key, and no model picker inside the app itself.
 
+## What are the agents doing?
+
+Press `Cmd+Shift+I` when you have looked away and lost the thread. PaneFlow
+lists every agent pane across every workspace with a one-line description of
+what it is currently doing or waiting on, then Enter jumps you to the one that
+needs you.
+
+Summaries are generated **on your Mac** by Apple's on-device foundation model.
+No terminal output is sent anywhere, there is no API key, and there is no
+per-summary cost. This needs Apple Intelligence on macOS 26 or later; without
+it the overlay says so and the rest of PaneFlow is unaffected.
+
+Plain shell panes are skipped - only panes running a detected agent are listed.
+Turn the whole surface off with `"agent_summary": false` in `paneflow.json`.
+
 ## Workspaces
 
 PaneFlow's mental model is two layers - **workspaces** (independent
