@@ -52,6 +52,7 @@ mod pane;
 mod pane_drag;
 mod pi_sessions;
 mod pricing;
+mod recents;
 mod runtime_paths;
 mod search;
 mod settings;
@@ -1440,6 +1441,10 @@ struct PaneFlowApp {
     /// `Window` - and consumed by `drain_pending_window_actions`, the
     /// window-bearing notify observer (issue #211). One-shot.
     pending_pane_focus: Option<Entity<Pane>>,
+    /// Recent folders whose click-time existence probe is outstanding
+    /// (issue #521): a repeat click or held `Cmd+N` on a mount that is not
+    /// responding coalesces instead of spawning another probe thread.
+    recent_probes: crate::app::workspace_ops::RecentProbes,
     /// Profile menu currently open at the right of the title bar.
     /// Stores the click position so the menu can anchor near the profile
     /// button. `None` = closed.

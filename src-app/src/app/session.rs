@@ -589,7 +589,8 @@ impl PaneFlowApp {
 
     fn finish_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pending = self.session_restore.take();
-        if self.workspaces.is_empty() {
+        let restored_workspaces = !self.workspaces.is_empty();
+        if !restored_workspaces {
             log::warn!(
                 "session restore: session contained no restorable workspaces; creating default workspace"
             );
@@ -601,6 +602,15 @@ impl PaneFlowApp {
             self.active_idx = pending
                 .active_workspace
                 .min(self.workspaces.len().saturating_sub(1));
+        }
+        // Issue #521: a restored session counts as opening its folders, the
+        // active one first, so recents.json tracks what the user last had up.
+        // The substituted `default_workspace` (the implicit launch cwd) is
+        // not something the user opened, so it is never recorded.
+        if pending.is_some() && restored_workspaces {
+            let restored =
+                crate::recents::restored_session_paths(&self.workspaces, self.active_idx);
+            crate::recents::record(&restored, cx);
         }
         spawn_restored_worktree_prune(&self.workspaces, cx);
         if let Some(pending) = pending {
@@ -1127,6 +1137,39 @@ const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// the git untracked-stats helper, a stalled thread is left to unwind on
 /// its own once the filesystem finally answers.
 fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bool {
+    probe_persisted_dir_within(path, timeout).unwrap_or(false)
+}
+
+/// The same bounded probe with the timeout kept apart from a definite
+/// answer: `Some(is_dir)` when `stat` replied in time, `None` when it did
+/// not. Restore folds `None` into "unavailable"; the worker, if any, is
+/// left to unwind on its own.
+pub(crate) fn probe_persisted_dir_within(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Option<bool> {
+    match start_persisted_dir_probe(path, timeout) {
+        ProbeOutcome::Answered(is_dir) => Some(is_dir),
+        ProbeOutcome::TimedOut(_) => None,
+    }
+}
+
+/// What [`start_persisted_dir_probe`] came back with.
+pub(super) enum ProbeOutcome {
+    /// `stat` replied within the bound.
+    Answered(bool),
+    /// No reply in time. The worker thread is still blocked in `stat`; the
+    /// receiver yields its answer whenever the filesystem finally responds
+    /// (or `Err` if the worker could not be spawned), so a caller that
+    /// holds a per-path claim (issue #521) can keep it until the worker
+    /// has actually exited instead of starting a second stuck thread on
+    /// the next retry.
+    TimedOut(std::sync::mpsc::Receiver<bool>),
+}
+
+/// Probe `path` on a helper thread with a deadline and hand back the
+/// still-running worker's receiver on a timeout.
+pub(super) fn start_persisted_dir_probe(path: &Path, timeout: std::time::Duration) -> ProbeOutcome {
     let (tx, rx) = std::sync::mpsc::channel();
     let probed = path.to_path_buf();
     let spawned = std::thread::Builder::new()
@@ -1139,16 +1182,18 @@ fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bo
             "session restore: could not spawn cwd probe for {}: {err}; treating it as unavailable",
             path.display()
         );
-        return false;
+        // The closure (and its sender) was dropped with the error, so the
+        // receiver answers `Err` at once: nothing is left running.
+        return ProbeOutcome::TimedOut(rx);
     }
     match rx.recv_timeout(timeout) {
-        Ok(is_dir) => is_dir,
+        Ok(is_dir) => ProbeOutcome::Answered(is_dir),
         Err(_) => {
             log::warn!(
                 "session restore: cwd {} did not answer stat within {timeout:?}; treating it as unavailable",
                 path.display()
             );
-            false
+            ProbeOutcome::TimedOut(rx)
         }
     }
 }
@@ -2193,6 +2238,80 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|path| path != &stalled);
+    }
+
+    /// Issue #521: the click-time probe on a recent row tells a definite
+    /// "gone" apart from a mount that has not answered, and never holds the
+    /// caller past its bound either way.
+    #[test]
+    fn persisted_dir_probe_separates_a_timeout_from_a_definite_answer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bound = STALLED_STAT_DELAY / 2;
+        assert_eq!(
+            probe_persisted_dir_within(tmp.path(), bound),
+            Some(true),
+            "a live local directory answers at once"
+        );
+        assert_eq!(
+            probe_persisted_dir_within(&tmp.path().join("missing"), bound),
+            Some(false),
+            "a missing directory is a definite no"
+        );
+        let stalled = tmp.path().join("unmounted-volume");
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(stalled.clone());
+        let started = std::time::Instant::now();
+        let answer = probe_persisted_dir_within(&stalled, bound / 4);
+        let elapsed = started.elapsed();
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|path| path != &stalled);
+        assert_eq!(answer, None, "a stalled stat is not an answer");
+        assert!(
+            elapsed < bound,
+            "the probe blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+    }
+
+    /// Issue #521: a timed-out probe hands back the worker's receiver, and
+    /// that receiver delivers the late answer once `stat` finally returns,
+    /// which is what lets the click path hold its per-path claim until the
+    /// blocked thread has really exited.
+    #[test]
+    fn timed_out_probe_delivers_its_late_answer_through_the_receiver() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stalled = tmp.path().join("unmounted-volume");
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(stalled.clone());
+        let started = std::time::Instant::now();
+        let outcome = start_persisted_dir_probe(&stalled, STALLED_STAT_DELAY / 8);
+        let ProbeOutcome::TimedOut(rx) = outcome else {
+            STALLED_STAT_PATHS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|path| path != &stalled);
+            panic!("a stalled stat must time out");
+        };
+        assert!(started.elapsed() < STALLED_STAT_DELAY / 2);
+        let late = rx.recv_timeout(STALLED_STAT_DELAY * 2);
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|path| path != &stalled);
+        assert_eq!(
+            late,
+            Ok(true),
+            "the worker's answer arrives late, not never"
+        );
+        match start_persisted_dir_probe(tmp.path(), STALLED_STAT_DELAY) {
+            ProbeOutcome::Answered(true) => {}
+            _ => panic!("a live local directory answers in time"),
+        }
     }
 
     /// Write a `session.json` with deliberately broken JSON, run the
