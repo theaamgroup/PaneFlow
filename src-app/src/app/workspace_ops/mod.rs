@@ -842,6 +842,15 @@ impl RecentProbes {
     pub(crate) fn finish(&mut self, path: &std::path::Path) {
         self.in_flight.retain(|pending| pending != path);
     }
+/// The toast every UI workspace-create path shows once [`MAX_WORKSPACES`] is
+/// reached.
+///
+/// One string for all three surfaces (launch-directory create, folder picker,
+/// sidebar drop / Open folder) so a user who presses Cmd+Shift+N at the cap
+/// learns why nothing happened instead of reading a dead shortcut. Mirrors the
+/// pane cap's `Maximum pane count reached ({MAX_PANES})`.
+pub(crate) fn workspace_limit_reached() -> String {
+    format!("Maximum workspace count reached ({MAX_WORKSPACES})")
 }
 
 impl PaneFlowApp {
@@ -1414,6 +1423,7 @@ impl PaneFlowApp {
             return;
         }
         if self.workspaces.len() >= MAX_WORKSPACES {
+            self.show_toast(workspace_limit_reached(), cx);
             return;
         }
         let cwd = crate::launch_cwd::implicit_launch_cwd();
@@ -1454,8 +1464,10 @@ impl PaneFlowApp {
         // a workspace are promoted in recents.json, so a stray file in a drop
         // never lands in the list.
         let mut recent_paths: Vec<std::path::PathBuf> = Vec::with_capacity(paths.len());
+        let mut refused_at_cap = false;
         for path in paths {
             if self.workspaces.len() >= MAX_WORKSPACES {
+                refused_at_cap = true;
                 break;
             }
             // A drop carries whatever the file manager had selected, so the
@@ -1493,6 +1505,9 @@ impl PaneFlowApp {
             self.active_idx = self.workspaces.len() - 1;
             opened = true;
             recent_paths.push(path.clone());
+        }
+        if refused_at_cap {
+            self.show_toast(workspace_limit_reached(), cx);
         }
         if !opened {
             return;
@@ -1611,6 +1626,7 @@ impl PaneFlowApp {
             return;
         }
         if self.workspaces.len() >= MAX_WORKSPACES {
+            self.show_toast(workspace_limit_reached(), cx);
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -4984,6 +5000,69 @@ mod tests {
         assert!(
             paths.contains(&std::path::PathBuf::from("/opt/homebrew/bin")),
             "missing /opt/homebrew/bin (Apple Silicon Homebrew prefix)"
+        );
+    }
+
+    /// The workspace cap is a refusal, not a silent no-op.
+    ///
+    /// Before this, every UI create path returned without a word once
+    /// `MAX_WORKSPACES` was reached, so Cmd+Shift+N, Window ▸ New Workspace,
+    /// and the sidebar's Open folder all looked like dead gestures exactly
+    /// when the user needed to be told why. `PaneFlowApp` is not
+    /// constructible in a test, so this pins the shape and the shared copy.
+    #[test]
+    fn workspace_create_paths_report_the_cap() {
+        let message = workspace_limit_reached();
+        assert!(
+            message.starts_with("Maximum workspace count reached"),
+            "the refusal should read like the pane cap's: {message}"
+        );
+        assert!(
+            message.contains(&MAX_WORKSPACES.to_string()),
+            "the refusal must name the bound so the cap is not a mystery: {message}"
+        );
+
+        let src = include_str!("mod.rs");
+
+        // Cmd+Shift+N / Window ▸ New Workspace. The guard runs BEFORE the
+        // native panel opens, so the toast is the only signal the user gets.
+        let picker = source_slice(
+            src,
+            "pub(crate) fn create_workspace_with_picker(",
+            "// --- Split/close/focus handlers",
+        );
+        assert!(
+            picker.contains("workspace_limit_reached()"),
+            "the folder picker must toast at the cap: {picker}"
+        );
+
+        // The implicit launch-directory create.
+        let create = source_slice(
+            src,
+            "pub(crate) fn create_workspace(",
+            "pub(crate) fn open_workspace_folders(",
+        );
+        assert!(
+            create.contains("workspace_limit_reached()"),
+            "the launch-directory create must toast at the cap: {create}"
+        );
+
+        // The Open folder / drag-and-drop path: one toast after the loop, not
+        // one per refused path (a multi-path drop at the cap would otherwise
+        // stack a toast per folder).
+        let folders = source_slice(
+            src,
+            "pub(crate) fn open_workspace_folders(",
+            "pub(crate) fn create_workspace_with_picker(",
+        );
+        assert!(
+            folders.contains("refused_at_cap") && folders.contains("workspace_limit_reached()"),
+            "the drop path must toast at the cap: {folders}"
+        );
+        assert_eq!(
+            folders.matches("workspace_limit_reached()").count(),
+            1,
+            "the drop path must toast once, not once per refused path: {folders}"
         );
     }
 }
