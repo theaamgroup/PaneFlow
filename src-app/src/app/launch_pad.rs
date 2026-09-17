@@ -288,6 +288,30 @@ impl PaneFlowApp {
             self.launch_pad_set_error("No agent selected", cx);
             return;
         };
+        if branch.is_empty() {
+            self.launch_pad_set_error("Branch name is empty", cx);
+            return;
+        }
+        let Some(ws) = self.workspaces.iter().find(|w| w.id == ws_id) else {
+            self.launch_pad_set_error("Workspace was closed", cx);
+            return;
+        };
+        // AC6: cwd without a git repo → explicit error, nothing executed.
+        let Some(repo_root) = ws.repo_root.clone() else {
+            self.launch_pad_set_error("No git repository for this workspace", cx);
+            return;
+        };
+        if ws.active_tab().is_zoomed() {
+            self.launch_pad_set_error("Unzoom before splitting panes", cx);
+            return;
+        }
+        if !ws.active_tab().can_add_pane() {
+            self.launch_pad_set_error(format!("Maximum pane count reached ({MAX_PANES})"), cx);
+            return;
+        }
+        // Every guard that does not need the PATH walk runs first, so only a
+        // form that would launch right now can be queued: an Enter on an
+        // empty branch is refused here and never replayed after an edit.
         // The pending flag is read before the snapshot: a walk that publishes
         // between the two reads then shows up as installed and proceeds,
         // while the other order could refuse an installed agent.
@@ -309,27 +333,6 @@ impl PaneFlowApp {
                 return;
             }
             self.launch_pad_set_error(format!("{} is not installed", agent.display_name()), cx);
-            return;
-        }
-        if branch.is_empty() {
-            self.launch_pad_set_error("Branch name is empty", cx);
-            return;
-        }
-        let Some(ws) = self.workspaces.iter().find(|w| w.id == ws_id) else {
-            self.launch_pad_set_error("Workspace was closed", cx);
-            return;
-        };
-        // AC6: cwd without a git repo → explicit error, nothing executed.
-        let Some(repo_root) = ws.repo_root.clone() else {
-            self.launch_pad_set_error("No git repository for this workspace", cx);
-            return;
-        };
-        if ws.active_tab().is_zoomed() {
-            self.launch_pad_set_error("Unzoom before splitting panes", cx);
-            return;
-        }
-        if !ws.active_tab().can_add_pane() {
-            self.launch_pad_set_error(format!("Maximum pane count reached ({MAX_PANES})"), cx);
             return;
         }
 
@@ -1052,6 +1055,25 @@ mod tests {
             confirm.contains("lp.agent_default_pending = false;"),
             "a queued confirm commits the selected row, so the settle must not move it: {confirm}"
         );
+        let queue_at = confirm
+            .find("lp.confirm_queued = true;")
+            .expect("confirm queues");
+        for guard in [
+            "branch.is_empty()",
+            "\"Workspace was closed\"",
+            "ws.repo_root.clone()",
+            "is_zoomed()",
+            "can_add_pane()",
+        ] {
+            let at = confirm
+                .find(guard)
+                .unwrap_or_else(|| panic!("confirm keeps the `{guard}` guard"));
+            assert!(
+                at < queue_at,
+                "`{guard}` must be checked before a confirm can be queued, or an invalid \
+                 form edited during the walk is replayed without another Enter: {confirm}"
+            );
+        }
         let pending_at = confirm
             .find("installed_binary_scan_pending()")
             .expect("confirm reads the pending flag");
