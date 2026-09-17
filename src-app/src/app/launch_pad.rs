@@ -56,6 +56,10 @@ pub(crate) struct LaunchPadState {
     /// settles it onto the first installed agent through
     /// [`settle_default_agent`].
     pub(crate) agent_default_pending: bool,
+    /// A confirm pressed while the first PATH walk was still pending
+    /// (issue #518): never waited for on the GPUI thread, replayed by the
+    /// boot warm's completion through `launch_pad_resume_queued_confirm`.
+    pub(crate) confirm_queued: bool,
     pub(crate) branch_input: Entity<TextInput>,
     pub(crate) prompt_input: Entity<TextArea>,
     pub(crate) issue_input: Entity<TextInput>,
@@ -205,6 +209,7 @@ impl PaneFlowApp {
             target,
             agent_idx,
             agent_default_pending,
+            confirm_queued: false,
             branch_input,
             prompt_input,
             issue_input,
@@ -227,6 +232,19 @@ impl PaneFlowApp {
         settle_default_agent(&mut lp.agent_idx, &mut lp.agent_default_pending, |a| {
             a.is_installed()
         })
+    }
+
+    /// Issue #518: the boot warm has published. A confirm queued while the
+    /// walk was pending runs now against the real installed answer.
+    pub(crate) fn launch_pad_resume_queued_confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(lp) = self.launch_pad.as_mut() else {
+            return;
+        };
+        if !std::mem::take(&mut lp.confirm_queued) {
+            return;
+        }
+        lp.error = None;
+        self.launch_pad_confirm(cx);
     }
 
     /// Escape path - only honored before confirmation (US-005 AC8: the
@@ -270,11 +288,18 @@ impl PaneFlowApp {
             self.launch_pad_set_error("No agent selected", cx);
             return;
         };
-        // Issue #518: a confirm is a user action, not a render frame. A cold
-        // cache waits for the first PATH walk to publish (well under a
-        // second) rather than dropping the Enter with a "looking" error that
-        // nothing re-arms once the walk lands.
-        if !agent.is_installed_now() {
+        if !agent.is_installed() {
+            // Issue #518: the first PATH walk has not published. Never wait
+            // for it here (this is the GPUI thread; a slow PATH entry would
+            // freeze the window): queue the confirm, say so, and let the
+            // boot warm's completion replay it with the real answer.
+            if crate::agent_launcher::installed_binary_scan_pending() {
+                if let Some(lp) = self.launch_pad.as_mut() {
+                    lp.confirm_queued = true;
+                }
+                self.launch_pad_set_error(AGENT_SCAN_PENDING_COPY, cx);
+                return;
+            }
             self.launch_pad_set_error(format!("{} is not installed", agent.display_name()), cx);
             return;
         }
@@ -995,13 +1020,12 @@ fn settle_default_agent(
 mod tests {
     use super::*;
 
-    /// Issue #518: render frames read the non-blocking snapshot, but a
-    /// confirm is a user action. Before the cold read stopped blocking, an
-    /// Enter pressed during the first PATH walk launched correctly; refusing
-    /// it with the "looking" copy drops the action and nothing re-arms it
-    /// once the walk lands. Both confirm paths must wait for the real answer.
+    /// Issue #518: neither confirm path may wait for the first PATH walk on
+    /// the GPUI thread (a slow PATH entry would freeze the window), and
+    /// neither may drop the Enter: a confirm during the walk is queued and
+    /// the boot warm's completion replays it with the real answer.
     #[test]
-    fn confirm_paths_wait_for_the_real_installed_answer() {
+    fn confirm_paths_never_block_on_the_cold_walk_and_are_replayed_when_it_lands() {
         let pad = include_str!("launch_pad.rs");
         let confirm = pad
             .split("pub(crate) fn launch_pad_confirm(")
@@ -1009,13 +1033,12 @@ mod tests {
             .and_then(|rest| rest.split("\n    }\n").next())
             .expect("launch_pad_confirm exists");
         assert!(
-            confirm.contains("agent.is_installed_now()"),
-            "launch_pad_confirm must block for the answer: {confirm}"
+            !confirm.contains("is_installed_now()"),
+            "launch_pad_confirm must not wait on the GPUI thread: {confirm}"
         );
         assert!(
-            !confirm.contains("installed_binary_scan_pending()")
-                && !confirm.contains("AGENT_SCAN_PENDING_COPY"),
-            "launch_pad_confirm must never refuse with the pending copy: {confirm}"
+            confirm.contains("lp.confirm_queued = true;"),
+            "launch_pad_confirm queues a confirm made during the walk: {confirm}"
         );
 
         let palette = include_str!("pane_palette.rs");
@@ -1025,13 +1048,34 @@ mod tests {
             .and_then(|rest| rest.split("\n    }\n").next())
             .expect("ensure_launchable exists");
         assert!(
-            launchable.contains("agent.is_installed_now()"),
-            "ensure_launchable must block for the answer: {launchable}"
+            !launchable.contains("is_installed_now()"),
+            "ensure_launchable must not wait on the GPUI thread: {launchable}"
         );
+        let launch = palette
+            .split("pub(crate) fn pane_palette_launch(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("pane_palette_launch exists");
         assert!(
-            !launchable.contains("installed_binary_scan_pending()"),
-            "ensure_launchable must never refuse with the pending copy: {launchable}"
+            launch.contains("palette.launch_queued = Some(preset.clone());"),
+            "pane_palette_launch queues a launch made during the walk: {launch}"
         );
+
+        let boot = include_str!("bootstrap.rs");
+        let warm = boot
+            .split("smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;")
+            .nth(1)
+            .and_then(|rest| rest.split(".detach();").next())
+            .expect("the boot warm awaits the first walk");
+        for replay in [
+            "app.launch_pad_resume_queued_confirm(cx);",
+            "app.pane_palette_resume_queued_launch(cx);",
+        ] {
+            assert!(
+                warm.contains(replay),
+                "the boot warm's completion must replay queued confirms: missing `{replay}` in {warm}"
+            );
+        }
     }
 
     /// Issue #518: a pad opened during the first PATH walk defaults to row

@@ -166,16 +166,28 @@ impl Preset {
 
     fn ensure_launchable(&self) -> Result<(), String> {
         match &self.source {
-            // Issue #518: a confirm is a user action, not a render frame. A
-            // cold cache waits for the first PATH walk to publish (well under
-            // a second) rather than refusing an agent that is installed; the
-            // rows say "looking" meanwhile, the confirm itself never lies.
-            PresetSource::Agent(agent) if !agent.is_installed_now() => Err(format!(
+            // Issue #518: the first PATH walk has not published. Never wait
+            // for it on the GPUI thread: the launch is queued
+            // (`PanePaletteState::launch_queued`) and replayed by the boot
+            // warm's completion, so the Enter is not dropped either.
+            PresetSource::Agent(_) if self.awaits_scan() => {
+                Err(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string())
+            }
+            PresetSource::Agent(agent) if !agent.is_installed() => Err(format!(
                 "{} is not installed - install its CLI, or hide it in Settings > AI Agent",
                 agent.display_name()
             )),
             _ => Ok(()),
         }
+    }
+
+    /// An agent row whose only blocker is the pending first PATH walk.
+    fn awaits_scan(&self) -> bool {
+        matches!(
+            &self.source,
+            PresetSource::Agent(agent)
+                if !agent.is_installed() && crate::agent_launcher::installed_binary_scan_pending()
+        )
     }
 }
 
@@ -190,6 +202,11 @@ pub(crate) struct PanePaletteState {
     /// The row the cursor names, by identity, so a catalogue reshaped by the
     /// cold PATH walk (issue #518) still launches the row the user chose.
     pub(crate) selected_key: PresetKey,
+    /// A launch confirmed while the first PATH walk was still pending
+    /// (issue #518). The boot warm's completion hands it to
+    /// `pending_palette_launch`, which the window-bearing drain replays, so
+    /// the confirm neither waits on the GPUI thread nor gets dropped.
+    pub(crate) launch_queued: Option<Preset>,
     /// Last refusal, shown under the buttons (US-015 AC4).
     pub(crate) error: Option<String>,
     /// Focus to hand back when the picker goes away (US-014 AC5). `None` for
@@ -325,14 +342,34 @@ impl PaneFlowApp {
     }
 
     /// The row the keyboard cursor names, resolved by identity against the
-    /// catalogue as it is now (issue #518), with the painted index as the
-    /// fallback when that row is gone.
+    /// catalogue as it is now (issue #518). `None` when that row is gone (an
+    /// agent that read `looking` and turned out not to be installed): Enter
+    /// is then inert rather than launching whatever now sits at the painted
+    /// index, and the next Up/Down re-anchors the cursor.
     fn pane_palette_selected(&self) -> Option<(usize, Preset)> {
         let palette = self.pane_palette.as_ref()?;
         let presets = self.pane_palette_presets(self.pane_palette_ws_idx()?);
-        let idx = resolve_selected(&presets, &palette.selected_key, palette.selected)?;
+        let idx = resolve_selected(&presets, &palette.selected_key)?;
         let preset = presets.into_iter().nth(idx)?;
         Some((idx, preset))
+    }
+
+    /// Issue #518: the boot warm has published. A launch confirmed while the
+    /// walk was pending is handed to the window-bearing drain, which replays
+    /// it through `pane_palette_launch` (the real installed answer applies
+    /// now, so an absent agent is refused there).
+    pub(crate) fn pane_palette_resume_queued_launch(&mut self, cx: &mut Context<Self>) {
+        let queued = self
+            .pane_palette
+            .as_mut()
+            .and_then(|palette| palette.launch_queued.take());
+        if let Some(preset) = queued {
+            if let Some(palette) = self.pane_palette.as_mut() {
+                palette.error = None;
+            }
+            self.pending_palette_launch = Some(preset);
+            cx.notify();
+        }
     }
 
     /// Open a `New pane` tab in `ws_idx` and make the preset picker its
@@ -468,6 +505,7 @@ impl PaneFlowApp {
             placement: PalettePlacement::Tab { tab_id },
             selected: 0,
             selected_key: PresetKey::Shell,
+            launch_queued: None,
             error: None,
             restore_focus,
             scroll: ScrollHandle::new(),
@@ -506,6 +544,7 @@ impl PaneFlowApp {
             },
             selected: 0,
             selected_key: PresetKey::Shell,
+            launch_queued: None,
             error: None,
             restore_focus: None,
             scroll: ScrollHandle::new(),
@@ -588,6 +627,7 @@ impl PaneFlowApp {
             placement: PalettePlacement::Tab { tab_id },
             selected: 0,
             selected_key: PresetKey::Shell,
+            launch_queued: None,
             error: None,
             restore_focus: None,
             scroll: ScrollHandle::new(),
@@ -748,7 +788,12 @@ impl PaneFlowApp {
     /// commands once it publishes, so an index captured from the pre-scan
     /// frame would launch a newly inserted agent instead of the custom
     /// command the user chose.
-    fn pane_palette_launch(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pane_palette_launch(
+        &mut self,
+        preset: Preset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(ws_idx) = self.pane_palette_ws_idx() else {
             self.pane_palette_set_error("This project is no longer open", cx);
             return;
@@ -760,6 +805,9 @@ impl PaneFlowApp {
             return;
         }
         if let Err(message) = preset.ensure_launchable() {
+            if let Some(palette) = self.pane_palette.as_mut().filter(|_| preset.awaits_scan()) {
+                palette.launch_queued = Some(preset.clone());
+            }
             self.pane_palette_set_error(message, cx);
             return;
         }
@@ -1318,17 +1366,12 @@ impl PaneFlowApp {
     }
 }
 
-/// Where `key` sits in `presets`, or `fallback` (clamped to the list) when
-/// that row is gone. Pure so the reshaped-catalogue case is testable without
+/// Where `key` sits in `presets`, or `None` when that row is gone. Never a
+/// positional fallback: a row that vanished must not resolve to whatever
+/// took its place. Pure so the reshaped-catalogue case is testable without
 /// a `PaneFlowApp`.
-fn resolve_selected(presets: &[Preset], key: &PresetKey, fallback: usize) -> Option<usize> {
-    if presets.is_empty() {
-        return None;
-    }
-    presets
-        .iter()
-        .position(|preset| preset.key() == *key)
-        .or(Some(fallback.min(presets.len() - 1)))
+fn resolve_selected(presets: &[Preset], key: &PresetKey) -> Option<usize> {
+    presets.iter().position(|preset| preset.key() == *key)
 }
 
 #[cfg(test)]
@@ -1337,8 +1380,8 @@ mod tests {
 
     /// Issue #518: a custom row highlighted before the cold PATH walk
     /// publishes must still be the row Enter launches once the walk inserts
-    /// agent rows ahead of it, and a row that vanished falls back to the
-    /// painted index instead of losing the cursor.
+    /// agent rows ahead of it, and a row that vanished resolves to nothing
+    /// rather than to the row that took its index.
     #[test]
     fn keyboard_cursor_keeps_the_custom_row_when_the_cold_scan_inserts_agents() {
         let shell = Preset {
@@ -1360,25 +1403,22 @@ mod tests {
         };
         let before = vec![shell.clone(), custom.clone()];
         let key = custom.key();
-        assert_eq!(resolve_selected(&before, &key, 1), Some(1));
+        assert_eq!(resolve_selected(&before, &key), Some(1));
 
         let after = vec![shell.clone(), agent.clone(), custom.clone()];
         assert_eq!(
-            resolve_selected(&after, &key, 1),
+            resolve_selected(&after, &key),
             Some(2),
             "the inserted agent row must not steal the cursor"
         );
+        // An agent highlighted while it read `looking` and then dropped by
+        // the walk: Enter must be inert, not launch the row at its index.
+        let vanished = agent.key();
         assert_eq!(
-            resolve_selected(&[shell.clone(), agent.clone()], &key, 1),
-            Some(1),
-            "a vanished row falls back to the painted index"
+            resolve_selected(&[shell.clone(), custom.clone()], &vanished),
+            None
         );
-        assert_eq!(
-            resolve_selected(&[shell], &key, 5),
-            Some(0),
-            "fallback clamps"
-        );
-        assert_eq!(resolve_selected(&[], &key, 0), None);
+        assert_eq!(resolve_selected(&[], &key), None);
     }
 
     #[test]

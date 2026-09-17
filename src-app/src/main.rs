@@ -1587,6 +1587,11 @@ struct PaneFlowApp {
     /// pane-event subscriber); `drain_pending_window_actions` claims focus
     /// for it before the next frame, mirroring `pending_pane_focus`.
     pending_palette_focus: bool,
+    /// Issue #518: a pane-palette launch confirmed while the first PATH walk
+    /// was pending, handed over by the boot warm's completion (which has no
+    /// `Window`); `drain_pending_window_actions` replays it before the next
+    /// frame, the same deferral as `pending_palette_focus`.
+    pending_palette_launch: Option<app::pane_palette::Preset>,
     /// Issue #83: the close awaiting confirmation, or `None`. One slot, so
     /// "only one close can be pending" is true by construction. Written ONLY
     /// through `set_pending_close`.
@@ -1868,6 +1873,9 @@ impl PaneFlowApp {
         }
         if std::mem::take(&mut self.pending_palette_focus) {
             window.focus(&self.pane_palette_focus, cx);
+        }
+        if let Some(preset) = self.pending_palette_launch.take() {
+            self.pane_palette_launch(preset, window, cx);
         }
         // The pane header's dock toggle closed a maximized or still-restoring
         // dock over a saved focus (#506).
@@ -3000,6 +3008,7 @@ mod render_side_effect_policy_tests {
         for forbidden in [
             "self.pending_pane_focus",
             "self.pending_palette_focus",
+            "self.pending_palette_launch",
             "self.prune_stale_split_palette",
             "self.ensure_empty_tab_palette",
         ] {

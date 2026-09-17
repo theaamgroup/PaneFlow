@@ -828,6 +828,7 @@ impl PaneFlowApp {
             pane_palette: None,
             pane_palette_focus: cx.focus_handle(),
             pending_palette_focus: false,
+            pending_palette_launch: None,
             pending_close: None,
             claude_registry_seen: Default::default(),
             claude_registry_sweep_pending: false,
@@ -919,6 +920,10 @@ impl PaneFlowApp {
             smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;
             let _ = this.update(cx, |app, cx| {
                 app.launch_pad_settle_default_agent();
+                // A confirm pressed while the walk was pending was queued
+                // rather than waited for; replay it with the real answer.
+                app.launch_pad_resume_queued_confirm(cx);
+                app.pane_palette_resume_queued_launch(cx);
                 cx.notify();
             });
         })
