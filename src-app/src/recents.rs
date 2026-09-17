@@ -414,8 +414,30 @@ fn read_from_disk(path: &Path) -> Vec<RecentWorkspace> {
     }
 }
 
+/// Resolve where a recents write must land. `recents.json` sits in the same
+/// dotfiles-managed directory as `session.json` and `paneflow.json`, so a
+/// symlinked file is published onto its target and the link survives the
+/// atomic rename (the `session_write_target` / `config_write_target` shape);
+/// a dangling link is an error, not a path to create.
+fn recents_write_target(path: &Path) -> Result<PathBuf, std::io::Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path),
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(error),
+    }
+}
+
 fn write_to_disk(path: &Path, workspaces: &[RecentWorkspace]) {
     use std::os::unix::fs::OpenOptionsExt;
+    let path = match recents_write_target(path) {
+        Ok(target) => target,
+        Err(error) => {
+            log::warn!("recents: could not resolve {}: {error}", path.display());
+            return;
+        }
+    };
+    let path = path.as_path();
     let Some(parent) = path.parent() else {
         return;
     };
@@ -580,6 +602,63 @@ mod tests {
         json.push('}');
         std::fs::write(&path, json).expect("write");
         assert!(load_pruned(&path).is_empty(), "oversized file is ignored");
+    }
+
+    /// A dotfiles-managed recents.json is a symlink into another store. The
+    /// atomic publish must land on the link's target, leaving the link
+    /// standing, instead of replacing the symlink inode with a regular 0600
+    /// file and leaving the linked store stale (the session.json contract).
+    #[test]
+    fn write_to_disk_persists_through_a_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).expect("store dir");
+        let target = store.join("recents.json");
+        std::fs::write(&target, "stale").expect("seed target");
+        let live = dir.path().join("live");
+        std::fs::create_dir_all(&live).expect("live dir");
+        let link = live.join("recents.json");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let a = dir.path().join("a");
+        std::fs::create_dir(&a).expect("mkdir");
+        let mut list = Vec::new();
+        promote(&mut list, std::slice::from_ref(&a));
+
+        write_to_disk(&link, &list);
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link still present")
+                .file_type()
+                .is_symlink(),
+            "recents.json must stay a symlink after a write"
+        );
+        assert_eq!(
+            load_pruned(&target),
+            list,
+            "the link target holds the new list"
+        );
+        assert!(
+            std::fs::read_dir(&live)
+                .expect("live dir")
+                .filter_map(Result::ok)
+                .all(|entry| entry.file_name() == "recents.json"),
+            "no temp file may be left beside the link"
+        );
+
+        // A dangling link is refused rather than replaced by a regular file.
+        let dangling = live.join("dangling.json");
+        std::os::unix::fs::symlink(dir.path().join("missing").join("x.json"), &dangling)
+            .expect("dangling symlink");
+        write_to_disk(&dangling, &list);
+        assert!(
+            std::fs::symlink_metadata(&dangling)
+                .expect("dangling link still present")
+                .file_type()
+                .is_symlink(),
+            "a dangling link must not be replaced"
+        );
+        assert!(!dir.path().join("missing").exists());
     }
 
     #[test]
