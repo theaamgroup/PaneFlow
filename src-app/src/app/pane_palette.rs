@@ -89,7 +89,28 @@ pub(crate) struct Preset {
     pub(crate) source: PresetSource,
 }
 
+/// What identifies a row across rebuilds of the catalogue. The keyboard
+/// cursor is kept by key, not by position (issue #518): the cold PATH walk
+/// inserts agent rows ahead of the custom commands once it publishes, and a
+/// numeric index taken before that frame would then name a different row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PresetKey {
+    Shell,
+    Agent(TerminalAgent),
+    /// A custom command by its stable `ButtonCommand::id`, which survives
+    /// renames and reorders.
+    Custom(String),
+}
+
 impl Preset {
+    pub(crate) fn key(&self) -> PresetKey {
+        match &self.source {
+            PresetSource::Shell => PresetKey::Shell,
+            PresetSource::Agent(agent) => PresetKey::Agent(*agent),
+            PresetSource::Custom(button) => PresetKey::Custom(button.id.clone()),
+        }
+    }
+
     fn icon_path(&self) -> SharedString {
         match &self.source {
             PresetSource::Shell => "icons/terminal.svg".into(),
@@ -163,8 +184,12 @@ pub(crate) struct PanePaletteState {
     /// Workspace the preset lands in, by stable id (survives reorders).
     pub(crate) ws_id: u64,
     pub(crate) placement: PalettePlacement,
-    /// Keyboard cursor into the preset list.
+    /// Keyboard cursor into the preset list, as painted last frame. Only a
+    /// scroll hint: launches and highlights resolve [`Self::selected_key`].
     pub(crate) selected: usize,
+    /// The row the cursor names, by identity, so a catalogue reshaped by the
+    /// cold PATH walk (issue #518) still launches the row the user chose.
+    pub(crate) selected_key: PresetKey,
     /// Last refusal, shown under the buttons (US-015 AC4).
     pub(crate) error: Option<String>,
     /// Focus to hand back when the picker goes away (US-014 AC5). `None` for
@@ -267,13 +292,21 @@ impl PaneFlowApp {
             label: "Terminal".to_string(),
             source: PresetSource::Shell,
         }];
+        // Issue #518: while the first PATH walk is pending the snapshot says
+        // nothing is installed, which would drop every default-enabled agent
+        // from the catalogue and leave the `looking` row unreachable. Treat
+        // them as installed until the walk publishes; the rows paint muted
+        // with `looking`, and the confirm still waits for the real answer.
+        let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
         presets.extend(
-            TerminalAgent::visible(&self.cached_config)
-                .into_iter()
-                .map(|agent| Preset {
-                    label: agent.display_name().to_string(),
-                    source: PresetSource::Agent(agent),
-                }),
+            TerminalAgent::visible_with(&self.cached_config, |agent| {
+                scan_pending || agent.is_installed()
+            })
+            .into_iter()
+            .map(|agent| Preset {
+                label: agent.display_name().to_string(),
+                source: PresetSource::Agent(agent),
+            }),
         );
         if let Some(ws) = self.workspaces.get(ws_idx) {
             presets.extend(ws.custom_buttons.iter().map(|button| Preset {
@@ -289,6 +322,17 @@ impl PaneFlowApp {
     fn pane_palette_ws_idx(&self) -> Option<usize> {
         let ws_id = self.pane_palette.as_ref()?.ws_id;
         self.workspaces.iter().position(|ws| ws.id == ws_id)
+    }
+
+    /// The row the keyboard cursor names, resolved by identity against the
+    /// catalogue as it is now (issue #518), with the painted index as the
+    /// fallback when that row is gone.
+    fn pane_palette_selected(&self) -> Option<(usize, Preset)> {
+        let palette = self.pane_palette.as_ref()?;
+        let presets = self.pane_palette_presets(self.pane_palette_ws_idx()?);
+        let idx = resolve_selected(&presets, &palette.selected_key, palette.selected)?;
+        let preset = presets.into_iter().nth(idx)?;
+        Some((idx, preset))
     }
 
     /// Open a `New pane` tab in `ws_idx` and make the preset picker its
@@ -423,6 +467,7 @@ impl PaneFlowApp {
             ws_id,
             placement: PalettePlacement::Tab { tab_id },
             selected: 0,
+            selected_key: PresetKey::Shell,
             error: None,
             restore_focus,
             scroll: ScrollHandle::new(),
@@ -460,6 +505,7 @@ impl PaneFlowApp {
                 direction,
             },
             selected: 0,
+            selected_key: PresetKey::Shell,
             error: None,
             restore_focus: None,
             scroll: ScrollHandle::new(),
@@ -541,6 +587,7 @@ impl PaneFlowApp {
             ws_id,
             placement: PalettePlacement::Tab { tab_id },
             selected: 0,
+            selected_key: PresetKey::Shell,
             error: None,
             restore_focus: None,
             scroll: ScrollHandle::new(),
@@ -766,7 +813,9 @@ impl PaneFlowApp {
         let len = self
             .pane_palette_ws_idx()
             .map_or(0, |ws_idx| self.pane_palette_presets(ws_idx).len());
-        let selected = self.pane_palette.as_ref().map_or(0, |p| p.selected);
+        // Resolve the cursor by identity first: the catalogue may have been
+        // reshaped by the cold PATH walk since the frame that painted it.
+        let selected = self.pane_palette_selected().map_or(0, |(idx, _)| idx);
         let picker_open = self
             .pane_palette
             .as_ref()
@@ -782,12 +831,9 @@ impl PaneFlowApp {
             }
             "escape" => self.close_pane_palette(window, cx),
             "enter" => {
-                // The keyboard cursor names a row of the catalogue as it is
-                // now, which is the list the last frame painted the highlight on.
-                let preset = self
-                    .pane_palette_ws_idx()
-                    .and_then(|ws_idx| self.pane_palette_presets(ws_idx).into_iter().nth(selected));
-                if let Some(preset) = preset {
+                // Launch the row the cursor names by identity, never the
+                // rebuilt list at the painted index (issue #518).
+                if let Some((_, preset)) = self.pane_palette_selected() {
                     self.pane_palette_launch(preset, window, cx);
                 }
             }
@@ -802,8 +848,15 @@ impl PaneFlowApp {
     }
 
     fn pane_palette_select(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let key = self
+            .pane_palette_ws_idx()
+            .and_then(|ws_idx| self.pane_palette_presets(ws_idx).into_iter().nth(idx))
+            .map(|preset| preset.key());
         if let Some(palette) = self.pane_palette.as_mut() {
             palette.selected = idx;
+            if let Some(key) = key {
+                palette.selected_key = key;
+            }
             // Keep the keyboard cursor inside the viewport: the column is
             // taller than its `max_h` as soon as a few agents are visible.
             palette.scroll.scroll_to_item(idx);
@@ -838,8 +891,15 @@ impl PaneFlowApp {
             .max_h(px(420.))
             .overflow_y_scroll()
             .track_scroll(&palette.scroll);
+        let selected_idx = self.pane_palette_selected().map(|(idx, _)| idx);
         for (idx, preset) in presets.iter().enumerate() {
-            buttons = buttons.child(self.render_pane_palette_button(idx, preset, palette, ui, cx));
+            buttons = buttons.child(self.render_pane_palette_button(
+                idx,
+                preset,
+                Some(idx) == selected_idx,
+                ui,
+                cx,
+            ));
         }
 
         let mut column = div().flex().flex_col().items_center().child(title);
@@ -1187,7 +1247,7 @@ impl PaneFlowApp {
         &self,
         idx: usize,
         preset: &Preset,
-        palette: &PanePaletteState,
+        is_selected: bool,
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1211,7 +1271,7 @@ impl PaneFlowApp {
 
         let mut button = select_item(
             SharedString::from(format!("pane-palette-row-{idx}")),
-            idx == palette.selected,
+            is_selected,
             ui,
         )
         .cursor(CursorStyle::PointingHand)
@@ -1258,9 +1318,68 @@ impl PaneFlowApp {
     }
 }
 
+/// Where `key` sits in `presets`, or `fallback` (clamped to the list) when
+/// that row is gone. Pure so the reshaped-catalogue case is testable without
+/// a `PaneFlowApp`.
+fn resolve_selected(presets: &[Preset], key: &PresetKey, fallback: usize) -> Option<usize> {
+    if presets.is_empty() {
+        return None;
+    }
+    presets
+        .iter()
+        .position(|preset| preset.key() == *key)
+        .or(Some(fallback.min(presets.len() - 1)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #518: a custom row highlighted before the cold PATH walk
+    /// publishes must still be the row Enter launches once the walk inserts
+    /// agent rows ahead of it, and a row that vanished falls back to the
+    /// painted index instead of losing the cursor.
+    #[test]
+    fn keyboard_cursor_keeps_the_custom_row_when_the_cold_scan_inserts_agents() {
+        let shell = Preset {
+            label: "Terminal".into(),
+            source: PresetSource::Shell,
+        };
+        let custom = Preset {
+            label: "Serve".into(),
+            source: PresetSource::Custom(ButtonCommand {
+                id: "serve".into(),
+                name: "Serve".into(),
+                command: "npm run dev".into(),
+                ..Default::default()
+            }),
+        };
+        let agent = Preset {
+            label: "Codex".into(),
+            source: PresetSource::Agent(TerminalAgent::Codex),
+        };
+        let before = vec![shell.clone(), custom.clone()];
+        let key = custom.key();
+        assert_eq!(resolve_selected(&before, &key, 1), Some(1));
+
+        let after = vec![shell.clone(), agent.clone(), custom.clone()];
+        assert_eq!(
+            resolve_selected(&after, &key, 1),
+            Some(2),
+            "the inserted agent row must not steal the cursor"
+        );
+        assert_eq!(
+            resolve_selected(&[shell.clone(), agent.clone()], &key, 1),
+            Some(1),
+            "a vanished row falls back to the painted index"
+        );
+        assert_eq!(
+            resolve_selected(&[shell], &key, 5),
+            Some(0),
+            "fallback clamps"
+        );
+        assert_eq!(resolve_selected(&[], &key, 0), None);
+    }
 
     #[test]
     fn tab_needs_palette_matches_the_open_tab_with_surface_guard() {
@@ -1377,6 +1496,15 @@ mod tests {
         assert!(
             row.contains("preset.looks_launchable()") && !row.contains("ensure_launchable()"),
             "a render frame reads the non-blocking snapshot: {row}"
+        );
+        let keys = src
+            .split("pub(crate) fn handle_pane_palette_key_down(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("handle_pane_palette_key_down exists");
+        assert!(
+            keys.contains("self.pane_palette_selected()") && !keys.contains(".nth(selected)"),
+            "Enter resolves the cursor by identity, never by the painted index: {keys}"
         );
         let looks = src
             .split("fn looks_launchable(")

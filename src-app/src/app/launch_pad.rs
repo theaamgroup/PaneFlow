@@ -192,8 +192,13 @@ impl PaneFlowApp {
         // Issue #518: while the first PATH walk is pending every row reads
         // as not installed, so remember that the fallback was provisional
         // and let the boot warm's completion pick the real default.
-        let agent_idx = default_agent_idx(|a| a.is_installed());
+        // The two reads lock the cache separately, so the pending flag is
+        // read first: a walk that publishes between them then leaves the
+        // flag `true` and the settle re-picks from the full snapshot, while
+        // the other order could pair a row-0 fallback from the empty
+        // snapshot with a cleared flag that nothing settles.
         let agent_default_pending = crate::agent_launcher::installed_binary_scan_pending();
+        let agent_idx = default_agent_idx(|a| a.is_installed());
 
         self.launch_pad = Some(LaunchPadState {
             ws_id,

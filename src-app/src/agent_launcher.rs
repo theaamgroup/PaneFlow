@@ -477,6 +477,20 @@ impl TerminalAgent {
             .collect()
     }
 
+    /// [`Self::visible`] with the installed answer supplied by the caller.
+    /// The pane palette passes "installed" for every agent while the first
+    /// PATH walk is pending (issue #518) so the default-enabled agents get a
+    /// row that reads `looking` instead of vanishing from the catalogue.
+    pub(crate) fn visible_with(
+        config: &PaneFlowConfig,
+        is_installed: impl Fn(TerminalAgent) -> bool,
+    ) -> Vec<TerminalAgent> {
+        TerminalAgent::ALL
+            .into_iter()
+            .filter(|a| a.is_visible_with(config, &is_installed))
+            .collect()
+    }
+
     /// [`Self::visible`] for a user action that records its answer (the
     /// workspace template's default agent): a cold cache waits for the first
     /// PATH walk instead of picking from a list that is missing every
