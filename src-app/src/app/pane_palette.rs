@@ -816,21 +816,35 @@ impl PaneFlowApp {
         let title = preset.label.clone();
         let placement = match self.pane_palette.as_ref() {
             Some(palette) => match &palette.placement {
-                PalettePlacement::Tab { .. } => None,
-                PalettePlacement::Split { target, direction } => Some((target.clone(), *direction)),
+                PalettePlacement::Tab { tab_id } => Err(*tab_id),
+                PalettePlacement::Split { target, direction } => Ok((target.clone(), *direction)),
             },
             None => return,
         };
 
         match placement {
-            None => {
-                // The picker *is* this tab, so the preset fills it in place -
-                // dropping the state first, otherwise closing the picker would
+            Err(tab_id) => {
+                // The picker *is* this tab, so the preset fills it in place.
+                // `open_tab_with_surface` fills the workspace's active tab,
+                // so the placement's own tab has to be that tab and still
+                // paneless: a launch replayed after the cold PATH walk
+                // (issue #518) may arrive after the user switched tabs or
+                // closed the `New pane` tab, and must not land elsewhere.
+                let owns_active_tab = ws_idx == self.active_idx
+                    && self.workspaces.get(ws_idx).is_some_and(|ws| {
+                        let tab = ws.active_tab();
+                        tab.id == tab_id && tab.root.is_none() && tab.saved_layout.is_none()
+                    });
+                if !owns_active_tab {
+                    self.pane_palette_set_error("That New pane tab is no longer active", cx);
+                    return;
+                }
+                // Drop the state first, otherwise closing the picker would
                 // close the tab that is about to receive the pane.
                 self.discard_pane_palette(cx);
                 self.open_tab_with_surface(ws_idx, title, profile, command, window, cx);
             }
-            Some((target, direction)) => {
+            Ok((target, direction)) => {
                 let Some(target) = target.upgrade() else {
                     self.pane_palette_set_error("That pane no longer exists", cx);
                     return;
@@ -1536,6 +1550,21 @@ mod tests {
         assert!(
             row.contains("preset.looks_launchable()") && !row.contains("ensure_launchable()"),
             "a render frame reads the non-blocking snapshot: {row}"
+        );
+        let launch = src
+            .split("pub(crate) fn pane_palette_launch(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("pane_palette_launch exists");
+        let bound = launch
+            .find("tab.id == tab_id && tab.root.is_none() && tab.saved_layout.is_none()")
+            .expect("the Tab arm binds the launch to the placement's own paneless tab");
+        let fill = launch
+            .find("self.open_tab_with_surface(ws_idx")
+            .expect("the Tab arm fills the tab");
+        assert!(
+            bound < fill,
+            "the tab check runs before the fill, so a replayed launch cannot land in another tab: {launch}"
         );
         let keys = src
             .split("pub(crate) fn handle_pane_palette_key_down(")
