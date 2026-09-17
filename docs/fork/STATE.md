@@ -11,6 +11,19 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
 
+**2026-09-16: #517 splash removed.** Upstream `df375ba5` part 1: the 900 ms
+`StartupSplashView` (its `STARTUP_SPLASH_*` consts, the letter and shimmer
+helpers, and the `min_visible` timer) is deleted from `src-app/src/main.rs`,
+and `mount_paneflow_app` now builds `PaneFlowApp` as the window root directly
+inside `open_window` (a synchronous, capped `load_session` read, then the
+#156 batched restore), so the first presented frame is the restored session
+or the empty state. The splash-only test and the DESIGN.md splash rows went
+with it. Gates on the branch (warm `target/`): `cargo build` exit 0; `cargo
+test --workspace --no-fail-fast` 3,523 passed, 0 failed, 7 ignored (the one
+removed test is `startup_splash_uses_bootstrap_material_value_without_reloading_config`);
+`cargo clippy --workspace --all-targets` exit 0, WARNING COUNT 1 (`block
+v0.1.6`); `cargo fmt --check` exit 0; `paneflow --version` -> `paneflow 0.6.1`.
+
 **2026-09-16: post-0.6.1 gate run on `main`.** Six PRs landed after the
 0.6.1 tag, all squash-merged: the bounded `hdiutil` retry for #547 (#557),
 the empty-state New Workspace copy for #533 (#558), the DeepSeek Harness
