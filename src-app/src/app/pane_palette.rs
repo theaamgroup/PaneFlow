@@ -133,6 +133,16 @@ impl Preset {
 
     /// `Err` carries the readable refusal a not-installed agent must produce
     /// instead of an empty terminal (US-015 AC4).
+    /// The render-frame answer: reads the installed-binary snapshot without
+    /// waiting on the cold PATH walk, so a row can paint as muted while the
+    /// walk is still out. Never a substitute for [`Self::ensure_launchable`].
+    fn looks_launchable(&self) -> bool {
+        match &self.source {
+            PresetSource::Agent(agent) => agent.is_installed(),
+            _ => true,
+        }
+    }
+
     fn ensure_launchable(&self) -> Result<(), String> {
         match &self.source {
             // Issue #518: a confirm is a user action, not a render frame. A
@@ -685,8 +695,13 @@ impl PaneFlowApp {
         }
     }
 
-    /// Launch the preset at `idx` where the picker stands.
-    fn pane_palette_launch(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Launch `preset` where the picker stands. The row that was clicked or
+    /// confirmed is passed by value, never re-resolved from its painted index:
+    /// the cold PATH walk (issue #518) inserts agent rows ahead of the custom
+    /// commands once it publishes, so an index captured from the pre-scan
+    /// frame would launch a newly inserted agent instead of the custom
+    /// command the user chose.
+    fn pane_palette_launch(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ws_idx) = self.pane_palette_ws_idx() else {
             self.pane_palette_set_error("This project is no longer open", cx);
             return;
@@ -697,9 +712,6 @@ impl PaneFlowApp {
             self.pane_palette_set_error(format!("Checking out {branch}..."), cx);
             return;
         }
-        let Some(preset) = self.pane_palette_presets(ws_idx).get(idx).cloned() else {
-            return;
-        };
         if let Err(message) = preset.ensure_launchable() {
             self.pane_palette_set_error(message, cx);
             return;
@@ -770,8 +782,13 @@ impl PaneFlowApp {
             }
             "escape" => self.close_pane_palette(window, cx),
             "enter" => {
-                if selected < len {
-                    self.pane_palette_launch(selected, window, cx);
+                // The keyboard cursor names a row of the catalogue as it is
+                // now, which is the list the last frame painted the highlight on.
+                let preset = self
+                    .pane_palette_ws_idx()
+                    .and_then(|ws_idx| self.pane_palette_presets(ws_idx).into_iter().nth(selected));
+                if let Some(preset) = preset {
+                    self.pane_palette_launch(preset, window, cx);
                 }
             }
             "up" if selected > 0 && selected < len => {
@@ -1174,7 +1191,9 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let launchable = preset.ensure_launchable().is_ok();
+        // A render frame reads the non-blocking snapshot; only the confirm
+        // (`ensure_launchable`) waits for the cold PATH walk (issue #518).
+        let launchable = preset.looks_launchable();
         let icon_path = preset.icon_path();
         let icon = if preset.icon_multicolor() {
             gpui::img(icon_path)
@@ -1199,9 +1218,14 @@ impl PaneFlowApp {
         .gap(px(8.))
         .h(px(34.))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.pane_palette_launch(idx, window, cx);
-            cx.stop_propagation();
+        .on_click(cx.listener({
+            // Issue #518: launch the row the user saw, not whatever sits at
+            // this index after the cold scan reshapes the catalogue.
+            let preset = preset.clone();
+            move |this, _: &ClickEvent, window, cx| {
+                this.pane_palette_launch(preset.clone(), window, cx);
+                cx.stop_propagation();
+            }
         }))
         .child(icon)
         .child(
@@ -1325,6 +1349,46 @@ mod tests {
 
     /// Source-text assertion: `close_pane_palette` needs a live `Window`, so
     /// the guard's position is pinned here. It must run before
+    /// Issue #518: the cold PATH walk inserts agent rows ahead of a
+    /// workspace's custom commands once it publishes, so a launch must carry
+    /// the `Preset` the user saw rather than re-resolve a painted index, and
+    /// the row painter must read the non-blocking snapshot, never the
+    /// confirm's blocking `ensure_launchable`.
+    #[test]
+    fn click_keeps_the_custom_row_when_the_cold_scan_inserts_agents() {
+        let src = include_str!("pane_palette.rs");
+        assert!(
+            src.contains("fn pane_palette_launch(&mut self, preset: Preset,"),
+            "pane_palette_launch takes the preset by value, not an index"
+        );
+        let row = src
+            .split("fn render_pane_palette_button(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("render_pane_palette_button exists");
+        assert!(
+            row.contains("this.pane_palette_launch(preset.clone(), window, cx)"),
+            "the click launches the captured preset: {row}"
+        );
+        assert!(
+            !row.contains("pane_palette_launch(idx"),
+            "the click must not re-resolve the painted index: {row}"
+        );
+        assert!(
+            row.contains("preset.looks_launchable()") && !row.contains("ensure_launchable()"),
+            "a render frame reads the non-blocking snapshot: {row}"
+        );
+        let looks = src
+            .split("fn looks_launchable(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("looks_launchable exists");
+        assert!(
+            looks.contains("agent.is_installed()") && !looks.contains("is_installed_now"),
+            "looks_launchable never blocks: {looks}"
+        );
+    }
+
     /// `self.pane_palette.take()`, or the picker is dropped even when the
     /// close is refused.
     #[test]
