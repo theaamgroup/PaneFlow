@@ -397,11 +397,18 @@ Two runs of the same commit differ by a few percent on the microsecond
 metrics. Treat a change below 5% as noise unless the allocation columns, which
 are deterministic, moved with it.
 
-The run measures its own CPU share over the timed scenarios (process CPU time
-divided by wall time, recorded as `cpu_share` in the result). The scenarios
-are single-threaded and never sleep, so an uncontended run reports close to
-1.0. Process CPU time comes from libproc, whose figures are Mach ticks and are
-converted through `mach_timebase_info`. A run that prints
+The terminal and editor runs measure their own CPU share over the timed
+scenarios (process CPU time divided by wall time, recorded as `cpu_share` in
+the result). Those scenarios are single-threaded and never sleep, so an
+uncontended run reports close to 1.0. Process CPU time comes from libproc,
+whose figures are Mach ticks and are converted through `mach_timebase_info`.
+The startup suite cannot measure the launched child this way: its
+`cpu_share` is the lowest core-share probe taken before a scenario's launches
+(see the startup section above), which catches a competing workload that is
+already running but not a stall that begins during the launches. For that
+suite, compare each metric's `mean` with its `p95`: with ten launches the p95
+is the ninth smallest sample, so a mean above it proves one launch stalled,
+and such a run should not become the baseline either. A run that prints
 `PANEFLOW_BENCH_WARNING` got less than 90% of a core: something else was
 competing (a `cargo build` in another worktree is enough, and so is the
 installed PaneFlow app with agents running), its timings are inflated, and it
