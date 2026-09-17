@@ -71,10 +71,9 @@ mod workspace;
 use crate::window_chrome::title_bar;
 
 use gpui::{
-    Animation, AnimationExt, App, Context, CursorStyle, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, PathBuilder, Pixels, Point, Render, SharedString, Styled,
-    WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, canvas, div, point,
-    prelude::*, px,
+    App, Context, CursorStyle, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    PathBuilder, Pixels, Point, Render, Styled, WeakEntity, Window, WindowBounds,
+    WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px,
 };
 use gpui_platform::application;
 use notify::Watcher;
@@ -364,37 +363,12 @@ impl ClosedRecord {
 
 const PRIMARY_SIDEBAR_ANIMATION_MS: u64 = 280;
 const PRIMARY_SIDEBAR_MIN_ANIMATION_DELTA: f32 = 0.5;
-const STARTUP_SPLASH_TEXT_WIDTH: f32 = 198.;
-const STARTUP_SPLASH_TEXT: [&str; 8] = ["P", "a", "n", "e", "F", "l", "o", "w"];
-const STARTUP_SPLASH_LETTER_COUNT: f32 = STARTUP_SPLASH_TEXT.len() as f32;
-const STARTUP_SPLASH_TEXT_ALPHA: f32 = 0.54;
-const STARTUP_SPLASH_SHIMMER_ALPHA: f32 = 0.82;
-const STARTUP_SPLASH_SHIMMER_MS: u64 = 2600;
-const STARTUP_SPLASH_MIN_VISIBLE_MS: u64 = 900;
 
 #[derive(Clone, Copy)]
 struct SidebarWidthAnimation {
     from_width: f32,
     to_width: f32,
     started_at: std::time::Instant,
-}
-
-struct StartupSplashView {
-    mount_scheduled: bool,
-    native_material_active: bool,
-}
-
-impl StartupSplashView {
-    fn from_bootstrap(native_material_active: bool) -> Self {
-        Self {
-            mount_scheduled: false,
-            native_material_active,
-        }
-    }
-
-    fn new(native_material_active: bool, _: &mut Context<Self>) -> Self {
-        Self::from_bootstrap(native_material_active)
-    }
 }
 
 fn should_load_login_shell_env_for_startup(
@@ -559,9 +533,9 @@ fn chrome_material_for_frame(material_enabled: bool, is_fullscreen: bool) -> boo
 #[cfg(test)]
 mod native_material_tests {
     use super::{
-        DEFAULT_LOG_FILTER, StartupSplashView, chrome_material_for_frame,
-        prepare_process_environment_before_threads, should_extract_mcp_bridge_for_cli,
-        should_load_login_shell_env_for_startup, should_setup_hooks_for_cli,
+        DEFAULT_LOG_FILTER, chrome_material_for_frame, prepare_process_environment_before_threads,
+        should_extract_mcp_bridge_for_cli, should_load_login_shell_env_for_startup,
+        should_setup_hooks_for_cli,
     };
     use crate::source_probe::source_slice;
 
@@ -630,15 +604,6 @@ mod native_material_tests {
         assert!(!should_load_login_shell_env_for_startup(
             false, false, false, true
         ));
-    }
-
-    #[test]
-    fn startup_splash_uses_bootstrap_material_value_without_reloading_config() {
-        let enabled = StartupSplashView::from_bootstrap(true);
-        let disabled = StartupSplashView::from_bootstrap(false);
-
-        assert!(enabled.native_material_active);
-        assert!(!disabled.native_material_active);
     }
 
     #[test]
@@ -1049,109 +1014,6 @@ fn panel_corner_mask(corner: PanelCorner, background: gpui::Hsla) -> impl IntoEl
     .size_full()
 }
 
-fn startup_splash_letter(
-    label: &'static str,
-    index: usize,
-    base_color: gpui::Hsla,
-) -> gpui::AnyElement {
-    div()
-        .text_size(px(34.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(base_color)
-        .child(label)
-        .with_animation(
-            SharedString::from(format!("startup-splash-shimmer-letter-{index}")),
-            Animation::new(std::time::Duration::from_millis(STARTUP_SPLASH_SHIMMER_MS)).repeat(),
-            move |letter, delta| {
-                let color = startup_splash_shimmer_color(base_color, index, delta);
-                letter.text_color(color)
-            },
-        )
-        .into_any_element()
-}
-
-fn startup_splash_shimmer_color(base_color: gpui::Hsla, index: usize, delta: f32) -> gpui::Hsla {
-    let active_delta = if delta < 0.78 {
-        delta / 0.78
-    } else {
-        return base_color;
-    };
-    let center = -1.8 + active_delta * (STARTUP_SPLASH_LETTER_COUNT + 3.6);
-    let distance = (index as f32 - center).abs();
-    let sigma = 0.86;
-    let strength = (-(distance * distance) / (2. * sigma * sigma)).exp();
-    let lightness = (base_color.l + (1. - base_color.l) * strength * 0.86).min(0.97);
-    let saturation = base_color.s * (1. - strength * 0.85).max(0.);
-    let alpha = base_color.a + (STARTUP_SPLASH_SHIMMER_ALPHA - base_color.a) * strength;
-
-    gpui::hsla(base_color.h, saturation, lightness, alpha)
-}
-
-impl Render for StartupSplashView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.mount_scheduled {
-            self.mount_scheduled = true;
-            cx.spawn_in(window, async move |_, cx| {
-                let loaded = smol::unblock(PaneFlowApp::load_session);
-                let min_visible = async {
-                    smol::Timer::after(std::time::Duration::from_millis(
-                        STARTUP_SPLASH_MIN_VISIBLE_MS,
-                    ))
-                    .await;
-                };
-                let ((saved_session, session_corruption), _) =
-                    smol::future::zip(loaded, min_visible).await;
-                let _ = cx.update(|window, cx| {
-                    mount_paneflow_app(window, cx, saved_session, session_corruption);
-                });
-            })
-            .detach();
-        }
-
-        let ui = crate::theme::ui_colors();
-        let splash_text_color = gpui::Hsla {
-            a: STARTUP_SPLASH_TEXT_ALPHA,
-            ..ui.muted
-        };
-        let theme = crate::theme::active_theme();
-        let is_window_active = window.is_window_active();
-        let shell_color = if is_window_active {
-            theme.title_bar_background
-        } else {
-            theme.title_bar_inactive_background
-        };
-        let background = crate::app::constants::cockpit_backdrop_background(
-            shell_color,
-            is_window_active,
-            self.native_material_active,
-        );
-        let content = div()
-            .font_family("Geist")
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .relative()
-                    .w(px(STARTUP_SPLASH_TEXT_WIDTH))
-                    .h(px(58.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .children(
-                        STARTUP_SPLASH_TEXT
-                            .iter()
-                            .enumerate()
-                            .map(|(index, label)| {
-                                startup_splash_letter(label, index, splash_text_color)
-                            }),
-                    ),
-            );
-        crate::window_chrome::csd::client_side_window_shell(content, window, background, ui.border)
-    }
-}
-
 impl SidebarWidthAnimation {
     fn width_at(self, now: std::time::Instant) -> f32 {
         let duration = std::time::Duration::from_millis(PRIMARY_SIDEBAR_ANIMATION_MS);
@@ -1393,7 +1255,7 @@ struct PaneFlowApp {
     /// this until after the first frame, then toasts the backup path so a
     /// corrupt file is not a silent first-launch.
     session_corruption: Option<app::session::SessionCorruptionInfo>,
-    /// Remaining workspaces from the splash-thread session load. Drained one
+    /// Remaining workspaces from the startup session load. Drained one
     /// bounded batch per GPUI frame so restore cannot stall the event loop.
     session_restore: Option<app::session::PendingSessionRestore>,
     /// Monotonic settings-persist generation. `persist_setting` `fetch_add`s
@@ -2882,15 +2744,13 @@ fn register_focus_lost_fallback<T: 'static>(
     .detach();
 }
 
-fn mount_paneflow_app(
-    window: &mut Window,
-    cx: &mut App,
-    saved_session: Option<paneflow_config::schema::SessionState>,
-    session_corruption: Option<app::session::SessionCorruptionInfo>,
-) -> Entity<PaneFlowApp> {
-    let view = window.replace_root(cx, |_, cx| {
-        PaneFlowApp::new(saved_session, session_corruption, cx)
-    });
+/// Builds the window root (issue #517, upstream df375ba5). There is no splash
+/// any more: the first presented frame is the restored session (or the empty
+/// state). `session.json` is a bounded read (`read_session_capped`), and the
+/// workspace restore itself stays batched across frames (#156).
+fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> {
+    let (saved_session, session_corruption) = PaneFlowApp::load_session();
+    let view = cx.new(|cx| PaneFlowApp::new(saved_session, session_corruption, cx));
     view.update(cx, |_, cx| {
         register_focus_lost_fallback(window, cx, |app| &app.empty_workspace_focus);
     });
@@ -3466,7 +3326,6 @@ fn main() {
                 ..Default::default()
             };
 
-            let startup_native_material_active = config.cockpit_chrome_material_enabled();
             let window_result = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -3491,7 +3350,7 @@ fn main() {
                         );
                     }
 
-                    cx.new(|cx| StartupSplashView::new(startup_native_material_active, cx))
+                    mount_paneflow_app(window, cx)
                 },
             );
 
