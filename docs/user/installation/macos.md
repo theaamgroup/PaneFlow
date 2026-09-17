@@ -19,7 +19,11 @@ scripts/bundle-macos.sh --version 0.1.0 --arch aarch64
 
 That writes `dist/PaneFlow.app` with the executable at
 `Contents/MacOS/paneflow`, `Info.plist` (with the version substituted),
-and `Resources/PaneFlow.icns`.
+`Resources/PaneFlow.icns`, and the Agent summary helper at
+`Contents/Helpers/paneflow-agent-summary` (a Swift sidecar that
+`scripts/build-agent-summary.sh` compiles with `xcrun swiftc`; on an SDK
+older than macOS 26 it builds as a stub that reports on-device summaries
+unavailable).
 
 Signing, notarization, and DMG creation are separate scripts:
 `scripts/sign-macos.sh`, `scripts/notarize-macos.sh`,

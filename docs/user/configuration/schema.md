@@ -72,6 +72,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `agent_stall_threshold_secs` | integer or null | `60` | Silence threshold before a Thinking agent is marked Stalled. Clamped to `30` to `86400`. |
 | `crash_reporting` | boolean or null | `true` | Master switch for Sentry crash reporting. `false` never initializes it. Reports are sent without default PII (`send_default_pii` is off), only a GUI launch initializes reporting (CLI subcommands never do), and the switch is read once at startup, so it requires a restart. |
 | `review_enabled` | boolean or null | `true` | Master switch for the Review surface. `false` hides the Review view and its sidebar tab, makes the Review shortcut a no-op, and reopens a Review-mode session in the terminal view. |
+| `agent_summary_enabled` | boolean or null | `true` | Master switch for the Agent Summary overlay (`Cmd+Shift+I` by default). It lists every agent pane across every workspace and, when Apple Intelligence is available on this Mac, summarises each pane's recent output on-device: nothing leaves the machine. `false` makes the shortcut a no-op and never runs the summary helper. Without Apple Intelligence the overlay still opens and lists agent states, with a one-line note instead of summaries. |
 | `new_pane_shows_sessions` | boolean or null | `false` | When true, a Tab-placement New pane picker also opens the Agent sessions sidebar, scoped to the workspace cwd, so a listed session can be resumed into the new pane. Split-placement pickers leave the sidebar alone. |
 | `mcp_bridge_prompt_dismissed` | array of strings | `[]` | MCP-install agent ids (`claude-code`, `codex`, `gemini`, `opencode`) whose sidebar "Install MCP bridge" callout was dismissed. When a pane runs one of those agents and its MCP config has no `paneflow` entry, the sidebar footer offers the bridge once; the callout's `×` writes the agent id here so it never asks again for that agent. Remove an id to see the offer again. A malformed value loads as the empty list. |
 | `review_prefill_delay_ms` | integer or null | `2000` | Delay before Review pre-fills a freshly launched CLI. Clamped to `250` to `10000`. |
@@ -329,6 +330,7 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "agent_stall_detection": true,
   "agent_stall_threshold_secs": 60,
   "review_enabled": true,
+  "agent_summary_enabled": true,
   "new_pane_shows_sessions": false,
   "review_prefill_delay_ms": 2000,
   "submit_paste_delay_ms": 70,

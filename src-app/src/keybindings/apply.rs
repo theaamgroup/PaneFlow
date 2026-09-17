@@ -391,6 +391,42 @@ mod tests {
         );
     }
 
+    /// Issue #576: the Agent Summary overlay is `secondary-shift-i`, global,
+    /// and nothing else claims that chord. It must stay a modified chord:
+    /// a global bare letter would be stolen from every shell (the issue's
+    /// "not a bare `f`" note), so the guard also refuses an unmodified key.
+    #[test]
+    fn agent_summary_is_cmd_shift_i_and_nothing_else_claims_it() {
+        use super::super::defaults::{DEFAULTS, MACOS_ONLY_DEFAULTS};
+
+        let action = action_from_name("open_agent_summary").expect("registered action");
+        assert_eq!(context_for_action("open_agent_summary"), None);
+        assert!(
+            make_binding("secondary-shift-i", action, None).is_some(),
+            "secondary-shift-i must parse into a valid KeyBinding"
+        );
+        let claimants: Vec<&str> = DEFAULTS
+            .iter()
+            .chain(MACOS_ONLY_DEFAULTS.iter())
+            .filter(|d| keystrokes_conflict(d.key, "secondary-shift-i"))
+            .map(|d| d.action_name)
+            .collect();
+        assert_eq!(
+            claimants,
+            vec!["open_agent_summary"],
+            "secondary-shift-i must be claimed by open_agent_summary and nothing else"
+        );
+        let bound = DEFAULTS
+            .iter()
+            .find(|d| d.action_name == "open_agent_summary")
+            .expect("a default chord for open_agent_summary");
+        assert!(
+            bound.key.contains('-'),
+            "a global overlay must never bind a bare key, found {:?}",
+            bound.key
+        );
+    }
+
     /// US-020: a user who already bound `secondary-]` to something else keeps
     /// it. `apply_keybindings` drops the default sharing a user-claimed chord
     /// before registering it, so no ambiguous double binding - and no

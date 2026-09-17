@@ -138,6 +138,7 @@ mod tests {
             agent_stall_threshold_secs: Some(300),
             crash_reporting: Some(true),
             review_enabled: Some(true),
+            agent_summary_enabled: Some(true),
             new_pane_shows_sessions: Some(false),
             review_prefill_delay_ms: Some(2000),
             submit_paste_delay_ms: Some(70),
@@ -445,6 +446,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.resolved_agent_stall_threshold_secs(), 600);
+    }
+
+    /// Issue #576: the Agent Summary overlay has a `None`-is-on opt-out that
+    /// the public schema publishes, so a Mac without Apple Intelligence can
+    /// turn the surface off outright.
+    #[test]
+    fn agent_summary_defaults_on_and_respects_kill_switch() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schemas/paneflow.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
+        assert!(
+            schema["properties"].get("agent_summary_enabled").is_some(),
+            "the public JSON schema must expose the agent_summary_enabled opt-out"
+        );
+
+        assert!(PaneFlowConfig::default().agent_summary_enabled());
+        let on = PaneFlowConfig {
+            agent_summary_enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(on.agent_summary_enabled());
+        let off = PaneFlowConfig {
+            agent_summary_enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.agent_summary_enabled());
     }
 
     #[test]

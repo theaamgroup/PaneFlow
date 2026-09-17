@@ -185,10 +185,29 @@ impl PaneFlowApp {
                 cx,
             )));
 
+        // Issue #576: the Agent Summary overlay's master switch. Off is the
+        // opt-out for a Mac without Apple Intelligence (or a user who wants
+        // no model near their panes); on, availability is a runtime check.
+        let summary_section = div()
+            .flex()
+            .flex_col()
+            .child(section_header(ui, "Agent summary"))
+            .child(setting_card(ui).child(toggle_row(
+                "row-agent-summary-enabled",
+                "Summarize agents on this Mac",
+                "The Agent summary shortcut (Cmd+Shift+I by default) lists every agent pane with a one-line summary of what it is doing, generated on-device by Apple Intelligence. Nothing leaves this Mac. Without Apple Intelligence the overlay lists agent states only.",
+                None,
+                config.agent_summary_enabled(),
+                "agent_summary_enabled",
+                ui,
+                cx,
+            )));
+
         div()
             .flex()
             .flex_col()
             .child(new_pane_section)
+            .child(summary_section.mt(px(24.)))
             .child(buttons_section.mt(px(24.)))
             .child(div().h(px(180.)).flex_none())
     }

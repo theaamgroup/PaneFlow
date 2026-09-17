@@ -824,6 +824,10 @@ impl PaneFlowApp {
             // Issue #339: Pane Overview closed.
             pane_overview: None,
             pane_overview_focus: cx.focus_handle(),
+            // Issue #576: Agent Summary closed.
+            agent_summary: None,
+            agent_summary_focus: cx.focus_handle(),
+            agent_summary_generation: 0,
             work_review: None,
             work_review_focus: cx.focus_handle(),
             pane_palette: None,

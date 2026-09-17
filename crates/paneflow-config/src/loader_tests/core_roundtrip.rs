@@ -51,6 +51,7 @@ fn test_serialization_roundtrip() {
         agent_stall_threshold_secs: None,
         crash_reporting: None,
         review_enabled: None,
+        agent_summary_enabled: None,
         new_pane_shows_sessions: None,
         review_prefill_delay_ms: None,
         submit_paste_delay_ms: None,

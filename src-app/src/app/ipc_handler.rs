@@ -1488,8 +1488,10 @@ fn neutralize_sentinel(body: &str) -> String {
 /// Wrap terminal text in the untrusted marker, with a per-call unguessable id
 /// on BOTH tags plus body sentinel neutralization (defense in depth). The pane
 /// content cannot emit a matching `</untrusted_terminal_output id="…">` to break
-/// out because it cannot predict the id.
-fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
+/// out because it cannot predict the id. `pub(crate)` so the Agent Summary
+/// overlay (issue #576) fences a pane tail with the same wrapper before it
+/// reaches the on-device model.
+pub(crate) fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
     let id = fence_id();
     let body = neutralize_sentinel(body);
     format!(

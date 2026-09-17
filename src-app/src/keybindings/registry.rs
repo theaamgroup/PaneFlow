@@ -696,6 +696,13 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Work review and PR checks",
         group: ShortcutGroup::Agents,
     },
+    ActionMeta {
+        name: "open_agent_summary",
+        factory: || Box::new(crate::OpenAgentSummary),
+        context: "",
+        description: "Agent summary (what every agent is doing)",
+        group: ShortcutGroup::Agents,
+    },
 ];
 
 fn find(name: &str) -> Option<&'static ActionMeta> {

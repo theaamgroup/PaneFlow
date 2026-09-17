@@ -235,6 +235,11 @@
       "description": "Master switch for the Review surface. null/true = enabled (default). false = the Review view and its sidebar tab are hidden, the Review keyboard shortcut does nothing, and a session saved in Review mode reopens in the terminal view. With Review off the footer's mode strip disappears entirely.",
       "default": true
     },
+    "agent_summary_enabled": {
+      "type": ["boolean", "null"],
+      "description": "Master switch for the Agent Summary overlay (Cmd+Shift+I by default). null/true = enabled (default): the overlay lists every agent pane across every workspace and, when Apple Intelligence is available on this Mac, summarises each pane's recent output on-device (no network, no API key). false = the shortcut does nothing and the summary helper never runs.",
+      "default": true
+    },
     "new_pane_shows_sessions": {
       "type": ["boolean", "null"],
       "description": "When true, opening a New pane tab shows the Agent sessions sidebar beside the picker so a listed session can be resumed into the new pane. null/false = off (default). Split-placement pickers leave the sidebar alone.",

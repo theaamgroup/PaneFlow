@@ -4,6 +4,7 @@
 # Output layout (US-013):
 #   dist/PaneFlow.app/Contents/
 #     MacOS/paneflow                  (executable, chmod 755)
+#     Helpers/paneflow-agent-summary  (Swift sidecar, scripts/build-agent-summary.sh, issue #576)
 #     Info.plist                      (from assets/Info.plist, @VERSION@ substituted)
 #     Frameworks/Sparkle.framework    (pinned, checksum-verified Sparkle 2)
 #     Resources/PaneFlow.icns         (from assets/PaneFlow.icns, produced by US-014)
@@ -109,6 +110,16 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 
 install -m 0755 "$BIN" "$MACOS_DIR/paneflow"
 install -m 0644 "$ICNS_SRC" "$RESOURCES_DIR/PaneFlow.icns"
+
+# Issue #576: the on-device Agent Summary sidecar. A Swift binary compiled
+# here, not staged by src-app/build.rs, so it never counts against the
+# embedded-helper budget. Contents/Helpers is on sign-macos.sh's inside-out
+# walk, so it is signed with the app's entitlements before the parent. On an
+# SDK without FoundationModels (Xcode 16.4) it compiles as a stub that
+# reports the model unavailable; the app then shows states only.
+HELPERS_DIR="$CONTENTS/Helpers"
+mkdir -p "$HELPERS_DIR"
+"$SCRIPT_DIR/build-agent-summary.sh" --arch "$ARCH" --out "$HELPERS_DIR/paneflow-agent-summary"
 
 # Sparkle is fetched from its pinned official release and checksum-verified by
 # sparkle-dist.sh. `ditto` preserves the framework's version symlinks and

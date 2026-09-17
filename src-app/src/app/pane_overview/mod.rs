@@ -816,27 +816,49 @@ fn reveal_overview_row(scroll: &ScrollHandle, row: usize, window: &Window) {
     });
 }
 
+/// The one-word label for a card's agent state, shared with the Agent
+/// Summary overlay (issue #576) so the two surfaces name a state the same
+/// way. Pure: it is also what the summary prompt reports as the observed
+/// state.
+pub(crate) fn agent_state_label(
+    state: Option<&crate::ai_types::AgentState>,
+    exited: bool,
+) -> &'static str {
+    use crate::ai_types::AgentState;
+    match state {
+        Some(AgentState::WaitingForInput) => "Needs input",
+        Some(AgentState::Errored) => "Error",
+        Some(AgentState::Stalled) => "Stalled",
+        Some(AgentState::Thinking) if exited => "Stopped",
+        Some(AgentState::Thinking) => "Working",
+        Some(AgentState::Finished) => "Done",
+        None if exited => "No agent",
+        None => "Idle",
+    }
+}
+
 /// Status dot, colour and label for one card.
 ///
 /// Colours come from the sidebar's grammar (`agent_summary_visual`) so the
 /// two surfaces cannot fork: amber = needs input, `agent_error` = errored,
 /// `agent_stalled` = stalled, muted = thinking, blue = finished, nothing =
-/// idle.
-fn pane_overview_status_visual(
+/// idle. `pub(crate)` for the Agent Summary overlay, which paints the same
+/// dot beside each row.
+pub(crate) fn pane_overview_status_visual(
     state: Option<&crate::ai_types::AgentState>,
     exited: bool,
     ui: crate::theme::UiColors,
 ) -> (AnyElement, gpui::Hsla, SharedString) {
     use crate::ai_types::AgentState;
-    let (color, label) = match state {
-        Some(AgentState::WaitingForInput) => (rgb(0xFBBF24).into(), "Needs input"),
-        Some(AgentState::Errored) => (ui.agent_error, "Error"),
-        Some(AgentState::Stalled) => (ui.agent_stalled, "Stalled"),
-        Some(AgentState::Thinking) if exited => (ui.muted, "Stopped"),
-        Some(AgentState::Thinking) => (ui.accent, "Working"),
-        Some(AgentState::Finished) => (rgb(0x83C3FF).into(), "Done"),
-        None if exited => (ui.muted, "No agent"),
-        None => (ui.muted, "Idle"),
+    let label = agent_state_label(state, exited);
+    let color: gpui::Hsla = match state {
+        Some(AgentState::WaitingForInput) => rgb(0xFBBF24).into(),
+        Some(AgentState::Errored) => ui.agent_error,
+        Some(AgentState::Stalled) => ui.agent_stalled,
+        Some(AgentState::Thinking) if exited => ui.muted,
+        Some(AgentState::Thinking) => ui.accent,
+        Some(AgentState::Finished) => rgb(0x83C3FF).into(),
+        None => ui.muted,
     };
     let dot = div()
         .flex_none()

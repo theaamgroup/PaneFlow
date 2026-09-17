@@ -487,6 +487,16 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_pane_overview",
         context: None,
     },
+    // Issue #576: Agent Summary. `secondary-shift-i` was free in the
+    // issue's chord audit (C/H/I/O/V/X/Y were open; `secondary-shift-u` is
+    // the work review). Global like the other fleet overlays: a terminal
+    // holds focus nearly always. Never a bare letter - a global bare key
+    // would be stolen from every shell.
+    DefaultBinding {
+        key: "secondary-shift-i",
+        action_name: "open_agent_summary",
+        context: None,
+    },
     DefaultBinding {
         key: "secondary-shift-u",
         action_name: "open_work_review",

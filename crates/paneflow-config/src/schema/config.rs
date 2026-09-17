@@ -178,6 +178,14 @@ pub struct PaneFlowConfig {
     /// a surface with no way back.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub review_enabled: Option<bool>,
+    /// Issue #576: master switch for the Agent Summary overlay. `None`/`true`
+    /// = enabled (default): `Cmd+Shift+I` lists every agent pane across every
+    /// workspace and, when Apple Intelligence is available on this Mac,
+    /// summarises each pane's recent output on-device. `false` = the chord is
+    /// a silent no-op and the summary helper never runs - for a Mac without
+    /// Apple Intelligence, or a user who wants no model near their panes.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub agent_summary_enabled: Option<bool>,
     /// When `Some(true)`, a Tab-placement New pane picker also opens the
     /// Agent sessions sidebar, scoped to the workspace cwd, so a listed
     /// session can be resumed into the new pane. `Some(false)` / `None`
@@ -602,6 +610,13 @@ impl PaneFlowConfig {
     /// was already using disappear.
     pub fn review_view_enabled(&self) -> bool {
         self.review_enabled.unwrap_or(true)
+    }
+
+    /// Issue #576: resolve the Agent Summary master switch. Absent means
+    /// enabled, like the other `None`-is-on switches here; availability of
+    /// the on-device model is a separate runtime check the overlay makes.
+    pub fn agent_summary_enabled(&self) -> bool {
+        self.agent_summary_enabled.unwrap_or(true)
     }
 
     /// Issue #204: resolve the crash-reporting master switch. Absent means

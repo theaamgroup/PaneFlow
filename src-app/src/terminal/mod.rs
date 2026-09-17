@@ -27,6 +27,7 @@ pub(crate) mod test_allocator;
 pub mod types;
 pub mod view;
 
+pub(crate) use pty_session::ScrollbackReader;
 pub(crate) use pty_session::TerminalSessionBackend;
 pub use pty_session::TerminalState;
 #[cfg(test)]

@@ -96,6 +96,19 @@ pub(crate) const MAX_WORKSPACE_TERMINALS: usize =
 /// scrub - they previously read 64, 64 and 48.
 pub(crate) const MAX_UNTRUSTED_LABEL_CHARS: usize = 64;
 
+/// Issue #576: the Agent Summary overlay hands the on-device model at most
+/// this many bytes of a pane's tail (control characters already stripped),
+/// so a prompt stays well inside the model's ~4k-token context window with
+/// room for the instructions and the reply. Egress cap: this is what leaves
+/// the app for the sidecar.
+pub(crate) const MAX_AGENT_SUMMARY_TAIL_BYTES: usize = 6 * 1024;
+
+/// Issue #576: a summary (or error line) from the sidecar is cut to this
+/// many characters before it is rendered. The sidecar caps at 600; this is
+/// the display-side half of that pair, and it also bounds a reply from a
+/// replaced or misbehaving helper binary.
+pub(crate) const MAX_AGENT_SUMMARY_CHARS: usize = 400;
+
 /// Clamp then scrub one untrusted label, in that ORDER.
 ///
 /// The order is load-bearing and was triplicated across the three sinks named

@@ -210,6 +210,7 @@ explicit priority.
 | Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Four** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
+| Agent summary | Horizontally centered, top-anchored at 24 (`OVERLAY_MARGIN`) | Up to 720 wide, radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; rows radius 8, gap 6, list padding 12, one workspace header per group | `app/agent_summary/mod.rs` |
 | Attention Queue · Fleet Search | Horizontally centered, top-anchored at 96 | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/attention_queue.rs:227-234`, `app/fleet_search.rs:379-386` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
 | Theme picker | Horizontally centered, top-anchored at 96 | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
@@ -412,6 +413,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Code editor | 12 px mono, row 18, caret 2, scrollbar track 15, minimum thumb 25 vertical and 28 horizontal; git marker column 6 left of the numbers, bar 4 radius 2 inset 1, deleted dot 8, hover grows 3 to the left |
 | Dock | preferred 880, minimum 360, maximum 1400; maximized: panel width minus two 8 px gutters, floor 360; tab strip 40 with 26 px chips, gap 4 |
 | Pane Overview | cards 312.5 by 192.5, gap 10, radius 8, grid padding 16, panel margin 24 |
+| Agent summary | panel up to 720 wide, margin 24, radius 12; rows radius 8, gap 6, `px 10 / py 8`, list padding 12 |
 
 ### 4.6 Typography
 
@@ -1048,6 +1050,66 @@ subscribing to terminal wakeups. **The thumbnail never routes through
 off the window-free `layout_from_snapshot`, culls off-screen cards in prepaint
 before taking any lock, forces a block cursor at `cursor` 0.5, and paints no
 selection, copy-mode, or search highlights.
+
+### 5.10 Agent summary
+
+Fork-only (issue #576); upstream has no equivalent. `Cmd+Shift+I` (global,
+`open_agent_summary`; never a bare letter, which a global binding would steal
+from every shell) opens a cross-workspace **list** of every agent pane - a
+pane with a detected launcher or a live agent session - with a one-line,
+plain-English summary of what it is doing, generated **on this Mac** by
+Apple's Foundation Models through the `paneflow-agent-summary` sidecar. No
+network, no API key, no telemetry; the footer says so. The surface is gated
+to Agents mode and to `agent_summary_enabled` (`None`-is-on): off, the chord
+is a silent no-op.
+
+The panel is the Pane Overview's peer: top-anchored at 24, up to 720 wide
+(a reading column, because summaries are sentences), radius 12, a 1 px
+border, `shadow_lg` on a black 0.4 scrim, deferred at priority **6**. Rows
+follow the sidebar's order - workspace, tab, pane - under one 12 px Semibold
+workspace header per group; the row is radius 8 with `px 10 / py 8`, gap 6
+between rows, list padding 12. A row's first line is the overview's status
+dot, the pane name (12 px Semibold, capped at 240 wide), an agent chip on
+`subtle`, the state word in the overview's colour grammar through the
+shared contrast floor, and the tab title right-aligned in `muted`. Its
+second line is the summary at 12 px on a 17 px line box, wrapping.
+
+**States.** The header's middle slot carries one note and nothing repeats
+it per row: `Checking the on-device model…` while the helper is probed,
+`Summarizing on this Mac… N to go` while replies land, nothing once every
+row has answered, and `On-device summaries unavailable: <reason>` when this
+build has no helper, macOS is older than 26, Apple Intelligence is off, the
+device is ineligible, or the model is still downloading. That last case is
+the quiet degrade the issue asks for: the list, the states and the
+navigation stay, only the second line goes. Per row: `Summarizing…` in
+`muted` while pending, the summary in `text` when ready, `Could not
+summarize: <reason>` in `muted` when the helper failed that pane, and `The
+pane's process has exited.` for a pane that is listed but never sent to the
+model. Work order is attention-first (needs input, errored, stalled; then
+working; then done; then idle) so the pane that needs the person answers
+first, while the visual order never re-sorts.
+
+**Trust boundary.** Each pane's last 80 rows are read off the render thread,
+control characters and escape sequences stripped, capped at 6 KiB from the
+front so the live end survives, and wrapped in the `surface.read`
+anti-injection fence (per-call unguessable id, closing sentinel neutralised)
+before they reach the helper, whose instructions name that block as data.
+The reply comes back the same way: one line, control-free, capped at 400
+characters, rendered as inert text. One helper process per pane under a 20 s
+deadline and a 64 KiB stdout cap. Dismissing the overlay flips a cancel flag
+the process runner polls, so the in-flight helper dies within a poll
+interval, and a generation stamp discards any reply that was already on its
+way. Summaries are a snapshot of the moment the overlay opened; reopening
+takes a fresh one.
+
+**Keyboard and assistive technology.** Up and down move the selection and
+reveal it; Enter or a click teleports to the surface, re-resolved by id so a
+pane closed since open is a clean no-op; Esc and a click on the scrim close
+and return focus to the workspace. Every row is a `Button` whose accessible
+name is the pane, the agent, the state and the summary, with
+`aria_selected` on the keyboard selection; the accent border marks it
+visually. There is no type-to-filter: the list is short by construction and
+Fleet Search owns content search.
 
 ## 6. Interaction
 

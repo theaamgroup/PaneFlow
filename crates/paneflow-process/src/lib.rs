@@ -14,6 +14,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::OnceLock;
 use std::thread;
@@ -86,6 +87,11 @@ pub enum ProcError {
     /// The child tree was terminated best-effort and cleanup was detached so the
     /// caller is released by the deadline.
     Timeout,
+    /// The caller's cancel flag flipped before the child finished
+    /// ([`run_with_timeout_stdin_cancellable`]). The child tree was
+    /// terminated best-effort and cleanup detached, exactly as on
+    /// [`ProcError::Timeout`]; no output is returned.
+    Cancelled,
 }
 
 impl fmt::Display for ProcError {
@@ -110,6 +116,7 @@ impl fmt::Display for ProcError {
                 write!(f, "process {stream} exceeded its {cap}-byte capture limit")
             }
             ProcError::Timeout => write!(f, "process exceeded its deadline; termination requested"),
+            ProcError::Cancelled => write!(f, "process run cancelled; termination requested"),
         }
     }
 }
@@ -124,7 +131,8 @@ impl Error for ProcError {
             ProcError::ReaderSpawn { source, .. } | ProcError::Read { source, .. } => Some(source),
             ProcError::InvalidOutputLimit(_)
             | ProcError::OutputLimitExceeded { .. }
-            | ProcError::Timeout => None,
+            | ProcError::Timeout
+            | ProcError::Cancelled => None,
         }
     }
 }
@@ -157,7 +165,32 @@ pub fn run_with_timeout_stdin(
     deadline: Duration,
     stdout_cap: u64,
 ) -> Result<BoundedOutput, ProcError> {
-    run_bounded(cmd, Some(stdin), deadline, stdout_cap, STDERR_CAP)
+    run_bounded(cmd, Some(stdin), deadline, stdout_cap, STDERR_CAP, None)
+}
+
+/// [`run_with_timeout_stdin`] that the caller can abandon early.
+///
+/// The run polls `cancel` at the same cadence as the deadline (every
+/// [`POLL_INTERVAL`]); once it reads `true` the child tree is terminated and
+/// the call returns [`ProcError::Cancelled`] without its output, even if the
+/// child had already exited. This is what lets a UI that spawned a helper
+/// (the Agent Summary sidecar, issue #576) kill it the moment the overlay is
+/// dismissed instead of letting it run out its deadline in the background.
+pub fn run_with_timeout_stdin_cancellable(
+    cmd: Command,
+    stdin: &[u8],
+    deadline: Duration,
+    stdout_cap: u64,
+    cancel: &AtomicBool,
+) -> Result<BoundedOutput, ProcError> {
+    run_bounded(
+        cmd,
+        Some(stdin),
+        deadline,
+        stdout_cap,
+        STDERR_CAP,
+        Some(cancel),
+    )
 }
 
 /// [`run_with_timeout`] with an explicit stderr capture cap.
@@ -172,7 +205,11 @@ pub fn run_with_timeout_capped(
     stdout_cap: u64,
     stderr_cap: u64,
 ) -> Result<BoundedOutput, ProcError> {
-    run_bounded(cmd, None, deadline, stdout_cap, stderr_cap)
+    run_bounded(cmd, None, deadline, stdout_cap, stderr_cap, None)
+}
+
+fn cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 fn run_bounded(
@@ -181,6 +218,7 @@ fn run_bounded(
     deadline: Duration,
     stdout_cap: u64,
     stderr_cap: u64,
+    cancel: Option<&AtomicBool>,
 ) -> Result<BoundedOutput, ProcError> {
     let stdout_cap = validate_capture_cap(stdout_cap)?;
     let stderr_cap = validate_capture_cap(stderr_cap)?;
@@ -237,6 +275,11 @@ fn run_bounded(
     let mut capture = CaptureState::default();
     let status = loop {
         drain_ready_reader_messages(process.reader()?, &mut capture)?;
+        // Checked before `try_wait` on purpose: a cancelled run never
+        // reports output, even from a child that raced to completion.
+        if cancelled(cancel) {
+            return Err(ProcError::Cancelled);
+        }
         match process.child_mut()?.try_wait().map_err(ProcError::Wait)? {
             Some(status) => break status,
             None => {
@@ -249,10 +292,19 @@ fn run_bounded(
     };
 
     while !capture.is_complete() {
+        if cancelled(cancel) {
+            return Err(ProcError::Cancelled);
+        }
         let remaining = remaining_until(start, deadline).unwrap_or(Duration::ZERO);
-        match process.reader()?.recv_timeout(remaining) {
+        // Bounded so a cancel that lands while the pipes drain is seen
+        // within one poll interval rather than at the deadline.
+        match process.reader()?.recv_timeout(remaining.min(POLL_INTERVAL)) {
             Ok(message) => capture.record(message)?,
-            Err(RecvTimeoutError::Timeout) => return Err(ProcError::Timeout),
+            Err(RecvTimeoutError::Timeout) => {
+                if remaining_until(start, deadline).is_none() {
+                    return Err(ProcError::Timeout);
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(supervision_error(
                     "output readers disconnected before reporting both streams",
@@ -723,6 +775,76 @@ mod tests {
             "stdout was {:?}",
             String::from_utf8_lossy(&out.stdout)
         );
+    }
+
+    /// Issue #576: a run whose cancel flag flips returns `Cancelled` within
+    /// a poll interval or two, and the sleeper is gone rather than left to
+    /// run out its 30 s deadline.
+    #[cfg(unix)]
+    #[test]
+    fn flipping_the_cancel_flag_kills_the_child_promptly() {
+        use std::sync::Arc;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        let res = run_with_timeout_stdin_cancellable(
+            sleep_command(),
+            b"",
+            Duration::from_secs(30),
+            1 << 20,
+            &cancel,
+        );
+        assert!(
+            matches!(res, Err(ProcError::Cancelled)),
+            "expected Cancelled, got {res:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must not wait for the sleeper or the deadline"
+        );
+    }
+
+    /// A flag that is already set wins over a child that finishes instantly:
+    /// cancelled means no output, deterministically.
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_set_cancel_flag_reports_cancelled_not_output() {
+        let cancel = AtomicBool::new(true);
+        let res = run_with_timeout_stdin_cancellable(
+            stdout_command(),
+            b"",
+            Duration::from_secs(5),
+            1 << 20,
+            &cancel,
+        );
+        assert!(
+            matches!(res, Err(ProcError::Cancelled)),
+            "expected Cancelled, got {res:?}"
+        );
+    }
+
+    /// The cancellable entry point with an untouched flag behaves like
+    /// [`run_with_timeout_stdin`]: stdin reaches the child and stdout comes
+    /// back complete.
+    #[cfg(unix)]
+    #[test]
+    fn an_untouched_cancel_flag_is_a_plain_stdin_run() {
+        let cancel = AtomicBool::new(false);
+        let out = run_with_timeout_stdin_cancellable(
+            sh("cat"),
+            b"round trip",
+            Duration::from_secs(5),
+            1 << 20,
+            &cancel,
+        )
+        .expect("cat should complete");
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"round trip");
     }
 
     #[test]

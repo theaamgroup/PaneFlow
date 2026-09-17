@@ -1581,6 +1581,14 @@ struct PaneFlowApp {
     /// that closes while the overlay is open disappears at the next repaint.
     pane_overview: Option<app::pane_overview::PaneOverviewState>,
     pane_overview_focus: FocusHandle,
+    /// Issue #576: Agent Summary overlay, `None` = closed. Rows are captured
+    /// at open (the snapshot the summaries describe); sidecar replies land
+    /// through a generation check so a reopened overlay never shows the
+    /// previous one's, and closing flips the state's cancel flag.
+    agent_summary: Option<app::agent_summary::AgentSummaryState>,
+    agent_summary_focus: FocusHandle,
+    /// Monotonic open counter for the overlay above.
+    agent_summary_generation: u64,
     work_review: Option<app::work_review::ReviewState>,
     work_review_focus: FocusHandle,
     /// EP-005 US-014 (cli-tab-hierarchy): « New pane » preset palette,
@@ -2321,6 +2329,7 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_open_attention_queue))
             .on_action(cx.listener(Self::handle_open_launch_pad))
             .on_action(cx.listener(Self::handle_open_pane_overview))
+            .on_action(cx.listener(Self::handle_open_agent_summary))
             .on_action(cx.listener(Self::handle_diff_new_file_tab))
             .on_action(cx.listener(Self::handle_diff_new_terminal_tab))
             // EP-001 US-003: Escape cancels an in-flight tab drag. Capture
@@ -2637,6 +2646,10 @@ impl Render for PaneFlowApp {
         // Issue #339: Pane Overview (same mode gate).
         if self.pane_overview.is_some() && in_cli_mode {
             app_content = app_content.child(self.render_pane_overview(window, cx));
+        }
+        // Issue #576: Agent Summary (same mode gate).
+        if self.agent_summary.is_some() && in_cli_mode {
+            app_content = app_content.child(self.render_agent_summary(window, cx));
         }
 
         if self.custom_buttons_modal.is_some() {

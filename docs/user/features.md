@@ -42,6 +42,26 @@ PaneFlow restores with every tab unbound, and a tab whose checkout was
 removed between two runs restores unbound with a warning in the log
 rather than pointing at a missing directory.
 
+## Agent summary
+
+Press `Cmd+Shift+I` to see, in plain English, what every agent pane across
+every workspace is doing right now. The overlay lists each pane with an
+agent - a launcher button or a live session - under its workspace, with the
+same state word the sidebar uses (Needs input, Working, Done, ...) and a one-
+or two-sentence summary of its recent output. Summaries are generated on this
+Mac by Apple Intelligence: nothing leaves the machine, there is no API key,
+and the pane text is fenced as untrusted data before the model sees it, so
+terminal output cannot redirect it. Arrow keys select a row, Enter jumps to
+that pane, Esc closes. Panes that need you are summarised first.
+
+Apple Intelligence on macOS 26 is required for the summaries themselves. On
+a Mac without it - older macOS, Apple Intelligence turned off, an ineligible
+device, or the model still downloading - the overlay still opens and lists
+the agents and their states, with a one-line note in the header instead of
+summaries. Set `agent_summary_enabled` to `false` in `paneflow.json` (or turn
+off *Summarize agents on this Mac* in Settings → AI Agent) to disable the
+shortcut entirely.
+
 ## Work review
 
 Open **Window → Work Review…** (`Cmd+Shift+U`) to inspect open checkouts together. Each row
