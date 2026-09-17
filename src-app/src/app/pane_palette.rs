@@ -89,7 +89,28 @@ pub(crate) struct Preset {
     pub(crate) source: PresetSource,
 }
 
+/// What identifies a row across rebuilds of the catalogue. The keyboard
+/// cursor is kept by key, not by position (issue #518): the cold PATH walk
+/// inserts agent rows ahead of the custom commands once it publishes, and a
+/// numeric index taken before that frame would then name a different row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PresetKey {
+    Shell,
+    Agent(TerminalAgent),
+    /// A custom command by its stable `ButtonCommand::id`, which survives
+    /// renames and reorders.
+    Custom(String),
+}
+
 impl Preset {
+    pub(crate) fn key(&self) -> PresetKey {
+        match &self.source {
+            PresetSource::Shell => PresetKey::Shell,
+            PresetSource::Agent(agent) => PresetKey::Agent(*agent),
+            PresetSource::Custom(button) => PresetKey::Custom(button.id.clone()),
+        }
+    }
+
     fn icon_path(&self) -> SharedString {
         match &self.source {
             PresetSource::Shell => "icons/terminal.svg".into(),
@@ -133,14 +154,40 @@ impl Preset {
 
     /// `Err` carries the readable refusal a not-installed agent must produce
     /// instead of an empty terminal (US-015 AC4).
+    /// The render-frame answer: reads the installed-binary snapshot without
+    /// waiting on the cold PATH walk, so a row can paint as muted while the
+    /// walk is still out. Never a substitute for [`Self::ensure_launchable`].
+    fn looks_launchable(&self) -> bool {
+        match &self.source {
+            PresetSource::Agent(agent) => agent.is_installed(),
+            _ => true,
+        }
+    }
+
     fn ensure_launchable(&self) -> Result<(), String> {
         match &self.source {
+            // Issue #518: the first PATH walk has not published. Never wait
+            // for it on the GPUI thread: the launch is queued
+            // (`PanePaletteState::launch_queued`) and replayed by the boot
+            // warm's completion, so the Enter is not dropped either.
+            PresetSource::Agent(_) if self.awaits_scan() => {
+                Err(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string())
+            }
             PresetSource::Agent(agent) if !agent.is_installed() => Err(format!(
                 "{} is not installed - install its CLI, or hide it in Settings > AI Agent",
                 agent.display_name()
             )),
             _ => Ok(()),
         }
+    }
+
+    /// An agent row whose only blocker is the pending first PATH walk.
+    fn awaits_scan(&self) -> bool {
+        matches!(
+            &self.source,
+            PresetSource::Agent(agent)
+                if !agent.is_installed() && crate::agent_launcher::installed_binary_scan_pending()
+        )
     }
 }
 
@@ -149,8 +196,17 @@ pub(crate) struct PanePaletteState {
     /// Workspace the preset lands in, by stable id (survives reorders).
     pub(crate) ws_id: u64,
     pub(crate) placement: PalettePlacement,
-    /// Keyboard cursor into the preset list.
+    /// Keyboard cursor into the preset list, as painted last frame. Only a
+    /// scroll hint: launches and highlights resolve [`Self::selected_key`].
     pub(crate) selected: usize,
+    /// The row the cursor names, by identity, so a catalogue reshaped by the
+    /// cold PATH walk (issue #518) still launches the row the user chose.
+    pub(crate) selected_key: PresetKey,
+    /// A launch confirmed while the first PATH walk was still pending
+    /// (issue #518). The boot warm's completion hands it to
+    /// `pending_palette_launch`, which the window-bearing drain replays, so
+    /// the confirm neither waits on the GPUI thread nor gets dropped.
+    pub(crate) launch_queued: Option<Preset>,
     /// Last refusal, shown under the buttons (US-015 AC4).
     pub(crate) error: Option<String>,
     /// Focus to hand back when the picker goes away (US-014 AC5). `None` for
@@ -253,13 +309,21 @@ impl PaneFlowApp {
             label: "Terminal".to_string(),
             source: PresetSource::Shell,
         }];
+        // Issue #518: while the first PATH walk is pending the snapshot says
+        // nothing is installed, which would drop every default-enabled agent
+        // from the catalogue and leave the `looking` row unreachable. Treat
+        // them as installed until the walk publishes; the rows paint muted
+        // with `looking`, and the confirm still waits for the real answer.
+        let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
         presets.extend(
-            TerminalAgent::visible(&self.cached_config)
-                .into_iter()
-                .map(|agent| Preset {
-                    label: agent.display_name().to_string(),
-                    source: PresetSource::Agent(agent),
-                }),
+            TerminalAgent::visible_with(&self.cached_config, |agent| {
+                scan_pending || agent.is_installed()
+            })
+            .into_iter()
+            .map(|agent| Preset {
+                label: agent.display_name().to_string(),
+                source: PresetSource::Agent(agent),
+            }),
         );
         if let Some(ws) = self.workspaces.get(ws_idx) {
             presets.extend(ws.custom_buttons.iter().map(|button| Preset {
@@ -275,6 +339,37 @@ impl PaneFlowApp {
     fn pane_palette_ws_idx(&self) -> Option<usize> {
         let ws_id = self.pane_palette.as_ref()?.ws_id;
         self.workspaces.iter().position(|ws| ws.id == ws_id)
+    }
+
+    /// The row the keyboard cursor names, resolved by identity against the
+    /// catalogue as it is now (issue #518). `None` when that row is gone (an
+    /// agent that read `looking` and turned out not to be installed): Enter
+    /// is then inert rather than launching whatever now sits at the painted
+    /// index, and the next Up/Down re-anchors the cursor.
+    fn pane_palette_selected(&self) -> Option<(usize, Preset)> {
+        let palette = self.pane_palette.as_ref()?;
+        let presets = self.pane_palette_presets(self.pane_palette_ws_idx()?);
+        let idx = resolve_selected(&presets, &palette.selected_key)?;
+        let preset = presets.into_iter().nth(idx)?;
+        Some((idx, preset))
+    }
+
+    /// Issue #518: the boot warm has published. A launch confirmed while the
+    /// walk was pending is handed to the window-bearing drain, which replays
+    /// it through `pane_palette_launch` (the real installed answer applies
+    /// now, so an absent agent is refused there).
+    pub(crate) fn pane_palette_resume_queued_launch(&mut self, cx: &mut Context<Self>) {
+        let queued = self
+            .pane_palette
+            .as_mut()
+            .and_then(|palette| palette.launch_queued.take());
+        if let Some(preset) = queued {
+            if let Some(palette) = self.pane_palette.as_mut() {
+                palette.error = None;
+            }
+            self.pending_palette_launch = Some(preset);
+            cx.notify();
+        }
     }
 
     /// Open a `New pane` tab in `ws_idx` and make the preset picker its
@@ -409,6 +504,8 @@ impl PaneFlowApp {
             ws_id,
             placement: PalettePlacement::Tab { tab_id },
             selected: 0,
+            selected_key: PresetKey::Shell,
+            launch_queued: None,
             error: None,
             restore_focus,
             scroll: ScrollHandle::new(),
@@ -446,6 +543,8 @@ impl PaneFlowApp {
                 direction,
             },
             selected: 0,
+            selected_key: PresetKey::Shell,
+            launch_queued: None,
             error: None,
             restore_focus: None,
             scroll: ScrollHandle::new(),
@@ -527,6 +626,8 @@ impl PaneFlowApp {
             ws_id,
             placement: PalettePlacement::Tab { tab_id },
             selected: 0,
+            selected_key: PresetKey::Shell,
+            launch_queued: None,
             error: None,
             restore_focus: None,
             scroll: ScrollHandle::new(),
@@ -681,8 +782,18 @@ impl PaneFlowApp {
         }
     }
 
-    /// Launch the preset at `idx` where the picker stands.
-    fn pane_palette_launch(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Launch `preset` where the picker stands. The row that was clicked or
+    /// confirmed is passed by value, never re-resolved from its painted index:
+    /// the cold PATH walk (issue #518) inserts agent rows ahead of the custom
+    /// commands once it publishes, so an index captured from the pre-scan
+    /// frame would launch a newly inserted agent instead of the custom
+    /// command the user chose.
+    pub(crate) fn pane_palette_launch(
+        &mut self,
+        preset: Preset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(ws_idx) = self.pane_palette_ws_idx() else {
             self.pane_palette_set_error("This project is no longer open", cx);
             return;
@@ -693,10 +804,10 @@ impl PaneFlowApp {
             self.pane_palette_set_error(format!("Checking out {branch}..."), cx);
             return;
         }
-        let Some(preset) = self.pane_palette_presets(ws_idx).get(idx).cloned() else {
-            return;
-        };
         if let Err(message) = preset.ensure_launchable() {
+            if let Some(palette) = self.pane_palette.as_mut().filter(|_| preset.awaits_scan()) {
+                palette.launch_queued = Some(preset.clone());
+            }
             self.pane_palette_set_error(message, cx);
             return;
         }
@@ -705,21 +816,35 @@ impl PaneFlowApp {
         let title = preset.label.clone();
         let placement = match self.pane_palette.as_ref() {
             Some(palette) => match &palette.placement {
-                PalettePlacement::Tab { .. } => None,
-                PalettePlacement::Split { target, direction } => Some((target.clone(), *direction)),
+                PalettePlacement::Tab { tab_id } => Err(*tab_id),
+                PalettePlacement::Split { target, direction } => Ok((target.clone(), *direction)),
             },
             None => return,
         };
 
         match placement {
-            None => {
-                // The picker *is* this tab, so the preset fills it in place -
-                // dropping the state first, otherwise closing the picker would
+            Err(tab_id) => {
+                // The picker *is* this tab, so the preset fills it in place.
+                // `open_tab_with_surface` fills the workspace's active tab,
+                // so the placement's own tab has to be that tab and still
+                // paneless: a launch replayed after the cold PATH walk
+                // (issue #518) may arrive after the user switched tabs or
+                // closed the `New pane` tab, and must not land elsewhere.
+                let owns_active_tab = ws_idx == self.active_idx
+                    && self.workspaces.get(ws_idx).is_some_and(|ws| {
+                        let tab = ws.active_tab();
+                        tab.id == tab_id && tab.root.is_none() && tab.saved_layout.is_none()
+                    });
+                if !owns_active_tab {
+                    self.pane_palette_set_error("That New pane tab is no longer active", cx);
+                    return;
+                }
+                // Drop the state first, otherwise closing the picker would
                 // close the tab that is about to receive the pane.
                 self.discard_pane_palette(cx);
                 self.open_tab_with_surface(ws_idx, title, profile, command, window, cx);
             }
-            Some((target, direction)) => {
+            Ok((target, direction)) => {
                 let Some(target) = target.upgrade() else {
                     self.pane_palette_set_error("That pane no longer exists", cx);
                     return;
@@ -750,7 +875,9 @@ impl PaneFlowApp {
         let len = self
             .pane_palette_ws_idx()
             .map_or(0, |ws_idx| self.pane_palette_presets(ws_idx).len());
-        let selected = self.pane_palette.as_ref().map_or(0, |p| p.selected);
+        // Resolve the cursor by identity first: the catalogue may have been
+        // reshaped by the cold PATH walk since the frame that painted it.
+        let selected = self.pane_palette_selected().map_or(0, |(idx, _)| idx);
         let picker_open = self
             .pane_palette
             .as_ref()
@@ -766,8 +893,10 @@ impl PaneFlowApp {
             }
             "escape" => self.close_pane_palette(window, cx),
             "enter" => {
-                if selected < len {
-                    self.pane_palette_launch(selected, window, cx);
+                // Launch the row the cursor names by identity, never the
+                // rebuilt list at the painted index (issue #518).
+                if let Some((_, preset)) = self.pane_palette_selected() {
+                    self.pane_palette_launch(preset, window, cx);
                 }
             }
             "up" if selected > 0 && selected < len => {
@@ -781,8 +910,15 @@ impl PaneFlowApp {
     }
 
     fn pane_palette_select(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let key = self
+            .pane_palette_ws_idx()
+            .and_then(|ws_idx| self.pane_palette_presets(ws_idx).into_iter().nth(idx))
+            .map(|preset| preset.key());
         if let Some(palette) = self.pane_palette.as_mut() {
             palette.selected = idx;
+            if let Some(key) = key {
+                palette.selected_key = key;
+            }
             // Keep the keyboard cursor inside the viewport: the column is
             // taller than its `max_h` as soon as a few agents are visible.
             palette.scroll.scroll_to_item(idx);
@@ -817,8 +953,15 @@ impl PaneFlowApp {
             .max_h(px(420.))
             .overflow_y_scroll()
             .track_scroll(&palette.scroll);
+        let selected_idx = self.pane_palette_selected().map(|(idx, _)| idx);
         for (idx, preset) in presets.iter().enumerate() {
-            buttons = buttons.child(self.render_pane_palette_button(idx, preset, palette, ui, cx));
+            buttons = buttons.child(self.render_pane_palette_button(
+                idx,
+                preset,
+                Some(idx) == selected_idx,
+                ui,
+                cx,
+            ));
         }
 
         let mut column = div().flex().flex_col().items_center().child(title);
@@ -1166,11 +1309,13 @@ impl PaneFlowApp {
         &self,
         idx: usize,
         preset: &Preset,
-        palette: &PanePaletteState,
+        is_selected: bool,
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let launchable = preset.ensure_launchable().is_ok();
+        // A render frame reads the non-blocking snapshot; only the confirm
+        // (`ensure_launchable`) waits for the cold PATH walk (issue #518).
+        let launchable = preset.looks_launchable();
         let icon_path = preset.icon_path();
         let icon = if preset.icon_multicolor() {
             gpui::img(icon_path)
@@ -1188,16 +1333,21 @@ impl PaneFlowApp {
 
         let mut button = select_item(
             SharedString::from(format!("pane-palette-row-{idx}")),
-            idx == palette.selected,
+            is_selected,
             ui,
         )
         .cursor(CursorStyle::PointingHand)
         .gap(px(8.))
         .h(px(34.))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.pane_palette_launch(idx, window, cx);
-            cx.stop_propagation();
+        .on_click(cx.listener({
+            // Issue #518: launch the row the user saw, not whatever sits at
+            // this index after the cold scan reshapes the catalogue.
+            let preset = preset.clone();
+            move |this, _: &ClickEvent, window, cx| {
+                this.pane_palette_launch(preset.clone(), window, cx);
+                cx.stop_propagation();
+            }
         }))
         .child(icon)
         .child(
@@ -1217,7 +1367,12 @@ impl PaneFlowApp {
                     .flex_none()
                     .text_size(px(10.))
                     .text_color(ui.muted)
-                    .child("not installed"),
+                    // Issue #518: the first PATH walk has not published yet.
+                    .child(if crate::agent_launcher::installed_binary_scan_pending() {
+                        "looking"
+                    } else {
+                        "not installed"
+                    }),
             );
         }
 
@@ -1225,9 +1380,60 @@ impl PaneFlowApp {
     }
 }
 
+/// Where `key` sits in `presets`, or `None` when that row is gone. Never a
+/// positional fallback: a row that vanished must not resolve to whatever
+/// took its place. Pure so the reshaped-catalogue case is testable without
+/// a `PaneFlowApp`.
+fn resolve_selected(presets: &[Preset], key: &PresetKey) -> Option<usize> {
+    presets.iter().position(|preset| preset.key() == *key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #518: a custom row highlighted before the cold PATH walk
+    /// publishes must still be the row Enter launches once the walk inserts
+    /// agent rows ahead of it, and a row that vanished resolves to nothing
+    /// rather than to the row that took its index.
+    #[test]
+    fn keyboard_cursor_keeps_the_custom_row_when_the_cold_scan_inserts_agents() {
+        let shell = Preset {
+            label: "Terminal".into(),
+            source: PresetSource::Shell,
+        };
+        let custom = Preset {
+            label: "Serve".into(),
+            source: PresetSource::Custom(ButtonCommand {
+                id: "serve".into(),
+                name: "Serve".into(),
+                command: "npm run dev".into(),
+                ..Default::default()
+            }),
+        };
+        let agent = Preset {
+            label: "Codex".into(),
+            source: PresetSource::Agent(TerminalAgent::Codex),
+        };
+        let before = vec![shell.clone(), custom.clone()];
+        let key = custom.key();
+        assert_eq!(resolve_selected(&before, &key), Some(1));
+
+        let after = vec![shell.clone(), agent.clone(), custom.clone()];
+        assert_eq!(
+            resolve_selected(&after, &key),
+            Some(2),
+            "the inserted agent row must not steal the cursor"
+        );
+        // An agent highlighted while it read `looking` and then dropped by
+        // the walk: Enter must be inert, not launch the row at its index.
+        let vanished = agent.key();
+        assert_eq!(
+            resolve_selected(&[shell.clone(), custom.clone()], &vanished),
+            None
+        );
+        assert_eq!(resolve_selected(&[], &key), None);
+    }
 
     #[test]
     fn tab_needs_palette_matches_the_open_tab_with_surface_guard() {
@@ -1316,6 +1522,70 @@ mod tests {
 
     /// Source-text assertion: `close_pane_palette` needs a live `Window`, so
     /// the guard's position is pinned here. It must run before
+    /// Issue #518: the cold PATH walk inserts agent rows ahead of a
+    /// workspace's custom commands once it publishes, so a launch must carry
+    /// the `Preset` the user saw rather than re-resolve a painted index, and
+    /// the row painter must read the non-blocking snapshot, never the
+    /// confirm's blocking `ensure_launchable`.
+    #[test]
+    fn click_keeps_the_custom_row_when_the_cold_scan_inserts_agents() {
+        let src = include_str!("pane_palette.rs");
+        assert!(
+            src.contains("fn pane_palette_launch(&mut self, preset: Preset,"),
+            "pane_palette_launch takes the preset by value, not an index"
+        );
+        let row = src
+            .split("fn render_pane_palette_button(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("render_pane_palette_button exists");
+        assert!(
+            row.contains("this.pane_palette_launch(preset.clone(), window, cx)"),
+            "the click launches the captured preset: {row}"
+        );
+        assert!(
+            !row.contains("pane_palette_launch(idx"),
+            "the click must not re-resolve the painted index: {row}"
+        );
+        assert!(
+            row.contains("preset.looks_launchable()") && !row.contains("ensure_launchable()"),
+            "a render frame reads the non-blocking snapshot: {row}"
+        );
+        let launch = src
+            .split("pub(crate) fn pane_palette_launch(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("pane_palette_launch exists");
+        let bound = launch
+            .find("tab.id == tab_id && tab.root.is_none() && tab.saved_layout.is_none()")
+            .expect("the Tab arm binds the launch to the placement's own paneless tab");
+        let fill = launch
+            .find("self.open_tab_with_surface(ws_idx")
+            .expect("the Tab arm fills the tab");
+        assert!(
+            bound < fill,
+            "the tab check runs before the fill, so a replayed launch cannot land in another tab: {launch}"
+        );
+        let keys = src
+            .split("pub(crate) fn handle_pane_palette_key_down(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("handle_pane_palette_key_down exists");
+        assert!(
+            keys.contains("self.pane_palette_selected()") && !keys.contains(".nth(selected)"),
+            "Enter resolves the cursor by identity, never by the painted index: {keys}"
+        );
+        let looks = src
+            .split("fn looks_launchable(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("looks_launchable exists");
+        assert!(
+            looks.contains("agent.is_installed()") && !looks.contains("is_installed_now"),
+            "looks_launchable never blocks: {looks}"
+        );
+    }
+
     /// `self.pane_palette.take()`, or the picker is dropped even when the
     /// close is refused.
     #[test]

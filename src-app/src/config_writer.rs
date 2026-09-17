@@ -314,7 +314,9 @@ pub fn migrate_agent_button_visibility_defaults() -> bool {
         log::warn!("config: cannot determine config path for agent visibility migration");
         return false;
     };
-    migrate_agent_button_visibility_at(&path, |agent| agent.is_installed())
+    // Issue #518: `is_installed` answers `false` from a cold cache; the
+    // migration runs before any warm, so it must wait for the PATH walk.
+    migrate_agent_button_visibility_at(&path, |agent| agent.is_installed_now())
 }
 
 /// Save a top-level config field, returning `true` on success and `false`

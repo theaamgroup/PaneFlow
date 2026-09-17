@@ -951,7 +951,9 @@ shown after 800 ms through `delayed_tooltip`. Their border is `border` at
 **Launch Pad** is 520 wide at radius 10, horizontally centered but anchored
 72 px from the top over a full-window black 0.4 backdrop. It stacks an `Agent`
 list (max height 180, radius 6, 13 px marks, 12 px rows, disabled rows marked
-`not installed` at 10 px), a fork-only GitHub issue row with a `Load issue`
+`not installed` at 10 px - or `looking` while the first PATH walk for agent
+CLIs is still running, with `Looking for agent CLIs on this machine.` as an
+11 px `muted` line under the list), a fork-only GitHub issue row with a `Load issue`
 button, a `New branch` field, an optional `Prompt` field (max height 140), the
 footer hint `Enter: load or create · Tab: fields · Esc: cancel`, and a confirm
 button whose label is tri-state: `Create worktree + launch`, `Creating…`,
@@ -973,7 +975,8 @@ closes. Input caps at 64 KiB.
 **The pane palette** fills an empty tab named `New pane` with a centered 260 px
 column: a 13 px Semibold title, an optional 28 px branch row whose select opens
 a 260 px menu, one 34 px row per preset with its 14 px agent mark and a `not
-installed` marker at 10 px, and an inline error in `vc_deleted` at 11 px.
+installed` marker at 10 px (`looking` while the first PATH walk is pending), and
+an inline error in `vc_deleted` at 11 px.
 Escape folds the branch menu before it closes the palette; arrows move and
 scroll the selection into view. **Escape is inert while the palette is the
 workspace's last surface** (its Tab placement sits on the workspace's only tab

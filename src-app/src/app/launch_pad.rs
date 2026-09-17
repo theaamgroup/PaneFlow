@@ -35,7 +35,21 @@ use crate::widgets::text_area::TextArea;
 use crate::widgets::text_input::TextInput;
 use crate::workspace::worktree::{self, ManagedWorktree};
 
+/// Shown in place of a "not installed" verdict while the first PATH walk
+/// for agent CLIs is still running (issue #518, upstream df375ba5). The
+/// launch pad and the pane palette share it.
+pub(crate) const AGENT_SCAN_PENDING_COPY: &str = "Looking for agent CLIs on this machine.";
+
 /// Live Launch Pad modal state, owned by `PaneFlowApp`.
+/// The request a confirm was validated with when the first PATH walk was
+/// still pending (issue #518); replayed verbatim once the walk lands.
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedConfirm {
+    pub(crate) agent_idx: usize,
+    pub(crate) branch: String,
+    pub(crate) prompt: String,
+}
+
 pub(crate) struct LaunchPadState {
     /// Workspace the launch targets, by stable id (survives reorders and
     /// closes - re-resolved when the background work returns).
@@ -45,6 +59,18 @@ pub(crate) struct LaunchPadState {
     pub(crate) target: WeakEntity<Pane>,
     /// Index into [`TerminalAgent::ALL`].
     pub(crate) agent_idx: usize,
+    /// `true` while `agent_idx` is the row 0 fallback chosen because the
+    /// first PATH walk had not published when the pad opened (issue #518),
+    /// and the user has not picked a row since. The boot warm's completion
+    /// settles it onto the first installed agent through
+    /// [`settle_default_agent`].
+    pub(crate) agent_default_pending: bool,
+    /// A confirm pressed while the first PATH walk was still pending
+    /// (issue #518): never waited for on the GPUI thread, replayed by the
+    /// boot warm's completion through `launch_pad_resume_queued_confirm`.
+    /// The validated request is snapshotted, so an edit made while the
+    /// looking copy shows is not what gets launched.
+    pub(crate) confirm_queued: Option<QueuedConfirm>,
     pub(crate) branch_input: Entity<TextInput>,
     pub(crate) prompt_input: Entity<TextArea>,
     pub(crate) issue_input: Entity<TextInput>,
@@ -178,15 +204,23 @@ impl PaneFlowApp {
 
         // Default to the first installed agent so confirm works out of the
         // box; fall back to 0 (the row renders grayed, confirm rejects).
-        let agent_idx = TerminalAgent::ALL
-            .iter()
-            .position(|a| a.is_installed())
-            .unwrap_or(0);
+        // Issue #518: while the first PATH walk is pending every row reads
+        // as not installed, so remember that the fallback was provisional
+        // and let the boot warm's completion pick the real default.
+        // The two reads lock the cache separately, so the pending flag is
+        // read first: a walk that publishes between them then leaves the
+        // flag `true` and the settle re-picks from the full snapshot, while
+        // the other order could pair a row-0 fallback from the empty
+        // snapshot with a cleared flag that nothing settles.
+        let agent_default_pending = crate::agent_launcher::installed_binary_scan_pending();
+        let agent_idx = default_agent_idx(|a| a.is_installed());
 
         self.launch_pad = Some(LaunchPadState {
             ws_id,
             target,
             agent_idx,
+            agent_default_pending,
+            confirm_queued: None,
             branch_input,
             prompt_input,
             issue_input,
@@ -196,6 +230,32 @@ impl PaneFlowApp {
         });
         window.focus(&branch_focus, cx);
         cx.notify();
+    }
+
+    /// Issue #518: the boot warm has published the installed-agent
+    /// snapshot. A pad that opened during the walk defaulted to row 0
+    /// provisionally; move it to the first installed agent unless the user
+    /// picked a row meanwhile. Returns `true` when the selection moved.
+    pub(crate) fn launch_pad_settle_default_agent(&mut self) -> bool {
+        let Some(lp) = self.launch_pad.as_mut() else {
+            return false;
+        };
+        settle_default_agent(&mut lp.agent_idx, &mut lp.agent_default_pending, |a| {
+            a.is_installed()
+        })
+    }
+
+    /// Issue #518: the boot warm has published. A confirm queued while the
+    /// walk was pending runs now against the real installed answer.
+    pub(crate) fn launch_pad_resume_queued_confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(lp) = self.launch_pad.as_mut() else {
+            return;
+        };
+        let Some(queued) = lp.confirm_queued.take() else {
+            return;
+        };
+        lp.error = None;
+        self.launch_pad_submit(queued.agent_idx, queued.branch, queued.prompt, cx);
     }
 
     /// Escape path - only honored before confirmation (US-005 AC8: the
@@ -227,22 +287,37 @@ impl PaneFlowApp {
             // AC8: a click/Enter during the run never double-creates.
             return;
         }
-        let ws_id = lp.ws_id;
         let agent_idx = lp.agent_idx;
         let branch = lp.branch_input.read(cx).value().trim().to_string();
         // Same delivery profile as the Composer (security review): LF-only,
         // trailing newlines trimmed, 64 KiB cap before the PTY write.
         let (prompt, _truncated) =
             crate::app::composer::normalize_composer_text(&lp.prompt_input.read(cx).value());
+        self.launch_pad_submit(agent_idx, branch, prompt, cx);
+    }
+
+    /// The confirm proper, on values already read from the form: the live
+    /// Enter passes what the inputs hold, a replay after the cold PATH walk
+    /// passes the snapshot it was queued with (issue #518).
+    fn launch_pad_submit(
+        &mut self,
+        agent_idx: usize,
+        branch: String,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lp) = self.launch_pad.as_ref() else {
+            return;
+        };
+        if lp.running || lp.issue_loading {
+            return;
+        }
+        let ws_id = lp.ws_id;
 
         let Some(agent) = TerminalAgent::ALL.get(agent_idx).copied() else {
             self.launch_pad_set_error("No agent selected", cx);
             return;
         };
-        if !agent.is_installed() {
-            self.launch_pad_set_error(format!("{} is not installed", agent.display_name()), cx);
-            return;
-        }
         if branch.is_empty() {
             self.launch_pad_set_error("Branch name is empty", cx);
             return;
@@ -262,6 +337,36 @@ impl PaneFlowApp {
         }
         if !ws.active_tab().can_add_pane() {
             self.launch_pad_set_error(format!("Maximum pane count reached ({MAX_PANES})"), cx);
+            return;
+        }
+        // Every guard that does not need the PATH walk runs first, so only a
+        // form that would launch right now can be queued: an Enter on an
+        // empty branch is refused here and never replayed after an edit.
+        // The pending flag is read before the snapshot: a walk that publishes
+        // between the two reads then shows up as installed and proceeds,
+        // while the other order could refuse an installed agent.
+        let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
+        if !agent.is_installed() {
+            // Issue #518: the first PATH walk has not published. Never wait
+            // for it here (this is the GPUI thread; a slow PATH entry would
+            // freeze the window): queue the confirm, say so, and let the
+            // boot warm's completion replay it with the real answer. The
+            // confirm commits the row the user sees, so the provisional
+            // default is no longer pending: the settle must not move it
+            // before the replay.
+            if scan_pending {
+                if let Some(lp) = self.launch_pad.as_mut() {
+                    lp.confirm_queued = Some(QueuedConfirm {
+                        agent_idx,
+                        branch: branch.clone(),
+                        prompt: prompt.clone(),
+                    });
+                    lp.agent_default_pending = false;
+                }
+                self.launch_pad_set_error(AGENT_SCAN_PENDING_COPY, cx);
+                return;
+            }
+            self.launch_pad_set_error(format!("{} is not installed", agent.display_name()), cx);
             return;
         }
 
@@ -662,6 +767,10 @@ impl PaneFlowApp {
             .border_1()
             .border_color(ui.border)
             .rounded(px(6.));
+        // Issue #518: while the first PATH walk is still running every row
+        // reads as not installed; mark them as pending instead, and the boot
+        // warm's `cx.notify()` repaints them once the walk publishes.
+        let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
         for (idx, agent) in TerminalAgent::ALL.iter().enumerate() {
             let installed = agent.is_installed();
             let is_selected = idx == lp.agent_idx;
@@ -719,6 +828,7 @@ impl PaneFlowApp {
                                 && !lp.running
                             {
                                 lp.agent_idx = idx;
+                                lp.agent_default_pending = false;
                                 cx.notify();
                             }
                             cx.stop_propagation();
@@ -731,12 +841,15 @@ impl PaneFlowApp {
                             .flex_none()
                             .text_size(px(10.))
                             .text_color(ui.muted)
-                            .child("not installed"),
+                            .child(if scan_pending {
+                                "looking"
+                            } else {
+                                "not installed"
+                            }),
                     ),
                 );
             }
         }
-
         let field_label =
             |label: &'static str| div().text_size(px(11.)).text_color(ui.muted).child(label);
 
@@ -748,6 +861,14 @@ impl PaneFlowApp {
             .py(px(10.))
             .child(field_label("Agent"))
             .child(agent_list)
+            // Issue #518: a sibling of the scrolling list, not its last row,
+            // so the pending copy is visible without scrolling 17 rows.
+            .children(scan_pending.then(|| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(ui.muted)
+                    .child(AGENT_SCAN_PENDING_COPY)
+            }))
             .child(field_label("Start from GitHub issue"))
             .child(
                 div()
@@ -909,9 +1030,217 @@ impl PaneFlowApp {
     }
 }
 
+/// First installed row of [`TerminalAgent::ALL`], or 0 when none is (the
+/// row renders grayed and confirm rejects).
+fn default_agent_idx(installed: impl Fn(TerminalAgent) -> bool) -> usize {
+    TerminalAgent::ALL
+        .iter()
+        .position(|a| installed(*a))
+        .unwrap_or(0)
+}
+
+/// Settle a provisional default once the first PATH walk has published
+/// (issue #518). Only a pad still flagged `pending` moves, and only when a
+/// different installed agent exists; the flag clears either way, so a
+/// later user click is never overridden. Returns `true` when `agent_idx`
+/// changed.
+fn settle_default_agent(
+    agent_idx: &mut usize,
+    pending: &mut bool,
+    installed: impl Fn(TerminalAgent) -> bool,
+) -> bool {
+    if !*pending {
+        return false;
+    }
+    *pending = false;
+    let settled = default_agent_idx(installed);
+    if settled == *agent_idx {
+        return false;
+    }
+    *agent_idx = settled;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #518: neither confirm path may wait for the first PATH walk on
+    /// the GPUI thread (a slow PATH entry would freeze the window), and
+    /// neither may drop the Enter: a confirm during the walk is queued and
+    /// the boot warm's completion replays it with the real answer.
+    #[test]
+    fn confirm_paths_never_block_on_the_cold_walk_and_are_replayed_when_it_lands() {
+        let pad = include_str!("launch_pad.rs");
+        let confirm = pad
+            .split("fn launch_pad_submit(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("launch_pad_submit exists");
+        assert!(
+            !confirm.contains("is_installed_now()"),
+            "launch_pad_submit must not wait on the GPUI thread: {confirm}"
+        );
+        assert!(
+            confirm.contains("lp.confirm_queued = Some(QueuedConfirm {"),
+            "launch_pad_submit queues a confirm made during the walk: {confirm}"
+        );
+        let resume = pad
+            .split("pub(crate) fn launch_pad_resume_queued_confirm(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("launch_pad_resume_queued_confirm exists");
+        assert!(
+            resume.contains(
+                "self.launch_pad_submit(queued.agent_idx, queued.branch, queued.prompt, cx)"
+            ) && !resume.contains("launch_pad_confirm("),
+            "the replay submits the snapshot, never a re-read of the live form: {resume}"
+        );
+        assert!(
+            confirm.contains("lp.agent_default_pending = false;"),
+            "a queued confirm commits the selected row, so the settle must not move it: {confirm}"
+        );
+        let queue_at = confirm
+            .find("lp.confirm_queued = Some(QueuedConfirm {")
+            .expect("confirm queues");
+        for guard in [
+            "branch.is_empty()",
+            "\"Workspace was closed\"",
+            "ws.repo_root.clone()",
+            "is_zoomed()",
+            "can_add_pane()",
+        ] {
+            let at = confirm
+                .find(guard)
+                .unwrap_or_else(|| panic!("confirm keeps the `{guard}` guard"));
+            assert!(
+                at < queue_at,
+                "`{guard}` must be checked before a confirm can be queued, or an invalid \
+                 form edited during the walk is replayed without another Enter: {confirm}"
+            );
+        }
+        let pending_at = confirm
+            .find("installed_binary_scan_pending()")
+            .expect("confirm reads the pending flag");
+        let snapshot_at = confirm
+            .find("agent.is_installed()")
+            .expect("confirm reads the snapshot");
+        assert!(
+            pending_at < snapshot_at,
+            "the pending flag is read before the snapshot: {confirm}"
+        );
+
+        let settings = include_str!("../settings/tabs/workspaces.rs");
+        assert!(
+            !settings.contains("visible_now("),
+            "Settings click handlers read the snapshot, never the blocking lookup"
+        );
+        for site in [
+            "fn add_workspace_template_pane(",
+            "fn set_workspace_template_pane_kind(",
+            "PaneKind::Agent => {\n                pane.command = None;\n                pane.prompt = (!prompt.is_empty())",
+        ] {
+            let body = settings
+                .split(site)
+                .nth(1)
+                .and_then(|rest| rest.split("\n    }\n").next())
+                .unwrap_or_else(|| panic!("`{site}` exists"));
+            assert!(
+                body.contains("installed_binary_scan_pending()")
+                    && body.contains("AGENT_SCAN_PENDING_COPY"),
+                "`{site}` must refuse with the looking copy while the walk is pending: {body}"
+            );
+            let pending_at = body
+                .find("installed_binary_scan_pending()")
+                .expect("checked above");
+            let snapshot_at = body
+                .find("TerminalAgent::visible(")
+                .unwrap_or_else(|| panic!("`{site}` reads the snapshot"));
+            assert!(
+                pending_at < snapshot_at,
+                "`{site}` reads the pending flag before the snapshot, or a publish between \
+                 the two locks bypasses the guard: {body}"
+            );
+        }
+
+        let palette = include_str!("pane_palette.rs");
+        let launchable = palette
+            .split("fn ensure_launchable(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("ensure_launchable exists");
+        assert!(
+            !launchable.contains("is_installed_now()"),
+            "ensure_launchable must not wait on the GPUI thread: {launchable}"
+        );
+        let launch = palette
+            .split("pub(crate) fn pane_palette_launch(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("pane_palette_launch exists");
+        assert!(
+            launch.contains("palette.launch_queued = Some(preset.clone());"),
+            "pane_palette_launch queues a launch made during the walk: {launch}"
+        );
+
+        let boot = include_str!("bootstrap.rs");
+        let warm = boot
+            .split("smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;")
+            .nth(1)
+            .and_then(|rest| rest.split(".detach();").next())
+            .expect("the boot warm awaits the first walk");
+        for replay in [
+            "app.launch_pad_resume_queued_confirm(cx);",
+            "app.pane_palette_resume_queued_launch(cx);",
+        ] {
+            assert!(
+                warm.contains(replay),
+                "the boot warm's completion must replay queued confirms: missing `{replay}` in {warm}"
+            );
+        }
+    }
+
+    /// Issue #518: a pad opened during the first PATH walk defaults to row
+    /// 0 provisionally; the boot warm's completion moves it to the first
+    /// installed agent, and a user pick made in the meantime is kept.
+    #[test]
+    fn pending_default_agent_settles_on_first_installed_once_the_walk_publishes() {
+        let installed = |a: TerminalAgent| a == TerminalAgent::Codex;
+        let codex = TerminalAgent::ALL
+            .iter()
+            .position(|a| *a == TerminalAgent::Codex)
+            .expect("codex row");
+        assert_ne!(
+            codex, 0,
+            "the fixture must not coincide with the fallback row"
+        );
+
+        // Cold open: nothing installed yet, row 0 is provisional.
+        let mut idx = default_agent_idx(|_| false);
+        let mut pending = true;
+        assert_eq!(idx, 0);
+        assert!(settle_default_agent(&mut idx, &mut pending, installed));
+        assert_eq!(idx, codex);
+        assert!(!pending);
+
+        // A second settle is a no-op: the flag is spent.
+        assert!(!settle_default_agent(&mut idx, &mut pending, |_| false));
+        assert_eq!(idx, codex);
+
+        // The user clicked a row while the walk ran: keep it.
+        let (mut idx, mut pending) = (3, false);
+        assert!(!settle_default_agent(&mut idx, &mut pending, installed));
+        assert_eq!(idx, 3);
+
+        // The walk found nothing: row 0 stays, the flag still clears.
+        let (mut idx, mut pending) = (0, true);
+        assert!(!settle_default_agent(&mut idx, &mut pending, |_| false));
+        assert_eq!(idx, 0);
+        assert!(!pending);
+
+        // A warm open never flags: the default is already the real one.
+        assert_eq!(default_agent_idx(installed), codex);
+    }
 
     #[test]
     fn launch_pad_refuses_split_when_zoomed() {

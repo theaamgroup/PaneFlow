@@ -383,14 +383,24 @@ impl TerminalAgent {
     /// Whether this agent's CLI binary is found on `PATH`. Drives the
     /// default visibility in [`Self::is_visible`].
     ///
-    /// `which` walks `PATH` off-thread. Render (and every other caller with a
-    /// snapshot already in hand) reads that snapshot and never waits on the
-    /// walk: a TTL miss schedules `paneflow-agent-which` and returns the last
-    /// answer. The first lookup in a process waits for that thread so CLI
-    /// PATH checks (`paneflow up`) cannot race an empty cache. The cache
-    /// mutex is never held across `which`.
+    /// **Never blocks.** `which` walks `PATH` off-thread. Render (and every
+    /// other caller with a snapshot already in hand) reads that snapshot and
+    /// never waits on the walk: a TTL miss schedules `paneflow-agent-which`
+    /// and returns the last answer, and a cold cache (issue #518) schedules
+    /// the first walk and answers `false` at once. Read
+    /// [`installed_binary_scan_pending`] to tell that `false` apart from a
+    /// finished scan that found nothing. The cache mutex is never held
+    /// across `which`.
     pub fn is_installed(self) -> bool {
         installed_binaries_contains(self.binary())
+    }
+
+    /// [`Self::is_installed`] for callers that need a real answer and may
+    /// block for it: `paneflow up` and the config migration. A cold cache
+    /// waits for the first `paneflow-agent-which` walk to publish; a warm
+    /// one reads the snapshot exactly like `is_installed`.
+    pub fn is_installed_now(self) -> bool {
+        installed_binaries().contains_now(self.binary())
     }
 
     /// Static arguments appended after [`Self::binary`] for interactive agents
@@ -464,6 +474,20 @@ impl TerminalAgent {
         TerminalAgent::ALL
             .into_iter()
             .filter(|a| a.is_visible(config))
+            .collect()
+    }
+
+    /// [`Self::visible`] with the installed answer supplied by the caller.
+    /// The pane palette passes "installed" for every agent while the first
+    /// PATH walk is pending (issue #518) so the default-enabled agents get a
+    /// row that reads `looking` instead of vanishing from the catalogue.
+    pub(crate) fn visible_with(
+        config: &PaneFlowConfig,
+        is_installed: impl Fn(TerminalAgent) -> bool,
+    ) -> Vec<TerminalAgent> {
+        TerminalAgent::ALL
+            .into_iter()
+            .filter(|a| a.is_visible_with(config, &is_installed))
             .collect()
     }
 }
@@ -650,27 +674,61 @@ impl InstalledBinaries {
         }
     }
 
+    /// Snapshot read that never waits on `which`. A stale or cold cache
+    /// schedules one refresh (if none is in flight) and answers from the
+    /// current snapshot, which is empty until the first walk publishes.
     fn contains(&self, binary: &'static str) -> bool {
-        let (snapshot, spawn, wait_for_initial) = {
+        let (hit, spawn) = {
             let mut cache = self.inner.lock_cache();
             let spawn = cache.is_stale() && !cache.refresh_in_flight;
             if spawn {
                 cache.refresh_in_flight = true;
             }
-            let wait_for_initial = cache.checked_at.is_none();
-            (cache.found.clone(), spawn, wait_for_initial)
+            (cache.found.contains(binary), spawn)
         };
 
         if spawn {
             self.spawn_refresh();
         }
 
-        if wait_for_initial {
-            self.inner.wait_for_initial();
-            return self.inner.lock_cache().found.contains(binary);
-        }
+        hit
+    }
 
-        snapshot.contains(binary)
+    /// Blocking read: like [`Self::contains`], but a cold cache waits for
+    /// the first walk to publish instead of answering from the empty
+    /// snapshot.
+    fn contains_now(&self, binary: &'static str) -> bool {
+        // `contains` only schedules; wait for the first publish (immediate
+        // once ready, and an abandoned spawn marks it ready with the empty
+        // snapshot) and re-read.
+        let _ = self.contains(binary);
+        self.inner.wait_for_initial();
+        self.inner.lock_cache().found.contains(binary)
+    }
+
+    /// `true` until the first walk has published (or been abandoned).
+    fn scan_pending(&self) -> bool {
+        self.inner.lock_cache().checked_at.is_none()
+    }
+
+    /// Run the walk on the caller's thread when the cache is stale and no
+    /// refresh is in flight; otherwise wait for an in-flight cold walk so
+    /// the caller returns with a published snapshot either way. Boot calls
+    /// this from `smol::unblock`, so the GPUI thread never walks `PATH`.
+    fn warm(&self) {
+        let run_here = {
+            let mut cache = self.inner.lock_cache();
+            let run_here = cache.is_stale() && !cache.refresh_in_flight;
+            if run_here {
+                cache.refresh_in_flight = true;
+            }
+            run_here
+        };
+        if run_here {
+            self.inner.run_refresh();
+        } else {
+            self.inner.wait_for_initial();
+        }
     }
 
     fn spawn_refresh(&self) {
@@ -684,10 +742,14 @@ impl InstalledBinaries {
                 tracing::warn!(
                     target: "paneflow_app::agent_launcher",
                     error = %err,
-                    "failed to spawn installed-binary probe thread; probing on caller"
+                    "failed to spawn installed-binary probe thread; abandoning this refresh"
                 );
-                // Last resort: still never hold the cache mutex across which.
-                self.inner.run_refresh();
+                // Never walk PATH on the caller: `contains` is read from
+                // render frames (issue #518), so a thread-exhausted process
+                // would otherwise run every `which` on the GPUI thread.
+                // Abandoning publishes the empty snapshot to cold waiters;
+                // the boot warm / the next stale read schedules another walk.
+                self.inner.abandon_refresh();
             }
         }
     }
@@ -738,6 +800,19 @@ fn installed_binaries_contains(binary: &'static str) -> bool {
     installed_binaries().contains(binary)
 }
 
+/// `true` while no PATH walk has published yet, so the UI can say it is
+/// still looking instead of claiming nothing is installed (issue #518).
+pub(crate) fn installed_binary_scan_pending() -> bool {
+    installed_binaries().scan_pending()
+}
+
+/// Blocking warm of the installed-agent cache for the boot task: walks
+/// `PATH` on the caller's thread (call it from `smol::unblock`), or waits
+/// for the walk already in flight. Returns once a snapshot is published.
+pub(crate) fn refresh_installed_binaries() {
+    installed_binaries().warm();
+}
+
 /// `KEY=value` shell prefix in front of a command (`RUST_LOG=info codex`).
 /// Conservative: the key must be a non-empty identifier, so `--flag=x` and a
 /// bare `=foo` are not mistaken for assignments.
@@ -755,6 +830,31 @@ fn is_env_assignment(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #518: `contains` is read from render frames, so a failed probe
+    /// thread spawn must abandon the refresh, never run the PATH walk on
+    /// the caller.
+    #[test]
+    fn a_failed_probe_thread_spawn_abandons_the_refresh_instead_of_probing_on_the_caller() {
+        let src = include_str!("agent_launcher.rs");
+        let body = src
+            .split("fn spawn_refresh(&self) {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("spawn_refresh exists");
+        let err_arm = body
+            .split("Err(err) => {")
+            .nth(1)
+            .expect("the spawn error arm");
+        assert!(
+            err_arm.contains("self.inner.abandon_refresh();"),
+            "the error arm abandons the refresh: {err_arm}"
+        );
+        assert!(
+            !err_arm.contains("run_refresh()"),
+            "the error arm must not walk PATH on the caller: {err_arm}"
+        );
+    }
 
     // Every agent's own launch command must declare that agent - otherwise a
     // pane launched from the palette shows no logo until the process scan
@@ -1144,8 +1244,138 @@ mod tests {
         assert_eq!(probe_calls.load(Ordering::SeqCst), 0);
     }
 
+    /// Issue #518: the first `is_installed` in a process schedules the walk
+    /// and answers at once; only `is_installed_now` waits for it. The probe
+    /// blocks on a channel, so a blocking cold read would hang the test
+    /// rather than merely slow it.
     #[test]
-    fn first_contains_waits_for_initial_probe() {
+    fn cold_contains_does_not_block_while_contains_now_waits_for_the_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let binaries = Arc::new(InstalledBinaries::with_probe(Arc::new({
+            let probe_calls = Arc::clone(&probe_calls);
+            move || {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                release_rx
+                    .lock()
+                    .expect("release_rx")
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("probe released");
+                HashSet::from(["claude"])
+            }
+        })));
+
+        assert!(binaries.scan_pending(), "a fresh cache is pending");
+        let start = Instant::now();
+        assert!(
+            !binaries.contains("claude"),
+            "a cold read answers from the empty snapshot"
+        );
+        assert!(
+            !binaries.contains("claude"),
+            "a second cold read still does not wait"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "cold reads must not wait for the probe"
+        );
+        assert!(
+            binaries.scan_pending(),
+            "still pending until the walk publishes"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while probe_calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "one walk is scheduled, not one per read"
+        );
+
+        let waiter = std::thread::spawn({
+            let binaries = Arc::clone(&binaries);
+            move || binaries.contains_now("claude")
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            !waiter.is_finished(),
+            "contains_now must wait for the probe"
+        );
+
+        release_tx.send(()).expect("release");
+        assert!(waiter.join().expect("waiter thread"));
+        assert!(!binaries.scan_pending());
+        assert!(binaries.contains("claude"));
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "a fresh snapshot must not schedule another walk"
+        );
+    }
+
+    /// The boot warm (`refresh_installed_binaries`) runs the walk on the
+    /// caller's thread - `smol::unblock`, never GPUI - and a cold read on
+    /// any other thread never walks itself: the probe only ever runs on
+    /// `paneflow-agent-which` or the warming thread.
+    #[test]
+    fn cold_reads_never_run_the_probe_on_the_caller_thread() {
+        let probe_threads = Arc::new(Mutex::new(Vec::<std::thread::ThreadId>::new()));
+        let binaries = Arc::new(InstalledBinaries::with_probe(Arc::new({
+            let probe_threads = Arc::clone(&probe_threads);
+            move || {
+                probe_threads
+                    .lock()
+                    .expect("probe_threads")
+                    .push(std::thread::current().id());
+                std::thread::sleep(Duration::from_millis(10));
+                HashSet::from(["claude"])
+            }
+        })));
+
+        let caller = std::thread::current().id();
+        assert!(!binaries.contains("claude"));
+        assert!(binaries.contains_now("claude"));
+        let threads = probe_threads.lock().expect("probe_threads").clone();
+        assert_eq!(threads.len(), 1, "one walk for the cold read");
+        assert_ne!(threads[0], caller, "the walk must not run on the reader");
+
+        // A warm from another thread while the snapshot is fresh reads it
+        // and walks nothing; once stale it walks on that thread only.
+        let warm_on_thread = |binaries: &Arc<InstalledBinaries>| {
+            let binaries = Arc::clone(binaries);
+            std::thread::spawn(move || {
+                binaries.warm();
+                std::thread::current().id()
+            })
+            .join()
+            .expect("warmer")
+        };
+        warm_on_thread(&binaries);
+        assert_eq!(probe_threads.lock().expect("probe_threads").len(), 1);
+
+        binaries.seed(
+            HashSet::from(["claude"]),
+            Instant::now() - INSTALLED_BINARIES_TTL - Duration::from_millis(1),
+        );
+        let warmer_id = warm_on_thread(&binaries);
+        let threads = probe_threads.lock().expect("probe_threads").clone();
+        assert_eq!(threads.len(), 2, "a stale warm walks once");
+        assert_eq!(
+            threads[1], warmer_id,
+            "the warm walks on the warming thread"
+        );
+        assert_ne!(threads[1], caller);
+    }
+
+    /// Upstream df375ba5: once the snapshot is published, reads are a hash
+    /// lookup and never touch PATH.
+    #[test]
+    fn installed_binary_reads_never_scan_on_the_caller_thread_once_warm() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let probe_calls = Arc::new(AtomicUsize::new(0));
@@ -1153,24 +1383,26 @@ mod tests {
             let probe_calls = Arc::clone(&probe_calls);
             move || {
                 probe_calls.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(30));
-                HashSet::from(["claude"])
+                std::thread::sleep(Duration::from_millis(200));
+                HashSet::new()
             }
         }));
+        binaries.seed(HashSet::from(["claude"]), Instant::now());
+        assert!(!binaries.scan_pending());
 
-        let start = Instant::now();
-        assert!(binaries.contains("claude"));
+        let started = Instant::now();
+        for _ in 0..1_000 {
+            assert!(binaries.contains("claude"));
+            assert!(!binaries.contains("paneflow-no-such-agent-binary"));
+            assert!(binaries.contains_now("claude"));
+        }
+        // The probe sleeps 200 ms, so anything under that proves no walk ran
+        // on this thread; the generous bound survives a loaded test run.
         assert!(
-            start.elapsed() >= Duration::from_millis(30),
-            "cold lookup must wait for the off-thread probe"
+            started.elapsed() < Duration::from_millis(200),
+            "warm reads must not walk PATH"
         );
-        assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
-        assert!(binaries.contains("claude"));
-        assert_eq!(
-            probe_calls.load(Ordering::SeqCst),
-            1,
-            "a fresh snapshot must not schedule another walk"
-        );
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1190,12 +1422,35 @@ mod tests {
         let threads: Vec<_> = (0..4)
             .map(|_| {
                 let binaries = Arc::clone(&binaries);
-                std::thread::spawn(move || binaries.contains("claude"))
+                std::thread::spawn(move || binaries.contains_now("claude"))
             })
             .collect();
         for thread in threads {
             assert!(thread.join().expect("lookup thread"));
         }
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A warm that finds a cold walk already in flight waits for it instead
+    /// of starting a second one, so boot and an early render share one walk.
+    #[test]
+    fn warm_joins_an_in_flight_cold_walk() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let binaries = Arc::new(InstalledBinaries::with_probe(Arc::new({
+            let probe_calls = Arc::clone(&probe_calls);
+            move || {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(40));
+                HashSet::from(["claude"])
+            }
+        })));
+
+        assert!(!binaries.contains("claude"));
+        binaries.warm();
+        assert!(!binaries.scan_pending());
+        assert!(binaries.contains("claude"));
         assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1295,5 +1550,14 @@ mod tests {
     fn is_installed_reads_without_panicking() {
         let _ = TerminalAgent::ClaudeCode.is_installed();
         let _ = TerminalAgent::Codex.is_installed();
+        let _ = installed_binary_scan_pending();
+        // The process-wide cache: a blocking read must agree with the
+        // snapshot once it is published, and the warm must return.
+        refresh_installed_binaries();
+        assert!(!installed_binary_scan_pending());
+        assert_eq!(
+            TerminalAgent::Codex.is_installed_now(),
+            TerminalAgent::Codex.is_installed()
+        );
     }
 }

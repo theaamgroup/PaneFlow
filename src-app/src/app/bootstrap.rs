@@ -829,6 +829,7 @@ impl PaneFlowApp {
             pane_palette: None,
             pane_palette_focus: cx.focus_handle(),
             pending_palette_focus: false,
+            pending_palette_launch: None,
             pending_close: None,
             claude_registry_seen: Default::default(),
             claude_registry_sweep_pending: false,
@@ -914,6 +915,25 @@ impl PaneFlowApp {
         // a local disk and a stalled network folder can never block startup
         // (the cache reads as empty until the load publishes).
         crate::recents::warm(cx);
+
+        // Issue #518 (upstream df375ba5): warm the installed-agent cache
+        // off-thread so the first launch pad / pane palette frame never
+        // walks PATH on the GPUI thread, and repaint once the walk lands
+        // so rows stop saying "looking" (`installed_binary_scan_pending`).
+        // A launch pad opened during the walk defaulted to row 0
+        // provisionally; settle it onto the first installed agent now.
+        cx.spawn(async move |this, cx| {
+            smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;
+            let _ = this.update(cx, |app, cx| {
+                app.launch_pad_settle_default_agent();
+                // A confirm pressed while the walk was pending was queued
+                // rather than waited for; replay it with the real answer.
+                app.launch_pad_resume_queued_confirm(cx);
+                app.pane_palette_resume_queued_launch(cx);
+                cx.notify();
+            });
+        })
+        .detach();
 
         app
     }

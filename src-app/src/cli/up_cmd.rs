@@ -647,7 +647,9 @@ pub(super) fn resolve_command(
     };
     let resolved = resolve_agent(agent)
         .ok_or_else(|| CliError::runtime(format!("pane {idx}: unknown agent '{agent}'")))?;
-    if !resolved.is_installed() {
+    // Issue #518: the CLI needs a real answer, so it waits for the PATH
+    // walk instead of reading the render path's cold snapshot.
+    if !resolved.is_installed_now() {
         return Err(CliError::runtime(format!(
             "pane {idx}: agent '{agent}' ({}) not found on PATH",
             resolved.binary()
