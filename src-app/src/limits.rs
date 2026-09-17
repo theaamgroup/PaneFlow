@@ -20,7 +20,7 @@
 //!   Live tab create cap ↔ `restore_workspaces` truncates a session's tab list,
 //!   and [`paneflow_config::schema::MAX_SESSION_TABS`] applies the same bound to
 //!   the v1 -> v2 migration (US-018); surplus is logged, not silent.
-//! - **`MAX_WORKSPACES`** (20) - [`crate::workspace::MAX_WORKSPACES`]. Live
+//! - **`MAX_WORKSPACES`** (32) - [`crate::workspace::MAX_WORKSPACES`]. Live
 //!   `workspace.create` cap ↔ `restore_workspaces` cap (US-009).
 //! - **`MAX_CONFIG_SIZE_BYTES`** (1 MiB) - `paneflow_config::loader`. Read cap
 //!   on `paneflow.json`; the app's own config writer never approaches it.

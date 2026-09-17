@@ -279,7 +279,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── macos_backdrop.rs              ← native material behind sidebar/title bar
 │   └── title_bar.rs                   ← window controls, drag-to-move
 ├── workspace/                         ← Vec<Workspace> state
-│   ├── mod.rs                         ← Workspace struct, AI agent PIDs, MAX_WORKSPACES = 20
+│   ├── mod.rs                         ← Workspace struct, AI agent PIDs, MAX_WORKSPACES = 32
 │   ├── git.rs / worktree.rs           ← branch detection for badges, worktree support
 │   ├── pid_resolve.rs                 ← PID-reuse-safe process identity
 │   ├── ports.rs                       ← TCP port scan (macOS libproc)
@@ -449,7 +449,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 - Each `LayoutChild` carries `node` plus `ratio: Rc<Cell<f32>>`.
 - `SplitDirection::Horizontal` = **horizontal divider, panes stacked top/bottom** (`flex_col`). `Vertical` = panes side by side (`flex_row`). Counterintuitive but consistent throughout the codebase.
 - Layout uses GPUI flex divs with `flex_basis(relative(ratio))`. `MIN_PANE_SIZE = 80.0`, `DIVIDER_PX = 8.0`, `DIVIDER_HIT_PX = 7.0` (`layout/tree.rs`): the divider is an unpainted shell-revealing gap with a narrower resize hitband centered inside it.
-- `MAX_PANES = 32` (`layout/mod.rs:34`), `MAX_WORKSPACES = 20` (`workspace/mod.rs:53`). Both are enforced on the live create path *and* at session restore and config load; `limits.rs` documents the read/write cap pairs.
+- `MAX_PANES = 32` (`layout/mod.rs:34`), `MAX_WORKSPACES = 32` (`workspace/mod.rs:53`). Both are enforced on the live create path *and* at session restore and config load; `limits.rs` documents the read/write cap pairs.
 - Drag-to-resize is pixel-accurate: `Container::container_size` captures the real main-axis pixel size each frame via a `canvas()` prepaint, so there is no hardcoded container estimate (the old `split.rs` 800px guess is gone).
 - Presets in `layout/presets.rs`: `from_panes_equal` (even horizontal / even vertical), `main_vertical`, `tiled`.
 
