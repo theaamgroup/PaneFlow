@@ -852,6 +852,18 @@ mod tests {
     const SUBPROCESS_GUARD_GROUP_ENV: &str = "PANEFLOW_TEST_GUARD_GROUP";
     const SUBPROCESS_GUARD_MASTER_ENV: &str = "PANEFLOW_TEST_GUARD_MASTER";
 
+    /// Wall-clock budget for one fixture wait: readiness lines, shells
+    /// honoring SIGTERM, and process groups vanishing after SIGKILL.
+    ///
+    /// Issue #568: a 10 s deadline is not what these tests are about, and a
+    /// loaded `cargo test --workspace` (the CI runner, run 35127045880) can
+    /// hold a trap handler's `exit 42` plus the reap past it, which read as
+    /// `shell did not honor SIGTERM`. Like the #562 / #564 budget in
+    /// `workspace/git.rs`, a budget no scheduler stall reaches keeps the
+    /// assertions about the mechanism: the wait ends on the observed exit or
+    /// disappearance, never on the deadline.
+    const FIXTURE_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
     #[test]
     fn failed_session_member_query_skips_only_exit_or_positive_session_change() {
         use FailedSessionMemberQuery::{FailSnapshot, SkipExitedOrMoved};
@@ -1012,7 +1024,7 @@ mod tests {
                 0
             );
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         let mut output = Vec::new();
         let mut buffer = [0u8; 1024];
         let mut guard_pid = None;
@@ -1161,7 +1173,7 @@ mod tests {
             pin_leader_process_group(pgid, Some(pinned_start)).expect("pin child process group");
         shutdown_guard_targets(&group, &PtyGuardMode::Frozen, &[]);
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         let status = loop {
             if let Some(status) = child.try_wait().expect("try_wait child") {
                 break status;
@@ -1235,7 +1247,7 @@ mod tests {
         );
         assert!(signal_pinned_process_group(&group, libc::SIGTERM));
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         let status = loop {
             if let Some(status) = child.try_wait().expect("try_wait shell") {
                 break status;
@@ -1253,7 +1265,7 @@ mod tests {
             signal_pinned_process_group(&group, libc::SIGKILL),
             "a surviving member pin must authorize the delayed KILL"
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         while unsafe { libc::kill(-(pgid as i32), 0) } == 0 {
             assert!(
                 Instant::now() < deadline,
@@ -1317,7 +1329,7 @@ mod tests {
         );
 
         guard_parent.kill_parent();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         let status = loop {
             if let Some(status) = shell.try_wait().expect("try_wait refreshed shell") {
                 break status;
@@ -1334,7 +1346,7 @@ mod tests {
             "shell must honor TERM before the refreshed member reaches KILL"
         );
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         loop {
             // SAFETY: signal 0 only probes this fixture-owned process group.
             if unsafe { libc::kill(-(shell_pid as i32), 0) } < 0
@@ -1447,7 +1459,7 @@ mod tests {
                 0
             );
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         let mut output = Vec::new();
         let mut buffer = [0u8; 1024];
         while !output
@@ -1520,7 +1532,7 @@ mod tests {
 
         guard_parent.kill_parent();
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         loop {
             // SAFETY: signal 0 only probes the fixture-owned foreground group.
             if unsafe { libc::kill(-(foreground.pgid as i32), 0) } < 0
@@ -1534,7 +1546,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         loop {
             // SAFETY: signal 0 only probes the fixture-owned stopped group.
             if unsafe { libc::kill(-(background_pgid as i32), 0) } < 0
