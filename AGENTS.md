@@ -90,20 +90,38 @@ destructive operations), `ui` (visible behavior/accessibility), `money`
 `release` (versions, CI, packaging, signing, deployment). Use `safety:none`
 only after checking all categories.
 
-Any risk category mechanically adds `needs-human-review`, removes
-`ready-for-agent`, and routes fully classified items to `ready-for-human`.
-Missing classification, owner, or metadata keeps the item in `needs-info`
-with any safety hold intact and blocks unattended work. Tests and agent confidence never
-clear the hold. A human may direct flagged implementation; the flag remains
-through human verification and merge. Only a human corrects mistaken safety
-classifications. Carry issue risk categories to its PR.
+`needs-human-review` is reserved for a concrete hard blocker that requires a
+human decision or verification to prevent serious system breakage, data loss,
+credential exposure, or an unsafe release. Before applying it, document the
+trigger, serious consequence, supporting evidence, and exact human action
+needed in the issue or PR. Examples include an irreversible migration needing
+recovery approval, a demonstrated credential leak, or an unverified signing
+change that could distribute an untrusted update. A category, file path,
+defect severity, routine UI inspection, missing metadata, or failed API lookup
+alone is not a hard blocker. Routine fixes in these areas remain eligible.
+
+Safety categories and path flags describe scope only; they never automatically
+add `needs-human-review`. Routing preserves an explicit hold and carries it
+from an issue to its PR. A hold removes `ready-for-agent` and routes fully
+classified items to `ready-for-human`. An issue explicitly assigned
+`ready-for-human` carries that state to its PR without adding a hold; a
+`wontfix` issue never classifies a PR. Missing classification, owner, or
+metadata keeps the item in `needs-info`, which blocks unattended work without
+claiming a human-review blocker. Tests and agent confidence never clear an
+explicit hold; a human removes it after resolving the documented blocker.
+Carry issue safety categories to its PR. Existing holds from the former broad
+policy require a one-time human reassessment; automation cannot distinguish
+them from deliberately placed holds. Human sign-off and merge remain required
+for every PR, independently of this exceptional label.
 
 To promote a fully classified item from `needs-info`, add `ready-for-agent`
 or `ready-for-human`; routing removes the previous state. Missing metadata
 and safety holds still take precedence. Open `wontfix` items also require
-complete metadata; otherwise they remain in `needs-info`. PRs with more than
-20 resolved issue links receive a human-review hold without individual issue
-fetches. GitHub’s resolved closing references, including manual links, define
+complete metadata; otherwise they remain in `needs-info`. A PR stays in
+`needs-info` when any of its resolved references cannot classify it (foreign,
+unreadable, closed, moved, `wontfix`, or a pull request), however eligible
+the others are; more than 20 resolved links stay in `needs-info` without
+individual issue fetches. GitHub’s resolved closing references, including manual links, define
 the linked issues; raw Markdown examples do not establish eligibility.
 
 The workflow derives additional conservative path flags:
@@ -112,7 +130,7 @@ The workflow derives additional conservative path flags:
 `native/` → platform-wide;
 `.github/`, `.agents/`, `.claude/`, `.cursor/`, `scripts/`, `skills/`, `packaging/`,
 manifests/lockfiles, toolchains, deny/clippy configuration, and agent instructions
-→ release. These are minimum flags, not exhaustive behavior classification.
+→ release. These are minimum scope flags, not automatic blockers or exhaustive behavior classification.
 
 Legacy labels are renamed: major → high, minor → medium, trivial → low,
 blocked-human-review → needs-human-review. Do not recreate them.
@@ -122,8 +140,9 @@ blocked-human-review → needs-human-review. Do not recreate them.
 - Find: create/update evidence-backed issues with the metadata above. Missing
   evidence or ownership means `needs-info`; no speculative finding dumps.
 - Fix: recheck eligibility immediately before starting. Unattended work needs
-  complete metadata, a human owner, `ready-for-agent`, `safety:none`, and no
-  human-review hold. Stop if scope adds risk unless a human authorizes the work.
+  complete metadata, a human owner, `ready-for-agent`, and no human-review
+  hold. Safety categories alone do not block implementation. Stop and document
+  a newly discovered hard blocker unless a human authorizes the flagged work.
 - Review: Codex reviews non-draft PRs and refreshes coverage after changes.
   Grok's review automation checks handoff readiness and responds as author
   where appropriate; it does not post a competing code review.
@@ -155,7 +174,8 @@ including blockers tracked in issues. No empty reviews or “no findings” comm
 Ready for handoff requires current-head Codex review, current required checks,
 zero unresolved threads, and no outstanding blockers. Pending, cancelled,
 failed, or stale review is not clean. New commits need refreshed verification.
-A human inspects declines/gaps and directly verifies flagged work.
+A human inspects declines/gaps and directly verifies work with a documented
+hard blocker.
 
 ### Verification and enforcement
 
