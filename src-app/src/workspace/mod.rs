@@ -50,7 +50,11 @@ pub use tab::{Tab, existing_worktree_dir, tab_spawn_root};
 
 /// Hard cap on open workspaces (US-054: single source for the bound previously
 /// re-declared as a local `const` at every create/IPC site).
-pub(crate) const MAX_WORKSPACES: usize = 20;
+///
+/// Raised from 20 to match the tab and pane caps: the bound is a memory guard,
+/// not a workflow limit, and 20 was small enough that a multi-repo day reached
+/// it and then saw every create gesture refuse silently.
+pub(crate) const MAX_WORKSPACES: usize = 32;
 
 /// Hard cap on tabs inside a single workspace (US-001, prd-cli-tab-hierarchy).
 /// Declared next to [`MAX_WORKSPACES`] and exported by the same path so every
