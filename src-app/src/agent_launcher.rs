@@ -698,9 +698,9 @@ impl InstalledBinaries {
     /// the first walk to publish instead of answering from the empty
     /// snapshot.
     fn contains_now(&self, binary: &'static str) -> bool {
-        // `contains` may have published on this thread (the spawn-failure
-        // fallback runs the walk inline), so never trust its cold answer:
-        // wait for the first publish (immediate once ready) and re-read.
+        // `contains` only schedules; wait for the first publish (immediate
+        // once ready, and an abandoned spawn marks it ready with the empty
+        // snapshot) and re-read.
         let _ = self.contains(binary);
         self.inner.wait_for_initial();
         self.inner.lock_cache().found.contains(binary)
@@ -742,10 +742,14 @@ impl InstalledBinaries {
                 tracing::warn!(
                     target: "paneflow_app::agent_launcher",
                     error = %err,
-                    "failed to spawn installed-binary probe thread; probing on caller"
+                    "failed to spawn installed-binary probe thread; abandoning this refresh"
                 );
-                // Last resort: still never hold the cache mutex across which.
-                self.inner.run_refresh();
+                // Never walk PATH on the caller: `contains` is read from
+                // render frames (issue #518), so a thread-exhausted process
+                // would otherwise run every `which` on the GPUI thread.
+                // Abandoning publishes the empty snapshot to cold waiters;
+                // the boot warm / the next stale read schedules another walk.
+                self.inner.abandon_refresh();
             }
         }
     }
@@ -826,6 +830,31 @@ fn is_env_assignment(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #518: `contains` is read from render frames, so a failed probe
+    /// thread spawn must abandon the refresh, never run the PATH walk on
+    /// the caller.
+    #[test]
+    fn a_failed_probe_thread_spawn_abandons_the_refresh_instead_of_probing_on_the_caller() {
+        let src = include_str!("agent_launcher.rs");
+        let body = src
+            .split("fn spawn_refresh(&self) {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("spawn_refresh exists");
+        let err_arm = body
+            .split("Err(err) => {")
+            .nth(1)
+            .expect("the spawn error arm");
+        assert!(
+            err_arm.contains("self.inner.abandon_refresh();"),
+            "the error arm abandons the refresh: {err_arm}"
+        );
+        assert!(
+            !err_arm.contains("run_refresh()"),
+            "the error arm must not walk PATH on the caller: {err_arm}"
+        );
+    }
 
     // Every agent's own launch command must declare that agent - otherwise a
     // pane launched from the palette shows no logo until the process scan

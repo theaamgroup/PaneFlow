@@ -41,6 +41,15 @@ use crate::workspace::worktree::{self, ManagedWorktree};
 pub(crate) const AGENT_SCAN_PENDING_COPY: &str = "Looking for agent CLIs on this machine.";
 
 /// Live Launch Pad modal state, owned by `PaneFlowApp`.
+/// The request a confirm was validated with when the first PATH walk was
+/// still pending (issue #518); replayed verbatim once the walk lands.
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedConfirm {
+    pub(crate) agent_idx: usize,
+    pub(crate) branch: String,
+    pub(crate) prompt: String,
+}
+
 pub(crate) struct LaunchPadState {
     /// Workspace the launch targets, by stable id (survives reorders and
     /// closes - re-resolved when the background work returns).
@@ -59,7 +68,9 @@ pub(crate) struct LaunchPadState {
     /// A confirm pressed while the first PATH walk was still pending
     /// (issue #518): never waited for on the GPUI thread, replayed by the
     /// boot warm's completion through `launch_pad_resume_queued_confirm`.
-    pub(crate) confirm_queued: bool,
+    /// The validated request is snapshotted, so an edit made while the
+    /// looking copy shows is not what gets launched.
+    pub(crate) confirm_queued: Option<QueuedConfirm>,
     pub(crate) branch_input: Entity<TextInput>,
     pub(crate) prompt_input: Entity<TextArea>,
     pub(crate) issue_input: Entity<TextInput>,
@@ -209,7 +220,7 @@ impl PaneFlowApp {
             target,
             agent_idx,
             agent_default_pending,
-            confirm_queued: false,
+            confirm_queued: None,
             branch_input,
             prompt_input,
             issue_input,
@@ -240,11 +251,11 @@ impl PaneFlowApp {
         let Some(lp) = self.launch_pad.as_mut() else {
             return;
         };
-        if !std::mem::take(&mut lp.confirm_queued) {
+        let Some(queued) = lp.confirm_queued.take() else {
             return;
-        }
+        };
         lp.error = None;
-        self.launch_pad_confirm(cx);
+        self.launch_pad_submit(queued.agent_idx, queued.branch, queued.prompt, cx);
     }
 
     /// Escape path - only honored before confirmation (US-005 AC8: the
@@ -276,13 +287,32 @@ impl PaneFlowApp {
             // AC8: a click/Enter during the run never double-creates.
             return;
         }
-        let ws_id = lp.ws_id;
         let agent_idx = lp.agent_idx;
         let branch = lp.branch_input.read(cx).value().trim().to_string();
         // Same delivery profile as the Composer (security review): LF-only,
         // trailing newlines trimmed, 64 KiB cap before the PTY write.
         let (prompt, _truncated) =
             crate::app::composer::normalize_composer_text(&lp.prompt_input.read(cx).value());
+        self.launch_pad_submit(agent_idx, branch, prompt, cx);
+    }
+
+    /// The confirm proper, on values already read from the form: the live
+    /// Enter passes what the inputs hold, a replay after the cold PATH walk
+    /// passes the snapshot it was queued with (issue #518).
+    fn launch_pad_submit(
+        &mut self,
+        agent_idx: usize,
+        branch: String,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lp) = self.launch_pad.as_ref() else {
+            return;
+        };
+        if lp.running || lp.issue_loading {
+            return;
+        }
+        let ws_id = lp.ws_id;
 
         let Some(agent) = TerminalAgent::ALL.get(agent_idx).copied() else {
             self.launch_pad_set_error("No agent selected", cx);
@@ -326,7 +356,11 @@ impl PaneFlowApp {
             // before the replay.
             if scan_pending {
                 if let Some(lp) = self.launch_pad.as_mut() {
-                    lp.confirm_queued = true;
+                    lp.confirm_queued = Some(QueuedConfirm {
+                        agent_idx,
+                        branch: branch.clone(),
+                        prompt: prompt.clone(),
+                    });
                     lp.agent_default_pending = false;
                 }
                 self.launch_pad_set_error(AGENT_SCAN_PENDING_COPY, cx);
@@ -1039,24 +1073,35 @@ mod tests {
     fn confirm_paths_never_block_on_the_cold_walk_and_are_replayed_when_it_lands() {
         let pad = include_str!("launch_pad.rs");
         let confirm = pad
-            .split("pub(crate) fn launch_pad_confirm(")
+            .split("fn launch_pad_submit(")
             .nth(1)
             .and_then(|rest| rest.split("\n    }\n").next())
-            .expect("launch_pad_confirm exists");
+            .expect("launch_pad_submit exists");
         assert!(
             !confirm.contains("is_installed_now()"),
-            "launch_pad_confirm must not wait on the GPUI thread: {confirm}"
+            "launch_pad_submit must not wait on the GPUI thread: {confirm}"
         );
         assert!(
-            confirm.contains("lp.confirm_queued = true;"),
-            "launch_pad_confirm queues a confirm made during the walk: {confirm}"
+            confirm.contains("lp.confirm_queued = Some(QueuedConfirm {"),
+            "launch_pad_submit queues a confirm made during the walk: {confirm}"
+        );
+        let resume = pad
+            .split("pub(crate) fn launch_pad_resume_queued_confirm(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("launch_pad_resume_queued_confirm exists");
+        assert!(
+            resume.contains(
+                "self.launch_pad_submit(queued.agent_idx, queued.branch, queued.prompt, cx)"
+            ) && !resume.contains("launch_pad_confirm("),
+            "the replay submits the snapshot, never a re-read of the live form: {resume}"
         );
         assert!(
             confirm.contains("lp.agent_default_pending = false;"),
             "a queued confirm commits the selected row, so the settle must not move it: {confirm}"
         );
         let queue_at = confirm
-            .find("lp.confirm_queued = true;")
+            .find("lp.confirm_queued = Some(QueuedConfirm {")
             .expect("confirm queues");
         for guard in [
             "branch.is_empty()",
@@ -1104,6 +1149,17 @@ mod tests {
                 body.contains("installed_binary_scan_pending()")
                     && body.contains("AGENT_SCAN_PENDING_COPY"),
                 "`{site}` must refuse with the looking copy while the walk is pending: {body}"
+            );
+            let pending_at = body
+                .find("installed_binary_scan_pending()")
+                .expect("checked above");
+            let snapshot_at = body
+                .find("TerminalAgent::visible(")
+                .unwrap_or_else(|| panic!("`{site}` reads the snapshot"));
+            assert!(
+                pending_at < snapshot_at,
+                "`{site}` reads the pending flag before the snapshot, or a publish between \
+                 the two locks bypasses the guard: {body}"
             );
         }
 

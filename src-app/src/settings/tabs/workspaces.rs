@@ -1114,8 +1114,12 @@ impl PaneFlowApp {
         // walk; while the walk is pending and the snapshot is still empty
         // the click is refused with the looking copy rather than recording
         // a pane with no agent.
+        // The pending flag is read before the snapshot: a walk that publishes
+        // between the two locks then shows up in the snapshot, while the
+        // other order could pair an empty snapshot with a cleared flag.
+        let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
         let visible = TerminalAgent::visible(&self.cached_config);
-        if visible.is_empty() && crate::agent_launcher::installed_binary_scan_pending() {
+        if visible.is_empty() && scan_pending {
             self.workspace_template_status =
                 Some(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
             cx.notify();
@@ -1208,11 +1212,10 @@ impl PaneFlowApp {
                 // the snapshot is still empty the change is refused with the
                 // looking copy, or the pane would lose its command and be
                 // persisted as Empty.
+                // Pending flag before the snapshot, as above.
+                let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
                 let visible = TerminalAgent::visible(&self.cached_config);
-                if pane.agent.is_none()
-                    && visible.is_empty()
-                    && crate::agent_launcher::installed_binary_scan_pending()
-                {
+                if pane.agent.is_none() && visible.is_empty() && scan_pending {
                     self.workspace_template_status =
                         Some(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
                     cx.notify();
@@ -1670,9 +1673,10 @@ impl PaneFlowApp {
                     // Issue #518: the snapshot, never the blocking read (this
                     // is the GPUI thread); a pending walk is reported, not
                     // waited for.
+                    let scan_pending = crate::agent_launcher::installed_binary_scan_pending();
                     let Some(agent) = TerminalAgent::visible(&self.cached_config).first().copied()
                     else {
-                        if crate::agent_launcher::installed_binary_scan_pending() {
+                        if scan_pending {
                             return Err(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
                         }
                         return Err("enable at least one AI Agent first".to_string());
