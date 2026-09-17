@@ -79,21 +79,26 @@ test('complete safe issue remains eligible; unrelated labels survive', () => {
   assert.deepEqual(route([...base, 'bug'], owner), [...base, 'bug'].sort());
 });
 for (const category of ['database', 'ui', 'money', 'access', 'integration', 'platform-wide', 'release']) {
-  test(`${category} always holds unattended work`, () => {
+  test(`${category} describes scope without demanding human review`, () => {
     const result = route([...base, `safety:${category}`], owner);
-    assert.ok(result.includes('needs-human-review'));
-    assert.ok(result.includes('ready-for-human'));
-    assert.ok(!result.includes('ready-for-agent'));
+    assert.ok(!result.includes('needs-human-review'));
+    assert.ok(result.includes('ready-for-agent'));
+    assert.ok(result.includes(`safety:${category}`));
     assert.ok(!result.includes('safety:none'));
   });
 }
+test('critical defect severity alone is not a blocker to implementing its fix', () => {
+  const result = route(base.map(l => l === 'severity:high' ? 'severity:critical' : l), owner);
+  assert.ok(!result.includes('needs-human-review'));
+  assert.ok(result.includes('ready-for-agent'));
+});
 test('missing or bot-only owner blocks unattended work', () => {
   for (const owners of [[], [{ type: 'Bot' }]]) assert.ok(route(base, owners).includes('needs-info'));
 });
 
 test('incomplete risky items retain needs-info and their human hold', () => {
   for (const labels of [base.filter(l => l !== 'severity:high'), base]) {
-    const result = route([...labels, 'safety:release'], []);
+    const result = route([...labels, 'safety:access', 'needs-human-review'], []);
     assert.ok(result.includes('needs-info'));
     assert.ok(result.includes('needs-human-review'));
     assert.ok(!result.includes('ready-for-agent'));
@@ -118,15 +123,27 @@ test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['skills/paneflow-conductor/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['.agents/skills/example/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['src-app/src/main.rs', '.github/workflows/test.yml', 'crates/x/src/lib.rs', 'native/a']), ['safety:ui', 'safety:release', 'safety:integration', 'safety:platform-wide']);
-  assert.ok(route(base, owner, [], ['safety:access']).includes('needs-human-review'));
+  assert.ok(!route(base, owner, [], ['safety:access']).includes('needs-human-review'));
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
+});
+test('file paths never establish a hard blocker on their own', async () => {
+  const paths = ['src-app/src/main.rs', 'crates/x/src/lib.rs', 'native/libghostty/a',
+    '.github/workflows/release.yml', '.github/workflows/agent-safety.yml',
+    'scripts/agent-policy.cjs', 'scripts/agent-policy.test.cjs', 'scripts/sign-macos.sh',
+    'packaging/macos/paneflow.entitlements', 'Cargo.lock', 'AGENTS.md'];
+  for (const filename of paths) {
+    const { labels } = await routePull({ files: [{ filename }] });
+    assert.ok(!labels.includes('needs-human-review'), filename);
+    assert.ok(labels.includes('ready-for-agent'), filename);
+  }
 });
 
 // --- Pull requests inherit classification from their linked issues ---------
 
 test('deriveClassification agrees on one value per prefix and needs a human owner', () => {
   const issue = { labels: base, assignees: owner };
-  assert.deepEqual(deriveClassification([issue]), { severity: 'severity:high', area: 'area:app', lens: 'lens:correctness', safetyNone: true });
+  assert.deepEqual(deriveClassification([issue]), { severity: 'severity:high', area: 'area:app', lens: 'lens:correctness', safetyNone: true, humanOnly: false });
+  assert.equal(deriveClassification([{ ...issue, humanOnly: true }]).humanOnly, true);
   assert.deepEqual(deriveClassification([issue, issue]), deriveClassification([issue]));
   assert.equal(deriveClassification([]), undefined);
   assert.equal(deriveClassification([{ labels: base, assignees: [] }]), undefined);
@@ -152,9 +169,65 @@ test('realistic PR: one classified safety:none issue with a human owner and no p
   assert.ok(removed.includes('needs-info'));
 });
 
-test('realistic PR: the same issue with a path risk routes to ready-for-human with the hold', async () => {
+test('realistic PR: the same issue touching src-app is labelled safety:ui and stays ready-for-agent', async () => {
   const { labels } = await routePull({ pull: pullFixture(['needs-info']), files: [{ filename: 'src-app/src/main.rs' }] });
-  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human', 'safety:ui']);
+  assert.deepEqual(labels, ['ready-for-agent', 'safety:ui']);
+});
+
+test('realistic PR: linked critical severity does not invent a blocker', async () => {
+  const { labels } = await routePull({ issues: { 9: issueFixture(base.map(l => l === 'severity:high' ? 'severity:critical' : l)) } });
+  assert.deepEqual(labels, ['ready-for-agent']);
+});
+
+test('realistic PR: release paths describe scope without holding an eligible PR', async () => {
+  const { labels } = await routePull({ files: [{ filename: '.github/workflows/release.yml' }] });
+  assert.deepEqual(labels, ['ready-for-agent', 'safety:release']);
+});
+
+test('realistic PR: a linked wontfix issue never classifies the PR', async () => {
+  const wontfix = issueFixture([...base.filter(l => l !== 'ready-for-agent'), 'wontfix']);
+  const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: wontfix } });
+  assert.deepEqual(labels, ['needs-info']);
+});
+
+test('realistic PR: a linked issue a human kept (ready-for-human, no hold) routes the PR to ready-for-human', async () => {
+  const kept = issueFixture(base.map(l => l === 'ready-for-agent' ? 'ready-for-human' : l));
+  assert.deepEqual(route(kept.labels.map(l => l.name), owner).filter(l => /^(ready|needs)/.test(l)), ['ready-for-human']);
+  const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: kept } });
+  assert.deepEqual(labels, ['ready-for-human']);
+  // Alongside an agent-ready issue the human-kept one still wins.
+  const { labels: mixed } = await routePull({ issues: { 9: kept, 10: issueFixture() } });
+  assert.deepEqual(mixed, ['ready-for-human']);
+});
+
+test('realistic PR: one eligible issue beside an unclassifiable reference keeps needs-info', async () => {
+  // A foreign resolved reference next to an eligible local one.
+  const foreign = async (query, variables) => {
+    if (query.includes('closedByPullRequestsReferences')) return linkedReferences()(query, variables);
+    return { repository: { pullRequest: { closingIssuesReferences: { pageInfo: { hasNextPage: false }, nodes: [
+      { number: 9, repository: { nameWithOwner: 'org/repo' } },
+      { number: 3, repository: { nameWithOwner: 'other/repo' } },
+    ] } } } };
+  };
+  const { labels: withForeign } = await routePull({ pull: pullFixture(['ready-for-agent']), graphql: foreign });
+  assert.deepEqual(withForeign, ['needs-info']);
+  // An eligible issue followed by an unreadable, closed, wontfix, or PR reference.
+  const siblings = {
+    unreadable: Object.assign(new Error('unavailable'), { status: 404 }),
+    closed: issueFixture(base, owner, { state: 'closed' }),
+    wontfix: issueFixture([...base.filter(l => l !== 'ready-for-agent'), 'wontfix']),
+    pr: issueFixture(base, owner, { pull_request: {} }),
+  };
+  for (const [name, sibling] of Object.entries(siblings)) {
+    const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: issueFixture(), 10: sibling } });
+    assert.deepEqual(labels, ['needs-info'], name);
+  }
+});
+
+test('realistic PR: docs-only with no linked issue is needs-info without a hold', async () => {
+  const { labels, added } = await routePull({ pull: pullFixture([]), graphql: linkedReferences([]) });
+  assert.deepEqual(labels, ['needs-info']);
+  assert.deepEqual(added, ['needs-info']);
 });
 
 test('realistic PR: two linked issues that agree still classify the PR', async () => {
@@ -173,14 +246,14 @@ test('realistic PR: a linked issue lacking a human assignee keeps needs-info', a
   for (const assignees of [[], [{ type: 'Bot', login: 'bot' }]]) {
     const { labels } = await routePull({ issues: { 9: issueFixture(base, assignees) } });
     assert.ok(labels.includes('needs-info'), JSON.stringify(assignees));
-    assert.ok(labels.includes('needs-human-review'));
+    assert.ok(!labels.includes('needs-human-review'));
     assert.ok(!labels.includes('ready-for-agent'));
   }
 });
 
 test('realistic PR: a stale ready-for-agent is withdrawn when the linked issue loses its metadata', async () => {
   const { labels } = await routePull({ pull: pullFixture(['ready-for-agent']), issues: { 9: issueFixture(base.filter(l => l !== 'area:app')) } });
-  assert.deepEqual(labels, ['needs-human-review', 'needs-info']);
+  assert.deepEqual(labels, ['needs-info']);
 });
 
 test('realistic PR: a human hold on the PR itself survives a fully classified issue', async () => {
@@ -198,7 +271,8 @@ for (const variant of ['unlinked', 'foreign-redirect', 'pr-link', 'missing-safet
       : variant === 'foreign-redirect' ? issueFixture(base, owner, { repository_url: 'https://api.github.com/repos/other/project' })
       : issueFixture();
     const { labels } = await routePull({ issues: { 9: issue }, graphql: linkedReferences(variant === 'unlinked' ? [] : [9]) });
-    assert.ok(labels.includes('needs-human-review'), variant);
+    // Ineligible for unattended work, but not a critical change: no human hold.
+    assert.ok(!labels.includes('needs-human-review'), variant);
     assert.ok(labels.includes('needs-info'), variant);
     assert.ok(!labels.includes('ready-for-agent'), variant);
   });
@@ -212,7 +286,7 @@ test('closing keywords in the PR body never establish a link', async () => {
   const body = 'Closes #9\nFixes org/repo#9\nCloses: #9\n<!-- Closes #9 -->\n`Closes #9`\n```\nCloses #9\n```';
   const { labels, reads } = await routePull({ pull: pullFixture(['ready-for-agent'], { body }), graphql: linkedReferences([]), files: [{ filename: 'src-app/main.rs' }] });
   assert.deepEqual(reads, [7]);
-  assert.deepEqual(labels, ['needs-human-review', 'needs-info', 'safety:ui']);
+  assert.deepEqual(labels, ['needs-info', 'safety:ui']);
 });
 
 test('routing is idempotent and never promotes needs-info', () => {
@@ -234,7 +308,7 @@ test('sync reads current state, inherits risk and writes only label deltas', asy
   const { added, labels } = await routePull({
     pull: pullFixture(['needs-info']),
     files: [{ filename: 'docs/new.md', previous_filename: 'src-app/old.rs' }],
-    issues: { 9: issueFixture([...base.filter(l => l !== 'safety:none'), 'safety:access']) },
+    issues: { 9: issueFixture([...base.filter(l => l !== 'safety:none'), 'safety:access', 'needs-human-review']) },
   });
   assert.ok(added.includes('safety:ui'));
   assert.ok(added.includes('safety:access'));
@@ -245,7 +319,7 @@ test('sync reads current state, inherits risk and writes only label deltas', asy
 
 // --- Issue events sweep only the PRs that link the issue -------------------
 
-function issueEventGithub({ issueState = 'open', issueLabels = [...base, 'safety:access'], graphql = linkedReferences(), pulls = [{ number: 7 }, { number: 8 }] } = {}) {
+function issueEventGithub({ issueState = 'open', issueLabels = [...base, 'safety:access', 'needs-human-review'], graphql = linkedReferences(), pulls = [{ number: 7 }, { number: 8 }] } = {}) {
   const writes = [], reads = [], paginated = [], warnings = [];
   const github = {
     graphql,
@@ -351,12 +425,13 @@ for (const action of ['deleted', 'transferred']) {
     await sync({ github, context: { repo, payload: { action, issue: { number: 9 } } }, core: quiet });
     assert.deepEqual(paginated.filter(m => m === 'pulls'), ['pulls']);
     assert.deepEqual(calls, [7, 9]);
-    assert.ok(additions.includes('needs-human-review'));
+    assert.ok(additions.includes('needs-info'));
+    assert.ok(!additions.includes('needs-human-review'));
   });
 }
 
 for (const status of [404, 403, 500]) {
-  test(`unreadable linked issue (${status}) retains path and human holds`, async () => {
+  test(`unreadable linked issue (${status}) retains path labels and withdraws eligibility`, async () => {
     const failures = [];
     const { added, labels } = await routePull({
       issues: { 999: Object.assign(new Error('unavailable'), { status }) },
@@ -364,7 +439,7 @@ for (const status of [404, 403, 500]) {
       core: { info() {}, warning() {}, setFailed(message) { failures.push(message); } },
     });
     assert.ok(added.includes('safety:ui'));
-    assert.ok(added.includes('needs-human-review'));
+    assert.ok(!added.includes('needs-human-review'));
     assert.ok(labels.includes('needs-info'));
     assert.equal(failures.length, status === 404 ? 0 : 1);
   });
@@ -417,13 +492,13 @@ test('open wontfix requires complete metadata and a human owner', () => {
   const complete = route([...base, 'wontfix', 'needs-info'], owner);
   assert.ok(complete.includes('wontfix'));
   assert.ok(!complete.includes('needs-info'));
-  const held = route(['wontfix', 'safety:release'], []);
+  const held = route(['wontfix', 'safety:access', 'needs-human-review'], []);
   assert.ok(held.includes('needs-info'));
   assert.ok(held.includes('needs-human-review'));
 });
 
 for (const count of [20, 21, 3000]) {
-  test(`${count} closing references have bounded requests and preserve path holds`, async () => {
+  test(`${count} closing references have bounded requests and withdraw eligibility`, async () => {
     const ids = Array.from({ length: Math.min(count, 21) }, (_, i) => i + 100);
     const { reads, added, labels } = await routePull({
       pull: pullFixture(['ready-for-agent']),
@@ -432,13 +507,14 @@ for (const count of [20, 21, 3000]) {
       graphql: linkedReferences(ids, count > 21),
     });
     assert.equal(reads.length, count > 20 ? 1 : 21);
-    assert.ok(added.includes('needs-human-review'));
+    assert.ok(added.includes('needs-info'));
+    assert.ok(!added.includes('needs-human-review'));
     assert.ok(added.includes('safety:ui'));
     assert.ok(!labels.includes('ready-for-agent'));
   });
 }
 
-test('throttled lookups stop at the first failure and still attempt the hold', async () => {
+test('throttled lookups stop at the first failure and still withdraw eligibility', async () => {
   const failures = [];
   const throttled = () => Object.assign(new Error('throttled'), { status: 429 });
   const { reads, added, labels } = await routePull({
@@ -449,7 +525,8 @@ test('throttled lookups stop at the first failure and still attempt the hold', a
   });
   assert.deepEqual(reads, [7, 9]);
   assert.equal(failures.length, 1);
-  assert.ok(added.includes('needs-human-review'));
+  assert.ok(added.includes('needs-info'));
+  assert.ok(!added.includes('needs-human-review'));
   assert.ok(!labels.includes('ready-for-agent'));
 });
 
@@ -469,9 +546,33 @@ for (const variant of ['query-failure', 'foreign-issue']) {
       core: { info() {}, setFailed(message) { failures.push(message); } },
     });
     assert.deepEqual(reads, [7]);
-    assert.ok(added.includes('needs-human-review'));
+    assert.ok(added.includes('needs-info'));
+    assert.ok(!added.includes('needs-human-review'));
     assert.ok(added.includes('safety:ui'));
     assert.ok(!labels.includes('ready-for-agent'));
     assert.equal(failures.length, variant === 'query-failure' ? 1 : 0);
   });
 }
+
+test('an explicit linked blocker holds even when other metadata is incomplete', async () => {
+  const { labels } = await routePull({
+    issues: { 9: issueFixture(['safety:access', 'needs-human-review']) },
+  });
+  assert.deepEqual(labels, ['needs-human-review', 'needs-info', 'safety:access']);
+});
+
+test('a human-cleared hold is not recreated from scope labels on the next event', async () => {
+  const issue = issueFixture([...base.filter(l => l !== 'safety:none'), 'safety:database']);
+  const { labels } = await routePull({
+    pull: pullFixture(['ready-for-agent', 'safety:database']),
+    issues: { 9: issue },
+    files: [{ filename: 'native/libghostty/test.c' }],
+  });
+  assert.deepEqual(labels, ['ready-for-agent', 'safety:database', 'safety:platform-wide']);
+});
+
+test('dependency audit requests triage without declaring every advisory a hard blocker', () => {
+  const workflow = readFileSync(path.join(__dirname, '../.github/workflows/audit.yml'), 'utf8');
+  assert.match(workflow, /--label "lens:security,area:platform,safety:release,needs-info"/);
+  assert.ok(!workflow.includes('needs-human-review'));
+});

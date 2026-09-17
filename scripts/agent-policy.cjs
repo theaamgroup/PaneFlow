@@ -52,6 +52,9 @@ function deriveClassification(linked) {
   // Every complete issue without safety:none carries a risk category, which
   // the caller inherits onto the PR; so `every` and `some` agree here.
   picks.safetyNone = linked.every(issue => (issue.labels || []).includes('safety:none'));
+  // An issue a human kept for themselves (`ready-for-human` without a hold)
+  // carries that state to its PR: it never becomes `ready-for-agent`.
+  picks.humanOnly = linked.some(issue => issue.humanOnly === true);
   return picks;
 }
 
@@ -64,7 +67,10 @@ function route(labels, assignees = [], paths = [], inherited = [], requestedStat
     if (categories.some(c => label === `safety:${c}`) || label === 'needs-human-review') next.add(label);
   }
   const risk = categories.some(c => next.has(`safety:${c}`));
-  const held = risk || next.has('needs-human-review');
+  // Categories, file paths and defect severity describe scope, not evidence
+  // of a hard blocker. Only an explicitly recorded hold (local or inherited)
+  // demands human review; automation never invents or clears one.
+  const held = next.has('needs-human-review');
   const isPull = linked !== undefined;
   const derived = isPull ? deriveClassification(linked) : undefined;
   const safetyValid = [...next].filter(l => l.startsWith('safety:')).every(l => l === 'safety:none' || categories.some(c => l === `safety:${c}`));
@@ -78,6 +84,7 @@ function route(labels, assignees = [], paths = [], inherited = [], requestedStat
   if (!complete) state = 'needs-info';
   else if (next.has('wontfix')) state = 'wontfix';
   else if (held) state = 'ready-for-human';
+  else if (isPull && derived.humanOnly) state = 'ready-for-human';
   else if (['ready-for-agent', 'ready-for-human'].includes(requestedState) && next.has(requestedState)) state = requestedState;
   // A complete, unheld PR inherits eligibility from its ready-for-agent
   // issues: nobody promotes a PR by hand, so a stale needs-info must not stick.
@@ -118,6 +125,10 @@ async function sync({ github, context, core }) {
     let ids = [];
     let oversized = false;
     let linkedIssues = 0;
+    // Fail closed: one resolved reference that cannot classify (foreign,
+    // unreadable, a PR, closed, moved, wontfix, or an unreadable link set)
+    // keeps the whole PR on needs-info, however eligible its siblings are.
+    let unclassifiable = false;
     try {
       const result = await github.graphql(`query($owner:String!,$repo:String!,$number:Int!,$limit:Int!) {
         repository(owner:$owner,name:$repo) {
@@ -134,45 +145,52 @@ async function sync({ github, context, core }) {
       const localRepo = `${repo.owner}/${repo.repo}`.toLowerCase();
       for (const issue of links.nodes) {
         if (issue.repository.nameWithOwner.toLowerCase() === localRepo) ids.push(issue.number);
-        else inherited.push('needs-human-review');
+        else unclassifiable = true;
       }
     } catch (error) {
-      inherited.push('needs-human-review');
+      unclassifiable = true;
       core.setFailed('Closing issue references could not be read.');
     }
     // Oversized link sets get no per-issue requests: reserve API budget for
-    // writing the hold and removing stale eligibility, even on repeated events.
+    // removing stale eligibility, even on repeated events.
     if (oversized) {
-      inherited.push('needs-human-review');
-      core.warning(`More than ${maxClosingReferences} closing references; retaining a human-review hold.`);
+      unclassifiable = true;
+      core.warning(`More than ${maxClosingReferences} closing references; the pull request stays needs-info.`);
     }
     for (const id of oversized ? [] : ids) {
       try {
         const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: id });
-        if (issue.pull_request) continue;
+        if (issue.pull_request) { unclassifiable = true; continue; }
         linkedIssues++;
         const labels = issue.labels.map(l => l.name);
         inherited.push(...labels);
         const moved = issue.repository_url && !issue.repository_url.toLowerCase().endsWith(`/repos/${repo.owner}/${repo.repo}`.toLowerCase());
-        if (moved || issue.state !== 'open' || !route(labels, issue.assignees || []).includes('ready-for-agent')) {
-          inherited.push('needs-human-review');
+        // Only open local issues classify the PR; a closed, moved, or wontfix
+        // one leaves it needs-info (its labels, including any explicit human hold,
+        // were still inherited above). An issue routed to
+        // ready-for-human keeps its PR out of ready-for-agent.
+        const routed = route(labels, issue.assignees || []);
+        if (!moved && issue.state === 'open' && !routed.includes('wontfix')) {
+          linked.push({ labels, assignees: issue.assignees || [], humanOnly: routed.includes('ready-for-human') });
+        } else {
+          unclassifiable = true;
         }
-        // Only open local issues classify the PR; closed or moved ones hold it.
-        if (!moved && issue.state === 'open') linked.push({ labels, assignees: issue.assignees || [] });
       } catch (error) {
         // Unknown issue classification cannot make a PR eligible. Preserve
         // path routing even when a closing reference is missing/inaccessible.
-        inherited.push('needs-human-review');
-        core.warning(`Cannot classify linked issue #${id}; retaining a human-review hold.`);
+        unclassifiable = true;
+        core.warning(`Cannot classify linked issue #${id}; the pull request stays needs-info.`);
         if (error.status !== 404) {
           core.setFailed(`Linked issue #${id} could not be read.`);
           break; // Do not compound throttling or service failures.
         }
       }
     }
-    // Absent or unreadable issue links are unknown scope, never
-    // evidence that this PR has an eligible issue for unattended work.
-    if (linkedIssues === 0) inherited.push('needs-human-review');
+    // Absent or unreadable issue links are unknown scope, never evidence
+    // that this PR has an eligible issue for unattended work: `linked` stays
+    // empty and routing lands on needs-info without a human hold.
+    if (linkedIssues === 0) core.info(`#${number} links no classifiable issue.`);
+    if (unclassifiable) linked = [];
   }
   const before = item.labels.map(l => l.name);
   const requestedState = event.action === 'labeled' ? event.label?.name : undefined;
