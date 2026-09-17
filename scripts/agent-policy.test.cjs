@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
-const { route, pathRisks, pathHolds, holdCategories, deriveClassification, sync } = require('./agent-policy.cjs');
+const { route, pathRisks, deriveClassification, sync } = require('./agent-policy.cjs');
 const owner = [{ type: 'User', login: 'maintainer' }];
 const base = ['severity:high', 'area:app', 'lens:correctness', 'safety:none', 'ready-for-agent'];
 const repo = { owner: 'org', repo: 'repo' };
@@ -78,20 +78,8 @@ test('privileged policy checkout uses protected main, including stacked PRs', ()
 test('complete safe issue remains eligible; unrelated labels survive', () => {
   assert.deepEqual(route([...base, 'bug'], owner), [...base, 'bug'].sort());
 });
-assert.deepEqual(holdCategories, ['database', 'money', 'access', 'platform-wide']);
-for (const category of holdCategories) {
-  test(`${category} always holds unattended work`, () => {
-    const result = route([...base, `safety:${category}`], owner);
-    assert.ok(result.includes('needs-human-review'));
-    assert.ok(result.includes('ready-for-human'));
-    assert.ok(!result.includes('ready-for-agent'));
-    assert.ok(!result.includes('safety:none'));
-  });
-}
-// The routine categories are recorded but never demand a human on their own:
-// nearly every change touches src-app/ or crates/, so they would hold all work.
-for (const category of ['ui', 'integration', 'release']) {
-  test(`${category} is recorded without a human hold`, () => {
+for (const category of ['database', 'ui', 'money', 'access', 'integration', 'platform-wide', 'release']) {
+  test(`${category} describes scope without demanding human review`, () => {
     const result = route([...base, `safety:${category}`], owner);
     assert.ok(!result.includes('needs-human-review'));
     assert.ok(result.includes('ready-for-agent'));
@@ -99,11 +87,10 @@ for (const category of ['ui', 'integration', 'release']) {
     assert.ok(!result.includes('safety:none'));
   });
 }
-test('severity:critical always holds unattended work', () => {
+test('critical defect severity alone is not a blocker to implementing its fix', () => {
   const result = route(base.map(l => l === 'severity:high' ? 'severity:critical' : l), owner);
-  assert.ok(result.includes('needs-human-review'));
-  assert.ok(result.includes('ready-for-human'));
-  assert.ok(!result.includes('ready-for-agent'));
+  assert.ok(!result.includes('needs-human-review'));
+  assert.ok(result.includes('ready-for-agent'));
 });
 test('missing or bot-only owner blocks unattended work', () => {
   for (const owners of [[], [{ type: 'Bot' }]]) assert.ok(route(base, owners).includes('needs-info'));
@@ -111,7 +98,7 @@ test('missing or bot-only owner blocks unattended work', () => {
 
 test('incomplete risky items retain needs-info and their human hold', () => {
   for (const labels of [base.filter(l => l !== 'severity:high'), base]) {
-    const result = route([...labels, 'safety:access'], []);
+    const result = route([...labels, 'safety:access', 'needs-human-review'], []);
     assert.ok(result.includes('needs-info'));
     assert.ok(result.includes('needs-human-review'));
     assert.ok(!result.includes('ready-for-agent'));
@@ -136,23 +123,19 @@ test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['skills/paneflow-conductor/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['.agents/skills/example/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['src-app/src/main.rs', '.github/workflows/test.yml', 'crates/x/src/lib.rs', 'native/a']), ['safety:ui', 'safety:release', 'safety:integration', 'safety:platform-wide']);
-  assert.ok(route(base, owner, [], ['safety:access']).includes('needs-human-review'));
+  assert.ok(!route(base, owner, [], ['safety:access']).includes('needs-human-review'));
   assert.deepEqual(pathRisks(['docs/guide.md']), []);
 });
-test('only release-pipeline, signing, and policy paths hold; routine paths only label', () => {
-  const critical = ['.github/workflows/release.yml', '.github/workflows/agent-safety.yml', 'scripts/agent-policy.cjs', 'scripts/agent-policy.test.cjs', 'scripts/sparkle-dist.sh', 'scripts/bundle-macos.sh', 'scripts/create-dmg.sh', 'scripts/sign-macos.sh', 'scripts/notarize-macos.sh', 'scripts/release-notes.sh', 'scripts/verify-update-feed.py', 'scripts/verify-update.swift', 'packaging/macos/paneflow.entitlements'];
-  for (const p of critical) assert.ok(pathHolds([p]), p);
-  // Every script release.yml executes is a critical path.
-  const release = readFileSync(path.join(__dirname, '../.github/workflows/release.yml'), 'utf8');
-  for (const p of new Set(release.match(/scripts\/[\w.-]+/g))) assert.ok(pathHolds([p]), `${p} runs in release.yml but does not hold`);
-  const routine = ['src-app/src/main.rs', 'crates/x/src/lib.rs', '.github/workflows/run_tests.yml', 'scripts/bench-terminal.sh', 'Cargo.lock', 'CLAUDE.md', 'AGENTS.md', '.claude/settings.json', 'docs/guide.md'];
-  for (const p of routine) assert.ok(!pathHolds([p]), p);
-  assert.ok(pathHolds([...routine, 'scripts/create-dmg.sh']));
-  assert.ok(route(base, owner, ['.github/workflows/release.yml']).includes('needs-human-review'));
-  const ui = route(base, owner, ['src-app/src/main.rs']);
-  assert.ok(!ui.includes('needs-human-review'));
-  assert.ok(ui.includes('safety:ui'));
-  assert.ok(ui.includes('ready-for-agent'));
+test('file paths never establish a hard blocker on their own', async () => {
+  const paths = ['src-app/src/main.rs', 'crates/x/src/lib.rs', 'native/libghostty/a',
+    '.github/workflows/release.yml', '.github/workflows/agent-safety.yml',
+    'scripts/agent-policy.cjs', 'scripts/agent-policy.test.cjs', 'scripts/sign-macos.sh',
+    'packaging/macos/paneflow.entitlements', 'Cargo.lock', 'AGENTS.md'];
+  for (const filename of paths) {
+    const { labels } = await routePull({ files: [{ filename }] });
+    assert.ok(!labels.includes('needs-human-review'), filename);
+    assert.ok(labels.includes('ready-for-agent'), filename);
+  }
 });
 
 // --- Pull requests inherit classification from their linked issues ---------
@@ -191,14 +174,14 @@ test('realistic PR: the same issue touching src-app is labelled safety:ui and st
   assert.deepEqual(labels, ['ready-for-agent', 'safety:ui']);
 });
 
-test('realistic PR: a linked severity:critical issue holds the PR', async () => {
+test('realistic PR: linked critical severity does not invent a blocker', async () => {
   const { labels } = await routePull({ issues: { 9: issueFixture(base.map(l => l === 'severity:high' ? 'severity:critical' : l)) } });
-  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human']);
+  assert.deepEqual(labels, ['ready-for-agent']);
 });
 
-test('realistic PR: a critical path holds even with a safe linked issue', async () => {
+test('realistic PR: release paths describe scope without holding an eligible PR', async () => {
   const { labels } = await routePull({ files: [{ filename: '.github/workflows/release.yml' }] });
-  assert.deepEqual(labels, ['needs-human-review', 'ready-for-human', 'safety:release']);
+  assert.deepEqual(labels, ['ready-for-agent', 'safety:release']);
 });
 
 test('realistic PR: a linked wontfix issue never classifies the PR', async () => {
@@ -325,7 +308,7 @@ test('sync reads current state, inherits risk and writes only label deltas', asy
   const { added, labels } = await routePull({
     pull: pullFixture(['needs-info']),
     files: [{ filename: 'docs/new.md', previous_filename: 'src-app/old.rs' }],
-    issues: { 9: issueFixture([...base.filter(l => l !== 'safety:none'), 'safety:access']) },
+    issues: { 9: issueFixture([...base.filter(l => l !== 'safety:none'), 'safety:access', 'needs-human-review']) },
   });
   assert.ok(added.includes('safety:ui'));
   assert.ok(added.includes('safety:access'));
@@ -336,7 +319,7 @@ test('sync reads current state, inherits risk and writes only label deltas', asy
 
 // --- Issue events sweep only the PRs that link the issue -------------------
 
-function issueEventGithub({ issueState = 'open', issueLabels = [...base, 'safety:access'], graphql = linkedReferences(), pulls = [{ number: 7 }, { number: 8 }] } = {}) {
+function issueEventGithub({ issueState = 'open', issueLabels = [...base, 'safety:access', 'needs-human-review'], graphql = linkedReferences(), pulls = [{ number: 7 }, { number: 8 }] } = {}) {
   const writes = [], reads = [], paginated = [], warnings = [];
   const github = {
     graphql,
@@ -509,7 +492,7 @@ test('open wontfix requires complete metadata and a human owner', () => {
   const complete = route([...base, 'wontfix', 'needs-info'], owner);
   assert.ok(complete.includes('wontfix'));
   assert.ok(!complete.includes('needs-info'));
-  const held = route(['wontfix', 'safety:access'], []);
+  const held = route(['wontfix', 'safety:access', 'needs-human-review'], []);
   assert.ok(held.includes('needs-info'));
   assert.ok(held.includes('needs-human-review'));
 });
@@ -570,3 +553,26 @@ for (const variant of ['query-failure', 'foreign-issue']) {
     assert.equal(failures.length, variant === 'query-failure' ? 1 : 0);
   });
 }
+
+test('an explicit linked blocker holds even when other metadata is incomplete', async () => {
+  const { labels } = await routePull({
+    issues: { 9: issueFixture(['safety:access', 'needs-human-review']) },
+  });
+  assert.deepEqual(labels, ['needs-human-review', 'needs-info', 'safety:access']);
+});
+
+test('a human-cleared hold is not recreated from scope labels on the next event', async () => {
+  const issue = issueFixture([...base.filter(l => l !== 'safety:none'), 'safety:database']);
+  const { labels } = await routePull({
+    pull: pullFixture(['ready-for-agent', 'safety:database']),
+    issues: { 9: issue },
+    files: [{ filename: 'native/libghostty/test.c' }],
+  });
+  assert.deepEqual(labels, ['ready-for-agent', 'safety:database', 'safety:platform-wide']);
+});
+
+test('dependency audit requests triage without declaring every advisory a hard blocker', () => {
+  const workflow = readFileSync(path.join(__dirname, '../.github/workflows/audit.yml'), 'utf8');
+  assert.match(workflow, /--label "lens:security,area:platform,safety:release,needs-info"/);
+  assert.ok(!workflow.includes('needs-human-review'));
+});

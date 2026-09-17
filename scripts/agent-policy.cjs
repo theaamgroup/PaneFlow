@@ -1,14 +1,5 @@
 // Shared, deterministic safety routing. No dependencies or code from PR heads.
 const categories = ['database', 'ui', 'money', 'access', 'integration', 'platform-wide', 'release'];
-// Only these mechanically demand a human (`needs-human-review`). The other
-// categories are recorded for routing but do not hold: nearly every change in
-// this repository touches `src-app/` or `crates/`, so holding on `ui`,
-// `integration` or `release` held every pull request.
-const holdCategories = ['database', 'money', 'access', 'platform-wide'];
-// Files where an unattended change is itself the risk: the release pipeline
-// (every script release.yml executes, signing and notarization included), and
-// this policy (an agent must not loosen it unattended).
-const criticalPaths = /^(\.github\/workflows\/(release|agent-safety)\.yml|scripts\/agent-policy(\.test)?\.cjs|scripts\/(sparkle-dist|bundle-macos|create-dmg|sign-macos|notarize-macos|release-notes)\.sh|scripts\/verify-update-feed\.py|scripts\/verify-update\.swift|packaging\/)/;
 const maxClosingReferences = 20;
 const maxLinkedPulls = 50;
 const states = ['needs-info', 'ready-for-agent', 'ready-for-human', 'wontfix'];
@@ -27,10 +18,6 @@ function pathRisks(paths) {
     if (/^(\.github\/|\.agents\/|\.claude\/|\.cursor\/|scripts\/|skills\/|packaging\/)|(^|\/)(Cargo\.(toml|lock)|rust-toolchain(\.toml)?|deny\.toml|clippy\.toml|AGENTS\.md|CLAUDE\.md|SKILL\.md)$/.test(path)) result.add('safety:release');
   }
   return [...result];
-}
-
-function pathHolds(paths) {
-  return paths.some(path => criticalPaths.test(path));
 }
 
 function hasHumanOwner(assignees) {
@@ -80,13 +67,10 @@ function route(labels, assignees = [], paths = [], inherited = [], requestedStat
     if (categories.some(c => label === `safety:${c}`) || label === 'needs-human-review') next.add(label);
   }
   const risk = categories.some(c => next.has(`safety:${c}`));
-  // A hold needs a critical signal: a holding category, `severity:critical`
-  // on the item or a linked issue, a critical path, or a hold a human already
-  // placed (on the item or a linked issue; never cleared automatically).
-  const critical = holdCategories.some(c => next.has(`safety:${c}`))
-    || next.has('severity:critical') || inherited.includes('severity:critical')
-    || pathHolds(paths);
-  const held = critical || next.has('needs-human-review');
+  // Categories, file paths and defect severity describe scope, not evidence
+  // of a hard blocker. Only an explicitly recorded hold (local or inherited)
+  // demands human review; automation never invents or clears one.
+  const held = next.has('needs-human-review');
   const isPull = linked !== undefined;
   const derived = isPull ? deriveClassification(linked) : undefined;
   const safetyValid = [...next].filter(l => l.startsWith('safety:')).every(l => l === 'safety:none' || categories.some(c => l === `safety:${c}`));
@@ -182,8 +166,8 @@ async function sync({ github, context, core }) {
         inherited.push(...labels);
         const moved = issue.repository_url && !issue.repository_url.toLowerCase().endsWith(`/repos/${repo.owner}/${repo.repo}`.toLowerCase());
         // Only open local issues classify the PR; a closed, moved, or wontfix
-        // one leaves it needs-info (its labels, including any human hold or
-        // severity:critical, were still inherited above). An issue routed to
+        // one leaves it needs-info (its labels, including any explicit human hold,
+        // were still inherited above). An issue routed to
         // ready-for-human keeps its PR out of ready-for-agent.
         const routed = route(labels, issue.assignees || []);
         if (!moved && issue.state === 'open' && !routed.includes('wontfix')) {
@@ -262,4 +246,4 @@ async function syncOpenPulls({ github, core, repo, issueNumber }) {
   for (const number of numbers) await sync({ github, core, context: { repo, payload: { pull_request: { number } } } });
 }
 
-module.exports = { pathRisks, pathHolds, holdCategories, route, deriveClassification, sync, syncOpenPulls };
+module.exports = { pathRisks, route, deriveClassification, sync, syncOpenPulls };
