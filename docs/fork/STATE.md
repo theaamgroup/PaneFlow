@@ -29,11 +29,18 @@ that is not the active application, and GPUI never starts a display link for
 a window that is not key, so a restore stalled on its first batch (found
 with `sample`, the main thread idle in `mach_msg`, zero frames after the
 first). Baseline measured on this Mac with
-`scripts/bench-startup.sh --set-baseline` at `8b462d0d37e0`, installed app
-closed, core-share probe 1.00, medians of 10: `fresh_first_frame_total`
-**378.24 ms** (an empty session; the default workspace and its shell exist
-before the first frame) and `restore3_first_frame_total` **479.83 ms** (three
-workspaces with one terminal each, to the frame after the last batch). The
+`scripts/bench-startup.sh --set-baseline` at `bf6c39921986`, core-share
+probe 1.00, medians of 10: `fresh_first_frame_total` **379.67 ms** (an empty
+session; the default workspace and its shell exist before the first frame)
+and `restore3_first_frame_total` **481.31 ms** (three workspaces with one
+terminal each, to the frame after the last batch). It replaces the first
+recording at `8b462d0d37e0` (378.24 ms / 479.83 ms), which review found to
+carry one launch that stalled ~300 ms in `window_created` (its
+`restore3_first_frame_total` mean, 513.7 ms, sat above its p95, 484.9 ms);
+the probe runs before the launches and cannot see a stall that starts during
+them, so check `mean` against `p95` before recording a baseline. Three runs
+at the same code (the two archived under `bench/results/` at `8b462d0d37e0`
+and this one) agree within 0.5% on both medians. The
 largest single steps in both are `gpui_app_ready` (~48 ms),
 `window_created` (~41 ms), `ipc_server_started` (~144 ms, the singleton
 guard and IPC thread inside `PaneFlowApp::new`), and for the fresh launch
