@@ -217,7 +217,7 @@ explicit priority.
 | Close confirm | Centered | 360 wide, radius 10, padding 16, gap 10 | `app/close_confirm.rs:922-931` |
 | Menus and selects | Deferred, anchored under the trigger | Squircle 18, list padding 4, item height 28 | `settings/components.rs:482,551,627` |
 | Tooltip | After 800 ms | Squircle 14 on the title bar color with a 1 px `border` at full alpha | `ui_primitives.rs:494,524,539-549` |
-| Toast | Bottom right: right 18, bottom **20** | Radius 8 on `subtle`, minimum width 220, one single-line row. The element is built at `bottom(18)`, but the animation callback owns the axis from the first frame: it enters 28 → 20, holds at 20, and exits 20 → 28, so 20 is the resting inset and 18 is never observed | `app/notifications.rs:106-122,136-141` |
+| Toast | Bottom right: right 18, bottom **20** | Radius 8 on `subtle`, minimum width 220, one single-line row. The element is built at `bottom(18)`, but the animation callback owns the axis from the first frame: it enters 28 → 20, holds at 20, and exits 20 → 28, so 20 is the resting inset and 18 is never observed. The sticky release-notes toast (5.8) adds an action button and a close glyph to that one row and never exits | `app/notifications.rs` `render_toast`, `render_sticky_toast` |
 | System Info dialog | Centered on a black 0.55 backdrop | Squircle 20, 560 wide, padding 20, label column 116, 1 px `border` at 0.6, `shadow_lg` | `app/system_info_dialog.rs:29-44,305-334` |
 | About dialog | Centered on the same backdrop | 382 wide, 420 tall body, radius 10 (round, not squircle), 1 px border, `shadow_lg`, 32 px header band; colors derived from `UiColors`; **Migration**, see section 11 | `app/about_dialog.rs:143,354,439-448` |
 | Peek badge | Anchored under the pane header, right 2 | Max width 420, `px 2 / py 1`, `text_xs` on `overlay` with a 1 px `vc_conflict` at 0.6 border; the collapsed line caps at 80 characters and hover expands it | `pane.rs:112-119,740-780` |
@@ -406,7 +406,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Icon buttons | small 20 outer with 12 icon, medium 24 outer with 13 icon |
 | Toolbar pill | height 24, padding 8, gap 5 |
 | Filter field | padding 10 by 6, gap 6, 13 px search icon; the clear control is a **24 by 24 hit target** carrying a 10 px glyph, pulled in by −4 so it keeps a 16 px layout footprint (WCAG 2.5.8) |
-| Toast | right 18, bottom **20** (the animation owns the vertical axis - see 3.3), padding 12 / 14 by 11, minimum width 220, max width 340 (440 for an error), single line |
+| Toast | right 18, bottom **20** (the animation owns the vertical axis - see 3.3), padding 12 / 14 by 11, minimum width 220, max width 340 (440 for an error), single line. **Sticky toast** (5.8): padding 12 / 8 by 8, max width 440, gap 9; action button 24 high, padding 9, radius 6, 12 Medium; close glyph is `icon_button_sm` (20 / 12, radius 4) |
 | Scrollbar | width 6, gutter 10, minimum thumb 24 |
 | Diff | row 18, file header 32, fold row 32, sticky header 24, gutter 36 (a floor, widened per digit count), change bar 4, split divider 3, minimum split column 360, revert chip 56 by 16 inset 10, horizontal track 6 |
 | Code editor | 12 px mono, row 18, caret 2, scrollbar track 15, minimum thumb 25 vertical and 28 horizontal; git marker column 6 left of the numbers, bar 4 radius 2 inset 1, deleted dot 8, hover grows 3 to the left |
@@ -497,7 +497,7 @@ text color. Do not invent a brand tint for a mark that returns `None`.
 | Primary sidebar slide | 280 ms | cubic ease-out `1 − (1 − p)³` | Panel inset and gutter follow the width |
 | Menu reveal | 140 ms | cubic ease-out `1 − (1 − p)³` (`ui_primitives::ease_out_cubic`, shared with the sidebar slide) | `menu_reveal`: every menu, select popup, context menu, and submenu fades in from 0 while dropping 4 px into place. No exit animation: GPUI drops the element when its state flips |
 | Diff dock open and maximize slides | 280 ms | cubic ease-out `1 − (1 − p)³` | `SidebarWidthAnimation` reused: the dock column grows from the right edge on open; on maximize the pane grid is clipped from its measured width to 0 (never resized) while the dock's left gutter grows with it. A session-switch restore skips the open slide |
-| Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift |
+| Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift. The **sticky** toast (5.8) plays the 180 ms entry only: it has no hold timer and no exit, and leaves on the frame it is dismissed |
 | Status spinner | 1 s loop | linear rotate | Empty states while scanning |
 | Sidebar comet-trail loader | 720 ms cycle | stepped | 3 by 3 perimeter of 3 px dots, gap 1, trailing opacities 0.81, 0.49, 0.26 over a 0.06 base |
 | Tooltip | 800 ms delay | none | `delayed_tooltip` |
@@ -1011,9 +1011,25 @@ a label of the description plus its chord, per 7.2.
 on a single ellipsized line. They **do not stack**: one is visible and the rest
 queue FIFO. They carry **no action row and no dismiss affordance** — they time
 out after 180 ms in, the hold, then 180 ms out, entering on an 8 px lift and
-leaving on an 8 px drop. The hold is 1440 ms by default and is carried per
+leaving on an 8 px drop. The one exception is the sticky toast below. The hold is 1440 ms by default and is carried per
 `Toast`; 4.8 names the deliberate longer-lived cases. Error text is detected from twelve substrings and
 takes the alert glyph in `agent_error` with a wider 440 px cap.
+
+**The sticky toast** (#526) is the single action-bearing case: a `Toast` whose
+`action` is `Some`. Today that is only "Updated to PaneFlow x.y.z", raised once,
+1500 ms after boot (`RELEASE_TOAST_DELAY_MS`), on the first launch of a newer
+version. It keeps the same skin — `subtle`, radius 8, **no shadow, no border,
+no notification frame** — and the same single row, and appends one action
+button ("View release notes", `text` at 0.08 resting and 0.14 on hover, radius
+6) and a named close glyph (`icon_button_sm`, "Dismiss"). It **never times
+out**: it ends on the action button (which opens the release page through
+`open_http_url` first), the close glyph, a click anywhere on its surface, or
+the arrival of any newer toast, which replaces it at once so a sticky toast
+can never hold later confirmations in the queue. A sticky toast that arrives
+while a timed one is visible queues like any other. It occludes the pane under
+it, takes no focus, and is pointer-only: Escape does not dismiss it, because it
+is not an overlay and never owns the key context. An action MUST NOT be put on
+a timed toast — a control the user has to reach for cannot sit behind a timer.
 
 **Callouts** (`widgets/callout.rs`) are a 16 px icon, a 14 Semibold title, and
 a 13 `muted` description, max width 560, on `surface` inside a 1 px border in

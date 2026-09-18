@@ -229,6 +229,9 @@ fn sidebar_tab_background(light_opacity: f32, dark_opacity: f32) -> Hsla {
 pub(crate) const TOAST_ENTER_MS: u64 = 180;
 pub(crate) const TOAST_HOLD_MS: u64 = 1440;
 pub(crate) const TOAST_EXIT_MS: u64 = 180;
+/// Post-boot delay before the release-notes toast (#526), so it lands on a
+/// settled window rather than racing session restore.
+pub(crate) const RELEASE_TOAST_DELAY_MS: u64 = 1500;
 
 /// Maximum number of closed-pane records kept for undo-close-pane (US-014).
 pub(crate) const MAX_CLOSED_PANES: usize = 5;
