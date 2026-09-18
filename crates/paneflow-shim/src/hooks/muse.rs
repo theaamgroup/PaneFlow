@@ -7,7 +7,7 @@
 //! the calls that go on to schedule tools.
 use super::owned_files::{
     cleanup_accepted_owned_file, install_accepted_owned_file, install_owned_file,
-    is_own_or_sibling_rendering, sweep_accepted_owned_file,
+    is_own_or_sibling_rendering, sweep_accepted_owned_file, sweep_matching_owned_file,
 };
 use super::{
     config_dir_is_symlink, home_unavailable, hook_config_error, install_hook_config_file,
@@ -77,37 +77,38 @@ impl MuseHookConfigGuard {
     pub(crate) fn install_at(directory: &Path) -> std::io::Result<Self> {
         let hooks_path = directory.join(MUSE_HOOKS_BASENAME);
         let baseline_path = env_baseline_path(&directory.join(MUSE_SETTINGS_BASENAME));
-        let mut first_take = None;
-        let mut installed = install_hook_config_file(
+        // The sidecar is published inside the settings merge, which runs
+        // under the one global config lock: it reaches disk before the
+        // managed keys do, so a kill in between leaves a marked sidecar
+        // (swept by the next first take) and never a settings file that
+        // points at the reserved path with no proof PaneFlow put it there.
+        // Nothing in here takes the config lock again.
+        let mut baseline_source = None;
+        let installed = install_hook_config_file(
             directory,
             MUSE_SETTINGS_BASENAME,
             "Muse Code",
             |root| {
-                first_take = merge_muse_settings(root, &hooks_path)?;
+                if let Some(pre_existing) = merge_muse_settings(root, &hooks_path)? {
+                    let source = env_baseline_source(&pre_existing);
+                    install_env_baseline_locked(&baseline_path, &source)?;
+                    baseline_source = Some(source);
+                }
                 Ok(())
             },
             InvalidJsonPolicy::Refuse,
-        )?;
-        // The sidecar is published outside the settings merge (one global
-        // config lock, never nested). The shared settings lease held from
-        // here on keeps any other session from restoring in between.
-        if let Some(pre_existing) = first_take.as_deref() {
-            if let Err(error) = install_env_baseline(&baseline_path, pre_existing) {
-                let owned = installed.created_file;
-                let _ = with_last_lease(&installed.path, &mut installed.lease, |lease_created| {
-                    restore_settings(
-                        &installed.path,
-                        &hooks_path,
-                        owned || lease_created,
-                        Some(pre_existing),
-                    )
-                });
-                if installed.created_directory {
-                    let _ = std::fs::remove_dir(directory);
+        );
+        let mut installed = match installed {
+            Ok(installed) => installed,
+            Err(error) => {
+                // The settings write failed after the sidecar was published:
+                // take back exactly the bytes this session wrote.
+                if let Some(source) = baseline_source.as_deref() {
+                    sweep_matching_owned_file(&baseline_path, source);
                 }
                 return Err(error);
             }
-        }
+        };
         // The hook file embeds this instance's ai-hook path; a sibling
         // PaneFlow instance (a different `PANEFLOW_BIN_DIR`) renders
         // different bytes for the same hooks, and that file serves this
@@ -273,35 +274,70 @@ fn env_baseline_source(names: &[String]) -> String {
     json!(names).to_string() + "\n"
 }
 
-/// Publish the sidecar as an owned file. A stale sidecar a crashed session
-/// left behind (durable marker, no live holder) is swept first; after that
-/// `install_owned_file` refuses a symlink and any pre-existing file that is
-/// not PaneFlow's, and sets the marker on the file it creates. The lease is
-/// not held past this call: the marker is the durable proof, and the
-/// session that restores the settings needs to be able to take it.
-fn install_env_baseline(path: &Path, names: &[String]) -> std::io::Result<()> {
-    sweep_accepted_owned_file(path, &|_| true);
-    let source = env_baseline_source(names);
+/// Publish the sidecar as an owned file. Runs under the settings config
+/// lock (never takes it again), so no other session is between the sidecar
+/// and the settings write. A stale sidecar a crashed first take left
+/// behind (durable marker, no live holder, still PaneFlow's array shape)
+/// is removed first; after that a symlink is refused, any other
+/// pre-existing file is refused (a byte-identical one included: adopting
+/// it would leave it unmarked and so never read back), and
+/// `install_owned_file` sets the marker on the file it creates.
+fn install_env_baseline_locked(path: &Path, source: &str) -> std::io::Result<()> {
+    if config_dir_is_symlink(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to write the Muse Code baseline through a symlink",
+        ));
+    }
     let mut lease = HookLease::acquire(path)?;
-    with_config_lock(path, || install_owned_file(path, &source, &mut lease))
+    if let Some(mut last) = lease.try_take_last()? {
+        let stale = last.take_created()?
+            && read_optional_text(path)?
+                .is_some_and(|existing| serde_json::from_str::<Vec<String>>(&existing).is_ok());
+        if stale {
+            std::fs::remove_file(path)?;
+        }
+        drop(last);
+        lease = HookLease::acquire(path)?;
+    }
+    if read_optional_text(path)?.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} is not a PaneFlow baseline; refusing to overwrite it",
+                path.display()
+            ),
+        ));
+    }
+    install_owned_file(path, source, &mut lease)
 }
 
-/// The recorded baseline: `None` when there is no sidecar, or it is a
-/// symlink (never read through), or it does not parse as PaneFlow's array
-/// of names. `None` means PaneFlow never took this file.
-fn read_env_baseline(path: &Path) -> Option<Vec<String>> {
+/// The recorded baseline, as `(bytes on disk, names)`: `None` when there
+/// is no sidecar, or it is a symlink (never read through), or the lease's
+/// durable marker does not say PaneFlow created it (a user's file at that
+/// path is never read as a baseline, whatever its shape), or it does not
+/// parse as PaneFlow's array of names. `None` means the managed keys are
+/// not PaneFlow's to strip.
+fn read_env_baseline(path: &Path) -> Option<(String, Vec<String>)> {
     if config_dir_is_symlink(path) {
         return None;
     }
+    let created = HookLease::acquire(path).is_ok_and(|lease| lease.is_created());
+    if !created {
+        return None;
+    }
     let content = read_optional_text(path).ok().flatten()?;
-    serde_json::from_str::<Vec<String>>(&content).ok()
+    let names = serde_json::from_str::<Vec<String>>(&content).ok()?;
+    Some((content, names))
 }
 
-/// Remove the sidecar once a restore has reached disk, and only when the
-/// lease's durable marker proves PaneFlow created it; a user's file at that
-/// path stays.
-fn consume_env_baseline(path: &Path) {
-    sweep_accepted_owned_file(path, &|_| true);
+/// Remove the sidecar once a restore has reached disk: only when the
+/// lease's durable marker proves PaneFlow created it, no session holds
+/// it, and its bytes are still exactly the ones that were just read, so
+/// a file the user replaced during the session is not PaneFlow's to
+/// delete.
+fn consume_env_baseline(path: &Path, content: &str) {
+    sweep_matching_owned_file(path, content);
 }
 
 /// Last-session release of the settings file: strip the managed keys
@@ -310,17 +346,13 @@ fn consume_env_baseline(path: &Path) {
 /// write leaves the next orphan sweep the same names to keep.
 fn release_settings(settings_path: &Path, hooks_path: &Path, lease: &mut HookLease, owned: bool) {
     let baseline_path = env_baseline_path(settings_path);
-    let keep = read_env_baseline(&baseline_path);
+    let baseline = read_env_baseline(&baseline_path);
+    let keep = baseline.as_ref().map(|(_, names)| names.as_slice());
     let restored = with_last_lease(settings_path, lease, |lease_created| {
-        restore_settings(
-            settings_path,
-            hooks_path,
-            owned || lease_created,
-            keep.as_deref(),
-        )
+        restore_settings(settings_path, hooks_path, owned || lease_created, keep)
     });
-    if matches!(restored, Ok(Some(()))) {
-        consume_env_baseline(&baseline_path);
+    if let (Ok(Some(())), Some((content, _))) = (restored, baseline) {
+        consume_env_baseline(&baseline_path, &content);
     }
 }
 
@@ -409,12 +441,13 @@ fn sweep_orphan(directory: &Path) {
     let settings_path = directory.join(MUSE_SETTINGS_BASENAME);
     let hooks_path = directory.join(MUSE_HOOKS_BASENAME);
     let baseline_path = env_baseline_path(&settings_path);
-    let keep = read_env_baseline(&baseline_path);
+    let baseline = read_env_baseline(&baseline_path);
+    let keep = baseline.as_ref().map(|(_, names)| names.as_slice());
     let restored = with_orphan_lease(&settings_path, &settings_path, |created| {
-        restore_settings(&settings_path, &hooks_path, created, keep.as_deref())
+        restore_settings(&settings_path, &hooks_path, created, keep)
     });
-    if matches!(restored, Ok(Some(()))) {
-        consume_env_baseline(&baseline_path);
+    if let (Ok(Some(())), Some((content, _))) = (restored, baseline) {
+        consume_env_baseline(&baseline_path, &content);
     }
     if let Ok(source) = hooks_source() {
         sweep_accepted_owned_file(&hooks_path, &|existing| {

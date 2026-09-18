@@ -66,6 +66,14 @@ impl ConfigLease {
         }
     }
 
+    /// Whether the durable ownership bit is set for the leased resource:
+    /// a non-consuming peek for callers that must read a managed file
+    /// only when PaneFlow created it, leaving the bit for the eventual last
+    /// owner to consume.
+    pub fn is_created(&self) -> bool {
+        self.marker.exists()
+    }
+
     /// Persist that the leased resource was created by PaneFlow.
     ///
     /// Callers serialize this update with their configuration lock. The bit
