@@ -367,6 +367,46 @@ mod tests {
         );
     }
 
+    /// Issue #523: the command palette is `secondary-shift-o`, not upstream's
+    /// `secondary-shift-p` (Pane Overview here, #339). Both chords must keep
+    /// exactly one claimant, and the palette's action must stay context-free,
+    /// or it could not open from a focused terminal - the only place it is
+    /// useful.
+    #[test]
+    fn command_palette_is_cmd_shift_o_and_pane_overview_keeps_cmd_shift_p() {
+        use super::super::defaults::{DEFAULTS, MACOS_ONLY_DEFAULTS};
+
+        let claimants = |key: &str| -> Vec<(&'static str, Option<&'static str>)> {
+            DEFAULTS
+                .iter()
+                .chain(MACOS_ONLY_DEFAULTS.iter())
+                .filter(|d| keystrokes_conflict(d.key, key))
+                .map(|d| (d.action_name, d.context))
+                .collect()
+        };
+
+        for (key, action_name) in [
+            ("secondary-shift-o", "open_command_palette"),
+            ("secondary-shift-p", "open_pane_overview"),
+        ] {
+            assert_eq!(
+                context_for_action(action_name),
+                None,
+                "{action_name} must be context-free"
+            );
+            let action = action_from_name(action_name).expect("registered action");
+            assert!(
+                make_binding(key, action, None).is_some(),
+                "{key} must parse into a valid KeyBinding"
+            );
+            assert_eq!(
+                claimants(key),
+                vec![(action_name, None)],
+                "{key} must be claimed by {action_name} and nothing else"
+            );
+        }
+    }
+
     /// Issue #105: Settings gained a menu-bar item but deliberately did NOT
     /// gain `Cmd+,`. The issue resolved that explicitly, and it is the right
     /// call here: a global default on that chord would swallow the comma from

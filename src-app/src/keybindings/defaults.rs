@@ -487,6 +487,16 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_pane_overview",
         context: None,
     },
+    // Issue #523: the command palette. Upstream binds `secondary-shift-p`,
+    // which is Pane Overview here (#339); `secondary-shift-o` was free on both
+    // tables when this landed (2026-09-14 decision on the issue). Global for
+    // the same reason the other overlays are: a terminal holds focus nearly
+    // always, and the palette exists to reach the global actions from there.
+    DefaultBinding {
+        key: "secondary-shift-o",
+        action_name: "open_command_palette",
+        context: None,
+    },
     DefaultBinding {
         key: "secondary-shift-u",
         action_name: "open_work_review",

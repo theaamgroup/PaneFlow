@@ -121,6 +121,9 @@ impl PaneFlowApp {
             self.close_attention_queue_and_restore_focus(window, cx);
             return;
         }
+        // Issue #523: a command palette that folds this overlay lands on
+        // the pane it was opened from.
+        self.remember_overlay_origin(window, cx);
         self.attention_queue_open = true;
         self.attention_queue_selected = 0;
         self.attention_queue_focus.focus(window, cx);
@@ -129,6 +132,7 @@ impl PaneFlowApp {
 
     pub(crate) fn close_attention_queue(&mut self, cx: &mut Context<Self>) {
         self.attention_queue_open = false;
+        self.overlay_origin_pane = None;
         self.attention_queue_selected = 0;
         cx.notify();
     }
