@@ -22,6 +22,8 @@ pub(crate) mod view;
 
 use gpui::{Context, Window};
 
+use crate::app::overlay_origin::OverlayKind;
+
 use crate::PaneFlowApp;
 use crate::limits::clamp_untrusted_label;
 
@@ -175,6 +177,9 @@ impl PaneFlowApp {
         // and exit state per pane.
         let cards = self.collect_pane_overview_cards(window, cx);
         let entries = entries_from_cards(&cards);
+        // Issue #584: Escape and a command palette that folds this overlay
+        // land on the pane it was opened from, resolved before it takes focus.
+        self.remember_overlay_origin(OverlayKind::AgentSummary, window, cx);
 
         self.agent_summary = Some(AgentSummaryState {
             entries,
@@ -384,13 +389,20 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// Close without touching the focus: a jump to a row's pane, or a command
+    /// palette fold, lands the focus itself.
     pub(crate) fn close_agent_summary(&mut self, cx: &mut Context<Self>) {
-        // Kill in-flight sidecars and orphan every queued task so a late model
-        // answer cannot repopulate a closed overlay.
+        self.drop_agent_summary_state();
+        self.forget_overlay_origin(OverlayKind::AgentSummary);
+        cx.notify();
+    }
+
+    /// Kill in-flight sidecars and orphan every queued task so a late model
+    /// answer cannot repopulate a closed overlay.
+    fn drop_agent_summary_state(&mut self) {
         self.cancel_agent_summary_work();
         self.agent_summary_generation = self.agent_summary_generation.wrapping_add(1);
         self.agent_summary = None;
-        cx.notify();
     }
 
     /// Signal any in-flight summary work to stop and clear the shared token.
@@ -411,14 +423,11 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_agent_summary(cx);
-        let focused = match self.workspaces.get(self.active_idx) {
-            Some(ws) => ws.focus_first(window, cx),
-            None => false,
-        };
-        if !focused {
-            window.focus(&self.empty_workspace_focus, cx);
-        }
+        // Issue #584: the pane the overlay was opened from, then the first
+        // pane, then the empty-workspace placeholder.
+        self.drop_agent_summary_state();
+        self.restore_overlay_origin_focus(OverlayKind::AgentSummary, window, cx);
+        cx.notify();
     }
 
     /// Enter / click on a row: jump to that pane and close.

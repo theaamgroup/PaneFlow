@@ -99,21 +99,34 @@ impl PaneFlowApp {
         if self.command_palette_blocked() {
             return;
         }
-        // The four focus-only overlays remembered the pane they were opened
-        // from (`overlay_origin_pane`); that pane, not the first leaf, is
-        // what the chosen action must land on.
-        // Taken BEFORE the closes below: each of those four closers clears
-        // `overlay_origin_pane` so a stale pane is never reused, which means
-        // a take after them always reads `None`.
-        let origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());
+        // Every open overlay remembered the pane it was opened from
+        // (`overlay_origins`, #584); the outermost of those, the pane the
+        // user was in before the first overlay opened, is what the chosen
+        // action must land on. Read BEFORE the closes below: each closer
+        // takes its own entry so a stale pane is never reused, which means
+        // a read after them always comes up empty.
+        let origin_pane = self.outermost_open_overlay_origin();
         let mut folded_without_restore = false;
         if self.launch_pad.is_some() {
-            self.launch_pad_cancel(cx);
+            // Not `launch_pad_cancel`: that parks a restore in
+            // `pending_overlay_restore`, which would pull the focus off the
+            // palette at the next drain.
+            self.launch_pad_dismiss(cx);
             folded_without_restore = true;
         }
-        // Pane Overview and the Attention Queue restore focus themselves,
-        // but onto the first leaf (issue #108), so the pane that owns focus
-        // after the fold is not the origin; the taken origin wins here too.
+        // A split or tab pane palette hands the focus back to its target
+        // pane or the element that held it; the picker holding the
+        // workspace's only surface refuses to close (issue #522) and the
+        // palette opens over it, as it did before it folded siblings.
+        if self.pane_palette.is_some() {
+            self.close_pane_palette(window, cx);
+            if self.pane_palette.is_none() {
+                folded_without_restore = true;
+            }
+        }
+        // Pane Overview and the Attention Queue restore focus themselves
+        // onto their own origin (#584), which after a stacked open may be an
+        // inherited one; the outermost origin read above still wins.
         if self.pane_overview.is_some() {
             self.close_pane_overview_and_restore_focus(window, cx);
             folded_without_restore = true;
@@ -134,6 +147,10 @@ impl PaneFlowApp {
             self.close_fleet_search(cx);
             folded_without_restore = true;
         }
+        if self.agent_summary.is_some() {
+            self.close_agent_summary(cx);
+            folded_without_restore = true;
+        }
         // Issue #524: an idle clone modal folds like the rest; its own close
         // restores the focus it took, which the capture below then reads.
         if self.clone_repo.is_some() {
@@ -150,16 +167,22 @@ impl PaneFlowApp {
         // kept beside the raw handle so a pane that leaves the tree while the
         // palette is open is not re-focused (issue #108). An overlay folded
         // above without a restoring close still holds the focus handle of an
-        // element that is gone next frame, so that handle is not kept.
-        self.command_palette_return_focus = if folded_without_restore {
-            None
-        } else {
+        // element that is gone next frame, so that handle is not kept,
+        // unless the picker holding the workspace's only surface stayed open
+        // under the fold (#522): that workspace has no pane to fall back to,
+        // and the picker is the element the palette hands the keys back to.
+        self.command_palette_return_focus = if !folded_without_restore {
             window.focused(cx)
+        } else if self.pane_palette.is_some() {
+            Some(self.pane_palette_focus.clone())
+        } else {
+            None
         };
-        // After a fold the taken origin comes first: a restoring close has
-        // just put the focus on the first leaf, which is exactly the pane the
-        // action must not target. Without a fold `origin_pane` is `None` and
-        // the pane owning the focus leads as before.
+        // After a fold the outermost origin comes first: a restoring close
+        // has put the focus on its own origin, which for an inner overlay is
+        // an inherited one, and a Launch Pad fold restores nothing. Without a
+        // fold `origin_pane` is `None` and the pane owning the focus leads
+        // as before.
         self.command_palette_return_pane = origin_pane
             .or_else(|| self.pane_owning_focus(window, cx))
             .or_else(|| self.command_palette_default_pane())
@@ -251,20 +274,8 @@ impl PaneFlowApp {
             .first_leaf()
     }
 
-    /// Record the pane a focus-only overlay (theme picker, broadcast picker,
-    /// fleet search, Launch Pad) is being opened from, for a command palette
-    /// that later folds it. Only a pane that owns the focus right now is
-    /// written: a focus-only overlay opened over another focus-only overlay
-    /// keeps the pane the first one came from, because the first overlay,
-    /// not a pane, owns the focus at that moment.
-    pub(crate) fn remember_overlay_origin(&mut self, window: &Window, cx: &App) {
-        if let Some(pane) = self.pane_owning_focus(window, cx) {
-            self.overlay_origin_pane = Some(pane.downgrade());
-        }
-    }
-
     /// Whether `pane` is still a leaf of the tree focus would return to.
-    fn command_palette_pane_is_live(&self, pane: &Entity<Pane>) -> bool {
+    pub(crate) fn command_palette_pane_is_live(&self, pane: &Entity<Pane>) -> bool {
         if self.mode == paneflow_config::schema::AppMode::Diff {
             return self
                 .review
@@ -341,30 +352,7 @@ impl PaneFlowApp {
                 }
             }
         }
-        // Review mode has its own grid: its first live diff pane is the
-        // fallback there, never the CLI workspace's pane behind it.
-        let focused = if self.mode == paneflow_config::schema::AppMode::Diff {
-            match self
-                .review
-                .layout
-                .as_ref()
-                .and_then(|root| root.first_leaf())
-            {
-                Some(pane) => {
-                    pane.read(cx).focus_handle(cx).focus(window, cx);
-                    true
-                }
-                None => false,
-            }
-        } else {
-            match self.workspaces.get(self.active_idx) {
-                Some(ws) => ws.focus_first(window, cx),
-                None => false,
-            }
-        };
-        if !focused {
-            window.focus(&self.empty_workspace_focus, cx);
-        }
+        self.focus_first_leaf_or_placeholder(window, cx);
     }
 
     pub(crate) fn handle_open_command_palette(
@@ -707,13 +695,16 @@ mod tests {
             "|| self.system_info_dialog.is_some()",
             ".is_some_and(|p| p.style == crate::app::close_guard::ConfirmStyle::Modal)",
             "|| self.work_review.is_some()",
-            "self.launch_pad_cancel(cx);",
+            "self.launch_pad_dismiss(cx);",
+            // Issue #584: the split pane palette folds like its siblings.
+            "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
             "self.close_attention_queue_and_restore_focus(window, cx);",
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",
-            "let origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());",
+            "self.close_agent_summary(cx);",
+            "let origin_pane = self.outermost_open_overlay_origin();",
             "let origin_pane = origin_pane.filter(|_| folded_without_restore);",
             "self.command_palette_return_pane = origin_pane",
             ".or_else(|| self.pane_owning_focus(window, cx))",
@@ -722,8 +713,12 @@ mod tests {
             ".role(gpui::Role::ListBox)",
             "select_option(",
             ".aria_label(label)",
-            "self.command_palette_return_focus = if folded_without_restore {",
+            "self.command_palette_return_focus = if !folded_without_restore {",
             "window.focused(cx)",
+            // A picker that refused to fold (#522) is the return target when
+            // a sibling folded above it: its workspace has no pane to land on.
+            "} else if self.pane_palette.is_some() {",
+            "Some(self.pane_palette_focus.clone())",
             ".map(|pane| pane.downgrade());",
             "if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {",
             "match return_pane.and_then(|pane| pane.upgrade()) {",
@@ -739,48 +734,30 @@ mod tests {
                 "restore must return focus to the originating pane: missing `{needle}`"
             );
         }
-        // The origin is taken BEFORE any closer runs: every closer clears
-        // `overlay_origin_pane`, so a take after them always reads `None`.
+        // The origin is read BEFORE any closer runs: every closer takes its
+        // own entry (#584), so a read after them always comes up empty.
         let take_at = palette
-            .find("let origin_pane = self.overlay_origin_pane.take()")
-            .expect("the palette takes the overlay origin");
+            .find("let origin_pane = self.outermost_open_overlay_origin();")
+            .expect("the palette reads the outermost overlay origin");
         for closer in [
-            "self.launch_pad_cancel(cx);",
+            "self.launch_pad_dismiss(cx);",
+            "self.close_pane_palette(window, cx);",
+            "self.close_pane_overview_and_restore_focus(window, cx);",
+            "self.close_attention_queue_and_restore_focus(window, cx);",
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",
+            "self.close_agent_summary(cx);",
         ] {
             let close_at = palette.find(closer).expect(closer);
             assert!(
                 take_at < close_at,
-                "`{closer}` clears overlay_origin_pane, so the take must come before it"
+                "`{closer}` takes its overlay's origin, so the read must come before it"
             );
         }
-        // The four focus-only overlays remember the pane they were opened
-        // from, at a point where that pane still owns the focus.
-        let capture = "self.remember_overlay_origin(window, cx);";
-        assert!(
-            palette.contains("if let Some(pane) = self.pane_owning_focus(window, cx) {"),
-            "remember_overlay_origin must only overwrite the origin when a pane owns focus, \
-             so stacked focus-only overlays keep the first origin"
-        );
-        for (module, src) in [
-            ("theme_picker.rs", include_str!("theme_picker.rs")),
-            ("broadcast.rs", include_str!("broadcast.rs")),
-            ("launch_pad.rs", include_str!("launch_pad.rs")),
-            ("pane_overview/mod.rs", include_str!("pane_overview/mod.rs")),
-            ("attention_queue.rs", include_str!("attention_queue.rs")),
-        ] {
-            assert!(
-                src.contains(capture),
-                "{module} must remember its origin pane for the command palette"
-            );
-        }
+        // Which overlay recorded which pane is pinned in
+        // `overlay_origin::tests::every_overlay_remembers_and_restores_its_own_origin`.
         let main = include_str!("../main.rs");
-        assert!(
-            main.contains(capture),
-            "the deferred fleet-search focus must remember its origin pane first"
-        );
         assert!(
             main.contains(".on_action(cx.listener(Self::handle_open_command_palette))"),
             "the render root must handle OpenCommandPalette"

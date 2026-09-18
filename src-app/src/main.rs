@@ -73,6 +73,7 @@ mod window_chrome;
 mod window_state;
 mod workspace;
 
+use crate::app::overlay_origin::OverlayKind;
 use crate::window_chrome::title_bar;
 
 use gpui::{
@@ -1445,6 +1446,13 @@ struct PaneFlowApp {
     /// `Window` - and consumed by `drain_pending_window_actions`, the
     /// window-bearing notify observer (issue #211). One-shot.
     pending_pane_focus: Option<Entity<Pane>>,
+    /// Overlay whose close must hand the focus back before the next frame
+    /// (#584). `launch_pad_cancel` runs without a `Window` (the prompt
+    /// field's Escape reaches it deferred), so the drain runs
+    /// `restore_overlay_origin_focus` for it: the origin pane, then the first
+    /// pane, then the empty-workspace placeholder (issue #108), the same
+    /// chain every other overlay's close walks. One-shot.
+    pending_overlay_restore: Option<app::overlay_origin::OverlayKind>,
     /// Recent folders whose click-time existence probe is outstanding
     /// (issue #521): a repeat click or held `Cmd+N` on a mount that is not
     /// responding coalesces instead of spawning another probe thread.
@@ -1565,11 +1573,12 @@ struct PaneFlowApp {
     /// `restore_focus` precedent), restored when no pane did: the dock's code
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
-    /// The pane that owned focus when a focus-only overlay opened (theme
-    /// picker, broadcast picker, fleet search, Launch Pad); consumed by the
-    /// command palette when it folds that overlay (#523), cleared by each
-    /// overlay's close so a stale pane is never reused.
-    overlay_origin_pane: Option<WeakEntity<pane::Pane>>,
+    /// The pane each open overlay was opened from, keyed by overlay (#584:
+    /// theme picker, broadcast picker, fleet search, Launch Pad, Pane
+    /// Overview, Attention Queue, pane palette). An overlay's own close
+    /// returns the focus to its entry; the command palette reads the
+    /// outermost one when it folds them (#523).
+    overlay_origins: app::overlay_origin::OverlayOrigins,
     /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
     /// closed. The target pane renders the pushed slot snapshot.
     composer: Option<app::composer::ComposerState>,
@@ -1922,6 +1931,9 @@ impl PaneFlowApp {
     fn drain_pending_window_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.pending_pane_focus.take() {
             pane.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        if let Some(kind) = self.pending_overlay_restore.take() {
+            self.restore_overlay_origin_focus(kind, window, cx);
         }
         if std::mem::take(&mut self.pending_palette_focus) {
             window.focus(&self.pane_palette_focus, cx);
@@ -2706,7 +2718,7 @@ impl Render for PaneFlowApp {
             if std::mem::take(&mut self.fleet_search_pending_focus) {
                 // Issue #523: the pane still owns focus here; remember it
                 // for a command palette that folds this overlay.
-                self.remember_overlay_origin(window, cx);
+                self.remember_overlay_origin(OverlayKind::FleetSearch, window, cx);
                 self.fleet_search_focus.focus(window, cx);
             }
             app_content = app_content.child(self.render_fleet_search(cx));
@@ -3097,6 +3109,7 @@ mod render_side_effect_policy_tests {
         // read, write, or call in render has to go through `self.`.
         for forbidden in [
             "self.pending_pane_focus",
+            "self.pending_overlay_restore",
             "self.pending_palette_focus",
             "self.pending_palette_launch",
             "self.prune_stale_split_palette",

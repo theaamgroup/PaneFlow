@@ -4,6 +4,7 @@
 //! outlived the control it named. Lists bundled themes from
 //! `crate::theme::THEMES` with a typeahead filter and keyboard navigation.
 
+use crate::app::overlay_origin::OverlayKind;
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Point, SharedString, Styled,
@@ -54,8 +55,9 @@ impl PaneFlowApp {
     }
 
     pub(crate) fn open_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Issue #523: remember the pane for a command palette that folds us.
-        self.remember_overlay_origin(window, cx);
+        // Issues #523 / #584: remember the pane the picker is opened from,
+        // for its own close and for a command palette that folds it.
+        self.remember_overlay_origin(OverlayKind::ThemePicker, window, cx);
         self.show_theme_picker = true;
         self.theme_picker_query.clear();
         // Pre-select the currently applied theme so the list opens on it.
@@ -66,12 +68,29 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// Close without touching the focus: a command palette fold, which
+    /// lands the focus itself.
     pub(crate) fn close_theme_picker(&mut self, cx: &mut Context<Self>) {
         self.show_theme_picker = false;
-        self.overlay_origin_pane = None;
+        self.forget_overlay_origin(OverlayKind::ThemePicker);
         self.theme_picker_query.clear();
         self.theme_picker_selected_idx = 0;
         self.theme_picker_drag = None;
+        cx.notify();
+    }
+
+    /// Escape, an outside click, or a committed theme: close and hand the
+    /// focus back to the pane the picker was opened from (#584).
+    pub(crate) fn close_theme_picker_and_restore_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_theme_picker = false;
+        self.theme_picker_query.clear();
+        self.theme_picker_selected_idx = 0;
+        self.theme_picker_drag = None;
+        self.restore_overlay_origin_focus(OverlayKind::ThemePicker, window, cx);
         cx.notify();
     }
 
@@ -141,30 +160,30 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    fn commit_theme_picker_selection(&mut self, cx: &mut Context<Self>) {
+    fn commit_theme_picker_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let matches = self.theme_picker_matches();
         if let Some(name) = matches.get(self.theme_picker_selected_idx)
             && !self.apply_theme_by_name(name, cx)
         {
             return;
         }
-        self.close_theme_picker(cx);
+        self.close_theme_picker_and_restore_focus(window, cx);
     }
 
     pub(crate) fn handle_theme_picker_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
         let len = self.theme_picker_matches().len();
 
         match key {
-            "escape" => self.close_theme_picker(cx),
+            "escape" => self.close_theme_picker_and_restore_focus(window, cx),
             "enter" => {
                 if len > 0 {
-                    self.commit_theme_picker_selection(cx);
+                    self.commit_theme_picker_selection(window, cx);
                 }
             }
             "up" => {
@@ -269,9 +288,9 @@ impl PaneFlowApp {
                     )
                     .cursor(CursorStyle::Arrow)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         if this.apply_theme_by_name(&name_owned, cx) {
-                            this.close_theme_picker(cx);
+                            this.close_theme_picker_and_restore_focus(window, cx);
                         }
                         cx.stop_propagation();
                     }))
@@ -350,8 +369,8 @@ impl PaneFlowApp {
                         .occlude()
                         .track_focus(&self.theme_picker_focus)
                         .on_key_down(cx.listener(Self::handle_theme_picker_key_down))
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.close_theme_picker(cx);
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            this.close_theme_picker_and_restore_focus(window, cx);
                         }))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())

@@ -18,6 +18,7 @@
 //! as a [`ManagedWorktree`] so teardown parity with `paneflow up` holds
 //! (AC5 - no second worktree population).
 
+use crate::app::overlay_origin::OverlayKind;
 use gpui::{
     AnyElement, ClickEvent, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, ParentElement, SharedString, Styled, WeakEntity, Window, deferred, div,
@@ -159,17 +160,16 @@ impl PaneFlowApp {
         }
         if self.launch_pad.is_some() {
             // Toggle semantics, but never abandon a run in flight.
-            if !self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
-                self.launch_pad = None;
-                self.overlay_origin_pane = None;
-                cx.notify();
-            }
+            self.launch_pad_cancel(cx);
             return;
         }
         let Some(ws) = self.active_workspace() else {
             return;
         };
         let ws_id = ws.id;
+        // Issues #523 / #584: remember the pane the Launch Pad is opened
+        // from, for its cancel and for a command palette that folds it.
+        self.remember_overlay_origin(OverlayKind::LaunchPad, window, cx);
         let target = self
             .focused_or_first_pane(window, cx)
             .map(|p| p.downgrade())
@@ -229,9 +229,6 @@ impl PaneFlowApp {
             running: false,
             error: None,
         });
-        // Issue #523: remember the pane for a command palette that folds us,
-        // resolved while the pane still owns the focus.
-        self.remember_overlay_origin(window, cx);
         window.focus(&branch_focus, cx);
         cx.notify();
     }
@@ -263,13 +260,32 @@ impl PaneFlowApp {
     }
 
     /// Escape path - only honored before confirmation (US-005 AC8: the
-    /// in-flight run keeps the modal up with its "Creating…" state).
+    /// in-flight run keeps the modal up with its "Creating…" state). The
+    /// focus goes back to the pane the Launch Pad was opened from (#584)
+    /// through `pending_overlay_restore`: the prompt field's Escape reaches
+    /// here deferred, without a `Window`, so the window-bearing drain runs
+    /// `restore_overlay_origin_focus`, the same chain every other overlay's
+    /// close walks (origin, first pane, then the empty-workspace placeholder
+    /// of issue #108, so a paneless tab keeps its global chords).
     pub(crate) fn launch_pad_cancel(&mut self, cx: &mut Context<Self>) {
         if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
             return;
         }
+        if self.launch_pad.take().is_none() {
+            return;
+        }
+        self.pending_overlay_restore = Some(OverlayKind::LaunchPad);
+        cx.notify();
+    }
+
+    /// Close without touching the focus: a command palette fold, which lands
+    /// the focus itself. Refuses a run in flight like `launch_pad_cancel`.
+    pub(crate) fn launch_pad_dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
+            return;
+        }
         self.launch_pad = None;
-        self.overlay_origin_pane = None;
+        self.forget_overlay_origin(OverlayKind::LaunchPad);
         cx.notify();
     }
 
@@ -589,7 +605,7 @@ impl PaneFlowApp {
                 cx,
             );
             self.launch_pad = None;
-            self.overlay_origin_pane = None;
+            self.forget_overlay_origin(OverlayKind::LaunchPad);
             if self.save_session_blocking(cx) {
                 self.spawn_persisted_worktree_teardown(reserved, cx);
             } else {
@@ -713,8 +729,8 @@ impl PaneFlowApp {
         }
 
         self.launch_pad = None;
-
-        self.overlay_origin_pane = None;
+        // The new pane takes the focus; the origin is not returned to.
+        self.forget_overlay_origin(OverlayKind::LaunchPad);
         self.pending_pane_focus = Some(new_pane);
         self.activate_workspace_without_window(ws_idx, cx);
     }
