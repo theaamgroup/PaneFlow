@@ -185,10 +185,29 @@ mod tests {
         recorder.mark_created_with("[\"A\"]").unwrap();
         drop(recorder);
 
-        let mut later = ConfigLease::acquire(&resource).unwrap();
-        assert!(later.is_created());
-        assert_eq!(later.created_note().as_deref(), Some("[\"A\"]"));
-        let mut last = later.try_take_last().unwrap().unwrap();
+        // File drop releases the shared flock synchronously, but a loaded
+        // runner can still observe WouldBlock on the immediate exclusive
+        // upgrade. Same retry as dropped_lease_does_not_strand_the_resource.
+        let mut last = None;
+        for attempt in 0..10 {
+            let mut later = ConfigLease::acquire(&resource).unwrap();
+            assert!(later.is_created());
+            assert_eq!(later.created_note().as_deref(), Some("[\"A\"]"));
+            match later.try_take_last().unwrap() {
+                Some(taken) => {
+                    last = Some(taken);
+                    break;
+                }
+                None => {
+                    if attempt + 1 < 10 {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        let mut last = last.expect(
+            "dropped lease stranded the resource: try_take_last stayed WouldBlock after Drop",
+        );
         assert!(last.take_created().unwrap());
         drop(last);
         assert_eq!(
