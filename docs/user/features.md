@@ -91,6 +91,24 @@ you opened it from.
 With no workspace open, the sidebar's empty state also carries a
 **Command palette** row.
 
+## Clone a repository
+
+Run **Clone repository** from the command palette, or click the
+**Clone repository** row in the sidebar's empty state. Type a repository URL
+(`https://`, `ssh://`, `git@host:owner/name.git`) or a GitHub `owner/name`
+shorthand and press Enter, or pick **Clone from GitHub** to list the
+repositories your signed-in `gh` account can see and filter them as you
+type. PaneFlow asks for the folder to clone into, then shows git's phase,
+the percentage, and the transfer rate while the clone runs. When it
+finishes, the clone opens as a new workspace and is filed at the top of the
+recent folders.
+
+GitHub targets clone through `gh repo clone`, so private repositories use
+the credentials `gh auth login` stored and a fork gets an `upstream` remote.
+If `gh` is not installed or nobody is signed in, the clone falls back to
+`git clone` with the HTTPS remote. Every other host clones with `git`. A URL
+that starts with a dash or uses the `ext::` transport is refused.
+
 ## Start a task from an issue
 
 In the agent Launch Pad (`Cmd+Shift+L`), enter a GitHub issue number or HTTPS

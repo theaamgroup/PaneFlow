@@ -1356,6 +1356,40 @@ impl PaneFlowApp {
                                 )
                             })
                     })
+                    // Issue #524: the Clone repository modal, the other way
+                    // a first launch gets a workspace (upstream's welcome
+                    // screen, #520, was dropped, so this rail is where the
+                    // row lives).
+                    .child({
+                        let hover_bg = crate::app::constants::sidebar_tab_active_background();
+                        div()
+                            .id("empty-clone-repo")
+                            .role(Role::Button)
+                            .aria_label("Clone repository")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(10.))
+                            .py(px(5.))
+                            .rounded(px(6.))
+                            .bg(ui.subtle)
+                            .text_color(ui.text)
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .hover(move |style| style.bg(hover_bg))
+                            .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                this.open_clone_repo(w, cx);
+                            }))
+                            .child(
+                                svg()
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .path("icons/brand-github.svg")
+                                    .text_color(ui.muted),
+                            )
+                            .child("Clone repository")
+                    })
                     .children(self.render_empty_state_recents(ui, cx)),
             );
         }
