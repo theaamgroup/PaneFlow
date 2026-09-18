@@ -1541,6 +1541,11 @@ struct PaneFlowApp {
     /// Scroll state for the theme picker list (visible scrollbar overlay).
     theme_picker_scroll: gpui::ScrollHandle,
     theme_picker_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
+    /// Issue #524: the Clone repository modal (`app/clone_repo.rs`), the
+    /// palette's shell as a quick pick over a URL field or the `gh repo
+    /// list` rows; `Some` while it is up, running or not.
+    clone_repo: Option<app::clone_repo::CloneRepoState>,
+    clone_repo_focus: FocusHandle,
     /// Issue #523: the command palette (`app/command_palette.rs`), the theme
     /// picker's shell over every context-free action. Rows are derived from
     /// `effective_shortcuts` on every render, never stored.
@@ -2358,6 +2363,8 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // Issue #523: the command palette (every context-free action).
             .on_action(cx.listener(Self::handle_open_command_palette))
+            // Issue #524: the Clone repository modal.
+            .on_action(cx.listener(Self::handle_clone_repository))
             // EP-001 (cli-cockpit): Composer + broadcast groups.
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))
@@ -2669,6 +2676,12 @@ impl Render for PaneFlowApp {
             } else {
                 app_content = app_content.child(self.render_command_palette(cx));
             }
+        }
+        // Issue #524: the Clone repository modal. Not mode-gated for the
+        // palette's reason: the clone lands as a workspace wherever it was
+        // started, and a running clone must keep reporting.
+        if self.clone_repo.is_some() {
+            app_content = app_content.child(self.render_clone_repo(cx));
         }
 
         // EP-001 US-002 (cli-cockpit): broadcast-group picker modal.

@@ -830,6 +830,9 @@ impl PaneFlowApp {
             theme_picker_focus: cx.focus_handle(),
             theme_picker_scroll: gpui::ScrollHandle::new(),
             theme_picker_drag: None,
+            // Issue #524: Clone repository modal closed.
+            clone_repo: None,
+            clone_repo_focus: cx.focus_handle(),
             // Issue #523: command palette closed.
             command_palette_open: false,
             command_palette_query: String::new(),
