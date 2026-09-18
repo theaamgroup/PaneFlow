@@ -39,28 +39,33 @@ fn record_launch(marker_path: &Path, current: &str) -> Option<String> {
     // silent too. Leave the marker alone.
     parse_version(current)?;
     let previous = std::fs::read_to_string(marker_path).ok();
-    if previous.as_deref().map(str::trim) != Some(current) {
-        write_marker(marker_path, current);
+    // A marker that cannot be rewritten would announce this version again on
+    // every launch; a once-only notice stays quiet instead.
+    if previous.as_deref().map(str::trim) != Some(current) && !write_marker(marker_path, current) {
+        return None;
     }
     is_upgrade(previous.as_deref(), current).then(|| current.to_string())
 }
 
-fn write_marker(marker_path: &Path, current: &str) {
+/// `false` when the marker could not be recorded.
+fn write_marker(marker_path: &Path, current: &str) -> bool {
     if let Some(parent) = marker_path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
         log::warn!(
-            "paneflow: cannot create cache dir {} ({err}); the release toast may repeat next launch",
+            "paneflow: cannot create cache dir {} ({err}); skipping the release toast",
             parent.display()
         );
-        return;
+        return false;
     }
     if let Err(err) = std::fs::write(marker_path, current.as_bytes()) {
         log::warn!(
-            "paneflow: cannot write version marker {} ({err}); the release toast may repeat next launch",
+            "paneflow: cannot write version marker {} ({err}); skipping the release toast",
             marker_path.display()
         );
+        return false;
     }
+    true
 }
 
 fn is_upgrade(previous: Option<&str>, current: &str) -> bool {
@@ -175,6 +180,23 @@ mod tests {
         );
         // The next valid version still announces against the kept marker.
         assert_eq!(record_launch(&marker, "0.14.2"), Some("0.14.2".to_string()));
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_rewritten_does_not_announce() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let marker = tmp.path().join(MARKER_FILENAME);
+        std::fs::write(&marker, b"0.14.1").expect("seed marker");
+        let mut perms = std::fs::metadata(&marker).expect("metadata").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&marker, perms).expect("read-only marker");
+
+        // Otherwise every launch would announce 0.14.2 again.
+        assert_eq!(record_launch(&marker, "0.14.2"), None);
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("marker kept"),
+            "0.14.1"
+        );
     }
 
     #[test]
