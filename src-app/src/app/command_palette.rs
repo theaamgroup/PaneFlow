@@ -106,11 +106,16 @@ impl PaneFlowApp {
             self.launch_pad_cancel(cx);
             folded_without_restore = true;
         }
+        // Pane Overview and the Attention Queue restore focus themselves,
+        // but onto the first leaf (issue #108), so the pane that owns focus
+        // after the fold is not the origin; the taken origin wins here too.
         if self.pane_overview.is_some() {
             self.close_pane_overview_and_restore_focus(window, cx);
+            folded_without_restore = true;
         }
         if self.attention_queue_open {
             self.close_attention_queue_and_restore_focus(window, cx);
+            folded_without_restore = true;
         }
         if self.show_theme_picker {
             self.close_theme_picker(cx);
@@ -124,9 +129,8 @@ impl PaneFlowApp {
             self.close_fleet_search(cx);
             folded_without_restore = true;
         }
-        // An overlay that restores its own focus (Pane Overview, the
-        // Attention Queue) has no recorded origin; only a fold without a
-        // restoring close consults it.
+        // Only a fold consults the recorded origin, and then it outranks
+        // whatever pane a restoring close just focused.
         let origin_pane = origin_pane.filter(|_| folded_without_restore);
         self.dismiss_transient_surfaces();
         // Remember where the user was before the palette takes focus:
@@ -142,9 +146,12 @@ impl PaneFlowApp {
         } else {
             window.focused(cx)
         };
-        self.command_palette_return_pane = self
-            .pane_owning_focus(window, cx)
-            .or(origin_pane)
+        // After a fold the taken origin comes first: a restoring close has
+        // just put the focus on the first leaf, which is exactly the pane the
+        // action must not target. Without a fold `origin_pane` is `None` and
+        // the pane owning the focus leads as before.
+        self.command_palette_return_pane = origin_pane
+            .or_else(|| self.pane_owning_focus(window, cx))
             .or_else(|| self.command_palette_default_pane())
             .map(|pane| pane.downgrade());
         self.command_palette_open = true;
@@ -694,7 +701,8 @@ mod tests {
             "self.close_fleet_search(cx);",
             "let origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());",
             "let origin_pane = origin_pane.filter(|_| folded_without_restore);",
-            ".or(origin_pane)",
+            "self.command_palette_return_pane = origin_pane",
+            ".or_else(|| self.pane_owning_focus(window, cx))",
             ".or_else(|| self.command_palette_default_pane())",
             // DESIGN.md 7.2: the rows are a listbox of options for VoiceOver.
             ".role(gpui::Role::ListBox)",
@@ -746,6 +754,8 @@ mod tests {
             ("theme_picker.rs", include_str!("theme_picker.rs")),
             ("broadcast.rs", include_str!("broadcast.rs")),
             ("launch_pad.rs", include_str!("launch_pad.rs")),
+            ("pane_overview/mod.rs", include_str!("pane_overview/mod.rs")),
+            ("attention_queue.rs", include_str!("attention_queue.rs")),
         ] {
             assert!(
                 src.contains(capture),
