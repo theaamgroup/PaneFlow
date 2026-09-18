@@ -91,6 +91,9 @@ impl PaneFlowApp {
         if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
             return;
         }
+        if self.command_palette_blocked_by_modal() {
+            return;
+        }
         // The four focus-only overlays remembered the pane they were opened
         // from (`overlay_origin_pane`); that pane, not the first leaf, is
         // what the chosen action must land on.
@@ -175,6 +178,30 @@ impl PaneFlowApp {
             }
         });
         owner
+    }
+
+    /// A modal dialog keeps the chord inert. Each of these owns the focus
+    /// and paints at or above the palette's `with_priority(7)`, so a palette
+    /// opened underneath would take the keys while staying invisible and
+    /// leave the visible dialog unresponsive. They are dialogs the user asked
+    /// for, or a destructive decision, so the palette refuses rather than
+    /// folding them. The next dialog registers here:
+    ///
+    /// - Custom Buttons (`custom_buttons_modal`, priority 8)
+    /// - About (`show_about_dialog`, priority 10)
+    /// - System Info (`system_info_dialog`, priority 10)
+    /// - the modal close-confirm (`pending_close` with `ConfirmStyle::Modal`,
+    ///   priority 11); an inline close arm is not a dialog
+    /// - Work Review (`work_review`, an occluding focus-owning surface)
+    fn command_palette_blocked_by_modal(&self) -> bool {
+        self.custom_buttons_modal.is_some()
+            || self.show_about_dialog
+            || self.system_info_dialog.is_some()
+            || self
+                .pending_close
+                .as_ref()
+                .is_some_and(|p| p.style == crate::app::close_guard::ConfirmStyle::Modal)
+            || self.work_review.is_some()
     }
 
     /// Last resort when no pane contains the focus (the sidebar or a folded
@@ -636,6 +663,13 @@ mod tests {
             // Stacking: sibling overlays fold before the capture, and a
             // mid-run Launch Pad keeps the palette closed.
             "if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {",
+            // A modal dialog keeps the palette closed.
+            "if self.command_palette_blocked_by_modal() {",
+            "self.custom_buttons_modal.is_some()",
+            "|| self.show_about_dialog",
+            "|| self.system_info_dialog.is_some()",
+            ".is_some_and(|p| p.style == crate::app::close_guard::ConfirmStyle::Modal)",
+            "|| self.work_review.is_some()",
             "self.launch_pad_cancel(cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
             "self.close_attention_queue_and_restore_focus(window, cx);",
