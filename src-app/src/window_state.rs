@@ -197,7 +197,7 @@ fn read_capped(file: std::fs::File, path: &Path) -> Option<String> {
 pub(crate) fn state_path() -> Option<PathBuf> {
     // Same APP_SUBDIR as paneflow.json so a debug `cargo run` never
     // overwrites the installed app's window size.
-    dirs::config_dir().map(|directory| {
+    crate::runtime_paths::config_dir().map(|directory| {
         directory
             .join(paneflow_config::loader::APP_SUBDIR)
             .join("window-state.json")

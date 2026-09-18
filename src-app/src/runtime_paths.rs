@@ -247,15 +247,29 @@ pub fn augment_path_for_gui_launch() {
     }
 }
 
+/// The per-user config root (`~/Library/Application Support`), relocated by
+/// `PANEFLOW_HOME` (#519, `paneflow_config::loader::HOME_ENV`). Callers join
+/// `APP_SUBDIR` themselves, exactly as they did with `dirs::config_dir()`.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    paneflow_config::loader::user_dirs().map(|dirs| dirs.config)
+}
+
+/// The per-user cache root (`~/Library/Caches`), relocated by `PANEFLOW_HOME`
+/// (#519). Same contract as [`config_dir`].
+pub(crate) fn cache_dir() -> Option<PathBuf> {
+    paneflow_config::loader::user_dirs().map(|dirs| dirs.cache)
+}
+
 /// Resolve the PaneFlow per-user data directory.
 ///
 /// macOS: `~/Library/Application Support/paneflow` (`paneflow-dev` in debug).
+/// `PANEFLOW_HOME` relocates the root to `<home>/data` (#519).
 ///
 /// The directory is created if it does not already exist. Returns `None` if
 /// either the platform helper returns `None` (broken environment) or the
 /// `create_dir_all` call fails (read-only FS, permission denied, etc.).
 pub fn data_dir() -> Option<PathBuf> {
-    let dir = dirs::data_local_dir()?.join(APP_SUBDIR);
+    let dir = paneflow_config::loader::user_dirs()?.data.join(APP_SUBDIR);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::debug!(
             "paneflow: data_dir {} is unwritable ({e}); callers will use ephemeral state",

@@ -55,16 +55,106 @@ pub enum ConfigError {
     ParseError(#[from] serde_json::Error),
 }
 
+/// Environment override for every per-user directory PaneFlow owns (#519).
+///
+/// When set to an absolute path, the config, data, and cache roots resolve to
+/// `<home>/config`, `<home>/data`, and `<home>/cache` instead of the platform
+/// directories, and every file keeps its [`APP_SUBDIR`] namespace beneath
+/// that root, so a release binary pointed at a scratch home reads
+/// `<home>/config/paneflow/paneflow.json` and writes its helper cache under
+/// `<home>/cache/paneflow/`. Unset, empty, or relative values are ignored
+/// (a relative path would silently follow the process cwd). The IPC socket
+/// is not moved by this variable: `PANEFLOW_SOCKET_PATH` keeps its own
+/// precedence.
+pub const HOME_ENV: &str = "PANEFLOW_HOME";
+
+/// The three per-user roots PaneFlow writes under. Each caller joins
+/// [`APP_SUBDIR`] itself, so the debug / release namespace rule is unchanged
+/// whether the roots come from the platform or from [`HOME_ENV`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserDirs {
+    /// `~/Library/Application Support` (`paneflow.json`, `session.json`,
+    /// `window-state.json`, `recents.json`).
+    pub config: PathBuf,
+    /// `~/Library/Application Support` (the stable `bin/` helper copies).
+    pub data: PathBuf,
+    /// `~/Library/Caches` (the versioned helper cache, the markdown state).
+    pub cache: PathBuf,
+}
+
+/// The roots an explicit `PANEFLOW_HOME` selects: three named directories
+/// under it. Pure, so tests and the startup benchmark can compute where a
+/// seeded file must land without touching the environment.
+pub fn user_dirs_under(home: &Path) -> UserDirs {
+    UserDirs {
+        config: home.join("config"),
+        data: home.join("data"),
+        cache: home.join("cache"),
+    }
+}
+
+/// Resolve the roots from an already-read `PANEFLOW_HOME` value, falling back
+/// to the platform directories. `None` only when the platform helpers fail
+/// (a broken environment with no home directory).
+pub fn user_dirs_from(home_env: Option<&std::ffi::OsStr>) -> Option<UserDirs> {
+    if let Some(home) = home_override_from(home_env) {
+        return Some(user_dirs_under(&home));
+    }
+    Some(UserDirs {
+        config: dirs::config_dir()?,
+        data: dirs::data_local_dir()?,
+        cache: dirs::cache_dir()?,
+    })
+}
+
+/// The `PANEFLOW_HOME` value as a usable root, or `None` when it is unset,
+/// empty, or relative. A relative override is refused with a warning rather
+/// than resolved against the cwd, which would move the user's state to
+/// wherever the app happened to be launched from.
+pub fn home_override_from(home_env: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let value = home_env.filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        warn!(
+            "{HOME_ENV}={} is not an absolute path; ignoring the override",
+            path.display()
+        );
+        None
+    }
+}
+
+/// The per-user roots for this process, honoring [`HOME_ENV`]. The override
+/// is read once: the app never mutates its own environment after startup,
+/// and a relative value should warn once, not on every path lookup.
+pub fn user_dirs() -> Option<UserDirs> {
+    static HOME_OVERRIDE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let home = HOME_OVERRIDE
+        .get_or_init(|| home_override_from(std::env::var_os(HOME_ENV).as_deref()))
+        .as_deref();
+    match home {
+        Some(home) => Some(user_dirs_under(home)),
+        None => user_dirs_from(None),
+    }
+}
+
 /// Returns the macOS config file path:
 /// `~/Library/Application Support/paneflow/paneflow.json`.
-/// Debug builds use the `paneflow-dev` subdir instead.
+/// Debug builds use the `paneflow-dev` subdir instead. `PANEFLOW_HOME`
+/// relocates the root (see [`HOME_ENV`]).
 pub fn config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join(APP_SUBDIR).join("paneflow.json"))
+    user_dirs().map(|dirs| config_path_in(&dirs))
+}
+
+/// `paneflow.json` under the config root of `dirs`.
+pub fn config_path_in(dirs: &UserDirs) -> PathBuf {
+    dirs.config.join(APP_SUBDIR).join("paneflow.json")
 }
 
 /// Filename of the persisted session. Namespaced per build profile so a
 /// `cargo run` instance never overwrites the installed app's layout.
-fn session_filename() -> &'static str {
+pub fn session_filename() -> &'static str {
     if cfg!(debug_assertions) {
         "session-dev.json"
     } else {
@@ -81,12 +171,17 @@ fn session_filename() -> &'static str {
 /// [`session_path_migrated`] (or [`migrate_session_from_cache`]) so a
 /// leftover cache copy is copied forward once.
 pub fn session_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join(APP_SUBDIR).join(session_filename()))
+    user_dirs().map(|dirs| session_path_in(&dirs))
+}
+
+/// The session file under the config root of `dirs`.
+pub fn session_path_in(dirs: &UserDirs) -> PathBuf {
+    dirs.config.join(APP_SUBDIR).join(session_filename())
 }
 
 /// Pre-#45 location: `~/Library/Caches/paneflow/{session,session-dev}.json`.
 pub fn legacy_session_cache_path() -> Option<PathBuf> {
-    dirs::cache_dir().map(|dir| dir.join(APP_SUBDIR).join(session_filename()))
+    user_dirs().map(|dirs| dirs.cache.join(APP_SUBDIR).join(session_filename()))
 }
 
 /// One-shot copy of a leftover cache-dir session onto `dest`.
@@ -328,3 +423,6 @@ mod session_tests;
 #[cfg(test)]
 #[path = "loader_tests/settings.rs"]
 mod settings_tests;
+#[cfg(test)]
+#[path = "loader_tests/user_dirs.rs"]
+mod user_dirs_tests;
