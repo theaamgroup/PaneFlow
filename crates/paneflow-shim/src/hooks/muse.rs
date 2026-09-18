@@ -245,17 +245,67 @@ pub(crate) fn env_baseline_path(settings_path: &Path) -> PathBuf {
     settings_path.with_extension(MUSE_ENV_BASELINE_EXTENSION)
 }
 
-fn write_env_baseline(path: &Path, names: &[String]) -> std::io::Result<()> {
-    write_json_atomic(path, &json!(names))
+/// True when `path` is a regular file (never a symlink) holding a JSON
+/// array of strings: the only shape PaneFlow ever writes there.
+fn env_baseline_is_ours(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+        && std::fs::read_to_string(path)
+            .is_ok_and(|content| serde_json::from_str::<Vec<String>>(&content).is_ok())
 }
 
-/// The recorded baseline. `None` when no sidecar exists, meaning PaneFlow
-/// never took this file. The sidecar is left in place: the caller removes
-/// it only once the restore has been written, so a failed write leaves the
-/// next orphan sweep the same names to keep.
+/// Publish the sidecar with no-clobber semantics: a symlink is refused, a
+/// pre-existing file is replaced only when it is a stale sidecar of
+/// PaneFlow's own shape (a crashed session that never wrote its settings),
+/// anything else is refused, and the create itself is `O_EXCL` so nothing
+/// that appears in between is written through.
+fn write_env_baseline(path: &Path, names: &[String]) -> std::io::Result<()> {
+    use std::io::Write;
+    if config_dir_is_symlink(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to write the Muse Code baseline through a symlink",
+        ));
+    }
+    if path.exists() {
+        if !env_baseline_is_ours(path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} is not a PaneFlow baseline; refusing to overwrite it",
+                    path.display()
+                ),
+            ));
+        }
+        std::fs::remove_file(path)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(json!(names).to_string().as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()
+}
+
+/// Remove the sidecar, but only a regular file of PaneFlow's own shape:
+/// a symlink or a foreign file at that path is left as it is.
+fn remove_env_baseline(path: &Path) {
+    if env_baseline_is_ours(path) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The recorded baseline. `None` when no sidecar of PaneFlow's own shape
+/// exists (a symlink or foreign file there is never read), meaning
+/// PaneFlow never took this file. The sidecar is left in place: the caller
+/// removes it only once the restore has been written, so a failed write
+/// leaves the next orphan sweep the same names to keep.
 fn read_env_baseline(path: &Path) -> Option<Vec<String>> {
-    let content = read_optional_text(path).ok().flatten()?;
-    Some(serde_json::from_str::<Vec<String>>(&content).unwrap_or_default())
+    if !env_baseline_is_ours(path) {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Vec<String>>(&content).ok()
 }
 
 /// Strip PaneFlow's managed keys, but only when `managed_hooks_path` is
@@ -303,11 +353,11 @@ fn settings_is_bare(root: &Value) -> bool {
 
 fn restore_settings(path: &Path, hooks_path: &Path, owned: bool) -> std::io::Result<()> {
     let Some(content) = read_optional_text(path)? else {
-        let _ = std::fs::remove_file(env_baseline_path(path));
+        remove_env_baseline(&env_baseline_path(path));
         return Ok(());
     };
     let Ok(mut root) = serde_json::from_str::<Value>(&content) else {
-        let _ = std::fs::remove_file(env_baseline_path(path));
+        remove_env_baseline(&env_baseline_path(path));
         return Ok(());
     };
     // No sidecar: the managed keys were the user's own (they pointed the
@@ -326,7 +376,7 @@ fn restore_settings(path: &Path, hooks_path: &Path, owned: bool) -> std::io::Res
         }
     }
     // Only a restore that reached disk consumes the baseline.
-    let _ = std::fs::remove_file(baseline_path);
+    remove_env_baseline(&baseline_path);
     Ok(())
 }
 

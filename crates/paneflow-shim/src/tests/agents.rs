@@ -1620,3 +1620,78 @@ fn muse_baseline_survives_a_failed_restore_write() {
     assert_eq!(read_json(&settings_path), original);
     assert!(!baseline.exists());
 }
+
+#[test]
+fn muse_symlinked_baseline_path_is_refused_and_its_target_untouched() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({"schema_version": 1, "model": "x"});
+    std::fs::write(&settings_path, original.to_string()).unwrap();
+    let target = td.path().join("precious.txt");
+    std::fs::write(&target, "keep me\n").unwrap();
+    std::os::unix::fs::symlink(&target, env_baseline_path(&settings_path)).unwrap();
+
+    let error = match MuseHookConfigGuard::install_at(&dir) {
+        Ok(_) => panic!("a symlinked baseline path must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me\n");
+    assert!(
+        env_baseline_path(&settings_path).is_symlink(),
+        "the user's symlink must survive"
+    );
+    assert_eq!(
+        read_json(&settings_path),
+        original,
+        "settings must not be merged"
+    );
+    assert!(!dir.join(MUSE_HOOKS_BASENAME).exists());
+
+    // Cleanup paths never read or remove through the link either.
+    crate::hooks::muse::sweep_orphan_for_test(&dir);
+    assert!(env_baseline_path(&settings_path).is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me\n");
+}
+
+#[test]
+fn muse_foreign_file_at_the_baseline_path_is_refused() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({"schema_version": 1, "model": "x"});
+    std::fs::write(&settings_path, original.to_string()).unwrap();
+    let baseline = env_baseline_path(&settings_path);
+    std::fs::write(&baseline, "user notes\n").unwrap();
+
+    let error = match MuseHookConfigGuard::install_at(&dir) {
+        Ok(_) => panic!("a foreign file at the baseline path must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(&baseline).unwrap(), "user notes\n");
+    assert_eq!(read_json(&settings_path), original);
+}
+
+#[test]
+fn muse_stale_baseline_of_our_shape_is_replaced_on_first_take() {
+    // A crashed session wrote its sidecar but never its settings; the next
+    // first take starts over from the file as it is now.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({"schema_version": 1, "managed_hooks_env_vars": ["PANEFLOW_AI_PID"]});
+    std::fs::write(&settings_path, original.to_string()).unwrap();
+    let baseline = env_baseline_path(&settings_path);
+    std::fs::write(&baseline, json!(["PANEFLOW_SOCKET_PATH"]).to_string()).unwrap();
+
+    let guard = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
+    assert_eq!(read_json(&baseline), json!(["PANEFLOW_AI_PID"]));
+    drop(guard);
+    assert_eq!(read_json(&settings_path), original);
+    assert!(!baseline.exists());
+}
