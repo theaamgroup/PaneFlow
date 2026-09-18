@@ -218,6 +218,11 @@
       "description": "Master switch for Stalled agent detection. null/true = enabled (default): a Thinking agent session with no hook activity past agent_stall_threshold_secs is flagged Stalled, with ONE desktop notification per stall episode (the flag clears on the next hook event, so a legitimately long turn costs at most one notification). false = kill switch - no Stalled state is ever produced.",
       "default": true
     },
+    "agent_summary_enabled": {
+      "type": ["boolean", "null"],
+      "description": "Master switch for the fleet agent summary overlay (Cmd+Shift+I), which describes what every agent pane is doing using Apple's on-device Foundation Models. null/true = enabled (default). false = the chord is a silent no-op and no summariser is ever spawned. Summaries need Apple Intelligence on macOS 26 or later; without it the overlay shows an explanatory line instead.",
+      "default": true
+    },
     "agent_stall_threshold_secs": {
       "type": ["integer", "null"],
       "description": "Silence threshold in seconds before a Thinking agent session is flagged Stalled (a likely-lost ai.stop). Checked by a 30 s sweep, so the effective detection latency is threshold + up to 30 s. Out-of-range values are clamped.",

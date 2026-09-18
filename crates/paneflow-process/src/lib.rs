@@ -14,6 +14,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::OnceLock;
 use std::thread;
@@ -86,6 +87,10 @@ pub enum ProcError {
     /// The child tree was terminated best-effort and cleanup was detached so the
     /// caller is released by the deadline.
     Timeout,
+    /// The caller's cancellation flag was set before the child finished. The
+    /// child tree was terminated best-effort and cleanup was detached, exactly
+    /// as on [`Self::Timeout`].
+    Cancelled,
 }
 
 impl fmt::Display for ProcError {
@@ -110,6 +115,7 @@ impl fmt::Display for ProcError {
                 write!(f, "process {stream} exceeded its {cap}-byte capture limit")
             }
             ProcError::Timeout => write!(f, "process exceeded its deadline; termination requested"),
+            ProcError::Cancelled => write!(f, "process was cancelled by its caller"),
         }
     }
 }
@@ -124,7 +130,8 @@ impl Error for ProcError {
             ProcError::ReaderSpawn { source, .. } | ProcError::Read { source, .. } => Some(source),
             ProcError::InvalidOutputLimit(_)
             | ProcError::OutputLimitExceeded { .. }
-            | ProcError::Timeout => None,
+            | ProcError::Timeout
+            | ProcError::Cancelled => None,
         }
     }
 }
@@ -157,7 +164,31 @@ pub fn run_with_timeout_stdin(
     deadline: Duration,
     stdout_cap: u64,
 ) -> Result<BoundedOutput, ProcError> {
-    run_bounded(cmd, Some(stdin), deadline, stdout_cap, STDERR_CAP)
+    run_bounded(cmd, Some(stdin), deadline, stdout_cap, STDERR_CAP, None)
+}
+
+/// [`run_with_timeout_stdin`] that also honors a shared cancellation flag.
+///
+/// When `cancel` is set at any point before the child finishes, the run
+/// returns [`ProcError::Cancelled`] after terminating the child tree (the same
+/// best-effort teardown as a deadline). Callers that abandon a batch early
+/// (an overlay closed, a newer request replaced this one) can therefore kill
+/// an in-flight child instead of waiting out its full deadline.
+pub fn run_with_timeout_stdin_cancellable(
+    cmd: Command,
+    stdin: &[u8],
+    deadline: Duration,
+    stdout_cap: u64,
+    cancel: &AtomicBool,
+) -> Result<BoundedOutput, ProcError> {
+    run_bounded(
+        cmd,
+        Some(stdin),
+        deadline,
+        stdout_cap,
+        STDERR_CAP,
+        Some(cancel),
+    )
 }
 
 /// [`run_with_timeout`] with an explicit stderr capture cap.
@@ -172,7 +203,7 @@ pub fn run_with_timeout_capped(
     stdout_cap: u64,
     stderr_cap: u64,
 ) -> Result<BoundedOutput, ProcError> {
-    run_bounded(cmd, None, deadline, stdout_cap, stderr_cap)
+    run_bounded(cmd, None, deadline, stdout_cap, stderr_cap, None)
 }
 
 fn run_bounded(
@@ -181,6 +212,7 @@ fn run_bounded(
     deadline: Duration,
     stdout_cap: u64,
     stderr_cap: u64,
+    cancel: Option<&AtomicBool>,
 ) -> Result<BoundedOutput, ProcError> {
     let stdout_cap = validate_capture_cap(stdout_cap)?;
     let stderr_cap = validate_capture_cap(stderr_cap)?;
@@ -240,6 +272,12 @@ fn run_bounded(
         match process.child_mut()?.try_wait().map_err(ProcError::Wait)? {
             Some(status) => break status,
             None => {
+                // A caller that cancelled while the child was running gets its
+                // answer before the deadline, and the child tree is terminated
+                // by the same best-effort teardown as a timeout.
+                if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                    return Err(ProcError::Cancelled);
+                }
                 let Some(sleep_for) = poll_sleep_duration(start, deadline) else {
                     return Err(ProcError::Timeout);
                 };
@@ -738,6 +776,40 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "must not wait for the child to finish on its own"
+        );
+    }
+
+    /// A child cancelled mid-run returns `Cancelled` and is terminated, not left
+    /// to run out its full deadline. This is the contract the agent-summary
+    /// overlay relies on to kill a sidecar when the overlay is dismissed.
+    #[test]
+    fn sleeping_child_is_killed_when_cancelled() {
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_handle = {
+            // Set the flag 100 ms in; the child is a 30 s sleeper.
+            let cancel = std::sync::Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.store(true, Ordering::Release);
+            })
+        };
+
+        let start = Instant::now();
+        let res = run_with_timeout_stdin_cancellable(
+            sleep_command(),
+            b"",
+            Duration::from_secs(30),
+            1 << 20,
+            &cancel,
+        );
+        cancel_handle.join().unwrap();
+        assert!(
+            matches!(res, Err(ProcError::Cancelled)),
+            "expected Cancelled, got {res:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancellation must not wait out the child or the deadline"
         );
     }
 
