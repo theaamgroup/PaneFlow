@@ -34,6 +34,10 @@ pub(crate) fn upgraded_version() -> Option<String> {
 }
 
 fn record_launch(marker_path: &Path, current: &str) -> Option<String> {
+    // An unparsable running version can never announce, and recording it
+    // would make the next valid version compare against garbage and stay
+    // silent too. Leave the marker alone.
+    parse_version(current)?;
     let previous = std::fs::read_to_string(marker_path).ok();
     if previous.as_deref().map(str::trim) != Some(current) {
         write_marker(marker_path, current);
@@ -156,6 +160,21 @@ mod tests {
             std::fs::read_to_string(&marker).expect("marker rewritten"),
             "0.14.2"
         );
+    }
+
+    #[test]
+    fn an_unparsable_running_version_leaves_the_marker_alone() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let marker = tmp.path().join(MARKER_FILENAME);
+        std::fs::write(&marker, b"0.14.1").expect("seed marker");
+
+        assert_eq!(record_launch(&marker, "nightly"), None);
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("marker kept"),
+            "0.14.1"
+        );
+        // The next valid version still announces against the kept marker.
+        assert_eq!(record_launch(&marker, "0.14.2"), Some("0.14.2".to_string()));
     }
 
     #[test]
