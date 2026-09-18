@@ -158,6 +158,7 @@ preserved; an invalid config is left untouched.
 | `qoder_button_visible` | Qoder | Off |
 | `openclaw_button_visible` | Openclaw | Off |
 | `deepseek_harness_button_visible` | DeepSeek Harness | Off |
+| `muse_button_visible` | Muse Code | Off |
 
 ## Terminal block
 
@@ -387,7 +388,8 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "factory_button_visible": null,
   "qoder_button_visible": null,
   "openclaw_button_visible": null,
-  "deepseek_harness_button_visible": null
+  "deepseek_harness_button_visible": null,
+  "muse_button_visible": null
 }
 ```
 

@@ -52,7 +52,7 @@ use hooks::{
     remove_cursor_hooks, remove_gemini_hooks, remove_paneflow_hooks, remove_qoder_hooks,
     CodexHookConfigGuard, DshOverlayGuard, GrokHookFileGuard, HermesHookConfigGuard,
     HookConfigGuard, HookInstall, HookInstallSkip, ManagedHookConfigGuard, ManagedHookSpec,
-    OpenCodePluginGuard, PiExtensionGuard,
+    MuseHookConfigGuard, OpenCodePluginGuard, PiExtensionGuard,
 };
 
 // ---------------------------------------------------------------------------
@@ -185,6 +185,7 @@ enum ToolHookGuard {
     Hermes(HermesHookConfigGuard),
     Grok(GrokHookFileGuard),
     Dsh(DshOverlayGuard),
+    Muse(MuseHookConfigGuard),
 }
 
 fn install_hook_guard(tool: &str) -> std::io::Result<HookInstall<ToolHookGuard>> {
@@ -241,6 +242,9 @@ fn install_hook_guard(tool: &str) -> std::io::Result<HookInstall<ToolHookGuard>>
         // Dedicated merged hook file - wholly Paneflow-owned, zero RMW.
         "grok" => GrokHookFileGuard::install().map(|outcome| outcome.map(ToolHookGuard::Grok)),
         "dsh" => DshOverlayGuard::install().map(|outcome| outcome.map(ToolHookGuard::Dsh)),
+        // Claude hook format, but hooks run with a cleared environment: a
+        // Paneflow-owned managed hook file plus `managed_hooks_env_vars`.
+        "muse" => MuseHookConfigGuard::install().map(|outcome| outcome.map(ToolHookGuard::Muse)),
         // Deliberately ABSENT (documented, not forgotten):
         // - "copilot": no hook/JSON-stream surface exists at all.
         // - "kiro-cli": hooks live inside PER-AGENT definition files

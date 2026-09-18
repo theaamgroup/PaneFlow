@@ -136,6 +136,12 @@ const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
         description: "Show the DeepSeek Harness launcher button in every tab bar.",
         agent: TerminalAgent::DeepSeekHarness,
     },
+    AgentToggleRow {
+        id: "row-muse-visible",
+        title: "Muse Code",
+        description: "Show the Muse Code launcher button in every tab bar.",
+        agent: TerminalAgent::Muse,
+    },
 ];
 
 impl PaneFlowApp {
