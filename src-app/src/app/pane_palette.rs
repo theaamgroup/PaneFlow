@@ -707,9 +707,15 @@ impl PaneFlowApp {
         let Some(palette) = self.pane_palette.take() else {
             return;
         };
-        // The picker's own restore below is exact (its target pane, or the
-        // element that held the focus); the origin only served a palette fold.
-        self.forget_overlay_origin(OverlayKind::PanePalette);
+        // Whether a pane held the focus when the picker opened (#584). The
+        // saved handle below is restored only while that pane is still a
+        // leaf of the tab the focus returns to, checked AFTER the tab close
+        // so the check reads the tab that becomes visible: a pane closed
+        // from the sidebar while the picker tab was up would otherwise get
+        // the focus back through a handle no element renders. A handle
+        // outside every pane (sidebar, dock editor, placeholder) recorded
+        // nothing and is restored as before.
+        let origin_recorded = self.overlay_origin_recorded(OverlayKind::PanePalette);
         self.close_palette_bound_sessions_sidebar(cx);
         match &palette.placement {
             PalettePlacement::Tab { tab_id } => {
@@ -734,7 +740,15 @@ impl PaneFlowApp {
                 }
             }
         }
-        if let Some(handle) = palette.restore_focus {
+        // Taken on every close so the entry never outlives the picker; the
+        // tab close above already focused the first pane (or the placeholder)
+        // for the case where the saved handle is skipped.
+        let origin_live = self
+            .take_live_overlay_origin(OverlayKind::PanePalette)
+            .is_some();
+        if let Some(handle) = palette.restore_focus
+            && (origin_live || !origin_recorded)
+        {
             window.focus(&handle, cx);
         }
         cx.notify();

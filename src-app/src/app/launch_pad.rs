@@ -262,9 +262,11 @@ impl PaneFlowApp {
     /// Escape path - only honored before confirmation (US-005 AC8: the
     /// in-flight run keeps the modal up with its "Creating…" state). The
     /// focus goes back to the pane the Launch Pad was opened from (#584)
-    /// through `pending_pane_focus`: the prompt field's Escape reaches here
-    /// deferred, without a `Window`. With no live origin the first pane of
-    /// the active tab takes it, the same fallback the other overlays use.
+    /// through `pending_overlay_restore`: the prompt field's Escape reaches
+    /// here deferred, without a `Window`, so the window-bearing drain runs
+    /// `restore_overlay_origin_focus`, the same chain every other overlay's
+    /// close walks (origin, first pane, then the empty-workspace placeholder
+    /// of issue #108, so a paneless tab keeps its global chords).
     pub(crate) fn launch_pad_cancel(&mut self, cx: &mut Context<Self>) {
         if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
             return;
@@ -272,15 +274,7 @@ impl PaneFlowApp {
         if self.launch_pad.take().is_none() {
             return;
         }
-        self.pending_pane_focus = self
-            .take_live_overlay_origin(OverlayKind::LaunchPad)
-            .or_else(|| {
-                self.active_workspace()?
-                    .active_tab()
-                    .root
-                    .as_ref()?
-                    .first_leaf()
-            });
+        self.pending_overlay_restore = Some(OverlayKind::LaunchPad);
         cx.notify();
     }
 

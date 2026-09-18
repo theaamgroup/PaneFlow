@@ -80,6 +80,13 @@ impl OverlayOrigins {
             .and_then(|(_, pane)| pane.upgrade())
     }
 
+    /// Whether `kind` recorded an origin at all: a pane owned the focus when
+    /// it opened. `false` when the focus sat outside every pane (the sidebar,
+    /// the dock editor, the placeholder), which records nothing.
+    pub(crate) fn recorded(&self, kind: OverlayKind) -> bool {
+        self.stack.iter().any(|(k, _)| *k == kind)
+    }
+
     /// Drop every entry whose overlay is no longer open, so a close path that
     /// bypassed `take` cannot leave a stale origin at the bottom.
     pub(crate) fn retain_open(&mut self, mut open: impl FnMut(OverlayKind) -> bool) {
@@ -168,6 +175,12 @@ impl PaneFlowApp {
     /// a command palette fold).
     pub(crate) fn forget_overlay_origin(&mut self, kind: OverlayKind) {
         let _ = self.overlay_origins.take(kind);
+    }
+
+    /// Whether a pane owned the focus when `kind` opened (see
+    /// [`OverlayOrigins::recorded`]).
+    pub(crate) fn overlay_origin_recorded(&self, kind: OverlayKind) -> bool {
+        self.overlay_origins.recorded(kind)
     }
 
     /// Take `kind`'s origin and return it only while it is still a leaf of
@@ -434,17 +447,22 @@ mod tests {
             );
         }
         // The Launch Pad's cancel has no `Window` (the prompt field's Escape
-        // is deferred), so it parks the origin in `pending_pane_focus`.
+        // is deferred), so it parks the restore in `pending_overlay_restore`
+        // and the window-bearing drain walks the shared chain, placeholder
+        // fallback included.
         let launch_pad = production(include_str!("launch_pad.rs"));
         assert!(
             launch_pad
                 .contains("self.remember_overlay_origin(OverlayKind::LaunchPad, window, cx);")
         );
         assert!(
-            launch_pad.contains(
-                "self.pending_pane_focus = self\n            .take_live_overlay_origin(OverlayKind::LaunchPad)"
-            ),
+            launch_pad.contains("self.pending_overlay_restore = Some(OverlayKind::LaunchPad);"),
             "launch_pad_cancel must return the focus to the origin pane through the drain"
+        );
+        assert!(
+            main.contains("if let Some(kind) = self.pending_overlay_restore.take() {")
+                && main.contains("self.restore_overlay_origin_focus(kind, window, cx);"),
+            "the drain must restore a parked overlay through the shared chain"
         );
         // The pane palette records both open paths and forgets on every take.
         let pane_palette = production(include_str!("pane_palette.rs"));
@@ -459,10 +477,32 @@ mod tests {
         assert_eq!(
             pane_palette
                 .matches("self.forget_overlay_origin(OverlayKind::PanePalette);")
-                .count(),
+                .count()
+                + pane_palette
+                    .matches(".take_live_overlay_origin(OverlayKind::PanePalette)")
+                    .count(),
             pane_palette.matches("self.pane_palette = None;").count()
                 + pane_palette.matches("self.pane_palette.take()").count(),
-            "every path that drops the pane palette must forget its origin"
+            "every path that drops the pane palette must forget or take its origin"
+        );
+        // `close_pane_palette` validates the saved handle through the origin:
+        // recorded before the tab close, taken live after it.
+        let close = &pane_palette[pane_palette
+            .find("fn close_pane_palette(")
+            .expect("close_pane_palette exists")..];
+        let recorded = close
+            .find("let origin_recorded = self.overlay_origin_recorded(OverlayKind::PanePalette);")
+            .expect("close_pane_palette reads whether a pane origin was recorded");
+        let closed = close
+            .find("self.close_workspace_tab(ws_idx, tab_idx, window, cx);")
+            .expect("close_pane_palette closes the picker tab");
+        let live = close
+            .find(".take_live_overlay_origin(OverlayKind::PanePalette)")
+            .expect("close_pane_palette takes the origin live");
+        assert!(recorded < closed && closed < live);
+        assert!(
+            close.contains("&& (origin_live || !origin_recorded)"),
+            "a saved handle inside a pane that left the tree must not be re-focused"
         );
         assert!(
             main.contains("self.remember_overlay_origin(OverlayKind::FleetSearch, window, cx);")

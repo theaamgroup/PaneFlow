@@ -103,8 +103,8 @@ impl PaneFlowApp {
         let origin_pane = self.outermost_open_overlay_origin();
         let mut folded_without_restore = false;
         if self.launch_pad.is_some() {
-            // Not `launch_pad_cancel`: that parks the origin in
-            // `pending_pane_focus`, which would pull the focus off the
+            // Not `launch_pad_cancel`: that parks a restore in
+            // `pending_overlay_restore`, which would pull the focus off the
             // palette at the next drain.
             self.launch_pad_dismiss(cx);
             folded_without_restore = true;
