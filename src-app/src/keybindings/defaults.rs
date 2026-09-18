@@ -502,6 +502,18 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_work_review",
         context: None,
     },
+    // Issue #576: fleet agent summary. `i` for "what's happening" - the
+    // neighbouring mnemonics are taken (`secondary-shift-a` attention queue,
+    // `secondary-shift-p` pane overview, `secondary-shift-u` work review) and
+    // `secondary-shift-i` is free on this table. Global: a terminal holds
+    // focus nearly always, and a bare `f` (the chord the prior art uses) is
+    // not available here because global bindings dispatch ahead of the
+    // terminal's key handler and would eat the letter from every shell.
+    DefaultBinding {
+        key: "secondary-shift-i",
+        action_name: "open_agent_summary",
+        context: None,
+    },
 ];
 
 /// Platform-specific default bindings layered on top of [`DEFAULTS`].

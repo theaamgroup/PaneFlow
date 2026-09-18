@@ -210,6 +210,7 @@ explicit priority.
 | Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Four** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
+| Agent Summary | Horizontally centered, top-anchored at 24 (`OVERLAY_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; width capped at 920 (`MAX_OVERLAY_WIDTH`); rows padded 16 by 8, gap 2, with a 2 px accent left border on the selected row | `app/agent_summary/view.rs:16-17,101-176` |
 | Attention Queue · Fleet Search | Horizontally centered, top-anchored at 96 | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/attention_queue.rs:227-234`, `app/fleet_search.rs:379-386` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
 | Theme picker | Horizontally centered, top-anchored at 96 | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
@@ -1084,6 +1085,42 @@ off the window-free `layout_from_snapshot`, culls off-screen cards in prepaint
 before taking any lock, forces a block cursor at `cursor` 0.5, and paints no
 selection, copy-mode, or search highlights.
 
+### 5.10 Agent Summary
+
+Fork-only (issue #576); upstream has no equivalent. `Cmd+Shift+I` opens a
+cross-workspace list of every **agent** pane with a one-line, plain-English
+description of what it is doing, generated on-device by Apple's Foundation
+Models. Plain shell panes are omitted, and the surface is gated to Agents mode
+and to the `agent_summary` config switch.
+
+The panel is top-anchored at `OVERLAY_MARGIN` (24), inset 24 on each side and
+capped at 920 wide, with radius 12, a 1 px border, and `shadow_lg` on a black
+0.4 scrim — the Pane Overview shell at a narrower ceiling, because the content
+is a text column rather than a thumbnail grid.
+
+Rows are padded 16 by 8 with a 2 px accent left border when selected. Each
+carries an identity line (12 px Medium pane name, 10 px muted agent and tab)
+above a 12 px summary line. The summary line is `text` when a summary has
+arrived and `muted` in every other state, so a settled row is visually distinct
+from one still working.
+
+Four row states, and the wording of each is pinned by `row_summary_text`:
+pending reads "Reading the pane…", a pane with no output reads "Nothing on
+screen yet.", a failure shows its own message, and a ready row shows the model
+sentence clamped to 200 characters. The empty and failed states MUST NOT share
+wording: both render muted, and a broken summariser would otherwise be
+indistinguishable from a quiet agent.
+
+The header counts the fleet ("6 agents") and switches to progress
+("Summarising… 2/6") while any row is pending. When the model is unavailable on
+the machine at all, the list is replaced by a single explanatory line plus the
+requirement ("Summaries need Apple Intelligence on macOS 26 or later") — a
+capability notice, never an error dialog, and never one failed row per pane.
+
+The footer states that summarisation is on-device: this is a privacy claim the
+surface is obliged to make, because the alternative a user will assume is that
+their terminal output was sent somewhere.
+
 ## 6. Interaction
 
 ### 6.1 Keyboard first
@@ -1116,6 +1153,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Zoom, equalize, swap | `secondary-shift-z`, `secondary-shift-=`, `secondary-shift-s` |
 | Review | `secondary-shift-g` |
 | Pane overview | `secondary-shift-p` |
+| Agent summary | `secondary-shift-i` |
 | Work review | `secondary-shift-u` |
 | Primary sidebar, files rail | `secondary-alt-b`, `secondary-alt-f` |
 | Maximize / restore the Changes dock | `secondary-shift-f` |

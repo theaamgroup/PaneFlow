@@ -252,7 +252,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 96 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 97 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -286,6 +286,10 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
+│   ├── agent_summary/                 ← Cmd+Shift+I: what every agent pane is doing, one line each,
+│                                         generated on-device by Apple Foundation Models through the
+│                                         Swift sidecar in `native/agent-summary/` (`summarize.rs` is the
+│                                         pure prompt/parse core; `model.rs` spawns the sidecar off-thread)
 │   ├── pane_overview/                 ← Cmd+Shift+P expose: every terminal pane across every
 │                                         workspace in a compact grid; tabs stay adjacent with
 │                                         split-pane labels and eight-row previews (rows.rs: packing/navigation)
@@ -480,7 +484,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 96 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 97 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -501,6 +505,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 96 ac
 | `Cmd+Shift+Z` | Toggle zoom | Global |
 | `Cmd+Shift+J` / `Cmd+Shift+A` | Jump to next waiting agent / open attention queue | Global |
 | `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
+| `Cmd+Shift+I` | Fleet agent summary (on-device, one line per agent pane) | Global |
 | `Cmd+Shift+G` | Diff view | Global |
 | `Cmd+G` / `Cmd+J` | New file tab / new terminal tab (diff dock; `secondary-g` / `secondary-j`) | Global, not Terminal/TextInput/CodeEditor |
 | `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
