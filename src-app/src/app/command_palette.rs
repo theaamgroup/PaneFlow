@@ -97,8 +97,11 @@ impl PaneFlowApp {
         // The four focus-only overlays remembered the pane they were opened
         // from (`overlay_origin_pane`); that pane, not the first leaf, is
         // what the chosen action must land on.
+        // Taken BEFORE the closes below: each of those four closers clears
+        // `overlay_origin_pane` so a stale pane is never reused, which means
+        // a take after them always reads `None`.
+        let origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());
         let mut folded_without_restore = false;
-        let mut origin_pane = None;
         if self.launch_pad.is_some() {
             self.launch_pad_cancel(cx);
             folded_without_restore = true;
@@ -121,9 +124,10 @@ impl PaneFlowApp {
             self.close_fleet_search(cx);
             folded_without_restore = true;
         }
-        if folded_without_restore {
-            origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());
-        }
+        // An overlay that restores its own focus (Pane Overview, the
+        // Attention Queue) has no recorded origin; only a fold without a
+        // restoring close consults it.
+        let origin_pane = origin_pane.filter(|_| folded_without_restore);
         self.dismiss_transient_surfaces();
         // Remember where the user was before the palette takes focus:
         // `close_command_palette_and_restore_focus` hands focus back there
@@ -676,7 +680,8 @@ mod tests {
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",
-            "origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());",
+            "let origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());",
+            "let origin_pane = origin_pane.filter(|_| folded_without_restore);",
             ".or(origin_pane)",
             ".or_else(|| self.command_palette_default_pane())",
             // DESIGN.md 7.2: the rows are a listbox of options for VoiceOver.
@@ -698,6 +703,23 @@ mod tests {
             assert!(
                 palette.contains(needle),
                 "restore must return focus to the originating pane: missing `{needle}`"
+            );
+        }
+        // The origin is taken BEFORE any closer runs: every closer clears
+        // `overlay_origin_pane`, so a take after them always reads `None`.
+        let take_at = palette
+            .find("let origin_pane = self.overlay_origin_pane.take()")
+            .expect("the palette takes the overlay origin");
+        for closer in [
+            "self.launch_pad_cancel(cx);",
+            "self.close_theme_picker(cx);",
+            "self.close_broadcast_picker(cx);",
+            "self.close_fleet_search(cx);",
+        ] {
+            let close_at = palette.find(closer).expect(closer);
+            assert!(
+                take_at < close_at,
+                "`{closer}` clears overlay_origin_pane, so the take must come before it"
             );
         }
         // The four focus-only overlays remember the pane they were opened
