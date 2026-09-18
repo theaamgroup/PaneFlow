@@ -361,6 +361,33 @@ fn gh_is_unusable(
     }
 }
 
+/// What the clone thread reports back: progress lines as they parse, then
+/// the outcome.
+enum CloneEvent {
+    Progress(CloneProgress),
+    Finished(Result<(), String>),
+}
+
+/// Relay progress until the clone reports its outcome. `Finished` ends the
+/// wait, never the channel closing: the progress sender lives in the stderr
+/// tap, which `paneflow_process` runs on a reader thread it does not join
+/// on a deadline, so a descendant still holding the pipe (an ssh master, a
+/// credential helper) would keep that sender alive after the run returned
+/// and leave the modal `running` for good. A closed channel with no
+/// `Finished` (the clone thread died) is reported as a failure.
+async fn drive_clone_events(
+    events: &smol::channel::Receiver<CloneEvent>,
+    mut on_progress: impl FnMut(CloneProgress),
+) -> Result<(), String> {
+    while let Ok(event) = events.recv().await {
+        match event {
+            CloneEvent::Progress(progress) => on_progress(progress),
+            CloneEvent::Finished(result) => return result,
+        }
+    }
+    Err("git clone ended without reporting a result".to_string())
+}
+
 fn run_clone(
     target: &str,
     destination: &Path,
@@ -808,23 +835,24 @@ impl PaneFlowApp {
 
             let clone_url = url.clone();
             let clone_destination = destination.clone();
-            let (progress_tx, progress_rx) = smol::channel::unbounded::<CloneProgress>();
+            let (event_tx, event_rx) = smol::channel::unbounded::<CloneEvent>();
+            let progress_tx = event_tx.clone();
             let clone_task = smol::unblock(move || {
-                run_clone(&clone_url, &clone_destination, move |progress| {
-                    let _ = progress_tx.try_send(progress);
-                })
+                let result = run_clone(&clone_url, &clone_destination, move |progress| {
+                    let _ = progress_tx.try_send(CloneEvent::Progress(progress));
+                });
+                let _ = event_tx.try_send(CloneEvent::Finished(result));
             });
-            // The sender lives inside the clone closure, so this loop ends
-            // when the clone does.
-            while let Ok(progress) = progress_rx.recv().await {
+            let result = drive_clone_events(&event_rx, |progress| {
                 let _ = this.update(cx, |app, cx| {
                     if let Some(clone) = app.clone_repo.as_mut() {
                         clone.progress = Some(progress);
                         cx.notify();
                     }
                 });
-            }
-            let result = clone_task.await;
+            })
+            .await;
+            clone_task.await;
 
             let _ = this.update_in(cx, |app, window, cx| match result {
                 Ok(()) => {
@@ -1383,6 +1411,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The stuck-reader case: `paneflow_process` returns on a deadline
+    /// without joining the stderr reader, so the tap (and the progress
+    /// sender inside it) can outlive the run. `Finished` must end the wait
+    /// while that sender is still held, or `running` never clears.
+    #[test]
+    fn clone_events_end_at_finished_while_a_progress_sender_is_still_held() {
+        let (tx, rx) = smol::channel::unbounded::<CloneEvent>();
+        let stuck_tap_sender = tx.clone();
+        tx.try_send(CloneEvent::Progress(CloneProgress {
+            phase: "Receiving objects",
+            fraction: 0.5,
+            detail: None,
+        }))
+        .unwrap();
+        tx.try_send(CloneEvent::Finished(Err("deadline".to_string())))
+            .unwrap();
+        let mut phases = Vec::new();
+        let result = smol::block_on(drive_clone_events(&rx, |progress| {
+            phases.push(progress.phase)
+        }));
+        assert_eq!(result, Err("deadline".to_string()));
+        assert_eq!(phases, vec!["Receiving objects"]);
+        drop(stuck_tap_sender);
+    }
+
+    /// The clone thread going away without reporting is a failure, not a
+    /// hang and not a success.
+    #[test]
+    fn clone_events_closing_without_finished_is_a_failure() {
+        let (tx, rx) = smol::channel::unbounded::<CloneEvent>();
+        drop(tx);
+        let result = smol::block_on(drive_clone_events(&rx, |_| {}));
+        assert!(result.is_err());
+    }
+
     /// The modal is wired into both entry points the issue names and the
     /// render root, and it lands the clone through `open_workspace_folders`
     /// (the one path that records recents, #521). Source-text assertions,
@@ -1404,7 +1467,7 @@ mod tests {
             "app.open_workspace_folders(std::slice::from_ref(&destination), cx);",
             "app.select_workspace(idx, window, cx);",
             // The clone runs off the render thread.
-            "smol::unblock(move || {\n                run_clone(",
+            "smol::unblock(move || {\n                let result = run_clone(",
             // Close restores focus (issue #108).
             "if let Some(handle) = clone.return_focus {",
             "window.focus(&self.empty_workspace_focus, cx);",
