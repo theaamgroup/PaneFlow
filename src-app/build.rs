@@ -223,6 +223,10 @@ fn main() {
     build_summarizer_sidecar(&workspace_root);
 }
 
+/// Xcode developer directory used for the summariser sidecar only (#586).
+/// Unset, the sidecar compiles with whatever toolchain the build selected.
+const SUMMARIZER_DEVELOPER_DIR_ENV: &str = "PANEFLOW_SUMMARIZER_DEVELOPER_DIR";
+
 /// Compile the Swift summariser sidecar next to the crate's own binary.
 ///
 /// `FoundationModels` is Swift-only, so this is the one non-Rust artifact in
@@ -262,14 +266,33 @@ fn build_summarizer_sidecar(workspace_root: &Path) {
     // Deployment target stays low: the binary itself runs anywhere, and the
     // `if #available(macOS 26, *)` guard inside it reports unavailability at
     // runtime rather than failing to launch on an older system.
-    let result = Command::new("swiftc")
+    let mut swiftc = Command::new("swiftc");
+    swiftc
         .arg("-O")
         .arg("-target")
         .arg("arm64-apple-macos13.0")
         .arg("-o")
         .arg(&staged)
-        .arg(&source)
-        .status();
+        .arg(&source);
+
+    // Issue #586 - the release build pins Xcode 16.4 for the Metal / GPUI
+    // compile, and that SDK predates `FoundationModels`, so the sidecar would
+    // compile its "no Foundation Models support" arm and never summarise.
+    // `PANEFLOW_SUMMARIZER_DEVELOPER_DIR` points this ONE command at a newer
+    // Xcode: `/usr/bin/swiftc` is an xcrun shim that resolves the toolchain
+    // and SDK from `DEVELOPER_DIR`. `SDKROOT` is dropped because it outranks
+    // `DEVELOPER_DIR` for SDK selection and would drag the old SDK back in.
+    // Nothing else in the build sees the override.
+    println!("cargo:rerun-if-env-changed={SUMMARIZER_DEVELOPER_DIR_ENV}");
+    if let Some(developer_dir) =
+        std::env::var_os(SUMMARIZER_DEVELOPER_DIR_ENV).filter(|dir| !dir.is_empty())
+    {
+        swiftc
+            .env("DEVELOPER_DIR", developer_dir)
+            .env_remove("SDKROOT");
+    }
+
+    let result = swiftc.status();
 
     let failure = match result {
         Ok(status) if status.success() => match fs::rename(&staged, &output) {

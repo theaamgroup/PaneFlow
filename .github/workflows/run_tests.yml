@@ -582,10 +582,23 @@ jobs:
           prefix-key: "v1-rust"
           key: aarch64-apple-darwin
 
+      # Issue #586: the pinned Xcode 16.4 SDK predates FoundationModels, so
+      # src-app/build.rs compiles the summariser sidecar (and only it) with
+      # the developer directory selected here. Same two steps as release.yml,
+      # so a broken override fails a PR instead of a tagged release.
+      - name: Select a macOS 26 SDK for the summariser sidecar
+        run: |
+          sidecar_developer_dir="$(bash scripts/select-summarizer-sdk.sh)"
+          env -u SDKROOT DEVELOPER_DIR="$sidecar_developer_dir" swiftc --version
+          echo "PANEFLOW_SUMMARIZER_DEVELOPER_DIR=$sidecar_developer_dir" >> "$GITHUB_ENV"
+
       # src-app/build.rs enforces EMBED_SIZE_LIMIT_BYTES on this build;
       # there is no separate YAML size-budget step.
       - name: cargo build --release (aarch64-apple-darwin)
         run: cargo build --release -p paneflow-app --locked --target aarch64-apple-darwin
+
+      - name: Verify the summariser sidecar links FoundationModels
+        run: bash scripts/verify-summarizer-sidecar.sh target/aarch64-apple-darwin/release/paneflow-summarize
 
       - name: Verify Mach-O arm64 binary
         run: |

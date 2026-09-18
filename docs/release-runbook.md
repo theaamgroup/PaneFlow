@@ -282,36 +282,56 @@ roughly 10 to 15 minutes on a `macos-15` runner with Xcode 16.4
 preflight proves the compiler with `xcrun metal --version` (never `xcrun -f
 metal` / `xcrun --find metal`, which succeed when the toolchain component is
 absent) and falls back to `xcodebuild -downloadComponent MetalToolchain`.
+
+The summariser sidecar is the one artifact that does **not** build with that
+pin (#586): the Xcode 16.4 SDK predates `FoundationModels`, so a sidecar
+compiled with it answers "This build has no Foundation Models support" forever.
+`scripts/select-summarizer-sdk.sh` picks the newest installed Xcode whose macOS
+SDK carries the framework, the workflow exports it as
+`PANEFLOW_SUMMARIZER_DEVELOPER_DIR`, and `src-app/build.rs` applies it to the
+sidecar's `swiftc` call only. After the release build,
+`scripts/verify-summarizer-sidecar.sh` fails the run unless the binary
+weak-links `FoundationModels` and keeps the macOS 13.0 deployment target.
+`run_tests.yml::macos_release_build` runs the same two steps on every PR. A
+local build needs neither: with Xcode 26 selected the default toolchain already
+has the SDK.
+
 `notarize-macos.sh` then polls Apple every 30 seconds with a **hard 90-minute
 ceiling**, so a busy Apple queue can stretch this step well past its budget
 without anything actually being wrong.
 
 The `build` job runs, in order:
 
-1. Verify `${RELEASE_TAG#v}` matches the inherited `paneflow-app` Cargo version.
+1. `scripts/select-summarizer-sdk.sh` exports `PANEFLOW_SUMMARIZER_DEVELOPER_DIR`
+   (#586). No installed Xcode with a `FoundationModels` SDK fails here, before
+   compilation.
+2. Verify `${RELEASE_TAG#v}` matches the inherited `paneflow-app` Cargo version.
    A mismatch fails before compilation.
-2. `cargo fmt --check` (hard fail; the cheapest guard against burning a tagged
+3. `cargo fmt --check` (hard fail; the cheapest guard against burning a tagged
    run).
-3. `cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings`.
-4. `cargo test --workspace --locked --target aarch64-apple-darwin`.
-5. `cargo build --release --target aarch64-apple-darwin`.
-6. `scripts/bundle-macos.sh` checksum-verifies the pinned Sparkle distribution,
+4. `cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings`.
+5. `cargo test --workspace --locked --target aarch64-apple-darwin`.
+6. `cargo build --release --target aarch64-apple-darwin`.
+7. `scripts/verify-summarizer-sidecar.sh` checks the built
+   `paneflow-summarize` weak-links `FoundationModels` with `minos 13.0`, before
+   anything is bundled.
+8. `scripts/bundle-macos.sh` checksum-verifies the pinned Sparkle distribution,
    embeds `Sparkle.framework`, and produces `dist/PaneFlow.app`.
-7. `Detect macOS signing secrets`. On a tag push, a missing `APPLE_*` secret is
+9. `Detect macOS signing secrets`. On a tag push, a missing `APPLE_*` secret is
    a hard failure here, not a downgrade to unsigned. Dry-run may continue
    unsigned and uploads `dist/PaneFlow.app` as a workflow artifact.
-8. `scripts/sign-macos.sh` codesigns it (Sparkle helpers inside-out, other
-   nested dylibs and executables,
-   parent seal) with the hardened runtime and the release entitlements.
-9. `scripts/notarize-macos.sh` zips it with `ditto`, submits to `notarytool`,
-   polls, staples the ticket, and runs `spctl --assess`.
-10. `scripts/create-dmg.sh` builds
-   `paneflow-<semver>-aarch64-apple-darwin.dmg` and independently re-verifies
-   `codesign`, `stapler validate`, and `spctl` against the bundle mounted from
-   the finished image. A `.sha256` sibling is staged next to it.
-11. Sparkle's `generate_appcast` signs the DMG with `SPARKLE_PRIVATE_KEY`,
+10. `scripts/sign-macos.sh` codesigns it (Sparkle helpers inside-out, other
+    nested dylibs and executables,
+    parent seal) with the hardened runtime and the release entitlements.
+11. `scripts/notarize-macos.sh` zips it with `ditto`, submits to `notarytool`,
+    polls, staples the ticket, and runs `spctl --assess`.
+12. `scripts/create-dmg.sh` builds
+    `paneflow-<semver>-aarch64-apple-darwin.dmg` and independently re-verifies
+    `codesign`, `stapler validate`, and `spctl` against the bundle mounted from
+    the finished image. A `.sha256` sibling is staged next to it.
+13. Sparkle's `generate_appcast` signs the DMG with `SPARKLE_PRIVATE_KEY`,
     embeds the release notes, and stages `appcast.xml`.
-12. The `release` job (tag-push only) attaches all three assets, verifies the
+14. The `release` job (tag-push only) attaches all three assets, verifies the
     exact remote asset set while the release is still a draft, then publishes.
 
 **Manual judgement:** a green run with a `::warning::` annotation on the signing
