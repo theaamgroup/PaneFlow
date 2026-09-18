@@ -142,6 +142,10 @@ impl PaneFlowApp {
             self.close_fleet_search(cx);
             folded_without_restore = true;
         }
+        if self.agent_summary.is_some() {
+            self.close_agent_summary(cx);
+            folded_without_restore = true;
+        }
         // Only a fold consults the recorded origin, and then it outranks
         // whatever pane a restoring close just focused.
         let origin_pane = origin_pane.filter(|_| folded_without_restore);
@@ -689,6 +693,7 @@ mod tests {
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",
+            "self.close_agent_summary(cx);",
             "let origin_pane = self.outermost_open_overlay_origin();",
             "let origin_pane = origin_pane.filter(|_| folded_without_restore);",
             "self.command_palette_return_pane = origin_pane",
@@ -732,6 +737,7 @@ mod tests {
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",
+            "self.close_agent_summary(cx);",
         ] {
             let close_at = palette.find(closer).expect(closer);
             assert!(

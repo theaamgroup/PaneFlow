@@ -1307,9 +1307,10 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-This paragraph covers the seven origin-tracked overlays, the `OverlayKind`
+This paragraph covers the eight origin-tracked overlays, the `OverlayKind`
 variants in `app/overlay_origin.rs`: theme picker, broadcast picker, fleet
-search, Launch Pad, Pane Overview, Attention Queue, and the pane palette. The
+search, Launch Pad, Pane Overview, Attention Queue, the pane palette, and
+the agent summary. The
 modal dialogs (About, System Info, Custom Buttons, close confirm, Work
 Review), the diff branch menu, and the Editor Controls menu keep their own
 restore paths and are not part of it. Dismissing a tracked overlay (Escape,

@@ -1,7 +1,8 @@
 //! Per-overlay focus origin (issue #584).
 //!
 //! Every overlay that takes the focus (theme picker, broadcast picker, fleet
-//! search, Launch Pad, Pane Overview, Attention Queue, the pane palette)
+//! search, Launch Pad, Pane Overview, Attention Queue, the pane palette, the
+//! agent summary)
 //! records the pane it was opened from, keyed by the overlay, so that:
 //!
 //! - its own close hands focus back to that pane, not to the first leaf;
@@ -32,6 +33,7 @@ pub(crate) enum OverlayKind {
     PaneOverview,
     AttentionQueue,
     PanePalette,
+    AgentSummary,
 }
 
 /// Insertion-ordered origins, outermost first. One entry per overlay kind:
@@ -128,6 +130,7 @@ impl PaneFlowApp {
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
             OverlayKind::AttentionQueue => self.attention_queue_open,
             OverlayKind::PanePalette => self.pane_palette.is_some(),
+            OverlayKind::AgentSummary => self.agent_summary.is_some(),
         }
     }
 
@@ -142,6 +145,7 @@ impl PaneFlowApp {
             OverlayKind::PaneOverview,
             OverlayKind::AttentionQueue,
             OverlayKind::PanePalette,
+            OverlayKind::AgentSummary,
         ]
         .into_iter()
         .filter(|kind| self.overlay_is_open(*kind))
@@ -426,6 +430,12 @@ mod tests {
                 production(include_str!("attention_queue.rs")),
                 "OverlayKind::AttentionQueue",
                 "\"escape\" => self.close_attention_queue_and_restore_focus(window, cx),",
+            ),
+            (
+                "agent_summary/mod.rs",
+                production(include_str!("agent_summary/mod.rs")),
+                "OverlayKind::AgentSummary",
+                "\"escape\" => self.close_agent_summary_and_restore_focus(window, cx),",
             ),
         ] {
             // Fleet search records in the render root: its trigger has no
