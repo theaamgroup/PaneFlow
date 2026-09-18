@@ -17,6 +17,7 @@
 //! panes that stay visible. Up / Down move the cursor, Enter launches, Escape
 //! creates nothing and hands focus back.
 
+use crate::app::overlay_origin::OverlayKind;
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseUpEvent, ParentElement,
@@ -475,6 +476,9 @@ impl PaneFlowApp {
         self.commit_rename(cx);
         self.dismiss_transient_surfaces();
         let restore_focus = window.focused(cx);
+        // Issue #584: a command palette that folds the picker returns a
+        // dispatched action to the pane it was opened from.
+        self.remember_overlay_origin(OverlayKind::PanePalette, window, cx);
 
         let mut tab = crate::workspace::Tab::new(PALETTE_TAB_TITLE, None);
         tab.worktree = checkout.clone();
@@ -536,6 +540,9 @@ impl PaneFlowApp {
         let ws_id = target.read(cx).workspace_id;
         self.commit_rename(cx);
         self.dismiss_transient_surfaces();
+        // Issue #584: the split's target pane is the origin by construction
+        // (no `Window` here to resolve the focused pane with).
+        self.remember_overlay_origin_pane(OverlayKind::PanePalette, &target);
         self.pane_palette = Some(PanePaletteState {
             ws_id,
             placement: PalettePlacement::Split {
@@ -580,6 +587,7 @@ impl PaneFlowApp {
         });
         if !visible {
             self.pane_palette = None;
+            self.forget_overlay_origin(OverlayKind::PanePalette);
             cx.notify();
         }
     }
@@ -682,6 +690,7 @@ impl PaneFlowApp {
     pub(crate) fn discard_pane_palette(&mut self, cx: &mut Context<Self>) {
         self.close_palette_bound_sessions_sidebar(cx);
         self.pane_palette = None;
+        self.forget_overlay_origin(OverlayKind::PanePalette);
         cx.notify();
     }
 
@@ -698,6 +707,9 @@ impl PaneFlowApp {
         let Some(palette) = self.pane_palette.take() else {
             return;
         };
+        // The picker's own restore below is exact (its target pane, or the
+        // element that held the focus); the origin only served a palette fold.
+        self.forget_overlay_origin(OverlayKind::PanePalette);
         self.close_palette_bound_sessions_sidebar(cx);
         match &palette.placement {
             PalettePlacement::Tab { tab_id } => {

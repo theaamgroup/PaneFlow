@@ -67,6 +67,10 @@ answers to, including your overrides from `paneflow.json`. Type to filter on
 words in any order, move with the arrow keys, and press Enter to run the
 highlighted action; Escape closes it. Actions scoped to a surface (terminal
 copy, diff navigation) are not listed, and the palette never lists itself.
+Opening it over another overlay folds that overlay first, and the action lands
+on the pane you were in before it opened. Dismissing any overlay (Pane
+Overview, the Attention Queue, the theme or broadcast picker, fleet search,
+the Launch Pad) also returns you to the pane you opened it from.
 With no workspace open, the sidebar's empty state also carries a
 **Command palette** row.
 

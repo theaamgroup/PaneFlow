@@ -72,6 +72,7 @@ mod window_chrome;
 mod window_state;
 mod workspace;
 
+use crate::app::overlay_origin::OverlayKind;
 use crate::window_chrome::title_bar;
 
 use gpui::{
@@ -1559,11 +1560,12 @@ struct PaneFlowApp {
     /// `restore_focus` precedent), restored when no pane did: the dock's code
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
-    /// The pane that owned focus when a focus-only overlay opened (theme
-    /// picker, broadcast picker, fleet search, Launch Pad); consumed by the
-    /// command palette when it folds that overlay (#523), cleared by each
-    /// overlay's close so a stale pane is never reused.
-    overlay_origin_pane: Option<WeakEntity<pane::Pane>>,
+    /// The pane each open overlay was opened from, keyed by overlay (#584:
+    /// theme picker, broadcast picker, fleet search, Launch Pad, Pane
+    /// Overview, Attention Queue, pane palette). An overlay's own close
+    /// returns the focus to its entry; the command palette reads the
+    /// outermost one when it folds them (#523).
+    overlay_origins: app::overlay_origin::OverlayOrigins,
     /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
     /// closed. The target pane renders the pushed slot snapshot.
     composer: Option<app::composer::ComposerState>,
@@ -2677,7 +2679,7 @@ impl Render for PaneFlowApp {
             if std::mem::take(&mut self.fleet_search_pending_focus) {
                 // Issue #523: the pane still owns focus here; remember it
                 // for a command palette that folds this overlay.
-                self.remember_overlay_origin(window, cx);
+                self.remember_overlay_origin(OverlayKind::FleetSearch, window, cx);
                 self.fleet_search_focus.focus(window, cx);
             }
             app_content = app_content.child(self.render_fleet_search(cx));

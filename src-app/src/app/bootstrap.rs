@@ -813,7 +813,7 @@ impl PaneFlowApp {
             command_palette_scroll: gpui::ScrollHandle::new(),
             command_palette_return_pane: None,
             command_palette_return_focus: None,
-            overlay_origin_pane: None,
+            overlay_origins: Default::default(),
             // EP-001 (cli-cockpit): Composer closed, no groups, no buffers.
             composer: None,
             broadcast: crate::app::broadcast::BroadcastState::default(),

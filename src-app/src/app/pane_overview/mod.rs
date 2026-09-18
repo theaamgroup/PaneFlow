@@ -15,6 +15,7 @@
 
 pub(crate) mod rows;
 
+use crate::app::overlay_origin::OverlayKind;
 use std::sync::Arc;
 
 use gpui::{
@@ -207,9 +208,10 @@ impl PaneFlowApp {
         // Esc then Enter is a no-op round trip. `is_active` is the focused
         // pane, resolved while the terminal still holds focus - i.e. BEFORE
         // the overlay takes it below.
-        // Issue #523: a command palette that folds this overlay lands on
-        // the pane it was opened from, resolved here for the same reason.
-        self.remember_overlay_origin(window, cx);
+        // Issues #523 / #584: Escape and a command palette that folds this
+        // overlay land on the pane it was opened from, resolved here for
+        // the same reason.
+        self.remember_overlay_origin(OverlayKind::PaneOverview, window, cx);
         let cards = self.collect_pane_overview_cards(window, cx);
         let current = cards.iter().find(|c| c.is_active).map(|c| c.surface_id);
         let order = flat_order(&group_cards(cards));
@@ -222,27 +224,25 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// Close without touching the focus: a teleport to a card, or a command
+    /// palette fold, lands the focus itself.
     pub(crate) fn close_pane_overview(&mut self, cx: &mut Context<Self>) {
         self.pane_overview = None;
-        self.overlay_origin_pane = None;
+        self.forget_overlay_origin(OverlayKind::PaneOverview);
         cx.notify();
     }
 
+    /// Escape, an outside click, or the toggle chord: close and hand the
+    /// focus back to the pane the overview was opened from (#584), then the
+    /// first pane, then the empty-workspace placeholder (issue #108).
     pub(crate) fn close_pane_overview_and_restore_focus(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_pane_overview(cx);
-        // Issue #108: fall back to the empty-workspace placeholder when the
-        // workspace we are restoring focus to has no pane.
-        let focused = match self.workspaces.get(self.active_idx) {
-            Some(ws) => ws.focus_first(window, cx),
-            None => false,
-        };
-        if !focused {
-            window.focus(&self.empty_workspace_focus, cx);
-        }
+        self.pane_overview = None;
+        self.restore_overlay_origin_focus(OverlayKind::PaneOverview, window, cx);
+        cx.notify();
     }
 
     /// Click / Enter on a card. The surface is re-resolved at activation time,
