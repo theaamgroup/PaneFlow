@@ -153,6 +153,16 @@ pub struct PaneFlowConfig {
     /// `false` = kill switch - no `Stalled` state is ever produced.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub agent_stall_detection: Option<bool>,
+    /// Issue #576: master switch for the fleet agent summary overlay.
+    /// `None`/`true` = enabled (default ON, like `shell_integration` and
+    /// `agent_stall_detection`). `false` = the chord is a silent no-op and no
+    /// summariser is ever spawned.
+    ///
+    /// The switch is about the feature, not the hardware: a Mac without Apple
+    /// Intelligence already degrades to an explanatory line in the overlay
+    /// without touching this. Turn it off to suppress the surface entirely.
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub agent_summary_enabled: Option<bool>,
     /// EP-004 US-011: silence threshold in seconds before a `Thinking`
     /// session is flagged `Stalled`. `None` resolves to 60 s; values are
     /// clamped to `[30, 86400]`. Checked by the 30 s sweep, so the
@@ -513,6 +523,11 @@ impl PaneFlowConfig {
     /// Resolve the Stalled-detection master switch (default ON).
     pub fn agent_stall_detection_enabled(&self) -> bool {
         self.agent_stall_detection.unwrap_or(true)
+    }
+
+    /// Resolve the fleet agent summary master switch (default ON).
+    pub fn agent_summary_enabled(&self) -> bool {
+        self.agent_summary_enabled.unwrap_or(true)
     }
 
     fn window_backdrop_disables_chrome_material(&self) -> bool {
