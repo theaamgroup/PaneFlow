@@ -1,7 +1,8 @@
 use crate::hooks::dsh::{hooks_source, render_overlay, DSH_HOOKS_BASENAME, DSH_OVERLAY_BASENAME};
 use crate::hooks::muse::{
-    env_baseline_path, remove_muse_settings, MuseHookConfigGuard, MUSE_HOOKS_BASENAME,
-    MUSE_HOOK_ENV_VARS, MUSE_HOOK_EVENTS, MUSE_SETTINGS_BASENAME,
+    env_baseline_path, record_env_baseline_for_test, recorded_env_baseline_for_test,
+    remove_muse_settings, MuseHookConfigGuard, MUSE_HOOKS_BASENAME, MUSE_HOOK_ENV_VARS,
+    MUSE_HOOK_EVENTS, MUSE_SETTINGS_BASENAME,
 };
 use crate::hooks::{
     enable_codex_feature_flag, CodexHookConfigGuard, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER,
@@ -1445,93 +1446,6 @@ fn muse_guard_never_adds_schema_version_to_a_pre_existing_settings_file() {
     assert_eq!(read_json(&settings_path), original);
 }
 
-/// Lay down `content` at `path` as a file PaneFlow created: the lease's
-/// durable marker is what cleanup checks before deleting it.
-fn write_paneflow_created_file(path: &std::path::Path, content: &str) {
-    let mut lease = crate::hooks::HookLease::acquire(path).unwrap();
-    std::fs::write(path, content).unwrap();
-    lease.mark_created().unwrap();
-}
-
-#[test]
-fn muse_guard_keeps_a_pre_existing_paneflow_env_var_forward() {
-    // The user listed PANEFLOW_SOCKET_PATH themselves, with no managed
-    // path. Two sessions overlap; the last one to exit must give back the
-    // file exactly as the user left it, even though it never saw the
-    // original.
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".config/muse");
-    std::fs::create_dir_all(&dir).unwrap();
-    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
-    let original = json!({
-        "schema_version": 1,
-        "managed_hooks_env_vars": ["PANEFLOW_SOCKET_PATH", "MY_VAR"]
-    });
-    std::fs::write(&settings_path, original.to_string()).unwrap();
-
-    let first = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
-    let baseline = env_baseline_path(&settings_path);
-    assert_eq!(
-        read_json(&baseline),
-        json!(["PANEFLOW_SOCKET_PATH"]),
-        "the first session records the user's own PANEFLOW_* names"
-    );
-    let second = MuseHookConfigGuard::install_at(&dir).expect("a second session joins");
-    let merged = read_json(&settings_path);
-    let env_vars = merged["managed_hooks_env_vars"].as_array().unwrap();
-    assert_eq!(env_vars[0], json!("PANEFLOW_SOCKET_PATH"));
-    assert_eq!(env_vars[1], json!("MY_VAR"));
-    assert_eq!(env_vars.len(), 1 + MUSE_HOOK_ENV_VARS.len());
-
-    drop(first);
-    assert!(
-        baseline.exists(),
-        "an earlier session leaves the baseline for the last one"
-    );
-    drop(second);
-    assert_eq!(read_json(&settings_path), original);
-    assert!(!baseline.exists(), "the last session consumes the baseline");
-    assert!(dir.exists());
-}
-
-#[test]
-fn muse_orphan_sweep_keeps_a_pre_existing_paneflow_env_var_forward() {
-    // A crashed session left the managed keys and its baseline behind; the
-    // orphan sweep on the next launch restores the user's file.
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".config/muse");
-    std::fs::create_dir_all(&dir).unwrap();
-    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
-    let original = json!({
-        "schema_version": 1,
-        "managed_hooks_env_vars": ["PANEFLOW_AI_TOOL"]
-    });
-    // Lay down what a session leaves behind when it is killed after
-    // install: the merged file plus its baseline sidecar, and no lease.
-    let hooks_path = dir.join(MUSE_HOOKS_BASENAME);
-    std::fs::write(
-        &settings_path,
-        json!({
-            "schema_version": 1,
-            "managed_hooks_env_vars": [
-                "PANEFLOW_AI_TOOL", "PANEFLOW_WORKSPACE_ID", "PANEFLOW_SURFACE_ID",
-                "PANEFLOW_SOCKET_PATH", "PANEFLOW_AI_PID"
-            ],
-            "managed_hooks_path": hooks_path.to_str().unwrap()
-        })
-        .to_string(),
-    )
-    .unwrap();
-    write_paneflow_created_file(
-        &env_baseline_path(&settings_path),
-        &json!(["PANEFLOW_AI_TOOL"]).to_string(),
-    );
-
-    crate::hooks::muse::sweep_orphan_for_test(&dir);
-    assert_eq!(read_json(&settings_path), original);
-    assert!(!env_baseline_path(&settings_path).exists());
-}
-
 #[test]
 fn muse_install_refusing_a_user_hook_file_leaves_user_managed_settings_alone() {
     // The user pointed managed_hooks_path at the reserved path themselves
@@ -1588,6 +1502,87 @@ fn muse_orphan_sweep_leaves_user_managed_settings_without_a_baseline_alone() {
 }
 
 #[test]
+fn muse_guard_keeps_a_pre_existing_paneflow_env_var_forward() {
+    // The user listed PANEFLOW_SOCKET_PATH themselves, with no managed
+    // path. Two sessions overlap; the last one to exit must give back the
+    // file exactly as the user left it, even though it never saw the
+    // original.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({
+        "schema_version": 1,
+        "managed_hooks_env_vars": ["PANEFLOW_SOCKET_PATH", "MY_VAR"]
+    });
+    std::fs::write(&settings_path, original.to_string()).unwrap();
+
+    let first = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
+    assert_eq!(
+        recorded_env_baseline_for_test(&settings_path).as_deref(),
+        Some(&["PANEFLOW_SOCKET_PATH".to_owned()][..]),
+        "the first session records the user's own PANEFLOW_* names"
+    );
+    assert!(
+        !env_baseline_path(&settings_path).exists(),
+        "nothing is written into the Muse config directory for the record"
+    );
+    let second = MuseHookConfigGuard::install_at(&dir).expect("a second session joins");
+    let merged = read_json(&settings_path);
+    let env_vars = merged["managed_hooks_env_vars"].as_array().unwrap();
+    assert_eq!(env_vars[0], json!("PANEFLOW_SOCKET_PATH"));
+    assert_eq!(env_vars[1], json!("MY_VAR"));
+    assert_eq!(env_vars.len(), 1 + MUSE_HOOK_ENV_VARS.len());
+
+    drop(first);
+    assert!(
+        recorded_env_baseline_for_test(&settings_path).is_some(),
+        "an earlier session leaves the record for the last one"
+    );
+    drop(second);
+    assert_eq!(read_json(&settings_path), original);
+    assert_eq!(
+        recorded_env_baseline_for_test(&settings_path),
+        None,
+        "the last session clears the record"
+    );
+    assert!(dir.exists());
+}
+
+#[test]
+fn muse_orphan_sweep_keeps_a_pre_existing_paneflow_env_var_forward() {
+    // A crashed session left the managed keys and its record behind; the
+    // orphan sweep on the next launch restores the user's file.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let hooks_path = dir.join(MUSE_HOOKS_BASENAME);
+    let original = json!({
+        "schema_version": 1,
+        "managed_hooks_env_vars": ["PANEFLOW_AI_TOOL"]
+    });
+    std::fs::write(
+        &settings_path,
+        json!({
+            "schema_version": 1,
+            "managed_hooks_env_vars": [
+                "PANEFLOW_AI_TOOL", "PANEFLOW_WORKSPACE_ID", "PANEFLOW_SURFACE_ID",
+                "PANEFLOW_SOCKET_PATH", "PANEFLOW_AI_PID"
+            ],
+            "managed_hooks_path": hooks_path.to_str().unwrap()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    record_env_baseline_for_test(&settings_path, &["PANEFLOW_AI_TOOL".to_owned()]);
+
+    crate::hooks::muse::sweep_orphan_for_test(&dir);
+    assert_eq!(read_json(&settings_path), original);
+    assert_eq!(recorded_env_baseline_for_test(&settings_path), None);
+}
+
+#[test]
 fn muse_baseline_survives_a_failed_restore_write() {
     use std::os::unix::fs::PermissionsExt;
     let td = tempfile::TempDir::new().unwrap();
@@ -1609,87 +1604,27 @@ fn muse_baseline_survives_a_failed_restore_write() {
         .to_string(),
     )
     .unwrap();
-    let baseline = env_baseline_path(&settings_path);
-    write_paneflow_created_file(&baseline, &json!(["PANEFLOW_AI_TOOL"]).to_string());
+    record_env_baseline_for_test(&settings_path, &["PANEFLOW_AI_TOOL".to_owned()]);
 
     // A read-only directory makes the atomic replace fail after the
-    // baseline has been read.
+    // record has been read.
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     crate::hooks::muse::sweep_orphan_for_test(&dir);
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(
-        baseline.exists(),
-        "a restore that never reached disk must not consume the baseline"
+        recorded_env_baseline_for_test(&settings_path).is_some(),
+        "a restore that never reached disk must not clear the record"
     );
     assert!(read_json(&settings_path)["managed_hooks_path"].is_string());
 
     crate::hooks::muse::sweep_orphan_for_test(&dir);
     assert_eq!(read_json(&settings_path), original);
-    assert!(!baseline.exists());
+    assert_eq!(recorded_env_baseline_for_test(&settings_path), None);
 }
 
 #[test]
-fn muse_symlinked_baseline_path_is_refused_and_its_target_untouched() {
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".config/muse");
-    std::fs::create_dir_all(&dir).unwrap();
-    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
-    let original = json!({"schema_version": 1, "model": "x"});
-    std::fs::write(&settings_path, original.to_string()).unwrap();
-    let target = td.path().join("precious.txt");
-    std::fs::write(&target, "keep me\n").unwrap();
-    std::os::unix::fs::symlink(&target, env_baseline_path(&settings_path)).unwrap();
-
-    let error = match MuseHookConfigGuard::install_at(&dir) {
-        Ok(_) => panic!("a symlinked baseline path must be refused"),
-        Err(error) => error,
-    };
-    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me\n");
-    assert!(
-        env_baseline_path(&settings_path).is_symlink(),
-        "the user's symlink must survive"
-    );
-    assert_eq!(
-        read_json(&settings_path),
-        original,
-        "settings must not be merged"
-    );
-    assert!(!dir.join(MUSE_HOOKS_BASENAME).exists());
-
-    // Cleanup paths never read or remove through the link either.
-    crate::hooks::muse::sweep_orphan_for_test(&dir);
-    assert!(env_baseline_path(&settings_path).is_symlink());
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me\n");
-}
-
-#[test]
-fn muse_foreign_file_at_the_baseline_path_is_refused() {
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".config/muse");
-    std::fs::create_dir_all(&dir).unwrap();
-    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
-    let original = json!({"schema_version": 1, "model": "x"});
-    std::fs::write(&settings_path, original.to_string()).unwrap();
-    let baseline = env_baseline_path(&settings_path);
-    // A user file, whatever its shape (even PaneFlow's own array shape):
-    // without the durable marker it is not PaneFlow's to replace.
-    for user in ["user notes\n", "[]\n", "[\"PANEFLOW_SOCKET_PATH\"]\n"] {
-        std::fs::write(&baseline, user).unwrap();
-        let error = match MuseHookConfigGuard::install_at(&dir) {
-            Ok(_) => panic!("a foreign file at the baseline path must be refused: {user}"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read_to_string(&baseline).unwrap(), user);
-        assert_eq!(read_json(&settings_path), original);
-        assert!(!dir.join(MUSE_HOOKS_BASENAME).exists());
-    }
-}
-
-#[test]
-fn muse_stale_baseline_paneflow_created_is_replaced_on_first_take() {
-    // A crashed session wrote its sidecar (marker set) but never its
+fn muse_stale_baseline_record_is_replaced_on_first_take() {
+    // A crashed session recorded its baseline but never wrote its
     // settings; the next first take starts over from the file as it is now.
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".config/muse");
@@ -1697,22 +1632,62 @@ fn muse_stale_baseline_paneflow_created_is_replaced_on_first_take() {
     let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
     let original = json!({"schema_version": 1, "managed_hooks_env_vars": ["PANEFLOW_AI_PID"]});
     std::fs::write(&settings_path, original.to_string()).unwrap();
-    let baseline = env_baseline_path(&settings_path);
-    write_paneflow_created_file(&baseline, &json!(["PANEFLOW_SOCKET_PATH"]).to_string());
+    record_env_baseline_for_test(&settings_path, &["PANEFLOW_SOCKET_PATH".to_owned()]);
 
     let guard = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
-    assert_eq!(read_json(&baseline), json!(["PANEFLOW_AI_PID"]));
+    assert_eq!(
+        recorded_env_baseline_for_test(&settings_path).as_deref(),
+        Some(&["PANEFLOW_AI_PID".to_owned()][..])
+    );
     drop(guard);
     assert_eq!(read_json(&settings_path), original);
-    assert!(!baseline.exists());
+    assert_eq!(recorded_env_baseline_for_test(&settings_path), None);
 }
 
 #[test]
-fn muse_user_array_at_the_baseline_path_is_never_read_as_a_baseline() {
+fn muse_user_files_at_the_baseline_path_are_never_read_or_touched() {
+    // The record lives in PaneFlow's lease marker, so whatever a user puts
+    // at the old sidecar path (a string array, prose, a symlink) is not
+    // a baseline, is not read, and survives install, drop, and the sweep.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({"schema_version": 1, "managed_hooks_env_vars": ["PANEFLOW_AI_TOOL"]});
+    std::fs::write(&settings_path, original.to_string()).unwrap();
+    let decoy = env_baseline_path(&settings_path);
+    std::fs::write(&decoy, "[\"PANEFLOW_SOCKET_PATH\"]\n").unwrap();
+
+    let guard = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
+    assert_eq!(
+        recorded_env_baseline_for_test(&settings_path).as_deref(),
+        Some(&["PANEFLOW_AI_TOOL".to_owned()][..]),
+        "the record comes from the settings file, never from the decoy"
+    );
+    drop(guard);
+    assert_eq!(read_json(&settings_path), original);
+    assert_eq!(
+        std::fs::read_to_string(&decoy).unwrap(),
+        "[\"PANEFLOW_SOCKET_PATH\"]\n"
+    );
+
+    let target = td.path().join("precious.txt");
+    std::fs::write(&target, "keep me\n").unwrap();
+    std::fs::remove_file(&decoy).unwrap();
+    std::os::unix::fs::symlink(&target, &decoy).unwrap();
+    let guard = MuseHookConfigGuard::install_at(&dir).expect("a symlink there is irrelevant");
+    drop(guard);
+    crate::hooks::muse::sweep_orphan_for_test(&dir);
+    assert!(decoy.is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me\n");
+    assert_eq!(read_json(&settings_path), original);
+}
+
+#[test]
+fn muse_settings_with_our_path_but_no_record_are_left_alone() {
     // Both reserved paths set by hand: the hook path points at the user's
-    // own hook file and a string array sits at the sidecar path. The
-    // refused install must not take that array as PaneFlow's baseline and
-    // strip the user's settings on the way out; nor may the orphan sweep.
+    // own hook file, and no session ever recorded a baseline. The refused
+    // install and the orphan sweep must not strip the user's settings.
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".config/muse");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1725,66 +1700,13 @@ fn muse_user_array_at_the_baseline_path_is_never_read_as_a_baseline() {
         "managed_hooks_env_vars": ["PANEFLOW_SOCKET_PATH", "PANEFLOW_AI_TOOL"]
     });
     std::fs::write(&settings_path, original.to_string()).unwrap();
-    let baseline = env_baseline_path(&settings_path);
-    std::fs::write(&baseline, "[\"PANEFLOW_SOCKET_PATH\"]\n").unwrap();
 
     assert!(MuseHookConfigGuard::install_at(&dir).is_err());
     assert_eq!(read_json(&settings_path), original);
     crate::hooks::muse::sweep_orphan_for_test(&dir);
     assert_eq!(read_json(&settings_path), original);
     assert_eq!(
-        std::fs::read_to_string(&baseline).unwrap(),
-        "[\"PANEFLOW_SOCKET_PATH\"]\n"
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        "{\"hooks\": {}}\n"
     );
-}
-
-#[test]
-fn muse_sidecar_replaced_by_the_user_mid_session_is_not_deleted() {
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".config/muse");
-    std::fs::create_dir_all(&dir).unwrap();
-    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
-    std::fs::write(
-        &settings_path,
-        json!({"schema_version": 1, "managed_hooks_env_vars": ["PANEFLOW_AI_TOOL"]}).to_string(),
-    )
-    .unwrap();
-    let guard = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
-    let baseline = env_baseline_path(&settings_path);
-    assert!(baseline.exists());
-    // An editor or sync tool replaces the sidecar while the session runs.
-    std::fs::write(&baseline, "user notes\n").unwrap();
-
-    drop(guard);
-    assert_eq!(
-        std::fs::read_to_string(&baseline).unwrap(),
-        "user notes\n",
-        "a file PaneFlow did not write is not PaneFlow's to delete"
-    );
-    assert!(!dir.join(MUSE_HOOKS_BASENAME).exists());
-
-    // The orphan sweep is bound by the same rule.
-    crate::hooks::muse::sweep_orphan_for_test(&dir);
-    assert_eq!(std::fs::read_to_string(&baseline).unwrap(), "user notes\n");
-}
-
-#[test]
-fn muse_sidecar_reaches_disk_before_the_managed_settings() {
-    // The sidecar is published inside the settings merge, so it exists
-    // (marked) by the time the managed keys do; a stale one from a kill
-    // between the two is swept by the next first take.
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".config/muse");
-    std::fs::create_dir_all(&dir).unwrap();
-    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
-    std::fs::write(&settings_path, json!({"schema_version": 1}).to_string()).unwrap();
-    let baseline = env_baseline_path(&settings_path);
-    write_paneflow_created_file(&baseline, "[\"PANEFLOW_AI_PID\"]\n");
-
-    let guard = MuseHookConfigGuard::install_at(&dir).expect("a stale sidecar is swept");
-    assert_eq!(read_json(&baseline), json!([]));
-    assert!(read_json(&settings_path)["managed_hooks_path"].is_string());
-    drop(guard);
-    assert_eq!(read_json(&settings_path), json!({"schema_version": 1}));
-    assert!(!baseline.exists());
 }
