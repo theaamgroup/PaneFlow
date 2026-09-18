@@ -91,7 +91,11 @@ impl PaneFlowApp {
         if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
             return;
         }
+        // The four focus-only overlays remembered the pane they were opened
+        // from (`overlay_origin_pane`); that pane, not the first leaf, is
+        // what the chosen action must land on.
         let mut folded_without_restore = false;
+        let mut origin_pane = None;
         if self.launch_pad.is_some() {
             self.launch_pad_cancel(cx);
             folded_without_restore = true;
@@ -114,6 +118,9 @@ impl PaneFlowApp {
             self.close_fleet_search(cx);
             folded_without_restore = true;
         }
+        if folded_without_restore {
+            origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());
+        }
         self.dismiss_transient_surfaces();
         // Remember where the user was before the palette takes focus:
         // `close_command_palette_and_restore_focus` hands focus back there
@@ -129,7 +136,8 @@ impl PaneFlowApp {
             window.focused(cx)
         };
         self.command_palette_return_pane = self
-            .command_palette_focused_pane(window, cx)
+            .pane_owning_focus(window, cx)
+            .or(origin_pane)
             .or_else(|| self.command_palette_default_pane())
             .map(|pane| pane.downgrade());
         self.command_palette_open = true;
@@ -147,7 +155,7 @@ impl PaneFlowApp {
     /// use, which is why the run path re-focuses the pane's own handle before
     /// dispatching. The active workspace's visible tab in the CLI cockpit,
     /// the Review grid in Review mode.
-    fn command_palette_focused_pane(&self, window: &Window, cx: &App) -> Option<Entity<Pane>> {
+    pub(crate) fn pane_owning_focus(&self, window: &Window, cx: &App) -> Option<Entity<Pane>> {
         let root = if self.mode == paneflow_config::schema::AppMode::Diff {
             self.review.layout.as_ref()?
         } else {
@@ -634,6 +642,8 @@ mod tests {
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",
+            "origin_pane = self.overlay_origin_pane.take().and_then(|p| p.upgrade());",
+            ".or(origin_pane)",
             ".or_else(|| self.command_palette_default_pane())",
             // DESIGN.md 7.2: the rows are a listbox of options for VoiceOver.
             ".role(gpui::Role::ListBox)",
@@ -656,7 +666,25 @@ mod tests {
                 "restore must return focus to the originating pane: missing `{needle}`"
             );
         }
+        // The four focus-only overlays remember the pane they were opened
+        // from, at a point where that pane still owns the focus.
+        let capture =
+            "self.overlay_origin_pane = self.pane_owning_focus(window, cx).map(|p| p.downgrade());";
+        for (module, src) in [
+            ("theme_picker.rs", include_str!("theme_picker.rs")),
+            ("broadcast.rs", include_str!("broadcast.rs")),
+            ("launch_pad.rs", include_str!("launch_pad.rs")),
+        ] {
+            assert!(
+                src.contains(capture),
+                "{module} must remember its origin pane for the command palette"
+            );
+        }
         let main = include_str!("../main.rs");
+        assert!(
+            main.contains("self.pane_owning_focus(window, cx).map(|p| p.downgrade());"),
+            "the deferred fleet-search focus must remember its origin pane first"
+        );
         assert!(
             main.contains(".on_action(cx.listener(Self::handle_open_command_palette))"),
             "the render root must handle OpenCommandPalette"

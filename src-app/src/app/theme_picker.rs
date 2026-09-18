@@ -54,6 +54,8 @@ impl PaneFlowApp {
     }
 
     pub(crate) fn open_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Issue #523: remember the pane for a command palette that folds us.
+        self.overlay_origin_pane = self.pane_owning_focus(window, cx).map(|p| p.downgrade());
         self.show_theme_picker = true;
         self.theme_picker_query.clear();
         // Pre-select the currently applied theme so the list opens on it.
@@ -66,6 +68,7 @@ impl PaneFlowApp {
 
     pub(crate) fn close_theme_picker(&mut self, cx: &mut Context<Self>) {
         self.show_theme_picker = false;
+        self.overlay_origin_pane = None;
         self.theme_picker_query.clear();
         self.theme_picker_selected_idx = 0;
         self.theme_picker_drag = None;

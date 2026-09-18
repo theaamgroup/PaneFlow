@@ -161,6 +161,7 @@ impl PaneFlowApp {
             // Toggle semantics, but never abandon a run in flight.
             if !self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
                 self.launch_pad = None;
+                self.overlay_origin_pane = None;
                 cx.notify();
             }
             return;
@@ -228,6 +229,9 @@ impl PaneFlowApp {
             running: false,
             error: None,
         });
+        // Issue #523: remember the pane for a command palette that folds us,
+        // resolved while the pane still owns the focus.
+        self.overlay_origin_pane = self.pane_owning_focus(window, cx).map(|p| p.downgrade());
         window.focus(&branch_focus, cx);
         cx.notify();
     }
@@ -265,6 +269,7 @@ impl PaneFlowApp {
             return;
         }
         self.launch_pad = None;
+        self.overlay_origin_pane = None;
         cx.notify();
     }
 
@@ -584,6 +589,7 @@ impl PaneFlowApp {
                 cx,
             );
             self.launch_pad = None;
+            self.overlay_origin_pane = None;
             if self.save_session_blocking(cx) {
                 self.spawn_persisted_worktree_teardown(reserved, cx);
             } else {
@@ -707,6 +713,8 @@ impl PaneFlowApp {
         }
 
         self.launch_pad = None;
+
+        self.overlay_origin_pane = None;
         self.pending_pane_focus = Some(new_pane);
         self.activate_workspace_without_window(ws_idx, cx);
     }

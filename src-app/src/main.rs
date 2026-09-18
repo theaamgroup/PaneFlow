@@ -1559,6 +1559,11 @@ struct PaneFlowApp {
     /// `restore_focus` precedent), restored when no pane did: the dock's code
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
+    /// The pane that owned focus when a focus-only overlay opened (theme
+    /// picker, broadcast picker, fleet search, Launch Pad); consumed by the
+    /// command palette when it folds that overlay (#523), cleared by each
+    /// overlay's close so a stale pane is never reused.
+    overlay_origin_pane: Option<WeakEntity<pane::Pane>>,
     /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
     /// closed. The target pane renders the pushed slot snapshot.
     composer: Option<app::composer::ComposerState>,
@@ -2661,6 +2666,10 @@ impl Render for PaneFlowApp {
         // deferred focus (the trigger event has no Window) lands here.
         if self.fleet_search.is_some() && in_cli_mode {
             if std::mem::take(&mut self.fleet_search_pending_focus) {
+                // Issue #523: the pane still owns focus here; remember it
+                // for a command palette that folds this overlay.
+                self.overlay_origin_pane =
+                    self.pane_owning_focus(window, cx).map(|p| p.downgrade());
                 self.fleet_search_focus.focus(window, cx);
             }
             app_content = app_content.child(self.render_fleet_search(cx));
