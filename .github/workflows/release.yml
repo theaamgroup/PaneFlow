@@ -90,6 +90,17 @@ jobs:
             xcrun metal --version
           fi
 
+      # Issue #586: the Xcode 16.4 SDK predates FoundationModels, so a
+      # summariser sidecar compiled with it can never summarise. The pin
+      # above stays for the Metal / GPUI build; src-app/build.rs points the
+      # one `swiftc` call for the sidecar at this directory instead; the
+      # script picks the newest installed Xcode whose SDK has the framework.
+      - name: Select a macOS 26 SDK for the summariser sidecar
+        run: |
+          sidecar_developer_dir="$(bash scripts/select-summarizer-sdk.sh)"
+          env -u SDKROOT DEVELOPER_DIR="$sidecar_developer_dir" swiftc --version
+          echo "PANEFLOW_SUMMARIZER_DEVELOPER_DIR=$sidecar_developer_dir" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 (master as of 2026-08-05)
         with:
           # Must match rust-toolchain.toml verbatim.
@@ -134,6 +145,14 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release -p paneflow-app --locked --target "$TARGET"
+
+      # A sidecar compile failure is only a cargo warning, and one built
+      # without the macOS 26 SDK still runs and answers "no Foundation Models
+      # support". Neither may reach a signed release (issue #586): the script
+      # requires the binary, a weak FoundationModels load command (so it
+      # still launches below macOS 26), and the macOS 13.0 deployment target.
+      - name: Verify the summariser sidecar links FoundationModels
+        run: bash scripts/verify-summarizer-sidecar.sh "target/${TARGET}/release/paneflow-summarize"
 
       - name: Produce .app bundle
         env:

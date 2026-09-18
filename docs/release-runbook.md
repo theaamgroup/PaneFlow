@@ -282,6 +282,20 @@ roughly 10 to 15 minutes on a `macos-15` runner with Xcode 16.4
 preflight proves the compiler with `xcrun metal --version` (never `xcrun -f
 metal` / `xcrun --find metal`, which succeed when the toolchain component is
 absent) and falls back to `xcodebuild -downloadComponent MetalToolchain`.
+
+The summariser sidecar is the one artifact that does **not** build with that
+pin (#586): the Xcode 16.4 SDK predates `FoundationModels`, so a sidecar
+compiled with it answers "This build has no Foundation Models support" forever.
+`scripts/select-summarizer-sdk.sh` picks the newest installed Xcode whose macOS
+SDK carries the framework, the workflow exports it as
+`PANEFLOW_SUMMARIZER_DEVELOPER_DIR`, and `src-app/build.rs` applies it to the
+sidecar's `swiftc` call only. After the release build,
+`scripts/verify-summarizer-sidecar.sh` fails the run unless the binary
+weak-links `FoundationModels` and keeps the macOS 13.0 deployment target.
+`run_tests.yml::macos_release_build` runs the same two steps on every PR. A
+local build needs neither: with Xcode 26 selected the default toolchain already
+has the SDK.
+
 `notarize-macos.sh` then polls Apple every 30 seconds with a **hard 90-minute
 ceiling**, so a busy Apple queue can stretch this step well past its budget
 without anything actually being wrong.
