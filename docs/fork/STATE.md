@@ -1,8 +1,9 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-17 after the #519 startup bench port
-(see the entry below), and before that 2026-09-16 after the post-0.6.1 review
-follow-ups. The prior header described the 0.6.1 cut;
+Living handoff record. Updated 2026-09-18 for the 0.7.0 cut (see the entry
+below), and before that 2026-09-17 after the #519 startup bench port and
+2026-09-16 after the post-0.6.1 review follow-ups. The prior header described
+the 0.6.1 cut;
 the one before that the 0.6.0 cut, and before that the 0.5.0 cut, which shipped
 the Review grid port (#438) and the first v0.12.0 port batch (#417: the
 terminal rendering chain #418 / #419 / #420, the Zed highlight queries #433,
@@ -11,6 +12,45 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 #357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-18: the 0.7.0 cut.** 36 non-merge commits since `v0.6.1`, a minor
+bump because the release adds surfaces rather than only fixing them: the
+agent-summary overlay on `Cmd+Shift+I` (#576, summaries produced on-device by
+Apple's foundation model through a signed Swift sidecar), the command palette
+on `Cmd+Shift+O` (#523), the Clone repository modal driving `gh repo clone`
+and git (#524), recent workspace folders in `recents.json` (#521), the
+release-notes toast on the first launch of a newer bundle (#526), and two more
+hooked agent launchers - DeepSeek Harness (#527) and Muse Code (#528), both
+off by default. Startup lost the 900 ms splash (#517) and the cold
+installed-agent scan came off the render thread (#518). `MAX_WORKSPACES` went
+20 -> 32 and the create path now reports the cap (#572). Every overlay restores
+focus to the pane it was opened from (#584). #586 is the trap worth
+remembering: release.yml pins Xcode 16.4 for Metal, that SDK predates
+`FoundationModels`, and every shipped sidecar would have answered "This build
+has no Foundation Models support" - `scripts/select-summarizer-sdk.sh` now
+picks the newest installed Xcode whose SDK carries the framework for that one
+`swiftc` call, and `scripts/verify-summarizer-sidecar.sh` fails the run if the
+built sidecar does not weak-link it. Curated notes live in
+`docs/releases/v0.7.0.md`.
+
+Pre-flight verification on `main` at `1497db7e` (the commit the bump sits on),
+warm `target/`: `cargo build` exit 0; `cargo test --workspace --no-fail-fast`
+**3,674 passed, 0 failed, 8 ignored** (3,523 / 0 / 7 at `05839a5f`). The eighth
+ignored test is `startup_bench::startup_first_frame_benchmark` from the #519
+port; the other seven are unchanged (the two perf benches, the two
+`tree_memory_probe` tests, the two `layout::render` frame gates, and the
+ghostty stress test). The +151 executed tests were **not** name-diffed against
+the `05839a5f` log this run. `cargo clippy --workspace --all-targets` exit 0,
+**WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0;
+`./target/debug/paneflow --version` -> `paneflow 0.6.1` (run before the bump
+commit); `cargo deny check advisories licenses sources` exit 0 ->
+`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` exit 0,
+**STAGE 2c ZERO-CONDITION 0** with all six components at 0, negative control
+**178** `cfg(unix)` / **93** `cfg(macos)` live sites. `cfg(unix)` moved
+177 -> 178, so CLAUDE.md's figure is corrected rather than re-attested;
+`cfg(macos)` is unchanged. Non-blocking review lines: 76 different-term-space
+hits, 7 orphaned `.rs` files, 0 comment-only references, and **32** ungated
+platform strings (issue #103).
 
 **2026-09-17: #519 startup trace probe and first-frame bench.** Upstream
 `df375ba5` part 3. `PANEFLOW_STARTUP_TRACE=<file>` makes the release binary
