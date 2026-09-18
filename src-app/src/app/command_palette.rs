@@ -153,11 +153,16 @@ impl PaneFlowApp {
         // kept beside the raw handle so a pane that leaves the tree while the
         // palette is open is not re-focused (issue #108). An overlay folded
         // above without a restoring close still holds the focus handle of an
-        // element that is gone next frame, so that handle is not kept.
-        self.command_palette_return_focus = if folded_without_restore {
-            None
-        } else {
+        // element that is gone next frame, so that handle is not kept,
+        // unless the picker holding the workspace's only surface stayed open
+        // under the fold (#522): that workspace has no pane to fall back to,
+        // and the picker is the element the palette hands the keys back to.
+        self.command_palette_return_focus = if !folded_without_restore {
             window.focused(cx)
+        } else if self.pane_palette.is_some() {
+            Some(self.pane_palette_focus.clone())
+        } else {
+            None
         };
         // After a fold the outermost origin comes first: a restoring close
         // has put the focus on its own origin, which for an inner overlay is
@@ -693,8 +698,12 @@ mod tests {
             ".role(gpui::Role::ListBox)",
             "select_option(",
             ".aria_label(label)",
-            "self.command_palette_return_focus = if folded_without_restore {",
+            "self.command_palette_return_focus = if !folded_without_restore {",
             "window.focused(cx)",
+            // A picker that refused to fold (#522) is the return target when
+            // a sibling folded above it: its workspace has no pane to land on.
+            "} else if self.pane_palette.is_some() {",
+            "Some(self.pane_palette_focus.clone())",
             ".map(|pane| pane.downgrade());",
             "if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {",
             "match return_pane.and_then(|pane| pane.upgrade()) {",
