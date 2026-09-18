@@ -230,12 +230,21 @@ grep -q "attempt ${HDIUTIL_RETRY_ATTEMPTS}/${HDIUTIL_RETRY_ATTEMPTS}" "$TMP/plan
 pass "create+verify pair refuses a corrupt image and removes the partial"
 
 # Restore the real create_udzo_dmg for every later test, and prove it.
+# The proof is the function body itself, not an hdiutil exit status (#580):
+# the old proof was a single bare `command hdiutil verify` outside the retry
+# wrapper, so one transient runner-side hdiutil failure failed the lane.
 eval "$ORIG_CREATE_UDZO_DMG"
-RESTORED="$TMP/restored.dmg"
-create_udzo_dmg "$STAGE" "PaneFlowRetryTest" "$RESTORED"
-command hdiutil verify "$RESTORED" >/dev/null 2>&1 \
+[ "$(declare -f create_udzo_dmg)" = "$ORIG_CREATE_UDZO_DMG" ] \
     || fail "create_udzo_dmg was not restored after the planted-non-image block"
-pass "create_udzo_dmg restored after the planted-non-image block"
+# The restored helper still has to build a real image, through the same
+# create+verify retry budget production uses, never a bare hdiutil call.
+RESTORED="$TMP/restored.dmg"
+VERIFY_CALLS=0
+run_logged "$TMP/restored.out" create_and_verify_dmg "$STAGE" "PaneFlowRetryTest" "$RESTORED"
+[ "$rc" -eq 0 ] || fail "restored create_udzo_dmg did not build a verifiable image: $(cat "$TMP/restored.out")"
+[ -s "$RESTORED" ] || fail "restored create_udzo_dmg left no image at $RESTORED"
+[ "$VERIFY_CALLS" -ge 1 ] || fail "restored create+verify never called hdiutil verify"
+pass "create_udzo_dmg restored after the planted-non-image block (verify calls=$VERIFY_CALLS)"
 
 # --- attach of a non-image: same retry budget, still fails ----------------
 # attach's hdiutil invocation is inside $(...), so ATTACH_CALLS in this
