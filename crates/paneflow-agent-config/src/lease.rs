@@ -14,7 +14,10 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 /// The lock file carries no payload. Windows shared locks forbid writes to the
 /// locked range for *every* process, the lock holder included, so writing the
 /// ownership bit into the locked file fails with `ERROR_LOCK_VIOLATION` there.
-/// The bit is therefore a sibling file whose presence is the whole state.
+/// The bit is therefore a sibling file: its presence is the ownership
+/// state, and it may carry a small PaneFlow-written note
+/// (`mark_created_with`) for state that must never live in a
+/// user-editable file.
 pub struct ConfigLease {
     file: Option<File>,
     marker: PathBuf,
@@ -66,23 +69,49 @@ impl ConfigLease {
         }
     }
 
+    /// Whether the durable ownership bit is set for the leased resource:
+    /// a non-consuming peek for callers that must read a managed file
+    /// only when PaneFlow created it, leaving the bit for the eventual last
+    /// owner to consume.
+    pub fn is_created(&self) -> bool {
+        self.marker.exists()
+    }
+
     /// Persist that the leased resource was created by PaneFlow.
     ///
     /// Callers serialize this update with their configuration lock. The bit
     /// survives process crashes and is consumed by the eventual last owner.
     pub fn mark_created(&mut self) -> Result<()> {
+        self.mark_created_with("")
+    }
+
+    /// [`Self::mark_created`] with a note stored in the marker itself: a
+    /// small record only PaneFlow writes (the marker lives under
+    /// PaneFlow's own configuration directory, keyed by the resource
+    /// path), for state that must survive the session that recorded it
+    /// and must never be read from a user-editable file.
+    pub fn mark_created_with(&mut self, note: &str) -> Result<()> {
+        use std::io::Write;
         if self.file.is_none() {
             return Err(Error::new(
                 ErrorKind::BrokenPipe,
                 "configuration lease was already released",
             ));
         }
-        let marker = OpenOptions::new()
+        let mut marker = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&self.marker)?;
+        marker.write_all(note.as_bytes())?;
         marker.sync_all()
+    }
+
+    /// The note stored by [`Self::mark_created_with`], `None` when the
+    /// ownership bit is not set. A non-consuming read; the eventual last
+    /// owner still clears the bit with [`LastConfigLease::take_created`].
+    pub fn created_note(&self) -> Option<String> {
+        std::fs::read_to_string(&self.marker).ok()
     }
 }
 
@@ -145,6 +174,46 @@ mod tests {
         let mut later = ConfigLease::acquire(&resource).unwrap();
         let mut last = later.try_take_last().unwrap().unwrap();
         assert!(!last.take_created().unwrap());
+    }
+
+    #[test]
+    fn created_note_survives_the_recording_lease_and_is_cleared_by_the_last() {
+        let resource = unique_resource("note");
+        let mut recorder = ConfigLease::acquire(&resource).unwrap();
+        assert!(!recorder.is_created());
+        assert_eq!(recorder.created_note(), None);
+        recorder.mark_created_with("[\"A\"]").unwrap();
+        drop(recorder);
+
+        // File drop releases the shared flock synchronously, but a loaded
+        // runner can still observe WouldBlock on the immediate exclusive
+        // upgrade. Same retry as dropped_lease_does_not_strand_the_resource.
+        let mut last = None;
+        for attempt in 0..10 {
+            let mut later = ConfigLease::acquire(&resource).unwrap();
+            assert!(later.is_created());
+            assert_eq!(later.created_note().as_deref(), Some("[\"A\"]"));
+            match later.try_take_last().unwrap() {
+                Some(taken) => {
+                    last = Some(taken);
+                    break;
+                }
+                None => {
+                    if attempt + 1 < 10 {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        let mut last = last.expect(
+            "dropped lease stranded the resource: try_take_last stayed WouldBlock after Drop",
+        );
+        assert!(last.take_created().unwrap());
+        drop(last);
+        assert_eq!(
+            ConfigLease::acquire(&resource).unwrap().created_note(),
+            None
+        );
     }
 
     #[test]

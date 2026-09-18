@@ -226,7 +226,7 @@ pub struct Workspace {
     /// even when Claude Code is launched without the Paneflow shim.
     /// Refreshed by the per-pane `scan_panes` walk (EP-005 US-012) - the
     /// union of every pane's detected agents; the recognition vocabulary
-    /// is `TerminalAgent::ALL` binaries (17), unified from the historical
+    /// is `TerminalAgent::ALL` binaries (18), unified from the historical
     /// 3-name `AI_PROCESS_NAMES` list.
     pub detected_agents: std::collections::HashSet<String>,
     /// User-defined New pane palette buttons for this workspace.

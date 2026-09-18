@@ -109,6 +109,10 @@ actions!(
         // does not grow an Unassigned row. Opens this fork's GitHub new-issue
         // form in the default browser.
         ReportIssue,
+        // Issue #523 (upstream 9aa03d09 part 4): the command palette, every
+        // context-free action with its live binding. `secondary-shift-o` here;
+        // upstream's `secondary-shift-p` is Pane Overview in this fork (#339).
+        OpenCommandPalette,
         // US-022 (cmux port 2026-Q2) - markdown pane navigation. Scoped to
         // the `Markdown` key context (root) and `MarkdownSearch` (when the
         // find overlay is open). Defined as separate actions from terminal

@@ -76,6 +76,7 @@ fn test_serialization_roundtrip() {
         qoder_button_visible: None,
         openclaw_button_visible: None,
         deepseek_harness_button_visible: None,
+        muse_button_visible: None,
         terminal: None,
         agent_panel: None,
         external_editor: None,

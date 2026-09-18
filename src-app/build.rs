@@ -69,18 +69,19 @@ use embed_staging::{
 /// `target/embed/{debug,release}/bin/<target>/`.
 /// Enforced to keep the main PaneFlow binary slim.
 ///
-/// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-08-27):
+/// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-09-17,
+/// after the Muse Code port, #528):
 ///
 /// ```text
-///   paneflow-shim      472_368 B
-///   paneflow-ai-hook   336_464 B
-///   paneflow-mcp       403_008 B
+///   paneflow-shim      506_192 B
+///   paneflow-ai-hook   353_168 B
+///   paneflow-mcp       419_840 B
 ///   ----------------------------
-///   total            1_211_840 B
+///   total            1_279_200 B
 /// ```
 ///
-/// Cap 1_400_000 B = total + 15.5% (headroom relative to the total);
-/// slack 188_160 B = 13.4% of the cap. Two denominators, two readings:
+/// Cap 1_400_000 B = total + 9.4% (headroom relative to the total);
+/// slack 120_800 B = 8.6% of the cap. Two denominators, two readings:
 /// name the one you mean when you re-baseline. The cap exists so a real
 /// bloat regression fails the build, while strip/LTO jitter does not.
 /// Release builds print the measured total as a `cargo:warning` so the

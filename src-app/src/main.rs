@@ -1540,6 +1540,30 @@ struct PaneFlowApp {
     /// Scroll state for the theme picker list (visible scrollbar overlay).
     theme_picker_scroll: gpui::ScrollHandle,
     theme_picker_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
+    /// Issue #523: the command palette (`app/command_palette.rs`), the theme
+    /// picker's shell over every context-free action. Rows are derived from
+    /// `effective_shortcuts` on every render, never stored.
+    command_palette_open: bool,
+    command_palette_query: String,
+    command_palette_selected: usize,
+    command_palette_focus: FocusHandle,
+    command_palette_scroll: gpui::ScrollHandle,
+    /// The pane that held focus when the palette opened, restored before the
+    /// chosen action dispatches so a pane-targeting command (Close pane,
+    /// Split, Toggle zoom) lands on the pane the user was in, not the first
+    /// leaf. Weak, so the palette never keeps a pane closed underneath it
+    /// alive; the restore upgrades and re-checks tree membership. `None`
+    /// when nothing in the pane tree was focused.
+    command_palette_return_pane: Option<WeakEntity<pane::Pane>>,
+    /// Whatever held focus when the palette opened (the pane palette's
+    /// `restore_focus` precedent), restored when no pane did: the dock's code
+    /// editor, the sidebar, the empty-workspace placeholder.
+    command_palette_return_focus: Option<FocusHandle>,
+    /// The pane that owned focus when a focus-only overlay opened (theme
+    /// picker, broadcast picker, fleet search, Launch Pad); consumed by the
+    /// command palette when it folds that overlay (#523), cleared by each
+    /// overlay's close so a stale pane is never reused.
+    overlay_origin_pane: Option<WeakEntity<pane::Pane>>,
     /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
     /// closed. The target pane renders the pushed slot snapshot.
     composer: Option<app::composer::ComposerState>,
@@ -2323,6 +2347,8 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_diff_dock_maximize))
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
+            // Issue #523: the command palette (every context-free action).
+            .on_action(cx.listener(Self::handle_open_command_palette))
             // EP-001 (cli-cockpit): Composer + broadcast groups.
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))
@@ -2620,6 +2646,21 @@ impl Render for PaneFlowApp {
         if self.show_theme_picker {
             app_content = app_content.child(self.render_theme_picker(cx));
         }
+        // Issue #523: the command palette. Not mode-gated: it lists only
+        // context-free actions, and each of those already decides for itself
+        // what it does outside the CLI cockpit.
+        // A modal opened over the palette from the menu bar (About, System
+        // Info), a close-confirm, or Settings outranks it, so the palette folds itself
+        // at the next frame instead of staying mounted and unfocused with
+        // its keystrokes reaching the terminal under the scrim; the modal's
+        // own close then restores focus through its usual chain.
+        if self.command_palette_open {
+            if self.command_palette_blocked() {
+                self.close_command_palette(cx);
+            } else {
+                app_content = app_content.child(self.render_command_palette(cx));
+            }
+        }
 
         // EP-001 US-002 (cli-cockpit): broadcast-group picker modal.
         if self.broadcast_picker_open {
@@ -2641,6 +2682,9 @@ impl Render for PaneFlowApp {
         // deferred focus (the trigger event has no Window) lands here.
         if self.fleet_search.is_some() && in_cli_mode {
             if std::mem::take(&mut self.fleet_search_pending_focus) {
+                // Issue #523: the pane still owns focus here; remember it
+                // for a command palette that folds this overlay.
+                self.remember_overlay_origin(window, cx);
                 self.fleet_search_focus.focus(window, cx);
             }
             app_content = app_content.child(self.render_fleet_search(cx));

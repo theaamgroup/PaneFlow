@@ -458,6 +458,7 @@ mod tests {
             qoder_button_visible: Some(true),
             openclaw_button_visible: Some(true),
             deepseek_harness_button_visible: Some(true),
+            muse_button_visible: Some(true),
             ..Default::default()
         }
     }
@@ -487,6 +488,7 @@ mod tests {
                 TerminalAgent::Qoder,
                 TerminalAgent::Openclaw,
                 TerminalAgent::DeepSeekHarness,
+                TerminalAgent::Muse,
             ]
         );
         assert!(
@@ -534,6 +536,7 @@ mod tests {
             TerminalAgent::Qoder => &mut config.qoder_button_visible,
             TerminalAgent::Openclaw => &mut config.openclaw_button_visible,
             TerminalAgent::DeepSeekHarness => &mut config.deepseek_harness_button_visible,
+            TerminalAgent::Muse => &mut config.muse_button_visible,
         };
         *slot = Some(visible);
     }

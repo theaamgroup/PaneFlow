@@ -207,6 +207,9 @@ impl PaneFlowApp {
         // Esc then Enter is a no-op round trip. `is_active` is the focused
         // pane, resolved while the terminal still holds focus - i.e. BEFORE
         // the overlay takes it below.
+        // Issue #523: a command palette that folds this overlay lands on
+        // the pane it was opened from, resolved here for the same reason.
+        self.remember_overlay_origin(window, cx);
         let cards = self.collect_pane_overview_cards(window, cx);
         let current = cards.iter().find(|c| c.is_active).map(|c| c.surface_id);
         let order = flat_order(&group_cards(cards));
@@ -221,6 +224,7 @@ impl PaneFlowApp {
 
     pub(crate) fn close_pane_overview(&mut self, cx: &mut Context<Self>) {
         self.pane_overview = None;
+        self.overlay_origin_pane = None;
         cx.notify();
     }
 

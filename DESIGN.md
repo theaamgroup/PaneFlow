@@ -477,15 +477,15 @@ is 9 (`pane.rs:150`), sized to sit inside a 15 px chip (5.3). Apart from it no
 glyph outside 10–16 and 18 exists, and every larger `size(px(N.))` is an icon
 button *box*, not a glyph.
 
-The fork ships 17 agent launchers (`agent_launcher.rs:23-41`). Marks live in
-`src-app/assets/agents/` for the twelve secondary agents and in `icons/` for
+The fork ships 18 agent launchers (`agent_launcher.rs:23-42`). Marks live in
+`src-app/assets/agents/` for the thirteen secondary agents and in `icons/` for
 Claude, Codex, OpenCode, Pi, and Hermes (`icons/hermesagent.svg`).
 `TerminalAgent::icon_multicolor` (`agent_launcher.rs:155-163`) is the authority
 on rendering: exactly five — Antigravity, CodeBuddy, Gemini, Kiro, Openclaw —
 render through `img()`. `TerminalAgent::accent()` is a separate and narrower
-authority on tint: it returns a brand color for **only four** agents — Claude
-`#d97757`, Amp `#F34E3F`, Qoder `#2ADB5C`, DeepSeek Harness `#4D6BFE` — and
-`None` for every other, whose monochrome mark deliberately takes the theme's
+authority on tint: it returns a brand color for **only five** agents — Claude
+`#d97757`, Amp `#F34E3F`, Qoder `#2ADB5C`, DeepSeek Harness `#4D6BFE`, Muse
+Code `#0081FB` — and `None` for every other, whose monochrome mark deliberately takes the theme's
 text color. Do not invent a brand tint for a mark that returns `None`.
 
 ### 4.8 Motion
@@ -987,6 +987,25 @@ put and the user picks a preset or closes the workspace instead. Split placement
 renders no branch row and never opens the sessions rail; Tab placement may, when
 `new_pane_shows_sessions` is on.
 
+**The command palette** (`secondary-shift-o`, issue #523) is the theme
+picker's shell: the menu surface of 5.6, 544 wide, docked 96 from the top of
+the window over a 0.4 black scrim. A 13 px query line reading `Execute a
+command…` sits over a hairline, then one `select_item` row per action that
+carries no key context, each showing the Settings description and its live
+binding at 11 px muted on the trailing edge (no chord, no trailing text).
+Typing filters on whole words in any order; arrows move and scroll the
+selection into view; Enter or a click closes the palette, hands focus back to
+the pane, then dispatches; Escape and an outside click close it the same way.
+It never lists itself, opening it folds any other open overlay first (a
+focus-only overlay returns it to the pane that overlay was opened from; a
+Launch Pad mid-run keeps it closed, and the chord is inert while a modal
+dialog or the Settings surface is open, About, System Info, Custom Buttons,
+close confirm, Work Review, Settings, while any of those opened over the
+palette closes it), and upstream's `secondary-shift-p` is
+Pane Overview in this fork. The Workspaces rail's empty state names it beside `Open folder`.
+The list is a `ListBox` of `ListBoxOption` rows carrying `aria_selected` and
+a label of the description plus its chord, per 7.2.
+
 ### 5.8 Feedback
 
 **Toasts** appear bottom right on `subtle` with a 15 px icon and 12.5 px text
@@ -1124,6 +1143,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Maximize / restore the Changes dock | `secondary-shift-f` |
 | New file tab, new terminal tab (dock) | `secondary-g`, `secondary-j` |
 | Composer, Launch Pad | `secondary-shift-space`, `secondary-shift-l` |
+| Command palette | `secondary-shift-o` |
 | Attention queue, jump to next waiting agent | `secondary-shift-a`, `secondary-shift-j` |
 | Broadcast groups, toggle member | `secondary-shift-m`, `secondary-shift-b` |
 | Copy, paste (Terminal) | `cmd-c` / `cmd-v`, plus `ctrl-shift-c` / `ctrl-shift-v` |

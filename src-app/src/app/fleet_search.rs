@@ -264,6 +264,7 @@ impl PaneFlowApp {
     pub(crate) fn close_fleet_search(&mut self, cx: &mut Context<Self>) {
         self.cancel_fleet_scan();
         self.fleet_search = None;
+        self.overlay_origin_pane = None;
         // Closing the search dismisses the badges (US-018 AC) - and bumping
         // the generation cancels any in-flight deposit/timer.
         self.fleet_search_generation += 1;

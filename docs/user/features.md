@@ -74,6 +74,17 @@ inspected base. Arrow keys select rows; Enter opens the task and R opens its dif
 GitHub information uses your existing `gh` authentication. Local repository
 information remains available if GitHub cannot be reached.
 
+## Command palette
+
+`Cmd+Shift+O` opens a palette listing every registered context-free action
+(split, tabs, workspaces, layouts, the overlays) with the binding it currently
+answers to, including your overrides from `paneflow.json`. Type to filter on
+words in any order, move with the arrow keys, and press Enter to run the
+highlighted action; Escape closes it. Actions scoped to a surface (terminal
+copy, diff navigation) are not listed, and the palette never lists itself.
+With no workspace open, the sidebar's empty state also carries a
+**Command palette** row.
+
 ## Start a task from an issue
 
 In the agent Launch Pad (`Cmd+Shift+L`), enter a GitHub issue number or HTTPS
@@ -217,7 +228,7 @@ A sidebar keeps your past chats one click away.
 
 Inside a project, run multiple threads - independent agent sessions -
 and choose which CLI drives each one: Claude Code, Codex, OpenCode, Pi,
-Hermes, Openclaw, DeepSeek Harness, Factory's Droid, or anything else on your `PATH`. Mix
+Hermes, Openclaw, DeepSeek Harness, Muse Code, Factory's Droid, or anything else on your `PATH`. Mix
 them per thread, so one thread can plan with Codex while another
 implements with Claude Code, side by side in the same project.
 

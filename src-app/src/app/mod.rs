@@ -13,6 +13,7 @@ pub mod broadcast;
 pub mod cli_diff_dock;
 pub mod close_confirm;
 pub mod close_guard;
+pub mod command_palette;
 pub mod composer;
 pub mod constants;
 pub mod custom_buttons_modal;
