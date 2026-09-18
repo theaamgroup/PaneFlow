@@ -696,6 +696,15 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Work review and PR checks",
         group: ShortcutGroup::Agents,
     },
+    // Issue #523: the command palette lists every entry of this table whose
+    // `context` is empty (`action_is_global`), except itself.
+    ActionMeta {
+        name: "open_command_palette",
+        factory: || Box::new(crate::OpenCommandPalette),
+        context: "",
+        description: "Command palette",
+        group: ShortcutGroup::Application,
+    },
 ];
 
 fn find(name: &str) -> Option<&'static ActionMeta> {
@@ -712,6 +721,13 @@ pub(super) fn context_for_action(name: &str) -> Option<&'static str> {
     find(name)
         .map(|meta| meta.context)
         .filter(|ctx| !ctx.is_empty())
+}
+
+/// Whether `name` is a registered action that needs no key context, i.e. one
+/// the command palette can dispatch from anywhere (issue #523). Unknown names
+/// are not global.
+pub fn action_is_global(name: &str) -> bool {
+    find(name).is_some_and(|meta| meta.context.is_empty())
 }
 
 /// Human-readable description for an action name, or `"Unknown"`.

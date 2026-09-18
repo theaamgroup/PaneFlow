@@ -1540,6 +1540,14 @@ struct PaneFlowApp {
     /// Scroll state for the theme picker list (visible scrollbar overlay).
     theme_picker_scroll: gpui::ScrollHandle,
     theme_picker_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
+    /// Issue #523: the command palette (`app/command_palette.rs`), the theme
+    /// picker's shell over every context-free action. Rows are derived from
+    /// `effective_shortcuts` on every render, never stored.
+    command_palette_open: bool,
+    command_palette_query: String,
+    command_palette_selected: usize,
+    command_palette_focus: FocusHandle,
+    command_palette_scroll: gpui::ScrollHandle,
     /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
     /// closed. The target pane renders the pushed slot snapshot.
     composer: Option<app::composer::ComposerState>,
@@ -2317,6 +2325,8 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_diff_dock_maximize))
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
+            // Issue #523: the command palette (every context-free action).
+            .on_action(cx.listener(Self::handle_open_command_palette))
             // EP-001 (cli-cockpit): Composer + broadcast groups.
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))
@@ -2612,6 +2622,12 @@ impl Render for PaneFlowApp {
 
         if self.show_theme_picker {
             app_content = app_content.child(self.render_theme_picker(cx));
+        }
+        // Issue #523: the command palette. Not mode-gated: it lists only
+        // context-free actions, and each of those already decides for itself
+        // what it does outside the CLI cockpit.
+        if self.command_palette_open {
+            app_content = app_content.child(self.render_command_palette(cx));
         }
 
         // EP-001 US-002 (cli-cockpit): broadcast-group picker modal.

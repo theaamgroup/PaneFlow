@@ -1312,6 +1312,46 @@ impl PaneFlowApp {
                             )
                             .child("Open folder")
                     })
+                    // Issue #523: the command palette is the one overlay that
+                    // reaches every global action, so the empty state names it
+                    // next to Open folder (#520's welcome screen was dropped,
+                    // so this rail is where a first launch finds it).
+                    .child({
+                        let hover_bg = crate::app::constants::sidebar_tab_active_background();
+                        let chord = self
+                            .shortcut_for_action(
+                                crate::app::command_palette::OPEN_COMMAND_PALETTE_ACTION,
+                            )
+                            .map(|key| SharedString::from(key.to_string()));
+                        div()
+                            .id("empty-command-palette")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(10.))
+                            .py(px(5.))
+                            .rounded(px(6.))
+                            .bg(ui.subtle)
+                            .text_color(ui.text)
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .hover(move |style| style.bg(hover_bg))
+                            .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                this.open_command_palette(w, cx);
+                            }))
+                            .child("Command palette")
+                            .when_some(chord, |row, key| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(10.))
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(ui.muted)
+                                        .child(key),
+                                )
+                            })
+                    })
                     .children(self.render_empty_state_recents(ui, cx)),
             );
         }

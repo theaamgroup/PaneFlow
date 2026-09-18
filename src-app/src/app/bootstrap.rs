@@ -805,6 +805,12 @@ impl PaneFlowApp {
             theme_picker_focus: cx.focus_handle(),
             theme_picker_scroll: gpui::ScrollHandle::new(),
             theme_picker_drag: None,
+            // Issue #523: command palette closed.
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_selected: 0,
+            command_palette_focus: cx.focus_handle(),
+            command_palette_scroll: gpui::ScrollHandle::new(),
             // EP-001 (cli-cockpit): Composer closed, no groups, no buffers.
             composer: None,
             broadcast: crate::app::broadcast::BroadcastState::default(),

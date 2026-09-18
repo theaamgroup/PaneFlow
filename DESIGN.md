@@ -978,7 +978,19 @@ a 260 px menu, one 34 px row per preset with its 14 px agent mark and a `not
 installed` marker at 10 px (`looking` while the first PATH walk is pending), and
 an inline error in `vc_deleted` at 11 px.
 Escape folds the branch menu before it closes the palette; arrows move and
-scroll the selection into view. **Escape is inert while the palette is the
+scroll the selection into view.
+
+**The command palette** (`secondary-shift-o`, issue #523) is the theme
+picker's shell: the menu surface of 5.6, 544 wide, docked 96 from the top of
+the window over a 0.4 black scrim. A 13 px query line reading `Execute a
+command…` sits over a hairline, then one `select_item` row per action that
+carries no key context, each showing the Settings description and its live
+binding at 11 px muted on the trailing edge (no chord, no trailing text).
+Typing filters on whole words in any order; arrows move and scroll the
+selection into view; Enter or a click closes the palette, hands focus back to
+the pane, then dispatches; Escape and an outside click close it the same way.
+It never lists itself, and upstream's `secondary-shift-p` is Pane Overview in
+this fork. The Workspaces rail's empty state names it beside `Open folder`. **Escape is inert while the palette is the
 workspace's last surface** (its Tab placement sits on the workspace's only tab
 and that tab has no pane, issue #522): closing it would only close the tab and
 have the next frame reinstall a fresh palette on a new one, so the palette stays
@@ -1086,6 +1098,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Maximize / restore the Changes dock | `secondary-shift-f` |
 | New file tab, new terminal tab (dock) | `secondary-g`, `secondary-j` |
 | Composer, Launch Pad | `secondary-shift-space`, `secondary-shift-l` |
+| Command palette | `secondary-shift-o` |
 | Attention queue, jump to next waiting agent | `secondary-shift-a`, `secondary-shift-j` |
 | Broadcast groups, toggle member | `secondary-shift-m`, `secondary-shift-b` |
 | Copy, paste (Terminal) | `cmd-c` / `cmd-v`, plus `ctrl-shift-c` / `ctrl-shift-v` |

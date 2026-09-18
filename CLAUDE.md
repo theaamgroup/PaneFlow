@@ -252,7 +252,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 95 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 96 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -290,6 +290,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                         workspace in a compact grid; tabs stay adjacent with
 │                                         split-pane labels and eight-row previews (rows.rs: packing/navigation)
 │   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
+│   ├── command_palette.rs             ← Cmd+Shift+O palette: every context-free registry action with its live
+│   │                                     binding, whole-word filter, Enter dispatches, never lists itself (#523)
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
 │   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
@@ -477,7 +479,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 96 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -502,6 +504,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 ac
 | `Cmd+G` / `Cmd+J` | New file tab / new terminal tab (diff dock; `secondary-g` / `secondary-j`) | Global, not Terminal/TextInput/CodeEditor |
 | `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
 | `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
+| `Cmd+Shift+O` | Command palette (every context-free action with its live binding; `app/command_palette.rs`, #523; upstream's `Cmd+Shift+P` is Pane Overview here) | Global |
 | `Cmd+Alt+F` | Toggle files sidebar for the active tab (inert in Review and Settings, where the rail is unmounted) | Global |
 | `Cmd+Shift+F` | Maximize / restore the Changes dock (`toggle_diff_dock_maximize`; no-op while the dock is not visible) | Global |
 | `Cmd+Alt+B` | Toggle primary sidebar (persisted across launches) | Global |
