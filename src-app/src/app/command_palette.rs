@@ -19,7 +19,7 @@ use gpui::{
 use crate::PaneFlowApp;
 use crate::keybindings::{ShortcutEntry, action_is_global};
 use crate::pane::Pane;
-use crate::settings::components::{menu_divider_color, menu_surface, select_item};
+use crate::settings::components::{menu_divider_color, menu_surface, select_option};
 
 /// The registry name of the action that opens this palette. Filtered out of
 /// its own rows: a palette that lists "Command palette" would only toggle
@@ -328,8 +328,13 @@ impl PaneFlowApp {
             .border_color(menu_divider_color(ui))
             .child(query_text);
 
+        // DESIGN.md 7.2: a select list is a `ListBox` of `ListBoxOption`s
+        // carrying `aria_selected`, so VoiceOver announces which command
+        // Enter will run while focus stays on the palette container.
         let mut list = div()
             .id("command-palette-list")
+            .role(gpui::Role::ListBox)
+            .aria_label("Commands")
             .flex()
             .flex_col()
             .gap(px(1.))
@@ -350,12 +355,17 @@ impl PaneFlowApp {
         } else {
             for (idx, entry) in matches.iter().enumerate() {
                 let is_selected = idx == self.command_palette_selected;
+                let label = match &entry.shortcut {
+                    Some(key) => format!("{}, {key}", entry.description),
+                    None => entry.description.clone(),
+                };
                 list = list.child(
-                    select_item(
+                    select_option(
                         SharedString::from(format!("command-palette-row-{idx}")),
                         is_selected,
                         ui,
                     )
+                    .aria_label(label)
                     .cursor(CursorStyle::PointingHand)
                     .justify_between()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -550,6 +560,10 @@ mod tests {
             .next()
             .expect("production half of the palette module");
         for needle in [
+            // DESIGN.md 7.2: the rows are a listbox of options for VoiceOver.
+            ".role(gpui::Role::ListBox)",
+            "select_option(",
+            ".aria_label(label)",
             "self.command_palette_return_focus = window.focused(cx);",
             ".map(|pane| pane.downgrade());",
             "if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {",

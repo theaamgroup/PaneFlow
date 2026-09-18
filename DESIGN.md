@@ -997,6 +997,8 @@ selection into view; Enter or a click closes the palette, hands focus back to
 the pane, then dispatches; Escape and an outside click close it the same way.
 It never lists itself, and upstream's `secondary-shift-p` is Pane Overview in
 this fork. The Workspaces rail's empty state names it beside `Open folder`.
+The list is a `ListBox` of `ListBoxOption` rows carrying `aria_selected` and
+a label of the description plus its chord, per 7.2.
 
 ### 5.8 Feedback
 
