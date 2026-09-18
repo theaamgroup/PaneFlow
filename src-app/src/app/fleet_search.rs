@@ -14,6 +14,7 @@
 //! row re-runs the LOCAL search on the target view (`arm_search`), which
 //! recomputes matches fresh - also how the US-017 rail lights up.
 
+use crate::app::overlay_origin::OverlayKind;
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     ParentElement, SharedString, Styled, Window, deferred, div, prelude::*, px,
@@ -261,14 +262,31 @@ impl PaneFlowApp {
         }
     }
 
+    /// Close without touching the focus: a teleport to a hit, or a command
+    /// palette fold, lands the focus itself.
     pub(crate) fn close_fleet_search(&mut self, cx: &mut Context<Self>) {
         self.cancel_fleet_scan();
         self.fleet_search = None;
-        self.overlay_origin_pane = None;
+        self.forget_overlay_origin(OverlayKind::FleetSearch);
         // Closing the search dismisses the badges (US-018 AC) - and bumping
         // the generation cancels any in-flight deposit/timer.
         self.fleet_search_generation += 1;
         self.push_fleet_badges(&std::collections::HashMap::new(), cx);
+        cx.notify();
+    }
+
+    /// Escape or an outside click: close and hand the focus back to the pane
+    /// the search was opened from (#584).
+    pub(crate) fn close_fleet_search_and_restore_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_fleet_scan();
+        self.fleet_search = None;
+        self.fleet_search_generation += 1;
+        self.push_fleet_badges(&std::collections::HashMap::new(), cx);
+        self.restore_overlay_origin_focus(OverlayKind::FleetSearch, window, cx);
         cx.notify();
     }
 
@@ -333,7 +351,7 @@ impl PaneFlowApp {
             None => return,
         };
         match key {
-            "escape" => self.close_fleet_search(cx),
+            "escape" => self.close_fleet_search_and_restore_focus(window, cx),
             "enter" if len > 0 => {
                 let idx = selected.min(len - 1);
                 let sid = self
@@ -372,8 +390,8 @@ impl PaneFlowApp {
             .occlude()
             .track_focus(&self.fleet_search_focus)
             .on_key_down(cx.listener(Self::handle_fleet_search_key_down))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.close_fleet_search(cx);
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                this.close_fleet_search_and_restore_focus(window, cx);
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())

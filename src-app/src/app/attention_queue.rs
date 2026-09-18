@@ -11,6 +11,7 @@
 //! queue is open disappears at the next repaint, and a row whose pane died
 //! is dropped rather than left navigable.
 
+use crate::app::overlay_origin::OverlayKind;
 use std::collections::HashSet;
 
 use gpui::{
@@ -121,37 +122,36 @@ impl PaneFlowApp {
             self.close_attention_queue_and_restore_focus(window, cx);
             return;
         }
-        // Issue #523: a command palette that folds this overlay lands on
-        // the pane it was opened from.
-        self.remember_overlay_origin(window, cx);
+        // Issues #523 / #584: Escape and a command palette that folds this
+        // overlay land on the pane it was opened from.
+        self.remember_overlay_origin(OverlayKind::AttentionQueue, window, cx);
         self.attention_queue_open = true;
         self.attention_queue_selected = 0;
         self.attention_queue_focus.focus(window, cx);
         cx.notify();
     }
 
+    /// Close without touching the focus: a teleport to a waiting pane, or a
+    /// command palette fold, lands the focus itself.
     pub(crate) fn close_attention_queue(&mut self, cx: &mut Context<Self>) {
         self.attention_queue_open = false;
-        self.overlay_origin_pane = None;
+        self.forget_overlay_origin(OverlayKind::AttentionQueue);
         self.attention_queue_selected = 0;
         cx.notify();
     }
 
+    /// Escape, an outside click, or the toggle chord: close and hand the
+    /// focus back to the pane the queue was opened from (#584), then the
+    /// first pane, then the empty-workspace placeholder (issue #108).
     pub(crate) fn close_attention_queue_and_restore_focus(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_attention_queue(cx);
-        // Issue #108: fall back to the empty-workspace placeholder when the
-        // workspace we are restoring focus to has no pane.
-        let focused = match self.workspaces.get(self.active_idx) {
-            Some(ws) => ws.focus_first(window, cx),
-            None => false,
-        };
-        if !focused {
-            window.focus(&self.empty_workspace_focus, cx);
-        }
+        self.attention_queue_open = false;
+        self.attention_queue_selected = 0;
+        self.restore_overlay_origin_focus(OverlayKind::AttentionQueue, window, cx);
+        cx.notify();
     }
 
     /// Enter / click on a row: teleport to the waiting pane (workspace

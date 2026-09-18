@@ -29,6 +29,7 @@ pub mod fleet_search;
 pub mod ipc_handler;
 pub mod launch_pad;
 pub mod notifications;
+pub(crate) mod overlay_origin;
 pub mod pane_overview;
 pub mod pane_palette;
 pub mod profile_menu;

@@ -8,6 +8,7 @@
 //! most ONE group (v1). The picker reuses the theme-picker modal scaffold
 //! (dedicated focus handle + manual key handler + deferred backdrop).
 
+use crate::app::overlay_origin::OverlayKind;
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
@@ -239,7 +240,7 @@ impl PaneFlowApp {
             return;
         }
         if self.broadcast_picker_open {
-            self.close_broadcast_picker(cx);
+            self.close_broadcast_picker_and_restore_focus(window, cx);
         } else {
             self.open_broadcast_picker(window, cx);
         }
@@ -248,8 +249,9 @@ impl PaneFlowApp {
     // -- Picker (theme-picker scaffold) ------------------------------------
 
     pub(crate) fn open_broadcast_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Issue #523: remember the pane for a command palette that folds us.
-        self.remember_overlay_origin(window, cx);
+        // Issues #523 / #584: remember the pane the picker is opened from,
+        // for its own close and for a command palette that folds it.
+        self.remember_overlay_origin(OverlayKind::BroadcastPicker, window, cx);
         self.broadcast_picker_open = true;
         self.broadcast_picker_query.clear();
         self.broadcast_picker_selected = self.broadcast.active.unwrap_or(0);
@@ -259,16 +261,33 @@ impl PaneFlowApp {
         cx.notify();
     }
 
+    /// Close without touching the focus: a command palette fold, which
+    /// lands the focus itself.
     pub(crate) fn close_broadcast_picker(&mut self, cx: &mut Context<Self>) {
         self.broadcast_picker_open = false;
-        self.overlay_origin_pane = None;
+        self.forget_overlay_origin(OverlayKind::BroadcastPicker);
         self.broadcast_picker_query.clear();
         self.broadcast_picker_renaming = None;
         self.broadcast_picker_error = None;
         cx.notify();
     }
 
-    fn create_broadcast_group(&mut self, name: &str, cx: &mut Context<Self>) {
+    /// Escape, an outside click, the toggle chord, or a chosen group: close
+    /// and hand the focus back to the pane the picker was opened from (#584).
+    pub(crate) fn close_broadcast_picker_and_restore_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.broadcast_picker_open = false;
+        self.broadcast_picker_query.clear();
+        self.broadcast_picker_renaming = None;
+        self.broadcast_picker_error = None;
+        self.restore_overlay_origin_focus(OverlayKind::BroadcastPicker, window, cx);
+        cx.notify();
+    }
+
+    fn create_broadcast_group(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         match validate_group_name(&self.broadcast.groups, name, None) {
             Ok(()) => {
                 let color_idx = next_free_color(&self.broadcast.groups);
@@ -278,7 +297,7 @@ impl PaneFlowApp {
                     members: Vec::new(),
                 });
                 self.broadcast.active = Some(self.broadcast.groups.len() - 1);
-                self.close_broadcast_picker(cx);
+                self.close_broadcast_picker_and_restore_focus(window, cx);
             }
             Err(e) => {
                 self.broadcast_picker_error = Some(e);
@@ -329,7 +348,7 @@ impl PaneFlowApp {
     pub(crate) fn handle_broadcast_picker_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
@@ -342,7 +361,7 @@ impl PaneFlowApp {
                     self.broadcast_picker_error = None;
                     cx.notify();
                 } else {
-                    self.close_broadcast_picker(cx);
+                    self.close_broadcast_picker_and_restore_focus(window, cx);
                 }
             }
             "enter" => {
@@ -351,12 +370,12 @@ impl PaneFlowApp {
                     self.commit_broadcast_rename(idx, &name, cx);
                 } else if !self.broadcast_picker_query.trim().is_empty() {
                     let name = self.broadcast_picker_query.clone();
-                    self.create_broadcast_group(&name, cx);
+                    self.create_broadcast_group(&name, window, cx);
                 } else if len > 0 {
                     let idx = self.broadcast_picker_selected.min(len - 1);
                     self.broadcast.active = Some(idx);
                     self.refresh_composer_slot(cx);
-                    self.close_broadcast_picker(cx);
+                    self.close_broadcast_picker_and_restore_focus(window, cx);
                 }
             }
             "up" => {
@@ -427,8 +446,8 @@ impl PaneFlowApp {
             .occlude()
             .track_focus(&self.broadcast_picker_focus)
             .on_key_down(cx.listener(Self::handle_broadcast_picker_key_down))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.close_broadcast_picker(cx);
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                this.close_broadcast_picker_and_restore_focus(window, cx);
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
@@ -546,10 +565,10 @@ impl PaneFlowApp {
                         .bg(resting_background)
                         .text_color(if is_active { ui.accent } else { ui.text })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.broadcast.active = Some(idx);
                             this.refresh_composer_slot(cx);
-                            this.close_broadcast_picker(cx);
+                            this.close_broadcast_picker_and_restore_focus(window, cx);
                             cx.stop_propagation();
                         }))
                         .child(
