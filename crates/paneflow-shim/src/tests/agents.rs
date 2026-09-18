@@ -1,7 +1,7 @@
 use crate::hooks::dsh::{hooks_source, render_overlay, DSH_HOOKS_BASENAME, DSH_OVERLAY_BASENAME};
 use crate::hooks::muse::{
-    remove_muse_settings, MuseHookConfigGuard, MUSE_HOOKS_BASENAME, MUSE_HOOK_ENV_VARS,
-    MUSE_HOOK_EVENTS, MUSE_SETTINGS_BASENAME,
+    env_baseline_path, remove_muse_settings, MuseHookConfigGuard, MUSE_HOOKS_BASENAME,
+    MUSE_HOOK_ENV_VARS, MUSE_HOOK_EVENTS, MUSE_SETTINGS_BASENAME,
 };
 use crate::hooks::{
     enable_codex_feature_flag, CodexHookConfigGuard, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER,
@@ -1387,6 +1387,7 @@ fn muse_remove_leaves_a_foreign_managed_hooks_path_alone() {
     remove_muse_settings(
         &mut root,
         std::path::Path::new("/home/u/.config/muse/paneflow-hooks.json"),
+        &[],
     );
     assert_eq!(root, before);
 }
@@ -1402,6 +1403,7 @@ fn muse_remove_leaves_a_foreign_managed_hooks_path_with_our_basename_alone() {
     remove_muse_settings(
         &mut root,
         std::path::Path::new("/home/u/.config/muse/paneflow-hooks.json"),
+        &[],
     );
     assert_eq!(
         root, before,
@@ -1412,6 +1414,7 @@ fn muse_remove_leaves_a_foreign_managed_hooks_path_with_our_basename_alone() {
     remove_muse_settings(
         &mut ours,
         std::path::Path::new("/etc/muse/paneflow-hooks.json"),
+        &[],
     );
     assert_eq!(
         ours,
@@ -1440,4 +1443,84 @@ fn muse_guard_never_adds_schema_version_to_a_pre_existing_settings_file() {
 
     drop(guard);
     assert_eq!(read_json(&settings_path), original);
+}
+
+#[test]
+fn muse_guard_keeps_a_pre_existing_paneflow_env_var_forward() {
+    // The user listed PANEFLOW_SOCKET_PATH themselves, with no managed
+    // path. Two sessions overlap; the last one to exit must give back the
+    // file exactly as the user left it, even though it never saw the
+    // original.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({
+        "schema_version": 1,
+        "managed_hooks_env_vars": ["PANEFLOW_SOCKET_PATH", "MY_VAR"]
+    });
+    std::fs::write(&settings_path, original.to_string()).unwrap();
+
+    let first = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
+    let baseline = env_baseline_path(&settings_path);
+    assert_eq!(
+        read_json(&baseline),
+        json!(["PANEFLOW_SOCKET_PATH"]),
+        "the first session records the user's own PANEFLOW_* names"
+    );
+    let second = MuseHookConfigGuard::install_at(&dir).expect("a second session joins");
+    let merged = read_json(&settings_path);
+    let env_vars = merged["managed_hooks_env_vars"].as_array().unwrap();
+    assert_eq!(env_vars[0], json!("PANEFLOW_SOCKET_PATH"));
+    assert_eq!(env_vars[1], json!("MY_VAR"));
+    assert_eq!(env_vars.len(), 1 + MUSE_HOOK_ENV_VARS.len());
+
+    drop(first);
+    assert!(
+        baseline.exists(),
+        "an earlier session leaves the baseline for the last one"
+    );
+    drop(second);
+    assert_eq!(read_json(&settings_path), original);
+    assert!(!baseline.exists(), "the last session consumes the baseline");
+    assert!(dir.exists());
+}
+
+#[test]
+fn muse_orphan_sweep_keeps_a_pre_existing_paneflow_env_var_forward() {
+    // A crashed session left the managed keys and its baseline behind; the
+    // orphan sweep on the next launch restores the user's file.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({
+        "schema_version": 1,
+        "managed_hooks_env_vars": ["PANEFLOW_AI_TOOL"]
+    });
+    // Lay down what a session leaves behind when it is killed after
+    // install: the merged file plus its baseline sidecar, and no lease.
+    let hooks_path = dir.join(MUSE_HOOKS_BASENAME);
+    std::fs::write(
+        &settings_path,
+        json!({
+            "schema_version": 1,
+            "managed_hooks_env_vars": [
+                "PANEFLOW_AI_TOOL", "PANEFLOW_WORKSPACE_ID", "PANEFLOW_SURFACE_ID",
+                "PANEFLOW_SOCKET_PATH", "PANEFLOW_AI_PID"
+            ],
+            "managed_hooks_path": hooks_path.to_str().unwrap()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        env_baseline_path(&settings_path),
+        json!(["PANEFLOW_AI_TOOL"]).to_string(),
+    )
+    .unwrap();
+
+    crate::hooks::muse::sweep_orphan_for_test(&dir);
+    assert_eq!(read_json(&settings_path), original);
+    assert!(!env_baseline_path(&settings_path).exists());
 }

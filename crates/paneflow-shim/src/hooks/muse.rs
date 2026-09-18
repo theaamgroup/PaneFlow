@@ -37,6 +37,12 @@ pub(crate) const MUSE_HOOK_ENV_VARS: &[&str] = &[
     "PANEFLOW_AI_TOOL",
     "PANEFLOW_AI_PID",
 ];
+/// Sidecar beside the lease's `.created` marker holding the `PANEFLOW_*`
+/// names a user had listed in `managed_hooks_env_vars` before PaneFlow first
+/// took the file (no managed path was set). Cleanup keeps exactly those
+/// names, so a pre-existing forward survives even when the last session to
+/// exit is not the one that recorded it.
+pub(crate) const MUSE_ENV_BASELINE_EXTENSION: &str = "paneflow-env-baseline";
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 const MANAGED_HOOKS_PATH_KEY: &str = "managed_hooks_path";
 const MANAGED_HOOKS_ENV_VARS_KEY: &str = "managed_hooks_env_vars";
@@ -64,11 +70,17 @@ impl MuseHookConfigGuard {
 
     pub(crate) fn install_at(directory: &Path) -> std::io::Result<Self> {
         let hooks_path = directory.join(MUSE_HOOKS_BASENAME);
+        let baseline_path = env_baseline_path(&directory.join(MUSE_SETTINGS_BASENAME));
         let mut installed = install_hook_config_file(
             directory,
             MUSE_SETTINGS_BASENAME,
             "Muse Code",
-            |root| merge_muse_settings(root, &hooks_path),
+            |root| {
+                if let Some(pre_existing) = merge_muse_settings(root, &hooks_path)? {
+                    write_env_baseline(&baseline_path, &pre_existing)?;
+                }
+                Ok(())
+            },
             InvalidJsonPolicy::Refuse,
         )?;
         // The hook file embeds this instance's ai-hook path; a sibling
@@ -162,7 +174,13 @@ pub(crate) fn muse_config_dir() -> Option<PathBuf> {
     }
 }
 
-fn merge_muse_settings(root: &mut Value, hooks_path: &Path) -> std::io::Result<()> {
+/// Merge PaneFlow's managed keys. Returns the `PANEFLOW_*` names the user
+/// had already listed while no managed path was set (PaneFlow is taking the
+/// file for the first time), so the caller can record them as the baseline.
+fn merge_muse_settings(
+    root: &mut Value,
+    hooks_path: &Path,
+) -> std::io::Result<Option<Vec<String>>> {
     let invalid = |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
     let Some(object) = root.as_object_mut() else {
         return Err(invalid("Muse Code settings root is not an object"));
@@ -170,15 +188,15 @@ fn merge_muse_settings(root: &mut Value, hooks_path: &Path) -> std::io::Result<(
     let hooks_path = hooks_path
         .to_str()
         .ok_or_else(|| invalid("Muse Code hook path is not valid UTF-8"))?;
-    match object.get(MANAGED_HOOKS_PATH_KEY) {
-        None | Some(Value::Null) => {}
-        Some(Value::String(existing)) if existing == hooks_path => {}
+    let first_take = match object.get(MANAGED_HOOKS_PATH_KEY) {
+        None | Some(Value::Null) => true,
+        Some(Value::String(existing)) if existing == hooks_path => false,
         Some(_) => {
             return Err(invalid(
                 "user Muse Code settings already point managed_hooks_path elsewhere",
             ))
         }
-    }
+    };
     if object
         .get(MANAGED_HOOKS_ENV_VARS_KEY)
         .is_some_and(|value| !value.is_null() && !value.is_array())
@@ -200,21 +218,45 @@ fn merge_muse_settings(root: &mut Value, hooks_path: &Path) -> std::io::Result<(
     if env_vars.is_null() {
         *env_vars = json!([]);
     }
+    let mut pre_existing = Vec::new();
     if let Some(entries) = env_vars.as_array_mut() {
         for name in MUSE_HOOK_ENV_VARS {
-            if !entries.iter().any(|entry| entry.as_str() == Some(name)) {
+            if entries.iter().any(|entry| entry.as_str() == Some(name)) {
+                pre_existing.push((*name).to_owned());
+            } else {
                 entries.push(json!(name));
             }
         }
     }
-    Ok(())
+    Ok((first_take && !pre_existing.is_empty()).then_some(pre_existing))
+}
+
+pub(crate) fn env_baseline_path(settings_path: &Path) -> PathBuf {
+    settings_path.with_extension(MUSE_ENV_BASELINE_EXTENSION)
+}
+
+fn write_env_baseline(path: &Path, names: &[String]) -> std::io::Result<()> {
+    write_json_atomic(path, &json!(names))
+}
+
+/// The recorded baseline, consumed: the sidecar is removed once read so a
+/// later session starts from the file as the user left it.
+fn take_env_baseline(path: &Path) -> Vec<String> {
+    let names = read_optional_text(path)
+        .ok()
+        .flatten()
+        .and_then(|content| serde_json::from_str::<Vec<String>>(&content).ok())
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(path);
+    names
 }
 
 /// Strip PaneFlow's managed keys, but only when `managed_hooks_path` is
 /// exactly `hooks_path`: a foreign file that happens to share the basename
 /// (`/etc/muse/paneflow-hooks.json`) is someone else's and stays intact,
-/// `PANEFLOW_*` env entries included.
-pub(crate) fn remove_muse_settings(root: &mut Value, hooks_path: &Path) {
+/// `PANEFLOW_*` env entries included. Names in `keep` were the user's own
+/// before PaneFlow took the file and stay in place.
+pub(crate) fn remove_muse_settings(root: &mut Value, hooks_path: &Path, keep: &[String]) {
     let Some(object) = root.as_object_mut() else {
         return;
     };
@@ -231,9 +273,9 @@ pub(crate) fn remove_muse_settings(root: &mut Value, hooks_path: &Path) {
         .and_then(Value::as_array_mut)
     {
         entries.retain(|entry| {
-            !entry
-                .as_str()
-                .is_some_and(|name| MUSE_HOOK_ENV_VARS.contains(&name))
+            !entry.as_str().is_some_and(|name| {
+                MUSE_HOOK_ENV_VARS.contains(&name) && !keep.iter().any(|kept| kept == name)
+            })
         });
     }
     if object
@@ -254,13 +296,16 @@ fn settings_is_bare(root: &Value) -> bool {
 
 fn restore_settings(path: &Path, hooks_path: &Path, owned: bool) -> std::io::Result<()> {
     let Some(content) = read_optional_text(path)? else {
+        let _ = std::fs::remove_file(env_baseline_path(path));
         return Ok(());
     };
     let Ok(mut root) = serde_json::from_str::<Value>(&content) else {
+        let _ = std::fs::remove_file(env_baseline_path(path));
         return Ok(());
     };
     let before = root.clone();
-    remove_muse_settings(&mut root, hooks_path);
+    let keep = take_env_baseline(&env_baseline_path(path));
+    remove_muse_settings(&mut root, hooks_path, &keep);
     if root == before {
         return Ok(());
     }
@@ -269,6 +314,11 @@ fn restore_settings(path: &Path, hooks_path: &Path, owned: bool) -> std::io::Res
     } else {
         write_json_atomic(path, &root)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn sweep_orphan_for_test(directory: &Path) {
+    sweep_orphan(directory);
 }
 
 fn sweep_orphan(directory: &Path) {
