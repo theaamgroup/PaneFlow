@@ -94,22 +94,33 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    /// The pane holding focus right now: the active workspace's visible tab
-    /// in the CLI cockpit, the Review grid in Review mode.
+    /// The pane that owns the focus right now: the leaf whose handle is
+    /// focused *or contains* the focused element (`contains_focused`), so a
+    /// pane whose find bar holds focus still counts as the user's pane.
+    /// `LayoutTree::focused_pane` is the exact-match lookup Split and Close
+    /// use, which is why the run path re-focuses the pane's own handle before
+    /// dispatching. The active workspace's visible tab in the CLI cockpit,
+    /// the Review grid in Review mode.
     fn command_palette_focused_pane(&self, window: &Window, cx: &App) -> Option<Entity<Pane>> {
-        if self.mode == paneflow_config::schema::AppMode::Diff {
-            return self
-                .review
-                .layout
-                .as_ref()
-                .and_then(|root| root.focused_pane(window, cx));
-        }
-        self.workspaces
-            .get(self.active_idx)?
-            .active_tab()
-            .root
-            .as_ref()?
-            .focused_pane(window, cx)
+        let root = if self.mode == paneflow_config::schema::AppMode::Diff {
+            self.review.layout.as_ref()?
+        } else {
+            self.workspaces
+                .get(self.active_idx)?
+                .active_tab()
+                .root
+                .as_ref()?
+        };
+        let mut owner = None;
+        root.any_leaf(&mut |pane| {
+            if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {
+                owner = Some(pane.clone());
+                true
+            } else {
+                false
+            }
+        });
+        owner
     }
 
     /// Whether `pane` is still a leaf of the tree focus would return to.
@@ -139,14 +150,30 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    /// Close and hand focus back to where the palette was opened from: the
-    /// originating pane while it is still in the tree, else the non-pane
-    /// element that held focus (dock editor, sidebar, placeholder), else the
-    /// active workspace's first pane, else the empty-workspace placeholder
-    /// (issue #108: an overlay that closes with nothing focused leaves every
-    /// global chord without a handler).
+    /// Cancel (Escape, outside click, the toggle chord): close and put focus
+    /// back exactly where it was.
     pub(crate) fn close_command_palette_and_restore_focus(
         &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_command_palette_restoring(false, window, cx);
+    }
+
+    /// Close and hand focus back to where the palette was opened from. With
+    /// `for_dispatch` the originating pane's own handle is focused (a find bar
+    /// inside it held the focus, say), so the action about to dispatch
+    /// resolves that pane through the exact-match `focused_pane` lookup;
+    /// without it the element that held focus gets it back unchanged. Either
+    /// way a pane that left the tree while the palette was open is skipped,
+    /// then the fallback is the non-pane element that held focus (dock
+    /// editor, sidebar, placeholder), the active workspace's first pane, and
+    /// last the empty-workspace placeholder (issue #108: an overlay that
+    /// closes with nothing focused leaves every global chord without a
+    /// handler).
+    fn close_command_palette_restoring(
+        &mut self,
+        for_dispatch: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -155,11 +182,14 @@ impl PaneFlowApp {
         self.close_command_palette(cx);
         match return_pane {
             Some(pane) if self.command_palette_pane_is_live(&pane) => {
-                pane.read(cx).focus_handle(cx).focus(window, cx);
+                match return_focus {
+                    Some(handle) if !for_dispatch => window.focus(&handle, cx),
+                    _ => pane.read(cx).focus_handle(cx).focus(window, cx),
+                }
                 return;
             }
             // The pane is gone: fall through to the first-leaf chain rather
-            // than re-focus its handle.
+            // than re-focus a handle inside it.
             Some(_) => {}
             None => {
                 if let Some(handle) = return_focus {
@@ -197,7 +227,7 @@ impl PaneFlowApp {
         else {
             return;
         };
-        self.close_command_palette_and_restore_focus(window, cx);
+        self.close_command_palette_restoring(true, window, cx);
         window.dispatch_action(action, cx);
     }
 
@@ -491,10 +521,12 @@ mod tests {
         for needle in [
             "self.command_palette_return_focus = window.focused(cx);",
             "self.command_palette_return_pane = self.command_palette_focused_pane(window, cx);",
+            "if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {",
             "let return_pane = self.command_palette_return_pane.take();",
             "Some(pane) if self.command_palette_pane_is_live(&pane) => {",
-            "pane.read(cx).focus_handle(cx).focus(window, cx);",
-            "window.focus(&handle, cx);",
+            "Some(handle) if !for_dispatch => window.focus(&handle, cx),",
+            "_ => pane.read(cx).focus_handle(cx).focus(window, cx),",
+            "self.close_command_palette_restoring(true, window, cx);\n        window.dispatch_action(action, cx);",
             "self.command_palette_return_pane = None;",
             "self.command_palette_return_focus = None;",
         ] {
