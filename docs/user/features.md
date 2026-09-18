@@ -117,6 +117,9 @@ Installed apps check at startup and hourly, download verified updates in the
 background, and install when you quit. A downloaded update or failed check
 produces a notice. **PaneFlow → Check for Updates…** opens Sparkle's update UI
 for a manual check or retry; **About PaneFlow** shows the current update status.
+The first launch of a newer version shows one "Updated to PaneFlow x.y.z" notice
+in the bottom-right corner; **View release notes** opens that release on GitHub,
+and the notice stays until you click it or close it.
 Your running terminals are not restarted by background checks. A source build
 outside an app bundle cannot update itself.
 

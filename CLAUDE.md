@@ -371,6 +371,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── keys.rs                            ← key translation (mouse encoding lives in terminal/input.rs)
 ├── search.rs                          ← find-in-buffer UI glue
 ├── limits.rs                          ← centralized ingress/egress size caps
+├── release_notes.rs                   ← `last-launched-version` cache marker (hand-parsed x.y.z); first launch of a newer version raises the sticky release-notes toast (#526)
 ├── runtime_paths.rs                   ← runtime/data/config path helpers + sun_path guard
 ├── login_shell_env.rs                 ← adopt the login shell's PATH (GUI launch has none)
 ├── config_writer.rs                   ← read-modify-write paneflow.json

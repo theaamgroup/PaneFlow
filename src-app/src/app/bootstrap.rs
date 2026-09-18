@@ -45,6 +45,31 @@ impl PaneFlowApp {
         // framework and return immediately.
         crate::sparkle::start_if_bundled();
 
+        // Issue #526: the first launch of a newer version raises one sticky
+        // "Updated to PaneFlow x.y.z" toast. The marker lives under the cache
+        // dir, so it fires whatever installed the bundle (Sparkle's
+        // install-on-quit, a DMG drag, a local build). The marker is read and
+        // rewritten off the main thread, after the post-boot delay.
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                smol::Timer::after(std::time::Duration::from_millis(
+                    crate::app::constants::RELEASE_TOAST_DELAY_MS,
+                ))
+                .await;
+                let Some(version) = smol::unblock(crate::release_notes::upgraded_version).await
+                else {
+                    return;
+                };
+                log::info!("paneflow: first launch on {version}; raising the release toast");
+                let _ = cx.update(|cx| {
+                    this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                        app.show_release_notes_toast(&version, cx);
+                    })
+                });
+            },
+        )
+        .detach();
+
         // Issue #283: `system.capabilities` is answered on the socket thread
         // from this process-wide mirror. Publish it before the listener
         // exists so a client that treats socket appearance as readiness
