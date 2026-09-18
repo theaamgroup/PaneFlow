@@ -91,7 +91,7 @@ impl PaneFlowApp {
         if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
             return;
         }
-        if self.command_palette_blocked_by_modal() {
+        if self.command_palette_blocked() {
             return;
         }
         // The four focus-only overlays remembered the pane they were opened
@@ -191,12 +191,16 @@ impl PaneFlowApp {
         owner
     }
 
-    /// A modal dialog keeps the chord inert. Each of these owns the focus
-    /// and paints at or above the palette's `with_priority(7)`, so a palette
-    /// opened underneath would take the keys while staying invisible and
-    /// leave the visible dialog unresponsive. They are dialogs the user asked
-    /// for, or a destructive decision, so the palette refuses rather than
-    /// folding them. The next dialog registers here:
+    /// A modal dialog or the Settings surface keeps the chord inert. Each
+    /// dialog owns the focus and paints at or above the palette's
+    /// `with_priority(7)`, so a palette opened underneath would take the
+    /// keys while staying invisible and leave the visible dialog
+    /// unresponsive; they are dialogs the user asked for, or a destructive
+    /// decision, so the palette refuses rather than folding them. Settings
+    /// is a full-surface mode that unmounts the pane grid and the Files
+    /// rail, so a pane-targeting command from it has no sensible target.
+    /// The render root also folds an open palette the frame any of these
+    /// appears over it. The next one registers here:
     ///
     /// - Custom Buttons (`custom_buttons_modal`, priority 8)
     /// - About (`show_about_dialog`, priority 10)
@@ -204,8 +208,10 @@ impl PaneFlowApp {
     /// - the modal close-confirm (`pending_close` with `ConfirmStyle::Modal`,
     ///   priority 11); an inline close arm is not a dialog
     /// - Work Review (`work_review`, an occluding focus-owning surface)
-    pub(crate) fn command_palette_blocked_by_modal(&self) -> bool {
-        self.custom_buttons_modal.is_some()
+    /// - Settings (`settings_section`)
+    pub(crate) fn command_palette_blocked(&self) -> bool {
+        self.settings_section.is_some()
+            || self.custom_buttons_modal.is_some()
             || self.show_about_dialog
             || self.system_info_dialog.is_some()
             || self
@@ -217,12 +223,9 @@ impl PaneFlowApp {
 
     /// Last resort when no pane contains the focus (the sidebar or a folded
     /// overlay had it): the first leaf of the tree the chosen action would
-    /// act on, so a pane-targeting command still has a target. Settings owns
-    /// the whole window, so nothing is captured there.
+    /// act on, so a pane-targeting command still has a target. Settings never
+    /// reaches here: `command_palette_blocked` refuses the chord there.
     fn command_palette_default_pane(&self) -> Option<Entity<Pane>> {
-        if self.settings_section.is_some() {
-            return None;
-        }
         if self.mode == paneflow_config::schema::AppMode::Diff {
             return self
                 .review
@@ -686,8 +689,9 @@ mod tests {
             // Stacking: sibling overlays fold before the capture, and a
             // mid-run Launch Pad keeps the palette closed.
             "if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {",
-            // A modal dialog keeps the palette closed.
-            "if self.command_palette_blocked_by_modal() {",
+            // A modal dialog or the Settings surface keeps the palette closed.
+            "if self.command_palette_blocked() {",
+            "self.settings_section.is_some()",
             "self.custom_buttons_modal.is_some()",
             "|| self.show_about_dialog",
             "|| self.system_info_dialog.is_some()",
@@ -781,7 +785,7 @@ mod tests {
             .map(|at| &main[at..at + 400])
             .expect("the render root gates the palette on command_palette_open");
         assert!(
-            mount.contains("if self.command_palette_blocked_by_modal() {")
+            mount.contains("if self.command_palette_blocked() {")
                 && mount.contains("self.close_command_palette(cx);"),
             "a modal dialog opened over the palette must close it at the next frame: {mount}"
         );

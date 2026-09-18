@@ -998,8 +998,9 @@ the pane, then dispatches; Escape and an outside click close it the same way.
 It never lists itself, opening it folds any other open overlay first (a
 focus-only overlay returns it to the pane that overlay was opened from; a
 Launch Pad mid-run keeps it closed, and the chord is inert while a modal
-dialog is open, About, System Info, Custom Buttons, close confirm, Work
-Review, while such a dialog opened over the palette closes it), and upstream's `secondary-shift-p` is
+dialog or the Settings surface is open, About, System Info, Custom Buttons,
+close confirm, Work Review, Settings, while any of those opened over the
+palette closes it), and upstream's `secondary-shift-p` is
 Pane Overview in this fork. The Workspaces rail's empty state names it beside `Open folder`.
 The list is a `ListBox` of `ListBoxOption` rows carrying `aria_selected` and
 a label of the description plus its chord, per 7.2.
