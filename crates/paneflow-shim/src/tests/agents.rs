@@ -1445,6 +1445,14 @@ fn muse_guard_never_adds_schema_version_to_a_pre_existing_settings_file() {
     assert_eq!(read_json(&settings_path), original);
 }
 
+/// Lay down `content` at `path` as a file PaneFlow created: the lease's
+/// durable marker is what cleanup checks before deleting it.
+fn write_paneflow_created_file(path: &std::path::Path, content: &str) {
+    let mut lease = crate::hooks::HookLease::acquire(path).unwrap();
+    std::fs::write(path, content).unwrap();
+    lease.mark_created().unwrap();
+}
+
 #[test]
 fn muse_guard_keeps_a_pre_existing_paneflow_env_var_forward() {
     // The user listed PANEFLOW_SOCKET_PATH themselves, with no managed
@@ -1514,11 +1522,10 @@ fn muse_orphan_sweep_keeps_a_pre_existing_paneflow_env_var_forward() {
         .to_string(),
     )
     .unwrap();
-    std::fs::write(
-        env_baseline_path(&settings_path),
-        json!(["PANEFLOW_AI_TOOL"]).to_string(),
-    )
-    .unwrap();
+    write_paneflow_created_file(
+        &env_baseline_path(&settings_path),
+        &json!(["PANEFLOW_AI_TOOL"]).to_string(),
+    );
 
     crate::hooks::muse::sweep_orphan_for_test(&dir);
     assert_eq!(read_json(&settings_path), original);
@@ -1603,7 +1610,7 @@ fn muse_baseline_survives_a_failed_restore_write() {
     )
     .unwrap();
     let baseline = env_baseline_path(&settings_path);
-    std::fs::write(&baseline, json!(["PANEFLOW_AI_TOOL"]).to_string()).unwrap();
+    write_paneflow_created_file(&baseline, &json!(["PANEFLOW_AI_TOOL"]).to_string());
 
     // A read-only directory makes the atomic replace fail after the
     // baseline has been read.
@@ -1665,21 +1672,37 @@ fn muse_foreign_file_at_the_baseline_path_is_refused() {
     let original = json!({"schema_version": 1, "model": "x"});
     std::fs::write(&settings_path, original.to_string()).unwrap();
     let baseline = env_baseline_path(&settings_path);
-    std::fs::write(&baseline, "user notes\n").unwrap();
+    // A user file, whatever its shape (even PaneFlow's own array shape):
+    // without the durable marker it is not PaneFlow's to replace.
+    for user in ["user notes\n", "[\"PANEFLOW_SOCKET_PATH\"]\n"] {
+        std::fs::write(&baseline, user).unwrap();
+        let error = match MuseHookConfigGuard::install_at(&dir) {
+            Ok(_) => panic!("a foreign file at the baseline path must be refused: {user}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&baseline).unwrap(), user);
+        assert_eq!(read_json(&settings_path), original);
+        assert!(!dir.join(MUSE_HOOKS_BASENAME).exists());
+    }
 
-    let error = match MuseHookConfigGuard::install_at(&dir) {
-        Ok(_) => panic!("a foreign file at the baseline path must be refused"),
-        Err(error) => error,
-    };
-    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-    assert_eq!(std::fs::read_to_string(&baseline).unwrap(), "user notes\n");
+    // A user file that happens to hold exactly the bytes PaneFlow would
+    // write is adopted, never marked, and so never deleted.
+    std::fs::write(&baseline, "[]\n").unwrap();
+    let guard = MuseHookConfigGuard::install_at(&dir).expect("identical bytes serve the session");
+    drop(guard);
     assert_eq!(read_json(&settings_path), original);
+    assert_eq!(
+        std::fs::read_to_string(&baseline).unwrap(),
+        "[]\n",
+        "a file PaneFlow did not create is not PaneFlow's to delete"
+    );
 }
 
 #[test]
-fn muse_stale_baseline_of_our_shape_is_replaced_on_first_take() {
-    // A crashed session wrote its sidecar but never its settings; the next
-    // first take starts over from the file as it is now.
+fn muse_stale_baseline_paneflow_created_is_replaced_on_first_take() {
+    // A crashed session wrote its sidecar (marker set) but never its
+    // settings; the next first take starts over from the file as it is now.
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".config/muse");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1687,7 +1710,7 @@ fn muse_stale_baseline_of_our_shape_is_replaced_on_first_take() {
     let original = json!({"schema_version": 1, "managed_hooks_env_vars": ["PANEFLOW_AI_PID"]});
     std::fs::write(&settings_path, original.to_string()).unwrap();
     let baseline = env_baseline_path(&settings_path);
-    std::fs::write(&baseline, json!(["PANEFLOW_SOCKET_PATH"]).to_string()).unwrap();
+    write_paneflow_created_file(&baseline, &json!(["PANEFLOW_SOCKET_PATH"]).to_string());
 
     let guard = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
     assert_eq!(read_json(&baseline), json!(["PANEFLOW_AI_PID"]));

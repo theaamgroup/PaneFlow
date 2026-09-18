@@ -222,7 +222,7 @@ agent CLI (claude, codex, opencode, …)
 
 - **Shim**: launching an agent from Paneflow puts a shim directory first in
   `PATH`. The shim records the real PID and process start time (PID-reuse
-  safe), then execs the real binary. Sixteen agent CLIs are recognized by
+  safe), then execs the real binary. Eighteen agent CLIs are recognized by
   name; unknown tools are reported as themselves.
 - **Hooks**: agents that support lifecycle hooks (Claude Code, Codex, …)
   report `session_start`, `prompt_submit`, `tool_use`, `notification`, `stop`,

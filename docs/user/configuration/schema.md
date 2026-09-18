@@ -130,7 +130,7 @@ same way regardless of these visibility settings.
 Each button visibility key is `boolean or null`. `true` always shows the
 button and `false` always hides it. For a fresh config, `null` or an omitted
 key shows Claude Code, Codex, or Grok only when that CLI is installed; the
-other 13 agents default off even when installed.
+other 15 agents default off even when installed.
 
 On the first launch after upgrading from the old all-installed default,
 PaneFlow preserves an existing valid config by writing explicit `true` values
