@@ -978,7 +978,13 @@ a 260 px menu, one 34 px row per preset with its 14 px agent mark and a `not
 installed` marker at 10 px (`looking` while the first PATH walk is pending), and
 an inline error in `vc_deleted` at 11 px.
 Escape folds the branch menu before it closes the palette; arrows move and
-scroll the selection into view.
+scroll the selection into view. **Escape is inert while the palette is the
+workspace's last surface** (its Tab placement sits on the workspace's only tab
+and that tab has no pane, issue #522): closing it would only close the tab and
+have the next frame reinstall a fresh palette on a new one, so the palette stays
+put and the user picks a preset or closes the workspace instead. Split placement
+renders no branch row and never opens the sessions rail; Tab placement may, when
+`new_pane_shows_sessions` is on.
 
 **The command palette** (`secondary-shift-o`, issue #523) is the theme
 picker's shell: the menu surface of 5.6, 544 wide, docked 96 from the top of
@@ -990,13 +996,7 @@ Typing filters on whole words in any order; arrows move and scroll the
 selection into view; Enter or a click closes the palette, hands focus back to
 the pane, then dispatches; Escape and an outside click close it the same way.
 It never lists itself, and upstream's `secondary-shift-p` is Pane Overview in
-this fork. The Workspaces rail's empty state names it beside `Open folder`. **Escape is inert while the palette is the
-workspace's last surface** (its Tab placement sits on the workspace's only tab
-and that tab has no pane, issue #522): closing it would only close the tab and
-have the next frame reinstall a fresh palette on a new one, so the palette stays
-put and the user picks a preset or closes the workspace instead. Split placement
-renders no branch row and never opens the sessions rail; Tab placement may, when
-`new_pane_shows_sessions` is on.
+this fork. The Workspaces rail's empty state names it beside `Open folder`.
 
 ### 5.8 Feedback
 
