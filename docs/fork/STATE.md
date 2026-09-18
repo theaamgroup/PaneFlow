@@ -42,15 +42,18 @@ port; the other seven are unchanged (the two perf benches, the two
 ghostty stress test). The +151 executed tests were **not** name-diffed against
 the `05839a5f` log this run. `cargo clippy --workspace --all-targets` exit 0,
 **WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0;
-`./target/debug/paneflow --version` -> `paneflow 0.6.1` (run before the bump
-commit); `cargo deny check advisories licenses sources` exit 0 ->
+`cargo deny check advisories licenses sources` exit 0 ->
 `advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` exit 0,
 **STAGE 2c ZERO-CONDITION 0** with all six components at 0, negative control
 **178** `cfg(unix)` / **93** `cfg(macos)` live sites. `cfg(unix)` moved
 177 -> 178, so CLAUDE.md's figure is corrected rather than re-attested;
 `cfg(macos)` is unchanged. Non-blocking review lines: 76 different-term-space
 hits, 7 orphaned `.rs` files, 0 comment-only references, and **32** ungated
-platform strings (issue #103).
+platform strings (issue #103). `./target/debug/paneflow --version` was
+re-run on the bump commit itself, after `cargo build` exit 0, and reports
+`paneflow 0.7.0`; the pre-bump run of the same gate reported `paneflow 0.6.1`,
+which is the expected reading for `1497db7e` and not the version this release
+ships.
 
 **2026-09-17: #519 startup trace probe and first-frame bench.** Upstream
 `df375ba5` part 3. `PANEFLOW_STARTUP_TRACE=<file>` makes the release binary
