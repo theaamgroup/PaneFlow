@@ -33,7 +33,7 @@ per-summary cost. This needs Apple Intelligence on macOS 26 or later; without
 it the overlay says so and the rest of PaneFlow is unaffected.
 
 Plain shell panes are skipped - only panes running a detected agent are listed.
-Turn the whole surface off with `"agent_summary": false` in `paneflow.json`.
+Turn the whole surface off with `"agent_summary_enabled": false` in `paneflow.json`.
 
 ## Workspaces
 

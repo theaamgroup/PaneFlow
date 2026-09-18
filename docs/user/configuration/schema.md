@@ -81,7 +81,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `option_as_meta` | boolean or null | `false` | Option produces Unicode input by default. Set to `true` to send Option/Alt as an ESC prefix. |
 | `shell_integration` | boolean or null | enabled | Master switch for shell rc injection: OSC 7 CWD reporting and OSC 133 command marks. |
 | `agent_stall_detection` | boolean or null | `true` | Enables stalled-agent detection. |
-| `agent_summary` | boolean or null | `true` | Enables the fleet agent summary overlay (`Cmd+Shift+I`), summarised on-device. |
+| `agent_summary_enabled` | boolean or null | `true` | Enables the fleet agent summary overlay (`Cmd+Shift+I`), summarised on-device. |
 | `agent_stall_threshold_secs` | integer or null | `60` | Silence threshold before a Thinking agent is marked Stalled. Clamped to `30` to `86400`. |
 | `crash_reporting` | boolean or null | `true` | Master switch for Sentry crash reporting. `false` never initializes it. Reports are sent without default PII (`send_default_pii` is off), only a GUI launch initializes reporting (CLI subcommands never do), and the switch is read once at startup, so it requires a restart. |
 | `review_enabled` | boolean or null | `true` | Master switch for the Review surface. `false` hides the Review view and its sidebar tab, makes the Review shortcut a no-op, and reopens a Review-mode session in the terminal view. |
@@ -341,7 +341,7 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "option_as_meta": false,
   "shell_integration": true,
   "agent_stall_detection": true,
-  "agent_summary": true,
+  "agent_summary_enabled": true,
   "agent_stall_threshold_secs": 60,
   "review_enabled": true,
   "new_pane_shows_sessions": false,

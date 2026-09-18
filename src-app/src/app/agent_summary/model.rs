@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use super::summarize::{ModelRequest, ModelResponse, normalize_summary};
@@ -84,9 +85,15 @@ pub(crate) fn sidecar_path(executable: &Path) -> Option<PathBuf> {
 /// Run one pane's summary to completion.
 ///
 /// **Blocking.** See the module note.
+///
+/// `cancel` is the overlay's shared cancellation flag: when it flips while the
+/// child runs, the run returns [`SummaryError::Failed`] after the child tree is
+/// terminated, so dismissing the overlay kills the sidecar instead of waiting
+/// out [`CALL_DEADLINE`].
 pub(crate) fn summarize_blocking(
     sidecar: &Path,
     request: &ModelRequest,
+    cancel: &AtomicBool,
 ) -> Result<String, SummaryError> {
     if !sidecar.is_file() {
         return Err(SummaryError::SidecarMissing(sidecar.to_path_buf()));
@@ -97,8 +104,14 @@ pub(crate) fn summarize_blocking(
     let mut cmd = Command::new(sidecar);
     cmd.arg("--json");
 
-    let output = paneflow_process::run_with_timeout_stdin(cmd, &payload, CALL_DEADLINE, STDOUT_CAP)
-        .map_err(|e| SummaryError::Failed(format!("summariser failed: {e}")))?;
+    let output = paneflow_process::run_with_timeout_stdin_cancellable(
+        cmd,
+        &payload,
+        CALL_DEADLINE,
+        STDOUT_CAP,
+        cancel,
+    )
+    .map_err(|e| SummaryError::Failed(format!("summariser failed: {e}")))?;
 
     parse_output(&output.stdout)
 }
@@ -204,7 +217,8 @@ mod tests {
             prompt: "p".into(),
         };
         let missing = Path::new("/nonexistent/paneflow-summarize");
-        let err = summarize_blocking(missing, &request).unwrap_err();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let err = summarize_blocking(missing, &request, &cancel).unwrap_err();
         assert!(matches!(err, SummaryError::SidecarMissing(_)), "{err:?}");
         assert!(err.is_terminal());
     }

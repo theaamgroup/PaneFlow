@@ -26,6 +26,7 @@ use crate::PaneFlowApp;
 use crate::limits::clamp_untrusted_label;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use model::SummaryError;
 use summarize::PaneContext;
@@ -37,7 +38,7 @@ use summarize::PaneContext;
 /// costs memory and blocking-pool threads without finishing any sooner. Four
 /// keeps the pipeline full on a large fleet - `MAX_PANES` is 32 per workspace
 /// and `MAX_WORKSPACES` is 32 - while rows still land progressively.
-const MAX_CONCURRENT_SUMMARIES: usize = 4;
+pub(crate) const MAX_CONCURRENT_SUMMARIES: usize = 4;
 
 /// Per-pane row state in the overlay.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,8 +161,14 @@ impl PaneFlowApp {
     }
 
     fn open_agent_summary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A reopen must cancel whatever the previous generation left in flight
+        // before issuing a fresh token, or the stale tasks keep their sidecars
+        // alive beside the new overlay's and the global cap is exceeded.
+        self.cancel_agent_summary_work();
         let generation = self.agent_summary_generation.wrapping_add(1);
         self.agent_summary_generation = generation;
+        let cancellation = Arc::new(AtomicBool::new(false));
+        self.agent_summary_cancellation = Some(cancellation.clone());
 
         // Reuse Pane Overview's collector: it already walks every workspace
         // and every tab (not just the active one) and resolves agent identity
@@ -178,11 +185,16 @@ impl PaneFlowApp {
         self.agent_summary_focus.focus(window, cx);
         cx.notify();
 
-        self.dispatch_agent_summaries(generation, cx);
+        self.dispatch_agent_summaries(generation, cancellation, cx);
     }
 
     /// Kick off one background task per pane.
-    fn dispatch_agent_summaries(&mut self, generation: u64, cx: &mut Context<Self>) {
+    fn dispatch_agent_summaries(
+        &mut self,
+        generation: u64,
+        cancellation: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(sidecar) = std::env::current_exe()
             .ok()
             .and_then(|exe| model::sidecar_path(&exe))
@@ -248,14 +260,28 @@ impl PaneFlowApp {
             );
         }
 
-        let permits = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT_SUMMARIES));
+        // One shared, app-lifetime limiter: reopens reuse the same permit pool,
+        // so the global sidecar cap holds across generations rather than being
+        // rebuilt (and effectively reset) on every dispatch.
+        let permits = Arc::clone(&self.agent_summary_permits);
         for (surface_id, mut context, reader) in targets {
             let sidecar = sidecar.clone();
             let permits = Arc::clone(&permits);
+            let cancellation = Arc::clone(&cancellation);
             cx.spawn(async move |app, cx| {
+                // Do not even queue for a permit the overlay no longer wants.
+                if cancellation.load(Ordering::Acquire) {
+                    return;
+                }
                 // Held across the blocking section and released on drop, so a
                 // cancelled or panicking task cannot leak a permit.
                 let _permit = permits.acquire_arc().await;
+                // The overlay may have closed or reopened while this task
+                // waited for a permit; do not spawn a sidecar for it.
+                if cancellation.load(Ordering::Acquire) {
+                    return;
+                }
+                let cancel_flag = Arc::clone(&cancellation);
                 // Both halves block: the transcript read parks on the runtime
                 // thread's reply, and the model call waits on a child. Neither
                 // may run on the GPUI thread (issue #363).
@@ -273,10 +299,20 @@ impl PaneFlowApp {
                     if request.prompt.is_empty() {
                         return Ok(None);
                     }
-                    model::summarize_blocking(&sidecar, &request).map(Some)
+                    // The overlay may have been dismissed while the transcript
+                    // was being read; do not start a child for a dead overlay.
+                    if cancel_flag.load(Ordering::Acquire) {
+                        return Err(SummaryError::Failed("cancelled".into()));
+                    }
+                    model::summarize_blocking(&sidecar, &request, &cancel_flag).map(Some)
                 })
                 .await;
 
+                // A cancelled task's result is worthless; skip the apply round
+                // trip rather than hand a stale answer to a newer overlay.
+                if cancellation.load(Ordering::Acquire) {
+                    return;
+                }
                 let _ = app.update(cx, |app, cx| {
                     app.apply_agent_summary(surface_id, generation, outcome, cx);
                 });
@@ -329,26 +365,45 @@ impl PaneFlowApp {
         generation: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.agent_summary.as_mut() else {
-            return;
-        };
-        if state.generation != generation {
-            return;
+        {
+            let Some(state) = self.agent_summary.as_mut() else {
+                return;
+            };
+            if state.generation != generation {
+                return;
+            }
+            state.unavailable = Some(message);
+            // Stop every in-flight task from writing a row-level duplicate of
+            // the same failure.
+            state.generation = state.generation.wrapping_add(1);
+            self.agent_summary_generation = state.generation;
         }
-        state.unavailable = Some(message);
-        // Stop every in-flight task from writing a row-level duplicate of the
-        // same failure.
-        state.generation = state.generation.wrapping_add(1);
-        self.agent_summary_generation = state.generation;
+        // The feature is off for the rest of the session, so kill the sidecars
+        // still running rather than let them wait out their deadline.
+        self.cancel_agent_summary_work();
         cx.notify();
     }
 
     pub(crate) fn close_agent_summary(&mut self, cx: &mut Context<Self>) {
-        // Orphan every in-flight task so a late model answer cannot repopulate
-        // a closed overlay.
+        // Kill in-flight sidecars and orphan every queued task so a late model
+        // answer cannot repopulate a closed overlay.
+        self.cancel_agent_summary_work();
         self.agent_summary_generation = self.agent_summary_generation.wrapping_add(1);
         self.agent_summary = None;
         cx.notify();
+    }
+
+    /// Signal any in-flight summary work to stop and clear the shared token.
+    ///
+    /// The queued tasks observe the flag before acquiring a permit, after
+    /// acquiring it, and before spawning a child; the sidecar runner observes
+    /// it while the child runs and terminates the process tree. A task from a
+    /// stale generation can therefore never keep a sidecar alive past the
+    /// overlay that asked for it.
+    fn cancel_agent_summary_work(&mut self) {
+        if let Some(cancellation) = self.agent_summary_cancellation.take() {
+            cancellation.store(true, Ordering::Release);
+        }
     }
 
     pub(crate) fn close_agent_summary_and_restore_focus(

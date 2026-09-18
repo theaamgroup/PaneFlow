@@ -1614,6 +1614,14 @@ struct PaneFlowApp {
     /// Bumped on every open/close so a late model answer cannot write into an
     /// overlay that has since closed or been reopened.
     agent_summary_generation: u64,
+    /// Issue #576: app-lifetime concurrency limiter for the summariser
+    /// sidecar. Shared across open/close generations so a reopened overlay can
+    /// never run more than `MAX_CONCURRENT_SUMMARIES` sidecars at once.
+    agent_summary_permits: std::sync::Arc<smol::lock::Semaphore>,
+    /// Issue #576: cancellation flag for in-flight summary work. Set when the
+    /// overlay closes or reopens; each dispatch clones it and checks it before
+    /// spawning a sidecar, and the sidecar runner kills the child when it flips.
+    agent_summary_cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     work_review: Option<app::work_review::ReviewState>,
     work_review_focus: FocusHandle,
     /// EP-005 US-014 (cli-tab-hierarchy): « New pane » preset palette,

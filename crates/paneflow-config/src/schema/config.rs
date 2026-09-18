@@ -162,7 +162,7 @@ pub struct PaneFlowConfig {
     /// Intelligence already degrades to an explanatory line in the overlay
     /// without touching this. Turn it off to suppress the surface entirely.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub agent_summary: Option<bool>,
+    pub agent_summary_enabled: Option<bool>,
     /// EP-004 US-011: silence threshold in seconds before a `Thinking`
     /// session is flagged `Stalled`. `None` resolves to 60 s; values are
     /// clamped to `[30, 86400]`. Checked by the 30 s sweep, so the
@@ -527,7 +527,7 @@ impl PaneFlowConfig {
 
     /// Resolve the fleet agent summary master switch (default ON).
     pub fn agent_summary_enabled(&self) -> bool {
-        self.agent_summary.unwrap_or(true)
+        self.agent_summary_enabled.unwrap_or(true)
     }
 
     fn window_backdrop_disables_chrome_material(&self) -> bool {

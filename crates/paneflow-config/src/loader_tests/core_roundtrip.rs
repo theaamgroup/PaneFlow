@@ -48,7 +48,7 @@ fn test_serialization_roundtrip() {
         option_as_meta: None,
         shell_integration: None,
         agent_stall_detection: None,
-        agent_summary: None,
+        agent_summary_enabled: None,
         agent_stall_threshold_secs: None,
         crash_reporting: None,
         review_enabled: None,

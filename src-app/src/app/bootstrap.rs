@@ -841,6 +841,10 @@ impl PaneFlowApp {
             agent_summary: None,
             agent_summary_focus: cx.focus_handle(),
             agent_summary_generation: 0,
+            agent_summary_permits: std::sync::Arc::new(smol::lock::Semaphore::new(
+                super::agent_summary::MAX_CONCURRENT_SUMMARIES,
+            )),
+            agent_summary_cancellation: None,
             work_review: None,
             work_review_focus: cx.focus_handle(),
             pane_palette: None,
