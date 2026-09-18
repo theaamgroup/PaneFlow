@@ -60,6 +60,9 @@ mod sidebar_title;
 #[cfg(test)]
 mod source_probe;
 mod sparkle;
+#[cfg(test)]
+mod startup_bench;
+mod startup_trace;
 mod system_info;
 mod terminal;
 pub mod theme;
@@ -1908,6 +1911,7 @@ const EMPTY_APP_WORKSPACE_HINT: &str = "Create your first workspace with Cmd+Shi
 
 impl Render for PaneFlowApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        startup_trace::on_app_render(window, cx);
         let ui = crate::theme::ui_colors();
         let theme = crate::theme::active_theme();
         #[cfg(target_os = "macos")]
@@ -2742,12 +2746,14 @@ impl Render for PaneFlowApp {
                 app_content.child(self.render_sessions_context_menu(menu, ui, window, cx));
         }
 
-        crate::window_chrome::csd::client_side_window_shell(
+        let shell = crate::window_chrome::csd::client_side_window_shell(
             app_content,
             window,
             app_backdrop_bg,
             ui.border,
-        )
+        );
+        startup_trace::on_app_render_built();
+        shell
     }
 }
 
@@ -2773,7 +2779,9 @@ fn register_focus_lost_fallback<T: 'static>(
 /// workspace restore itself stays batched across frames (#156).
 fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> {
     let (saved_session, session_corruption) = PaneFlowApp::load_session();
+    startup_trace::mark("session_loaded");
     let view = cx.new(|cx| PaneFlowApp::new(saved_session, session_corruption, cx));
+    startup_trace::mark("app_state_built");
     view.update(cx, |_, cx| {
         register_focus_lost_fallback(window, cx, |app| &app.empty_workspace_focus);
     });
@@ -2866,6 +2874,7 @@ fn mount_paneflow_app(window: &mut Window, cx: &mut App) -> Entity<PaneFlowApp> 
         // with no panes; the placeholder keeps global keybindings alive.
         app.begin_staged_session_restore(window, cx);
     });
+    startup_trace::mark("app_mounted");
     view.update(cx, |app, cx| {
         // Issue #211: window-bearing self-observer for the deferred window
         // actions (pending pane/palette focus, palette reconciliation).
@@ -3039,6 +3048,7 @@ mod render_side_effect_policy_tests {
 }
 
 fn main() {
+    startup_trace::begin();
     // Handle --help and --version before initializing GPUI
     let args: Vec<String> = std::env::args().collect();
     #[cfg(unix)]
@@ -3114,6 +3124,7 @@ fn main() {
         login_shell_env::load_login_shell_env,
         runtime_paths::augment_path_for_gui_launch,
     );
+    startup_trace::mark("login_shell_env_loaded");
 
     // US-003: install the process-wide kill-on-parent-death guard BEFORE any
     // agent CLI or ConPTY spawns so children inherit the Job Object (Windows).
@@ -3226,6 +3237,7 @@ fn main() {
                 crash_reporting_options(),
             ))
         });
+    startup_trace::mark("crash_reporting_ready");
 
     // Issue #85: preserve every agent launcher that an existing installation
     // would have shown under the old PATH-only default, then let fresh configs
@@ -3239,6 +3251,7 @@ fn main() {
     // PATH has been adopted but before GPUI starts. Workspace-menu rendering
     // reads this cache only; it never executes `which` on the render thread.
     editor::initialize_workspace_editor_installation_cache();
+    startup_trace::mark("editor_cache_ready");
 
     #[cfg(target_os = "macos")]
     warn_if_rosetta_translated();
@@ -3255,6 +3268,7 @@ fn main() {
             "paneflow: MCP bridge extraction failed ({e:#}); `paneflow mcp install` will be unavailable until resolved"
         ),
     }
+    startup_trace::mark("bridge_extracted");
 
     // Issue #542: materialize `paneflow-ai-hook` at the same stable,
     // non-versioned path so the shim can render hook commands that survive an
@@ -3268,12 +3282,15 @@ fn main() {
             "paneflow: AI hook extraction failed ({e:#}); agent hooks will fall back to the version-pinned cache copy"
         ),
     }
+    startup_trace::mark("ai_hook_extracted");
 
     application()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
+            startup_trace::mark("gpui_app_ready");
             // Load config early - needed for keybindings and window decorations
             let config = paneflow_config::loader::load_config();
+            startup_trace::mark("config_loaded");
             // Match Windows Terminal/PowerShell-style grayscale text
             // antialiasing. GPUI's platform default can pick subpixel
             // rendering on Windows/Linux; Paneflow's dark terminal surfaces
@@ -3310,6 +3327,7 @@ fn main() {
                      systems without a system monospace font"
                 );
             }
+            startup_trace::mark("fonts_loaded");
 
             // US-012: macOS native menu bar. On Linux/Windows the call is
             // elided - GPUI's non-macOS platforms don't render a menu bar
@@ -3350,6 +3368,7 @@ fn main() {
                 ..Default::default()
             };
 
+            startup_trace::mark("window_requested");
             let window_result = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -3374,9 +3393,11 @@ fn main() {
                         );
                     }
 
+                    startup_trace::mark("window_created");
                     mount_paneflow_app(window, cx)
                 },
             );
+            startup_trace::mark("window_open_returned");
 
             match window_result {
                 Ok(_) => cx.activate(true),

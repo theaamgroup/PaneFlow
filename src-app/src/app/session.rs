@@ -624,6 +624,7 @@ impl PaneFlowApp {
         self.refresh_pull_requests(cx);
         self.resume_pending_worktree_teardowns(cx);
         self.focus_restored_session(window, cx);
+        crate::startup_trace::on_session_restored(window);
         cx.notify();
     }
 
