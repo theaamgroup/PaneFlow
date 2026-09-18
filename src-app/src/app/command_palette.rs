@@ -79,16 +79,58 @@ impl PaneFlowApp {
             self.close_command_palette_and_restore_focus(window, cx);
             return;
         }
+        // Stacking: the chord can arrive while another overlay owns the
+        // focus (Pane Overview, the Attention Queue, the theme picker, the
+        // broadcast picker, fleet search, the Launch Pad). None of those is a
+        // descendant of a pane, so capturing focus now would hand it back to
+        // the overlay before dispatch and leave Split / Close pane without a
+        // target. Fold each one first, through its own focus-restoring close
+        // where it has one, so the capture below sees the pane the overlay
+        // was opened from. A Launch Pad mid-run keeps its modal up (it
+        // refuses Escape too), so the palette does not open over it.
+        if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
+            return;
+        }
+        let mut folded_without_restore = false;
+        if self.launch_pad.is_some() {
+            self.launch_pad_cancel(cx);
+            folded_without_restore = true;
+        }
+        if self.pane_overview.is_some() {
+            self.close_pane_overview_and_restore_focus(window, cx);
+        }
+        if self.attention_queue_open {
+            self.close_attention_queue_and_restore_focus(window, cx);
+        }
+        if self.show_theme_picker {
+            self.close_theme_picker(cx);
+            folded_without_restore = true;
+        }
+        if self.broadcast_picker_open {
+            self.close_broadcast_picker(cx);
+            folded_without_restore = true;
+        }
+        if self.fleet_search.is_some() {
+            self.close_fleet_search(cx);
+            folded_without_restore = true;
+        }
         self.dismiss_transient_surfaces();
         // Remember where the user was before the palette takes focus:
         // `close_command_palette_and_restore_focus` hands focus back there
         // before the chosen action dispatches, so Close pane / Split / Toggle
         // zoom act on that pane and not on the first leaf. The pane entity is
         // kept beside the raw handle so a pane that leaves the tree while the
-        // palette is open is not re-focused (issue #108).
-        self.command_palette_return_focus = window.focused(cx);
+        // palette is open is not re-focused (issue #108). An overlay folded
+        // above without a restoring close still holds the focus handle of an
+        // element that is gone next frame, so that handle is not kept.
+        self.command_palette_return_focus = if folded_without_restore {
+            None
+        } else {
+            window.focused(cx)
+        };
         self.command_palette_return_pane = self
             .command_palette_focused_pane(window, cx)
+            .or_else(|| self.command_palette_default_pane())
             .map(|pane| pane.downgrade());
         self.command_palette_open = true;
         self.command_palette_query.clear();
@@ -125,6 +167,29 @@ impl PaneFlowApp {
             }
         });
         owner
+    }
+
+    /// Last resort when no pane contains the focus (the sidebar or a folded
+    /// overlay had it): the first leaf of the tree the chosen action would
+    /// act on, so a pane-targeting command still has a target. Settings owns
+    /// the whole window, so nothing is captured there.
+    fn command_palette_default_pane(&self) -> Option<Entity<Pane>> {
+        if self.settings_section.is_some() {
+            return None;
+        }
+        if self.mode == paneflow_config::schema::AppMode::Diff {
+            return self
+                .review
+                .layout
+                .as_ref()
+                .and_then(|root| root.first_leaf());
+        }
+        self.workspaces
+            .get(self.active_idx)?
+            .active_tab()
+            .root
+            .as_ref()?
+            .first_leaf()
     }
 
     /// Whether `pane` is still a leaf of the tree focus would return to.
@@ -560,11 +625,22 @@ mod tests {
             .next()
             .expect("production half of the palette module");
         for needle in [
+            // Stacking: sibling overlays fold before the capture, and a
+            // mid-run Launch Pad keeps the palette closed.
+            "if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {",
+            "self.launch_pad_cancel(cx);",
+            "self.close_pane_overview_and_restore_focus(window, cx);",
+            "self.close_attention_queue_and_restore_focus(window, cx);",
+            "self.close_theme_picker(cx);",
+            "self.close_broadcast_picker(cx);",
+            "self.close_fleet_search(cx);",
+            ".or_else(|| self.command_palette_default_pane())",
             // DESIGN.md 7.2: the rows are a listbox of options for VoiceOver.
             ".role(gpui::Role::ListBox)",
             "select_option(",
             ".aria_label(label)",
-            "self.command_palette_return_focus = window.focused(cx);",
+            "self.command_palette_return_focus = if folded_without_restore {",
+            "window.focused(cx)",
             ".map(|pane| pane.downgrade());",
             "if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {",
             "match return_pane.and_then(|pane| pane.upgrade()) {",
