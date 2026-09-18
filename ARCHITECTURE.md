@@ -29,7 +29,7 @@ focused library crates:
 |---|---|---|
 | `paneflow-app` | `src-app/` | The GPUI application and `paneflow` CLI entrypoint: UI, panes, PTY sessions, IPC server |
 | `paneflow-config` | `crates/paneflow-config/` | Config schema, tolerant JSON loader, file watcher |
-| `paneflow-shim` | `crates/paneflow-shim/` | PATH shim wrapping 17 known agent CLIs so Paneflow can observe their lifecycle |
+| `paneflow-shim` | `crates/paneflow-shim/` | PATH shim wrapping 18 known agent CLIs so Paneflow can observe their lifecycle |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | The hook binary agent CLIs invoke to report session events back over IPC |
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Blocking JSON-RPC client for the local IPC socket (shared by the MCP bridge and the CLI) |
 | `paneflow-mcp` | `crates/paneflow-mcp/` | Stdio MCP server exposing read-only pane access (`list_panes`, `read_pane`, `search_pane`) |
@@ -222,7 +222,7 @@ agent CLI (claude, codex, opencode, …)
 
 - **Shim**: launching an agent from Paneflow puts a shim directory first in
   `PATH`. The shim records the real PID and process start time (PID-reuse
-  safe), then execs the real binary. Sixteen agent CLIs are recognized by
+  safe), then execs the real binary. Eighteen agent CLIs are recognized by
   name; unknown tools are reported as themselves.
 - **Hooks**: agents that support lifecycle hooks (Claude Code, Codex, …)
   report `session_start`, `prompt_submit`, `tool_use`, `notification`, `stop`,

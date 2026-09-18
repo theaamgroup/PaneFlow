@@ -476,15 +476,15 @@ is 9 (`pane.rs:150`), sized to sit inside a 15 px chip (5.3). Apart from it no
 glyph outside 10–16 and 18 exists, and every larger `size(px(N.))` is an icon
 button *box*, not a glyph.
 
-The fork ships 17 agent launchers (`agent_launcher.rs:23-41`). Marks live in
-`src-app/assets/agents/` for the twelve secondary agents and in `icons/` for
+The fork ships 18 agent launchers (`agent_launcher.rs:23-42`). Marks live in
+`src-app/assets/agents/` for the thirteen secondary agents and in `icons/` for
 Claude, Codex, OpenCode, Pi, and Hermes (`icons/hermesagent.svg`).
 `TerminalAgent::icon_multicolor` (`agent_launcher.rs:155-163`) is the authority
 on rendering: exactly five — Antigravity, CodeBuddy, Gemini, Kiro, Openclaw —
 render through `img()`. `TerminalAgent::accent()` is a separate and narrower
-authority on tint: it returns a brand color for **only four** agents — Claude
-`#d97757`, Amp `#F34E3F`, Qoder `#2ADB5C`, DeepSeek Harness `#4D6BFE` — and
-`None` for every other, whose monochrome mark deliberately takes the theme's
+authority on tint: it returns a brand color for **only five** agents — Claude
+`#d97757`, Amp `#F34E3F`, Qoder `#2ADB5C`, DeepSeek Harness `#4D6BFE`, Muse
+Code `#0081FB` — and `None` for every other, whose monochrome mark deliberately takes the theme's
 text color. Do not invent a brand tint for a mark that returns `None`.
 
 ### 4.8 Motion

@@ -213,7 +213,7 @@ A sidebar keeps your past chats one click away.
 
 Inside a project, run multiple threads - independent agent sessions -
 and choose which CLI drives each one: Claude Code, Codex, OpenCode, Pi,
-Hermes, Openclaw, DeepSeek Harness, Factory's Droid, or anything else on your `PATH`. Mix
+Hermes, Openclaw, DeepSeek Harness, Muse Code, Factory's Droid, or anything else on your `PATH`. Mix
 them per thread, so one thread can plan with Codex while another
 implements with Claude Code, side by side in the same project.
 

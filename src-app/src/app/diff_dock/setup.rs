@@ -571,6 +571,7 @@ mod tests {
                 "Qoder",
                 "Openclaw",
                 "DeepSeek Harness",
+                "Muse Code",
             ]
         );
     }

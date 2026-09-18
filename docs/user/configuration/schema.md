@@ -130,7 +130,7 @@ same way regardless of these visibility settings.
 Each button visibility key is `boolean or null`. `true` always shows the
 button and `false` always hides it. For a fresh config, `null` or an omitted
 key shows Claude Code, Codex, or Grok only when that CLI is installed; the
-other 13 agents default off even when installed.
+other 15 agents default off even when installed.
 
 On the first launch after upgrading from the old all-installed default,
 PaneFlow preserves an existing valid config by writing explicit `true` values
@@ -158,6 +158,7 @@ preserved; an invalid config is left untouched.
 | `qoder_button_visible` | Qoder | Off |
 | `openclaw_button_visible` | Openclaw | Off |
 | `deepseek_harness_button_visible` | DeepSeek Harness | Off |
+| `muse_button_visible` | Muse Code | Off |
 
 ## Terminal block
 
@@ -387,7 +388,8 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "factory_button_visible": null,
   "qoder_button_visible": null,
   "openclaw_button_visible": null,
-  "deepseek_harness_button_visible": null
+  "deepseek_harness_button_visible": null,
+  "muse_button_visible": null
 }
 ```
 
