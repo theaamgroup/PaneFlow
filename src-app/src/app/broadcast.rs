@@ -249,7 +249,7 @@ impl PaneFlowApp {
 
     pub(crate) fn open_broadcast_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Issue #523: remember the pane for a command palette that folds us.
-        self.overlay_origin_pane = self.pane_owning_focus(window, cx).map(|p| p.downgrade());
+        self.remember_overlay_origin(window, cx);
         self.broadcast_picker_open = true;
         self.broadcast_picker_query.clear();
         self.broadcast_picker_selected = self.broadcast.active.unwrap_or(0);

@@ -231,7 +231,7 @@ impl PaneFlowApp {
         });
         // Issue #523: remember the pane for a command palette that folds us,
         // resolved while the pane still owns the focus.
-        self.overlay_origin_pane = self.pane_owning_focus(window, cx).map(|p| p.downgrade());
+        self.remember_overlay_origin(window, cx);
         window.focus(&branch_focus, cx);
         cx.notify();
     }

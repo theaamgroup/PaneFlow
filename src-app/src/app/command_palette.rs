@@ -231,6 +231,18 @@ impl PaneFlowApp {
             .first_leaf()
     }
 
+    /// Record the pane a focus-only overlay (theme picker, broadcast picker,
+    /// fleet search, Launch Pad) is being opened from, for a command palette
+    /// that later folds it. Only a pane that owns the focus right now is
+    /// written: a focus-only overlay opened over another focus-only overlay
+    /// keeps the pane the first one came from, because the first overlay,
+    /// not a pane, owns the focus at that moment.
+    pub(crate) fn remember_overlay_origin(&mut self, window: &Window, cx: &App) {
+        if let Some(pane) = self.pane_owning_focus(window, cx) {
+            self.overlay_origin_pane = Some(pane.downgrade());
+        }
+    }
+
     /// Whether `pane` is still a leaf of the tree focus would return to.
     fn command_palette_pane_is_live(&self, pane: &Entity<Pane>) -> bool {
         if self.mode == paneflow_config::schema::AppMode::Diff {
@@ -724,8 +736,12 @@ mod tests {
         }
         // The four focus-only overlays remember the pane they were opened
         // from, at a point where that pane still owns the focus.
-        let capture =
-            "self.overlay_origin_pane = self.pane_owning_focus(window, cx).map(|p| p.downgrade());";
+        let capture = "self.remember_overlay_origin(window, cx);";
+        assert!(
+            palette.contains("if let Some(pane) = self.pane_owning_focus(window, cx) {"),
+            "remember_overlay_origin must only overwrite the origin when a pane owns focus, \
+             so stacked focus-only overlays keep the first origin"
+        );
         for (module, src) in [
             ("theme_picker.rs", include_str!("theme_picker.rs")),
             ("broadcast.rs", include_str!("broadcast.rs")),
@@ -738,7 +754,7 @@ mod tests {
         }
         let main = include_str!("../main.rs");
         assert!(
-            main.contains("self.pane_owning_focus(window, cx).map(|p| p.downgrade());"),
+            main.contains(capture),
             "the deferred fleet-search focus must remember its origin pane first"
         );
         assert!(

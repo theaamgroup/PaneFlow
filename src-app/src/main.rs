@@ -2668,8 +2668,7 @@ impl Render for PaneFlowApp {
             if std::mem::take(&mut self.fleet_search_pending_focus) {
                 // Issue #523: the pane still owns focus here; remember it
                 // for a command palette that folds this overlay.
-                self.overlay_origin_pane =
-                    self.pane_owning_focus(window, cx).map(|p| p.downgrade());
+                self.remember_overlay_origin(window, cx);
                 self.fleet_search_focus.focus(window, cx);
             }
             app_content = app_content.child(self.render_fleet_search(cx));
