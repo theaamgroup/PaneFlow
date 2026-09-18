@@ -53,6 +53,7 @@ mod pane_drag;
 mod pi_sessions;
 mod pricing;
 mod recents;
+mod release_notes;
 mod runtime_paths;
 mod search;
 mod settings;
@@ -2644,7 +2645,7 @@ impl Render for PaneFlowApp {
         }
 
         if let Some(toast) = &self.toast {
-            app_content = app_content.child(self.render_toast(toast, ui));
+            app_content = app_content.child(self.render_toast(toast, ui, cx));
         }
 
         if let Some(anchor) = self.profile_menu_open {
