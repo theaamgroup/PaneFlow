@@ -57,6 +57,7 @@ impl PaneFlowApp {
         cx.subscribe(&title_bar, Self::handle_title_bar_event)
             .detach();
         let (ipc_rx, ipc_status, event_bus) = ipc::start_server();
+        crate::startup_trace::mark("ipc_server_started");
 
         // US-006 - install the shared cursor-blink phase as a GPUI global
         // before any `TerminalView` is constructed. Each `TerminalView`
@@ -195,9 +196,12 @@ impl PaneFlowApp {
             // Issue #156: mount a lightweight root and restore at most one
             // workspace per GPUI frame. Diff mode and the saved active
             // workspace are applied only after the last batch.
+            crate::startup_trace::expect_session_restore();
             (Vec::new(), 0, paneflow_config::schema::AppMode::Cli)
         } else {
-            (vec![Self::default_workspace(cx)], 0, restored_mode)
+            let workspaces = vec![Self::default_workspace(cx)];
+            crate::startup_trace::mark("default_workspace_built");
+            (workspaces, 0, restored_mode)
         };
         // Setup notify file watcher for .git directories
         let (git_event_tx, git_event_rx) = std::sync::mpsc::channel();
@@ -677,6 +681,7 @@ impl PaneFlowApp {
             cached_config.theme.as_deref(),
         );
 
+        crate::startup_trace::mark("app_fields_prepared");
         let mut app = Self {
             workspaces,
             active_idx,

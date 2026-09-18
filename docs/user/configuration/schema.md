@@ -19,7 +19,19 @@ The path depends on the build profile, because `APP_SUBDIR`
 | Debug (`cargo run`) | `~/Library/Application Support/paneflow-dev/paneflow.json` |
 
 A from-source debug build therefore ignores edits to the release path.
-There is no env-var override for the config location.
+
+`PANEFLOW_HOME` relocates every per-user directory PaneFlow owns. Set to an
+absolute path, the config root becomes `<home>/config`, the data root
+`<home>/data` (the stable `bin/` helper copies), and the cache root
+`<home>/cache` (the versioned helper cache), each still namespaced by the
+build profile, so a release build reads
+`<home>/config/paneflow/paneflow.json` with `session.json`,
+`window-state.json`, and `recents.json` beside it. Unset and empty values
+are ignored; a relative value is ignored with a warning. The variable exists
+for isolated runs
+(the startup benchmark, a scratch instance); it does not move the IPC
+socket, which `PANEFLOW_SOCKET_PATH` controls (see
+[scripting](../scripting.md)).
 
 Unknown top-level keys are ignored by the runtime. The schema uses
 `additionalProperties: false` so editors can flag typos before launch.

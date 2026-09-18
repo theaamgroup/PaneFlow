@@ -1,7 +1,8 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-16 after the post-0.6.1 review
-follow-ups (see the entry below). The prior header described the 0.6.1 cut;
+Living handoff record. Updated 2026-09-17 after the #519 startup bench port
+(see the entry below), and before that 2026-09-16 after the post-0.6.1 review
+follow-ups. The prior header described the 0.6.1 cut;
 the one before that the 0.6.0 cut, and before that the 0.5.0 cut, which shipped
 the Review grid port (#438) and the first v0.12.0 port batch (#417: the
 terminal rendering chain #418 / #419 / #420, the Zed highlight queries #433,
@@ -10,6 +11,42 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 #357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
+
+**2026-09-17: #519 startup trace probe and first-frame bench.** Upstream
+`df375ba5` part 3. `PANEFLOW_STARTUP_TRACE=<file>` makes the release binary
+record a mark per launch stage (`src-app/src/startup_trace.rs`), write the
+timeline once the measured frame is presented, and quit; the ignored
+`startup_bench::startup_first_frame_benchmark` launches it against two seeded
+`PANEFLOW_HOME` fixtures (the new env override in
+`paneflow_config::loader::user_dirs`, which relocates the config, data, and
+cache roots and keeps the `APP_SUBDIR` namespace) and
+`scripts/bench-startup.sh` archives the run. Two things upstream did not need:
+the restore scenario ends at the frame after the last #156 restore batch
+(`restored_frame`), because the first frame alone shows an empty root; and
+the probe pumps its own frames by sending `displayLayer:` to the GPUI view
+every 8 ms, because macOS refuses to activate an app launched from a process
+that is not the active application, and GPUI never starts a display link for
+a window that is not key, so a restore stalled on its first batch (found
+with `sample`, the main thread idle in `mach_msg`, zero frames after the
+first). Baseline measured on this Mac with
+`scripts/bench-startup.sh --set-baseline` at `bf6c39921986`, core-share
+probe 1.00, medians of 10: `fresh_first_frame_total` **379.67 ms** (an empty
+session; the default workspace and its shell exist before the first frame)
+and `restore3_first_frame_total` **481.31 ms** (three workspaces with one
+terminal each, to the frame after the last batch). It replaces the first
+recording at `8b462d0d37e0` (378.24 ms / 479.83 ms), which review found to
+carry one launch that stalled ~300 ms in `window_created` (its
+`restore3_first_frame_total` mean, 513.7 ms, sat above its p95, 484.9 ms);
+the probe runs before the launches and cannot see a stall that starts during
+them, so check `mean` against `p95` before recording a baseline. Three runs
+at the same code (the two archived under `bench/results/` at `8b462d0d37e0`
+and this one) agree within 0.5% on both medians. The
+largest single steps in both are `gpui_app_ready` (~48 ms),
+`window_created` (~41 ms), `ipc_server_started` (~144 ms, the singleton
+guard and IPC thread inside `PaneFlowApp::new`), and for the fresh launch
+`default_workspace_built` (~51 ms, the shell spawn) and
+`window_open_returned` (~65 ms, the first layout and paint). Never compare
+against upstream's numbers; they were measured on Windows.
 
 **2026-09-16: #517 splash removed.** Upstream `df375ba5` part 1: the 900 ms
 `StartupSplashView` (its `STARTUP_SPLASH_*` consts, the letter and shimmer
