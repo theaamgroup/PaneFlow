@@ -1548,6 +1548,15 @@ struct PaneFlowApp {
     command_palette_selected: usize,
     command_palette_focus: FocusHandle,
     command_palette_scroll: gpui::ScrollHandle,
+    /// The pane that held focus when the palette opened, restored before the
+    /// chosen action dispatches so a pane-targeting command (Close pane,
+    /// Split, Toggle zoom) lands on the pane the user was in, not the first
+    /// leaf. `None` when nothing in the pane tree was focused.
+    command_palette_return_pane: Option<Entity<pane::Pane>>,
+    /// Whatever held focus when the palette opened (the pane palette's
+    /// `restore_focus` precedent), restored when no pane did: the dock's code
+    /// editor, the sidebar, the empty-workspace placeholder.
+    command_palette_return_focus: Option<FocusHandle>,
     /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
     /// closed. The target pane renders the pushed slot snapshot.
     composer: Option<app::composer::ComposerState>,

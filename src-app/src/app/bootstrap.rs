@@ -811,6 +811,8 @@ impl PaneFlowApp {
             command_palette_selected: 0,
             command_palette_focus: cx.focus_handle(),
             command_palette_scroll: gpui::ScrollHandle::new(),
+            command_palette_return_pane: None,
+            command_palette_return_focus: None,
             // EP-001 (cli-cockpit): Composer closed, no groups, no buffers.
             composer: None,
             broadcast: crate::app::broadcast::BroadcastState::default(),

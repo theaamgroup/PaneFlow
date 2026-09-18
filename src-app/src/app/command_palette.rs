@@ -11,12 +11,14 @@
 //! command.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ParentElement, SharedString, Styled, Window, deferred, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, CursorStyle, Entity, Focusable, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, SharedString, Styled, Window, deferred,
+    div, prelude::*, px,
 };
 
 use crate::PaneFlowApp;
 use crate::keybindings::{ShortcutEntry, action_is_global};
+use crate::pane::Pane;
 use crate::settings::components::{menu_divider_color, menu_surface, select_item};
 
 /// The registry name of the action that opens this palette. Filtered out of
@@ -76,12 +78,53 @@ impl PaneFlowApp {
             return;
         }
         self.dismiss_transient_surfaces();
+        // Remember where the user was before the palette takes focus:
+        // `close_command_palette_and_restore_focus` hands focus back there
+        // before the chosen action dispatches, so Close pane / Split / Toggle
+        // zoom act on that pane and not on the first leaf. The pane entity is
+        // kept beside the raw handle so a pane that leaves the tree while the
+        // palette is open is not re-focused (issue #108).
+        self.command_palette_return_focus = window.focused(cx);
+        self.command_palette_return_pane = self.command_palette_focused_pane(window, cx);
         self.command_palette_open = true;
         self.command_palette_query.clear();
         self.command_palette_selected = 0;
         self.command_palette_scroll = gpui::ScrollHandle::new();
         self.command_palette_focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// The pane holding focus right now: the active workspace's visible tab
+    /// in the CLI cockpit, the Review grid in Review mode.
+    fn command_palette_focused_pane(&self, window: &Window, cx: &App) -> Option<Entity<Pane>> {
+        if self.mode == paneflow_config::schema::AppMode::Diff {
+            return self
+                .review
+                .layout
+                .as_ref()
+                .and_then(|root| root.focused_pane(window, cx));
+        }
+        self.workspaces
+            .get(self.active_idx)?
+            .active_tab()
+            .root
+            .as_ref()?
+            .focused_pane(window, cx)
+    }
+
+    /// Whether `pane` is still a leaf of the tree focus would return to.
+    fn command_palette_pane_is_live(&self, pane: &Entity<Pane>) -> bool {
+        if self.mode == paneflow_config::schema::AppMode::Diff {
+            return self
+                .review
+                .layout
+                .as_ref()
+                .is_some_and(|root| root.contains_leaf(pane));
+        }
+        self.workspaces
+            .get(self.active_idx)
+            .and_then(|ws| ws.active_tab().root.as_ref())
+            .is_some_and(|root| root.contains_leaf(pane))
     }
 
     pub(crate) fn close_command_palette(&mut self, cx: &mut Context<Self>) {
@@ -91,18 +134,40 @@ impl PaneFlowApp {
         self.command_palette_open = false;
         self.command_palette_query.clear();
         self.command_palette_selected = 0;
+        self.command_palette_return_pane = None;
+        self.command_palette_return_focus = None;
         cx.notify();
     }
 
-    /// Close and hand focus back to the active workspace's first pane, or to
-    /// the empty-workspace placeholder (issue #108: an overlay that closes
-    /// with nothing focused leaves every global chord without a handler).
+    /// Close and hand focus back to where the palette was opened from: the
+    /// originating pane while it is still in the tree, else the non-pane
+    /// element that held focus (dock editor, sidebar, placeholder), else the
+    /// active workspace's first pane, else the empty-workspace placeholder
+    /// (issue #108: an overlay that closes with nothing focused leaves every
+    /// global chord without a handler).
     pub(crate) fn close_command_palette_and_restore_focus(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let return_pane = self.command_palette_return_pane.take();
+        let return_focus = self.command_palette_return_focus.take();
         self.close_command_palette(cx);
+        match return_pane {
+            Some(pane) if self.command_palette_pane_is_live(&pane) => {
+                pane.read(cx).focus_handle(cx).focus(window, cx);
+                return;
+            }
+            // The pane is gone: fall through to the first-leaf chain rather
+            // than re-focus its handle.
+            Some(_) => {}
+            None => {
+                if let Some(handle) = return_focus {
+                    window.focus(&handle, cx);
+                    return;
+                }
+            }
+        }
         let focused = match self.workspaces.get(self.active_idx) {
             Some(ws) => ws.focus_first(window, cx),
             None => false,
@@ -416,6 +481,28 @@ mod tests {
             sidebar.contains("this.open_command_palette(w, cx);"),
             "the empty-state row must open the palette"
         );
+        // The pane that opened the palette is the one the chosen action must
+        // land on (Codex P1 on #583): opening captures it, restore prefers it
+        // while it is still a leaf, and closing forgets it.
+        let palette = include_str!("command_palette.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the palette module");
+        for needle in [
+            "self.command_palette_return_focus = window.focused(cx);",
+            "self.command_palette_return_pane = self.command_palette_focused_pane(window, cx);",
+            "let return_pane = self.command_palette_return_pane.take();",
+            "Some(pane) if self.command_palette_pane_is_live(&pane) => {",
+            "pane.read(cx).focus_handle(cx).focus(window, cx);",
+            "window.focus(&handle, cx);",
+            "self.command_palette_return_pane = None;",
+            "self.command_palette_return_focus = None;",
+        ] {
+            assert!(
+                palette.contains(needle),
+                "restore must return focus to the originating pane: missing `{needle}`"
+            );
+        }
         let main = include_str!("../main.rs");
         assert!(
             main.contains(".on_action(cx.listener(Self::handle_open_command_palette))"),
