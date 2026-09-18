@@ -1325,6 +1325,10 @@ impl PaneFlowApp {
                             .map(|key| SharedString::from(key.to_string()));
                         div()
                             .id("empty-command-palette")
+                            // Issue #340: a clickable row is a button to
+                            // AccessKit, like the `empty-recent-<i>` rows.
+                            .role(Role::Button)
+                            .aria_label("Command palette")
                             .flex()
                             .flex_row()
                             .items_center()

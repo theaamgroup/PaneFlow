@@ -61,7 +61,7 @@ information remains available if GitHub cannot be reached.
 
 ## Command palette
 
-`Cmd+Shift+O` opens a palette listing every action that works from anywhere
+`Cmd+Shift+O` opens a palette listing every registered context-free action
 (split, tabs, workspaces, layouts, the overlays) with the binding it currently
 answers to, including your overrides from `paneflow.json`. Type to filter on
 words in any order, move with the arrow keys, and press Enter to run the

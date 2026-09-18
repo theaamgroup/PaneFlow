@@ -38,14 +38,16 @@ pub(crate) struct CommandMatch {
     pub(crate) shortcut: Option<String>,
 }
 
-/// Every whitespace-separated word of `query` must occur in `haystack`, in any
-/// order; both sides are compared lowercase. A prefix of a word matches, so
-/// `laun` finds `Launch Pad`.
+/// Every whitespace-separated term of `query` must be a prefix of some word
+/// of `haystack`, in any order; both sides are compared lowercase. `laun`
+/// finds `Launch Pad`; `riz` does not find `Split horizontal`, because the
+/// filter is on whole words, not substrings.
 fn matches_query(haystack: &str, query: &str) -> bool {
-    let haystack = haystack.to_lowercase();
-    query
-        .split_whitespace()
-        .all(|word| haystack.contains(&word.to_lowercase()))
+    let words: Vec<String> = haystack.split_whitespace().map(str::to_lowercase).collect();
+    query.split_whitespace().all(|term| {
+        let term = term.to_lowercase();
+        words.iter().any(|word| word.starts_with(&term))
+    })
 }
 
 /// The rows the palette shows for `query`, from the live shortcut list:
@@ -85,7 +87,9 @@ impl PaneFlowApp {
         // kept beside the raw handle so a pane that leaves the tree while the
         // palette is open is not re-focused (issue #108).
         self.command_palette_return_focus = window.focused(cx);
-        self.command_palette_return_pane = self.command_palette_focused_pane(window, cx);
+        self.command_palette_return_pane = self
+            .command_palette_focused_pane(window, cx)
+            .map(|pane| pane.downgrade());
         self.command_palette_open = true;
         self.command_palette_query.clear();
         self.command_palette_selected = 0;
@@ -180,7 +184,10 @@ impl PaneFlowApp {
         let return_pane = self.command_palette_return_pane.take();
         let return_focus = self.command_palette_return_focus.take();
         self.close_command_palette(cx);
-        match return_pane {
+        // The weak handle upgrades while the pane entity is alive anywhere
+        // (a render closure may hold one for a frame after a close), so the
+        // tree membership check below is what decides.
+        match return_pane.and_then(|pane| pane.upgrade()) {
             Some(pane) if self.command_palette_pane_is_live(&pane) => {
                 match return_focus {
                     Some(handle) if !for_dispatch => window.focus(&handle, cx),
@@ -198,9 +205,26 @@ impl PaneFlowApp {
                 }
             }
         }
-        let focused = match self.workspaces.get(self.active_idx) {
-            Some(ws) => ws.focus_first(window, cx),
-            None => false,
+        // Review mode has its own grid: its first live diff pane is the
+        // fallback there, never the CLI workspace's pane behind it.
+        let focused = if self.mode == paneflow_config::schema::AppMode::Diff {
+            match self
+                .review
+                .layout
+                .as_ref()
+                .and_then(|root| root.first_leaf())
+            {
+                Some(pane) => {
+                    pane.read(cx).focus_handle(cx).focus(window, cx);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            match self.workspaces.get(self.active_idx) {
+                Some(ws) => ws.focus_first(window, cx),
+                None => false,
+            }
         };
         if !focused {
             window.focus(&self.empty_workspace_focus, cx);
@@ -420,6 +444,13 @@ mod tests {
         assert!(!matches_query("split horizontal", "split vertical"));
     }
 
+    /// Whole words: a term must start a word, not merely occur inside one.
+    #[test]
+    fn a_query_does_not_match_inside_a_word() {
+        assert!(!matches_query("Split horizontal", "riz"));
+        assert!(matches_query("Split horizontal", "hor spl"));
+    }
+
     fn entry(action_name: &'static str, key: &str, description: &str) -> ShortcutEntry {
         ShortcutEntry {
             key: key.to_string(),
@@ -520,9 +551,9 @@ mod tests {
             .expect("production half of the palette module");
         for needle in [
             "self.command_palette_return_focus = window.focused(cx);",
-            "self.command_palette_return_pane = self.command_palette_focused_pane(window, cx);",
+            ".map(|pane| pane.downgrade());",
             "if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {",
-            "let return_pane = self.command_palette_return_pane.take();",
+            "match return_pane.and_then(|pane| pane.upgrade()) {",
             "Some(pane) if self.command_palette_pane_is_live(&pane) => {",
             "Some(handle) if !for_dispatch => window.focus(&handle, cx),",
             "_ => pane.read(cx).focus_handle(cx).focus(window, cx),",

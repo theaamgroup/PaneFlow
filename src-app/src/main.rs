@@ -1551,8 +1551,10 @@ struct PaneFlowApp {
     /// The pane that held focus when the palette opened, restored before the
     /// chosen action dispatches so a pane-targeting command (Close pane,
     /// Split, Toggle zoom) lands on the pane the user was in, not the first
-    /// leaf. `None` when nothing in the pane tree was focused.
-    command_palette_return_pane: Option<Entity<pane::Pane>>,
+    /// leaf. Weak, so the palette never keeps a pane closed underneath it
+    /// alive; the restore upgrades and re-checks tree membership. `None`
+    /// when nothing in the pane tree was focused.
+    command_palette_return_pane: Option<WeakEntity<pane::Pane>>,
     /// Whatever held focus when the palette opened (the pane palette's
     /// `restore_focus` precedent), restored when no pane did: the dock's code
     /// editor, the sidebar, the empty-workspace placeholder.
