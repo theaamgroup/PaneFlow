@@ -1384,6 +1384,60 @@ fn muse_remove_leaves_a_foreign_managed_hooks_path_alone() {
         "managed_hooks_env_vars": ["PANEFLOW_SURFACE_ID"]
     });
     let before = root.clone();
-    remove_muse_settings(&mut root);
+    remove_muse_settings(
+        &mut root,
+        std::path::Path::new("/home/u/.config/muse/paneflow-hooks.json"),
+    );
     assert_eq!(root, before);
+}
+
+#[test]
+fn muse_remove_leaves_a_foreign_managed_hooks_path_with_our_basename_alone() {
+    let mut root = json!({
+        "schema_version": 1,
+        "managed_hooks_path": "/etc/muse/paneflow-hooks.json",
+        "managed_hooks_env_vars": ["PANEFLOW_SURFACE_ID", "PANEFLOW_SOCKET_PATH"]
+    });
+    let before = root.clone();
+    remove_muse_settings(
+        &mut root,
+        std::path::Path::new("/home/u/.config/muse/paneflow-hooks.json"),
+    );
+    assert_eq!(
+        root, before,
+        "same basename under a foreign directory is not ours"
+    );
+
+    let mut ours = before.clone();
+    remove_muse_settings(
+        &mut ours,
+        std::path::Path::new("/etc/muse/paneflow-hooks.json"),
+    );
+    assert_eq!(
+        ours,
+        json!({"schema_version": 1}),
+        "the exact path is stripped"
+    );
+}
+
+#[test]
+fn muse_guard_never_adds_schema_version_to_a_pre_existing_settings_file() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".config/muse");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings_path = dir.join(MUSE_SETTINGS_BASENAME);
+    let original = json!({"model": "x"});
+    std::fs::write(&settings_path, original.to_string()).unwrap();
+
+    let guard = MuseHookConfigGuard::install_at(&dir).expect("install must succeed");
+    let merged = read_json(&settings_path);
+    assert!(
+        merged.get("schema_version").is_none(),
+        "a pre-existing file that lacked schema_version must not gain one"
+    );
+    assert!(merged.get("managed_hooks_path").is_some());
+    assert!(merged.get("managed_hooks_env_vars").is_some());
+
+    drop(guard);
+    assert_eq!(read_json(&settings_path), original);
 }

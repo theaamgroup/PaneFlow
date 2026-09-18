@@ -89,7 +89,7 @@ impl MuseHookConfigGuard {
             Err(error) => {
                 let owned = installed.created_file;
                 let _ = with_last_lease(&installed.path, &mut installed.lease, |lease_created| {
-                    restore_settings(&installed.path, owned || lease_created)
+                    restore_settings(&installed.path, &hooks_path, owned || lease_created)
                 });
                 if installed.created_directory {
                     let _ = std::fs::remove_dir(directory);
@@ -123,8 +123,9 @@ impl Drop for MuseHookConfigGuard {
         });
         let owned = self.created_settings;
         let settings_path = &self.settings_path;
+        let hooks_path = &self.hooks_path;
         let _ = with_last_lease(settings_path, &mut self.settings_lease, |lease_created| {
-            restore_settings(settings_path, owned || lease_created)
+            restore_settings(settings_path, hooks_path, owned || lease_created)
         });
         if self.created_dir {
             let _ = std::fs::remove_dir(&self.config_dir);
@@ -186,7 +187,12 @@ fn merge_muse_settings(root: &mut Value, hooks_path: &Path) -> std::io::Result<(
             "user Muse Code settings hold a non-array managed_hooks_env_vars",
         ));
     }
-    object.entry(SCHEMA_VERSION_KEY).or_insert_with(|| json!(1));
+    // Only a settings file PaneFlow is creating gets a `schema_version`: a
+    // pre-existing file that lacked one keeps lacking it, so there is
+    // nothing to restore at cleanup.
+    if object.is_empty() {
+        object.insert(SCHEMA_VERSION_KEY.to_owned(), json!(1));
+    }
     object.insert(MANAGED_HOOKS_PATH_KEY.to_owned(), json!(hooks_path));
     let env_vars = object
         .entry(MANAGED_HOOKS_ENV_VARS_KEY)
@@ -204,18 +210,18 @@ fn merge_muse_settings(root: &mut Value, hooks_path: &Path) -> std::io::Result<(
     Ok(())
 }
 
-pub(crate) fn remove_muse_settings(root: &mut Value) {
+/// Strip PaneFlow's managed keys, but only when `managed_hooks_path` is
+/// exactly `hooks_path`: a foreign file that happens to share the basename
+/// (`/etc/muse/paneflow-hooks.json`) is someone else's and stays intact,
+/// `PANEFLOW_*` env entries included.
+pub(crate) fn remove_muse_settings(root: &mut Value, hooks_path: &Path) {
     let Some(object) = root.as_object_mut() else {
         return;
     };
     let owns_managed_path = object
         .get(MANAGED_HOOKS_PATH_KEY)
         .and_then(Value::as_str)
-        .is_some_and(|path| {
-            Path::new(path)
-                .file_name()
-                .is_some_and(|name| name == MUSE_HOOKS_BASENAME)
-        });
+        .is_some_and(|path| Some(path) == hooks_path.to_str());
     if !owns_managed_path {
         return;
     }
@@ -246,7 +252,7 @@ fn settings_is_bare(root: &Value) -> bool {
     })
 }
 
-fn restore_settings(path: &Path, owned: bool) -> std::io::Result<()> {
+fn restore_settings(path: &Path, hooks_path: &Path, owned: bool) -> std::io::Result<()> {
     let Some(content) = read_optional_text(path)? else {
         return Ok(());
     };
@@ -254,7 +260,7 @@ fn restore_settings(path: &Path, owned: bool) -> std::io::Result<()> {
         return Ok(());
     };
     let before = root.clone();
-    remove_muse_settings(&mut root);
+    remove_muse_settings(&mut root, hooks_path);
     if root == before {
         return Ok(());
     }
@@ -270,11 +276,12 @@ fn sweep_orphan(directory: &Path) {
         return;
     }
     let settings_path = directory.join(MUSE_SETTINGS_BASENAME);
+    let hooks_path = directory.join(MUSE_HOOKS_BASENAME);
     let _ = with_orphan_lease(&settings_path, &settings_path, |created| {
-        restore_settings(&settings_path, created)
+        restore_settings(&settings_path, &hooks_path, created)
     });
     if let Ok(source) = hooks_source() {
-        sweep_accepted_owned_file(&directory.join(MUSE_HOOKS_BASENAME), &|existing| {
+        sweep_accepted_owned_file(&hooks_path, &|existing| {
             is_own_or_sibling_rendering(existing, &source)
         });
     }
