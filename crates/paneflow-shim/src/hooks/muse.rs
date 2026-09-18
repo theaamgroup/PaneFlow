@@ -37,11 +37,14 @@ pub(crate) const MUSE_HOOK_ENV_VARS: &[&str] = &[
     "PANEFLOW_AI_TOOL",
     "PANEFLOW_AI_PID",
 ];
-/// Sidecar beside the lease's `.created` marker holding the `PANEFLOW_*`
-/// names a user had listed in `managed_hooks_env_vars` before PaneFlow first
-/// took the file (no managed path was set). Cleanup keeps exactly those
-/// names, so a pre-existing forward survives even when the last session to
-/// exit is not the one that recorded it.
+/// Sidecar beside the lease's `.created` marker, written by the session
+/// that first takes the file (no managed path was set yet). It proves
+/// PaneFlow added the managed keys and lists the `PANEFLOW_*` names the user
+/// had already put in `managed_hooks_env_vars`. Cleanup strips the managed
+/// keys only when the sidecar exists and keeps exactly those names, so a
+/// file the user pointed at the reserved path themselves is never touched
+/// and a pre-existing forward survives even when the last session to exit
+/// is not the one that recorded it.
 pub(crate) const MUSE_ENV_BASELINE_EXTENSION: &str = "paneflow-env-baseline";
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 const MANAGED_HOOKS_PATH_KEY: &str = "managed_hooks_path";
@@ -174,9 +177,10 @@ pub(crate) fn muse_config_dir() -> Option<PathBuf> {
     }
 }
 
-/// Merge PaneFlow's managed keys. Returns the `PANEFLOW_*` names the user
-/// had already listed while no managed path was set (PaneFlow is taking the
-/// file for the first time), so the caller can record them as the baseline.
+/// Merge PaneFlow's managed keys. When no managed path was set (PaneFlow is
+/// taking the file for the first time) returns the `PANEFLOW_*` names the
+/// user had already listed, possibly none, so the caller records the
+/// baseline; `None` means the managed keys were already PaneFlow's.
 fn merge_muse_settings(
     root: &mut Value,
     hooks_path: &Path,
@@ -218,6 +222,12 @@ fn merge_muse_settings(
     if env_vars.is_null() {
         *env_vars = json!([]);
     }
+    if !first_take {
+        // The managed path is already ours: either a PaneFlow session added
+        // the names, or the user pointed the reserved path at their own
+        // hook file and their env list is theirs to keep.
+        return Ok(None);
+    }
     let mut pre_existing = Vec::new();
     if let Some(entries) = env_vars.as_array_mut() {
         for name in MUSE_HOOK_ENV_VARS {
@@ -228,7 +238,7 @@ fn merge_muse_settings(
             }
         }
     }
-    Ok((first_take && !pre_existing.is_empty()).then_some(pre_existing))
+    Ok(Some(pre_existing))
 }
 
 pub(crate) fn env_baseline_path(settings_path: &Path) -> PathBuf {
@@ -239,16 +249,13 @@ fn write_env_baseline(path: &Path, names: &[String]) -> std::io::Result<()> {
     write_json_atomic(path, &json!(names))
 }
 
-/// The recorded baseline, consumed: the sidecar is removed once read so a
-/// later session starts from the file as the user left it.
-fn take_env_baseline(path: &Path) -> Vec<String> {
-    let names = read_optional_text(path)
-        .ok()
-        .flatten()
-        .and_then(|content| serde_json::from_str::<Vec<String>>(&content).ok())
-        .unwrap_or_default();
-    let _ = std::fs::remove_file(path);
-    names
+/// The recorded baseline. `None` when no sidecar exists, meaning PaneFlow
+/// never took this file. The sidecar is left in place: the caller removes
+/// it only once the restore has been written, so a failed write leaves the
+/// next orphan sweep the same names to keep.
+fn read_env_baseline(path: &Path) -> Option<Vec<String>> {
+    let content = read_optional_text(path).ok().flatten()?;
+    Some(serde_json::from_str::<Vec<String>>(&content).unwrap_or_default())
 }
 
 /// Strip PaneFlow's managed keys, but only when `managed_hooks_path` is
@@ -303,17 +310,24 @@ fn restore_settings(path: &Path, hooks_path: &Path, owned: bool) -> std::io::Res
         let _ = std::fs::remove_file(env_baseline_path(path));
         return Ok(());
     };
-    let before = root.clone();
-    let keep = take_env_baseline(&env_baseline_path(path));
-    remove_muse_settings(&mut root, hooks_path, &keep);
-    if root == before {
+    // No sidecar: the managed keys were the user's own (they pointed the
+    // reserved path at their own hook file), so they stay.
+    let baseline_path = env_baseline_path(path);
+    let Some(keep) = read_env_baseline(&baseline_path) else {
         return Ok(());
+    };
+    let before = root.clone();
+    remove_muse_settings(&mut root, hooks_path, &keep);
+    if root != before {
+        if owned && settings_is_bare(&root) {
+            std::fs::remove_file(path)?;
+        } else {
+            write_json_atomic(path, &root)?;
+        }
     }
-    if owned && settings_is_bare(&root) {
-        std::fs::remove_file(path)
-    } else {
-        write_json_atomic(path, &root)
-    }
+    // Only a restore that reached disk consumes the baseline.
+    let _ = std::fs::remove_file(baseline_path);
+    Ok(())
 }
 
 #[cfg(test)]
