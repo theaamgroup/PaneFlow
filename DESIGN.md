@@ -997,8 +997,11 @@ Typing filters on whole words in any order; arrows move and scroll the
 selection into view; Enter or a click closes the palette, hands focus back to
 the pane, then dispatches; Escape and an outside click close it the same way.
 It never lists itself, opening it folds any other open overlay first (the
-pane palette included; the dispatched action lands on the pane the outermost
-folded overlay was opened from; a Launch Pad mid-run keeps it closed, and the chord is inert while a modal
+pane palette included, except the §5.7 last-surface case: a pane palette on
+the workspace's sole paneless tab cannot close, so the command palette opens
+over it and hands the keyboard back to it when it closes; the dispatched
+action lands on the pane the outermost folded overlay was opened from; a
+Launch Pad mid-run keeps it closed, and the chord is inert while a modal
 dialog or the Settings surface is open, About, System Info, Custom Buttons,
 close confirm, Work Review, Settings, while any of those opened over the
 palette closes it), and upstream's `secondary-shift-p` is
@@ -1304,17 +1307,23 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-Dismissing an overlay (Escape, an outside click on its scrim, its toggle
-chord, or a committed choice) returns the focus to the pane it was opened
-from, then to the workspace's first pane when that pane is gone, then to the
-empty-workspace placeholder. Each overlay keeps its own origin
-(`app/overlay_origin.rs`): one opened over another inherits the outer
+This paragraph covers the seven origin-tracked overlays, the `OverlayKind`
+variants in `app/overlay_origin.rs`: theme picker, broadcast picker, fleet
+search, Launch Pad, Pane Overview, Attention Queue, and the pane palette. The
+modal dialogs (About, System Info, Custom Buttons, close confirm, Work
+Review), the diff branch menu, and the Editor Controls menu keep their own
+restore paths and are not part of it. Dismissing a tracked overlay (Escape,
+an outside click on its scrim, its toggle chord, or a committed choice)
+returns the focus to the pane it was opened from, then to the workspace's
+first pane when that pane is gone, then to the empty-workspace placeholder.
+Each tracked overlay keeps its own origin: one opened over another inherits the outer
 overlay's origin, and closing the inner one leaves the outer one's in place,
 so the focus lands on the same pane whichever closes last. An activation that
 teleports (a Pane Overview card, an Attention Queue row, a fleet-search hit)
 lands on its target instead, and a Launch Pad run lands on the pane it
-created. A new overlay MUST record its origin before it takes the focus and
-restore through it.
+created. A new cockpit overlay of this kind (a focus-taking surface over the
+pane grid) MUST add an `OverlayKind`, record its origin before it takes the
+focus, and restore through it.
 
 ### 7.5 Known accessibility gaps
 
