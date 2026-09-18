@@ -1559,6 +1559,11 @@ struct PaneFlowApp {
     /// `restore_focus` precedent), restored when no pane did: the dock's code
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
+    /// Issue #524: the Clone repository modal (`app/clone_repo.rs`), the
+    /// palette's shell as a quick pick over a URL field or the `gh repo
+    /// list` rows; `Some` while it is up, running or not.
+    clone_repo: Option<app::clone_repo::CloneRepoState>,
+    clone_repo_focus: FocusHandle,
     /// The pane that owned focus when a focus-only overlay opened (theme
     /// picker, broadcast picker, fleet search, Launch Pad); consumed by the
     /// command palette when it folds that overlay (#523), cleared by each
@@ -2357,6 +2362,8 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // Issue #523: the command palette (every context-free action).
             .on_action(cx.listener(Self::handle_open_command_palette))
+            // Issue #524: the Clone repository modal.
+            .on_action(cx.listener(Self::handle_clone_repository))
             // EP-001 (cli-cockpit): Composer + broadcast groups.
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))
@@ -2668,6 +2675,12 @@ impl Render for PaneFlowApp {
             } else {
                 app_content = app_content.child(self.render_command_palette(cx));
             }
+        }
+        // Issue #524: the Clone repository modal. Not mode-gated for the
+        // palette's reason: the clone lands as a workspace wherever it was
+        // started, and a running clone must keep reporting.
+        if self.clone_repo.is_some() {
+            app_content = app_content.child(self.render_clone_repo(cx));
         }
 
         // EP-001 US-002 (cli-cockpit): broadcast-group picker modal.

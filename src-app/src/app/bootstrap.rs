@@ -813,6 +813,9 @@ impl PaneFlowApp {
             command_palette_scroll: gpui::ScrollHandle::new(),
             command_palette_return_pane: None,
             command_palette_return_focus: None,
+            // Issue #524: Clone repository modal closed.
+            clone_repo: None,
+            clone_repo_focus: cx.focus_handle(),
             overlay_origin_pane: None,
             // EP-001 (cli-cockpit): Composer closed, no groups, no buffers.
             composer: None,

@@ -94,6 +94,11 @@ impl PaneFlowApp {
         if self.command_palette_blocked() {
             return;
         }
+        // Issue #524: a clone in flight keeps its modal up (it refuses
+        // Escape too), so the palette does not open over it.
+        if self.clone_repo_running() {
+            return;
+        }
         // The four focus-only overlays remembered the pane they were opened
         // from (`overlay_origin_pane`); that pane, not the first leaf, is
         // what the chosen action must land on.
@@ -128,6 +133,11 @@ impl PaneFlowApp {
         if self.fleet_search.is_some() {
             self.close_fleet_search(cx);
             folded_without_restore = true;
+        }
+        // Issue #524: an idle clone modal folds like the rest; its own close
+        // restores the focus it took, which the capture below then reads.
+        if self.clone_repo.is_some() {
+            self.close_clone_repo(window, cx);
         }
         // Only a fold consults the recorded origin, and then it outranks
         // whatever pane a restoring close just focused.

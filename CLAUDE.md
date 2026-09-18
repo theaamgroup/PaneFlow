@@ -284,6 +284,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
 │   ├── attention_queue.rs             ← "which agent needs me" queue
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
+│   ├── clone_repo.rs                  ← Clone repository modal (#524): URL guard, `gh repo clone` with a
+│   │                                     `git clone` fallback, weighted progress from the stderr tap
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
 │   ├── agent_summary/                 ← Cmd+Shift+I: what every agent pane is doing, one line each,

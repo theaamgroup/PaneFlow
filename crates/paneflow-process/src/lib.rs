@@ -24,6 +24,16 @@ use std::time::{Duration, Instant};
 /// cap is enough. Exceeding it fails the run instead of returning partial data.
 const STDERR_CAP: u64 = 64 * 1024;
 
+/// Read size of the stderr reader that feeds a [`StderrTap`]: small enough
+/// that a `git clone --progress` line reaches the tap while it is still
+/// current, large enough that a chatty child does not wake the tap per byte.
+const TAP_CHUNK: usize = 4 * 1024;
+
+/// A sink [`run_with_timeout_tapping_stderr`] hands every stderr chunk to as
+/// it arrives, on the reader thread. The captured tail is still returned in
+/// [`BoundedOutput::stderr`] afterwards.
+pub type StderrTap = Box<dyn FnMut(&[u8]) + Send>;
+
 /// How often [`run_with_timeout`] polls the child for exit. Small enough that a
 /// fast command returns promptly, large enough that a multi-minute deadline
 /// does not spin the CPU.
@@ -156,6 +166,29 @@ pub fn run_with_timeout(
     run_with_timeout_capped(cmd, deadline, stdout_cap, STDERR_CAP)
 }
 
+/// [`run_with_timeout`] that streams every stderr chunk through `stderr_tap`
+/// as it is read, for a child that reports progress on stderr (`git clone
+/// --progress`). Unlike the capped readers, the stderr capture here never
+/// fails the run on volume: the tap sees everything and only the last
+/// [`STDERR_CAP`] bytes are kept for [`BoundedOutput::stderr`], so a long
+/// clone's progress stream cannot SIGKILL the clone. stdout keeps its cap.
+pub fn run_with_timeout_tapping_stderr(
+    cmd: Command,
+    deadline: Duration,
+    stdout_cap: u64,
+    stderr_tap: impl FnMut(&[u8]) + Send + 'static,
+) -> Result<BoundedOutput, ProcError> {
+    run_bounded_with_tap(
+        cmd,
+        None,
+        deadline,
+        stdout_cap,
+        STDERR_CAP,
+        None,
+        Some(Box::new(stderr_tap)),
+    )
+}
+
 /// [`run_with_timeout`] that writes `stdin` to the child and closes the pipe
 /// (EOF) so plumbing such as `git cat-file --batch` can read a request set.
 pub fn run_with_timeout_stdin(
@@ -207,12 +240,24 @@ pub fn run_with_timeout_capped(
 }
 
 fn run_bounded(
+    cmd: Command,
+    stdin: Option<&[u8]>,
+    deadline: Duration,
+    stdout_cap: u64,
+    stderr_cap: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<BoundedOutput, ProcError> {
+    run_bounded_with_tap(cmd, stdin, deadline, stdout_cap, stderr_cap, cancel, None)
+}
+
+fn run_bounded_with_tap(
     mut cmd: Command,
     stdin: Option<&[u8]>,
     deadline: Duration,
     stdout_cap: u64,
     stderr_cap: u64,
     cancel: Option<&AtomicBool>,
+    stderr_tap: Option<StderrTap>,
 ) -> Result<BoundedOutput, ProcError> {
     let stdout_cap = validate_capture_cap(stdout_cap)?;
     let stderr_cap = validate_capture_cap(stderr_cap)?;
@@ -263,8 +308,15 @@ fn run_bounded(
         stdout_cap,
         OutputStream::Stdout,
         reader_tx.clone(),
+        None,
     )?;
-    spawn_bounded_reader(stderr_pipe, stderr_cap, OutputStream::Stderr, reader_tx)?;
+    spawn_bounded_reader(
+        stderr_pipe,
+        stderr_cap,
+        OutputStream::Stderr,
+        reader_tx,
+        stderr_tap,
+    )?;
 
     let mut capture = CaptureState::default();
     let status = loop {
@@ -505,6 +557,7 @@ fn spawn_bounded_reader<R>(
     cap: usize,
     stream: OutputStream,
     sender: mpsc::Sender<ReaderMessage>,
+    tap: Option<StderrTap>,
 ) -> Result<(), ProcError>
 where
     R: Read + Send + 'static,
@@ -512,11 +565,41 @@ where
     thread::Builder::new()
         .name(format!("paneflow-process-{stream}"))
         .spawn(move || {
-            let result = read_bounded(pipe, cap);
+            let result = match tap {
+                Some(tap) => read_tapped_tail(pipe, cap, tap),
+                None => read_bounded(pipe, cap),
+            };
             let _ = sender.send(ReaderMessage { stream, result });
         })
         .map(|_| ())
         .map_err(|source| ProcError::ReaderSpawn { stream, source })
+}
+
+/// The tapped reader: every chunk goes to `tap` first, then joins a rolling
+/// tail that never grows past `cap`. Volume is not an error here (the tap
+/// consumed it), which is the one way this differs from [`read_bounded`].
+fn read_tapped_tail<R>(
+    mut pipe: R,
+    cap: usize,
+    mut tap: StderrTap,
+) -> Result<Vec<u8>, ReaderFailure>
+where
+    R: Read,
+{
+    let mut tail = Vec::new();
+    let mut chunk = [0u8; TAP_CHUNK];
+    loop {
+        let read = pipe.read(&mut chunk).map_err(ReaderFailure::Read)?;
+        if read == 0 {
+            return Ok(tail);
+        }
+        tap(&chunk[..read]);
+        tail.extend_from_slice(&chunk[..read]);
+        if tail.len() > cap {
+            let excess = tail.len() - cap;
+            tail.drain(..excess);
+        }
+    }
 }
 
 fn read_bounded<R>(mut pipe: R, cap: usize) -> Result<Vec<u8>, ReaderFailure>
@@ -747,6 +830,45 @@ mod tests {
     fn bounded_reader_rejects_overflow() {
         let read = read_bounded(std::io::Cursor::new(b"abcdef".to_vec()), 3);
         assert!(matches!(read, Err(ReaderFailure::LimitExceeded { cap: 3 })));
+    }
+
+    #[test]
+    fn tapped_reader_streams_every_chunk_and_keeps_only_the_tail() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let tail = read_tapped_tail(
+            std::io::Cursor::new(b"abcdef".to_vec()),
+            3,
+            Box::new(move |chunk: &[u8]| sink.lock().unwrap().extend_from_slice(chunk)),
+        )
+        .unwrap();
+        assert_eq!(tail, b"def", "only the last `cap` bytes are kept");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            b"abcdef",
+            "the tap sees every byte, including the ones the tail dropped"
+        );
+    }
+
+    /// The tapped run reports stderr as it flows and does not fail the run
+    /// when stderr outgrows the tail cap, unlike the capped reader.
+    #[cfg(unix)]
+    #[test]
+    fn tapped_run_streams_stderr_and_survives_volume_past_the_cap() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let sink = seen.clone();
+        // 3 * STDERR_CAP bytes of stderr, more than the capped reader accepts.
+        let out = run_with_timeout_tapping_stderr(
+            sh("head -c 196608 /dev/zero | tr '\\0' 'x' >&2; printf ok"),
+            Duration::from_secs(10),
+            1 << 20,
+            move |chunk| *sink.lock().unwrap() += chunk.len(),
+        )
+        .expect("a chatty child must not be killed for its stderr volume");
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"ok");
+        assert_eq!(*seen.lock().unwrap(), 196_608);
+        assert_eq!(out.stderr.len(), STDERR_CAP as usize);
     }
 
     #[test]
