@@ -1540,6 +1540,11 @@ struct PaneFlowApp {
     /// Scroll state for the theme picker list (visible scrollbar overlay).
     theme_picker_scroll: gpui::ScrollHandle,
     theme_picker_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
+    /// Issue #524: the Clone repository modal (`app/clone_repo.rs`), the
+    /// palette's shell as a quick pick over a URL field or the `gh repo
+    /// list` rows; `Some` while it is up, running or not.
+    clone_repo: Option<app::clone_repo::CloneRepoState>,
+    clone_repo_focus: FocusHandle,
     /// Issue #523: the command palette (`app/command_palette.rs`), the theme
     /// picker's shell over every context-free action. Rows are derived from
     /// `effective_shortcuts` on every render, never stored.
@@ -1559,11 +1564,6 @@ struct PaneFlowApp {
     /// `restore_focus` precedent), restored when no pane did: the dock's code
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
-    /// Issue #524: the Clone repository modal (`app/clone_repo.rs`), the
-    /// palette's shell as a quick pick over a URL field or the `gh repo
-    /// list` rows; `Some` while it is up, running or not.
-    clone_repo: Option<app::clone_repo::CloneRepoState>,
-    clone_repo_focus: FocusHandle,
     /// The pane that owned focus when a focus-only overlay opened (theme
     /// picker, broadcast picker, fleet search, Launch Pad); consumed by the
     /// command palette when it folds that overlay (#523), cleared by each

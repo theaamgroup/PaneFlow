@@ -88,15 +88,15 @@ impl PaneFlowApp {
         // where it has one, so the capture below sees the pane the overlay
         // was opened from. A Launch Pad mid-run keeps its modal up (it
         // refuses Escape too), so the palette does not open over it.
+        // Issue #524: a clone in flight keeps its modal up (it refuses
+        // Escape too), so the palette does not open over it.
+        if self.clone_repo_running() {
+            return;
+        }
         if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
             return;
         }
         if self.command_palette_blocked() {
-            return;
-        }
-        // Issue #524: a clone in flight keeps its modal up (it refuses
-        // Escape too), so the palette does not open over it.
-        if self.clone_repo_running() {
             return;
         }
         // The four focus-only overlays remembered the pane they were opened
