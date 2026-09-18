@@ -2642,8 +2642,17 @@ impl Render for PaneFlowApp {
         // Issue #523: the command palette. Not mode-gated: it lists only
         // context-free actions, and each of those already decides for itself
         // what it does outside the CLI cockpit.
+        // A modal opened over the palette from the menu bar (About, System
+        // Info) or a close-confirm outranks it, so the palette folds itself
+        // at the next frame instead of staying mounted and unfocused with
+        // its keystrokes reaching the terminal under the scrim; the modal's
+        // own close then restores focus through its usual chain.
         if self.command_palette_open {
-            app_content = app_content.child(self.render_command_palette(cx));
+            if self.command_palette_blocked_by_modal() {
+                self.close_command_palette(cx);
+            } else {
+                app_content = app_content.child(self.render_command_palette(cx));
+            }
         }
 
         // EP-001 US-002 (cli-cockpit): broadcast-group picker modal.

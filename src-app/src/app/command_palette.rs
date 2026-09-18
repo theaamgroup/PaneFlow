@@ -197,7 +197,7 @@ impl PaneFlowApp {
     /// - the modal close-confirm (`pending_close` with `ConfirmStyle::Modal`,
     ///   priority 11); an inline close arm is not a dialog
     /// - Work Review (`work_review`, an occluding focus-owning surface)
-    fn command_palette_blocked_by_modal(&self) -> bool {
+    pub(crate) fn command_palette_blocked_by_modal(&self) -> bool {
         self.custom_buttons_modal.is_some()
             || self.show_about_dialog
             || self.system_info_dialog.is_some()
@@ -764,6 +764,16 @@ mod tests {
         assert!(
             main.contains("self.render_command_palette(cx)"),
             "the render root must mount the palette overlay"
+        );
+        // A modal opened over the palette folds it at the next frame.
+        let mount = main
+            .find("if self.command_palette_open {")
+            .map(|at| &main[at..at + 400])
+            .expect("the render root gates the palette on command_palette_open");
+        assert!(
+            mount.contains("if self.command_palette_blocked_by_modal() {")
+                && mount.contains("self.close_command_palette(cx);"),
+            "a modal dialog opened over the palette must close it at the next frame: {mount}"
         );
     }
 }
