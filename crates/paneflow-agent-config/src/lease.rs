@@ -190,20 +190,17 @@ impl Drop for LastConfigLease {
     }
 }
 
-fn lease_directory(dirs: paneflow_config::loader::UserDirs) -> PathBuf {
-    dirs.config
-        .join(paneflow_config::loader::APP_SUBDIR)
-        .join("agent-config-leases")
-}
-
 fn lease_path(resource: &Path) -> Result<PathBuf> {
-    let dirs = paneflow_config::loader::user_dirs().ok_or_else(|| {
+    // These leases protect external agent files shared by every PaneFlow
+    // instance. App-specific homes and debug/release namespaces would split
+    // their ownership, allowing one instance to clean up another's live hooks.
+    let config_dir = dirs::config_dir().ok_or_else(|| {
         Error::new(
             ErrorKind::NotFound,
             "could not resolve the user configuration directory",
         )
     })?;
-    let directory = lease_directory(dirs);
+    let directory = config_dir.join("paneflow").join("agent-config-leases");
     std::fs::create_dir_all(&directory)?;
     Ok(directory.join(format!("{:016x}.lock", resource_hash(resource))))
 }
@@ -386,19 +383,64 @@ mod tests {
     }
 
     #[test]
-    fn leases_use_the_shared_home_and_build_namespace() {
-        let home = tempfile::tempdir().unwrap();
-        let directory = lease_directory(paneflow_config::loader::user_dirs_under(home.path()));
-        assert_eq!(
-            directory,
-            home.path()
-                .join("config")
-                .join(paneflow_config::loader::APP_SUBDIR)
-                .join("agent-config-leases")
-        );
-        if cfg!(debug_assertions) {
-            assert!(!directory.starts_with(home.path().join("config/paneflow")));
+    fn leases_share_resource_across_paneflow_homes() {
+        let resource = unique_resource("shared-home");
+        let mut holder = ConfigLease::acquire(&resource).unwrap();
+        holder.mark_created_with("shared ownership").unwrap();
+        let homes = tempfile::tempdir().unwrap();
+        let mut outputs = Vec::new();
+        for home in [
+            None,
+            Some(homes.path().join("one")),
+            Some(homes.path().join("two")),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "lease::tests::lease_namespace_child",
+                    "--nocapture",
+                ])
+                .env("PANEFLOW_TEST_LEASE_RESOURCE", &resource)
+                .env_remove("PANEFLOW_HOME");
+            if let Some(home) = home {
+                child.env("PANEFLOW_HOME", home);
+            }
+            outputs.push(child.output().unwrap());
         }
+        let mut last = holder.try_take_last().unwrap().unwrap();
+        assert!(last.take_created().unwrap());
+        for output in outputs {
+            assert!(
+                output.status.success(),
+                "child lease check failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn lease_namespace_child() {
+        let Some(resource) = std::env::var_os("PANEFLOW_TEST_LEASE_RESOURCE") else {
+            return;
+        };
+        let resource = PathBuf::from(resource);
+        let mut lease = ConfigLease::acquire(&resource).unwrap();
+        assert_eq!(lease.created_note().as_deref(), Some("shared ownership"));
+        // Even a debug build must use the installed release's namespace.
+        assert_eq!(
+            lease.path,
+            dirs::config_dir()
+                .unwrap()
+                .join("paneflow")
+                .join("agent-config-leases")
+                .join(format!("{:016x}.lock", resource_hash(&resource)))
+        );
+        assert!(
+            lease.try_take_last().unwrap().is_none(),
+            "the parent still owns the resource"
+        );
     }
 
     fn unique_resource(label: &str) -> PathBuf {
