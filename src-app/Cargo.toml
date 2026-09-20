@@ -39,21 +39,6 @@ path = "src/main.rs"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8", features = ["font-kit"] }
 
-# Zed markdown rendering pipeline + design-system primitives. Pinned at the
-# same rev as gpui so the workspace graph resolves consistently. Pulls ~51
-# Zed workspace crates transitively (language/theme/ui/lsp/...) - accepted
-# trade-off for visual parity with Zed's agent panel.
-# Bootstraps Zed's `GlobalTheme` at startup. `MarkdownElement::paint` reads
-# `cx.theme().colors()` unconditionally for secondary chrome (borders, panel
-# backgrounds, etc.) regardless of the `MarkdownStyle` we pass in, so the
-# global must exist. `theme::init(LoadThemes::JustBase, cx)` is the minimal
-# bootstrap - no JSON theme bundles, no `theme_settings` integration.
-# Zed's design-system primitives (Icon + IconName, Disclosure, Label, ...).
-# Pinned at the same rev as gpui/markdown/theme. Required so the agent-panel
-# thinking + tool-call rows match Zed's exact rendering (`Icon::new(IconName::
-# ToolSearch).size(IconSize::Small).color(Color::Muted)` etc.) instead of
-# hand-rolled svg() paths.
-
 # Terminal engine (#184): PaneFlow owns the PTY through portable-pty; the
 # vendored libghostty-vt archive (linked by paneflow-libghostty-sys) parses
 # bytes and owns the grid; GPUI paints the snapshots. One engine, no
@@ -115,9 +100,6 @@ anyhow.workspace = true
 # manual and run before clap so it never eats their flags.
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
-# Async utilities used by app subsystems that need tokio-compatible futures
-# without blocking GPUI's smol event loop.
-tokio = { version = "1", features = ["rt", "macros", "io-util", "sync", "time"] }
 tracing = "0.1"
 log.workspace = true
 env_logger = "0.11"
@@ -211,13 +193,7 @@ unicode-segmentation = "1"
 # `@`-mention file completion popup (recursive, gitignore-respecting,
 # debounced 200ms). Pulled in directly so the composer does not have
 # to reimplement .gitignore / .ignore / hidden-file filtering by hand.
-#
-# `base64` encodes image attachments into the ACP `ImageContent.data` field
-# (base64 string with a `mime_type` companion). Already a transitive dep
-# (rusqlite, ...), so the explicit declaration only adds the public
-# surface, not a new compile unit.
 ignore = "0.4"
-base64 = "0.22"
 
 # Desktop notifications fired by the agents runtime when a turn ends, needs
 # input, stalls, or exits unexpectedly while the user is not already looking
