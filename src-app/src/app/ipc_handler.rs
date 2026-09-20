@@ -881,7 +881,7 @@ fn wrap_send_text_bracketed_paste(text: &str) -> String {
 }
 
 /// Map a PTY write Result onto JSON-RPC. Closed channel / overflow / poison
-/// become `-32603` so CLI `paneflow send` / `flow` fail instead of treating
+/// become `-32603` so CLI `paneflow send` fails instead of treating
 /// `sent: true` as landed. Queued-pending and live EventLoop writes are `Ok`.
 fn send_text_from_pty_write<E: ToString>(result: Result<(), E>) -> Result<(), JsonRpcError> {
     result.map_err(|err| JsonRpcError::internal_error(err.to_string()))
@@ -2459,7 +2459,7 @@ impl PaneFlowApp {
         // prompt is written WITHOUT a carriage return - human-in-loop: the user
         // reviews and submits it themselves (US-010).
         // EP-003 (orchestration-v2): collect the spawned terminals' surface ids
-        // in pane order - `paneflow flow` maps them back to its DAG steps.
+        // in pane order so clients can map them back to their pane specifications.
         let mut surface_ids: Vec<u64> = Vec::with_capacity(launches.len());
         for (i, (terminal, command, prompt)) in launches.into_iter().enumerate() {
             surface_ids.push(terminal.entity_id().as_u64());
@@ -3253,7 +3253,7 @@ impl PaneFlowApp {
                 };
                 // EP-001 US-003 (agent-control-plane): expose the output
                 // generation counter so a client detects pane-idle without a
-                // timer heuristic (kills the flow engine's settling poll).
+                // timer heuristic.
                 let output_generation = terminal.read(cx).terminal.output_generation;
                 let sid = terminal.entity_id().as_u64();
                 // EP-003 US-011 (agent-control-plane): wrap the returned text as
@@ -3261,14 +3261,14 @@ impl PaneFlowApp {
                 // reading it. Default follows the global `ai_injection_fence`
                 // setting (ON); a caller can override per call with
                 // `fenced: false`. Internal consumers that parse raw output (the
-                // MCP bridge, which re-fences itself; the `flow`/`wait` poll
+                // MCP bridge, which re-fences itself; the `wait` poll
                 // loops) pass `fenced:false`, so this only changes the CLI/IPC
                 // read path an orchestrator uses directly, mirroring the MCP fence.
                 let fenced =
                     fenced.unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
                 // Issue #363: the extract parks on the runtime's reply for up
                 // to a second, and this runs on the 50 ms GPUI automation tick
-                // that `wait`/`flow` hit every 500 ms. Clone the `Send` reader
+                // that `wait` hits every 500 ms. Clone the `Send` reader
                 // here (an `Arc` bump) and do the waiting on a background
                 // worker, so a slow or silent runtime cannot stall painting.
                 let reader = terminal.read(cx).terminal.scrollback_reader();
@@ -3280,12 +3280,12 @@ impl PaneFlowApp {
                     let read_started = std::time::Instant::now();
                     // The engine cuts the window (`DisplayTerminal::transcript_window`):
                     // it reads the screen plus the `lines` rows the page covers,
-                    // never the whole 4000-row history, so a wait/flow poll costs
+                    // never the whole 4000-row history, so a wait poll costs
                     // what it asks for (issue #29). The rows are the history
                     // followed by the live screen (#184 Phase 3.6): a full-screen
                     // TUI has no history, so the screen is what a reader gets.
                     // `None` is a runtime that did not answer - an error, not a
-                    // blank pane, or wait/flow would settle on a wedged runtime.
+                    // blank pane, or wait would settle on a wedged runtime.
                     let window =
                         smol::unblock(move || reader.extract_scrollback_window(lines, offset))
                             .await;
@@ -6313,7 +6313,7 @@ mod tests {
 
     /// Issue #363: `GhosttySession::request` parks its caller on the runtime
     /// for up to a second. `surface.read` and `surface.search` are dispatched
-    /// from `process_automation_tick` on the GPUI thread - `wait`/`flow` poll
+    /// from `process_automation_tick` on the GPUI thread - `wait` polls
     /// a read every 500 ms, and a search over a large buffer is one wait per
     /// chunk - so neither may perform that wait inline. Both hand it to a
     /// background worker and answer through the response channel from there.
@@ -6367,7 +6367,7 @@ mod tests {
             .expect("surface.read arm");
         assert!(
             arm.contains("extract_scrollback_window"),
-            "surface.read must window the grid extract so wait/flow do not pay 4000 lines"
+            "surface.read must window the grid extract so wait does not pay 4000 lines"
         );
         assert!(
             !arm.contains("extract_scrollback()"),

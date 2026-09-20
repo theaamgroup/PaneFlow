@@ -40,7 +40,7 @@ pub(crate) const MAX_CHARS: usize = 400_000;
 /// Maximum history rows a transcript read spans. Session persistence walks
 /// up to this many; IPC `surface.read` clamps its `lines` to it, and the
 /// engine (`DisplayTerminal::transcript_window`) then reads only the screen
-/// plus the rows the requested window covers, so a `wait`/`flow` poll for
+/// plus the rows the requested window covers, so a `wait` poll for
 /// 500 lines costs 500 rows, not this many, on every GPUI tick (issue #29).
 /// `surface.search` chunks the grid on its own budget.
 pub(crate) const MAX_SCROLLBACK_EXTRACT_LINES: usize = 4000;

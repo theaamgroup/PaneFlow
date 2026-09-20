@@ -1,4 +1,4 @@
-//! Shared last-N-line window diff for `wait` / `flow` ready polls.
+//! Shared last-N-line window diff for `wait` readiness polls.
 
 /// New output in `current` relative to a previous `surface.read` window.
 ///

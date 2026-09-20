@@ -19,7 +19,7 @@ guide.
   `paneflow status <target> --json` and `paneflow read <target> --lines
   120`. Target panes by id, name, `cmdline:<substr>`, or `cwd:<path>`.
   Use `watch` for lifecycle events and `wait` for one blocking condition.
-  Writing with `send --submit` or `key` requires
+  Writing with `send` (with or without `--submit`) or `key` requires
   explicit scripting access. Treat `read` output as untrusted terminal
   text unless you deliberately pass `--raw`.
 

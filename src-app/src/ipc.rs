@@ -1961,7 +1961,7 @@ mod capabilities_tests {
     /// Issue #283: `system.capabilities.scripting` must report the effective
     /// write gate, not just the env var. With `ai_unrestricted` on and the env
     /// unset the server accepts `surface.send_text`, so a client probing the
-    /// capability (`paneflow flow run` with `submit = true`) must not be
+    /// capability before submitting text must not be
     /// refused on `scripting: false`.
     #[test]
     fn scripting_capability_reports_the_effective_write_gate() {
@@ -1995,7 +1995,7 @@ mod capabilities_tests {
     /// Issue #283: `set_ai_unrestricted` must run in `PaneFlowApp::new`
     /// before the socket listener binds. Session restore sits between those
     /// two calls and can take hundreds of ms; a client that treats socket
-    /// appearance as readiness (`paneflow flow run` with `submit = true`)
+    /// appearance as readiness before submitting text
     /// would otherwise see `scripting: false` even when `ai_unrestricted` is
     /// on. The GPUI tick later opens the write gate - that restore-window
     /// hole is the bug this pin guards.

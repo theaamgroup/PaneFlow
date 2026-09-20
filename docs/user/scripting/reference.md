@@ -1,6 +1,6 @@
 # Scripting reference
 
-> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, workspace specs, flow specs, MCP tools, hooks, and exit codes for PaneFlow automation.
+> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, workspace specs, MCP tools, hooks, and exit codes for PaneFlow automation.
 
 This is the compact reference for [Scripting and automation](../scripting.md).
 It names the public surface a human script or LLM can quote exactly.
@@ -52,7 +52,7 @@ except commands that explicitly accept multiple matches such as
 | `1`  | Runtime failure: instance unreachable, pane closed, gate refused, or handler error |
 | `2`  | CLI usage error                                                                    |
 | `3`  | Target not found or ambiguous                                                      |
-| `4`  | `wait` timeout or flow ready timeout                                               |
+| `4`  | `wait` timeout                                               |
 
 ## Write gates
 
@@ -63,7 +63,6 @@ Reading is allowed by default. Writes are split by capability:
 | `send` without `--submit`      | `PANEFLOW_IPC_SCRIPTING=1` or `ai_unrestricted`        |
 | `send --submit`                | `PANEFLOW_IPC_SCRIPTING=1` or `ai_unrestricted`        |
 | `key`                          | `PANEFLOW_IPC_SCRIPTING=1` or `ai_unrestricted`        |
-| Flow step with `submit = true` | Scripting capability reported by `system.capabilities` |
 
 `send` does not append a carriage return unless `--submit` is present.
 `key` rejects submitting keystrokes such as `enter`, `ctrl-m`, and
@@ -200,7 +199,7 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `system.identify`          | -                                                                                               | `{name, version, protocol}`                              |
 | `workspace.create`         | `name?`, `cwd?`, `layout?`                                                                      | Create a workspace                                       |
 | `workspace.select`         | `index`                                                                                         | Switch workspace                                         |
-| `workspace.up`             | `name`, `layout`, `panes[]`                                                                     | Declarative spawn used by `up` and flow roots            |
+| `workspace.up`             | `name`, `layout`, `panes[]`                                                                     | Declarative spawn used by `up`            |
 | `surface.list`             | `workspace_id?`                                                                                 | `{surfaces:[{surface_id,name,title,cwd,cmd,workspace,workspace_id,scope,tab_id,tab_title}]}`; agents-pane surfaces have no `workspace_id` and are omitted when the filter is set |
 | `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`, `workspace_id?`                                   | Scrollback, `output_generation`, `truncated`             |
 | `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches                       |

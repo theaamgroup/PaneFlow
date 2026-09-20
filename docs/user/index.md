@@ -37,7 +37,7 @@ source: see [INSTALL.md](../../INSTALL.md).
 
 **Automating it**
 
-* [scripting](scripting.md) - CLI, JSON-RPC, events, workspace and flow files, MCP, hooks.
+* [scripting](scripting.md) - CLI, JSON-RPC, events, workspace files, MCP, hooks.
 * [scripting/reference](scripting/reference.md) - the exact surface to quote.
 
 ## What runs on the inside

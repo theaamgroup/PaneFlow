@@ -1,8 +1,8 @@
 //! "Workspaces" settings page - visual builder for reusable workspace
 //! templates backed by the existing `commands[].workspace` config surface.
 //!
-//! This is intentionally a `WorkspaceSpec`-level builder, not a `flow.toml`
-//! DAG editor: users can compose panes, agents, shell commands, cwd and prompt
+//! This is a `WorkspaceSpec`-level builder: users can compose panes, agents,
+//! shell commands, cwd and prompt
 //! prefill, then launch through the same `workspace.up` path the CLI uses.
 
 use crate::ui_primitives::TooltipDelayExt;

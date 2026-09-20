@@ -144,7 +144,7 @@ impl WorkspaceSpec {
     }
 }
 
-/// Per-pane invariants, shared with the flow spec (EP-003): `agent` XOR
+/// Per-pane invariants: `agent` XOR
 /// `command`, plus the worktree-field rules below.
 pub(super) fn validate_pane(i: usize, pane: &PaneSpec) -> Result<(), String> {
     if pane.agent.is_some() && pane.command.is_some() {
