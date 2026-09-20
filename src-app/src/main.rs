@@ -1571,7 +1571,7 @@ struct PaneFlowApp {
     command_palette_return_focus: Option<FocusHandle>,
     /// The pane each open overlay was opened from, keyed by overlay (#584:
     /// theme picker, broadcast picker, fleet search, Launch Pad, Pane
-    /// Overview, Attention Queue, pane palette). An overlay's own close
+    /// Overview, pane palette). An overlay's own close
     /// returns the focus to its entry; the command palette reads the
     /// outermost one when it folds them (#523).
     overlay_origins: app::overlay_origin::OverlayOrigins,
@@ -1590,12 +1590,6 @@ struct PaneFlowApp {
     broadcast_picker_renaming: Option<usize>,
     broadcast_picker_error: Option<String>,
     broadcast_picker_focus: FocusHandle,
-    /// EP-002 US-004 (cli-cockpit): Attention Queue overlay - visibility,
-    /// keyboard cursor, key-routing focus handle. Rows are derived live
-    /// from `agent_sessions` on every render, never stored.
-    attention_queue_open: bool,
-    attention_queue_selected: usize,
-    attention_queue_focus: FocusHandle,
     /// EP-006 US-018 (cli-cockpit): fleet-grep overlay state, `None` =
     /// closed. Results are a bounded snapshot (counts + names, never the
     /// match vectors); the fan-out is generation-guarded.
@@ -2376,8 +2370,7 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))
             .on_action(cx.listener(Self::handle_open_broadcast_groups))
-            // EP-002 (cli-cockpit): Attention Queue + Launch Pad.
-            .on_action(cx.listener(Self::handle_open_attention_queue))
+            // EP-002 (cli-cockpit): Launch Pad.
             .on_action(cx.listener(Self::handle_open_launch_pad))
             .on_action(cx.listener(Self::handle_open_pane_overview))
             .on_action(cx.listener(Self::handle_open_agent_summary))
@@ -2693,14 +2686,11 @@ impl Render for PaneFlowApp {
             app_content = app_content.child(self.render_broadcast_picker(cx));
         }
 
-        // EP-002 (cli-cockpit): Attention Queue overlay + Launch Pad modal.
+        // EP-002 (cli-cockpit): Launch Pad modal.
         // Mode-gated (review R3): a mode switch while a launch runs in the
         // background must not paint cockpit chrome over Agents/Diff - the
         // modal reappears (or finishes) back in Cli mode.
         let in_cli_mode = matches!(self.mode, paneflow_config::schema::AppMode::Cli);
-        if self.attention_queue_open && in_cli_mode {
-            app_content = app_content.child(self.render_attention_queue(cx));
-        }
         if self.launch_pad.is_some() && in_cli_mode {
             app_content = app_content.child(self.render_launch_pad(cx));
         }

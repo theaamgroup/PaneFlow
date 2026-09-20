@@ -174,29 +174,7 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut order: Vec<(usize, usize, gpui::Entity<crate::pane::Pane>, u64)> = Vec::new();
-        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
-            let matching: std::collections::HashSet<u64> = ws
-                .agent_sessions
-                .values()
-                // A session marked read (#408) presents no state to jump to.
-                .filter(|s| s.presented_state().is_some_and(&state_matches))
-                .filter_map(|s| s.surface_id)
-                .collect();
-            if matching.is_empty() {
-                continue;
-            }
-            for (tab_idx, tab) in ws.tabs().iter().enumerate() {
-                for pane in tab.collect_panes() {
-                    if let Some(t) = pane.read(cx).active_terminal_opt() {
-                        let sid = t.entity_id().as_u64();
-                        if matching.contains(&sid) {
-                            order.push((ws_idx, tab_idx, pane.clone(), sid));
-                        }
-                    }
-                }
-            }
-        }
+        let order = matching_session_panes(&self.workspaces, state_matches, cx);
         let ids: Vec<u64> = order.iter().map(|(_, _, _, sid)| *sid).collect();
         let Some(next) = next_in_cycle(&ids, self.jump_cursor) else {
             return;
@@ -216,7 +194,7 @@ impl PaneFlowApp {
     /// and activation), which every caller treats as a clean no-op.
     ///
     /// The ORDER is load-bearing and is why this is one function rather than
-    /// another copy of the Attention Queue / Fleet Search teleport: focus can
+    /// another copy of the waiting-agent navigation / Fleet Search teleport: focus can
     /// only land on a *rendered* pane, so the owning tab has to become
     /// visible before `activate_workspace_at` runs. Indices are re-resolved
     /// from `surface_id` here rather than captured by the caller, so a
@@ -281,5 +259,85 @@ mod tests {
         assert_eq!(next_in_cycle(&[10, 20, 30], Some(30)), Some(10));
         // Single waiting pane: jumping again stays on it.
         assert_eq!(next_in_cycle(&[10], Some(10)), Some(10));
+    }
+}
+
+type SessionPane = (usize, usize, gpui::Entity<crate::pane::Pane>, u64);
+
+fn matching_session_panes(
+    workspaces: &[crate::workspace::Workspace],
+    state_matches: impl Fn(&crate::ai_types::AgentState) -> bool,
+    cx: &gpui::App,
+) -> Vec<SessionPane> {
+    let mut order: Vec<SessionPane> = Vec::new();
+    for (ws_idx, ws) in workspaces.iter().enumerate() {
+        let matching: std::collections::HashSet<u64> = ws
+            .agent_sessions
+            .values()
+            // A session marked read (#408) presents no state to jump to.
+            .filter(|s| s.presented_state().is_some_and(&state_matches))
+            .filter_map(|s| s.surface_id)
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        for (tab_idx, tab) in ws.tabs().iter().enumerate() {
+            for pane in tab.collect_panes() {
+                if let Some(t) = pane.read(cx).active_terminal_opt() {
+                    let sid = t.entity_id().as_u64();
+                    if matching.contains(&sid) {
+                        order.push((ws_idx, tab_idx, pane.clone(), sid));
+                    }
+                }
+            }
+        }
+    }
+    order
+}
+
+#[cfg(test)]
+mod waiting_navigation_tests {
+    use super::*;
+    use gpui::AppContext;
+
+    #[gpui::test]
+    fn next_waiting_target_includes_background_tabs(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let front = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        let back = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(2, cx));
+        let sid = back.entity_id().as_u64();
+        let front = cx.new(|cx| crate::pane::Pane::new(front, 1, cx));
+        let back = cx.new(|cx| crate::pane::Pane::new(back, 2, cx));
+        let mut ws = crate::workspace::Workspace::with_layout_and_id(
+            1,
+            "test",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(front),
+        );
+        assert!(ws.open_tab(crate::workspace::Tab::new(
+            "background",
+            Some(crate::layout::LayoutTree::Leaf(back))
+        )));
+        ws.set_active_tab(0);
+        let mut session = crate::ai_types::AgentSession::new(
+            crate::agent_launcher::TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::WaitingForInput,
+        );
+        session.surface_id = Some(sid);
+        ws.agent_sessions.insert(1, session);
+        let workspaces = vec![ws];
+        let order = cx.update(|_, cx| {
+            matching_session_panes(
+                &workspaces,
+                |state| *state == crate::ai_types::AgentState::WaitingForInput,
+                cx,
+            )
+        });
+        assert_eq!(order.len(), 1);
+        assert_eq!((order[0].0, order[0].1, order[0].3), (0, 1, sid));
+        assert_eq!(
+            next_in_cycle(&order.iter().map(|entry| entry.3).collect::<Vec<_>>(), None),
+            Some(sid)
+        );
     }
 }

@@ -252,7 +252,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 97 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 96 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -282,7 +282,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
-│   ├── attention_queue.rs             ← "which agent needs me" queue
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
@@ -484,7 +483,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 97 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 96 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -503,7 +502,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 97 ac
 | `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
 | `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
 | `Cmd+Shift+Z` | Toggle zoom | Global |
-| `Cmd+Shift+J` / `Cmd+Shift+A` | Jump to next waiting agent / open attention queue | Global |
+| `Cmd+Shift+J` | Jump to next waiting agent, including background tabs | Global |
 | `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
 | `Cmd+Shift+I` | Fleet agent summary (on-device, one line per agent pane) | Global |
 | `Cmd+Shift+G` | Diff view | Global |
@@ -531,7 +530,10 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 97 ac
 | `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
 | `Cmd+Q` | Quit (macOS only) | Global |
 
-The Attention Queue is `Cmd+Shift+A`, not `Cmd+Shift+K` (issue #184): `secondary-shift-k` is the terminal-convention clear-scrollback chord (kitty, Ghostty) and `clear_scroll_history` owns it now, with `cmd-k` as the macOS spelling. `attention_queue_is_cmd_shift_a_and_cmd_shift_k_clears_scrollback` in `keybindings/apply.rs` fails if the queue drifts back, if any of those chords gains a second claimant, or if `close_window` returns (it was removed: closing the window is `Quit`, and the title-bar close button reaches `quit_after_session_save` through `TitleBarEvent::CloseRequested`).
+`Cmd+Shift+K` and `Cmd+K` clear terminal scrollback; `Cmd+Shift+R` resets
+the terminal. Their registry contexts and exclusive chord ownership are
+covered by `cmd_shift_k_and_cmd_k_clear_scrollback` in `keybindings/apply.rs`.
+`Cmd+Shift+A` is unassigned after removal of the waiting-agent list overlay.
 
 Next-workspace is `ctrl-tab`, not the upstream `secondary-tab` (Cmd+Tab): macOS reserves Cmd+Tab for the application switcher and never delivers it to the app (issue #10; a synthetic Cmd+Tab on 2026-08-27 moved focus to another app while Cmd+1/Cmd+2 through the same path switched workspaces). A test in `keybindings/apply.rs` fails if any default binds `secondary-tab` again.
 
@@ -554,7 +556,7 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 
 - **Themes**: **8 bundled variants** (`theme/builtin.rs:9-18`): `PaneFlow Dark` (default identifier, `DEFAULT_THEME`), `PaneFlow Light`, `Vercel Dark` / `Vercel Light`, `Claude Dark` / `Claude Light`, `Cursor Dark` / `Cursor Light`. Legacy alias table (`LEGACY_THEME_ALIASES`) maps `One Dark` → `PaneFlow Dark` (plus the old single-name Vercel/Claude/Cursor entries onto their dark variants). The previous `Paneflow Dark` / `Paneflow Light` spelling still resolves (names are matched case-insensitively). Hot-reload is notify-driven with a 500 ms mtime-poll fallback (`theme/watcher.rs:37`).
 - **`window_decorations`**: read at startup only, requires restart. `"client"` = CSD (default), `"server"` = SSD. An invalid value logs a warning and falls back to `"client"`.
-- **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings here. The schema stays a free-form object; Settings → Keyboard Shortcuts only reads and writes it. That page groups every registry action under a `ShortcutGroup` (`keybindings/registry.rs`), filters by action name *or* chord (`ShortcutEntry::search_key` carries the ASCII spellings, `cmd+shift+a` / `cmd-shift-a`, of the glyph key), has a "Find by key" capture mode, and is virtualized with `gpui::list` because it is the one page long enough to lag when every row was rebuilt per frame. Rebinding records through `app/settings.rs::recorded_shortcut_key` (`Keystroke::unparse()`, never `to_string()`, or the saved chord is Apple glyphs no keypress can match) and reaches the page through `App::intercept_keystrokes` (`main.rs::mount_paneflow_app`) - the only hook that runs before GPUI dispatches a matching binding, so recording Cmd+Shift+D no longer splits the pane. "Reset to defaults" is a two-step inline confirm (`step_reset_confirm`, pure); only the second click calls `config_writer::reset_shortcuts_checked()`.
+- **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings here. The schema stays a free-form object; Settings → Keyboard Shortcuts only reads and writes it. That page groups every registry action under a `ShortcutGroup` (`keybindings/registry.rs`), filters by action name *or* chord (`ShortcutEntry::search_key` carries the ASCII spellings, `cmd+shift+j` / `cmd-shift-j`, of the glyph key), has a "Find by key" capture mode, and is virtualized with `gpui::list` because it is the one page long enough to lag when every row was rebuilt per frame. Rebinding records through `app/settings.rs::recorded_shortcut_key` (`Keystroke::unparse()`, never `to_string()`, or the saved chord is Apple glyphs no keypress can match) and reaches the page through `App::intercept_keystrokes` (`main.rs::mount_paneflow_app`) - the only hook that runs before GPUI dispatches a matching binding, so recording Cmd+Shift+D no longer splits the pane. "Reset to defaults" is a two-step inline confirm (`step_reset_confirm`, pure); only the second click calls `config_writer::reset_shortcuts_checked()`.
 - **`option_as_meta`**: **defaults to `false`**. `keys::default_option_as_meta()` returns the literal `false` (`keys.rs:69`); it used to compute `!cfg!(target_os = "macos")`, which was a runtime expression that is constant in a macOS-only fork. So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior. The published JSON Schema and `docs/user/configuration/schema.md` both declare `false` too - they moved together in `6a7b14d` and a drift test reads the doc off disk.
 - **`macos_chrome_material`**: opts the sidebar and title bar into a native AppKit material (`window_chrome/macos_backdrop.rs`). `windows_terminal_material` and `windows_chrome_material` are **gone from the published schema** and the Rust struct. The loader still accepts those leftover keys (and a leftover `telemetry` block) as ignored no-ops so existing `paneflow.json` files keep loading.
 - **`review_enabled`**: master switch for the Review surface, **defaults to `true`** (`None`-is-on, like `shell_integration` and `agent_stall_detection`). Off, the footer's mode strip is not rendered **at all** - one reachable mode is not a choice, and the segment builder already drops the click handler from the active segment, so a lone "Agents" button would be dead chrome. `enter_diff_mode` (`app/review/mode.rs`) is the single chokepoint every entry path funnels through, so `Cmd+Shift+G` becomes a silent no-op. Two demotion paths exist because the tick has no `Window`: the Settings toggle calls `enter_cli_mode` (restores focus), while a hand edit to `paneflow.json` lands in `leave_review_if_disabled` on the automation tick (queues the active workspace pane in `pending_pane_focus` for focus restoration at the next render). Session restore in `bootstrap.rs` requires the switch and a viable restored Review layout or default subject.

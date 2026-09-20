@@ -3001,7 +3001,7 @@ impl PaneFlowApp {
                 // `Some(None)` here. `.flatten()` collapsed that to `None` - the
                 // exact value a pane with NO agent gets - so the attention ring,
                 // header dot and peek overlay never painted for it, while
-                // `Cmd+Shift+J` and the Attention Queue still listed it.
+                // `Cmd+Shift+J` and the waiting-agent navigation still listed it.
                 // `Pane::attention`'s contract is "empty when none was captured".
                 let attention = sid
                     .and_then(|sid| waiting.get(&sid).cloned())
@@ -4630,7 +4630,7 @@ fn upsert_session_state_with_start(
     };
 
     // EP-002 US-004 (cli-cockpit): this is the single choke point for every
-    // state write, so the Attention Queue's wait stamp lives here - stamped
+    // state write, so the waiting-agent navigation's wait stamp lives here - stamped
     // on entering WaitingForInput, preserved across re-notifications,
     // cleared on any other transition.
     //

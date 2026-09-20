@@ -85,7 +85,7 @@ copy, diff navigation) are not listed, and the palette never lists itself.
 Opening it over another overlay folds that overlay first, and the action lands
 on the pane you were in before it opened. The one exception is a New pane
 picker on a workspace's only tab: it has nowhere to fold to, so the palette
-opens over it. Dismissing Pane Overview, the Attention Queue, the theme or
+opens over it. Dismissing Pane Overview, the theme or
 broadcast picker, fleet search, or the Launch Pad also returns you to the pane
 you opened it from.
 With no workspace open, the sidebar's empty state also carries a

@@ -124,19 +124,19 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("backspace", "Pane overview · delete filter character"),
     (
         "up",
-        "Attention queue, Fleet Search, theme picker, broadcast groups · previous result",
+        "Fleet Search, theme picker, broadcast groups · previous result",
     ),
     (
         "down",
-        "Attention queue, Fleet Search, theme picker, broadcast groups · next result",
+        "Fleet Search, theme picker, broadcast groups · next result",
     ),
     (
         "enter",
-        "Attention queue, Fleet Search, theme picker, broadcast groups · activate selection",
+        "Fleet Search, theme picker, broadcast groups · activate selection",
     ),
     (
         "escape",
-        "Attention queue, Fleet Search, theme picker, broadcast groups · close",
+        "Fleet Search, theme picker, broadcast groups · close",
     ),
     (
         "backspace",

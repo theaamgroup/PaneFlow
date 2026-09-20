@@ -80,7 +80,7 @@ impl PaneFlowApp {
             return;
         }
         // Stacking: the chord can arrive while another overlay owns the
-        // focus (Pane Overview, the Attention Queue, the theme picker, the
+        // focus (Pane Overview, the theme picker, the
         // broadcast picker, fleet search, the Launch Pad). None of those is a
         // descendant of a pane, so capturing focus now would hand it back to
         // the overlay before dispatch and leave Split / Close pane without a
@@ -119,15 +119,11 @@ impl PaneFlowApp {
                 folded_without_restore = true;
             }
         }
-        // Pane Overview and the Attention Queue restore focus themselves
+        // Pane Overview restores focus itself
         // onto their own origin (#584), which after a stacked open may be an
         // inherited one; the outermost origin read above still wins.
         if self.pane_overview.is_some() {
             self.close_pane_overview_and_restore_focus(window, cx);
-            folded_without_restore = true;
-        }
-        if self.attention_queue_open {
-            self.close_attention_queue_and_restore_focus(window, cx);
             folded_without_restore = true;
         }
         if self.show_theme_picker {
@@ -691,7 +687,6 @@ mod tests {
             // Issue #584: the split pane palette folds like its siblings.
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
-            "self.close_attention_queue_and_restore_focus(window, cx);",
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",
@@ -735,7 +730,6 @@ mod tests {
             "self.launch_pad_dismiss(cx);",
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
-            "self.close_attention_queue_and_restore_focus(window, cx);",
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_fleet_search(cx);",

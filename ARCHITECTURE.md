@@ -216,7 +216,7 @@ agent CLI (claude, codex, opencode, …)
   └─ launched through a PATH shim (paneflow-shim)
        └─ agent hooks fire paneflow-ai-hook on lifecycle events
             └─ ai.* JSON-RPC notifications over the local socket
-                 └─ GUI: tab dots, sidebar spinners, attention queue,
+                 └─ GUI: tab dots, sidebar spinners, waiting-agent navigation,
                     desktop notifications carrying the actual question
 ```
 

@@ -1093,7 +1093,7 @@ impl PaneFlowApp {
                         // Focus can only land on a rendered pane (the
                         // invariant `Workspace::focus_first` documents), so the
                         // owning tab has to become visible BEFORE the focus
-                        // call. Same recipe as `attention_queue_activate`.
+                        // call. Same recipe as `focus_surface_by_id`.
                         self.workspaces[idx].set_active_tab(tab_idx);
                         pane.update(cx, |_p, cx| cx.notify());
                         pane.read(cx).focus_handle(cx).focus(window, cx);

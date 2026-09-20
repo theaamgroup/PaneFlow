@@ -648,7 +648,7 @@ impl PaneFlowApp {
             });
         }
         // The registry rows of the moved panes' agents go with them, so the
-        // sidebar badge, the attention queue and `whoami` follow the pane and
+        // sidebar badge, the waiting-agent navigation and `whoami` follow the pane and
         // closing the source workspace no longer discards a live session.
         migrate_agent_sessions(
             &mut self.workspaces,

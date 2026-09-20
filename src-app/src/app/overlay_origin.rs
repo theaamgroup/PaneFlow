@@ -1,7 +1,7 @@
 //! Per-overlay focus origin (issue #584).
 //!
 //! Every overlay that takes the focus (theme picker, broadcast picker, fleet
-//! search, Launch Pad, Pane Overview, Attention Queue, the pane palette, the
+//! search, Launch Pad, Pane Overview, the pane palette, the
 //! agent summary)
 //! records the pane it was opened from, keyed by the overlay, so that:
 //!
@@ -31,7 +31,6 @@ pub(crate) enum OverlayKind {
     FleetSearch,
     LaunchPad,
     PaneOverview,
-    AttentionQueue,
     PanePalette,
     AgentSummary,
 }
@@ -128,7 +127,6 @@ impl PaneFlowApp {
             OverlayKind::FleetSearch => self.fleet_search.is_some(),
             OverlayKind::LaunchPad => self.launch_pad.is_some(),
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
-            OverlayKind::AttentionQueue => self.attention_queue_open,
             OverlayKind::PanePalette => self.pane_palette.is_some(),
             OverlayKind::AgentSummary => self.agent_summary.is_some(),
         }
@@ -143,7 +141,6 @@ impl PaneFlowApp {
             OverlayKind::FleetSearch,
             OverlayKind::LaunchPad,
             OverlayKind::PaneOverview,
-            OverlayKind::AttentionQueue,
             OverlayKind::PanePalette,
             OverlayKind::AgentSummary,
         ]
@@ -345,10 +342,10 @@ mod tests {
         let mut origins = OverlayOrigins::default();
         {
             let gone = make_pane(cx);
-            origins.remember(OverlayKind::AttentionQueue, Some(gone.downgrade()));
+            origins.remember(OverlayKind::AgentSummary, Some(gone.downgrade()));
         }
         // The only strong handle is out of scope; the weak one is dead.
-        assert_eq!(origins.take(OverlayKind::AttentionQueue), None);
+        assert_eq!(origins.take(OverlayKind::AgentSummary), None);
         assert!(origins.kinds().is_empty());
     }
 
@@ -424,12 +421,6 @@ mod tests {
                 production(include_str!("pane_overview/mod.rs")),
                 "OverlayKind::PaneOverview",
                 "self.close_pane_overview_and_restore_focus(window, cx);",
-            ),
-            (
-                "attention_queue.rs",
-                production(include_str!("attention_queue.rs")),
-                "OverlayKind::AttentionQueue",
-                "\"escape\" => self.close_attention_queue_and_restore_focus(window, cx),",
             ),
             (
                 "agent_summary/mod.rs",

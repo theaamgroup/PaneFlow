@@ -37,8 +37,7 @@ your test runner.
    `Cmd+Shift+L`.
 3. Split the pane with `Cmd+Shift+D` or `Cmd+Shift+E` to run another agent,
    tests, or a development server alongside it.
-4. Open the **Attention Queue** with `Cmd+Shift+A` to see agent activity,
-   or press `Cmd+Shift+J` to jump to an agent waiting for input.
+4. Press `Cmd+Shift+J` to jump to an agent waiting for input.
 5. Open **Review** with `Cmd+Shift+G` to inspect changes in your repositories
    and worktrees.
 
@@ -47,9 +46,10 @@ your test runner.
 - **Keep parallel work organized.** Group terminals into workspaces and
   tabs, associate tabs with Git worktrees, and restore your workspace
   layout between launches.
-- **See what needs attention.** Agent status indicators, desktop
-  notifications, and the Attention Queue help you spot agents that are
-  running, waiting, stalled, finished, or reporting an error.
+- **See what needs attention.** Agent status indicators and desktop
+  notifications help you spot agents that are running, waiting, stalled,
+  finished, or reporting an error. Jump to the next waiting agent with
+  `Cmd+Shift+J`.
 - **Review changes together.** Arrange repository and worktree diffs in a
   grid, switch between unified and split views, and navigate change by
   change. **Review with agent** opens an agent in a workspace tab with a
@@ -75,7 +75,6 @@ shortcuts in **Settings → Keyboard Shortcuts**.
 | Close pane | `Cmd+Shift+W` |
 | Move focus between panes | `Option+Arrow` |
 | Launch an agent | `Cmd+Shift+L` |
-| Open Attention Queue | `Cmd+Shift+A` |
 | Jump to next waiting agent | `Cmd+Shift+J` |
 | Open Review | `Cmd+Shift+G` |
 | Show or hide sidebar | `Cmd+Option+B` |
