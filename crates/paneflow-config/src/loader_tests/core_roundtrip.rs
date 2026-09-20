@@ -80,7 +80,6 @@ fn test_serialization_roundtrip() {
         terminal: None,
         agent_panel: None,
         external_editor: None,
-        tool_permissions: HashMap::new(),
         mcp_bridge_prompt_dismissed: Vec::new(),
     };
 

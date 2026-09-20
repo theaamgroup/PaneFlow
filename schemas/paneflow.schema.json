@@ -5,6 +5,12 @@
   "description": "Schema for paneflow.json. Lives at ~/Library/Application Support/paneflow/paneflow.json. The runtime is lenient: unknown top-level keys are ignored, so the schema's `additionalProperties: false` is an editor-side aid, not a runtime constraint.",
   "type": "object",
   "additionalProperties": false,
+  "patternProperties": {
+    "^tool_permissions$": {
+      "deprecated": true,
+      "description": "Legacy Agents-view setting; accepted and ignored."
+    }
+  },
   "properties": {
     "$schema": {
       "type": "string",
@@ -466,74 +472,24 @@
     },
     "agent_panel": {
       "type": ["object", "null"],
-      "description": "Agents-view display, profile, and notification settings.",
+      "description": "Terminal-agent notification preferences.",
+      "patternProperties": {
+        "^(max_content_width|thinking_display|profiles|default_profile)$": {
+          "deprecated": true,
+          "description": "Legacy Agents-view setting; accepted and ignored."
+        }
+      },
       "additionalProperties": false,
       "properties": {
-        "max_content_width": {
-          "type": ["integer", "null"],
-          "minimum": 320,
-          "maximum": 4000,
-          "default": 760
-        },
-        "thinking_display": {
-          "type": ["string", "null"],
-          "enum": ["Auto", "Preview", "AlwaysExpanded", "AlwaysCollapsed", null],
-          "default": "Auto"
-        },
-        "profiles": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/definitions/profileConfig" },
-          "default": {}
-        },
-        "default_profile": {
-          "type": ["string", "null"]
-        },
         "notify_when_agent_waiting": {
           "type": ["string", "null"],
           "enum": ["PrimaryScreen", "AllScreens", "Never", null],
           "default": "Never"
         }
       }
-    },
-    "tool_permissions": {
-      "type": "object",
-      "description": "Per-tool always-allow and always-deny input patterns.",
-      "additionalProperties": { "$ref": "#/definitions/toolPermissionsEntry" },
-      "default": {}
     }
   },
   "definitions": {
-    "profileConfig": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "agent": { "type": ["string", "null"] },
-        "model": { "type": ["string", "null"] },
-        "mode": { "type": ["string", "null"] },
-        "effort": { "type": ["string", "null"] },
-        "tools": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": []
-        }
-      }
-    },
-    "toolPermissionsEntry": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "always_allow": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": []
-        },
-        "always_deny": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": []
-        }
-      }
-    },
     "commandDefinition": {
       "type": "object",
       "required": ["name"],

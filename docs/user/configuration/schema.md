@@ -98,7 +98,6 @@ That strictness is an editor-side aid only; it never affects loading.
 | `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI conductors. |
 | `agent_button_visibility_defaults_migrated` | boolean or null | `null` | Internal one-time marker recording that a pre-allowlist config preserved its installed launcher buttons as explicit values. Runtime visibility does not otherwise consult it. |
 | `agent_panel` | object or null | defaults below | Agents-view display, profiles, and notification settings. |
-| `tool_permissions` | object | `{}` | Per-tool always-allow and always-deny input patterns. |
 
 ### How `window_backdrop` resolves on macOS
 
@@ -193,48 +192,12 @@ preserved; an invalid config is left untouched.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `agent_panel.max_content_width` | integer or null | `760` | Range `320` to `4000`. |
-| `agent_panel.thinking_display` | string or null | `Auto` | `Auto`, `Preview`, `AlwaysExpanded`, or `AlwaysCollapsed`. |
-| `agent_panel.profiles` | object | `{}` | Named agent launch profiles. |
-| `agent_panel.default_profile` | string or null | none | Profile selected by default. |
 | `agent_panel.notify_when_agent_waiting` | string or null | `Never` | `PrimaryScreen`, `AllScreens`, or `Never`. `AllScreens` currently behaves identically to `PrimaryScreen` at runtime. A notification is dropped only when the agent's pane is under your eye (the PaneFlow window is active and the pane's workspace and tab are on screen); an agent in another workspace or a background tab notifies even while you work elsewhere in PaneFlow. |
 
-Profile entries under `agent_panel.profiles` can set `agent`, `model`,
-`mode`, `effort`, and `tools`.
-
-```json
-{
-  "agent_panel": {
-    "thinking_display": "Auto",
-    "notify_when_agent_waiting": "Never",
-    "profiles": {
-      "Write": {
-        "agent": "codex",
-        "model": "default",
-        "mode": "default",
-        "effort": "medium",
-        "tools": ["read", "edit"]
-      }
-    }
-  }
-}
-```
-
-## Tool permissions
-
-`tool_permissions` is keyed by tool kind. Each entry accepts
-`always_allow` and `always_deny` arrays of string patterns.
-
-```json
-{
-  "tool_permissions": {
-    "read": {
-      "always_allow": ["src/**"],
-      "always_deny": ["secrets/**"]
-    }
-  }
-}
-```
+Legacy `agent_panel.max_content_width`, `thinking_display`, `profiles`,
+`default_profile`, and top-level `tool_permissions` remain accepted and ignored.
+They configure the removed Agents view and have no effect on terminal agents.
+`notify_when_agent_waiting` remains active.
 
 ## Commands and workspace templates
 
@@ -362,13 +325,8 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
     "minimum_contrast": 45.0
   },
   "agent_panel": {
-    "max_content_width": 760,
-    "thinking_display": "Auto",
-    "profiles": {},
-    "default_profile": null,
     "notify_when_agent_waiting": "Never"
   },
-  "tool_permissions": {},
   "commands": [],
   "claude_code_bypass_permissions": false,
   "ai_unrestricted": false,

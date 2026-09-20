@@ -355,21 +355,6 @@ pub struct PaneFlowConfig {
     /// `"agent_panel": { ... }`.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub agent_panel: Option<AgentPanelConfig>,
-    /// Per-tool permission patterns (US-111 of
-    /// `tasks/prd-agent-ui-refactor-2026-Q3.md`). The key is the
-    /// `ToolKind` discriminant (e.g. `"read"`, `"edit"`, `"execute"`)
-    /// -- matching Zed §13's `ToolPermissions` shape. An entry's
-    /// `always_allow` patterns auto-resolve future
-    /// `WaitingForConfirmation` callbacks; `always_deny` patterns
-    /// auto-reject them. A bare entry with no patterns matches every
-    /// call of that tool kind, which is what the "Allow Always for
-    /// this tool" UI writes today.
-    #[serde(
-        default,
-        skip_serializing_if = "HashMap::is_empty",
-        deserialize_with = "lenient_value_or_default"
-    )]
-    pub tool_permissions: HashMap<String, ToolPermissionsEntry>,
     /// MCP-install agent ids (`"claude-code"`, `"codex"`, `"gemini"`,
     /// `"opencode"`) whose sidebar "Install MCP bridge" callout the user
     /// dismissed (issue #443). The callout offers the bridge once per agent
@@ -861,28 +846,6 @@ where
             },
         )
         .collect())
-}
-
-/// Per-tool permission patterns persisted under `"tool_permissions"`
-/// in `paneflow.json` (US-111). Patterns are matched as substrings
-/// against the tool call's raw input pretty-printed JSON; an empty
-/// `always_allow` list with an existing entry counts as "always
-/// allow every call of this tool" (the v1 UI does not yet expose
-/// pattern-scoped persistence and uses this shape).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ToolPermissionsEntry {
-    /// Substring patterns whose presence in the tool input auto-
-    /// resolves `Allow`. An empty vec means "always allow".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub always_allow: Vec<String>,
-    /// Substring patterns whose presence auto-resolves `Reject`.
-    /// Auto-promotion from `always_allow` to `always_deny` happens
-    /// at the UI layer when the user explicitly rejects a call that
-    /// previously matched -- treated as a correction signal per Zed
-    /// §13 / PRD US-111 AC #8.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub always_deny: Vec<String>,
 }
 
 #[cfg(test)]

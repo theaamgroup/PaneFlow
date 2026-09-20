@@ -20,6 +20,33 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     #[test]
+    fn retired_agent_view_keys_load_without_disabling_notifications() {
+        let config: PaneFlowConfig = serde_json::from_str(
+            r#"{
+            "agent_panel": {"max_content_width":760,"thinking_display":"Preview",
+                "profiles":{"Write":{"agent":"codex","tools":["read"]}},
+                "default_profile":"Write","notify_when_agent_waiting":"PrimaryScreen"},
+            "tool_permissions":{"read":{"always_allow":["src/"],"always_deny":["secrets/"]}}
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .agent_panel
+                .as_ref()
+                .unwrap()
+                .resolved_notify_when_agent_waiting(),
+            NotifyWhenAgentWaiting::PrimaryScreen
+        );
+        let value = serde_json::to_value(config).unwrap();
+        assert!(value.get("tool_permissions").is_none());
+        assert_eq!(
+            value["agent_panel"],
+            serde_json::json!({"notify_when_agent_waiting":"PrimaryScreen"})
+        );
+    }
+
+    #[test]
     fn editor_display_defaults_and_partial_config_are_lenient() {
         for input in [
             "{}",
@@ -71,26 +98,6 @@ mod tests {
 
     #[test]
     fn public_json_schema_covers_every_config_field() {
-        let mut permissions = HashMap::new();
-        permissions.insert(
-            "read".to_string(),
-            ToolPermissionsEntry {
-                always_allow: vec!["src/".to_string()],
-                always_deny: vec!["secrets/".to_string()],
-            },
-        );
-        let mut profiles = HashMap::new();
-        profiles.insert(
-            "Write".to_string(),
-            ProfileConfig {
-                agent: Some("codex".to_string()),
-                model: Some("default".to_string()),
-                mode: Some("default".to_string()),
-                effort: Some("medium".to_string()),
-                tools: vec!["read".to_string()],
-            },
-        );
-
         // Deliberately exhaustive struct literals: adding a Rust config field
         // fails this test at compile time until the public schema is updated.
         let config = PaneFlowConfig {
@@ -179,13 +186,8 @@ mod tests {
                 osc52_clipboard: Some(Osc52ClipboardConfig::CopyOnly),
             }),
             agent_panel: Some(AgentPanelConfig {
-                max_content_width: Some(760),
-                thinking_display: Some(ThinkingDisplayMode::Auto),
-                profiles,
-                default_profile: Some("Write".to_string()),
                 notify_when_agent_waiting: Some(NotifyWhenAgentWaiting::PrimaryScreen),
             }),
-            tool_permissions: permissions,
             mcp_bridge_prompt_dismissed: vec!["codex".to_string()],
         };
 
@@ -222,16 +224,6 @@ mod tests {
             object_keys(&serialized["agent_panel"]),
             object_keys(&schema["properties"]["agent_panel"]["properties"]),
             "AgentPanelConfig and public JSON Schema drifted"
-        );
-        assert_eq!(
-            object_keys(&serialized["agent_panel"]["profiles"]["Write"]),
-            object_keys(&schema["definitions"]["profileConfig"]["properties"]),
-            "ProfileConfig and public JSON Schema drifted"
-        );
-        assert_eq!(
-            object_keys(&serialized["tool_permissions"]["read"]),
-            object_keys(&schema["definitions"]["toolPermissionsEntry"]["properties"]),
-            "ToolPermissionsEntry and public JSON Schema drifted"
         );
 
         let command = CommandDefinition {
@@ -313,16 +305,6 @@ mod tests {
             &doc,
             &schema["properties"]["agent_panel"]["properties"],
             "agent_panel",
-        );
-        assert_doc_mentions_property_keys(
-            &doc,
-            &schema["definitions"]["profileConfig"]["properties"],
-            "profileConfig",
-        );
-        assert_doc_mentions_property_keys(
-            &doc,
-            &schema["definitions"]["toolPermissionsEntry"]["properties"],
-            "toolPermissionsEntry",
         );
         assert_doc_mentions_property_keys(
             &doc,
@@ -803,52 +785,6 @@ mod tests {
             cfg.resolved_notify_when_agent_waiting(),
             NotifyWhenAgentWaiting::PrimaryScreen
         );
-    }
-
-    #[test]
-    fn agent_panel_thinking_display_pascal_case_roundtrip() {
-        // US-109 AC #1: PascalCase tags as documented in the PRD.
-        let raw = r#"{"thinking_display": "Preview"}"#;
-        let cfg: AgentPanelConfig = serde_json::from_str(raw).unwrap();
-        assert_eq!(cfg.thinking_display, Some(ThinkingDisplayMode::Preview));
-
-        let raw = r#"{"thinking_display": "AlwaysExpanded"}"#;
-        let cfg: AgentPanelConfig = serde_json::from_str(raw).unwrap();
-        assert_eq!(
-            cfg.thinking_display,
-            Some(ThinkingDisplayMode::AlwaysExpanded)
-        );
-
-        let raw = r#"{"thinking_display": "AlwaysCollapsed"}"#;
-        let cfg: AgentPanelConfig = serde_json::from_str(raw).unwrap();
-        assert_eq!(
-            cfg.thinking_display,
-            Some(ThinkingDisplayMode::AlwaysCollapsed)
-        );
-
-        let raw = r#"{"thinking_display": "Auto"}"#;
-        let cfg: AgentPanelConfig = serde_json::from_str(raw).unwrap();
-        assert_eq!(cfg.thinking_display, Some(ThinkingDisplayMode::Auto));
-    }
-
-    #[test]
-    fn agent_panel_thinking_display_unknown_falls_back_to_auto() {
-        // US-109 AC #7: unknown string deserialises as Auto (the
-        // custom deserialiser logs a warn! line; this test asserts
-        // only the surface behavior since `warn!` is not captured).
-        let raw = r#"{"thinking_display": "Bogus"}"#;
-        let cfg: AgentPanelConfig = serde_json::from_str(raw).unwrap();
-        assert_eq!(cfg.thinking_display, Some(ThinkingDisplayMode::Auto));
-    }
-
-    #[test]
-    fn agent_panel_thinking_display_missing_resolves_to_auto() {
-        // US-109 AC #1: missing field resolves to Auto via the
-        // resolver (the on-disk Option stays `None`).
-        let raw = r#"{}"#;
-        let cfg: AgentPanelConfig = serde_json::from_str(raw).unwrap();
-        assert!(cfg.thinking_display.is_none());
-        assert_eq!(cfg.resolved_thinking_display(), ThinkingDisplayMode::Auto);
     }
 
     #[test]
