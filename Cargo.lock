@@ -4629,7 +4629,6 @@ name = "paneflow-agent-config"
 version = "0.7.0"
 dependencies = [
  "dirs",
- "paneflow-config",
  "serde_json",
  "tempfile",
 ]
