@@ -252,7 +252,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 96 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 95 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -283,7 +283,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
-│   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
 │   ├── agent_summary/                 ← Cmd+Shift+I: what every agent pane is doing, one line each,
 │                                         generated on-device by Apple Foundation Models through the
@@ -483,7 +482,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 96 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -526,7 +525,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 96 ac
 | `Ctrl+F` / `Ctrl+Shift+C` | Find in buffer / copy selection | Markdown |
 | `Ctrl+Shift+C` | Copy diff hunk | DiffView |
 | `Enter` / `Shift+Enter` / `Esc` | Next / prev / dismiss | Search, MarkdownSearch |
-| `Alt+R` / `Alt+F` | Toggle regex / fleet-wide search | Search |
+| `Alt+R` | Toggle regex | Search |
 | `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
 | `Cmd+Q` | Quit (macOS only) | Global |
 

@@ -1206,7 +1206,7 @@ fn visible_window(len: usize, show_all: bool, cap: usize) -> (usize, usize) {
 
 /// Issue #333: normalize the sidebar filter field's raw value into the needle
 /// [`filter_sessions`] expects. Trimmed and lowercased; whitespace-only input
-/// is "no filter". No regex - if that asymmetry with fleet search ever bites,
+/// is "no filter". No regex - if that asymmetry with pane search ever bites,
 /// adopt its toggle rather than inventing a second dialect.
 fn normalize_session_filter(raw: &str) -> String {
     raw.trim().to_lowercase()

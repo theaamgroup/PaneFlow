@@ -29,7 +29,7 @@ use crate::{ClosedRecord, PaneFlowApp};
 /// The pane label can be an OSC title: a bidi override there could visually
 /// reverse the `Close "…"?` around it and make the modal name a different
 /// surface than the one about to die. Same scrub the port-conflict tooltip and
-/// the fleet-search target list apply to the same source, and literally the
+/// the pane-search target list apply to the same source, and literally the
 /// same cap: [`crate::limits::MAX_UNTRUSTED_LABEL_CHARS`].
 ///
 /// Two characters beyond that scrub, because this sink QUOTES the label rather
@@ -225,7 +225,7 @@ impl PaneFlowApp {
         sync_close_armed(self.pending_close.as_ref(), next.as_ref(), cx);
         // A modal can be armed from a `Window`-less path (`handle_pane_event`
         // subscribes with plain `cx.subscribe`), so the next render claims
-        // focus for it - the `fleet_search_pending_focus` pattern.
+        // focus for it - the deferred pane focus pattern.
         self.pending_close_focus_claim = next
             .as_ref()
             .is_some_and(|p| p.style == ConfirmStyle::Modal);

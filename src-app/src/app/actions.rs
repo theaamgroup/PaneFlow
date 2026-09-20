@@ -70,9 +70,6 @@ actions!(
         FontSizeIncrease,
         FontSizeDecrease,
         FontSizeReset,
-        // EP-006 US-018 - widen the open search to every pane of every
-        // workspace (fleet grep). Search context (find bar open).
-        ToggleFleetSearch,
         // US-012: macOS native menu-bar actions. Dispatched by `cx.set_menus`
         // via GPUI's `on_app_menu_action` → `cx.dispatch_action`, then caught
         // by the `.on_action(...)` handlers on the PaneFlowApp render root.
@@ -189,7 +186,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 96, "review action surface is pinned");
+        assert_eq!(declared, 95, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

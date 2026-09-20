@@ -19,7 +19,7 @@ use crate::{
     SplitEqualize, SplitHorizontally, SplitVertically, SwapPane, TerminalCopy, TerminalPaste,
     ToggleCopyMode, ToggleSearch, ToggleSearchRegex, ToggleZoom, UndoClosePane,
 };
-use crate::{FontSizeDecrease, FontSizeIncrease, FontSizeReset, ToggleFleetSearch};
+use crate::{FontSizeDecrease, FontSizeIncrease, FontSizeReset};
 
 /// The section an action belongs to on the Shortcuts settings page.
 ///
@@ -433,13 +433,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         context: "Terminal",
         description: "Reset pane font size",
         group: ShortcutGroup::Terminal,
-    },
-    ActionMeta {
-        name: "toggle_fleet_search",
-        factory: || Box::new(ToggleFleetSearch),
-        context: "Search",
-        description: "Search across all panes",
-        group: ShortcutGroup::Search,
     },
     ActionMeta {
         name: "toggle_search_regex",

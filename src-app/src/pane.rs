@@ -332,11 +332,6 @@ pub struct Pane {
     /// recompute-from-session-truth contract. Drives the dedicated
     /// `agent_error` header dot, ranked above the waiting dot.
     errored: bool,
-    /// EP-006 US-018 (cli-cockpit): transient fleet-grep match count for this
-    /// pane's terminal. Pushed by `PaneFlowApp::push_fleet_badges` after a
-    /// fan-out, cleared 4 s later or when the fleet overlay closes. FR-11: the
-    /// LOWEST-priority header adornment - first to yield its slot.
-    search_hits: Option<usize>,
     /// US-020: the peek badge is hovered - render the full question panel.
     peek_expanded: bool,
     /// Set to true when the workspace is zoomed on this pane.
@@ -452,7 +447,6 @@ impl Pane {
             surface,
             attention: None,
             errored: false,
-            search_hits: None,
             peek_expanded: false,
             zoomed: false,
             workspace_id,
@@ -501,15 +495,6 @@ impl Pane {
     pub fn set_errored(&mut self, errored: bool, cx: &mut Context<Self>) {
         if self.errored != errored {
             self.errored = errored;
-            cx.notify();
-        }
-    }
-
-    /// EP-006 US-018 (cli-cockpit): set/clear this pane's transient fleet-grep
-    /// badge count. Same idempotent push contract as [`Pane::set_attention`].
-    pub fn set_search_hits(&mut self, hits: Option<usize>, cx: &mut Context<Self>) {
-        if self.search_hits != hits {
-            self.search_hits = hits;
             cx.notify();
         }
     }
@@ -840,7 +825,6 @@ impl Pane {
                 | TerminalEvent::OpenMarkdownPath(_)
                 | TerminalEvent::OpenCodePath { .. }
                 | TerminalEvent::FontZoomChanged
-                | TerminalEvent::FleetSearchRequested { .. }
                 | TerminalEvent::FocusGained
                 | TerminalEvent::AgentProgressChanged { .. }
                 | TerminalEvent::ProgramNotification { .. }
@@ -1734,29 +1718,6 @@ impl Pane {
                 .into_any_element()
         });
 
-        // EP-006 US-018 - transient fleet-match badge, governed by the FR-11
-        // anatomy: at most 2 adornments, in priority order state dot > queued
-        // chip > progress chip > match badge (lowest priority, "s'efface en
-        // premier").
-        let match_badge = {
-            let slots_used: u8 = leading_slots + u8::from(progress.is_some());
-            self.surface
-                .as_terminal()
-                .and(self.search_hits)
-                .filter(|count| *count > 0 && slots_used < 2)
-                .map(|count| {
-                    div()
-                        .flex_none()
-                        .px(px(4.))
-                        .rounded(px(3.))
-                        .bg(ui.subtle)
-                        .text_size(px(9.))
-                        .text_color(ui.accent)
-                        .child(format!("{count} hits"))
-                        .into_any_element()
-                })
-        };
-
         // Identity area. `flex_1` + `min_w_0` + `overflow_x_hidden` is what
         // keeps a long surface name inside the card: the title slot ellipsizes
         // and the action cluster (`flex_none`, rendered as this row's sibling)
@@ -1789,8 +1750,7 @@ impl Pane {
             .child(self.render_surface_title(cx))
             .children(status_dot)
             .children(pending_chip)
-            .children(progress_chip)
-            .children(match_badge);
+            .children(progress_chip);
 
         // Close the pane. It lives in the header's leading corner, alone and
         // opposite the constructive actions: the one destructive control here

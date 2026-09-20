@@ -81,7 +81,7 @@ impl PaneFlowApp {
         }
         // Stacking: the chord can arrive while another overlay owns the
         // focus (Pane Overview, the theme picker, the
-        // broadcast picker, fleet search, the Launch Pad). None of those is a
+        // broadcast picker, pane search, the Launch Pad). None of those is a
         // descendant of a pane, so capturing focus now would hand it back to
         // the overlay before dispatch and leave Split / Close pane without a
         // target. Fold each one first, through its own focus-restoring close
@@ -132,10 +132,6 @@ impl PaneFlowApp {
         }
         if self.broadcast_picker_open {
             self.close_broadcast_picker(cx);
-            folded_without_restore = true;
-        }
-        if self.fleet_search.is_some() {
-            self.close_fleet_search(cx);
             folded_without_restore = true;
         }
         if self.agent_summary.is_some() {
@@ -689,7 +685,6 @@ mod tests {
             "self.close_pane_overview_and_restore_focus(window, cx);",
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
-            "self.close_fleet_search(cx);",
             "self.close_agent_summary(cx);",
             "let origin_pane = self.outermost_open_overlay_origin();",
             "let origin_pane = origin_pane.filter(|_| folded_without_restore);",
@@ -732,7 +727,6 @@ mod tests {
             "self.close_pane_overview_and_restore_focus(window, cx);",
             "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
-            "self.close_fleet_search(cx);",
             "self.close_agent_summary(cx);",
         ] {
             let close_at = palette.find(closer).expect(closer);

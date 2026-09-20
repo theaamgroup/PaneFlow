@@ -173,7 +173,7 @@ pub(crate) enum DimPolicy {
     ClearAll,
     /// Dim every leaf except the one at this index.
     DimAllExcept(usize),
-    /// Focus left the pane tree entirely (sidebar, settings, a fleet search
+    /// Focus left the pane tree entirely (sidebar, settings, a pane search
     /// field). Keep the previous decision instead of flashing the whole
     /// cockpit back to full brightness. This replaces Ghostty's
     /// `lastFocusedSurface` bookkeeping: the last decision *is* the memory.

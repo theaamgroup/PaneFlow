@@ -851,12 +851,6 @@ impl PaneFlowApp {
             broadcast_picker_error: None,
             broadcast_picker_focus: cx.focus_handle(),
             // EP-002 (cli-cockpit): Launch Pad closed.
-            // EP-006 US-018 (cli-cockpit): fleet grep closed.
-            fleet_search: None,
-            fleet_search_generation: 0,
-            fleet_search_cancellation: None,
-            fleet_search_focus: cx.focus_handle(),
-            fleet_search_pending_focus: false,
             launch_pad: None,
             launch_pad_focus: cx.focus_handle(),
             // Issue #339: Pane Overview closed.

@@ -138,8 +138,8 @@ pub(crate) fn group_cards(cards: Vec<CardMeta>) -> Vec<WorkspaceGroup> {
 
 /// Metadata-only filter: name, workspace, tab, agent, cwd basename.
 ///
-/// Deliberately NOT a content search. Fleet Search already owns that, and
-/// re-running it across every pane on each keystroke is the
+/// Use the pane find bar or MCP search for terminal content. Reading every
+/// pane on each keystroke is the
 /// extract-scrollback-on-the-tick anti-pattern guarded in `ipc_handler.rs`
 /// (issue #29).
 pub(crate) fn filter_cards(cards: &[CardMeta], query: &str) -> Vec<CardMeta> {
