@@ -1390,12 +1390,12 @@ mod tests {
     fn upserts_into_agent_panel_preserving_siblings() {
         let mut j = json!({
             "agent_panel": {
-                "max_content_width": 760,
+                "legacy_display_width": 760,
                 "notify_when_agent_waiting": "PrimaryScreen"
             }
         });
         apply_agent_panel_field(&mut j, "notify_when_agent_waiting", json!("Never"));
-        assert_eq!(j["agent_panel"]["max_content_width"], json!(760));
+        assert_eq!(j["agent_panel"]["legacy_display_width"], json!(760));
         assert_eq!(
             j["agent_panel"]["notify_when_agent_waiting"],
             json!("Never")
