@@ -1,24 +1,11 @@
 //! Cross-platform "open this source file at line:col" - invoked when the
 //! user Cmd/Ctrl-clicks a `path:42:7` style reference in a terminal pane.
 //!
-//! Strategy (in order):
-//! 1. `$VISUAL` then `$EDITOR` env. The string is parsed as a shell command
-//!    (binary + flags) so users running `EDITOR="code --wait"` get their
-//!    pre-set flags carried over. If the binary is one of the well-known
-//!    editors with a documented line:col syntax (code/zed/subl/cursor/
-//!    nvim/vim/helix/emacs), the right argv is appended.
-//! 2. Probed fallback chain - `code`, `cursor`, `zed`, `subl`, `nvim`,
-//!    `vim`, `hx`, `emacs` (in that order). First binary found on `PATH`
-//!    wins.
-//! 3. Last-resort: `open::that(path)` so the OS launcher (`open`) hands
-//!    the file to its registered handler. Loses
-//!    the line/col target but always does something useful.
-//!
-//! Platform notes:
-//! - Linux/macOS: editor names are looked up via `which` on `$PATH`.
-//! - Windows: same. `code.cmd` is the common shim under `%LocalAppData%
-//!   \Programs\Microsoft VS Code\bin`, which `which` resolves correctly
-//!   when that dir is on `Path`.
+//! An explicit `external_editor` takes precedence. `system` uses macOS's
+//! registered file handler; `auto` (or an absent setting) tries `$VISUAL`,
+//! `$EDITOR`, the fallback CLI probes, then the system handler. Commands are
+//! parsed into binary and flags without invoking a shell; known editors get
+//! their own line/column argument syntax.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -327,26 +314,48 @@ const FALLBACK_PROBES: &[&str] = &[
     "emacs",
 ];
 
+// Explicit selection and automatic environment fallback share this resolver.
+fn preferred_editor_commands(
+    configured: Option<&str>,
+    visual: Option<&str>,
+    editor: Option<&str>,
+) -> Vec<(String, Vec<String>)> {
+    let configured = configured.map(str::trim).filter(|value| !value.is_empty());
+    if configured == Some("system") {
+        return Vec::new();
+    }
+    [configured.filter(|value| *value != "auto"), visual, editor]
+        .into_iter()
+        .flatten()
+        .filter_map(parse_env_editor)
+        .collect()
+}
+
 /// Open `path` in the user's preferred editor at the given location.
 /// Spawns the editor process detached - does not wait for it to exit.
 ///
 /// Errors are logged at `warn` level and swallowed so a misconfigured
 /// editor never panics the renderer. The boolean return signals only
 /// whether something was actually spawned (useful for tests).
-pub fn open_at_location(path: &Path, line: Option<u32>, col: Option<u32>) -> bool {
-    // 1. $VISUAL → $EDITOR
-    for var in &["VISUAL", "EDITOR"] {
-        if let Ok(value) = std::env::var(var)
-            && let Some((bin, extra_args)) = parse_env_editor(&value)
-        {
-            let kind = EditorKind::from_binary_name(&bin);
-            let mut args = extra_args;
-            args.extend(kind.argv_for(path, line, col));
-            let resolved = resolve_editor_command(&bin);
-            if try_spawn(&resolved.to_string_lossy(), &args) {
-                return true;
-            }
-            log::warn!("editor: ${var}={value:?} failed to spawn - falling through");
+pub fn open_at_location(
+    path: &Path,
+    line: Option<u32>,
+    col: Option<u32>,
+    configured: Option<&str>,
+) -> bool {
+    if configured.map(str::trim) == Some("system") {
+        return open::that(path).is_ok();
+    }
+    let visual = std::env::var("VISUAL").ok();
+    let editor = std::env::var("EDITOR").ok();
+    for (bin, mut args) in
+        preferred_editor_commands(configured, visual.as_deref(), editor.as_deref())
+    {
+        let kind = EditorKind::from_binary_name(&bin);
+        args.extend(kind.argv_for(path, line, col));
+        let resolved = resolve_editor_command(&bin);
+        if try_spawn(&resolved.to_string_lossy(), &args) {
+            return true;
         }
     }
 
@@ -387,6 +396,23 @@ fn try_spawn(bin: &str, args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_editor_precedes_environment_and_auto_preserves_it() {
+        assert_eq!(
+            preferred_editor_commands(Some("zed --wait"), None, None),
+            vec![("zed".into(), vec!["--wait".into()])]
+        );
+        assert_eq!(
+            preferred_editor_commands(Some("cursor"), Some("zed"), Some("code"))[0].0,
+            "cursor"
+        );
+        assert_eq!(
+            preferred_editor_commands(Some("auto"), Some("zed"), Some("code"))[0].0,
+            "zed"
+        );
+        assert!(preferred_editor_commands(Some("system"), Some("zed"), Some("code")).is_empty());
+    }
 
     fn p(s: &str) -> &Path {
         Path::new(s)

@@ -223,21 +223,12 @@ pub struct PaneFlowConfig {
     /// larger value never blocks the UI.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub submit_paste_delay_ms: Option<u64>,
-    /// External editor used to open markdown links (file paths shipped
-    /// by the agent as `[foo](src/foo.rs)` or `[foo](src/foo.rs:42)`).
-    ///
-    /// Accepted values:
-    /// - `"auto"` (default when absent): detect the first CLI present
-    ///   on PATH from the preferred order `zed`, `cursor`, `windsurf`,
-    ///   `code`. Falls back to the system opener (`open`) when none are
-    ///   installed.
-    /// - `"system"`: always defer to the OS-level opener.
-    /// - `"zed"` | `"cursor"` | `"windsurf"` | `"code"`: force the
-    ///   named CLI even if other editors are also installed.
-    ///
-    /// The chosen CLI is spawned with `<editor> <abs_path>[:line[:col]]`;
-    /// all four support that suffix natively to jump to the target
-    /// position.
+    /// External editor for terminal file links. An explicit command takes
+    /// precedence over `$VISUAL` and `$EDITOR`; a failed launch falls through
+    /// to those variables, CLI probes, then the macOS file handler.
+    /// `auto` (or an absent value) starts with the environment variables.
+    /// `system` uses only the macOS handler, without a line/column target.
+    /// Commands may include quoted paths and flags; no shell is invoked.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub external_editor: Option<String>,
     /// When `Some(true)`, the Claude Code terminal launcher adds
