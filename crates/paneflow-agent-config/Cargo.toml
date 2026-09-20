@@ -7,6 +7,7 @@ license.workspace = true
 description = "Dependency-light shared primitives for safely editing coding-agent configuration."
 
 [dependencies]
+paneflow-config.workspace = true
 dirs.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
