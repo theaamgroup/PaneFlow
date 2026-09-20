@@ -1497,57 +1497,10 @@ pub(crate) fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
     )
 }
 
-fn rename_uses_new_name_alias(params: &serde_json::Value) -> bool {
-    params.get("new_name").is_some()
-}
-
-/// Targeting params for `surface.rename`. When the `new_name` alias is
-/// present, `name` keeps its `resolve_surface` selector role. Otherwise
-/// `name` is the new name and must not also select the target.
-fn rename_target_params(params: &serde_json::Value) -> serde_json::Value {
-    if rename_uses_new_name_alias(params) {
-        return params.clone();
-    }
-    let mut targeting = params.clone();
-    if let Some(obj) = targeting.as_object_mut() {
-        obj.remove("name");
-    }
-    targeting
-}
-
-/// Parse the new-name field of a `surface.rename` request (US-013 / issue #86).
-/// Precedence: `new_name` (alias, wins) → `name` → neither present is an
-/// error. An explicit `null` or empty/whitespace string yields `Ok(None)`
-/// (clear the custom name, reverting to auto-derived). Any other JSON type
-/// is `-32602`.
-pub(crate) fn parse_rename_name(
-    params: &serde_json::Value,
-) -> Result<Option<String>, JsonRpcError> {
-    let value = if rename_uses_new_name_alias(params) {
-        params.get("new_name")
-    } else {
-        params.get("name")
-    };
-    let Some(value) = value else {
-        return Err(JsonRpcError::invalid_params(
-            "surface.rename requires 'name' (or 'new_name'); send null to clear",
-        ));
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let Some(raw) = value.as_str() else {
-        return Err(JsonRpcError::invalid_params(
-            "surface.rename: 'name' must be a string or null",
-        ));
-    };
-    Ok(sanitize_pane_name(raw))
-}
-
 /// EP-004 US-012 (agent-control-plane): sanitize a user-supplied pane
 /// name/label: trim, strip control characters, cap at 64 chars. Returns `None`
 /// for an empty/blank result (clears the custom name / no label). Shared by
-/// `surface.rename` (`new_name`) and the atomic spawn label on
+/// UI pane names and the atomic spawn label on
 /// `surface.split`/`workspace.up`.
 pub(crate) fn sanitize_pane_name(raw: &str) -> Option<String> {
     const MAX_NAME_LEN: usize = 64;
@@ -3103,43 +3056,6 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
         match method {
-            "workspace.list" => {
-                let list: Vec<_> = self
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .map(|(i, ws)| {
-                        serde_json::json!({
-                            "index": i,
-                            "title": ws.title,
-                            "cwd": ws.cwd,
-                            "panes": ws.pane_count(),
-                            "active": i == self.active_idx,
-                        })
-                    })
-                    .collect();
-                serde_json::json!({
-                    "workspaces": list,
-                    "restoring": self.session_restore.is_some(),
-                })
-            }
-            "workspace.current" => {
-                if let Some(ws) = self.active_workspace() {
-                    // Metadata only: do not extract_scrollback every pane on
-                    // the GPUI tick (issue #29). Session persistence already
-                    // uses the omit-scrollback path.
-                    let layout = ws.serialize_layout_without_scrollback(cx);
-                    serde_json::json!({
-                        "index": self.active_idx,
-                        "title": ws.title,
-                        "cwd": ws.cwd,
-                        "panes": ws.pane_count(),
-                        "layout": layout.and_then(|l| serde_json::to_value(l).ok()),
-                    })
-                } else {
-                    serde_json::json!(null)
-                }
-            }
             "workspace.create" => {
                 if self.session_restore.is_some() {
                     return serde_json::json!({"error": "Session restore in progress"});
@@ -3258,56 +3174,6 @@ impl PaneFlowApp {
                     serde_json::json!({"selected": idx})
                 } else {
                     JsonRpcError::invalid_params("Index out of bounds").into_value()
-                }
-            }
-            "workspace.close" => {
-                if self.session_restore.is_some() {
-                    return serde_json::json!({"error": "Session restore in progress"});
-                }
-                if !ipc_orchestration_enabled() {
-                    return orchestration_disabled_error(method).into_value();
-                }
-                if self.workspaces.len() <= 1 {
-                    JsonRpcError::invalid_params("Cannot close last workspace").into_value()
-                } else {
-                    let idx = match requested_index(params) {
-                        Ok(index) => index.unwrap_or(self.active_idx),
-                        Err(error) => return error.into_value(),
-                    };
-                    match self.request_close_workspace_without_window(
-                        idx,
-                        crate::app::close_guard::ConfirmStyle::Modal,
-                        cx,
-                    ) {
-                        crate::app::close_confirm::WorkspaceCloseOutcome::ConfirmationRequired => {
-                            serde_json::json!({"confirmation_required": true, "workspace": idx})
-                        }
-                        crate::app::close_confirm::WorkspaceCloseOutcome::NotFound => {
-                            JsonRpcError::invalid_params("Index out of bounds").into_value()
-                        }
-                    }
-                }
-            }
-            "workspace.restore_layout" => {
-                if self.session_restore.is_some() {
-                    return serde_json::json!({"error": "Session restore in progress"});
-                }
-                let Some(layout_value) = params.get("layout") else {
-                    return JsonRpcError::invalid_params("Missing 'layout' parameter").into_value();
-                };
-                let mut layout: LayoutNode = match serde_json::from_value(layout_value.clone()) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        return JsonRpcError::invalid_params(format!("Invalid layout JSON: {e}"))
-                            .into_value();
-                    }
-                };
-                match self.apply_layout_from_json(&mut layout, cx) {
-                    Ok(()) => {
-                        let panes = self.active_workspace().map_or(0, |ws| ws.pane_count());
-                        serde_json::json!({"restored": true, "panes": panes})
-                    }
-                    Err(e) => JsonRpcError::invalid_params(e).into_value(),
                 }
             }
             _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
@@ -3555,35 +3421,6 @@ impl PaneFlowApp {
                 })
                 .detach();
                 ipc_deferred_response()
-            }
-            "surface.rename" => {
-                // US-013 / issue #86: `name` is the documented new-name key;
-                // `new_name` is a backward-compatible alias that wins when
-                // both are sent. Neither key present is an error; explicit
-                // null or empty/whitespace clears. When `new_name` is
-                // absent, `name` is the new name and must not also select
-                // the target — target by `surface_id` (else the active
-                // surface).
-                let new_name = match parse_rename_name(params) {
-                    Ok(name) => name,
-                    Err(e) => return e.into_value(),
-                };
-                let targeting = rename_target_params(params);
-                let terminal = match self.resolve_surface(&targeting, cx) {
-                    Ok(t) => t,
-                    Err(e) => return e.into_value(),
-                };
-                let sid = terminal.entity_id().as_u64();
-                if let Some(loc) = find_pane_by_surface_id(&self.workspaces, sid, cx) {
-                    self.rename_cli_pane(&loc.pane, new_name.clone(), cx);
-                } else {
-                    terminal.update(cx, |view, _cx| {
-                        view.terminal.custom_name = new_name.clone();
-                    });
-                    self.save_session(cx);
-                    cx.notify();
-                }
-                serde_json::json!({"renamed": true, "name": new_name})
             }
             "surface.focus" => {
                 // US-001 (orchestration-v2): give a targeted pane the focus.
@@ -5460,38 +5297,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn workspace_close_ipc_uses_shared_guarded_closer() {
-        let src = include_str!("ipc_handler.rs");
-        let close_arm = src
-            .split("\"workspace.close\"")
-            .nth(1)
-            .and_then(|rest| rest.split("\"workspace.restore_layout\"").next())
-            .expect("workspace.close arm");
-        assert!(
-            close_arm.contains("request_close_workspace_without_window")
-                && close_arm.contains("ConfirmStyle::Modal"),
-            "workspace.close must reuse the UI guard before the shared closer"
-        );
-        assert!(
-            close_arm.contains("!ipc_orchestration_enabled()")
-                && close_arm.contains("orchestration_disabled_error(method)"),
-            "workspace lifecycle mutation must require the orchestration opt-in"
-        );
-        assert!(
-            close_arm.contains("Cannot close last workspace"),
-            "last-workspace refusal stays on the IPC path"
-        );
-        assert!(
-            !close_arm.contains("workspaces.remove"),
-            "workspace.close must not re-inline a clamp-only remove"
-        );
-        assert!(
-            close_arm.contains("confirmation_required"),
-            "a live-agent workspace must report that the in-app modal now owns the decision"
-        );
-    }
-
     /// Issue #279: a client-caused refusal (cap hit, out-of-range index,
     /// last-workspace close, malformed layout) must reach the wire as
     /// `-32602`, the same code `workspace.up` already uses for the cap.
@@ -5519,7 +5324,7 @@ mod tests {
         let select_arm = body
             .split("\"workspace.select\"")
             .nth(1)
-            .and_then(|rest| rest.split("\"workspace.close\"").next())
+            .and_then(|rest| rest.split("            _ =>").next())
             .expect("workspace.select arm");
         assert!(
             select_arm.contains("JsonRpcError::invalid_params(\"Index out of bounds\")"),
@@ -6575,24 +6380,6 @@ mod tests {
         assert!(
             arm.contains("internal_error(\"terminal runtime did not answer\")"),
             "a runtime that did not answer is an error, not an empty read at eof"
-        );
-    }
-
-    #[test]
-    fn workspace_current_omits_scrollback_extract() {
-        let src = include_str!("ipc_handler.rs");
-        let arm = src
-            .split("\"workspace.current\"")
-            .nth(1)
-            .and_then(|rest| rest.split("\"workspace.create\"").next())
-            .expect("workspace.current arm");
-        assert!(
-            arm.contains("serialize_layout_without_scrollback"),
-            "workspace.current must not extract_scrollback every pane on the GPUI tick"
-        );
-        assert!(
-            !arm.contains("serialize_layout(cx)"),
-            "the inline-scrollback serializer is the persistence path, not IPC metadata"
         );
     }
 
@@ -7689,139 +7476,9 @@ mod tests {
     // US-013 (prd-pane-context-bridge) - surface.rename name parsing
     // -----------------------------------------------------------------
 
-    #[test]
-    fn parse_rename_name_trims_and_accepts() {
-        let p = serde_json::json!({"new_name": "  build logs  "});
-        assert_eq!(
-            super::parse_rename_name(&p),
-            Ok(Some("build logs".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_rename_name_explicit_null_or_empty_clears() {
-        assert_eq!(
-            super::parse_rename_name(&serde_json::json!({"new_name": serde_json::Value::Null})),
-            Ok(None)
-        );
-        assert_eq!(
-            super::parse_rename_name(&serde_json::json!({"name": serde_json::Value::Null})),
-            Ok(None)
-        );
-        assert_eq!(
-            super::parse_rename_name(&serde_json::json!({"new_name": "   "})),
-            Ok(None)
-        );
-        assert_eq!(
-            super::parse_rename_name(&serde_json::json!({"new_name": ""})),
-            Ok(None)
-        );
-    }
-
-    #[test]
-    fn parse_rename_name_absent_is_an_error() {
-        let error = super::parse_rename_name(&serde_json::json!({}))
-            .expect_err("absent name/new_name must fail");
-        assert_eq!(error.code, super::JsonRpcError::INVALID_PARAMS);
-        assert_eq!(
-            error.message,
-            "surface.rename requires 'name' (or 'new_name'); send null to clear"
-        );
-    }
-
-    #[test]
-    fn parse_rename_name_strips_control_chars_and_caps_length() {
-        let p = serde_json::json!({"new_name": "ab\ncd\u{7}ef"});
-        assert_eq!(super::parse_rename_name(&p), Ok(Some("abcdef".to_string())));
-        let p = serde_json::json!({"new_name": "build\u{202E}codex\u{200D}"});
-        assert_eq!(
-            super::parse_rename_name(&p),
-            Ok(Some("buildcodex".to_string()))
-        );
-        let long = "x".repeat(200);
-        let p = serde_json::json!({ "new_name": long });
-        assert_eq!(
-            super::parse_rename_name(&p).unwrap().map(|s| s.len()),
-            Some(64)
-        );
-    }
-
     /// The call exactly as `docs/user/scripting/reference.md:221` documents it.
     /// Before the fix this returns `None` and the handler silently wipes the
     /// tab's custom name while replying `{"renamed": true}`.
-    #[test]
-    fn parse_rename_name_accepts_the_documented_name_key() {
-        let p = serde_json::json!({"surface_id": 7, "name": "  build logs  "});
-        assert_eq!(
-            super::parse_rename_name(&p),
-            Ok(Some("build logs".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_rename_name_prefers_new_name_over_name() {
-        let p = serde_json::json!({"new_name": "winner", "name": "target-selector"});
-        assert_eq!(super::parse_rename_name(&p), Ok(Some("winner".to_string())));
-    }
-
-    #[test]
-    fn parse_rename_name_rejects_non_string_values() {
-        for value in [
-            serde_json::json!(123),
-            serde_json::json!(true),
-            serde_json::json!({}),
-        ] {
-            let by_name = serde_json::json!({"surface_id": 7, "name": value.clone()});
-            let error = super::parse_rename_name(&by_name).expect_err("non-string name must fail");
-            assert_eq!(error.code, super::JsonRpcError::INVALID_PARAMS);
-            assert_eq!(
-                error.message,
-                "surface.rename: 'name' must be a string or null"
-            );
-            let by_alias = serde_json::json!({"surface_id": 7, "new_name": value});
-            let error =
-                super::parse_rename_name(&by_alias).expect_err("non-string new_name must fail");
-            assert_eq!(error.code, super::JsonRpcError::INVALID_PARAMS);
-            assert_eq!(
-                error.message,
-                "surface.rename: 'name' must be a string or null"
-            );
-        }
-    }
-
-    #[test]
-    fn rename_target_params_strips_name_when_it_is_the_new_name() {
-        let p = serde_json::json!({"surface_id": 7, "name": "backend"});
-        let targeting = super::rename_target_params(&p);
-        assert!(targeting.get("name").is_none());
-        assert_eq!(targeting["surface_id"], 7);
-    }
-
-    #[test]
-    fn rename_target_params_keeps_name_as_target_when_new_name_alias_present() {
-        let p = serde_json::json!({"new_name": "winner", "name": "target-selector"});
-        let targeting = super::rename_target_params(&p);
-        assert_eq!(targeting["name"], "target-selector");
-        assert_eq!(targeting["new_name"], "winner");
-    }
-
-    #[test]
-    fn surface_rename_also_renames_the_owning_tab() {
-        let src = include_str!("ipc_handler.rs");
-        let arm = src
-            .split("\"surface.rename\" => {")
-            .nth(1)
-            .and_then(|rest| rest.split("\"surface.focus\" => {").next())
-            .expect("surface.rename arm");
-        assert!(
-            arm.contains("rename_cli_pane("),
-            "a pane rename must write the owning tab title, not only custom_name: {arm}"
-        );
-        assert!(
-            arm.contains("find_pane_by_surface_id"),
-            "the tab write needs the pane that owns this surface: {arm}"
-        );
-    }
 
     #[test]
     fn prompt_prefill_writes_through_inject_text_and_never_submits() {

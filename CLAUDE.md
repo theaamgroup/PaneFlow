@@ -575,7 +575,7 @@ Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thre
 | Method | Thread | Description |
 |--------|--------|-------------|
 | `system.ping` / `capabilities` / `identify` | Socket | Stateless health checks |
-| `workspace.list` / `current` / `create` / `select` / `close` | GPUI | Workspace management; `close` uses the same live-agent confirmation gate as the UI and can return a pending-confirmation response |
+| `workspace.create` / `workspace.select` | GPUI | Create or select a workspace |
 | `workspace.up` / `restore_layout` | GPUI | Declarative bring-up, layout restore |
 | `surface.list` / `read` / `search` / `status` | GPUI | Read pane state; `read` returns the retained history followed by the live screen (#184 Phase 3.6), so a full-screen TUI is readable |
 | `surface.send_text` / `send_keystroke` | GPUI | Write into a pane (scripting-gated) |

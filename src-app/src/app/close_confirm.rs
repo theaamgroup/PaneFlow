@@ -24,14 +24,6 @@ use crate::pane::Pane;
 use crate::ui_primitives::AnimatedHoverExt;
 use crate::{ClosedRecord, PaneFlowApp};
 
-/// Result returned to the window-less IPC path. A guarded request is not a
-/// close: it arms the same in-app modal the UI uses and reports that fact to
-/// the caller instead of pretending the workspace is already gone.
-pub(crate) enum WorkspaceCloseOutcome {
-    ConfirmationRequired,
-    NotFound,
-}
-
 /// Scrub and clamp a label before it lands in the modal copy.
 ///
 /// The pane label can be an OSC title: a bidi override there could visually
@@ -415,21 +407,6 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         self.arm_pending_close_workspace(ws_idx, style, cx);
-    }
-
-    /// Window-less sibling for `workspace.close`. It may arm the modal, but
-    /// only the app's visible confirmation can complete a guarded close.
-    pub(crate) fn request_close_workspace_without_window(
-        &mut self,
-        ws_idx: usize,
-        style: ConfirmStyle,
-        cx: &mut Context<Self>,
-    ) -> WorkspaceCloseOutcome {
-        if self.arm_pending_close_workspace(ws_idx, style, cx) {
-            WorkspaceCloseOutcome::ConfirmationRequired
-        } else {
-            WorkspaceCloseOutcome::NotFound
-        }
     }
 
     /// The one entry point every user-initiated tab close GESTURE goes
@@ -1379,14 +1356,6 @@ mod tests {
         );
         assert!(!menu_close.contains("close_workspace_at("));
 
-        let ipc = include_str!("ipc_handler.rs");
-        let ipc_close = source_slice(ipc, "\"workspace.close\"", "\"workspace.restore_layout\"");
-        assert!(
-            ipc_close.contains("request_close_workspace_without_window"),
-            "IPC must ask in-app rather than closing agents remotely: {ipc_close}"
-        );
-        assert!(!ipc_close.contains("close_workspace_at_without_window"));
-
         let closer = source_slice(
             ops,
             "fn close_workspace_at_inner(",
@@ -1414,7 +1383,7 @@ mod tests {
         let request = source_slice(
             src,
             "pub(crate) fn request_close_workspace(",
-            "pub(crate) fn request_close_workspace_without_window(",
+            "/// The one entry point every user-initiated tab close",
         );
         assert!(
             !request.contains("close_workspace_at_inner"),
@@ -1442,16 +1411,6 @@ mod tests {
             arm.contains("is_empty()"),
             "dock and Review terminals die with the folder even when they are not agents, so the \
              undo copy must key off their presence, not off a live-agent scan: {arm}"
-        );
-
-        let windowless = source_slice(
-            src,
-            "pub(crate) fn request_close_workspace_without_window(",
-            "/// The one entry point every user-initiated tab close",
-        );
-        assert!(
-            !windowless.contains("close_workspace_at_inner"),
-            "IPC must not close a workspace without the in-app modal: {windowless}"
         );
 
         let render = source_slice(
