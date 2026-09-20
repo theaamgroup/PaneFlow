@@ -215,7 +215,7 @@ explicit priority.
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
 | Agent Summary | Horizontally centered, top-anchored at 24 (`OVERLAY_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; width capped at 920 (`MAX_OVERLAY_WIDTH`); rows padded 16 by 8, gap 2, with a 2 px accent left border on the selected row | `app/agent_summary/view.rs:16-17,101-176` |
-| Attention Queue · Fleet Search | Horizontally centered, top-anchored at 96 | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/attention_queue.rs:227-234`, `app/fleet_search.rs:379-386` |
+| Fleet Search | Horizontally centered, top-anchored at 96 | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/fleet_search.rs:379-386` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
 | Theme picker | Horizontally centered, top-anchored at 96 | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
 | Custom Buttons | Horizontally centered, top-anchored at 72 | 560 wide, radius 10, black 0.45 scrim | `app/custom_buttons_modal.rs:489-543` |
@@ -1171,7 +1171,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | New file tab, new terminal tab (dock) | `secondary-g`, `secondary-j` |
 | Composer, Launch Pad | `secondary-shift-space`, `secondary-shift-l` |
 | Command palette | `secondary-shift-o` |
-| Attention queue, jump to next waiting agent | `secondary-shift-a`, `secondary-shift-j` |
+| Jump to next waiting agent | `secondary-shift-j` |
 | Broadcast groups, toggle member | `secondary-shift-m`, `secondary-shift-b` |
 | Copy, paste (Terminal) | `cmd-c` / `cmd-v`, plus `ctrl-shift-c` / `ctrl-shift-v` |
 | Clear scrollback, reset terminal | `secondary-shift-k` and `cmd-k`; `secondary-shift-r` |
@@ -1221,8 +1221,7 @@ workspace ghost is a wider variant at `SIDEBAR_WIDTH − 16`.
 Focus is shown by absence of dim: the focused pane stays at full contrast while
 its siblings fade. There is no focus ring (7.5). An agent that needs the user
 gets the `vc_conflict` border at 0.7 and a sidebar bell; clicking anywhere in
-the panel acknowledges visible completions. The attention queue lists those
-panes and `secondary-shift-j` jumps through them. A native notification is
+the panel acknowledges visible completions. `secondary-shift-j` jumps through waiting agents across all workspace tabs. A native notification is
 dropped when its workspace is muted or its pane is under the user's eye: the window is focused and
 the pane's workspace and tab are on screen (the same test as the completion
 dot, #408 / #422). A pane in another workspace, a background tab, a zoomed-away
@@ -1300,7 +1299,7 @@ row washes carry no floor today.
 
 ### 7.4 Keyboard-operable surfaces
 
-These answer arrows, Enter, and Escape in full: attention queue, Pane Overview
+These answer arrows, Enter, and Escape in full: Pane Overview
 (two-dimensional), sessions rail, files rail, theme picker, pane palette, fleet
 search, work review, broadcast groups, and the Editor Controls menu. Launch
 Pad, the diff branch menu, close confirm, and About answer Escape and Enter
@@ -1315,9 +1314,9 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-This paragraph covers the eight origin-tracked overlays, the `OverlayKind`
+This paragraph covers the seven origin-tracked overlays, the `OverlayKind`
 variants in `app/overlay_origin.rs`: theme picker, broadcast picker, fleet
-search, Launch Pad, Pane Overview, Attention Queue, the pane palette, and
+search, Launch Pad, Pane Overview, the pane palette, and
 the agent summary. The
 modal dialogs (About, System Info, Custom Buttons, close confirm, Work
 Review), the diff branch menu, and the Editor Controls menu keep their own
@@ -1328,7 +1327,7 @@ first pane when that pane is gone, then to the empty-workspace placeholder.
 Each tracked overlay keeps its own origin: one opened over another inherits the outer
 overlay's origin, and closing the inner one leaves the outer one's in place,
 so the focus lands on the same pane whichever closes last. An activation that
-teleports (a Pane Overview card, an Attention Queue row, a fleet-search hit)
+teleports (a Pane Overview card, a fleet-search hit)
 lands on its target instead, and a Launch Pad run lands on the pane it
 created. A new cockpit overlay of this kind (a focus-taking surface over the
 pane grid) MUST add an `OverlayKind`, record its origin before it takes the

@@ -1027,7 +1027,7 @@ impl PaneFlowApp {
     /// rename state clears. Without this the window ends every rename with
     /// nothing focused - the dispatch path collapses to the tree root, and
     /// every global `context: None` binding matches but finds no handler.
-    /// Mirrors `close_attention_queue_and_restore_focus`.
+    /// Mirrors `restore_overlay_origin_focus`.
     pub(crate) fn restore_focus_after_rename(
         &mut self,
         window: &mut Window,

@@ -850,10 +850,7 @@ impl PaneFlowApp {
             broadcast_picker_renaming: None,
             broadcast_picker_error: None,
             broadcast_picker_focus: cx.focus_handle(),
-            // EP-002 (cli-cockpit): Attention Queue + Launch Pad closed.
-            attention_queue_open: false,
-            attention_queue_selected: 0,
-            attention_queue_focus: cx.focus_handle(),
+            // EP-002 (cli-cockpit): Launch Pad closed.
             // EP-006 US-018 (cli-cockpit): fleet grep closed.
             fleet_search: None,
             fleet_search_generation: 0,

@@ -296,7 +296,7 @@ impl PaneFlowApp {
         }
     }
 
-    /// Enter / click on a row: teleport to the pane (Attention Queue
+    /// Enter / click on a row: teleport to the pane (waiting-agent navigation
     /// mechanics) and arm its LOCAL search with the fleet query - matches
     /// recompute fresh, the viewport lands on the first hit, and the
     /// US-017 rail renders from the same state.

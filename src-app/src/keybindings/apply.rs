@@ -292,18 +292,10 @@ mod tests {
         );
     }
 
-    /// Issue #184 (upstream v0.10.0 port): the Attention Queue gave up
-    /// `secondary-shift-k` and moved to `secondary-shift-a`, because ⇧⌘K is
-    /// what kitty and Ghostty use for "clear scrollback" and that action now
-    /// owns it. macOS also spells clear-scrollback as bare `cmd-k` (iTerm2,
-    /// Terminal.app), so that alias lives in `MACOS_ONLY_DEFAULTS`; both
-    /// reach `clear_scroll_history`. `secondary-shift-r` resets the terminal.
-    /// `close_window` is gone: closing the only window is `quit` here, and a
-    /// registry entry with no handler would only ever be an `Unassigned`
-    /// row. Every claimant list is exact, so the queue drifting back onto
-    /// ⇧⌘K, or a second action landing on any of these chords, fails loudly.
+    /// Clear-scrollback aliases and reset retain exclusive ownership of
+    /// their terminal chords after overlay removal.
     #[test]
-    fn attention_queue_is_cmd_shift_a_and_cmd_shift_k_clears_scrollback() {
+    fn cmd_shift_k_and_cmd_k_clear_scrollback() {
         use super::super::defaults::{DEFAULTS, MACOS_ONLY_DEFAULTS};
 
         let claimants = |key: &str| -> Vec<(&'static str, Option<&'static str>)> {
@@ -316,7 +308,6 @@ mod tests {
         };
 
         for (key, action_name, context) in [
-            ("secondary-shift-a", "open_attention_queue", None),
             (
                 "secondary-shift-k",
                 "clear_scroll_history",
@@ -341,15 +332,6 @@ mod tests {
                 "{key} must be claimed by {action_name} and nothing else"
             );
         }
-
-        let queue_on_shift_k = DEFAULTS.iter().chain(MACOS_ONLY_DEFAULTS.iter()).any(|d| {
-            d.action_name == "open_attention_queue"
-                && keystrokes_conflict(d.key, "secondary-shift-k")
-        });
-        assert!(
-            !queue_on_shift_k,
-            "open_attention_queue must not drift back onto secondary-shift-k"
-        );
 
         let close_window_defaults: Vec<&str> = DEFAULTS
             .iter()

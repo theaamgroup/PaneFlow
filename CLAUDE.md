@@ -252,7 +252,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 97 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 96 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -282,7 +282,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
-│   ├── attention_queue.rs             ← "which agent needs me" queue
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── fleet_search.rs                ← cross-pane search
 │   ├── launch_pad.rs                  ← agent launcher UI
@@ -484,7 +483,7 @@ The old binary `SplitNode` in `split.rs` is gone. `LayoutTree` (`layout/tree.rs`
 
 ## Keybindings
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 97 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 96 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs:12-14`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -503,7 +502,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 97 ac
 | `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
 | `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
 | `Cmd+Shift+Z` | Toggle zoom | Global |
-| `Cmd+Shift+J` / `Cmd+Shift+A` | Jump to next waiting agent / open attention queue | Global |
+| `Cmd+Shift+J` | Jump to next waiting agent, including background tabs | Global |
 | `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
 | `Cmd+Shift+I` | Fleet agent summary (on-device, one line per agent pane) | Global |
 | `Cmd+Shift+G` | Diff view | Global |
@@ -531,7 +530,10 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 97 ac
 | `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
 | `Cmd+Q` | Quit (macOS only) | Global |
 
-The Attention Queue is `Cmd+Shift+A`, not `Cmd+Shift+K` (issue #184): `secondary-shift-k` is the terminal-convention clear-scrollback chord (kitty, Ghostty) and `clear_scroll_history` owns it now, with `cmd-k` as the macOS spelling. `attention_queue_is_cmd_shift_a_and_cmd_shift_k_clears_scrollback` in `keybindings/apply.rs` fails if the queue drifts back, if any of those chords gains a second claimant, or if `close_window` returns (it was removed: closing the window is `Quit`, and the title-bar close button reaches `quit_after_session_save` through `TitleBarEvent::CloseRequested`).
+`Cmd+Shift+K` and `Cmd+K` clear terminal scrollback; `Cmd+Shift+R` resets
+the terminal. Their registry contexts and exclusive chord ownership are
+covered by `cmd_shift_k_and_cmd_k_clear_scrollback` in `keybindings/apply.rs`.
+`Cmd+Shift+A` is unassigned after removal of the waiting-agent list overlay.
 
 Next-workspace is `ctrl-tab`, not the upstream `secondary-tab` (Cmd+Tab): macOS reserves Cmd+Tab for the application switcher and never delivers it to the app (issue #10; a synthetic Cmd+Tab on 2026-08-27 moved focus to another app while Cmd+1/Cmd+2 through the same path switched workspaces). A test in `keybindings/apply.rs` fails if any default binds `secondary-tab` again.
 

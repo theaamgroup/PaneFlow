@@ -206,7 +206,7 @@ pub struct AgentSession {
     /// exists at workspace level (no per-pane glow), never a wrong pane.
     pub surface_id: Option<u64>,
     /// EP-002 US-004 (cli-cockpit): when this session ENTERED
-    /// `WaitingForInput` - drives the Attention Queue's wait column and its
+    /// `WaitingForInput` - drives the fleet listing's wait duration and its
     /// longest-waiting-first order. Stamped by `upsert_session_state` via
     /// [`next_waiting_since`]; cleared on any non-waiting transition.
     /// `Instant` (monotonic) so a wall-clock jump never shows a negative or
@@ -269,7 +269,7 @@ impl AgentSession {
 
     /// The state this session presents to the user: `None` once marked read
     /// (issue #408). The sidebar badge, the pane ring and peek overlay, the
-    /// Attention Queue, jump-to-waiting, and the overview dot all read this;
+    /// jump-to-waiting, and the overview dot all read this;
     /// the delivery gate and the stall clock keep reading [`Self::state`].
     pub fn presented_state(&self) -> Option<&AgentState> {
         (!self.read).then_some(&self.state)
@@ -960,7 +960,7 @@ mod tests {
     fn a_waiting_row_is_never_taken_over_by_a_weaker_source() {
         // Issue #196: a permission prompt routinely sits unanswered past
         // SOURCE_TAKEOVER_SILENCE (the user is elsewhere - that is the whole
-        // point of the attention queue). The silence escape hatch exists for a
+        // point of the waiting-agent navigation). The silence escape hatch exists for a
         // dead channel describing a RUNNING turn; it must not let a registry
         // "busy" flip or an OSC 9;4 progress change move the row off the thing
         // the user has to act on.

@@ -1196,23 +1196,23 @@ mod tests {
 
     #[test]
     fn search_matches_an_action_by_its_chord_text() {
-        // The attention queue is Cmd+Shift+A (issue #184). A user who knows the
+        // The waiting-agent navigation is Cmd+Shift+J (issue #184). A user who knows the
         // chord but not the action's name has to be able to find it by typing
         // the chord - in either of the spellings the config and the docs use,
         // the dashed GPUI one and the plus-joined one.
         let entries = default_entries();
         let none = HashSet::new();
-        for query in ["shift-a", "shift+a", "cmd-shift-a", "cmd+shift+a"] {
+        for query in ["shift-j", "shift+j", "cmd-shift-j", "cmd+shift+j"] {
             let rows = shortcut_rows_from(&entries, query, false, &none);
             assert!(
-                listed(&rows, &entries).contains(&"open_attention_queue"),
-                "searching `{query}` must find open_attention_queue; got {:?}",
+                listed(&rows, &entries).contains(&"jump_next_waiting"),
+                "searching `{query}` must find jump_next_waiting; got {:?}",
                 listed(&rows, &entries)
             );
         }
         // And the name still works, so the chord match is an addition.
-        let rows = shortcut_rows_from(&entries, "attention", false, &none);
-        assert_eq!(listed(&rows, &entries), vec!["open_attention_queue"]);
+        let rows = shortcut_rows_from(&entries, "next waiting", false, &none);
+        assert_eq!(listed(&rows, &entries), vec!["jump_next_waiting"]);
     }
 
     #[test]
@@ -1220,7 +1220,7 @@ mod tests {
         // A section with no matches has no header at all; one with matches
         // carries the surviving count on its header.
         let entries = default_entries();
-        let rows = shortcut_rows_from(&entries, "attention", false, &HashSet::new());
+        let rows = shortcut_rows_from(&entries, "next waiting", false, &HashSet::new());
         assert_eq!(
             rows,
             vec![
@@ -1228,7 +1228,7 @@ mod tests {
                 ShortcutListRow::Binding {
                     idx: entries
                         .iter()
-                        .position(|e| e.action_name == "open_attention_queue")
+                        .position(|e| e.action_name == "jump_next_waiting")
                         .expect("listed"),
                     first: true,
                     last: true,
@@ -1240,19 +1240,19 @@ mod tests {
     #[test]
     fn capture_query_matches_the_whole_chord_only() {
         // Capture mode asks "what owns exactly this?". macOS glyphs concatenate
-        // with no separator, so a substring test would answer ⌘⇧A with every
+        // with no separator, so a substring test would answer ⌘⇧J with every
         // row that merely contains it.
         let entries = default_entries();
         let none = HashSet::new();
-        let chord = keybindings::format_keystroke("cmd-shift-a").to_lowercase();
+        let chord = keybindings::format_keystroke("cmd-shift-j").to_lowercase();
         let rows = shortcut_rows_from(&entries, &chord, true, &none);
-        assert_eq!(listed(&rows, &entries), vec!["open_attention_queue"]);
+        assert_eq!(listed(&rows, &entries), vec!["jump_next_waiting"]);
 
         // A partial chord matches nothing in capture mode, and the name never
         // takes part.
-        let partial = keybindings::format_keystroke("shift-a").to_lowercase();
+        let partial = keybindings::format_keystroke("shift-j").to_lowercase();
         assert!(shortcut_rows_from(&entries, &partial, true, &none).is_empty());
-        assert!(shortcut_rows_from(&entries, "attention", true, &none).is_empty());
+        assert!(shortcut_rows_from(&entries, "next waiting", true, &none).is_empty());
     }
 
     #[test]
@@ -1293,8 +1293,8 @@ mod tests {
         let entries = default_entries();
         let mut collapsed = HashSet::new();
         collapsed.insert(ShortcutGroup::Agents);
-        let rows = shortcut_rows_from(&entries, "attention", false, &collapsed);
-        assert_eq!(listed(&rows, &entries), vec!["open_attention_queue"]);
+        let rows = shortcut_rows_from(&entries, "next waiting", false, &collapsed);
+        assert_eq!(listed(&rows, &entries), vec!["jump_next_waiting"]);
         assert!(
             collapsed.contains(&ShortcutGroup::Agents),
             "the fold state is not consumed by filtering"

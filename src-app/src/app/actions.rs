@@ -152,14 +152,9 @@ actions!(
         OpenComposer,
         ToggleBroadcastMember,
         OpenBroadcastGroups,
-        // EP-002 (CLI Cockpit) - triage & launch.
-        // `OpenAttentionQueue` (US-004) lists every WaitingForInput session
-        // cross-workspace with its question + wait time; `OpenLaunchPad`
-        // (US-005) is the worktree + split + agent + prefill one-gesture
-        // modal.
+        // Launch Pad opens a worktree, split, agent and prompt in one modal.
         ToggleFilesSidebar,
         ToggleDiffDockMaximize,
-        OpenAttentionQueue,
         OpenLaunchPad,
         // EP-005 US-018 (prd-file-editor-2026-Q3): the diff dock's `+` menu
         // advertises Ctrl+G / Ctrl+J on its two rows. These make both chords
@@ -194,7 +189,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 97, "review action surface is pinned");
+        assert_eq!(declared, 96, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

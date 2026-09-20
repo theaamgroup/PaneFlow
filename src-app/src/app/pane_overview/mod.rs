@@ -7,9 +7,7 @@
 //! background tabs of inactive workspaces already have live content sitting in
 //! `SharedState` - nothing has to be pulled or woken.
 //!
-//! It is a `deferred(...).with_priority(6)` overlay, a peer of the Attention
-//! Queue and Fleet Search, and follows their open/close/key/render shape. It
-//! is repainted at ~4 fps by its own timer in `bootstrap.rs` while open; it
+//! It is a `deferred(...).with_priority(6)` overlay. It is repainted at ~4 fps by its own timer in `bootstrap.rs` while open; it
 //! never subscribes to terminal wakeups (a chatty pane fires at the 4 ms
 //! coalescing floor).
 
@@ -87,9 +85,8 @@ impl Default for PaneOverviewState {
 
 /// Every terminal pane, in workspace -> tab -> traversal order.
 ///
-/// Walks `ws.tabs()` and NOT `ws.active_tab()`: the Attention Queue and
-/// Fleet Search both visit only the active tab, and inheriting that here
-/// would hide most of what the overview exists to show. It also avoids
+/// Walks every tab: an active-tab-only walk would hide background agents.
+/// It also avoids
 /// `Workspace::collect_panes`, which dedupes with a linear `contains` per
 /// pane. The saved layout is authoritative during zoom: walking it preserves
 /// split order instead of moving the zoomed pane to the front of the list.
@@ -1094,10 +1091,7 @@ mod tests {
         assert_eq!(last.size.height, px(CARD_H));
     }
 
-    /// The walk pins §6 of the design: every tab, not just the active one.
-    /// The Attention Queue and Fleet Search both visit only `ws.active_tab()`,
-    /// and regressing to that walk would hide most of what the overview
-    /// exists to show.
+    /// Every tab contributes, including tabs that are not active.
     #[gpui::test]
     fn overview_walks_every_tab_not_just_the_active_one(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;

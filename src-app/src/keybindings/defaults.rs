@@ -214,10 +214,8 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
     // Ghostty both clear the scrollback on Shift+K under the platform
     // modifier; the plain macOS spelling is ⌘K (iTerm2 "Clear Buffer",
     // Terminal.app, Ghostty), which `MACOS_ONLY_DEFAULTS` adds on top, so
-    // this entry is the ⇧⌘K alias. It cost `open_attention_queue` its
-    // original slot; the queue moved to `secondary-shift-a` because it is
-    // reachable from the UI and clearing the scrollback is not. FR-12 still
-    // holds: Ctrl+K kill-line is BARE ctrl, not ctrl+shift.
+    // this entry is the ⇧⌘K alias. Ctrl+K remains the shell's kill-line
+    // chord because it has no Shift modifier.
     //
     // `secondary-shift-r` follows iTerm2's ⌘R "Reset". It is distinct from
     // `alt-r` (toggle_search_regex, Search context) and `ctrl-alt-r`
@@ -460,28 +458,12 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_broadcast_groups",
         context: None,
     },
-    // Attention Queue + Launch Pad. The queue used to sit
-    // on `secondary-shift-k`, which the terminal convention wants for
-    // `clear_scroll_history` (see that binding above; issue #184); `a` for
-    // "attention" is the mnemonic and shadows no shell/readline/TUI chord,
-    // same FR-12 test as `secondary-shift-l`. Pinned by
-    // `attention_queue_is_cmd_shift_a_and_cmd_shift_k_clears_scrollback` in
-    // `apply.rs`.
-    DefaultBinding {
-        key: "secondary-shift-a",
-        action_name: "open_attention_queue",
-        context: None,
-    },
     DefaultBinding {
         key: "secondary-shift-l",
         action_name: "open_launch_pad",
         context: None,
     },
-    // Issue #339: Pane Overview. `p` for panes; `secondary-shift-p` is free on
-    // this table today and stays clear of `secondary-shift-a` (attention
-    // queue) and `secondary-shift-l` (launch pad), the two chords a user
-    // reaches for in the same breath. Global for the same reason those are:
-    // a terminal holds focus nearly always.
+    // Pane Overview is global because a terminal usually owns the focus.
     DefaultBinding {
         key: "secondary-shift-p",
         action_name: "open_pane_overview",
@@ -503,7 +485,7 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         context: None,
     },
     // Issue #576: fleet agent summary. `i` for "what's happening" - the
-    // neighbouring mnemonics are taken (`secondary-shift-a` attention queue,
+    // neighbouring mnemonics are taken (`secondary-shift-j` waiting-agent navigation,
     // `secondary-shift-p` pane overview, `secondary-shift-u` work review) and
     // `secondary-shift-i` is free on this table. Global: a terminal holds
     // focus nearly always, and a bare `f` (the chord the prior art uses) is

@@ -668,13 +668,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
     },
     // EP-002 (CLI Cockpit): triage & launch.
     ActionMeta {
-        name: "open_attention_queue",
-        factory: || Box::new(crate::OpenAttentionQueue),
-        context: "",
-        description: "Attention queue",
-        group: ShortcutGroup::Agents,
-    },
-    ActionMeta {
         name: "open_launch_pad",
         factory: || Box::new(crate::OpenLaunchPad),
         context: "",
