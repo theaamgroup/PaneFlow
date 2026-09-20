@@ -165,6 +165,10 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 The window is 800 by 500 at minimum, and a surface MUST hold there with the
 primary sidebar hidden and a right rail or the dock open at the same time.
 
+Branch metadata polling runs only while the primary sidebar is visible and
+`sidebar_show.branch` is enabled. Hiding either pauses pane-CWD collection and
+git metadata reads; showing both resumes on the next two-second tick.
+
 ### 3.2 Modes
 
 PaneFlow has two modes and one takeover surface.

@@ -616,7 +616,7 @@ pub fn resolve_worktree_root(
 /// Returns `(branch_name, true)`. On read failure returns `("", true)` -
 /// the directory is a git repo but the branch is unknown.
 /// Only `refs/heads/` branches are resolved; tags and remote refs return empty.
-pub(super) fn parse_head(git_dir: &std::path::Path) -> (String, bool) {
+pub(crate) fn parse_head(git_dir: &std::path::Path) -> (String, bool) {
     let head_path = git_dir.join("HEAD");
     let content = match read_capped(&head_path, 512) {
         Ok(c) => c,

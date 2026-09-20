@@ -38,6 +38,7 @@ pub(crate) fn path_is_in_retiring_worktree(path: &std::path::Path) -> bool {
     retiring.iter().any(|root| path.starts_with(root))
 }
 
+pub(crate) use git::parse_head;
 pub use git::{
     GIT_STATS_SWEEP_DEADLINE, GitDiffStats, detect_branch, find_git_dir, resolve_repo_root,
     resolve_worktree_root,
