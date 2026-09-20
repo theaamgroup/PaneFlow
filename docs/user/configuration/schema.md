@@ -89,7 +89,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `mcp_bridge_prompt_dismissed` | array of strings | `[]` | MCP-install agent ids (`claude-code`, `codex`, `gemini`, `opencode`) whose sidebar "Install MCP bridge" callout was dismissed. When a pane runs one of those agents and its MCP config has no `paneflow` entry, the sidebar footer offers the bridge once; the callout's `×` writes the agent id here so it never asks again for that agent. Remove an id to see the offer again. A malformed value loads as the empty list. |
 | `review_prefill_delay_ms` | integer or null | `2000` | Delay before Review pre-fills a freshly launched CLI. Clamped to `250` to `10000`. |
 | `submit_paste_delay_ms` | integer or null | `70` | Minimum delay between bracketed paste and submit carriage return. Clamped to `10` to `5000`. |
-| `external_editor` | string or null | `auto` | `auto`, `system`, `zed`, `cursor`, `windsurf`, `code`. |
+| `external_editor` | string or null | `auto` | Editor command (quoted paths and flags supported, without a shell), tried before `$VISUAL` and `$EDITOR`. `auto`/null starts with those variables, then probes `code`, `cursor`, `zed`, `subl`, `code-insiders`, `windsurf`, `hx`, `nvim`, `vim`, `emacs`, then the macOS handler. Failed commands fall through. `system` uses only the macOS handler, without line/column positioning. |
 | `shortcuts` | object | `{}` | Custom keybindings: `{ "ctrl+shift+t": "new_tab" }`. |
 | `terminal` | object or null | defaults below | Terminal renderer and PTY settings. |
 | `commands` | array | `[]` | Command palette entries and workspace templates. |

@@ -996,9 +996,10 @@ impl PaneFlowApp {
                 let path = path.clone();
                 let line = *line;
                 let col = *col;
+                let editor = self.cached_config.external_editor.clone();
                 cx.background_executor()
                     .spawn(async move {
-                        crate::editor::open_at_location(&path, line, col);
+                        crate::editor::open_at_location(&path, line, col, editor.as_deref());
                     })
                     .detach();
             }

@@ -267,8 +267,7 @@
     },
     "external_editor": {
       "type": ["string", "null"],
-      "description": "Editor used to open file links. 'auto' probes zed, cursor, windsurf, then code; 'system' always uses the OS opener.",
-      "enum": ["auto", "system", "zed", "cursor", "windsurf", "code", null],
+      "description": "Editor command for terminal file links, before VISUAL and EDITOR. 'auto' or null tries VISUAL, EDITOR, then code, cursor, zed, subl, code-insiders, windsurf, hx, nvim, vim, emacs, and the OS opener. Failed commands fall through. 'system' uses only the OS opener (no line/column). Commands may include quoted paths and flags; no shell is invoked.",
       "default": "auto"
     },
     "shortcuts": {
