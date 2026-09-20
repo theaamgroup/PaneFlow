@@ -9,8 +9,7 @@ Fork context, decisions, the upstream leak register, and the traps register live
 
 **Work tracking:** GitHub issues are the backlog. File an issue for every bug
 and every feature (`gh issue create`); remaining work is `gh issue list`.
-Markdown is for documentation, design, runbooks, and fixtures
-(`examples/TASK.md` is load-bearing). Do not add TODO.md, ISSUES.md,
+Markdown is for documentation, design, runbooks, and fixtures. Do not add TODO.md, ISSUES.md,
 ROADMAP.md, FIXES.md, a live findings.md queue, or any other markdown list of
 open work, and do not grow `docs/fork/STATE.md` into a backlog.
 
@@ -81,12 +80,9 @@ is a **false fail** via SIGPIPE after a successful command.
 
 ## Delegating parallel work
 
-Do **not** use the `paneflow-conductor` skill to grind this repo. Headless
-grok in git worktrees is the mechanism that worked. (Conducting *can* drive
-a live PaneFlow window when `PANEFLOW_IPC_ORCHESTRATION=1` and
-`PANEFLOW_IPC_SCRIPTING=1` are set, but `paneflow read` still returns 0
-lines; that path is for a human-supervised interactive agent, not batch
-fan-out. See `docs/mcp-bridge.md` and the `grok-subagents` skill.)
+Use headless agents in separate git worktrees for batch fan-out. PaneFlow's
+terminal panes, read-only MCP bridge, and lifecycle hooks remain available
+for interactive work. See `docs/mcp-bridge.md`.
 
 Fan-out works when the worker does **not** have to discover anything.
 Give exact `file:line` + the cfg/expression as written + the action.
@@ -435,6 +431,9 @@ remaining Zed dependency; do not restore the removed Markdown-widget graph.
 
 Everything that runs outside the GUI process must stay GPU-free and never link GPUI.
 
+`clippy.toml` is load-bearing: it allows unwrap and expect in tests while
+keeping the workspace lint policy strict in production code.
+
 ## Critical external dependencies
 
 GPUI and `gpui_platform` are **git dependencies** pinned to `zed-industries/zed`:
@@ -616,7 +615,6 @@ engineering summary, not the contract.
 - **A note that used to live here was wrong, and the correction is worth keeping.** It said the in-app updater's `update/macos/dmg.rs` two `#[cfg(all(test, not(target_os = "macos")))]` items should be un-gated rather than deleted. They could not be: they were the second half of a complementary pair — the real `cp -R` vs a test-host shim — so un-gating the second one is a duplicate definition, `error[E0428]`. Stage 2c deleted the shim; leftover-removal then deleted the whole updater (`src-app/src/update/` is gone). Before acting on a claim like that, check whether the two gates are complementary definitions of ONE item.
 - **The binary-size budget is Mach-O now.** `src-app/build.rs` measures the three embedded helpers under `--profile release-min` on `aarch64-apple-darwin`: shim 506_192 + ai-hook 353_168 + mcp **419_840** B = **1_279_200 B** (J8 deferred; measured 2026-09-17 after the Muse Code port, #528). Cap is `EMBED_SIZE_LIMIT_BYTES = 1_400_000`, which is total + 9.4% (slack 120_800 B = 8.6% of the cap), quoted from `src-app/build.rs`; a `--release` build prints the measured total as a `cargo:warning`. Nested staging always uses `release-min`, so a debug outer build still embeds those sizes. Per-binary caps were dropped with the CI matrix (issue #3); do not re-derive a Linux ELF number.
 - **License**: GPL-3.0-or-later (GPUI is a Zed fork). Keep packaging metadata in sync with the root `LICENSE` file and `Cargo.toml`.
-- **`examples/review-pipeline.flow.toml` is an `include_str!` target** (`src-app/src/cli/flow_spec.rs:749`). Deleting it breaks the build. `examples/TASK.md` is its fixture. `clippy.toml` is likewise load-bearing: it carries the `allow-unwrap-in-tests` escape hatch for the workspace lint policy.
 - **libproc CPU time is Mach ticks, not nanoseconds.** `TaskAllInfo.ptinfo.pti_total_user` / `pti_total_system` need `mach_timebase_info` (observed **125/3** on arm64). `Duration::from_nanos` on the raw tick count is ~50× too small (`bench_harness.rs`, moved there from `terminal/bench_corpus.rs` in #425; its two live-process tests moved with it).
 - **`scripts/create-dmg.sh` is allowed to fail `codesign --verify --deep --strict` on an unsigned smoke.** The script writes the `.dmg` first, then the strict check exits 1 because the enclosed binary is adhoc/linker-signed. That check is for a signed+notarized release. Local artifact: `dist/paneflow-0.1.0-aarch64-apple-darwin.dmg` (~30M), `CFBundleIdentifier=com.theaamgroup.paneflow`. Gatekeeper will quarantine a copied copy.
 - **Comments still mention Windows and Linux.** `runtime_paths.rs` still documents a named-pipe fallback. That is leftover copy. Do not re-implement from a comment. Ghostty identifiers in `terminal/view.rs` and `pty_session.rs` are the opposite: they are the live engine (#184) and must not be pruned.

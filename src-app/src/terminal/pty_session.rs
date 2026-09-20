@@ -3817,7 +3817,7 @@ mod tests {
 
     /// Issue #362: a runtime that cannot answer is not a finished scan with
     /// zero hits. `surface.search` used to report `matches=[] truncated=true`
-    /// for it, which a conductor reads as "raise max_matches" or "pattern
+    /// for it, which an orchestrator reads as "raise max_matches" or "pattern
     /// absent"; the same unanswered runtime is an error on `surface.read`.
     #[test]
     fn search_scrollback_fails_when_the_runtime_does_not_answer() {

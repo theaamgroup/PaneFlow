@@ -27,7 +27,6 @@ launching the app.
 | `wait --match <sel>`                       | `surface.read`, `events.subscribe` | No                         | Block until pattern, idle, or both     |
 | `watch [--surface <sel>] [--type <event>]` | `events.subscribe`                 | No                         | Stream lifecycle and surface events    |
 | `up <file>`                                | Workspace spec engine              | Prefill only               | Create a declarative workspace         |
-| `flow run <file>`                          | Flow engine                        | Gated for submitting steps | Run a local multi-agent DAG            |
 
 Aliases accepted by the CLI: `list_panes` maps to `ls`,
 `read_pane` maps to `read`, and `search_pane` maps to `search`.
@@ -171,35 +170,6 @@ worktree is refused with `-32602` rather than silently moved, so a pane
 and the ownership record it registers can never point at different
 checkouts. A split into an unbound tab takes `cwd` anywhere, as before.
 
-## Flow spec
-
-`paneflow flow run <file>` reads a TOML flow spec and runs it against
-the current PaneFlow instance.
-
-| Field     | Type         | Notes                                                    |
-| --------- | ------------ | -------------------------------------------------------- |
-| `id`      | string       | Required, unique step id                                 |
-| `needs`   | array        | Dependencies; on `foreach`, waits for all instances      |
-| `foreach` | array        | Fan-out, one instance per item                           |
-| `pane`    | inline table | Spawn a pane using workspace pane fields                 |
-| `send`    | inline table | `{ target, text, submit? }`; requires a dependency       |
-| `ready`   | table        | `{ pattern, timeout_secs? }`; regex barrier              |
-| `capture` | table        | `{ var, lines }`; captures 1-500 lines after `ready`     |
-| `submit`  | bool         | Submits a spawned pane prompt; requires scripting access |
-
-Variables:
-
-| Variable        | Scope                                                                                                 |
-| --------------- | ----------------------------------------------------------------------------------------------------- |
-| `${item}`       | `foreach` steps: `cwd`, `name`, `worktree`, `env`, `send.target`, `ready.pattern`, prompts, and texts |
-| `${var}`        | Captured values inside `send.text` and submitting `pane.prompt`                                       |
-| `${var.<item>}` | Captures from a `foreach` group                                                                       |
-
-The runner validates unknown keys, missing dependencies, dependency
-cycles, invalid regexes, undefined captures, pane budget, and missing
-timeouts before execution. `Ctrl-C` stops the orchestration loop; panes
-that were created remain in PaneFlow.
-
 ## JSON-RPC connection
 
 | Property         | Value                                                                                |
@@ -304,5 +274,4 @@ state may be limited to process detection.
 ## Related
 
 * [Scripting guide](../scripting.md)
-* [Conductor](../conductor.md)
 * [Configuration schema](../configuration/schema.md)

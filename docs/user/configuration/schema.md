@@ -95,7 +95,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `commands` | array | `[]` | Command palette entries and workspace templates. |
 | `claude_code_bypass_permissions` | boolean or null | `false` | Adds Claude Code `--permission-mode bypassPermissions` when launching from PaneFlow. |
 | `ai_unrestricted` | boolean or null | `false` | Allows trusted automation to submit via IPC without `PANEFLOW_IPC_SCRIPTING=1`. |
-| `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI conductors. |
+| `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI clients. |
 | `agent_button_visibility_defaults_migrated` | boolean or null | `null` | Internal one-time marker recording that a pre-allowlist config preserved its installed launcher buttons as explicit values. Runtime visibility does not otherwise consult it. |
 | `agent_panel` | object or null | defaults below | Agents-view display, profiles, and notification settings. |
 

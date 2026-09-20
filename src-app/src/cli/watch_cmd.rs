@@ -3,7 +3,7 @@
 //!
 //! Opens a persistent `events.subscribe` connection and prints each pushed event
 //! as a line of JSONL, until the server closes the stream or the user interrupts
-//! with Ctrl-C (a clean stop, exit 0). This is the in-pane conductor's read
+//! with Ctrl-C (a clean stop, exit 0). This is the in-pane orchestrator's read
 //! channel: the same push an external orchestrator gets over the raw socket,
 //! reached through the CLI.
 

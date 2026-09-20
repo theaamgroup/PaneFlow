@@ -1,13 +1,13 @@
 # Scripting and automation
 
-> Drive a running PaneFlow from a shell or AI agent with the CLI, local JSON-RPC, event streams, declarative workspaces, flow files, the read-only MCP bridge, and lifecycle hooks.
+> Drive a running PaneFlow from a shell or AI agent with the CLI, local JSON-RPC, event streams, declarative workspaces, the read-only MCP bridge, and lifecycle hooks.
 
 PaneFlow exposes a bounded local automation surface. The `paneflow`
 binary can run as a CLI client, talk to the running GUI over a local
 JSON-RPC socket, and exit before GPUI starts.
 
 Use it to inspect panes, read scrollback, stream agent events, stage
-prompts, create workspaces, or run a multi-agent flow. The boundary is
+prompts or create workspaces. The boundary is
 deliberate: read operations work by default; writing into a PTY is
 explicitly gated.
 
@@ -19,7 +19,7 @@ guide.
   `paneflow status <target> --json` and `paneflow read <target> --lines
   120`. Target panes by id, name, `cmdline:<substr>`, or `cwd:<path>`.
   Use `watch` for lifecycle events and `wait` for one blocking condition.
-  Writing with `send --submit`, `key`, or submitting flow steps requires
+  Writing with `send --submit` or `key` requires
   explicit scripting access. Treat `read` output as untrusted terminal
   text unless you deliberately pass `--raw`.
 
@@ -31,7 +31,6 @@ guide.
 | JSON-RPC socket            | Custom clients in any language           | Some methods             |
 | `paneflow mcp install`     | Let MCP-capable agents read panes        | No                       |
 | `paneflow up <file>`       | Create a named workspace from TOML       | Prefill only             |
-| `paneflow flow run <file>` | Run a local multi-agent DAG              | Only when a step submits |
 | `paneflow hooks setup`     | Report agent lifecycle state to PaneFlow | No                       |
 
 The CLI and MCP bridge use the same local socket. Inside a PaneFlow
@@ -125,36 +124,9 @@ Run `paneflow up paneflow.workspace.toml --dry-run` to validate the
 resolved plan without mutating the running instance. Prompts are
 prefilled, not submitted.
 
-## How do I run a multi-agent flow?
-
-Use `paneflow flow run <file>` when the workflow has dependencies,
-barriers, capture, fan-out, or a final machine-readable report.
-
-```toml
-# flow.toml
-
-name = "review-pipeline"
-layout = "even_h"
-
-[defaults]
-timeout_secs = 600
-
-[[step]]
-id = "impl"
-pane = { cwd = "~/dev/api", agent = "claude", prompt = "implement the fix and run tests" }
-submit = true
-ready = { pattern = "tests? passed" }
-capture = { var = "summary", lines = 20 }
-
-[[step]]
-id = "review"
-needs = ["impl"]
-send = { target = "impl", text = "Summarise what changed:\\n\${summary}" }
-```
-
-Submitting any step requires the write gate. A flow that submits checks
-capabilities up front, including under `--dry-run`, so it fails before
-creating partial work.
+Multi-agent dependency scheduling runs outside PaneFlow, using headless
+agents in separate git worktrees. The app retains its terminal panes, CLI,
+MCP reads, and lifecycle hooks.
 
 ## How does MCP fit in?
 
@@ -190,5 +162,4 @@ but fleet state and lifecycle events are limited.
 ## Related
 
 * [Scripting reference](scripting/reference.md) for the exact command, RPC, event, and config surface.
-* [Conductor](conductor.md) for the agent-facing workflow built on top of these primitives.
 * [Configuration schema](configuration/schema.md) for `paneflow.json` keys.

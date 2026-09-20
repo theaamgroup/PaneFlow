@@ -245,7 +245,7 @@ pub struct PaneFlowConfig {
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub claude_code_bypass_permissions: Option<bool>,
     /// EP-003 US-008 (agent-control-plane): "AI free access" master switch.
-    /// `Some(true)` debrays the *bridling* guardrails so a conductor (a CLI
+    /// `Some(true)` debrays the *bridling* guardrails so an orchestrator (a CLI
     /// agent or external orchestrator) can drive its peers without friction:
     /// `surface.send_text submit:true` is authorized without the
     /// `PANEFLOW_IPC_SCRIPTING` env gate, and every such write is traced.
@@ -260,7 +260,7 @@ pub struct PaneFlowConfig {
     /// the `surface.read` CLI/IPC path, INDEPENDENT of `ai_unrestricted`.
     /// `Some(true)` / `None` (the default) wraps returned terminal text in
     /// the `<untrusted_terminal_output id="…">` marker (parity with the MCP
-    /// bridge) so a malicious peer pane cannot hijack a conductor reading it.
+    /// bridge) so a malicious peer pane cannot hijack an orchestrator reading it.
     /// `Some(false)` returns raw text (historical behavior), a risk the user
     /// assumes. The fence PROTECTS the AI from being redirected; it does not
     /// bridle it, so it stays ON by default even in free-access mode. A
@@ -703,7 +703,7 @@ impl PaneFlowConfig {
     /// EP-003 US-008/US-011 (agent-control-plane): resolve the anti-injection
     /// fence. Default ON (`true`): a missing or malformed value fails closed
     /// to fenced, even when free-access mode is on (the fence protects the
-    /// conductor, it does not bridle it).
+    /// orchestrator, it does not bridle it).
     pub fn ai_injection_fence_enabled(&self) -> bool {
         self.ai_injection_fence.unwrap_or(true)
     }
