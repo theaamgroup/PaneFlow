@@ -1,6 +1,6 @@
 # Scripting reference
 
-> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, workspace specs, flow specs, MCP tools, hooks, and exit codes for PaneFlow automation.
+> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, workspace specs, MCP tools, hooks, and exit codes for PaneFlow automation.
 
 This is the compact reference for [Scripting and automation](../scripting.md).
 It names the public surface a human script or LLM can quote exactly.
@@ -27,7 +27,6 @@ launching the app.
 | `wait --match <sel>`                       | `surface.read`, `events.subscribe` | No                         | Block until pattern, idle, or both     |
 | `watch [--surface <sel>] [--type <event>]` | `events.subscribe`                 | No                         | Stream lifecycle and surface events    |
 | `up <file>`                                | Workspace spec engine              | Prefill only               | Create a declarative workspace         |
-| `flow run <file>`                          | Flow engine                        | Gated for submitting steps | Run a local multi-agent DAG            |
 
 Aliases accepted by the CLI: `list_panes` maps to `ls`,
 `read_pane` maps to `read`, and `search_pane` maps to `search`.
@@ -53,7 +52,7 @@ except commands that explicitly accept multiple matches such as
 | `1`  | Runtime failure: instance unreachable, pane closed, gate refused, or handler error |
 | `2`  | CLI usage error                                                                    |
 | `3`  | Target not found or ambiguous                                                      |
-| `4`  | `wait` timeout or flow ready timeout                                               |
+| `4`  | `wait` timeout                                               |
 
 ## Write gates
 
@@ -64,7 +63,6 @@ Reading is allowed by default. Writes are split by capability:
 | `send` without `--submit`      | `PANEFLOW_IPC_SCRIPTING=1` or `ai_unrestricted`        |
 | `send --submit`                | `PANEFLOW_IPC_SCRIPTING=1` or `ai_unrestricted`        |
 | `key`                          | `PANEFLOW_IPC_SCRIPTING=1` or `ai_unrestricted`        |
-| Flow step with `submit = true` | Scripting capability reported by `system.capabilities` |
 
 `send` does not append a carriage return unless `--submit` is present.
 `key` rejects submitting keystrokes such as `enter`, `ctrl-m`, and
@@ -171,35 +169,6 @@ worktree is refused with `-32602` rather than silently moved, so a pane
 and the ownership record it registers can never point at different
 checkouts. A split into an unbound tab takes `cwd` anywhere, as before.
 
-## Flow spec
-
-`paneflow flow run <file>` reads a TOML flow spec and runs it against
-the current PaneFlow instance.
-
-| Field     | Type         | Notes                                                    |
-| --------- | ------------ | -------------------------------------------------------- |
-| `id`      | string       | Required, unique step id                                 |
-| `needs`   | array        | Dependencies; on `foreach`, waits for all instances      |
-| `foreach` | array        | Fan-out, one instance per item                           |
-| `pane`    | inline table | Spawn a pane using workspace pane fields                 |
-| `send`    | inline table | `{ target, text, submit? }`; requires a dependency       |
-| `ready`   | table        | `{ pattern, timeout_secs? }`; regex barrier              |
-| `capture` | table        | `{ var, lines }`; captures 1-500 lines after `ready`     |
-| `submit`  | bool         | Submits a spawned pane prompt; requires scripting access |
-
-Variables:
-
-| Variable        | Scope                                                                                                 |
-| --------------- | ----------------------------------------------------------------------------------------------------- |
-| `${item}`       | `foreach` steps: `cwd`, `name`, `worktree`, `env`, `send.target`, `ready.pattern`, prompts, and texts |
-| `${var}`        | Captured values inside `send.text` and submitting `pane.prompt`                                       |
-| `${var.<item>}` | Captures from a `foreach` group                                                                       |
-
-The runner validates unknown keys, missing dependencies, dependency
-cycles, invalid regexes, undefined captures, pane budget, and missing
-timeouts before execution. `Ctrl-C` stops the orchestration loop; panes
-that were created remain in PaneFlow.
-
 ## JSON-RPC connection
 
 | Property         | Value                                                                                |
@@ -230,7 +199,7 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `system.identify`          | -                                                                                               | `{name, version, protocol}`                              |
 | `workspace.create`         | `name?`, `cwd?`, `layout?`                                                                      | Create a workspace                                       |
 | `workspace.select`         | `index`                                                                                         | Switch workspace                                         |
-| `workspace.up`             | `name`, `layout`, `panes[]`                                                                     | Declarative spawn used by `up` and flow roots            |
+| `workspace.up`             | `name`, `layout`, `panes[]`                                                                     | Declarative spawn used by `up`            |
 | `surface.list`             | `workspace_id?`                                                                                 | `{surfaces:[{surface_id,name,title,cwd,cmd,workspace,workspace_id,scope,tab_id,tab_title}]}`; agents-pane surfaces have no `workspace_id` and are omitted when the filter is set |
 | `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`, `workspace_id?`                                   | Scrollback, `output_generation`, `truncated`             |
 | `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches                       |
@@ -304,5 +273,4 @@ state may be limited to process detection.
 ## Related
 
 * [Scripting guide](../scripting.md)
-* [Conductor](../conductor.md)
 * [Configuration schema](../configuration/schema.md)

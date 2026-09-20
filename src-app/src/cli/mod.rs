@@ -15,8 +15,6 @@ use serde_json::Value;
 
 mod context_cmds;
 mod control_cmds;
-mod flow_cmd;
-mod flow_spec;
 mod read_cmds;
 mod scrollback;
 mod selector;
@@ -43,7 +41,7 @@ pub const EXIT_TIMEOUT: i32 = 4;
 ///
 /// EP-005 US-011: the trailing `list_panes`/`read_pane`/`search_pane` are the
 /// `paneflow` MCP tool names, accepted as CLI aliases (clap maps each to its
-/// canonical subcommand via `#[command(alias = ...)]`) so a conductor that types
+/// canonical subcommand via `#[command(alias = ...)]`) so an orchestrator that types
 /// the tool name reaches the matching verb instead of tripping the GUI
 /// single-instance guard. This list only gates the `main.rs` intercept.
 pub(crate) const VERBS: &[&str] = &[
@@ -63,7 +61,6 @@ pub(crate) const VERBS: &[&str] = &[
     "watch",
     "focus",
     "key",
-    "flow",
     "list_panes",
     "read_pane",
     "search_pane",
@@ -88,7 +85,6 @@ pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
     ("watch", "Stream lifecycle events as JSONL"),
     ("focus", "Give a surface keyboard focus"),
     ("key", "Send a named keystroke to a pane"),
-    ("flow", "Run a declarative agent DAG"),
 ];
 
 /// Offline intercepts handled in `main.rs` before clap (`mcp`, `hooks`).
@@ -161,7 +157,7 @@ enum Commands {
     },
     /// List terminal surfaces.
     // EP-005 US-011: `list_panes` is the MCP tool name; accept it as a hidden
-    // alias so a conductor can type either.
+    // alias so an orchestrator can type either.
     #[command(alias = "list_panes")]
     Ls {
         /// Human-readable table instead of the default JSON.
@@ -288,9 +284,6 @@ enum Commands {
         /// Dash-separated keystroke description ("escape", "ctrl-c", "alt-f").
         keystroke: String,
     },
-    /// Run a declarative agent DAG from a `flow.toml` (orchestration engine).
-    #[command(subcommand)]
-    Flow(FlowCommand),
     /// Spawn a declarative agent workspace from a TOML file ("compose for agents").
     Up {
         /// Path to a `paneflow.workspace.toml` spec.
@@ -343,24 +336,6 @@ enum Commands {
         /// Hide subscription protocol frames and print user events only.
         #[arg(long)]
         events_only: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum FlowCommand {
-    /// Execute (or validate with --dry-run) a flow file against the running
-    /// instance. Spawns panes, waits on `ready` barriers, feeds steps -
-    /// submission only with explicit `submit = true` + the scripting gate.
-    Run {
-        /// Path to a `flow.toml`.
-        file: String,
-        /// Validate + print the resolved plan without touching the instance.
-        #[arg(long)]
-        dry_run: bool,
-        /// Final machine-readable report on stdout (live transitions move to
-        /// stderr).
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -506,11 +481,6 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
         ),
         Commands::Focus { target } => control_cmds::focus(client, &target),
         Commands::Key { target, keystroke } => send_cmd::key(client, &target, &keystroke),
-        Commands::Flow(FlowCommand::Run {
-            file,
-            dry_run,
-            json,
-        }) => flow_cmd::run(client, &file, dry_run, json),
         Commands::Up { file, dry_run } => up_cmd::up(client, &file, dry_run),
         Commands::Wait {
             selector,
@@ -588,6 +558,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn removed_flow_is_unknown_and_absent_from_help() {
+        assert!(!VERBS.contains(&"flow"));
+        assert!(!HELP_VERBS.iter().any(|(name, _)| *name == "flow"));
+        assert!(looks_like_unknown_verb(Some("flow")));
+        assert!(Cli::try_parse_from(["paneflow", "flow", "run", "file.toml"]).is_err());
+        assert!(
+            !format_help_commands()
+                .lines()
+                .any(|line| line.trim_start().starts_with("flow "))
+        );
+    }
+
+    #[test]
     fn is_cli_verb_matches_known_verbs() {
         assert!(is_cli_verb(Some("ls")));
         assert!(is_cli_verb(Some("send")));
@@ -648,7 +631,7 @@ mod tests {
         assert!(is_cli_verb(Some("read_pane")));
         assert!(is_cli_verb(Some("list_panes")));
         // ...and clap routes each alias to its canonical subcommand, so a
-        // conductor that types the MCP name never lands on the GUI launch path.
+        // orchestrator that types the MCP name never lands on the GUI launch path.
         let cli = Cli::try_parse_from(["paneflow", "search_pane", "backend", "needle"])
             .expect("parse search_pane");
         assert!(matches!(cli.command, Some(Commands::Search { .. })));

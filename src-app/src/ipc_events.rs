@@ -2,7 +2,7 @@
 //!
 //! The IPC server was request/response only - the lifecycle events the GPUI
 //! thread already observes (agent state transitions, pane output) had no way
-//! OUT to a client, so the flow engine and any conductor had to poll. This is
+//! OUT to a client, so orchestrators had to poll. This is
 //! the efferent path: an `events.subscribe` connection registers a subscriber
 //! here; the GPUI thread calls [`EventBus::broadcast`] (a brief lock + a
 //! non-blocking `try_send`, never blocking the render thread); the connection

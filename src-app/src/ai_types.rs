@@ -53,7 +53,7 @@ pub enum AgentState {
 
 impl AgentState {
     /// Stable wire string for IPC (`fleet.list` / `surface.status`,
-    /// prd-agent-control-plane EP-001). These are machine ids a conductor
+    /// prd-agent-control-plane EP-001). These are machine ids an orchestrator
     /// matches on, distinct from `display_name` - never shown to a human, never
     /// localised.
     pub fn wire_str(&self) -> &'static str {
@@ -229,7 +229,7 @@ pub struct AgentSession {
     pub proc_start: Option<u64>,
     /// EP-004 US-015 (agent-control-plane): an optional summary of the agent's
     /// last completed turn, surfaced by `fleet.list` / `surface.status` so a
-    /// conductor reads structured context instead of scraping the scrollback.
+    /// orchestrator reads structured context instead of scraping the scrollback.
     /// Best-effort: populated on `ai.stop` from the stop hook payload when it
     /// carries a summary; `None` (the common case today) when the hook provides
     /// none. UNTRUSTED, display-only (same provenance as `message`).

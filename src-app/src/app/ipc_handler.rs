@@ -289,7 +289,7 @@ pub(crate) fn group_up_panes_by_worktree(
 ) -> Vec<(Option<String>, Vec<usize>)> {
     let mut unbound: Vec<usize> = Vec::new();
     // Insertion-ordered rather than a map: the tab order must follow the order
-    // the panes were declared in, which is the order the conductor wrote them.
+    // the panes were declared in, which is the order the orchestrator wrote them.
     let mut bound: Vec<(String, Vec<usize>)> = Vec::new();
     for (idx, worktree) in worktrees.iter().enumerate() {
         match worktree {
@@ -370,7 +370,7 @@ fn sanitize_notification_message(raw: &str) -> String {
 /// When this returns `None` the `ai.stop` handler falls back to reading that
 /// transcript off-thread via [`extract_last_result_from_transcript`] (US-010).
 /// Sanitized (bidi-strip + a 2 KiB cap) like the question, since it is
-/// untrusted, display-only text a conductor may surface.
+/// untrusted, display-only text an orchestrator may surface.
 fn read_last_result(params: &serde_json::Value) -> Option<String> {
     let hook = params.get("hook_payload");
     let raw = ["last_result", "summary", "result"].iter().find_map(|k| {
@@ -395,7 +395,7 @@ fn read_notification_message(params: &serde_json::Value) -> Option<String> {
 }
 
 /// EP-004 US-010 (agent-control-plane-hardening): a Stop-hook transcript larger
-/// than this is skipped - `last_result` stays null and the conductor falls back
+/// than this is skipped - `last_result` stays null and the orchestrator falls back
 /// to the file-report discipline (US-009). Bounds the off-thread read so a long
 /// session can't load an unbounded file onto the heap.
 const TRANSCRIPT_READ_CAP: u64 = 4 * 1024 * 1024;
@@ -480,7 +480,7 @@ fn extract_last_result_capped(path: &std::path::Path, cap: u64) -> Option<String
         if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
             continue;
         }
-        // Skip a subagent (Task tool) turn: we want the conductor-visible agent's
+        // Skip a subagent (Task tool) turn: we want the orchestrator-visible agent's
         // own last message, not a nested leaf's.
         if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
             continue;
@@ -509,7 +509,7 @@ fn extract_last_result_capped(path: &std::path::Path, cap: u64) -> Option<String
 // ---------------------------------------------------------------------------
 // EP-004 US-015 (agent-control-plane): structured context channel.
 //
-// A conductor passes a (possibly large) context blob to a spawned agent via the
+// A orchestrator passes a (possibly large) context blob to a spawned agent via the
 // `context` param of `surface.split` / `workspace.up`. Inlining it would hit the
 // 64 KiB `send_text` cap and silently truncate; instead it is staged to a temp
 // file and the path is handed to the agent through `PANEFLOW_CONTEXT_FILE`. The
@@ -539,7 +539,7 @@ fn next_context_file_path() -> std::path::PathBuf {
 /// blob is small enough to run on the automation tick. Callers must not insert
 /// the env var or return IPC success until this returns `Ok`.
 ///
-/// The blob is a conductor's inter-agent payload (task text, code, possibly
+/// The blob is an orchestrator's inter-agent payload (task text, code, possibly
 /// secrets). `std::env::temp_dir()` can resolve to a world-traversable root
 /// (e.g. `/tmp`), so the dir is locked owner-only (0700) and the file is created
 /// 0600 - parity with the IPC socket dir hardening in `ipc.rs`. `create_new`
@@ -881,7 +881,7 @@ fn wrap_send_text_bracketed_paste(text: &str) -> String {
 }
 
 /// Map a PTY write Result onto JSON-RPC. Closed channel / overflow / poison
-/// become `-32603` so CLI `paneflow send` / `flow` fail instead of treating
+/// become `-32603` so CLI `paneflow send` fails instead of treating
 /// `sent: true` as landed. Queued-pending and live EventLoop writes are `Ok`.
 fn send_text_from_pty_write<E: ToString>(result: Result<(), E>) -> Result<(), JsonRpcError> {
     result.map_err(|err| JsonRpcError::internal_error(err.to_string()))
@@ -1286,7 +1286,7 @@ fn requested_index(params: &serde_json::Value) -> Result<Option<usize>, JsonRpcE
 ///
 /// `surface.read` and `surface.search` used to coerce a string, float,
 /// negative, or `null` to the default and clamp `0` or `4001` into range, so
-/// a conductor that sent a typo'd `lines` over JSON-RPC got a 200-line page
+/// an orchestrator that sent a typo'd `lines` over JSON-RPC got a 200-line page
 /// and believed it was the requested window. The MCP bridge rejects the
 /// same inputs (`validate_limit` in `paneflow-mcp`); this mirrors it so the
 /// two contracts agree (issue #281). Mirrors [`requested_index`].
@@ -1555,7 +1555,7 @@ fn build_fleet_rows(
                     "state": s.state.wire_str(),
                     "hooked": true,
                     // EP-002 US-006: symmetric with the unhooked shape so a
-                    // conductor can always read `.reason`; null when hooked
+                    // orchestrator can always read `.reason`; null when hooked
                     // (the events ARE trustworthy).
                     "reason": serde_json::Value::Null,
                     "surface_id": s.surface_id,
@@ -1585,7 +1585,7 @@ fn build_fleet_rows(
                     "hooked": false,
                     // EP-002 US-006: the row exists only because the /proc scan
                     // saw the binary; no hook ever fired, so events/state are
-                    // unavailable. `no_hook` tells the conductor to fall back
+                    // unavailable. `no_hook` tells the orchestrator to fall back
                     // (the agent was likely launched outside `paneflow up`).
                     "reason": "no_hook",
                     "surface_id": serde_json::Value::Null,
@@ -1616,7 +1616,7 @@ fn surface_status_value(
         Some(s) => serde_json::json!({
             "surface_id": sid,
             "state": s.state.wire_str(),
-            // EP-002 US-006: an explicit `hooked` flag so the conductor knows
+            // EP-002 US-006: an explicit `hooked` flag so the orchestrator knows
             // the state is hook-derived (trustworthy) here…
             "hooked": true,
             "tool": s.tool.binary(),
@@ -1632,7 +1632,7 @@ fn surface_status_value(
         // …and `hooked:false` when no agent session tracks the pane. `idle` is
         // the honest default (correct for a plain shell, and for an unhooked
         // agent it signals "precise state unavailable" rather than a scan-
-        // fabricated thinking/idle). The conductor reads `hooked` to decide
+        // fabricated thinking/idle). The orchestrator reads `hooked` to decide
         // whether to trust `state`.
         None => serde_json::json!({
             "surface_id": sid,
@@ -1827,7 +1827,7 @@ impl PaneFlowApp {
     /// EP-002 US-006: push a successful `ai.*` lifecycle frame to event-bus
     /// subscribers. The post-handler session (looked up by pid) carries the new
     /// state and the resolved surface; when absent (e.g. `ai.session_end`) the
-    /// event still carries the method + pid + tool so a conductor can correlate.
+    /// event still carries the method + pid + tool so an orchestrator can correlate.
     fn broadcast_ai_frame(&self, method: &str, params: &serde_json::Value) {
         if !self.event_bus.has_subscribers() {
             return;
@@ -2315,7 +2315,7 @@ impl PaneFlowApp {
         // EP-004 US-012 AC3: disambiguate duplicate labels WITHIN this batch
         // (the second "logs" becomes "logs-2") and warn, reusing the same
         // suffix algorithm the query-time surface-name resolver uses, so a
-        // conductor's labels stay stable and distinct instead of colliding.
+        // orchestrator's labels stay stable and distinct instead of colliding.
         dedupe_planned_pane_labels(&mut planned);
 
         // EP-004 US-012: capture the final (de-duplicated) labels in pane order
@@ -2459,7 +2459,7 @@ impl PaneFlowApp {
         // prompt is written WITHOUT a carriage return - human-in-loop: the user
         // reviews and submits it themselves (US-010).
         // EP-003 (orchestration-v2): collect the spawned terminals' surface ids
-        // in pane order - `paneflow flow` maps them back to its DAG steps.
+        // in pane order so clients can map them back to their pane specifications.
         let mut surface_ids: Vec<u64> = Vec::with_capacity(launches.len());
         for (i, (terminal, command, prompt)) in launches.into_iter().enumerate() {
             surface_ids.push(terminal.entity_id().as_u64());
@@ -3253,22 +3253,22 @@ impl PaneFlowApp {
                 };
                 // EP-001 US-003 (agent-control-plane): expose the output
                 // generation counter so a client detects pane-idle without a
-                // timer heuristic (kills the flow engine's settling poll).
+                // timer heuristic.
                 let output_generation = terminal.read(cx).terminal.output_generation;
                 let sid = terminal.entity_id().as_u64();
                 // EP-003 US-011 (agent-control-plane): wrap the returned text as
-                // untrusted so a malicious peer pane cannot hijack a conductor
+                // untrusted so a malicious peer pane cannot hijack an orchestrator
                 // reading it. Default follows the global `ai_injection_fence`
                 // setting (ON); a caller can override per call with
                 // `fenced: false`. Internal consumers that parse raw output (the
-                // MCP bridge, which re-fences itself; the `flow`/`wait` poll
+                // MCP bridge, which re-fences itself; the `wait` poll
                 // loops) pass `fenced:false`, so this only changes the CLI/IPC
-                // read path a conductor uses directly, mirroring the MCP fence.
+                // read path an orchestrator uses directly, mirroring the MCP fence.
                 let fenced =
                     fenced.unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
                 // Issue #363: the extract parks on the runtime's reply for up
                 // to a second, and this runs on the 50 ms GPUI automation tick
-                // that `wait`/`flow` hit every 500 ms. Clone the `Send` reader
+                // that `wait` hits every 500 ms. Clone the `Send` reader
                 // here (an `Arc` bump) and do the waiting on a background
                 // worker, so a slow or silent runtime cannot stall painting.
                 let reader = terminal.read(cx).terminal.scrollback_reader();
@@ -3280,12 +3280,12 @@ impl PaneFlowApp {
                     let read_started = std::time::Instant::now();
                     // The engine cuts the window (`DisplayTerminal::transcript_window`):
                     // it reads the screen plus the `lines` rows the page covers,
-                    // never the whole 4000-row history, so a wait/flow poll costs
+                    // never the whole 4000-row history, so a wait poll costs
                     // what it asks for (issue #29). The rows are the history
                     // followed by the live screen (#184 Phase 3.6): a full-screen
                     // TUI has no history, so the screen is what a reader gets.
                     // `None` is a runtime that did not answer - an error, not a
-                    // blank pane, or wait/flow would settle on a wedged runtime.
+                    // blank pane, or wait would settle on a wedged runtime.
                     let window =
                         smol::unblock(move || reader.extract_scrollback_window(lines, offset))
                             .await;
@@ -3800,7 +3800,7 @@ impl PaneFlowApp {
                 }
                 // Issue #347: a split into a tab bound to a worktree starts in
                 // that worktree when no `cwd` was given. An explicit `cwd` is
-                // honoured as written - a conductor that names a directory
+                // honoured as written - an orchestrator that names a directory
                 // means it - but only inside the bound worktree: one outside
                 // it (and the `managed_worktree` that has to match it) is
                 // refused rather than silently moved, so the pane and the
@@ -4114,7 +4114,7 @@ impl PaneFlowApp {
                 if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) {
                     let interrupt_stop = is_interrupt_lifecycle_event(params);
                     // EP-004 US-015: a best-effort summary of the just-finished
-                    // turn when the stop hook carried one, so a conductor reads
+                    // turn when the stop hook carried one, so an orchestrator reads
                     // it via fleet.list / surface.status. None when the hook
                     // provides nothing (the common case).
                     let (session_summary, transcript_to_read) = if interrupt_stop {
@@ -5133,7 +5133,7 @@ mod tests {
     fn a_batch_without_worktrees_is_the_single_tab_it_has_always_been() {
         // The regression guard for the split below: `up` must not grow a second
         // tab for a plain batch, and the pane order inside it is the order the
-        // conductor declared - `surface_ids` in the response are keyed on it.
+        // orchestrator declared - `surface_ids` in the response are keyed on it.
         let groups = group_up_panes_by_worktree(&[None, None, None]);
         assert_eq!(groups, vec![(None, vec![0, 1, 2])]);
         assert_eq!(group_up_panes_by_worktree(&[]), vec![]);
@@ -5164,7 +5164,7 @@ mod tests {
     #[test]
     fn a_split_into_a_bound_tab_keeps_an_explicit_cwd_inside_it_and_refuses_one_outside() {
         // Issue #347 review, finding 2: `surface.split` confined every cwd
-        // to the bound tab's worktree, so a conductor splitting a feat-a pane
+        // to the bound tab's worktree, so an orchestrator splitting a feat-a pane
         // with `cwd` = feat-b (and a matching `managed_worktree`) got a pane in
         // feat-a while the workspace recorded ownership of feat-b.
         let sandbox = tempfile::tempdir().expect("tempdir");
@@ -6313,7 +6313,7 @@ mod tests {
 
     /// Issue #363: `GhosttySession::request` parks its caller on the runtime
     /// for up to a second. `surface.read` and `surface.search` are dispatched
-    /// from `process_automation_tick` on the GPUI thread - `wait`/`flow` poll
+    /// from `process_automation_tick` on the GPUI thread - `wait` polls
     /// a read every 500 ms, and a search over a large buffer is one wait per
     /// chunk - so neither may perform that wait inline. Both hand it to a
     /// background worker and answer through the response channel from there.
@@ -6367,7 +6367,7 @@ mod tests {
             .expect("surface.read arm");
         assert!(
             arm.contains("extract_scrollback_window"),
-            "surface.read must window the grid extract so wait/flow do not pay 4000 lines"
+            "surface.read must window the grid extract so wait does not pay 4000 lines"
         );
         assert!(
             !arm.contains("extract_scrollback()"),
@@ -7608,7 +7608,7 @@ mod tests {
         assert_eq!(super::sanitize_pane_name("   "), None);
     }
 
-    // EP-001 US-001: fleet rows are pure - a conductor's snapshot.
+    // EP-001 US-001: fleet rows are pure - an orchestrator's snapshot.
     #[test]
     fn build_fleet_rows_empty_is_empty() {
         let sessions = HashMap::new();
@@ -7691,7 +7691,7 @@ mod tests {
         assert_eq!(v["state"], "idle");
         assert_eq!(v["output_generation"], 99);
         assert!(v.get("tool").is_none());
-        // EP-002 US-006: no session -> hooked:false so the conductor knows the
+        // EP-002 US-006: no session -> hooked:false so the orchestrator knows the
         // `idle` is a default, not a hook-derived reading.
         assert_eq!(v["hooked"], false);
     }

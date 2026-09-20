@@ -37,10 +37,8 @@ source: see [INSTALL.md](../../INSTALL.md).
 
 **Automating it**
 
-* [scripting](scripting.md) - CLI, JSON-RPC, events, workspace and flow files, MCP, hooks.
+* [scripting](scripting.md) - CLI, JSON-RPC, events, workspace files, MCP, hooks.
 * [scripting/reference](scripting/reference.md) - the exact surface to quote.
-* [conductor](conductor.md) - driving agent panes from the CLI. Read the status note first: this is known-unreliable.
-* [conductor/reference](conductor/reference.md) - conductor verbs, fields, and events.
 
 ## What runs on the inside
 

@@ -26,8 +26,7 @@ workspace templates, agent launchers, AI access, and MCP setup.
 ## AI access vs MCP
 
 The AI Agent page controls how PaneFlow launches agents and how much
-automation a trusted conductor can perform. The conductor feature itself
-is known unreliable in this fork: see [conductor.md](conductor.md).
+automation a trusted CLI client can perform. MCP remains read-only.
 
 `claude_code_bypass_permissions` only affects Claude Code launches. When
 enabled, PaneFlow launches Claude Code with

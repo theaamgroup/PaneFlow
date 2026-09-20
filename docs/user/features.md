@@ -140,8 +140,8 @@ Drive PaneFlow from outside the GUI: the `paneflow` binary is also a
 CLI over a local JSON-RPC IPC socket. Scripts can list panes, read and
 search scrollback, inspect agent state, stream lifecycle events,
 split, focus, stage prompts behind an explicit write gate, spawn
-declarative workspaces (`paneflow up`), and run multi-agent pipelines
-(`paneflow flow`). A read-only MCP bridge exposes pane reads to
+declarative workspaces (`paneflow up`). Run dependency scheduling with
+headless agents in separate git worktrees. A read-only MCP bridge exposes pane reads to
 agents, so an assistant can inspect another pane without copy-paste.
 The guide and command reference live on the [scripting and automation page](scripting.md).
 

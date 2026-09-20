@@ -21,14 +21,14 @@ and dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 | Ghostty backend | Deleted 2026-08-25; **restored as the only engine by #184 on 2026-08-31** | Was verified unreachable on macOS at the time (the historical section below). Upstream v0.10.0 made macOS a Ghostty target; Phase 1 vendored the crates and the darwin archive, Phase 2 swapped the session host and deleted Alacritty, keeping this fork's pinned teardown on top (trap 18). |
 | Self-update | **Sparkle 2, added by #119.** The deleted hand-rolled updater stays deleted | Hourly background checks, EdDSA + Developer ID verification, silent download, install on ordinary quit, no forced relaunch or update UI. No minisign and no `src-app/src/update/`. |
 | Telemetry | **Deleted** (post-2c grind). Do not resurrect PostHog | Never set `POSTHOG_API_KEY`. Crate, app module, consent UI, and `build.rs` env directives are gone. |
-| Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server, conductor skill and `PANEFLOW_*` stay. See `docs/fork/2026-08-25-post-2c-plan.md` |
+| Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server and `PANEFLOW_*` stay. The pane-driving skill was later removed (#609). See `docs/fork/2026-08-25-post-2c-plan.md` |
 | gpui dependency | Pin `zed-industries/zed` by exact revision, keep the AAM fork only as a cold backup | `Cargo.lock` and all three Cargo dependency entries pin the revision, so the risk is availability, not drift. Never restore the old `arthjean/zed` source. |
 | Apple signing | AAM Developer ID, signed and notarized DMG | Other AAM Macs can install without Gatekeeper warnings |
 
 ## Naming
 
 The product stays **PaneFlow**. A full rebrand to PanesCLI was scoped (bundle
-id, binary, CLI, config dir, MCP server, conductor skill, `PANEFLOW_*` env)
+id, binary, CLI, config dir, MCP server, orchestrator skill, `PANEFLOW_*` env)
 and dropped. See `docs/fork/2026-08-25-post-2c-plan.md`.
 
 Task 12 still replaced *upstream's* identity so this fork is not signed as
@@ -41,7 +41,7 @@ Task 12 still replaced *upstream's* identity so this fork is not signed as
 | Binary and CLI | `paneflow` |
 | Config dir | `~/Library/Application Support/paneflow/paneflow.json`. Driven by `APP_SUBDIR` in `crates/paneflow-config/src/loader.rs` via `dirs::config_dir()`. NOT `~/.config`: that is the Linux path and an earlier draft of this spec had it wrong. |
 | MCP server | `paneflow` |
-| Conductor skill | `paneflow-conductor` |
+| Pane-driving automation | Removed (#609); use headless agents in separate worktrees |
 | Env var prefix | `PANEFLOW_*` |
 
 ## Toolchain prerequisites
@@ -58,7 +58,6 @@ Task 12 still replaced *upstream's* identity so this fork is not signed as
 Verified load-bearing. Each of these looks like cruft and is not.
 
 - `schemas/paneflow.schema.json`: two tests in `crates/paneflow-config/src/schema.rs` (`public_json_schema_covers_every_config_field`, `public_configuration_schema_doc_mentions_schema_keys`) read it off disk. Drift fails the suite.
-- `examples/review-pipeline.flow.toml`: `include_str!` target at `src-app/src/cli/flow_spec.rs:749`. Deleting it breaks the build. `examples/TASK.md` is its fixture.
 - `clippy.toml`: the `allow-unwrap-in-tests` escape hatch for the workspace lint policy in `Cargo.toml`. Without it, test code starts warning.
 - `rust-toolchain.toml`: the 1.98.0 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
 - `LICENSE`: GPL-3.0-or-later, mandatory. GPUI is a Zed fork.
@@ -94,9 +93,8 @@ Scripts: the 5 PowerShell files, `bundle-appimage.sh`, `bundle-tarball.sh`,
 
 `context7.json` carries upstream's Context7 API key, so it goes regardless.
 
-`skills/paneflow-conductor/` is deliberately NOT deleted. An earlier draft of
-this list included it, which contradicted the decision to keep and rename the
-conductor so it can be fixed here. It was never actually removed from the tree.
+The pane-driving skill and pipeline engine were subsequently removed in #609.
+Batch fan-out uses headless agents in separate git worktrees.
 
 ## Stage 2: Rust surgery
 
@@ -146,15 +144,9 @@ and minisign client stay deleted; do not recreate `MINISIGN_SECRET_KEY`,
 This is the reason the fork exists, so defects get recorded here as they surface
 rather than living only in chat.
 
-1. **The conductor does not work reliably.** `skills/paneflow-conductor/SKILL.md`
-   ships a skill that drives a fleet of CLI coding agents living in Paneflow
-   panes over the `paneflow` CLI. In practice it is janky and does not work,
-   confirmed across more than one attempt. The working pattern it fails to
-   replace is one headless agent process per task, launched as a background job,
-   each in its own git worktree, which needs no TUI to stay alive and has no
-   shared-state conflicts. Treat the pane-driving model itself as suspect, not
-   just its implementation. The skill is kept and renamed rather than deleted
-   precisely so it can be fixed here.
+1. **The pane-driving pipeline was unreliable and has been removed (#609).**
+   Batch work uses one headless agent process per task in its own git worktree.
+   Terminal panes, the read-only MCP bridge, and agent lifecycle hooks remain.
 
 2. **Two narrow keybinding issues. Earlier drafts of this entry overstated the
    problem twice, so the evidence is spelled out here.**
@@ -388,5 +380,4 @@ part", not "restore the crate".
   upstream merge base.
 - A product-name rebrand (scoped and dropped; see
   `docs/fork/2026-08-25-post-2c-plan.md`) would orphan any existing local
-  PaneFlow config and require re-registering the MCP server and the conductor
-  skill. That cost is one reason it did not happen.
+  PaneFlow config and require re-registering the MCP server and its former pane-driving integration. That cost is one reason it did not happen.

@@ -203,7 +203,7 @@ impl WorktreePlan {
     }
 
     /// The `managed_worktree` JSON object handed to the server (ownership
-    /// record for close-time teardown, US-009). Shared by `up` and `flow`.
+    /// record for close-time teardown, US-009). Used by `up`.
     pub(super) fn managed_json(&self) -> serde_json::Value {
         json!({
             "path": self.path.to_string_lossy(),

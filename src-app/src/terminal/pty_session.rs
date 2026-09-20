@@ -1885,7 +1885,7 @@ impl TerminalState {
     /// Returns `Some((text, returned, total, eof))`, or `None` when the
     /// runtime did not answer (mailbox full or closed, no reply within a
     /// second) or the engine failed the read. `None` is not a blank pane:
-    /// `surface.read` turns it into an error so `wait`/`flow` do not settle
+    /// `surface.read` turns it into an error so `wait` does not settle
     /// on a wedged runtime as if it had gone quiet.
     pub(crate) fn extract_scrollback_window(
         &self,
@@ -2499,7 +2499,7 @@ fn restore_or_drop_env_key(
 ///
 /// [`GhosttySession::request`] parks its caller on the runtime's reply for up
 /// to a second, so a slow or silent runtime froze painting for that long on
-/// every `surface.read` (`wait`/`flow` poll one every 500 ms) and once per
+/// every `surface.read` (`wait` polls one every 500 ms) and once per
 /// `SearchChunk` of a `surface.search`. The handle is cloned out of the
 /// entity on the render thread and the wait happens on a background worker.
 #[derive(Clone)]
@@ -3817,7 +3817,7 @@ mod tests {
 
     /// Issue #362: a runtime that cannot answer is not a finished scan with
     /// zero hits. `surface.search` used to report `matches=[] truncated=true`
-    /// for it, which a conductor reads as "raise max_matches" or "pattern
+    /// for it, which an orchestrator reads as "raise max_matches" or "pattern
     /// absent"; the same unanswered runtime is an error on `surface.read`.
     #[test]
     fn search_scrollback_fails_when_the_runtime_does_not_answer() {
@@ -4657,7 +4657,7 @@ mod tests {
 
     /// A runtime that cannot answer is not a blank pane: `surface.read`
     /// used to report `{"text":"","total_lines":0,"eof":true}` for it, and
-    /// `paneflow wait` / `flow` settled on that as "the agent went quiet".
+    /// `paneflow wait` settled on that as "the agent went quiet".
     #[test]
     fn extract_scrollback_window_is_none_when_the_runtime_does_not_answer() {
         let state = seed_numbered_history(4, 40, 10);

@@ -881,7 +881,6 @@ dropped; see `docs/fork/2026-08-25-post-2c-plan.md`.
 | Debug config dir | `paneflow-dev` |
 | Env prefix | `PANEFLOW_*` |
 | MCP server | `paneflow` |
-| Conductor skill | `skills/paneflow-conductor/` |
 
 The debug sibling is not optional. `APP_SUBDIR` in
 `crates/paneflow-config/src/loader.rs:17` switches to `paneflow-dev` under
@@ -1227,10 +1226,9 @@ see it.
 
 ## Parallel work
 
-Do not use the `paneflow-conductor` skill to grind this repo. Headless grok
-in git worktrees is what worked. Conducting can drive a live PaneFlow
-window when both IPC env gates are on, but `paneflow read` still returns 0
-lines and that path is for a human-supervised agent, not batch fan-out.
+Use headless agents in separate git worktrees for batch work. The pane-driving
+pipeline and skill were removed in #609; the CLI, read-only MCP bridge, and
+agent lifecycle hooks remain available for interactive terminal work.
 
 **This section used to say the Rust passes do not fan out. 2c falsified that.**
 All eight of its remaining batches ran on headless grok in isolated worktrees,
