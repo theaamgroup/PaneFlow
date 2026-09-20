@@ -1053,34 +1053,7 @@ fn handle_connection(
                                 json!({"jsonrpc": "2.0", "result": {"pong": true}, "id": response_id})
                             }
                             "system.capabilities" => {
-                                let mut methods = vec![
-                                    "system.ping",
-                                    "system.capabilities",
-                                    "system.identify",
-                                    "workspace.list",
-                                    "workspace.create",
-                                    "workspace.select",
-                                    "workspace.close",
-                                    "workspace.current",
-                                    "workspace.restore_layout",
-                                    "workspace.up",
-                                    "surface.list",
-                                    "surface.read",
-                                    "surface.search",
-                                    "surface.rename",
-                                    "surface.send_text",
-                                    "surface.send_keystroke",
-                                    "surface.split",
-                                    "surface.focus",
-                                    "surface.status",
-                                    "fleet.list",
-                                    "agent.whoami",
-                                    "task.get",
-                                    "task.assign",
-                                    "task.report",
-                                    "events.subscribe",
-                                ];
-                                methods.extend_from_slice(paneflow_ipc_client::ai_hook::METHODS);
+                                let methods = supported_methods();
                                 json!({"jsonrpc": "2.0", "result": {
                                     "scripting": scripting_capability_from(
                                         std::env::var("PANEFLOW_IPC_SCRIPTING").ok().as_deref(),
@@ -1265,6 +1238,9 @@ fn dispatch_to_gpui(
     id: Value,
     caller_pid: Option<i64>,
 ) -> Value {
+    if !supported_methods().contains(&method.as_str()) {
+        return json!({"jsonrpc": "2.0", "error": {"code": -32601, "message": format!("Method not found: {method}")}, "id": id});
+    }
     let (resp_tx, resp_rx) = mpsc::channel();
     let dispatch = Arc::new(AtomicU8::new(IPC_DISPATCH_QUEUED));
     let ipc_req = IpcRequest {
@@ -2037,6 +2013,74 @@ mod capabilities_tests {
             "set_ai_unrestricted must run before the socket binds; seeding after \
              restore leaves a window where system.capabilities reports scripting: false \
              while ai_unrestricted is on"
+        );
+    }
+}
+
+/// The socket advertises and dispatches the same method set.
+fn supported_methods() -> Vec<&'static str> {
+    let mut methods = vec![
+        "system.ping",
+        "system.capabilities",
+        "system.identify",
+        "workspace.create",
+        "workspace.select",
+        "workspace.up",
+        "surface.list",
+        "surface.read",
+        "surface.search",
+        "surface.send_text",
+        "surface.send_keystroke",
+        "surface.split",
+        "surface.focus",
+        "surface.status",
+        "fleet.list",
+        "agent.whoami",
+        "task.get",
+        "task.assign",
+        "task.report",
+        "events.subscribe",
+    ];
+    methods.extend_from_slice(paneflow_ipc_client::ai_hook::METHODS);
+    methods
+}
+
+#[cfg(test)]
+mod removed_method_tests {
+    use super::*;
+
+    #[test]
+    fn removed_methods_are_not_advertised_or_dispatched() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        for (namespace, verb) in [
+            ("workspace", "list"),
+            ("workspace", "current"),
+            ("workspace", "close"),
+            ("workspace", "restore_layout"),
+            ("surface", "rename"),
+        ] {
+            let method = format!("{namespace}.{verb}");
+            assert!(!supported_methods().contains(&method.as_str()));
+            let response = dispatch_to_gpui(&tx, method, json!({}), json!(42), None);
+            assert_eq!(response["error"]["code"], -32601);
+            assert_eq!(response["id"], 42);
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+        for retained in [
+            "surface.list",
+            "surface.read",
+            "surface.search",
+            "agent.whoami",
+            "task.get",
+            "workspace.create",
+            "surface.split",
+        ] {
+            assert!(supported_methods().contains(&retained));
+        }
+        assert!(
+            paneflow_ipc_client::ai_hook::METHODS
+                .iter()
+                .all(|method| supported_methods().contains(method))
         );
     }
 }

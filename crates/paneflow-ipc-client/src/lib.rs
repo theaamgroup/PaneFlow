@@ -166,8 +166,6 @@ fn method_is_safe_to_retry_after_timeout(method: &str) -> bool {
         "system.ping"
             | "system.capabilities"
             | "system.identify"
-            | "workspace.list"
-            | "workspace.current"
             | "surface.list"
             | "surface.read"
             | "surface.search"

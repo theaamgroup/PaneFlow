@@ -655,19 +655,9 @@ impl Workspace {
     /// scrollback. Per-tab serialization is [`Tab::serialize`]; the session
     /// writer uses [`Self::serialize_tabs_without_scrollback`] with the v2
     /// schema (US-018).
-    ///
-    /// IPC `workspace.current` uses [`Self::serialize_layout_without_scrollback`]
-    /// so the GPUI tick does not extract 4000 lines per pane (issue #29).
     #[allow(dead_code)]
     pub fn serialize_layout(&self, cx: &App) -> Option<LayoutNode> {
         self.active_tab().serialize(cx)
-    }
-
-    /// Serialize the visible tab's layout WITHOUT per-pane scrollback.
-    /// IPC `workspace.current` uses this so the GPUI tick does not extract
-    /// 4000 lines per pane (issue #29).
-    pub fn serialize_layout_without_scrollback(&self, cx: &App) -> Option<LayoutNode> {
-        self.active_tab().serialize_without_scrollback(cx)
     }
 
     /// US-018: serialize every tab for session persistence, without terminal
