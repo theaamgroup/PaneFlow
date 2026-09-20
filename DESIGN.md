@@ -642,7 +642,7 @@ The header is **34 px** (28 content plus the 3 px inset twice), gap 7, padding
 3. The surface title sits at 14 px on an 18 px line, centered by three flex
 zones, ellipsized, with a tooltip past 13 characters and a hard cap at 24. A
 6 px status dot leads (`agent_error` wins over `vc_conflict`). **At most two
-adornments** paint, ranked dot, then queued, then progress, then match: 9 px
+adornments** paint, ranked dot, then queued, then progress: 9 px
 chips on `subtle` at padding 4 / radius 3 carrying `1 queued`, the OSC 9;4
 or progress. There is no worktree chip
 — the sidebar row owns the worktree — and there is no identity pill, because
@@ -1324,7 +1324,7 @@ first pane when that pane is gone, then to the empty-workspace placeholder.
 Each tracked overlay keeps its own origin: one opened over another inherits the outer
 overlay's origin, and closing the inner one leaves the outer one's in place,
 so the focus lands on the same pane whichever closes last. An activation that
-teleports (a Pane Overview card, a pane-overview card)
+teleports (a Pane Overview card)
 lands on its target instead, and a Launch Pad run lands on the pane it
 created. A new cockpit overlay of this kind (a focus-taking surface over the
 pane grid) MUST add an `OverlayKind`, record its origin before it takes the
