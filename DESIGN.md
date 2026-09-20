@@ -215,7 +215,6 @@ explicit priority.
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
 | Agent Summary | Horizontally centered, top-anchored at 24 (`OVERLAY_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; width capped at 920 (`MAX_OVERLAY_WIDTH`); rows padded 16 by 8, gap 2, with a 2 px accent left border on the selected row | `app/agent_summary/view.rs:16-17,101-176` |
-| Fleet Search | Horizontally centered, top-anchored at 96 | 560 wide, radius 8, black 0.4 scrim, `shadow_lg` | `app/fleet_search.rs:379-386` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
 | Theme picker | Horizontally centered, top-anchored at 96 | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
 | Custom Buttons | Horizontally centered, top-anchored at 72 | 560 wide, radius 10, black 0.45 scrim | `app/custom_buttons_modal.rs:489-543` |
@@ -643,9 +642,9 @@ The header is **34 px** (28 content plus the 3 px inset twice), gap 7, padding
 3. The surface title sits at 14 px on an 18 px line, centered by three flex
 zones, ellipsized, with a tooltip past 13 characters and a hard cap at 24. A
 6 px status dot leads (`agent_error` wins over `vc_conflict`). **At most two
-adornments** paint, ranked dot, then queued, then progress, then match: 9 px
+adornments** paint, ranked dot, then queued, then progress: 9 px
 chips on `subtle` at padding 4 / radius 3 carrying `1 queued`, the OSC 9;4
-progress, or an accent `{n} hits` fleet-match badge. There is no worktree chip
+or progress. There is no worktree chip
 — the sidebar row owns the worktree — and there is no identity pill, because
 the sidebar owns identity.
 
@@ -1081,7 +1080,7 @@ separately from agent status, and exited previews are dimmed. Status text uses
 the shared contrast floor. Card accessible names include both states.
 
 Filtering matches **metadata only** — pane, workspace, and tab titles, the
-agent name, the cwd basename — because content search belongs to Fleet Search.
+agent name, the cwd basename — because terminal content is searched in the pane find bar or through MCP.
 Left and right move by one in flat order and never wrap; up and down preserve
 the visual column across workspace boundaries. Enter or a click teleports to
 the surface, re-resolving it by id so a pane closed since render is a clean
@@ -1177,7 +1176,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Clear scrollback, reset terminal | `secondary-shift-k` and `cmd-k`; `secondary-shift-r` |
 | Prompt marks | `secondary-shift-up`, `secondary-shift-down` |
 | Font size up, down, reset | `secondary-=`, `secondary--`, `secondary-0` |
-| Copy mode, find in buffer, fleet search | `ctrl-shift-x`, `ctrl-shift-f`, `alt-f` |
+| Copy mode, find in buffer | `ctrl-shift-x`, `ctrl-shift-f` |
 | Diff: hunks, view, dismiss | `]`, `[`, `u`, `escape` |
 | Quit | `cmd-q` |
 
@@ -1300,8 +1299,7 @@ row washes carry no floor today.
 ### 7.4 Keyboard-operable surfaces
 
 These answer arrows, Enter, and Escape in full: Pane Overview
-(two-dimensional), sessions rail, files rail, theme picker, pane palette, fleet
-search, work review, broadcast groups, and the Editor Controls menu. Launch
+(two-dimensional), sessions rail, files rail, theme picker, pane palette, work review, broadcast groups, and the Editor Controls menu. Launch
 Pad, the diff branch menu, close confirm, and About answer Escape and Enter
 only; Launch Pad additionally cycles its text fields with Tab, and its agent
 list is mouse-driven by design. **System Info is Escape-only** — it carries
@@ -1314,9 +1312,8 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-This paragraph covers the seven origin-tracked overlays, the `OverlayKind`
-variants in `app/overlay_origin.rs`: theme picker, broadcast picker, fleet
-search, Launch Pad, Pane Overview, the pane palette, and
+This paragraph covers the six origin-tracked overlays, the `OverlayKind`
+variants in `app/overlay_origin.rs`: theme picker, broadcast picker, Launch Pad, Pane Overview, the pane palette, and
 the agent summary. The
 modal dialogs (About, System Info, Custom Buttons, close confirm, Work
 Review), the diff branch menu, and the Editor Controls menu keep their own
@@ -1327,7 +1324,7 @@ first pane when that pane is gone, then to the empty-workspace placeholder.
 Each tracked overlay keeps its own origin: one opened over another inherits the outer
 overlay's origin, and closing the inner one leaves the outer one's in place,
 so the focus lands on the same pane whichever closes last. An activation that
-teleports (a Pane Overview card, a fleet-search hit)
+teleports (a Pane Overview card)
 lands on its target instead, and a Launch Pad run lands on the pane it
 created. A new cockpit overlay of this kind (a focus-taking surface over the
 pane grid) MUST add an `OverlayKind`, record its origin before it takes the

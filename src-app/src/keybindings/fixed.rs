@@ -122,22 +122,13 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("enter", "Pane overview · open selected pane"),
     ("escape", "Pane overview · close"),
     ("backspace", "Pane overview · delete filter character"),
-    (
-        "up",
-        "Fleet Search, theme picker, broadcast groups · previous result",
-    ),
-    (
-        "down",
-        "Fleet Search, theme picker, broadcast groups · next result",
-    ),
+    ("up", "Theme picker, broadcast groups · previous result"),
+    ("down", "Theme picker, broadcast groups · next result"),
     (
         "enter",
-        "Fleet Search, theme picker, broadcast groups · activate selection",
+        "Theme picker, broadcast groups · activate selection",
     ),
-    (
-        "escape",
-        "Fleet Search, theme picker, broadcast groups · close",
-    ),
+    ("escape", "Theme picker, broadcast groups · close"),
     (
         "backspace",
         "Theme picker, broadcast groups · delete filter character",

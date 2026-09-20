@@ -538,8 +538,8 @@ impl PaneFlowApp {
                     .text_color(ui.muted)
                     .child(
                         "Arrows select \u{b7} Enter focuses the pane \u{b7} Esc closes \u{b7} type \
-                         to filter by name, workspace, tab or agent (fleet search finds pane \
-                         contents)",
+                         to filter by name, workspace, tab, agent or cwd basename. Use the pane find bar \
+                         to search terminal content.",
                     ),
             );
 

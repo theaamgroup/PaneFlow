@@ -1,8 +1,7 @@
 //! Per-overlay focus origin (issue #584).
 //!
-//! Every overlay that takes the focus (theme picker, broadcast picker, fleet
-//! search, Launch Pad, Pane Overview, the pane palette, the
-//! agent summary)
+//! Every overlay that takes the focus (theme picker, broadcast picker,
+//! Launch Pad, Pane Overview, the pane palette, the agent summary)
 //! records the pane it was opened from, keyed by the overlay, so that:
 //!
 //! - its own close hands focus back to that pane, not to the first leaf;
@@ -28,7 +27,6 @@ use crate::pane::Pane;
 pub(crate) enum OverlayKind {
     ThemePicker,
     BroadcastPicker,
-    FleetSearch,
     LaunchPad,
     PaneOverview,
     PanePalette,
@@ -124,7 +122,6 @@ impl PaneFlowApp {
         match kind {
             OverlayKind::ThemePicker => self.show_theme_picker,
             OverlayKind::BroadcastPicker => self.broadcast_picker_open,
-            OverlayKind::FleetSearch => self.fleet_search.is_some(),
             OverlayKind::LaunchPad => self.launch_pad.is_some(),
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
             OverlayKind::PanePalette => self.pane_palette.is_some(),
@@ -138,7 +135,6 @@ impl PaneFlowApp {
         [
             OverlayKind::ThemePicker,
             OverlayKind::BroadcastPicker,
-            OverlayKind::FleetSearch,
             OverlayKind::LaunchPad,
             OverlayKind::PaneOverview,
             OverlayKind::PanePalette,
@@ -317,19 +313,19 @@ mod tests {
         let b = make_pane(cx);
         let mut origins = OverlayOrigins::default();
         origins.remember(OverlayKind::BroadcastPicker, Some(b.downgrade()));
-        origins.remember(OverlayKind::FleetSearch, Some(a.downgrade()));
+        origins.remember(OverlayKind::LaunchPad, Some(a.downgrade()));
         assert_eq!(origins.outermost(|_| true), Some(b.clone()));
         // Only open overlays count: a stale bottom entry never wins.
         assert_eq!(
-            origins.outermost(|kind| kind == OverlayKind::FleetSearch),
+            origins.outermost(|kind| kind == OverlayKind::LaunchPad),
             Some(a.clone())
         );
-        origins.retain_open(|kind| kind == OverlayKind::FleetSearch);
-        assert_eq!(origins.kinds(), vec![OverlayKind::FleetSearch]);
+        origins.retain_open(|kind| kind == OverlayKind::LaunchPad);
+        assert_eq!(origins.kinds(), vec![OverlayKind::LaunchPad]);
         // Re-opening replaces the kind's own entry and nothing else.
-        origins.remember(OverlayKind::FleetSearch, Some(b.downgrade()));
-        assert_eq!(origins.kinds(), vec![OverlayKind::FleetSearch]);
-        assert_eq!(origins.take(OverlayKind::FleetSearch), Some(b));
+        origins.remember(OverlayKind::LaunchPad, Some(b.downgrade()));
+        assert_eq!(origins.kinds(), vec![OverlayKind::LaunchPad]);
+        assert_eq!(origins.take(OverlayKind::LaunchPad), Some(b));
         // `None` records nothing but still forgets the previous entry.
         origins.remember(OverlayKind::LaunchPad, Some(a.downgrade()));
         origins.remember(OverlayKind::LaunchPad, None);
@@ -388,7 +384,6 @@ mod tests {
     #[test]
     fn every_overlay_remembers_and_restores_its_own_origin() {
         // Split at the trailing test module, not the first `#[cfg(test)]`:
-        // fleet search carries test-only items near its top.
         let production = |src: &'static str| -> &'static str {
             src.split("\n#[cfg(test)]\nmod ")
                 .next()
@@ -411,12 +406,6 @@ mod tests {
                 "self.close_broadcast_picker_and_restore_focus(window, cx);",
             ),
             (
-                "fleet_search.rs",
-                production(include_str!("fleet_search.rs")),
-                "OverlayKind::FleetSearch",
-                "\"escape\" => self.close_fleet_search_and_restore_focus(window, cx),",
-            ),
-            (
                 "pane_overview/mod.rs",
                 production(include_str!("pane_overview/mod.rs")),
                 "OverlayKind::PaneOverview",
@@ -429,8 +418,6 @@ mod tests {
                 "\"escape\" => self.close_agent_summary_and_restore_focus(window, cx),",
             ),
         ] {
-            // Fleet search records in the render root: its trigger has no
-            // `Window`, so the deferred focus in `main.rs` remembers first.
             let remember = format!("self.remember_overlay_origin({kind}, window, cx);");
             assert!(
                 src.contains(&remember) || main.contains(&remember),
@@ -504,9 +491,6 @@ mod tests {
         assert!(
             close.contains("&& (origin_live || !origin_recorded)"),
             "a saved handle inside a pane that left the tree must not be re-focused"
-        );
-        assert!(
-            main.contains("self.remember_overlay_origin(OverlayKind::FleetSearch, window, cx);")
         );
     }
 }

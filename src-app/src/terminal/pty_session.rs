@@ -373,7 +373,7 @@ impl TerminalSessionBackend {
     }
 
     /// Uncancellable twin of [`Self::search_with_cancel`]; production paths
-    /// (find bar, fleet search, IPC) all carry a cancel flag.
+    /// (find bar, pane search, IPC) all carry a cancel flag.
     #[cfg(test)]
     pub(crate) fn search(&self, query: &str, regex: bool) -> crate::search::SearchResult {
         self.search_with_cancel(query, regex, &std::sync::atomic::AtomicBool::new(false))

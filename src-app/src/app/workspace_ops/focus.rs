@@ -194,7 +194,7 @@ impl PaneFlowApp {
     /// and activation), which every caller treats as a clean no-op.
     ///
     /// The ORDER is load-bearing and is why this is one function rather than
-    /// another copy of the waiting-agent navigation / Fleet Search teleport: focus can
+    /// another copy of the waiting-agent navigation / pane search teleport: focus can
     /// only land on a *rendered* pane, so the owning tab has to become
     /// visible before `activate_workspace_at` runs. Indices are re-resolved
     /// from `surface_id` here rather than captured by the caller, so a

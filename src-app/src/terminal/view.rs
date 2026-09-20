@@ -1346,11 +1346,6 @@ pub enum TerminalEvent {
     /// (PaneFlowApp) persists the session so the zoom survives a crash,
     /// not just a clean quit (same rationale as `SurfaceRenamed`).
     FontZoomChanged,
-    /// EP-006 US-018 - the user toggled the fleet scope from this view's
-    /// find bar. The receiver (PaneFlowApp) fans the query out to every
-    /// pane of every workspace off the render thread and opens the fleet
-    /// results overlay.
-    FleetSearchRequested { query: String, regex: bool },
     /// The OSC 9;4 progress state of this pane flipped between "something is
     /// running" and "nothing is". Claude Code publishes `indeterminate` for
     /// the whole of a turn and clears it when the prompt comes back, so on a
@@ -1438,7 +1433,7 @@ impl TerminalView {
         use gpui::{MouseButton, px, svg};
 
         // Themed chrome (One Dark / PaneFlow Light), not hardcoded Catppuccin -
-        // keeps the find bar consistent with the fleet-search card and sidebar.
+        // keeps the find bar consistent with the sidebar.
         let ui = crate::theme::ui_colors();
 
         let regex_active = self.search_regex_mode;
@@ -1487,39 +1482,6 @@ impl TerminalView {
             .on_click(cx.listener(|this, _, _window, cx| {
                 cx.stop_propagation();
                 this.toggle_search_regex(cx);
-            }));
-
-        // EP-006 US-018: fan the query out to every pane of every workspace. The
-        // clickable counterpart of the remappable `toggle_fleet_search` action.
-        let fleet_toggle = div()
-            .id("search-fleet-toggle")
-            .role(Role::Button)
-            .aria_label("Fleet search")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.))
-            .h(px(22.))
-            .px(px(7.))
-            .rounded(px(5.))
-            .text_size(px(12.))
-            .text_color(ui.muted)
-            .animated_hover(move |style, delta| {
-                style.bg(lerp_color(ui.subtle.opacity(0.0), ui.subtle, delta));
-            })
-            .delayed_tooltip(text_tooltip("Fleet search"))
-            .child(
-                svg()
-                    .size(px(13.))
-                    .flex_none()
-                    .path("icons/world.svg")
-                    .text_color(ui.muted),
-            )
-            .child("Fleet")
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _, _window, cx| {
-                cx.stop_propagation();
-                this.request_fleet_search(cx);
             }));
 
         let nav_color = if has_matches {
@@ -1595,7 +1557,6 @@ impl TerminalView {
             )
             .child(field)
             .child(regex_toggle)
-            .child(fleet_toggle)
             .when(!status_text.is_empty(), |el| {
                 el.child(
                     div()
@@ -1875,12 +1836,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &crate::FontSizeReset, _window, cx| {
                 this.font_zoom_reset(cx);
             }))
-            // EP-006 US-018: fan the current query out to the whole fleet.
-            .on_action(
-                cx.listener(|this, _: &crate::ToggleFleetSearch, _window, cx| {
-                    this.request_fleet_search(cx);
-                }),
-            )
             .on_drop(cx.listener(Self::handle_file_drop))
             .on_action(
                 cx.listener(|this, _: &crate::ClearScrollHistory, _window, cx| {
@@ -2044,14 +1999,10 @@ mod tests {
                 "search overlay lost the {id} control"
             );
         }
-        assert!(
-            overlay.contains("search-fleet-toggle"),
-            "search overlay lost the fleet toggle"
-        );
         let clicks = overlay.matches(".on_click(").count();
         assert!(
-            clicks >= 5,
-            "regex, fleet, prev, next and close must all fire on click; found {clicks} on_click"
+            clicks >= 4,
+            "regex, prev, next and close must all fire on click; found {clicks} on_click"
         );
     }
 

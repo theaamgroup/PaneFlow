@@ -86,31 +86,6 @@ impl TerminalView {
 
     // --- Search ---
 
-    /// EP-006 US-018: hand the current query to the app for a fleet-wide
-    /// fan-out. Empty query is a silent no-op; the regex validity check
-    /// happens app-side ONCE (a single error surface, never N copies).
-    pub(super) fn request_fleet_search(&mut self, cx: &mut Context<Self>) {
-        if !self.search_active || self.search_query.trim().is_empty() {
-            return;
-        }
-        cx.emit(super::TerminalEvent::FleetSearchRequested {
-            query: self.search_query.clone(),
-            regex: self.search_regex_mode,
-        });
-    }
-
-    /// EP-006 US-018: arm THIS view's local search with a fleet query (the
-    /// Enter-on-result teleport). Same effect as typing it in the find bar:
-    /// overlay open, matches computed, viewport on the first hit - and the
-    /// US-017 match rail renders from the same state.
-    pub fn arm_search(&mut self, query: &str, regex: bool, cx: &mut Context<Self>) {
-        self.search_active = true;
-        self.search_query = query.to_string();
-        self.search_regex_mode = regex;
-        self.schedule_search(cx);
-        cx.notify();
-    }
-
     pub(super) fn toggle_search(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         self.cancel_pending_search();
         self.search_active = !self.search_active;

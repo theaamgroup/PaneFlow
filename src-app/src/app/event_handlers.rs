@@ -983,10 +983,6 @@ impl PaneFlowApp {
                 // crash, not just a clean quit (SurfaceRenamed parity).
                 self.save_session(cx);
             }
-            terminal::TerminalEvent::FleetSearchRequested { query, regex } => {
-                // EP-006 US-018: fan the query out to every pane.
-                self.start_fleet_search(query.clone(), *regex, cx);
-            }
             terminal::TerminalEvent::OpenCodePath { path, line, col } => {
                 // Spawn the editor on the GPUI background executor so a
                 // slow editor launch (cold VS Code, remote SSH editor)

@@ -73,7 +73,6 @@ mod window_chrome;
 mod window_state;
 mod workspace;
 
-use crate::app::overlay_origin::OverlayKind;
 use crate::window_chrome::title_bar;
 
 use gpui::{
@@ -1570,7 +1569,7 @@ struct PaneFlowApp {
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
     /// The pane each open overlay was opened from, keyed by overlay (#584:
-    /// theme picker, broadcast picker, fleet search, Launch Pad, Pane
+    /// theme picker, broadcast picker, Launch Pad, Pane
     /// Overview, pane palette). An overlay's own close
     /// returns the focus to its entry; the command palette reads the
     /// outermost one when it folds them (#523).
@@ -1590,18 +1589,6 @@ struct PaneFlowApp {
     broadcast_picker_renaming: Option<usize>,
     broadcast_picker_error: Option<String>,
     broadcast_picker_focus: FocusHandle,
-    /// EP-006 US-018 (cli-cockpit): fleet-grep overlay state, `None` =
-    /// closed. Results are a bounded snapshot (counts + names, never the
-    /// match vectors); the fan-out is generation-guarded.
-    fleet_search: Option<app::fleet_search::FleetSearchState>,
-    fleet_search_generation: u64,
-    /// Cooperative cancellation flag for the fan-out currently in flight.
-    fleet_search_cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    fleet_search_focus: FocusHandle,
-    /// Deferred focus for the fleet overlay (opened from an event handler
-    /// that has no `Window` - consumed in `render`, like
-    /// `pending_pane_focus`).
-    fleet_search_pending_focus: bool,
     /// Keyboard focus for the Agents environment branch picker so its Codex-style
     /// search field captures typing (live filter + new-branch name). Focused on
     /// open; focus returns to the active thread terminal on close.
@@ -1657,7 +1644,7 @@ struct PaneFlowApp {
     /// Focus handle routing key events to the close-confirm modal while open.
     pending_close_focus: FocusHandle,
     /// Set when a modal close confirmation is armed; the next render claims
-    /// focus for it. Mirrors `fleet_search_pending_focus` - the pane half of
+    /// focus for it. Applied after render mounts the pane, like
     /// the guard is reached from a `Window`-less subscriber.
     pending_close_focus_claim: bool,
     /// State of the "Custom Buttons" management modal opened from the
@@ -2677,9 +2664,6 @@ impl Render for PaneFlowApp {
                 app_content = app_content.child(self.render_command_palette(cx));
             }
         }
-        // Issue #524: the Clone repository modal. Not mode-gated for the
-        // palette's reason: the clone lands as a workspace wherever it was
-        // started, and a running clone must keep reporting.
 
         // EP-001 US-002 (cli-cockpit): broadcast-group picker modal.
         if self.broadcast_picker_open {
@@ -2693,17 +2677,6 @@ impl Render for PaneFlowApp {
         let in_cli_mode = matches!(self.mode, paneflow_config::schema::AppMode::Cli);
         if self.launch_pad.is_some() && in_cli_mode {
             app_content = app_content.child(self.render_launch_pad(cx));
-        }
-        // EP-006 US-018: fleet-grep results overlay (same mode gate). The
-        // deferred focus (the trigger event has no Window) lands here.
-        if self.fleet_search.is_some() && in_cli_mode {
-            if std::mem::take(&mut self.fleet_search_pending_focus) {
-                // Issue #523: the pane still owns focus here; remember it
-                // for a command palette that folds this overlay.
-                self.remember_overlay_origin(OverlayKind::FleetSearch, window, cx);
-                self.fleet_search_focus.focus(window, cx);
-            }
-            app_content = app_content.child(self.render_fleet_search(cx));
         }
         // Issue #339: Pane Overview (same mode gate).
         if self.agent_summary.is_some() && in_cli_mode {
