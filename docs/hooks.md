@@ -130,3 +130,20 @@ Both guards still need a one-time RUNTIME smoke on real hardware:
   "thinking" loader, press `Ctrl+C` to interrupt mid-turn (the agent stays
   alive at its prompt), then confirm the loader clears within ~5 s. PASS = no
   stuck spinner.
+
+## Configuration lease storage
+
+Agent-configuration leases always use the OS user configuration directory
+under `paneflow/agent-config-leases`, independent of `PANEFLOW_HOME` and build
+profile. This intentional exception to app-directory isolation keeps one lock
+and ownership record for external agent files shared by multiple instances.
+The final holder removes its `.lock` file. Acquirers recheck the locked inode
+against the path before using a lease, so an opener racing cleanup retries
+instead of holding an obsolete lock. Ownership `.created` markers survive
+until the final resource cleanup consumes them.
+
+When upgrading from a build with persistent lease files, quit PaneFlow and
+stop its agent/shim processes before starting the new build. With all those
+processes stopped, old `.lock` files in the `agent-config-leases` directory
+can be removed; retain `.created` files, which record ownership of managed
+configuration. Never clear lease files while an older process is running.
