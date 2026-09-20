@@ -133,8 +133,10 @@ Both guards still need a one-time RUNTIME smoke on real hardware:
 
 ## Configuration lease storage
 
-Agent-configuration leases use the shared `PANEFLOW_HOME` directory resolver
-and build namespace (`paneflow-dev` in debug builds, `paneflow` in release).
+Agent-configuration leases always use the OS user configuration directory
+under `paneflow/agent-config-leases`, independent of `PANEFLOW_HOME` and build
+profile. This intentional exception to app-directory isolation keeps one lock
+and ownership record for external agent files shared by multiple instances.
 The final holder removes its `.lock` file. Acquirers recheck the locked inode
 against the path before using a lease, so an opener racing cleanup retries
 instead of holding an obsolete lock. Ownership `.created` markers survive
