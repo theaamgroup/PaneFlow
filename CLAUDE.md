@@ -225,7 +225,7 @@ opposite (presence-gating) and was fixed in `1cfee6c7`; do not
 re-transcribe the bug title as behaviour. `open -a PaneFlow` drops shell
 env; use `open --env VAR=1`.
 
-### Fork-pin maintenance (Zed Markdown widget)
+### Fork-pin maintenance (GPUI)
 
 The Zed git deps in `src-app/Cargo.toml` pin `zed-industries/zed@fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8` (`gpui` and `gpui_platform` in `[dependencies]` at lines 39-40, plus a test-support `gpui` in `[dev-dependencies]` at line 253). `gpui_platform` must carry the `font-kit` feature on macOS. To bump: choose and freeze a tested upstream revision, update every exact `rev`, run `cargo update`, then run the workspace test, Clippy, and format gates. Do not reintroduce an `arthjean/zed` pin.
 
@@ -433,9 +433,9 @@ KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
 | `paneflow-textdiff` | `crates/paneflow-textdiff/` | Library | IntelliJ-style line/word comparison + `BlockTracker` for editor gutter markers (#432). GPU-free; never linked by the size-capped helpers |
 | `paneflow-ghostty-smoke` | `crates/paneflow-ghostty-smoke/` | Binary | Headless PTY smoke against the linked archive |
 
-There is **no** `paneflow-telemetry` crate. It was deleted in the post-2c
-grind. Zed lockfile crates named `telemetry` / `telemetry_events` belong
-to the markdown pin; leave them.
+There is **no** `paneflow-telemetry` crate, and the lockfile contains no
+Zed `markdown`, `telemetry`, or `telemetry_events` packages. GPUI is the
+remaining Zed dependency; do not restore the removed Markdown-widget graph.
 
 Everything that runs outside the GUI process must stay GPU-free and never link GPUI.
 
