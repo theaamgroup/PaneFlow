@@ -116,7 +116,6 @@ actions!(
         // Issue #524 (upstream 9aa03d09 part 5): the Clone repository modal.
         // No default chord; reached from the palette row and the Workspaces
         // rail's empty state.
-        CloneRepository,
         // US-022 (cmux port 2026-Q2) - markdown pane navigation. Scoped to
         // the `Markdown` key context (root) and `MarkdownSearch` (when the
         // find overlay is open). Defined as separate actions from terminal
@@ -195,7 +194,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 98, "review action surface is pinned");
+        assert_eq!(declared, 97, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

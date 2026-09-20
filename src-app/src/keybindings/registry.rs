@@ -119,15 +119,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "New workspace",
         group: ShortcutGroup::Workspaces,
     },
-    // Issue #524: the Clone repository modal. No default chord; the command
-    // palette lists it because `context` is empty.
-    ActionMeta {
-        name: "clone_repository",
-        factory: || Box::new(crate::CloneRepository),
-        context: "",
-        description: "Clone repository",
-        group: ShortcutGroup::Workspaces,
-    },
     ActionMeta {
         name: "close_workspace",
         factory: || Box::new(CloseWorkspace),

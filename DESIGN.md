@@ -1013,36 +1013,9 @@ Pane Overview in this fork. The Workspaces rail's empty state names it beside `O
 The list is a `ListBox` of `ListBoxOption` rows carrying `aria_selected` and
 a label of the description plus its chord, per 7.2.
 
-**The `Clone repository` modal** (issue #524, the palette's `Clone
-repository` row and the rail empty state's `Clone repository` row beneath
-`Command palette`; no default chord) is the same quick pick in the same
-shell: a field reading `Provide repository URL or pick a repository source.`
-over the hairline, then `ListBoxOption` rows on the `select_item` skin with a
-14 px glyph, the label, and a group name at 11 px muted on the trailing edge.
-With nothing typed the single row is `Clone from GitHub` in the `remote
-sources` group; a typed URL becomes a `Clone <url>` row and Enter clones it.
-Picking GitHub swaps the field for `Repository name (type to search)` and
-lists the repositories `gh repo list` returns, one row per `owner/name`,
-filtered on whole words; Escape steps back to the sources, then closes and
-hands focus back where it was. An error replaces the rows with one 12 px
-`vc_deleted` line. A running clone replaces them with a progress block:
-`Cloning <name>` at 12 px with the percentage at 11 px muted on the trailing
-edge, a 4 px full-radius track in the 0.10 `text` tint filled in `#3fa266`
-from the left, and an 11 px muted line naming git's phase and throughput.
-Before git reports anything a 30% `#3fa266` segment sweeps the track on a
-1.4 s ease-in-out loop (a static segment under `reduce_motion`). The
-percentage weights git's phases: enumerating and counting 0 to 5,
-compressing 5 to 10, receiving objects 10 to 80, resolving deltas 80 to 95,
-updating files 95 to 100. Enter asks for a destination folder and clones
-into `<folder>/<name>`; Escape and an outside click are ignored while a
-clone runs, and the command palette stays closed over it. A target on
-GitHub, whether a `github.com` URL, an `owner/name` shorthand, or a row of
-the list, clones through `gh repo clone`, which carries gh's credentials for
-private repositories and adds an `upstream` remote on a fork; when gh is
-missing or signed out the clone falls back to `git clone`, expanding the
-shorthand to `https://github.com/owner/name.git`. Every other target clones
-with git. The clone lands as a new, selected workspace at the head of the
-recents list.
+Repository cloning happens in a terminal with `gh repo clone` or `git clone`.
+The sidebar empty state offers New workspace, the command palette, and recent
+folders; there is no clone modal or clone action in the palette.
 
 ### 5.8 Feedback
 
