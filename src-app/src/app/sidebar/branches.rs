@@ -15,12 +15,27 @@ pub(crate) struct TerminalBranch {
 fn probe_branches(cwds: HashSet<String>) -> HashMap<String, TerminalBranch> {
     cwds.into_iter()
         .map(|cwd| {
-            let (branch, _) = crate::workspace::detect_branch(&cwd);
-            let repo_root = crate::workspace::find_git_dir(&cwd)
-                .and_then(|dir| crate::workspace::resolve_repo_root(&dir).0);
+            let (branch, repo_root) = crate::workspace::find_git_dir(&cwd)
+                .map(|dir| {
+                    (
+                        crate::workspace::parse_head(&dir).0,
+                        crate::workspace::resolve_repo_root(&dir).0,
+                    )
+                })
+                .unwrap_or_default();
             (cwd, TerminalBranch { branch, repo_root })
         })
         .collect()
+}
+
+// Keep collection itself behind the gate: even reading all pane CWDs is
+// unnecessary when no branch line can be displayed.
+fn visible_branch_cwds(
+    enabled: bool,
+    visible: bool,
+    collect: impl FnOnce() -> HashSet<String>,
+) -> Option<HashSet<String>> {
+    (enabled && visible).then(collect)
 }
 
 impl PaneFlowApp {
@@ -28,23 +43,36 @@ impl PaneFlowApp {
         cx.spawn(async |this, cx| {
             loop {
                 let cwds = this.update(cx, |app, cx| {
-                    app.workspaces
-                        .iter()
-                        .flat_map(|ws| ws.collect_panes())
-                        .filter_map(|pane| {
-                            let pane = pane.read(cx);
-                            let terminal = pane.active_terminal_opt()?.read(cx);
-                            terminal.terminal.current_cwd.clone()
-                        })
-                        .collect::<HashSet<_>>()
+                    visible_branch_cwds(
+                        app.cached_config.sidebar_show.branch_enabled(),
+                        app.primary_sidebar_visible,
+                        || {
+                            app.workspaces
+                                .iter()
+                                .flat_map(|ws| ws.collect_panes())
+                                .filter_map(|pane| {
+                                    let pane = pane.read(cx);
+                                    let terminal = pane.active_terminal_opt()?.read(cx);
+                                    terminal.terminal.current_cwd.clone()
+                                })
+                                .collect::<HashSet<_>>()
+                        },
+                    )
                 });
                 let Ok(cwds) = cwds else { break };
+                let Some(cwds) = cwds else {
+                    smol::Timer::after(std::time::Duration::from_secs(2)).await;
+                    continue;
+                };
                 // Only small git metadata files are read; no git subprocess or filesystem
                 // work runs during render. Shared CWDs are probed once per pass.
                 let branches = smol::unblock(move || probe_branches(cwds)).await;
                 if this
                     .update(cx, |app, cx| {
-                        if app.terminal_branches != branches {
+                        if app.primary_sidebar_visible
+                            && app.cached_config.sidebar_show.branch_enabled()
+                            && app.terminal_branches != branches
+                        {
                             app.terminal_branches = branches;
                             app.refresh_pull_requests(cx);
                             cx.notify();
@@ -65,6 +93,19 @@ impl PaneFlowApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_branch_lines_skip_collection_and_resume_when_visible() {
+        let calls = std::cell::Cell::new(0);
+        for (enabled, visible) in [(false, false), (false, true), (true, false), (true, true)] {
+            let cwds = visible_branch_cwds(enabled, visible, || {
+                calls.set(calls.get() + 1);
+                HashSet::from(["repo".to_string()])
+            });
+            assert_eq!(cwds.is_some(), enabled && visible);
+        }
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn terminal_cwds_keep_worktree_branches_independent_and_refresh_head() {
