@@ -11,7 +11,6 @@ pub mod attention_queue;
 pub mod bootstrap;
 pub mod broadcast;
 pub mod cli_diff_dock;
-pub mod clone_repo;
 pub mod close_confirm;
 pub mod close_guard;
 pub mod command_palette;
