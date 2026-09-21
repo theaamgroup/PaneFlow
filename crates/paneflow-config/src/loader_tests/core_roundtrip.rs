@@ -21,7 +21,6 @@ fn test_serialization_roundtrip() {
             workspace: None,
             command: Some("echo hello".to_string()),
         }],
-        window_decorations: None,
         window_backdrop: None,
         macos_chrome_material: None,
         unfocused_pane_opacity: None,
@@ -401,4 +400,23 @@ fn new_tab_branches_inherit_override_and_preserve_legacy_preferences() {
         PaneFlowConfig::default().new_tab_branch_for_workspace("/projects/another"),
         Some("main")
     );
+}
+
+#[test]
+fn legacy_window_decorations_loads_without_changing_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paneflow.json");
+    for value in ["client", "server", "invalid"] {
+        std::fs::write(
+            &path,
+            serde_json::json!({"window_decorations": value, "font_size": 17.0}).to_string(),
+        )
+        .unwrap();
+        let config = load_config_from_path(&path);
+        assert_eq!(config.font_size, Some(17.0));
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("window_decorations")
+            .is_none());
+    }
 }

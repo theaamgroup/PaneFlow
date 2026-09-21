@@ -97,7 +97,7 @@ During hot reload, a malformed save keeps the last valid config.
 Unknown top-level keys are ignored at runtime; the
 [JSON Schema](configuration/schema.md) catches them in your editor.
 
-`window_decorations` and `window_backdrop` are read once at startup.
+`window_backdrop` is read once at startup.
 Restart PaneFlow after changing either key.
 
 ### Why are my shortcuts not working?

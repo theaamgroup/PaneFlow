@@ -193,12 +193,6 @@
         }
       }
     },
-    "window_decorations": {
-      "type": ["string", "null"],
-      "description": "Window decoration mode. 'client' = client-side decorations (custom title bar). 'server' = server-side decorations (compositor-drawn). Read once at startup; changes require a restart.",
-      "enum": ["client", "server", null],
-      "default": "client"
-    },
     "window_backdrop": {
       "type": ["string", "null"],
       "description": "Native window backdrop. 'auto' uses a transparent surface on macOS; 'blurred' opts into blur; 'transparent' keeps a transparent surface; 'opaque'/'off' disables native transparency. Read once at startup; PANEFLOW_WINDOW_BACKDROP overrides it for one launch.",

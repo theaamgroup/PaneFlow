@@ -36,9 +36,6 @@ pub struct PaneFlowConfig {
     /// Workspace command definitions (cmux-compatible format).
     #[serde(default, deserialize_with = "lenient_commands")]
     pub commands: Vec<CommandDefinition>,
-    /// Window decoration mode: `"client"` (CSD, default) or `"server"` (SSD).
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub window_decorations: Option<String>,
     /// Native window backdrop: `"auto"` (default), `"blurred"`,
     /// `"transparent"`, or `"opaque"` / `"off"`. Read at startup;
     /// `PANEFLOW_WINDOW_BACKDROP` overrides it for one launch. Legacy

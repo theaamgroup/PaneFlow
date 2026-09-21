@@ -76,8 +76,8 @@ use crate::window_chrome::title_bar;
 
 use gpui::{
     App, Context, CursorStyle, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    PathBuilder, Pixels, Point, Render, Styled, WeakEntity, Window, WindowBounds,
-    WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px,
+    PathBuilder, Pixels, Point, Render, Styled, WeakEntity, Window, WindowBounds, WindowOptions,
+    canvas, div, point, prelude::*, px,
 };
 use gpui_platform::application;
 use notify::Watcher;
@@ -93,7 +93,7 @@ pub use app::actions::*;
 // so callers like `crate::SIDEBAR_WIDTH` keep resolving without an
 // import-rewrite churn across the workspace.
 pub(crate) use app::constants::{
-    MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, RESIZE_BORDER, SIDEBAR_WIDTH,
+    MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, SIDEBAR_WIDTH,
 };
 // `TOAST_ENTER_MS` and `TOAST_EXIT_MS` are used only by the toast
 // renderer inside `app::notifications`; not re-exported at crate root.
@@ -2258,9 +2258,7 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_ws8))
             .on_action(cx.listener(Self::handle_ws9))
             // macOS menu-bar actions. `Quit` is the single "close the
-            // app" path (issue #184 dropped the `CloseWindow` twin: the
-            // title-bar close emits `TitleBarEvent::CloseRequested`, which
-            // lands on the same `quit_after_session_save`).
+            // app" path, routed through `quit_after_session_save`.
             // `About` opens the in-app About dialog. `Copy` / `Paste` /
             // `SelectAll` delegate to the existing terminal clipboard and
             // selection actions so Edit > Copy / Paste / Select All work
@@ -2772,12 +2770,8 @@ impl Render for PaneFlowApp {
                 app_content.child(self.render_sessions_context_menu(menu, ui, window, cx));
         }
 
-        let shell = crate::window_chrome::csd::client_side_window_shell(
-            app_content,
-            window,
-            app_backdrop_bg,
-            ui.border,
-        );
+        let shell =
+            crate::window_chrome::shell::native_window_shell(app_content, window, app_backdrop_bg);
         startup_trace::on_app_render_built();
         shell
     }
@@ -3366,18 +3360,6 @@ fn main() {
             }
 
             let bounds = crate::window_state::initial_bounds(cx);
-            let decorations = match config.window_decorations.as_deref() {
-                Some("server") => WindowDecorations::Server,
-                Some("client") | None => WindowDecorations::Client,
-                Some(other) => {
-                    log::warn!(
-                        "Invalid window_decorations value '{}', using 'client'",
-                        other
-                    );
-                    WindowDecorations::Client
-                }
-            };
-
             // US-011: reserve space on the left of the custom titlebar
             // for macOS traffic lights. The three red/yellow/green circles
             // live at x≈12-78px; the sidebar-aligned title-bar slot starts at
@@ -3400,7 +3382,6 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(crate::window_state::minimum_size()),
-                    window_decorations: Some(decorations),
                     titlebar: Some(titlebar_options),
                     window_background: crate::app::constants::window_background_appearance(
                         config.window_backdrop.as_deref(),

@@ -265,7 +265,7 @@ One target: macOS on Apple Silicon.
 | Concern | Implementation |
 |---|---|
 | GPU | Metal (GPUI compiles its Metal shaders at build time, so a full Metal toolchain is a build prerequisite) |
-| Windowing | AppKit, with client-side decorations by default |
+| Windowing | AppKit, with native window decorations |
 | Terminal engine | vendored `libghostty-vt` (`native/libghostty`, Ghostty `f2d5758f`) via `paneflow-terminal-ghostty` |
 | PTY | `portable-pty`, owned by Paneflow; libghostty only parses |
 | IPC | Unix socket under `$TMPDIR` |

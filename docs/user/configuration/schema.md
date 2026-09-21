@@ -75,7 +75,6 @@ That strictness is an editor-side aid only; it never affects loading.
 | `workspace_cursor_menu_visible` | boolean or null | installed detection | Show the **Open in Cursor** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Cursor CLI is installed. |
 | `workspace_vscode_menu_visible` | boolean or null | installed detection | Show the **Open in VS Code** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the VS Code CLI is installed. |
 | `workspace_windsurf_menu_visible` | boolean or null | installed detection | Show the **Open in Windsurf** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Windsurf CLI is installed. |
-| `window_decorations` | string or null | `client` | `client` for PaneFlow chrome, `server` for OS chrome. Read once at startup; requires a restart. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material across the whole window shell: the primary rail, panel inset, and pane gutters. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
 | `option_as_meta` | boolean or null | `false` | Option produces Unicode input by default. Set to `true` to send Option/Alt as an ESC prefix. |
@@ -298,7 +297,6 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "workspace_cursor_menu_visible": null,
   "workspace_vscode_menu_visible": null,
   "workspace_windsurf_menu_visible": null,
-  "window_decorations": "client",
   "window_backdrop": "auto",
   "macos_chrome_material": true,
   "option_as_meta": false,
@@ -356,3 +354,7 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
 `agent_context` on a surface stores the session-owned pane UUID and current agent task.
 Omit it from reusable templates. Assign tasks through `paneflow task assign`;
 see [Agent context](../../agent-context.md) for the API and persistence contract.
+
+Legacy `window_decorations` values are accepted and ignored by the loader.
+The editor schema omits this retired setting; macOS always supplies native
+window decorations.

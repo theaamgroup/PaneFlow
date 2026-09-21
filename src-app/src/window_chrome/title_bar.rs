@@ -1,11 +1,10 @@
 use crate::ui_primitives::TooltipDelayExt;
 
 use gpui::{
-    Context, Decorations, EventEmitter, IntoElement, MouseButton, Render, Role, Styled, Window,
+    Context, EventEmitter, IntoElement, MouseButton, Render, Role, Styled, Window,
     WindowControlArea, div, prelude::*, px, svg,
 };
 
-use super::csd::default_button_layout;
 use crate::{
     app::constants::{
         SIDEBAR_WIDTH, TITLE_BAR_CONTROL_SIZE, TITLE_BAR_EDGE_INSET, TITLE_BAR_MIN_HEIGHT,
@@ -30,12 +29,6 @@ pub struct TitleBar {
     /// Pushed by `PaneFlowApp::render` so the Appearance switch can
     /// control title bar transparency independently from terminal cells.
     pub cockpit_material_active: bool,
-    /// #10: subscription that repaints the title bar when the desktop
-    /// environment relocates the window-control buttons (e.g. GNOME left↔right).
-    /// Registered lazily on the first `render` (where `window` is available, as
-    /// `new` has none); `None` until then. Dropping it on `TitleBar` drop
-    /// unregisters the observer.
-    button_layout_observer: Option<gpui::Subscription>,
 }
 
 impl TitleBar {
@@ -48,13 +41,11 @@ impl TitleBar {
             ipc_state: crate::ipc::IpcState::Online,
             cockpit: false,
             cockpit_material_active: true,
-            button_layout_observer: None,
         }
     }
 }
 
 pub enum TitleBarEvent {
-    CloseRequested,
     ToggleSidebar,
 }
 
@@ -62,32 +53,9 @@ impl EventEmitter<TitleBarEvent> for TitleBar {}
 
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // #10: repaint when the desktop environment relocates the window-control
-        // buttons (GNOME left↔right) so `cx.button_layout()` below is never
-        // stale until some unrelated repaint forces a frame. Registered once
-        // here (not in `new`, which has no `Window`); the `Subscription` lives
-        // in `self`. Mirrors Zed (`title_bar.rs:488`).
-        if self.button_layout_observer.is_none() {
-            self.button_layout_observer =
-                Some(cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()));
-        }
-
         let height = (1.75 * window.rem_size()).max(TITLE_BAR_MIN_HEIGHT);
-        let decorations = window.window_decorations();
-        let is_csd = matches!(decorations, Decorations::Client { .. });
-        // #9: under real server-side decorations (`window_decorations: server`,
-        // opt-in; e.g. KDE Plasma) the compositor draws its own caption bar AND
-        // this custom bar renders below it - they double up. We can't simply
-        // drop this bar under SSD: it carries app chrome the compositor caption
-        // does NOT (the sidebar toggle and workspace breadcrumb). The
-        // min/max/close pill IS gated on `is_csd` below so those don't double;
-        // the app-chrome row is best-effort under SSD. The default `client`
-        // (CSD) path - which PaneFlow uses everywhere it can - avoids this
-        // entirely, which is why it is the default.
-
         // The parent window shell owns the active/inactive tint. This child is
-        // transparent so blur is composed once and cannot refill rounded CSD
-        // corner pixels with a rectangular background.
+        // transparent so the native material is composed once.
         let theme = crate::theme::active_theme();
         let is_window_active = window.is_window_active();
         let bg_color = if is_window_active {
@@ -101,60 +69,18 @@ impl Render for TitleBar {
             self.cockpit_material_active,
         );
 
-        // --- Read DE button layout ---
-        let layout = cx.button_layout().unwrap_or_else(default_button_layout);
-        let is_maximized = window.is_maximized();
-        let supported = window.window_controls();
-
-        // Close handler: emit CloseRequested so `PaneFlowApp` can intercept
-        // (e.g., session save) before the window is removed.
-        let close_handle = cx.entity().downgrade();
-        let on_close = move |_window: &mut Window, cx: &mut gpui::App| {
-            if let Some(entity) = close_handle.upgrade() {
-                entity.update(cx, |_this, cx| cx.emit(TitleBarEvent::CloseRequested));
-            }
-        };
-
-        // Paint our own window controls only under client-side decorations.
-        // macOS keeps its native traffic lights, so this stays gated on
-        // `is_csd`. Fullscreen hides them.
-        let render_controls = !window.is_fullscreen() && is_csd;
-
-        let left_controls = if render_controls {
-            super::csd::render_button_group(
-                "l",
-                &layout.left,
-                is_maximized,
-                &supported,
-                on_close.clone(),
-            )
-        } else {
-            None
-        };
-
-        let right_controls = if render_controls {
-            super::csd::render_button_group("r", &layout.right, is_maximized, &supported, on_close)
-        } else {
-            None
-        };
-        let left_controls_present = left_controls.is_some();
-        let right_controls_present = right_controls.is_some();
-
         // --- Left section: brand slot, fixed width aligned with sidebar ---
         let ui = crate::theme::ui_colors();
         // US-011: on macOS, reserve the leftmost ~80px of the custom titlebar
         // for the native red/yellow/green traffic lights (positioned at
         // x=12,y=12 by WindowOptions::titlebar::traffic_light_position in
-        // main.rs). Custom control groups already own the shared 8px edge
-        // inset; adding another brand inset would duplicate that spacing.
+        // main.rs).
         //
         // In macOS fullscreen AppKit hides the traffic lights, so the 80px
         // reservation would leave a dead gap before the brand cluster - drop
         // back to the shared 8px inset there.
-        let brand_pl = if cfg!(target_os = "macos") && !window.is_fullscreen() {
+        let brand_pl = if !window.is_fullscreen() {
             gpui::px(80.0)
-        } else if left_controls_present {
-            gpui::px(0.)
         } else {
             TITLE_BAR_EDGE_INSET
         };
@@ -231,7 +157,6 @@ impl Render for TitleBar {
             .flex_row()
             .items_center()
             .overflow_x_hidden()
-            .children(left_controls)
             .child(brand);
 
         // --- Center section: workspace name breadcrumb (muted) ---
@@ -322,8 +247,7 @@ impl Render for TitleBar {
             // The transparent fill reveals either the themed shell or the
             // platform material selected by the parent window.
             .bg(chrome_bg)
-            // Layouts without right-side controls keep the bar-level inset.
-            .when(!right_controls_present, |d| d.pr(TITLE_BAR_EDGE_INSET));
+            .pr(TITLE_BAR_EDGE_INSET);
 
         bar
             // Drag-to-move state machine
@@ -362,7 +286,6 @@ impl Render for TitleBar {
             .child(left_rail)
             .child(content)
             .children(ipc_pill)
-            .children(right_controls)
             .when(!self.cockpit, |this| {
                 // Cockpit chrome drops the bottom divider so the title bar
                 // and sidebar read as one surface; non-cockpit keeps it.
