@@ -1,6 +1,6 @@
 # Scripting and automation
 
-> Drive a running PaneFlow from a shell or AI agent with the CLI, local JSON-RPC, event streams, declarative workspaces, the read-only MCP bridge, and lifecycle hooks.
+> Drive a running PaneFlow from a shell or AI agent with the CLI, local JSON-RPC, event streams, the read-only MCP bridge, and lifecycle hooks.
 
 PaneFlow exposes a bounded local automation surface. The `paneflow`
 binary can run as a CLI client, talk to the running GUI over a local

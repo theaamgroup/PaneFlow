@@ -1,6 +1,6 @@
 # Scripting reference
 
-> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, workspace specs, MCP tools, hooks, and exit codes for PaneFlow automation.
+> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, MCP tools, hooks, and exit codes for PaneFlow automation.
 
 This is the compact reference for [Scripting and automation](../scripting.md).
 It names the public surface a human script or LLM can quote exactly.
@@ -26,7 +26,6 @@ launching the app.
 | `key <target> <keystroke>`                 | `surface.send_keystroke`           | Gated                      | Send one non-submitting keystroke      |
 | `wait --match <sel>`                       | `surface.read`, `events.subscribe` | No                         | Block until pattern, idle, or both     |
 | `watch [--surface <sel>] [--type <event>]` | `events.subscribe`                 | No                         | Stream lifecycle and surface events    |
-| `up <file>`                                | Workspace spec engine              | Prefill only               | Create a declarative workspace         |
 
 Aliases accepted by the CLI: `list_panes` maps to `ls`,
 `read_pane` maps to `read`, and `search_pane` maps to `search`.
