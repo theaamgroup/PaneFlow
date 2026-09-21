@@ -30,7 +30,6 @@ guide.
 | `paneflow <verb>`          | Human scripts and in-pane agents         | Some verbs               |
 | JSON-RPC socket            | Custom clients in any language           | Some methods             |
 | `paneflow mcp install`     | Let MCP-capable agents read panes        | No                       |
-| `paneflow up <file>`       | Create a named workspace from TOML       | Prefill only             |
 | `paneflow hooks setup`     | Report agent lifecycle state to PaneFlow | No                       |
 
 The CLI and MCP bridge use the same local socket. Inside a PaneFlow
@@ -94,39 +93,6 @@ Use `--raw` only for trusted human scripts. Use `--report-file` when a
 full-screen agent may overwrite or truncate scrollback. Use `--paste`
 only when you need to force bracketed-paste delivery; PaneFlow already
 auto-detects the safer paste path for known agent panes.
-
-## How do I create a workspace from TOML?
-
-`paneflow up <file>` creates a workspace with panes, working
-directories, agent commands, prompt prefill, environment variables, and
-optional worktrees.
-
-```toml
-# paneflow.workspace.toml
-
-name = "feat-x"
-layout = "main_vertical"
-
-[[panes]]
-cwd = "~/dev/api"
-agent = "claude"
-prompt = "review the diff on this branch"
-name = "reviewer"
-focus = true
-
-[[panes]]
-cwd = "~/dev/api"
-command = "cargo watch -x test"
-name = "tests"
-```
-
-Run `paneflow up paneflow.workspace.toml --dry-run` to validate the
-resolved plan without mutating the running instance. Prompts are
-prefilled, not submitted.
-
-Multi-agent dependency scheduling runs outside PaneFlow, using headless
-agents in separate git worktrees. The app retains its terminal panes, CLI,
-MCP reads, and lifecycle hooks.
 
 ## How does MCP fit in?
 

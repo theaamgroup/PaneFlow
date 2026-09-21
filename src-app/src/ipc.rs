@@ -44,9 +44,7 @@
 //!   canonicalised (US-014) and rejected if not a directory.
 //! - `surface.split`: layout mutation, bounded by `MAX_PANES` on the tab
 //!   owning the targeted surface (US-003, `prd-cli-tab-hierarchy`). Bare layout
-//!   splits are navigation-level; spawn fields are gated like `workspace.up`.
-//! - `workspace.up`: multi-pane creation. Navigation-only pane specs are
-//!   allowed for same-UID clients, but `command`, `prompt`, `context`, and
+//!   splits are navigation-level; `command`, `prompt`, `context`, and
 //!   non-empty `env` and `managed_worktree` ownership are orchestration primitives gated behind
 //!   `PANEFLOW_IPC_ORCHESTRATION=1`. `PANEFLOW_IPC_SCRIPTING=1` also enables
 //!   them as a broader legacy opt-in.
@@ -125,7 +123,7 @@ pub struct IpcRequest {
     /// Single CAS lifecycle (issue #38): `IPC_DISPATCH_QUEUED` → `STARTED`
     /// (GPUI, just before `handle_ipc`) or `CANCELLED` (socket 5 s timeout).
     /// Exactly one transition wins, so a timed-out `workspace.create` /
-    /// `workspace.up` / `surface.split` cannot still run after `-32002`.
+    /// `surface.split` cannot still run after `-32002`.
     pub dispatch: Arc<AtomicU8>,
     /// EP-003 US-010 (agent-control-plane): the socket peer's PID, captured
     /// from `LOCAL_PEERCRED` once per connection (None when the kernel does
@@ -2025,7 +2023,6 @@ fn supported_methods() -> Vec<&'static str> {
         "system.identify",
         "workspace.create",
         "workspace.select",
-        "workspace.up",
         "surface.list",
         "surface.read",
         "surface.search",
@@ -2053,6 +2050,7 @@ mod removed_method_tests {
     fn removed_methods_are_not_advertised_or_dispatched() {
         let (tx, rx) = mpsc::sync_channel(1);
         for (namespace, verb) in [
+            ("workspace", "up"),
             ("workspace", "list"),
             ("workspace", "current"),
             ("workspace", "close"),

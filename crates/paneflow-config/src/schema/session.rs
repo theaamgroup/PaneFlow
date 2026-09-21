@@ -245,7 +245,7 @@ pub struct WorkspaceSession {
     /// deliberately NOT persisted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expanded_paths: Vec<String>,
-    /// Git worktrees Paneflow created for this workspace via `paneflow up`
+    /// Git worktrees Paneflow created for this workspace via Launch Pad
     /// (EP-002, prd-orchestration-v2). Persisted so a crash/restart keeps the
     /// ownership record (teardown at close, `git worktree prune` at startup).
     /// Additive + optional like `expanded_paths`.
@@ -387,7 +387,7 @@ fn surface_title(surface: &SurfaceDefinition) -> String {
 }
 
 /// A git worktree created (and therefore owned) by Paneflow for one pane of a
-/// `paneflow up` workspace. Paths are stored absolute; `teardown` is `"auto"`
+/// workspace. Paths are stored absolute; `teardown` is `"auto"`
 /// (remove at close when clean) or `"keep"`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

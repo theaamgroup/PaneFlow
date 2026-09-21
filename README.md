@@ -96,10 +96,9 @@ paneflow watch --type ai.stop         # Stream agent stop events
 Replace `<pane-id>` with an ID from `paneflow ps`. You can also target panes
 by name.
 
-To create a repeatable workspace, define its panes and commands in a TOML
-file, then run `paneflow up workspace.toml`. The
-[scripting guide](docs/user/scripting.md) includes a sample file and
-explains prompt delivery, submission controls, and event streams.
+Create repeatable workspaces in Settings → Workspaces. The
+[scripting guide](docs/user/scripting.md) explains prompt delivery,
+submission controls, and event streams.
 
 From an external terminal, use the installed binary's full path or
 [add it to your PATH](docs/user/installation/macos.md#put-the-cli-on-your-path).

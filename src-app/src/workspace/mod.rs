@@ -240,10 +240,10 @@ pub struct Workspace {
     /// `session.json`; the sidebar's visibility itself is never persisted.
     pub files_expanded: Vec<std::path::PathBuf>,
     /// Git worktrees Paneflow created for this workspace's panes via
-    /// `paneflow up` (`worktree = "branch"`, EP-002 orchestration-v2). Torn
+    /// Launch Pad. Torn
     /// down - clean ones only, branch never deleted - when the workspace
     /// closes; persisted in `session.json` so a crash keeps the ownership
-    /// record. Empty for every workspace not built by `up` with worktrees.
+    /// record. Empty when the workspace owns no managed worktrees.
     pub managed_worktrees: Vec<worktree::ManagedWorktree>,
     /// US-008: whether the sidebar folder row for this workspace shows its
     /// tab children. Persisted since issue #349 as
