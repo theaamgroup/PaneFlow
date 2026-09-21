@@ -20,7 +20,6 @@
 
 # OS
 .DS_Store
-Thumbs.db
 
 # Environment
 .env
@@ -34,24 +33,8 @@ LOG_*.text
 # Local development artifacts
 .codex
 
-# Local-only release plans and internal deep-dives (kept out of the public repo)
-/RELEASE_MACOS_PLAN.md
-/RELEASE_V0.2.0_PLAN.md
-/RELEASE_WINDOWS_PLAN.md
-/ZED_TERMINAL_DEEP_DIVE.md
-/CMUX_ANALYSIS.md
-/CMUX_PULL_REPORT.md
-/zed-terminal-architecture.md
-
-# Local-only PRDs, spikes, and task-tracking notes (kept out of the public repo)
-/paneflow-site/tasks/
-
-# Local-only logo explorations (kept out of the public repo)
-/logo-concepts/
-
 # Local Claude Code agent state (memory, scheduled tasks) - never share publicly
 **/.claude/
-.vercel
 
 # Local-only security pipeline artifacts (vuln-scan/triage/patch). Contain
 # exploit recipes for live findings - never publish to the OSS repo.
@@ -67,17 +50,6 @@ LOG_*.text
 # Local-only /ultron deep-audit reports (finding details, same class as the
 # security pipeline output above) - never publish to the OSS repo.
 /ULTRON/
-
-# Local-only LinkedIn post drafts (personal marketing, not project source).
-/linkedin/
-
-# Local-only distribution/growth strategy notes (personal marketing, not
-# project source) - never publish to the OSS repo.
-/DISTRIBUTION.md
-
-# Windows debug symbols emitted next to release builds (multi-MB .pdb tree).
-# Build artifact, not source.
-/pf-symbols/
 
 # Local-only diff/render audit reports (same class as /ULTRON/ above): generated
 # tool output with finding-level detail, kept out of the public repo.

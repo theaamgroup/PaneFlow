@@ -10,7 +10,7 @@ Take PaneFlow under `theaamgroup` and strip it to macOS only, so The AAM Group
 can make improvements and fixes to it. The repository began private and became
 public when anonymous Sparkle appcast and DMG access became a release
 requirement. The product name stays PaneFlow; a rebrand to PanesCLI was scoped
-and dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
+and dropped (see [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada)).
 
 ## Decisions
 
@@ -21,7 +21,7 @@ and dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 | Ghostty backend | Deleted 2026-08-25; **restored as the only engine by #184 on 2026-08-31** | Was verified unreachable on macOS at the time (the historical section below). Upstream v0.10.0 made macOS a Ghostty target; Phase 1 vendored the crates and the darwin archive, Phase 2 swapped the session host and deleted Alacritty, keeping this fork's pinned teardown on top (trap 18). |
 | Self-update | **Sparkle 2, added by #119.** The deleted hand-rolled updater stays deleted | Hourly background checks, EdDSA + Developer ID verification, silent download, install on ordinary quit, no forced relaunch or update UI. No minisign and no `src-app/src/update/`. |
 | Telemetry | **Deleted** (post-2c grind). Do not resurrect PostHog | Never set `POSTHOG_API_KEY`. Crate, app module, consent UI, and `build.rs` env directives are gone. |
-| Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server and `PANEFLOW_*` stay. The pane-driving skill was later removed (#609). See `docs/fork/2026-08-25-post-2c-plan.md` |
+| Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server and `PANEFLOW_*` stay. The pane-driving skill was later removed (#609). See [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada) |
 | gpui dependency | Pin `zed-industries/zed` by exact revision, keep the AAM fork only as a cold backup | `Cargo.lock` and all three Cargo dependency entries pin the revision, so the risk is availability, not drift. Never restore the old `arthjean/zed` source. |
 | Apple signing | AAM Developer ID, signed and notarized DMG | Other AAM Macs can install without Gatekeeper warnings |
 
@@ -29,7 +29,7 @@ and dropped (see `docs/fork/2026-08-25-post-2c-plan.md`).
 
 The product stays **PaneFlow**. A full rebrand to PanesCLI was scoped (bundle
 id, binary, CLI, config dir, MCP server, orchestrator skill, `PANEFLOW_*` env)
-and dropped. See `docs/fork/2026-08-25-post-2c-plan.md`.
+and dropped. See [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada).
 
 Task 12 still replaced *upstream's* identity so this fork is not signed as
 `io.github.arthurdev44.paneflow`.
@@ -379,5 +379,5 @@ part", not "restore the crate".
   reclaiming it needs `filter-repo`, which rewrites every SHA and destroys the
   upstream merge base.
 - A product-name rebrand (scoped and dropped; see
-  `docs/fork/2026-08-25-post-2c-plan.md`) would orphan any existing local
+  [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada)) would orphan any existing local
   PaneFlow config and require re-registering the MCP server and its former pane-driving integration. That cost is one reason it did not happen.

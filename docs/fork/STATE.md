@@ -680,7 +680,7 @@ the session-host PR on top). What is now true, and where the evidence is:
 **2026-08-28 deep review.** Five parallel agents (correctness, security,
 architecture, performance, reality-check) swept the whole repo. The findings
 are archived as a historical record in
-`docs/fork/2026-08-28-deep-review-findings.md` (as of `29ac597a`); it is not
+[archived audit revision](https://github.com/theaamgroup/PaneFlow/commit/693be926) (as of `29ac597a`); it is not
 a backlog and quotes no live open count. Open work is `gh issue list`, and
 `src-app/tests/fork_docs_backlog_policy.rs` fails if either document regains
 the work-queue role (issue #224). Twelve landed in that pass, all gates
@@ -765,7 +765,7 @@ top of the deep review, in three file-disjoint batches:
   site itself testable without a `Window`.
 
 Companion documents:
-- `docs/fork/2026-08-25-post-2c-plan.md` is the **historical 2026-08-25
+- [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada) is the **historical 2026-08-25
   execution plan** (schema, telemetry, identity, CI). Leftover-removal
   buckets 1–4 (2026-08-26) superseded its self-update “disable the feed”
   decision: the old hand-rolled updater was deleted. GitHub issue #13's bundle-id and
@@ -784,7 +784,7 @@ post-adoption pass closed #11, #14, #15 (evidence on the issues), landed the
 CI/test hygiene set #66–#71, and triaged #73–#85 against 925e21ce (comments
 on each; #75 closed as superseded; #74/#77/#80/#82 retitled to their
 residuals). Remaining standing visual/runtime checks are in
-`MANUAL-CHECKLIST.md`.
+[historical verification revision](https://github.com/theaamgroup/PaneFlow/commit/b9fbb457).
 
 The 2026-08-27 keyboard-correctness cluster closed **#108**, **#79** and the
 focus-routing half of **#78** across five commits
@@ -870,7 +870,7 @@ Three things that pass gates but are **not** end-to-end verified:
 ## Naming, confirmed and locked
 
 The product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and
-dropped; see `docs/fork/2026-08-25-post-2c-plan.md`.
+dropped; see [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada).
 
 | Thing | Value |
 |---|---|
