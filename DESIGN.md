@@ -447,7 +447,10 @@ is rejected unless the user has it installed system-wide.
 
 Geist Mono and IBM Plex Mono are no longer bundled. Existing configuration
 names remain valid when installed system-wide; otherwise they log a warning
-and fall back to JetBrainsMono Nerd Font. Medium and semibold Nerd Font faces
+and fall back to JetBrainsMono Nerd Font. In `font_fallbacks`, unavailable
+retired families are omitted while installed copies and other entries keep
+their order; an emptied list uses GPUI's default fallback stack.
+Medium and semibold Nerd Font faces
 remain bundled for configured terminal weights and diff headers. Lilex and
 IBM Plex Sans remain available to GPUI’s internal fallback stack.
 

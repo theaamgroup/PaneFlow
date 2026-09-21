@@ -171,14 +171,28 @@ pub(super) struct FontSettings {
 /// Normalize a configured `font_fallbacks` list before it reaches GPUI:
 /// trim each entry, drop empties, and collapse an absent / all-empty list to
 /// `None` so [`base_font`] emits `fallbacks: None` (GPUI's built-in stack
-/// only) rather than an empty `FontFallbacks`. Pure - unit-tested.
+/// only) rather than an empty `FontFallbacks`.
 fn sanitize_font_fallbacks(configured: Option<&Vec<String>>) -> Option<Vec<String>> {
+    sanitize_font_fallbacks_with_registry(configured, &INSTALLED_MONO_FONTS)
+}
+
+fn sanitize_font_fallbacks_with_registry(
+    configured: Option<&Vec<String>>,
+    installed: &HashSet<String>,
+) -> Option<Vec<String>> {
     let list: Vec<String> = configured?
         .iter()
         .map(|entry| entry.trim().to_string())
         .filter(|entry| !entry.is_empty())
+        // Retired bundled families must not become unresolved Core Text
+        // cascade descriptors. Other fallbacks may be non-monospace fonts.
+        .filter(|entry| !is_retired_font_family(entry) || installed.contains(entry))
         .collect();
     (!list.is_empty()).then_some(list)
+}
+
+fn is_retired_font_family(family: &str) -> bool {
+    matches!(family, "Geist Mono" | "IBM Plex Mono")
 }
 
 fn canonical_font_weight_key(raw: &str) -> String {
@@ -293,7 +307,7 @@ fn resolve_font_family_with_registry(
     // (a system family that resolves but rasterizes empty - commit c3e2331).
     #[cfg(target_os = "macos")]
     // Retired bundled families must fall back even if system enumeration fails.
-    let retired_family = matches!(candidate, "Geist Mono" | "IBM Plex Mono");
+    let retired_family = is_retired_font_family(candidate);
     if (!installed.is_empty() || retired_family) && !installed.contains(candidate) {
         let fallback = default_font_family();
         log::warn!(
@@ -1363,6 +1377,45 @@ mod tests {
     // must collapse absent/all-empty lists to `None` so `base_font` emits
     // `fallbacks: None` (GPUI's built-in stack) rather than an empty
     // `FontFallbacks`, and must trim + drop blank entries.
+
+    #[test]
+    fn retired_fallbacks_are_omitted_unless_installed() {
+        let dir = tempfile::tempdir().expect("config directory");
+        let path = dir.path().join("paneflow.json");
+        for family in ["Geist Mono", "IBM Plex Mono"] {
+            std::fs::write(
+                &path,
+                serde_json::json!({"font_fallbacks": [format!(" {family} ")]}).to_string(),
+            )
+            .expect("write config");
+            let config = paneflow_config::loader::load_config_from_path(&path);
+            for installed in [HashSet::new(), HashSet::from(["Menlo".to_string()])] {
+                assert_eq!(
+                    sanitize_font_fallbacks_with_registry(
+                        config.font_fallbacks.as_ref(),
+                        &installed
+                    ),
+                    None
+                );
+            }
+            assert_eq!(
+                sanitize_font_fallbacks_with_registry(
+                    config.font_fallbacks.as_ref(),
+                    &HashSet::from([family.to_string()])
+                ),
+                Some(vec![family.to_string()]),
+            );
+        }
+        let mixed = vec![
+            "Geist Mono".to_string(),
+            "Apple Color Emoji".to_string(),
+            "IBM Plex Mono".to_string(),
+        ];
+        assert_eq!(
+            sanitize_font_fallbacks_with_registry(Some(&mixed), &HashSet::new()),
+            Some(vec!["Apple Color Emoji".to_string()]),
+        );
+    }
 
     #[test]
     fn sanitize_font_fallbacks_absent_is_none() {
