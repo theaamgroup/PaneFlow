@@ -55,7 +55,6 @@ pub(crate) const JETBRAINS_MONO_NF_ALIAS: &str = "JetBrainsMono NF";
 /// #420). Configs written against it keep resolving to the bundled family.
 pub(crate) const LEGACY_JETBRAINS_MONO_NFM_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 pub(crate) const JETBRAINS_MONO_NFM_ALIAS: &str = "JetBrainsMono NFM";
-pub(crate) const LEGACY_GEIST_MONO_FAMILY: &str = "Geist Mono";
 pub(crate) const LEGACY_EMBEDDED_MONO_FAMILY: &str = "Lilex";
 
 /// Embedded UI/sans family. Files:
@@ -264,6 +263,13 @@ pub(crate) fn default_font_family() -> &'static str {
 }
 
 pub fn resolve_font_family(configured: Option<&str>) -> String {
+    resolve_font_family_with_registry(configured, &INSTALLED_MONO_FONTS)
+}
+
+fn resolve_font_family_with_registry(
+    configured: Option<&str>,
+    installed: &HashSet<String>,
+) -> String {
     let candidate = configured
         .map(str::trim)
         .filter(|family| !family.is_empty())
@@ -274,14 +280,11 @@ pub fn resolve_font_family(configured: Option<&str>) -> String {
     // registers them directly with GPUI's text system at boot,
     // bypassing the OS font enumeration registry. Short-circuit before
     // the INSTALLED_MONO_FONTS lookup, which only sees system fonts.
-    // Lilex and IBM Plex Mono are also embedded and remain valid explicit
-    // choices. Installed families flow through normal system-font resolution.
+    // Installed families flow through normal system-font resolution.
     if candidate == EMBEDDED_MONO_FAMILY
-        || candidate == LEGACY_GEIST_MONO_FAMILY
         || candidate == LEGACY_EMBEDDED_MONO_FAMILY
         || candidate == EMBEDDED_SANS_FAMILY
         || candidate == "IBM Plex Sans"
-        || candidate == "IBM Plex Mono"
     {
         return candidate.to_string();
     }
@@ -289,7 +292,9 @@ pub fn resolve_font_family(configured: Option<&str>) -> String {
     // The installed-monospace validation guards a Core Text failure mode
     // (a system family that resolves but rasterizes empty - commit c3e2331).
     #[cfg(target_os = "macos")]
-    if !INSTALLED_MONO_FONTS.is_empty() && !INSTALLED_MONO_FONTS.contains(candidate) {
+    // Retired bundled families must fall back even if system enumeration fails.
+    let retired_family = matches!(candidate, "Geist Mono" | "IBM Plex Mono");
+    if (!installed.is_empty() || retired_family) && !installed.contains(candidate) {
         let fallback = default_font_family();
         log::warn!(
             "font_family '{candidate}' is not an installed monospace family; using default '{fallback}'"
@@ -1293,20 +1298,42 @@ mod tests {
 
     #[test]
     fn resolve_font_family_short_circuits_embedded_concrete_names() {
-        // Users who write the canonical JetBrainsMono name, `"Geist Mono"`,
-        // `"Lilex"`, `"Geist"`, or `"IBM Plex Sans"` in
-        // paneflow.json get the embedded font even on platforms whose
-        // INSTALLED_MONO_FONTS registry doesn't list them (Windows
-        // pre-DirectWrite, container without fontconfig). The short
-        // circuit before the registry lookup is what makes that work.
+        // Bundled families resolve even when absent from the system registry.
         assert_eq!(
             resolve_font_family(Some("JetBrainsMono Nerd Font")),
             "JetBrainsMono Nerd Font"
         );
-        assert_eq!(resolve_font_family(Some("Geist Mono")), "Geist Mono");
         assert_eq!(resolve_font_family(Some("Lilex")), "Lilex");
         assert_eq!(resolve_font_family(Some("Geist")), "Geist");
         assert_eq!(resolve_font_family(Some("IBM Plex Sans")), "IBM Plex Sans");
+    }
+
+    #[test]
+    fn retired_bundled_families_load_and_fall_back_unless_installed() {
+        let dir = tempfile::tempdir().expect("config directory");
+        let path = dir.path().join("paneflow.json");
+        for family in ["Geist Mono", "IBM Plex Mono"] {
+            std::fs::write(
+                &path,
+                serde_json::json!({"font_family": family}).to_string(),
+            )
+            .expect("write config");
+            let config = paneflow_config::loader::load_config_from_path(&path);
+            assert_eq!(config.font_family.as_deref(), Some(family));
+            for installed in [HashSet::new(), HashSet::from(["Menlo".to_string()])] {
+                assert_eq!(
+                    resolve_font_family_with_registry(config.font_family.as_deref(), &installed),
+                    EMBEDDED_MONO_FAMILY,
+                );
+            }
+            assert_eq!(
+                resolve_font_family_with_registry(
+                    config.font_family.as_deref(),
+                    &HashSet::from([family.to_string()])
+                ),
+                family,
+            );
+        }
     }
 
     #[test]

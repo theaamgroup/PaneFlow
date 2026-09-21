@@ -438,12 +438,18 @@ MUST use them. They are not yet universal — a couple of hundred
 `text_size(px(N.))` literals remain — so treat an existing literal as debt, not
 as licence.
 
-Bundled families (`src-app/assets/fonts/`): Geist, Geist Mono, IBM Plex Mono,
-IBM Plex Sans, JetBrainsMono Nerd Font, Lilex, VT323. `Assets::load_fonts`
-registers every one with GPUI at boot, but only the first six are selectable:
+Bundled families (`src-app/assets/fonts/`): Geist, IBM Plex Sans,
+JetBrainsMono Nerd Font, Lilex, VT323. `Assets::load_fonts`
+registers every one with GPUI at boot, but only the first four are selectable:
 **VT323 is Contextual to the About dialog's CRT credit plate** and is absent
 from `resolve_font_family`'s embedded list, so configuring it as `font_family`
 is rejected unless the user has it installed system-wide.
+
+Geist Mono and IBM Plex Mono are no longer bundled. Existing configuration
+names remain valid when installed system-wide; otherwise they log a warning
+and fall back to JetBrainsMono Nerd Font. Medium and semibold Nerd Font faces
+remain bundled for configured terminal weights and diff headers. Lilex and
+IBM Plex Sans remain available to GPUI’s internal fallback stack.
 
 The Nerd Font ships in its non-Mono variant so icon glyphs keep their designed
 size; the renderer constrains them to their cells. Aliases that resolve

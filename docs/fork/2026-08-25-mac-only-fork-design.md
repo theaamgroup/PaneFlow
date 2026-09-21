@@ -64,7 +64,7 @@ Verified load-bearing. Each of these looks like cruft and is not.
 - `CLAUDE.md`: the single most useful file in the repo. Real build and test commands, annotated module tree, thread model, keystroke-to-pixel data flow, and a Gotchas section with hard-won GPUI behaviour.
 - `ARCHITECTURE.md`, `docs/hooks.md`, `docs/mcp-bridge.md`, `docs/debugging-rendering.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
 - `src-app/assets/fonts/`: 23M of TTFs, `rust-embed`ed into the binary.
-- `assets/PaneFlow.icns`, `assets/Info.plist`, `assets/dmg-background.png`: macOS bundle inputs.
+- `assets/PaneFlow.icns`, `assets/Info.plist`: macOS bundle inputs. The DMG uses no custom background.
 
 ## Stage 1: file-level deletion
 
