@@ -1,9 +1,8 @@
 //! "Workspaces" settings page - visual builder for reusable workspace
 //! templates backed by the existing `commands[].workspace` config surface.
 //!
-//! This is a `WorkspaceSpec`-level builder: users can compose panes, agents,
-//! shell commands, cwd and prompt
-//! prefill, then launch through the same `workspace.up` path the CLI uses.
+//! Users can compose panes, agents, shell commands, cwd and prompt prefill,
+//! then launch through the shared pane validation and layout helpers.
 
 use crate::ui_primitives::TooltipDelayExt;
 use gpui::{

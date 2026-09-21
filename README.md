@@ -57,8 +57,8 @@ your test runner.
 - **Share context between agents.** The optional MCP bridge lets agents
   read and search other panes in their workspace. They can also read an
   assigned task and report progress on it.
-- **Automate repeatable setups.** Use the CLI to inspect panes, follow
-  events, or create a workspace from a TOML file.
+- **Script pane workflows.** Use the CLI to inspect panes, follow
+  events, or inspect agent state.
 
 ## Everyday shortcuts
 
@@ -96,10 +96,9 @@ paneflow watch --type ai.stop         # Stream agent stop events
 Replace `<pane-id>` with an ID from `paneflow ps`. You can also target panes
 by name.
 
-To create a repeatable workspace, define its panes and commands in a TOML
-file, then run `paneflow up workspace.toml`. The
-[scripting guide](docs/user/scripting.md) includes a sample file and
-explains prompt delivery, submission controls, and event streams.
+Create repeatable workspaces in Settings → Workspaces. The
+[scripting guide](docs/user/scripting.md) explains prompt delivery,
+submission controls, and event streams.
 
 From an external terminal, use the installed binary's full path or
 [add it to your PATH](docs/user/installation/macos.md#put-the-cli-on-your-path).
@@ -163,7 +162,7 @@ For the code structure and runtime design, see [ARCHITECTURE.md](ARCHITECTURE.md
 
 - [User guide](docs/user/index.md) — features, layouts, themes, and settings
 - [Troubleshooting](docs/user/troubleshooting.md) — help with common problems
-- [CLI and automation](docs/user/scripting.md) — commands, events, and workspace files
+- [CLI and automation](docs/user/scripting.md) — commands, events, and pane reads
 - [MCP bridge](docs/mcp-bridge.md) — connect agents to pane output
 - [Agent context](docs/agent-context.md) — task assignments and progress reports
 - [Architecture](ARCHITECTURE.md) — how the application is built

@@ -117,7 +117,7 @@ impl WorktreeStates {
 /// held by an undo record - is removed when that ownership ends, and a tab
 /// bound to it would then spawn every pane into a missing directory. One the
 /// retirement journal already names is going now. A workspace's own managed
-/// checkouts are fine: that is exactly what `workspace.up` binds its tabs to.
+/// checkouts are fine: their lifetime belongs to the same workspace.
 /// Prefix matches both ways, like the ownership check `surface.split` runs,
 /// so a binding cannot sit under or over an owned path either.
 fn binding_refusal(
@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn a_tab_cannot_bind_to_a_checkout_another_workspace_owns_or_is_retiring() {
         // Issue #347 review, finding 3: the picker bound to any listing entry
-        // holding the branch, including a checkout `workspace.up` created for
+        // holding the branch, including a checkout Launch Pad created for
         // another workspace - which is removed when that workspace closes.
         let feat = PathBuf::from("/repo.worktrees/feat-x");
         let owned = vec![(0usize, feat.clone())];

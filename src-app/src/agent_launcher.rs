@@ -407,7 +407,7 @@ impl TerminalAgent {
     }
 
     /// [`Self::is_installed`] for callers that need a real answer and may
-    /// block for it: `paneflow up` and the config migration. A cold cache
+    /// block for it: the config migration. A cold cache
     /// waits for the first `paneflow-agent-which` walk to publish; a warm
     /// one reads the snapshot exactly like `is_installed`.
     pub fn is_installed_now(self) -> bool {

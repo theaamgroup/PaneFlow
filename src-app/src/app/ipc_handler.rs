@@ -29,13 +29,13 @@ use crate::agent_launcher::TerminalAgent;
 use crate::agents::notifications::{self as desktop_notifications, DesktopNotification};
 use crate::ai_types::AgentSession;
 use crate::layout::LayoutTree;
-use crate::layout::{MAX_PANES, SplitDirection};
+use crate::layout::SplitDirection;
 use crate::pane::Pane;
 use crate::terminal::TerminalView;
 use crate::workspace::{MAX_WORKSPACES, Workspace, next_workspace_id};
 use crate::{PaneFlowApp, ai_types, keybindings};
 
-/// Prompt-prefill readiness window for `workspace.up` (US-010,
+/// Prompt-prefill readiness window for workspace templates (US-010,
 /// prd-cli-agent-orchestration).
 ///
 /// The agent CLI's input box is not ready the instant its launch command is
@@ -54,7 +54,7 @@ const UP_PREFILL_FLOOR: Duration = Duration::from_millis(1800);
 const UP_PREFILL_MAX: Duration = Duration::from_millis(8000);
 const UP_PREFILL_POLL: Duration = Duration::from_millis(200);
 
-/// `workspace.up` launch-command readiness window. A newly-created PTY can be
+/// workspace templates launch-command readiness window. A newly-created PTY can be
 /// alive before its shell prompt is ready to consume typed input, especially on
 /// Windows. Launch commands are therefore delayed until the initial shell output
 /// settles, then prompts are scheduled after the command has been injected.
@@ -83,7 +83,7 @@ const SUBMIT_ECHO_POLL: Duration = Duration::from_millis(15);
 /// elapses, so a dispatch can never hang. Bounds the long tail without a loop.
 const SUBMIT_ECHO_EXTRA: Duration = Duration::from_millis(500);
 
-/// A validated pane plan for `workspace.up`: the cwd is already canonicalized,
+/// A validated pane plan for workspace templates: the cwd is already canonicalized,
 /// so the spawn phase is infallible with respect to directories (US-012).
 pub(crate) struct PlannedPane {
     pub(crate) cwd: Option<PathBuf>,
@@ -238,14 +238,16 @@ pub(crate) fn dedupe_planned_pane_labels(planned: &mut [PlannedPane]) {
         if let Some(label) = pp.label.take() {
             let unique = crate::workspace::surface_naming::claim_unique(&mut taken, &label);
             if unique != label {
-                log::warn!("workspace.up: duplicate label '{label}' in batch, using '{unique}'");
+                log::warn!(
+                    "workspace templates: duplicate label '{label}' in batch, using '{unique}'"
+                );
             }
             pp.label = Some(unique);
         }
     }
 }
 
-/// Build the layout tree for `workspace.up` from a preset name. Mirrors the
+/// Build the layout tree for workspace templates from a preset name. Mirrors the
 /// keyboard layout presets (`handle_layout_*`): `even_h` = side by side
 /// (Vertical divider), `even_v` = stacked (Horizontal divider), `main_vertical`
 /// = the focused pane on the left with the rest stacked, `tiled` = tmux grid.
@@ -270,50 +272,11 @@ pub(crate) fn build_up_layout(
     }
 }
 
-/// Split `workspace.up`'s panes into one tab per git worktree (issue #347).
-///
-/// Returns each tab's worktree (`None` for the workspace's own checkout) with
-/// the pane indices it holds, in display order: the unbound panes first, then
-/// one tab per distinct worktree in first-appearance order.
-///
-/// `up` accepts a per-pane `worktree = "branch"`, creates each checkout, and
-/// used to stack every pane into a single tab where two worktrees sat side by
-/// side, visually identical. One tab per worktree makes switching checkout a
-/// deliberate gesture with a visible target, and binds each tab so the panes
-/// opened in it later land in the same checkout.
-///
-/// A batch that declares no worktree at all yields exactly one group holding
-/// every pane in order - byte-for-byte the layout `up` has always built.
-pub(crate) fn group_up_panes_by_worktree(
-    worktrees: &[Option<String>],
-) -> Vec<(Option<String>, Vec<usize>)> {
-    let mut unbound: Vec<usize> = Vec::new();
-    // Insertion-ordered rather than a map: the tab order must follow the order
-    // the panes were declared in, which is the order the orchestrator wrote them.
-    let mut bound: Vec<(String, Vec<usize>)> = Vec::new();
-    for (idx, worktree) in worktrees.iter().enumerate() {
-        match worktree {
-            None => unbound.push(idx),
-            Some(path) => match bound.iter_mut().find(|(known, _)| known == path) {
-                Some((_, panes)) => panes.push(idx),
-                None => bound.push((path.clone(), vec![idx])),
-            },
-        }
-    }
-
-    let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::with_capacity(bound.len() + 1);
-    if !unbound.is_empty() {
-        groups.push((None, unbound));
-    }
-    groups.extend(bound.into_iter().map(|(path, panes)| (Some(path), panes)));
-    groups
-}
-
 /// Keyboard focus needs a `&mut Window`, which IPC dispatch does not carry.
 /// Defer one tick and re-enter through the main window handle (locate it
 /// among `cx.windows()` by downcast). Deferring keeps the re-entrant
 /// `PaneFlowApp` update out of the in-flight one. Shared by `surface.focus`
-/// and `workspace.up`.
+/// and workspace templates.
 fn defer_pane_focus(pane: Entity<Pane>, cx: &mut Context<PaneFlowApp>) {
     cx.defer(move |cx| {
         for handle in cx.windows() {
@@ -510,7 +473,7 @@ fn extract_last_result_capped(path: &std::path::Path, cap: u64) -> Option<String
 // EP-004 US-015 (agent-control-plane): structured context channel.
 //
 // A orchestrator passes a (possibly large) context blob to a spawned agent via the
-// `context` param of `surface.split` / `workspace.up`. Inlining it would hit the
+// `context` param of `surface.split`. Inlining it would hit the
 // 64 KiB `send_text` cap and silently truncate; instead it is staged to a temp
 // file and the path is handed to the agent through `PANEFLOW_CONTEXT_FILE`. The
 // write finishes before that env var is inserted and before the IPC method
@@ -824,7 +787,7 @@ fn text_contains_submit_byte(text: &str) -> bool {
     text.contains('\r') || text.contains('\n')
 }
 
-/// Issue #236: a `workspace.up` / `surface.split` `prompt` is prefilled through
+/// Issue #236: a `surface.split` `prompt` is prefilled through
 /// a verbatim `send_text` and documented as "never submitted", so a CR or LF
 /// inside it would submit under the orchestration gate alone, without the
 /// scripting write gate `surface.send_text` enforces. Refuse it up front.
@@ -1010,9 +973,9 @@ fn find_terminal_in_tree(
     }
 }
 
-/// Parse the optional `managed_worktree` object a `workspace.up` pane spec or
-/// a spawn-capable `surface.split` carries (EP-002/EP-003, orchestration-v2):
-/// the CLI created a git worktree for this pane and hands the ownership
+/// Parse the optional `managed_worktree` object a spawn-capable
+/// `surface.split` carries (EP-002/EP-003, orchestration-v2):
+/// the caller created a git worktree for this pane and hands the ownership
 /// record over so the workspace tears it down at close (US-009). `path` and
 /// `repo_root` are both required - anything else is ignored (no record, no
 /// teardown: fail toward "never touch what we can't prove we own").
@@ -1501,7 +1464,7 @@ pub(crate) fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
 /// name/label: trim, strip control characters, cap at 64 chars. Returns `None`
 /// for an empty/blank result (clears the custom name / no label). Shared by
 /// UI pane names and the atomic spawn label on
-/// `surface.split`/`workspace.up`.
+/// `surface.split`/workspace templates.
 pub(crate) fn sanitize_pane_name(raw: &str) -> Option<String> {
     const MAX_NAME_LEN: usize = 64;
     let cleaned: String = raw
@@ -1586,7 +1549,7 @@ fn build_fleet_rows(
                     // EP-002 US-006: the row exists only because the /proc scan
                     // saw the binary; no hook ever fired, so events/state are
                     // unavailable. `no_hook` tells the orchestrator to fall back
-                    // (the agent was likely launched outside `paneflow up`).
+                    // (the agent was likely launched outside workspace templates).
                     "reason": "no_hook",
                     "surface_id": serde_json::Value::Null,
                     "surface_name": serde_json::Value::Null,
@@ -1792,7 +1755,7 @@ impl PaneFlowApp {
         for req in drain_ipc_requests_for_tick(&self.ipc_rx) {
             // Issue #38: CAS Queued→Started. If the socket timeout already
             // CAS'd Queued→Cancelled and returned -32002, skip so
-            // workspace.create / workspace.up / surface.split cannot still run.
+            // workspace.create / surface.split cannot still run.
             if !crate::ipc::try_start_dispatch(&req.dispatch) {
                 continue;
             }
@@ -2185,305 +2148,11 @@ impl PaneFlowApp {
             || managed_worktree_path_conflicts(path, target_workspace, &owned, &closed, &pending)
     }
 
-    /// `workspace.up` - materialize a declarative multi-pane agent workspace in
-    /// one call (US-008/US-009/US-010, prd-cli-agent-orchestration). Unlike
-    /// `workspace.create` + `layout`, this honors a per-pane cwd / launch
-    /// command / prompt: each pane spawns in its own directory, optionally runs
-    /// an agent CLI, and optionally gets a prompt pre-filled (never submitted).
-    ///
-    /// Security: navigation-only pane creation is allowed for same-UID clients,
-    /// but command/prompt/context/env fields are orchestration primitives. They
-    /// require `PANEFLOW_IPC_ORCHESTRATION=1`, with
-    /// `PANEFLOW_IPC_SCRIPTING=1` accepted as a broader legacy opt-in.
-    ///
-    /// Atomic: every pane's cwd is canonicalized BEFORE anything spawns, so a
-    /// bad directory returns -32602 with no half-built workspace (US-012).
-    pub(crate) fn handle_workspace_up(
-        &mut self,
-        params: &serde_json::Value,
-        cx: &mut Context<Self>,
-    ) -> serde_json::Value {
-        if self.session_restore.is_some() {
-            return serde_json::json!({"error": "Session restore in progress"});
-        }
-        if self.workspaces.len() >= MAX_WORKSPACES {
-            return JsonRpcError::invalid_params("Workspace limit reached").into_value();
-        }
-        let name = params
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("Workspace")
-            .to_string();
-        let preset = params
-            .get("layout")
-            .and_then(|l| l.as_str())
-            .unwrap_or("even_h");
-        let pane_specs = match params.get("panes").and_then(|p| p.as_array()) {
-            Some(a) if !a.is_empty() => a,
-            _ => {
-                return JsonRpcError::invalid_params("`panes` must be a non-empty array")
-                    .into_value();
-            }
-        };
-        if pane_specs.len() > MAX_PANES {
-            return JsonRpcError::invalid_params(format!(
-                "layout exceeds maximum pane count ({MAX_PANES})"
-            ))
-            .into_value();
-        }
-        if pane_specs.iter().any(pane_spec_requires_orchestration) && !ipc_orchestration_enabled() {
-            return orchestration_disabled_error("workspace.up").into_value();
-        }
-
-        // Phase 1 (no mutation): validate + canonicalize every cwd up-front so a
-        // bad path fails atomically with -32602 before any pane spawns (US-012).
-        // EP-002 (orchestration-v2): collect the worktrees the CLI created for
-        // these panes - the workspace records ownership so close tears them
-        // down (US-009) and session restore keeps the record across a crash.
-        let mut managed_worktrees: Vec<crate::workspace::worktree::ManagedWorktree> = Vec::new();
-        let mut managed_paths = std::collections::HashSet::new();
-        // Which worktree each pane belongs to, by pane index (issue #347). Kept
-        // parallel to `planned` rather than folded into the flat ownership
-        // list above: the tab split below needs the pane-to-checkout mapping,
-        // and reading it back from cwd prefixes would guess where the spec
-        // already states it.
-        let mut pane_worktrees: Vec<Option<String>> = Vec::with_capacity(pane_specs.len());
-        let mut planned: Vec<PlannedPane> = Vec::with_capacity(pane_specs.len());
-        for (i, spec) in pane_specs.iter().enumerate() {
-            let managed_value = spec
-                .get("managed_worktree")
-                .filter(|value| !value.is_null());
-            let managed_worktree = match managed_value {
-                Some(_) => match parse_managed_worktree(managed_value) {
-                    Some(worktree) => Some(worktree),
-                    None => {
-                        return JsonRpcError::invalid_params(format!(
-                            "pane {i}: invalid managed_worktree ownership record"
-                        ))
-                        .into_value();
-                    }
-                },
-                None => None,
-            };
-            match parse_workspace_pane_plan(spec) {
-                Ok(plan) => {
-                    let effective_cwd = plan
-                        .cwd
-                        .clone()
-                        .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
-                    if self.pending_worktree_teardown_conflicts(&effective_cwd) {
-                        return JsonRpcError::invalid_params(format!(
-                            "pane {i}: cwd is inside a worktree being retired"
-                        ))
-                        .into_value();
-                    }
-                    pane_worktrees.push(
-                        managed_worktree
-                            .as_ref()
-                            .map(|worktree| worktree.path.to_string_lossy().into_owned()),
-                    );
-                    if let Some(worktree) = managed_worktree {
-                        if plan.cwd.as_deref() != Some(worktree.path.as_path()) {
-                            return JsonRpcError::invalid_params(format!(
-                                "pane {i}: managed_worktree path must match cwd"
-                            ))
-                            .into_value();
-                        }
-                        if self.managed_worktree_conflicts(&worktree.path, None, cx) {
-                            return JsonRpcError::invalid_params(format!(
-                                "pane {i}: managed worktree is already owned by another workspace"
-                            ))
-                            .into_value();
-                        }
-                        if !managed_paths.insert(worktree.path.clone()) {
-                            return JsonRpcError::invalid_params(format!(
-                                "pane {i}: managed worktree is repeated in this workspace"
-                            ))
-                            .into_value();
-                        }
-                        managed_worktrees.push(worktree);
-                    }
-                    planned.push(plan);
-                }
-                Err(err) => {
-                    return JsonRpcError::invalid_params(format!("pane {i}: {}", err.message))
-                        .into_value();
-                }
-            }
-        }
-
-        // EP-004 US-012 AC3: disambiguate duplicate labels WITHIN this batch
-        // (the second "logs" becomes "logs-2") and warn, reusing the same
-        // suffix algorithm the query-time surface-name resolver uses, so a
-        // orchestrator's labels stay stable and distinct instead of colliding.
-        dedupe_planned_pane_labels(&mut planned);
-
-        // EP-004 US-012: capture the final (de-duplicated) labels in pane order
-        // so the response associates each returned `surface_id` with its stable
-        // label; `null` for an unlabeled pane.
-        let labels: Vec<serde_json::Value> = planned
-            .iter()
-            .map(|p| {
-                p.label
-                    .clone()
-                    .map_or(serde_json::Value::Null, serde_json::Value::String)
-            })
-            .collect();
-
-        // Stage context files before any PTY spawn. A write failure is a
-        // JSON-RPC error, not success with PANEFLOW_CONTEXT_FILE pointing at a
-        // missing path. `self.workspaces` stays untouched until the tree is built.
-        let mut staged_envs: Vec<Option<HashMap<String, String>>> =
-            Vec::with_capacity(planned.len());
-        for (i, pp) in planned.iter().enumerate() {
-            match stage_planned_pane_env(pp, cx) {
-                Ok(env) => staged_envs.push(env),
-                Err(err) => {
-                    return JsonRpcError::internal_error(format!(
-                        "pane {i}: failed to stage context file: {err}"
-                    ))
-                    .into_value();
-                }
-            }
-        }
-
-        // Phase 2: spawn every pane (cwd + env honored).
-        let ws_id = next_workspace_id();
-        let mut panes: Vec<Entity<Pane>> = Vec::with_capacity(planned.len());
-        let mut launches: Vec<(Entity<TerminalView>, Option<String>, Option<String>)> =
-            Vec::with_capacity(planned.len());
-        for (pp, env) in planned.iter().zip(staged_envs) {
-            let terminal = cx.new(|cx| {
-                TerminalView::with_cwd_env_and_profile(
-                    ws_id,
-                    pp.cwd.clone(),
-                    None,
-                    env,
-                    pp.profile,
-                    cx,
-                )
-            });
-            // EP-004 US-012: pose the label as `custom_name` on the same GPUI
-            // tick, before the PTY (spawned off-thread) can emit an OSC title -
-            // no race with the auto-name. Mirrors `surface.split`.
-            if let Some(label) = pp.label.clone() {
-                terminal.update(cx, |view, _cx| {
-                    view.terminal.custom_name = Some(label);
-                });
-            }
-            let pane = self.create_pane(terminal.clone(), ws_id, cx);
-            launches.push((terminal, pp.command.clone(), pp.prompt.clone()));
-            panes.push(pane);
-        }
-
-        let focus_idx = planned.iter().position(|p| p.focus).unwrap_or(0);
-        let focus_pane = panes.get(focus_idx).cloned();
-
-        // Issue #347: one tab per worktree. With no worktree declared this is
-        // a single group holding every pane, so the layout is the one `up` has
-        // always built. Every pane was already spawned above, so a batch the
-        // tab cap cannot hold is refused here rather than silently truncated
-        // by `restored_with_id`.
-        let groups = group_up_panes_by_worktree(&pane_worktrees);
-        if groups.len() > crate::workspace::MAX_TABS_PER_WORKSPACE {
-            return JsonRpcError::invalid_params(format!(
-                "layout spans {} worktrees, more than the {} tabs a workspace holds",
-                groups.len(),
-                crate::workspace::MAX_TABS_PER_WORKSPACE
-            ))
-            .into_value();
-        }
-        let all_panes = panes;
-        let mut tabs: Vec<crate::workspace::Tab> = Vec::with_capacity(groups.len());
-        let mut active_tab = 0;
-        for (tab_idx, (worktree, pane_idxs)) in groups.iter().enumerate() {
-            if pane_idxs.contains(&focus_idx) {
-                active_tab = tab_idx;
-            }
-            let panes: Vec<Entity<Pane>> =
-                pane_idxs.iter().map(|i| all_panes[*i].clone()).collect();
-            // The focused pane's position WITHIN this tab: `main_vertical`
-            // promotes it, and a global index would promote the wrong pane.
-            let focus_idx = pane_idxs.iter().position(|i| *i == focus_idx).unwrap_or(0);
-            let Some(tree) = build_up_layout(preset, panes, focus_idx) else {
-                return JsonRpcError::invalid_params("could not build layout from panes")
-                    .into_value();
-            };
-            // A worktree tab is named by its branch; a pane rename or the
-            // agent's own session title still replaces it, as for any tab.
-            let title = worktree
-                .as_ref()
-                .and_then(|path| {
-                    managed_worktrees
-                        .iter()
-                        .find(|mw| mw.path.to_string_lossy() == path.as_str())
-                        .map(|mw| mw.branch.clone())
-                })
-                .unwrap_or_default();
-            tabs.push(
-                crate::workspace::Tab::restored(
-                    title,
-                    Some(tree),
-                    worktree.as_ref().map(std::path::PathBuf::from),
-                )
-                .with_automatic_title(true),
-            );
-        }
-
-        // The workspace root is the checkout the unbound panes are in, so a
-        // batch that puts every agent in its own worktree still roots the
-        // workspace at the repository rather than at whichever worktree came
-        // first.
-        let ws_cwd = groups
-            .iter()
-            .find(|(worktree, _)| worktree.is_none())
-            .and_then(|(_, pane_idxs)| pane_idxs.iter().find_map(|i| planned[*i].cwd.clone()))
-            .or_else(|| planned.iter().find_map(|p| p.cwd.clone()))
-            .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
-        let mut ws = Workspace::restored_with_id(ws_id, &name, ws_cwd, tabs, active_tab);
-        ws.managed_worktrees = managed_worktrees;
-        self.watch_git_dir(&ws);
-        Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
-        self.workspaces.push(ws);
-        let idx = self.workspaces.len() - 1;
-        self.activate_workspace_without_window(idx, cx);
-        // Activation never focuses a leaf, and `focus_idx` only changes the
-        // main_vertical slot. Give the `focus = true` pane keyboard focus for
-        // every preset (same Window-defer path as `surface.focus`).
-        if let Some(pane) = focus_pane {
-            defer_pane_focus(pane, cx);
-        }
-
-        // Phase 3: launch each agent (typed-ahead into the shell is fine) and
-        // schedule the prompt prefill after a bounded readiness wait. The
-        // prompt is written WITHOUT a carriage return - human-in-loop: the user
-        // reviews and submits it themselves (US-010).
-        // EP-003 (orchestration-v2): collect the spawned terminals' surface ids
-        // in pane order so clients can map them back to their pane specifications.
-        let mut surface_ids: Vec<u64> = Vec::with_capacity(launches.len());
-        for (i, (terminal, command, prompt)) in launches.into_iter().enumerate() {
-            surface_ids.push(terminal.entity_id().as_u64());
-            if let Some(cmd) = command.filter(|c| !c.is_empty()) {
-                Self::schedule_launch_command(&terminal, cmd, prompt, i, cx);
-            } else if let Some(prompt) = prompt.filter(|p| !p.is_empty()) {
-                Self::schedule_prompt_prefill(&terminal, prompt, i, cx);
-            }
-        }
-
-        let panes_n = self.active_workspace().map_or(0, |ws| ws.pane_count());
-        self.save_session(cx);
-        cx.notify();
-        serde_json::json!({
-            "index": idx, "title": name, "panes": panes_n,
-            "surface_ids": surface_ids, "labels": labels
-        })
-    }
-
     /// Prefill a prompt into a pane once its output settles (US-010,
     /// cli-agent-orchestration): FLOOR delay, then poll `output_generation`
     /// until idle (two equal reads) or MAX elapses; then write the prompt
     /// WITHOUT a carriage return - human-in-loop, the user submits. Shared by
-    /// `workspace.up` and the spawn-capable `surface.split` (EP-003).
+    /// workspace templates and the spawn-capable `surface.split` (EP-003).
     /// The text a prompt prefill writes, given whether the surface has
     /// enabled bracketed paste (`ESC[?2004h`).
     ///
@@ -2801,7 +2470,7 @@ impl PaneFlowApp {
     /// US-017 (orchestration-v2): resolve which surface (pane terminal) a
     /// session's PID lives in, by walking the process ancestor chain to a
     /// known `terminal.child_pid`. Direct children (agents launched by
-    /// `paneflow up`) hit the fast path synchronously; deeper chains walk
+    /// workspace templates) hit the fast path synchronously; deeper chains walk
     /// `/proc`/libproc OFF the render thread and deposit the result back.
     /// Exited overlays and spawn-pin mismatches are skipped; deposit
     /// re-reads the live terminal and requires pid+start to still match.
@@ -3154,7 +2823,6 @@ impl PaneFlowApp {
                 cx.notify();
                 serde_json::json!({"index": idx, "title": name, "panes": panes})
             }
-            "workspace.up" => self.handle_workspace_up(params, cx),
             "workspace.select" => {
                 if self.session_restore.is_some() {
                     return serde_json::json!({"error": "Session restore in progress"});
@@ -3446,8 +3114,7 @@ impl PaneFlowApp {
                 }
                 pane.update(cx, |_p, cx| cx.notify());
                 // Keyboard focus needs a `&mut Window`, which IPC dispatch
-                // doesn't carry. Same defer-through-main-window path as
-                // `workspace.up`.
+                // doesn't carry. Defer through the main window.
                 defer_pane_focus(pane, cx);
                 self.save_session(cx);
                 cx.notify();
@@ -3671,7 +3338,7 @@ impl PaneFlowApp {
                 };
                 // EP-003 (orchestration-v2): `surface.split` can spawn a fully
                 // configured pane - optional `cwd` (canonicalized, -32602 when
-                // bad), `command` (launched like workspace.up panes), `env`,
+                // bad), `command` (launched like workspace templates panes), `env`,
                 // `name`, `prompt` (server-side prefill, never submitted) and
                 // `managed_worktree` (ownership registration, US-009). Same
                 // command/prompt/context/env are orchestration primitives and
@@ -5017,6 +4684,7 @@ pub(crate) fn parse_layout_param(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::MAX_PANES;
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
 
@@ -5130,38 +4798,6 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_without_worktrees_is_the_single_tab_it_has_always_been() {
-        // The regression guard for the split below: `up` must not grow a second
-        // tab for a plain batch, and the pane order inside it is the order the
-        // orchestrator declared - `surface_ids` in the response are keyed on it.
-        let groups = group_up_panes_by_worktree(&[None, None, None]);
-        assert_eq!(groups, vec![(None, vec![0, 1, 2])]);
-        assert_eq!(group_up_panes_by_worktree(&[]), vec![]);
-    }
-
-    #[test]
-    fn each_worktree_gets_its_own_tab_in_declaration_order() {
-        let wt = |p: &str| Some(p.to_string());
-        // Two agents on one worktree share its tab; the shell that stayed in
-        // the main checkout keeps the workspace's own tab, which leads.
-        let groups = group_up_panes_by_worktree(&[
-            wt("/r.worktrees/b"),
-            None,
-            wt("/r.worktrees/a"),
-            wt("/r.worktrees/b"),
-        ]);
-        assert_eq!(
-            groups,
-            vec![
-                (None, vec![1]),
-                (wt("/r.worktrees/b"), vec![0, 3]),
-                (wt("/r.worktrees/a"), vec![2]),
-            ],
-            "tab order follows first appearance, not path order"
-        );
-    }
-
-    #[test]
     fn a_split_into_a_bound_tab_keeps_an_explicit_cwd_inside_it_and_refuses_one_outside() {
         // Issue #347 review, finding 2: `surface.split` confined every cwd
         // to the bound tab's worktree, so an orchestrator splitting a feat-a pane
@@ -5233,53 +4869,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_all_worktree_batch_opens_no_empty_main_tab() {
-        let wt = |p: &str| Some(p.to_string());
-        let groups = group_up_panes_by_worktree(&[wt("/r.worktrees/a"), wt("/r.worktrees/b")]);
-        assert_eq!(
-            groups,
-            vec![
-                (wt("/r.worktrees/a"), vec![0]),
-                (wt("/r.worktrees/b"), vec![1])
-            ],
-            "no pane in the main checkout means no tab for it"
-        );
-    }
-
-    #[test]
-    fn workspace_up_binds_one_tab_per_worktree() {
-        // Issue #347: the source-level contract of the split above - the
-        // groups drive the tabs, every tab carries its worktree, and the
-        // workspace roots at the unbound panes' checkout.
-        let src = include_str!("ipc_handler.rs");
-        let body = src
-            .split("pub(crate) fn handle_workspace_up")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn schedule_prompt_prefill").next())
-            .expect("handle_workspace_up body");
-        assert!(
-            body.contains("group_up_panes_by_worktree(&pane_worktrees)"),
-            "up must group its panes by managed worktree"
-        );
-        assert!(
-            body.contains("crate::workspace::Tab::restored("),
-            "each group must become a tab bound to its worktree"
-        );
-        assert!(
-            body.contains(".with_automatic_title(true)"),
-            "generated branch labels must follow a single pane's session title"
-        );
-        assert!(
-            body.contains("Workspace::restored_with_id(ws_id, &name, ws_cwd, tabs, active_tab)"),
-            "the workspace must be built from the grouped tabs"
-        );
-        assert!(
-            !body.contains("Workspace::with_layout_and_id"),
-            "the single-tab constructor would flatten every worktree into one tab"
-        );
-    }
-
     fn test_ipc_request(method: &str, cancelled: bool) -> crate::ipc::IpcRequest {
         let (response_tx, _response_rx) = mpsc::channel();
         let state = if cancelled {
@@ -5299,7 +4888,7 @@ mod tests {
 
     /// Issue #279: a client-caused refusal (cap hit, out-of-range index,
     /// last-workspace close, malformed layout) must reach the wire as
-    /// `-32602`, the same code `workspace.up` already uses for the cap.
+    /// `-32602` for client-caused refusals.
     /// The legacy `{"error": <string>}` shape is promoted to `-32603` by
     /// `promote_response`, which reads to automation as a server crash.
     /// Only the transient "Session restore in progress" refusal keeps the
@@ -5315,11 +4904,11 @@ mod tests {
         let create_arm = body
             .split("\"workspace.create\"")
             .nth(1)
-            .and_then(|rest| rest.split("\"workspace.up\"").next())
+            .and_then(|rest| rest.split("\"workspace.select\"").next())
             .expect("workspace.create arm");
         assert!(
             create_arm.contains("JsonRpcError::invalid_params(\"Workspace limit reached\")"),
-            "workspace.create at MAX_WORKSPACES must be -32602 like workspace.up"
+            "workspace.create at MAX_WORKSPACES must be -32602"
         );
         let select_arm = body
             .split("\"workspace.select\"")
@@ -5509,7 +5098,7 @@ mod tests {
         );
     }
 
-    // US-008: `workspace.up` env parsing. A shell env value can only be a
+    // US-008: workspace templates env parsing. A shell env value can only be a
     // string, so a non-string value is a `-32602` (never silently dropped),
     // and an absent/empty object yields `None` so the global `terminal.env`
     // default still applies underneath.
@@ -5686,7 +5275,7 @@ mod tests {
         let arm = src
             .split("\"workspace.create\"")
             .nth(1)
-            .and_then(|rest| rest.split("\"workspace.up\"").next())
+            .and_then(|rest| rest.split("\"workspace.select\"").next())
             .expect("workspace.create arm");
         let layout_branch = arm
             .split("if layout.is_some()")
@@ -5994,7 +5583,7 @@ mod tests {
 
     #[test]
     fn prefill_prompt_with_cr_or_lf_is_rejected_as_invalid_params() {
-        // Issue #236: `workspace.up` / `surface.split` prompts are prefilled
+        // Issue #236: `surface.split` prompts are prefilled
         // "never submitted" through a verbatim `send_text`, so a CR/LF inside
         // the prompt would auto-submit under the orchestration gate alone.
         // Refuse them with -32602 before anything is spawned.
@@ -6149,7 +5738,7 @@ mod tests {
         );
     }
 
-    /// Issue #358: `workspace.create` / `workspace.up` / `surface.split`
+    /// Issue #358: `workspace.create` / `surface.split`
     /// resolve `cwd` on the GPUI automation tick. A cwd on a dead NFS/SMB
     /// mount can pin `stat` for the kernel mount timeout, so the probe must
     /// answer within a bounded window (`-32602` on timeout) like session
@@ -7482,7 +7071,7 @@ mod tests {
 
     #[test]
     fn prompt_prefill_writes_through_inject_text_and_never_submits() {
-        // Issue #334: the shared prefill (workspace.up, surface.split, Launch
+        // Issue #334: the shared prefill (surface.split, Launch
         // Pad, and "Continue in") writes through `inject_text`, which wraps
         // the block in bracketed-paste markers when the surface has enabled
         // `ESC[?2004h` and otherwise writes it verbatim, never rewriting a
@@ -7528,67 +7117,8 @@ mod tests {
     }
 
     #[test]
-    fn workspace_up_focuses_focus_idx_leaf_for_every_preset() {
-        // Issue #40: `focus_idx` only picks the main_vertical slot.
-        // even_h/even_v/tiled ignore it for geometry, and activation never
-        // focuses a leaf. Keyboard focus must be applied after the tree is
-        // built, for every preset.
-        let src = include_str!("ipc_handler.rs");
-        let body = src
-            .split("pub(crate) fn handle_workspace_up")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn schedule_prompt_prefill").next())
-            .expect("handle_workspace_up body");
-        assert!(
-            body.contains("let focus_pane = panes.get(focus_idx).cloned()"),
-            "must capture the focus pane before build_up_layout consumes the vec"
-        );
-        assert!(
-            body.contains("build_up_layout(preset, panes, focus_idx)"),
-            "focus_idx still selects the main_vertical slot"
-        );
-        let after_activate = body
-            .split("activate_workspace_without_window")
-            .nth(1)
-            .expect("activation");
-        assert!(
-            after_activate.contains("defer_pane_focus"),
-            "must focus the focus_idx leaf after activation, for every preset"
-        );
-        let layout_fn = src
-            .split("pub(crate) fn build_up_layout")
-            .nth(1)
-            .and_then(|rest| rest.split("fn defer_pane_focus").next())
-            .expect("build_up_layout body");
-        assert!(
-            layout_fn.contains("let main = panes.get(focus_idx)"),
-            "main_vertical still uses focus_idx for the left slot"
-        );
-        for arm in ["even_v", "tiled"] {
-            let arm_body = layout_fn
-                .split(&format!("\"{arm}\" =>"))
-                .nth(1)
-                .and_then(|rest| rest.split('\n').next())
-                .unwrap_or("");
-            assert!(
-                !arm_body.contains("focus_idx"),
-                "{arm} must not consume focus_idx for geometry"
-            );
-        }
-        let default_arm = layout_fn
-            .split("_ =>")
-            .nth(1)
-            .and_then(|rest| rest.split('\n').next())
-            .unwrap_or("");
-        assert!(
-            !default_arm.contains("focus_idx"),
-            "even_h fallback must not consume focus_idx for geometry"
-        );
-    }
-
-    #[test]
-    fn workspace_up_dedups_duplicate_labels_in_batch() {
-        // EP-004 US-012 AC3: two identical labels in one `workspace.up` batch
+    fn workspace_template_dedups_duplicate_labels_in_batch() {
+        // EP-004 US-012 AC3: two identical labels in one workspace templates batch
         // resolve to distinct stable names (the second gets a `-2` suffix),
         // reusing the shared suffix algorithm the handler calls.
         use crate::workspace::surface_naming::claim_unique;

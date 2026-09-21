@@ -794,7 +794,7 @@ pub struct TerminalState {
     /// Cleared after cx.notify() triggers a repaint.
     pub dirty: bool,
     /// US-010 (cli-agent-orchestration): monotonic count of processed
-    /// PTY-output events. Never reset. `workspace.up` polls this as a
+    /// PTY-output events. Never reset. Prompt prefill polls this as a
     /// readiness signal for prompt prefill - it is the only screen-agnostic
     /// "the agent produced output" signal available: `dirty` is cleared on
     /// every repaint, and `extract_scrollback` misses content painted on the
@@ -1460,7 +1460,7 @@ impl TerminalState {
             GhosttyUiEvent::Wakeup(events) => {
                 events.acknowledge_wakeup();
                 self.dirty = true;
-                // US-010: advance the readiness signal `workspace.up` polls.
+                // US-010: advance the readiness signal Prompt prefill polls.
                 // Saturating (not wrapping) so the count is monotone for the
                 // lifetime of a pane; u64 never realistically saturates.
                 self.output_generation = self.output_generation.saturating_add(1);
@@ -4072,7 +4072,7 @@ mod tests {
 
     #[test]
     fn output_generation_advances_on_pty_output() {
-        // `workspace.up` polls `output_generation` as its prefill
+        // Prompt prefill polls `output_generation` as its prefill
         // readiness signal. A fresh terminal has produced nothing (0); the
         // counter must advance once the shell emits output (Wakeup events
         // drained by `sync`), proving the signal tracks real PTY activity.

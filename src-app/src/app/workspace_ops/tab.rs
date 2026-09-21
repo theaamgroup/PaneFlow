@@ -155,7 +155,7 @@ impl PaneFlowApp {
             .flatten()
             .or_else(|| (!ws.cwd.is_empty()).then(|| std::path::PathBuf::from(&ws.cwd)));
         // The same gate every other pane-creation path holds
-        // (`split_pane`, `surface.split`, `workspace.up`): a checkout being
+        // (`split_pane`, `surface.split`, workspace templates): a checkout being
         // torn down is not a place to start a shell.
         if let Some(cwd) = cwd.as_deref()
             && self.pending_worktree_teardown_conflicts(cwd)

@@ -19,10 +19,8 @@ mod read_cmds;
 mod scrollback;
 mod selector;
 mod send_cmd;
-mod up_cmd;
 mod wait_cmd;
 mod watch_cmd;
-mod workspace_spec;
 
 /// Process exit codes. Kept distinct so scripts can branch on the failure
 /// kind. clap owns `2` for its own usage/parse errors (and `0` for
@@ -56,7 +54,6 @@ pub(crate) const VERBS: &[&str] = &[
     "select",
     "split",
     "send",
-    "up",
     "wait",
     "watch",
     "focus",
@@ -80,7 +77,6 @@ pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
     ("select", "Select a workspace by index"),
     ("split", "Split the active pane"),
     ("send", "Inject text into a pane"),
-    ("up", "Spawn a workspace from a TOML spec"),
     ("wait", "Block until idle or a pattern matches"),
     ("watch", "Stream lifecycle events as JSONL"),
     ("focus", "Give a surface keyboard focus"),
@@ -284,14 +280,6 @@ enum Commands {
         /// Dash-separated keystroke description ("escape", "ctrl-c", "alt-f").
         keystroke: String,
     },
-    /// Spawn a declarative agent workspace from a TOML file ("compose for agents").
-    Up {
-        /// Path to a `paneflow.workspace.toml` spec.
-        file: String,
-        /// Validate + print the resolved plan without touching the instance.
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Block until a pane goes idle, or a regex appears in its output (orchestration).
     Wait {
         /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
@@ -481,7 +469,6 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
         ),
         Commands::Focus { target } => control_cmds::focus(client, &target),
         Commands::Key { target, keystroke } => send_cmd::key(client, &target, &keystroke),
-        Commands::Up { file, dry_run } => up_cmd::up(client, &file, dry_run),
         Commands::Wait {
             selector,
             pattern,
@@ -567,6 +554,19 @@ mod tests {
             !format_help_commands()
                 .lines()
                 .any(|line| line.trim_start().starts_with("flow "))
+        );
+    }
+
+    #[test]
+    fn removed_up_is_unknown_and_absent_from_help() {
+        assert!(!VERBS.contains(&"up"));
+        assert!(!HELP_VERBS.iter().any(|(name, _)| *name == "up"));
+        assert!(looks_like_unknown_verb(Some("up")));
+        assert!(Cli::try_parse_from(["paneflow", "up", "file.toml"]).is_err());
+        assert!(
+            !format_help_commands()
+                .lines()
+                .any(|line| line.trim_start().starts_with("up "))
         );
     }
 

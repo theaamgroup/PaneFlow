@@ -293,7 +293,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
 │   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
-├── cli/                               ← `paneflow up|watch|wait|send|read` over the IPC socket
+├── cli/                               ← `paneflow watch|wait|send|read` over the IPC socket
 ├── window_chrome/
 │   ├── csd.rs                         ← client-side decorations, resize edges
 │   ├── macos_backdrop.rs              ← native material behind sidebar/title bar
@@ -574,7 +574,6 @@ Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thre
 |--------|--------|-------------|
 | `system.ping` / `capabilities` / `identify` | Socket | Stateless health checks |
 | `workspace.create` / `workspace.select` | GPUI | Create or select a workspace |
-| `workspace.up` | GPUI | Declarative workspace bring-up |
 | `surface.list` / `read` / `search` / `status` | GPUI | Read pane state; `read` returns the retained history followed by the live screen (#184 Phase 3.6), so a full-screen TUI is readable |
 | `surface.send_text` / `send_keystroke` | GPUI | Write into a pane (scripting-gated) |
 | `surface.split` / `focus` | GPUI | Pane operations |

@@ -1,11 +1,9 @@
 //! Git worktree-per-agent management (EP-002, prd-orchestration-v2).
 //!
-//! `paneflow up` panes can declare `worktree = "branch"`: the CLI process
-//! creates (or reuses) a git worktree in a SIBLING directory of the repo -
-//! `<repo>.worktrees/<branch-slug>`, or `<branch-slug>-<hash>` on slug
-//! collision - copies the top-level gitignored `.env*` files, optionally runs
-//! a `setup` command, and the pane spawns with the worktree as its cwd. The
-//! app side records ownership ([`ManagedWorktree`]). Closing transfers that
+//! Launch Pad creates a git worktree in a sibling directory of the repo,
+//! copies the top-level gitignored `.env*` files, and spawns a pane with the
+//! worktree as its cwd. The app records ownership ([`ManagedWorktree`]).
+//! Closing transfers that
 //! ownership to the undo record; retirement happens when the record is evicted
 //! or on final quit, and removes the worktree only IF it is clean.
 //!
@@ -881,7 +879,7 @@ pub fn prepare_branch_checkout(repo_root: &Path, branch: &str) -> Result<PathBuf
                 ));
             }
             git_worktree_add(repo_root, &path, branch, false)?;
-            // Same courtesy `paneflow up` and the Launch Pad extend their
+            // Same courtesy the Launch Pad extends its
             // worktrees: a checkout without the repository's gitignored
             // `.env*` cannot run the app it holds. Best-effort by design.
             let _ = copy_env_files(repo_root, &path);

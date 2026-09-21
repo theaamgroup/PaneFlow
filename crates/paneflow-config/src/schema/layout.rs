@@ -75,7 +75,7 @@ pub struct WorkspaceDefinition {
     pub cwd: Option<String>,
     /// Layout preset used by the visual workspace builder.
     ///
-    /// Accepted values mirror `paneflow up`: `"even_h"`, `"even_v"`,
+    /// Accepted values mirror workspace templates: `"even_h"`, `"even_v"`,
     /// `"main_vertical"`, and `"tiled"`. Older configs may omit this and rely
     /// on `layout` alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]

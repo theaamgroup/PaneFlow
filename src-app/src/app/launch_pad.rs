@@ -15,8 +15,8 @@
 //! Atomicity (US-005 AC4): a worktree failure surfaces git's error verbatim
 //! in the modal and creates NO pane. Branch names are NOT validated locally
 //! git is the single authority (AC7). The created worktree is registered
-//! as a [`ManagedWorktree`] so teardown parity with `paneflow up` holds
-//! (AC5 - no second worktree population).
+//! as a [`ManagedWorktree`] so the shared ownership and retirement
+//! lifecycle applies (AC5 - no second worktree population).
 
 use crate::app::overlay_origin::OverlayKind;
 use gpui::{
@@ -703,8 +703,8 @@ impl PaneFlowApp {
                 return;
             };
             // PRD: split in the active preset's direction, fallback Vertical.
-            // No active preset is tracked anywhere (LayoutPreset is a one-shot
-            // `workspace.up` input), so the documented fallback IS the default:
+            // No active preset is tracked after applying a layout,
+            // so the documented fallback IS the default:
             // Vertical = side-by-side, the natural cockpit arrangement.
             match target {
                 Some(t) => {

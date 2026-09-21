@@ -1,6 +1,6 @@
 # Scripting reference
 
-> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, workspace specs, MCP tools, hooks, and exit codes for PaneFlow automation.
+> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, MCP tools, hooks, and exit codes for PaneFlow automation.
 
 This is the compact reference for [Scripting and automation](../scripting.md).
 It names the public surface a human script or LLM can quote exactly.
@@ -26,7 +26,6 @@ launching the app.
 | `key <target> <keystroke>`                 | `surface.send_keystroke`           | Gated                      | Send one non-submitting keystroke      |
 | `wait --match <sel>`                       | `surface.read`, `events.subscribe` | No                         | Block until pattern, idle, or both     |
 | `watch [--surface <sel>] [--type <event>]` | `events.subscribe`                 | No                         | Stream lifecycle and surface events    |
-| `up <file>`                                | Workspace spec engine              | Prefill only               | Create a declarative workspace         |
 
 Aliases accepted by the CLI: `list_panes` maps to `ls`,
 `read_pane` maps to `read`, and `search_pane` maps to `search`.
@@ -126,49 +125,6 @@ flag `--raw` passes `fenced: false`.
 An empty fleet is `{"agents":[]}` with exit code `0`. A pane with no
 tracked agent returns idle state, not an error.
 
-## Workspace spec
-
-`paneflow up <file>` reads a TOML workspace spec.
-
-| Top-level field | Type    | Default       | Notes                                           |
-| --------------- | ------- | ------------- | ----------------------------------------------- |
-| `name`          | string  | `"Workspace"` | Workspace title                                 |
-| `layout`        | string  | `"even_h"`    | `even_h`, `even_v`, `main_vertical`, or `tiled` |
-| `port_base`     | integer | `3000`        | Base for `${port_offset}` allocation            |
-| `[[panes]]`     | array   | required      | One entry per pane                              |
-
-| Pane field           | Type    | Default  | Notes                                                        |
-| -------------------- | ------- | -------- | ------------------------------------------------------------ |
-| `cwd`                | string  | none     | Must exist after expansion and canonicalization              |
-| `agent`              | string  | none     | Agent launcher name, mutually exclusive with `command`       |
-| `command`            | string  | none     | Raw command, mutually exclusive with `agent`                 |
-| `prompt`             | string  | none     | Prefilled into an agent input, never submitted by `up`       |
-| `focus`              | bool    | `false`  | Gives initial focus to this pane                             |
-| `env`                | table   | none     | Merged over `terminal.env`; supports `${port_offset}`        |
-| `name`               | string  | none     | Stable selector name                                         |
-| `worktree`           | string  | none     | Branch name for a managed worktree under `<repo>.worktrees/` |
-| `copy_env`           | bool    | `true`   | Copies gitignored `.env*` files into the worktree            |
-| `setup`              | string  | none     | Command run before launch                                    |
-| `setup_timeout_secs` | integer | `300`    | Setup timeout                                                |
-| `worktree_teardown`  | string  | `"auto"` | `auto` removes clean worktrees on close; `keep` leaves them  |
-
-`${port_offset}` substitutes only inside `env` values. Unknown keys are
-errors. Workspace creation validates paths before creating panes.
-
-Panes are grouped into **one tab per worktree**: the panes with no
-`worktree` share the workspace's own tab (first, rooted at the
-repository), and each distinct `worktree` gets a tab of its own, in the
-order the panes were declared, bound to that checkout and titled by its
-branch. A file with no `worktree` at all still produces the single tab it
-always did. Over JSON-RPC the same grouping reads each pane's
-`managed_worktree` record. A `surface.split` into a bound tab starts in
-that tab's worktree when `cwd` is omitted. An explicit `cwd` is honoured
-as written, but it must lie inside that tab's worktree (and a
-`managed_worktree` still has to match it): a `cwd` outside the bound
-worktree is refused with `-32602` rather than silently moved, so a pane
-and the ownership record it registers can never point at different
-checkouts. A split into an unbound tab takes `cwd` anywhere, as before.
-
 ## JSON-RPC connection
 
 | Property         | Value                                                                                |
@@ -199,7 +155,6 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `system.identify`          | -                                                                                               | `{name, version, protocol}`                              |
 | `workspace.create`         | `name?`, `cwd?`, `layout?`                                                                      | Create a workspace                                       |
 | `workspace.select`         | `index`                                                                                         | Switch workspace                                         |
-| `workspace.up`             | `name`, `layout`, `panes[]`                                                                     | Declarative spawn used by `up`            |
 | `surface.list`             | `workspace_id?`                                                                                 | `{surfaces:[{surface_id,name,title,cwd,cmd,workspace,workspace_id,scope,tab_id,tab_title}]}`; agents-pane surfaces have no `workspace_id` and are omitted when the filter is set |
 | `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`, `workspace_id?`                                   | Scrollback, `output_generation`, `truncated`             |
 | `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches                       |
