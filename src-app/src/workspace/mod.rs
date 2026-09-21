@@ -67,7 +67,6 @@ use gpui::{App, Entity, Window};
 use paneflow_config::schema::{ButtonCommand, LayoutNode, TabSession};
 
 use crate::ai_types::AgentSession;
-use crate::launch_cwd;
 use crate::layout::LayoutTree;
 use crate::pane::Pane;
 
