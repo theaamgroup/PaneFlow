@@ -4,8 +4,8 @@ Every PaneFlow command has a canonical action name. The action name is
 the string you put in the `shortcuts` object in
 [`paneflow.json`](configuration/schema.md#top-level-keys).
 
-There is no keybinding table in this file. Do not add one by hand: it
-would drift. The source of truth is:
+The tables below document defaults. Update them together with the registry;
+the source of truth is:
 
 | What | Where |
 | --- | --- |
@@ -59,3 +59,61 @@ actions, the later entry takes effect.
 
 Unknown action names are skipped with a warning rather than failing the
 load. `+` and `-` both parse as separators.
+
+## Default binding reference
+
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+
+**`secondary` resolves to Cmd on macOS** (`defaults.rs`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
+
+**The macOS menu bar** (`app/bootstrap.rs::install_macos_menu_bar`, `#[cfg(target_os = "macos")]`) is PaneFlow (`About PaneFlow`, `Settings…`, separator, `Report an Issue`, separator, `Quit PaneFlow`) / Edit / Window (`Minimize`, `Zoom`, separator, `Show All Panes`, separator, `Next Workspace`, `Close Workspace`, `New Workspace`) / Help (`PaneFlow Help`, separator, `System Info…`). `Settings…` dispatches `OpenSettings` into `open_settings_window`. `Report an Issue` dispatches `ReportIssue` and opens `https://github.com/theaamgroup/paneflow/issues/new` in the default browser. `System Info…` dispatches `ShowSystemInfo` into `open_system_info_dialog` (`app/system_info_dialog.rs`): a copyable environment block - version, install format, OS, CPU, GPU, renderer, libghostty version - with no project path and no environment dump, collected off the render thread by `system_info.rs` (`sysctl`, `MTLCopyAllDevices`, and `sparkle::bundled_framework_binary` for the install format). Like `About` / `OpenHelp` / `OpenSettings` / `ReportIssue` it has no default chord and is absent from `keybindings/registry.rs::ACTIONS`. Theme selection lives in Settings → Appearance (and the title-bar profile menu's `Themes…` row, which calls `open_theme_picker` directly); there is no View menu. Every menu action needs BOTH a render-root `.on_action` in `main.rs` and an app-global fallback in `install_macos_menu_action_fallbacks`, or AppKit's `is_action_available` check paints the item permanently greyed while focus sits in a terminal. `OpenSettings` is deliberately absent from `keybindings/registry.rs::ACTIONS` (the `About` / `OpenHelp` precedent) so Settings → Keyboard Shortcuts does not grow permanently `Unassigned` rows, and **`Cmd+,` is deliberately unbound** (issue #105) - `no_default_binds_the_macos_preferences_chord` in `keybindings/apply.rs` fails if any default claims it. The sidebar's "Workspaces" header carries no `+` (issue #105); it does carry the Pane Overview button (issue #339, id `sidebar-pane-overview`), which the #105 guard test permits because it forbids only the `sidebar-new-workspace` id. New Workspace is `Cmd+Shift+N`, Window ▸ New Workspace, and the sidebar's empty-state "Open folder" button (`empty-new-ws` in `app/sidebar/mod.rs`; the sidebar can be collapsed with `Cmd+Alt+B`, so the `empty-app` copy in `main.rs` says the button is in the sidebar; the title-bar profile menu is reachable but carries no New Workspace row). The sidebar footer carries **no Settings affordance at all** - the gear that survived issue #105 is gone, so `Settings…` on the menu bar and the title-bar profile menu are the only two entry points.
+
+| Key | Action | Context |
+|-----|--------|---------|
+| `Cmd+Shift+D` / `Cmd+Shift+E` | Split horizontal / vertical | Global |
+| `Cmd+Shift+W` / `Cmd+Shift+T` | Close pane / undo close pane | Global |
+| `Cmd+Alt+T` / `Cmd+W` | New tab / close tab | Global |
+| `Cmd+]` / `Cmd+[` | Next tab / previous tab | Global |
+| `Alt+Arrow` | Focus navigation | Global |
+| `Cmd+Shift+N` / `Cmd+Shift+Q` | New / close workspace | Global |
+| `Ctrl+Tab` | Next workspace | Global |
+| `Cmd+1`-`Cmd+9` | Select workspace | Global |
+| `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
+| `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
+| `Cmd+Shift+Z` | Toggle zoom | Global |
+| `Cmd+Shift+J` | Jump to next waiting agent, including background tabs | Global |
+| `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
+| `Cmd+Shift+I` | Fleet agent summary (on-device, one line per agent pane) | Global |
+| `Cmd+Shift+G` | Diff view | Global |
+| `Cmd+G` / `Cmd+J` | New file tab / new terminal tab (diff dock; `secondary-g` / `secondary-j`) | Global, not Terminal/TextInput/CodeEditor |
+| `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
+| `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
+| `Cmd+Shift+O` | Command palette (every context-free action with its live binding; `app/command_palette.rs`, #523; upstream's `Cmd+Shift+P` is Pane Overview here) | Global |
+| `Cmd+Alt+F` | Toggle files sidebar for the active tab (inert in Review and Settings, where the rail is unmounted) | Global |
+| `Cmd+Shift+F` | Maximize / restore the Changes dock (`toggle_diff_dock_maximize`; no-op while the dock is not visible) | Global |
+| `Cmd+Alt+B` | Toggle primary sidebar (persisted across launches) | Global |
+| `Ctrl+Alt+R` / `Ctrl+Shift+Alt+C` | Reveal in Finder / copy workspace path | Global |
+| `Ctrl+Alt+Z` / `C` / `V` / `W` | Open workspace in Zed / Cursor / VS Code / Windsurf | Global |
+| `Cmd+C` / `Cmd+V` | Copy / paste (macOS layer) | Terminal |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste (cross-platform layer, still bound) | Terminal |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll page | Terminal, Markdown |
+| `Cmd+Shift+Up` / `Cmd+Shift+Down` | Jump to prev / next shell prompt mark | Terminal |
+| `Cmd+K` / `Cmd+Shift+K` | Clear scrollback (`clear_scroll_history`; `cmd-k` is the macOS layer, `secondary-shift-k` the alias) | Terminal |
+| `Cmd+Shift+R` | Reset terminal (`reset_terminal`, RIS) | Terminal |
+| `Ctrl+Shift+X` / `Ctrl+Shift+F` | Copy mode / find-in-buffer | Terminal |
+| `Cmd+=` / `Cmd+-` / `Cmd+0` | Font size up / down / reset | Terminal |
+| `Ctrl+F` / `Ctrl+Shift+C` | Find in buffer / copy selection | Markdown |
+| `Ctrl+Shift+C` | Copy diff hunk | DiffView |
+| `Enter` / `Shift+Enter` / `Esc` | Next / prev / dismiss | Search, MarkdownSearch |
+| `Alt+R` | Toggle regex | Search |
+| `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
+| `Cmd+Q` | Quit (macOS only) | Global |
+
+`Cmd+Shift+K` and `Cmd+K` clear terminal scrollback; `Cmd+Shift+R` resets
+the terminal. Their registry contexts and exclusive chord ownership are
+covered by `cmd_shift_k_and_cmd_k_clear_scrollback` in `keybindings/apply.rs`.
+`Cmd+Shift+A` is unassigned after removal of the waiting-agent list overlay.
+
+Next-workspace is `ctrl-tab`, not the upstream `secondary-tab` (Cmd+Tab): macOS reserves Cmd+Tab for the application switcher and never delivers it to the app (issue #10; a synthetic Cmd+Tab on 2026-08-27 moved focus to another app while Cmd+1/Cmd+2 through the same path switched workspaces). A test in `keybindings/apply.rs` fails if any default binds `secondary-tab` again.
+
+Work Review opens with `Cmd+Shift+U` (`open_work_review`) or **Window → Work Review**. The command palette (`Cmd+Shift+O`), agent summary (`Cmd+Shift+I`), pane overview (`Cmd+Shift+P`), and Files sidebar (`Cmd+Alt+F`) use the current defaults in `keybindings/defaults.rs`.

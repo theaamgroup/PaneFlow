@@ -22,25 +22,165 @@ without Electron.
 
 ## Workspace layout
 
-The repo is a Cargo workspace with one binary crate and a set of small,
-focused library crates:
+```
+PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
+├── app/                               ← PaneFlowApp impl, split across modules
+│   ├── actions.rs                     ← 95 GPUI action types (paneflow namespace)
+│   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
+│   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
+│   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
+│   ├── session.rs                     ← persist/restore workspaces to session.json
+│   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
+│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs; `code/perf_bench.rs` +
+│   │                                     `code/bench_corpus.rs` are the editor bench, scripts/bench-editor.sh); parked per TAB
+│   │                                     (`cli_diff_dock.rs` keys slots by `Tab::id`, never by workspace);
+│   │                                     rendered width = min(stored, main-panel remainder), and the dock is
+│   │                                     not rendered at all below the floor (remainder < 360 px dock +
+│   │                                     one minimum pane); stored width only written by the resize drag,
+│   │                                     and a drag pinned at the render ceiling leaves a wider preference alone;
+│   │                                     `Cmd+Shift+F` maximizes the dock over a clipped (never resized) pane grid,
+│   │                                     with the sidebar slide on open and maximize (`reduce_motion` makes both instant)
+│   ├── review/                        ← Review mode: Workspaces rail (220 px), Changes rail (300 px),
+│   │                                     independent single-subject diff panes in LayoutTree (MAX_REVIEW_PANES = 6);
+│   │                                     mode.rs gates entry, grid.rs handles opening/split/move/zoom,
+│   │                                     session.rs persists subjects + geometry + collapsed repository groups
+│   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
+│   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor;
+│   │                                     `FilesSidebar` entity (#430): `worker.rs` thread owns the snapshot + watches,
+│   │                                     `projection.rs` builds rows off-thread, `view.rs` is a `uniform_list`
+│   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348;
+│   │                                     tab Mark as read clears waiting/errored/stalled session badges, #408;
+│   │                                     workspace Mark as read clears completions, Mute/Unmute notifications persists, #493),
+│   │                                     Customize Sidebar menu (`customize_menu.rs`: `sidebar_show` toggles,
+│   │                                     Expand all / Collapse all, #349); footer mode tabs
+│                                         + IPC banner (no Settings affordance at all)
+│   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
+│   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
+│   ├── launch_pad.rs                  ← agent launcher UI
+│   ├── agent_summary/                 ← Cmd+Shift+I: what every agent pane is doing, one line each,
+│                                         generated on-device by Apple Foundation Models through the
+│                                         Swift sidecar in `native/agent-summary/` (`summarize.rs` is the
+│                                         pure prompt/parse core; `model.rs` spawns the sidecar off-thread)
+│   ├── pane_overview/                 ← Cmd+Shift+P expose: every terminal pane across every
+│                                         workspace in a compact grid; tabs stay adjacent with
+│                                         split-pane labels and eight-row previews (rows.rs: packing/navigation)
+│   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
+│   ├── command_palette.rs             ← Cmd+Shift+O palette: every context-free registry action with its live
+│   │                                     binding, whole-word filter, Enter dispatches, never lists itself (#523)
+│   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
+│   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
+│   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
+├── cli/                               ← `paneflow send|read` over the IPC socket
+├── window_chrome/
+│   ├── shell.rs                       ← native macOS window content shell
+│   ├── macos_backdrop.rs              ← native material behind sidebar/title bar
+│   └── title_bar.rs                   ← window controls, drag-to-move
+├── workspace/                         ← Vec<Workspace> state
+│   ├── mod.rs                         ← Workspace struct, AI agent PIDs, MAX_WORKSPACES = 32
+│   ├── git.rs / worktree.rs           ← branch detection for badges, worktree support
+│   ├── pid_resolve.rs                 ← PID-reuse-safe process identity
+│   ├── ports.rs                       ← TCP port scan (macOS libproc)
+│   └── surface_naming.rs              ← auto-naming panes from their process
+├── layout/                            ← N-ary tree of panes (replaced the old binary SplitNode)
+│   ├── tree.rs                        ← LayoutTree::{Leaf, Container}, DragState, size consts
+│   ├── mutations.rs / navigation.rs / close.rs
+│   ├── presets.rs                     ← from_panes_equal, main_vertical, tiled
+│   ├── render.rs                      ← GPUI flex emission + divider hitboxes
+│   └── queries.rs / serde.rs          ← MAX_PANES = 32 lives in layout/mod.rs
+├── pane.rs / pane_drag.rs             ← Pane: tab strip + active terminal; drag-to-split
+├── terminal/                          ← PTY session + VT emulation + rendering
+│   ├── view.rs                        ← TerminalView (Entity<Render>), 4 ms wakeup coalescing
+│   ├── ghostty_session.rs             ← GhosttySession: runtime thread owns DisplayTerminal + PTY, publishes snapshots
+│   ├── pty_session.rs                 ← TerminalState: GPUI-facing host, env, pinned Drop ladder, scrollback
+│   ├── clipboard_gate.rs / input.rs   ← OSC 52 policy gate, key/mouse encoding through libghostty
+│   ├── kitty.rs                       ← Kitty graphics placements (PNG decode, 32 MiB/pane cap)
+│   ├── search.rs / marks.rs           ← find-in-buffer, shell-integration prompt marks
+│   ├── service_detector.rs / shell.rs ← dev-server detection, shell resolution
+│   ├── blink.rs / types.rs            ← cursor blink, shared terminal types
+│   ├── bench_corpus.rs / perf_bench.rs ← deterministic VT corpus, terminal bench (#[ignore], scripts/bench-terminal.sh)
+│   ├── ghostty_stress.rs / test_allocator.rs ← runtime stress (#[ignore]); the test binary's one #[global_allocator]
+│   └── element/                       ← low-level GPUI Element rendering
+│       ├── mod.rs                     ← TerminalElement: layout → prepaint → paint
+│       ├── color.rs                   ← ANSI→Hsla, APCA contrast
+│       ├── font.rs / geometry.rs      ← font resolution + cell geometry
+│       ├── hyperlink.rs               ← OSC 8 + URL scanning
+│       ├── sprites.rs                 ← glyphs the renderer draws itself: box drawing, shades, braille, Powerline
+│       ├── paint/                     ← background, text, cursor, selection, scrollbar, sprites
+│       ├── thumbnail.rs               ← read-only cropped pane preview; NEVER routes through
+│                                          TerminalElement (its build_layout resizes the PTY)
+│       └── golden/ pixel_probe.rs     ← golden-image + pixel assertions
+├── theme/                             ← theme model + hot-reload (8 bundled variants)
+│   ├── model.rs                       ← TerminalTheme (36 Hsla slots + ui + syntax), UiColors
+│   ├── builtin.rs                     ← THEMES table + theme_by_name
+│   └── watcher.rs                     ← 500 ms mtime cache + notify events, active_theme()
+├── keybindings/
+│   ├── defaults.rs                    ← DEFAULTS + MACOS_ONLY_DEFAULTS tables
+│   ├── apply.rs                       ← apply_keybindings() wires cx.bind_keys
+│   └── registry.rs / display.rs       ← action registry, human-readable binding strings
+├── settings/                          ← embedded Codex-style settings (inline, not a window)
+│   ├── chrome.rs                      ← grouped nav rail + content panel (impl PaneFlowApp)
+│   ├── components.rs / nav_header.rs  ← shared cards/toggles/section headers
+│   └── tabs/                          ← general, appearance, shortcuts, terminal, ai_agent, mcp,
+│                                        workspaces. shortcuts is the one virtualized tab
+│                                        (gpui::list, owns its scroll): ~80 rows × ~8 nodes
+│                                        rebuilt every frame made the whole settings surface lag
+├── diff/                              ← git diff engine + single-ReviewSubject viewer (custom Element, own hscroll);
+│                                         per-pane base + unified/split display, no embedded terminals or scope/sync layer
+├── markdown/                          ← streaming Markdown view (parser, security, theme); panes come from
+│                                         OSC path click + session restore only (no Files-sidebar drag or click)
+├── agents/                            ← agent process supervision, notifications
+├── ai_hooks/                          ← ai.* hook payload extraction
+├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
+├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
+├── widgets/                           ← text_input, text_area, scrollbar, callout
+├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
+├── ai_types.rs                        ← AiToolState, AgentStateSource ranking, lifecycle reducer
+├── claude_session_registry.rs         ← reads Claude Code's sessions/<pid>.json (state without hooks)
+├── ipc.rs                            ← JSON-RPC server over `interprocess`
+├── keys.rs                            ← key translation (mouse encoding lives in terminal/input.rs)
+├── search.rs                          ← find-in-buffer UI glue
+├── limits.rs                          ← centralized ingress/egress size caps
+├── release_notes.rs                   ← `last-launched-version` cache marker (hand-parsed x.y.z); first launch of a newer version raises the sticky release-notes toast (#526)
+├── runtime_paths.rs                   ← runtime/data/config path helpers + sun_path guard
+├── login_shell_env.rs                 ← adopt the login shell's PATH (GUI launch has none)
+├── config_writer.rs                   ← read-modify-write paneflow.json
+├── window_state.rs / editor.rs / external_open.rs
+├── sidebar_title.rs                   ← sidebar label cleanup
+├── startup_trace.rs / startup_bench.rs ← PANEFLOW_STARTUP_TRACE probe (marks in main / mount / new / render, writes
+│                                         JSON at the measured frame, quits); cfg(test) first-frame bench (#519)
+├── system_info.rs                     ← Help ▸ System Info… collection: sysctl, Metal devices, install format, libghostty identity
+├── bench_harness.rs                   ← cfg(test): Metric, measure, comparison table, publish(), libproc counters shared by both benches
+└── assets.rs                          ← rust-embed asset registry (fonts, icons)
+```
 
-| Crate | Path | Purpose |
-|---|---|---|
-| `paneflow-app` | `src-app/` | The GPUI application and `paneflow` CLI entrypoint: UI, panes, PTY sessions, IPC server |
-| `paneflow-config` | `crates/paneflow-config/` | Config schema, tolerant JSON loader, file watcher |
-| `paneflow-shim` | `crates/paneflow-shim/` | PATH shim wrapping 18 known agent CLIs so Paneflow can observe their lifecycle |
-| `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | The hook binary agent CLIs invoke to report session events back over IPC |
-| `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Blocking JSON-RPC client for the local IPC socket (shared by the MCP bridge and the CLI) |
-| `paneflow-mcp` | `crates/paneflow-mcp/` | Stdio MCP server exposing read-only pane access (`list_panes`, `read_pane`, `search_pane`) |
-| `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | GPU-free install engine for the MCP bridge: per-agent detection, idempotent config merge, backup + atomic write |
-| `paneflow-process` | `crates/paneflow-process/` | Bounded external-process execution (wall-clock deadline + stdout cap) shared across crates |
+### Workspace crates
 
-`src-app` is the default workspace member, so bare `cargo run` starts the
-desktop app instead of becoming ambiguous across helper binaries. The split is
-deliberate: anything that runs *outside* the GUI process (shim, hook, MCP
-bridge, MCP installer logic) must stay GPU-free and tiny, so it lives in its
-own crate and never links GPUI.
+
+| Crate | Path | Type | Purpose |
+|-------|------|------|---------|
+| `paneflow-app` | `src-app/` | Binary | GPUI application: all UI, PTY, IPC, CLI |
+| `paneflow-config` | `crates/paneflow-config/` | Library | Config schema, JSON loader, file watcher |
+| `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
+| `paneflow-mcp` | `crates/paneflow-mcp/` | Binary | Read-only stdio MCP server (see below) |
+| `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | GPU-free per-agent MCP config merge engine |
+| `paneflow-agent-setup` | `crates/paneflow-agent-setup/` | Library | GPU-free rulebook inventory (instruction files, skills, rules, hooks, MCP) behind the dock's Agent setup tab (#331) |
+| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 18 agent CLIs |
+| `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
+| `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
+| `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |
+| `paneflow-libghostty-sys` | `crates/paneflow-libghostty-sys/` | Library | Raw libghostty-vt FFI; `build.rs` verifies and links `native/libghostty/prebuilt/aarch64-apple-darwin` (no Zig) |
+| `paneflow-terminal-ghostty` | `crates/paneflow-terminal-ghostty/` | Library | Safe `DisplayTerminal` wrapper over the FFI |
+| `paneflow-textdiff` | `crates/paneflow-textdiff/` | Library | IntelliJ-style line/word comparison + `BlockTracker` for editor gutter markers (#432). GPU-free; never linked by the size-capped helpers |
+| `paneflow-ghostty-smoke` | `crates/paneflow-ghostty-smoke/` | Binary | Headless PTY smoke against the linked archive |
+
+There is **no** `paneflow-telemetry` crate, and the lockfile contains no
+Zed `markdown`, `telemetry`, or `telemetry_events` packages. GPUI is the
+remaining Zed dependency; do not restore the removed Markdown-widget graph.
+
+Everything that runs outside the GUI process must stay GPU-free and never link GPUI.
+
+`clippy.toml` is load-bearing: it allows unwrap and expect in tests while
+keeping the workspace lint policy strict in production code.
 
 ## Thread model
 
@@ -58,23 +198,13 @@ own crate and never links GPUI.
 └────────────────┘  └────────────────┘  └──────────────────┘
 ```
 
-- **Main thread**: the GPUI event loop. All UI state lives in `Entity<T>`
-  values mutated through GPUI contexts; there are no locks around UI state.
-- **Terminal workers**: one `paneflow-ghostty-runtime` thread per session. It
-  owns the `!Send` libghostty `DisplayTerminal`, the PTY master, and the
-  child, and publishes owned snapshots through an `Arc<RwLock<SharedState>>`
-  (the only cross-thread terminal data) plus backend-neutral events to the
-  view through `TerminalSessionBackend`. The runtime only reaps the child;
-  every signal a user close sends comes from the app thread through the
-  fork's pinned process-group path.
-- **IPC thread**: accepts connections on a Unix socket. Stateless methods
-  reply in place; stateful methods are dispatched to the main thread through a
-  bounded channel and drained by the 50 ms app poll loop
-  (`PaneFlowApp::process_automation_tick`).
-- Blocking work (git subprocesses, filesystem walks, fleet-wide search) is
-  pushed to background executors. Registering a recursive file watcher or
-  scanning a monorepo on the render thread is how you get a "not responding"
-  window, so the codebase treats the main thread as render-only.
+- **Main thread**: GPUI event loop, owns all Entity state, rendering, input dispatch. No locks around UI state.
+- **Ghostty runtime thread** (`paneflow-ghostty-runtime`, one per terminal): owns the `!Send` `DisplayTerminal`, the PTY master and the child; drains the mailbox (input, resize, selection, shutdown) and publishes `Content` snapshots through a `PublishGate` (#343, upstream 799ab51d + 8d8a9d88 + e03972c5). The gate holds a frame for two reasons: DEC 2026 synchronized output is set (one FFI mode query per wake, `DisplayTerminal::synchronized_output`), or the previous publish is newer than **8 ms** (`MIN_PUBLISH_INTERVAL`; deferred to the interval's end through `next_wake`, never dropped). A 2026 hold expires after **150 ms** (`SYNC_OUTPUT_MAX_HOLD`) so a program that opens a frame and dies cannot freeze the pane. Resize, scroll, scrollback clear, reset, select-all, a command mark, the first frame of a session, and the frame preceding `ChildExited` bypass the gate (`publish_now`). A `Wakeup` is queued only for a frame that was actually published. Publishing converts only the rows the engine flagged (`ghostty::Content::dirty_rows` → `CellMirror`, two alternating `Arc<[Cell]>` buffers, full conversion when the render thread still holds the back buffer). The loop blocks 10 ms (`RUNTIME_IDLE_TICK`) only while output flows, a drag is held, or a child is winding down, and **100 ms** (`RUNTIME_QUIET_TICK`) once a pane has been silent for a second; the display-only runtime blocks for a second. A `Shutdown` message wakes the mailbox at once, so neither tick delays the close guard, and the gate touches nothing but the grid: it never signals or reaps (see the close-guard trap above). A sibling **PTY reader thread** (`paneflow-ghostty-pty-reader`) feeds it 32 KiB chunks through a 4-buffer pool. An OSC 8 hover lookup is a `HyperlinkHover` message answered by `GhosttyUiEvent::HyperlinkResolved`, never a blocking round trip from the UI thread.
+- **IPC thread**: Unix-socket server; stateless methods reply in place and stateful requests reach the main thread through a bounded channel drained every 50 ms. `runtime_paths.rs` uses an existing UTF-8 `$TMPDIR`, then `dirs::cache_dir()/run`; it ignores XDG runtime paths. `PANEFLOW_SOCKET_PATH` is an absolute-path override. Release sockets use `paneflow/paneflow.sock`, debug sockets `paneflow-dev/paneflow-dev.sock`; reject paths reaching the 104-byte macOS limit. Keep the IPC-client resolver in lockstep.
+- **Watcher threads**: config (notify, 300 ms debounce, 1 s max-wait ceiling), theme, git state.
+- **Shared state**: `parking_lot::RwLock<SharedState>` (`Content` cells + modes + metrics + kitty placements) written by the runtime thread and read by the GPUI thread; `UiEventState` slots carry title/cwd/progress/notification/clipboard events. The libghostty C handle never leaves the runtime thread.
+
+Blocking git, filesystem walks, recursive watcher registration, and fleet-wide search run off the render thread.
 
 ## Files tree
 
@@ -151,33 +281,23 @@ checkout files or runtime configuration are read by the app.
 
 ## Keystroke → pixel
 
-The full input/output pipeline, end to end:
-
 ```
-KeyDownEvent
-  → TerminalView::handle_key_down()
-  → keys::to_esc_str() escape-sequence translation
-  → GhosttySession::write (runtime mailbox) → PTY master → shell / agent CLI
-  → output bytes → libghostty-vt parser → DisplayTerminal grid mutations
-  → SharedState snapshot + Wakeup → TerminalBackendEvent
-  → 4 ms coalescing batch → sync() → cx.notify()
-  → TerminalSessionBackend::render_content() → owned neutral Content
-  → TerminalElement::prepaint()
-  → TerminalElement::paint()     - quads + shaped glyph runs
-  → GPU (Metal)
+KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
+→ write_ghostty_key() → RuntimeMessage::KeyInput → runtime thread → DisplayTerminal::encode_key() → PTY write
+→ shell output → pty-reader thread → RuntimeMessage::Output → DisplayTerminal::feed()
+→ PublishGate::request(): held while DEC 2026 is set (150 ms max) or the last frame is < 8 ms old
+   (deferred via next_wake, never dropped); resize/scroll/first frame/pre-ChildExited bypass it
+→ commit(): snapshot (dirty rows only, CellMirror) → RwLock<SharedState> with a new Content::generation;
+   queue_wakeup → GhosttyUiEvent::Wakeup (only on a real publish)
+→ 4ms coalescing batch (terminal/view.rs; a timer for event bursts, not the frame gate)
+→ process_backend_wakeup() → dirty=true → cx.notify()
+→ TerminalElement::prepaint() → session_backend().render_content() (RwLock read + Arc<[Cell]> clone)
+→ build_layout(): LayoutCacheKey (Content::generation + theme generation + bounds/font/cursor/focus/
+   search/exit inputs) hit → Arc<LayoutState> clone; miss → layout_from_snapshot()
+→ TerminalElement::paint() → paint_quad + shape_line (+ kitty placements) → Metal
 ```
 
-Wakeups are coalesced into a 4 ms event batch (`terminal/view.rs`) so a chatty
-process cannot drive one repaint per byte.
-
-`TerminalElement` (`src-app/src/terminal/element/`) is the one place Paneflow
-implements GPUI's low-level `Element` trait directly instead of composing
-divs: terminal rendering wants per-cell control over background quads, glyph
-runs, cursor shapes, underlines and hyperlink hitboxes. Everything else in the
-app (sidebar, tabs, settings, diff viewer) is regular GPUI flex layout.
-
-Debug builds can trace the whole pipeline: `PANEFLOW_LATENCY_PROBE=1` stamps a
-keystroke at ingress and reports time-to-pixel.
+Debug builds can trace ingress-to-paint latency with `PANEFLOW_LATENCY_PROBE=1`. Terminal and diff/code elements implement GPUI’s low-level `Element` contract; ordinary chrome uses flex layout.
 
 ## The terminal engine boundary
 
@@ -287,12 +407,130 @@ and report back through events.
 
 ## Building
 
-From-source setup, the Xcode/Metal traps, and debug vs release paths are in
-[`INSTALL.md`](INSTALL.md). The short version:
-
 ```bash
-cargo build --release    # LTO thin, strip, codegen-units=1
-cargo test --workspace
+# Build
+cargo build
+cargo build --release          # LTO thin, strip, codegen-units=1
+
+# Run
+cargo run                      # debug build (src-app is the default workspace member)
+RUST_LOG=info cargo run        # with logging (env_logger)
+PANEFLOW_LATENCY_PROBE=1 cargo run  # keystroke→pixel latency tracing (debug only)
+
+# Test
+cargo test --workspace         # all workspace tests
+cargo test -p paneflow-config  # config crate tests only
+cargo test -p paneflow-app --test flex_nchild -- --nocapture  # GPUI layout integration tests
+cargo test <test_name> -- --nocapture  # single test with output
+
+# Lint
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
+
+# Benchmark (release profile; see bench/README.md)
+scripts/bench-terminal.sh                # terminal pipeline benchmark: writes bench/results/<stamp>-<sha>.json,
+                                         # prints a Markdown comparison against bench/baseline.json when it exists
+scripts/bench-terminal.sh --set-baseline # same run, then make it the baseline
+scripts/bench-editor.sh                  # code editor benchmark: writes bench/results/editor-<stamp>-<sha>.json,
+                                         # compares against bench/editor-baseline.json (plain results table without one)
+scripts/bench-editor.sh --set-baseline   # same run, then make it the baseline; refused when cpu_share < 0.90
+scripts/bench-startup.sh                 # time to first frame: builds the release binary, launches it against two
+                                         # seeded PANEFLOW_HOME fixtures, writes bench/results/startup-<stamp>-<sha>.json,
+                                         # compares against bench/startup-baseline.json
+scripts/bench-startup.sh --set-baseline  # same run, then make it the baseline; refused when the core-share probe < 0.90
+cargo test -p paneflow-app --release -- --ignored layout::render --test-threads=1
+                                         # editor scroll frame beside 0/2/6 terminal panes (scroll_frame_p95_us_panes_N)
 ```
+
+Performance claims about the terminal pipeline, the code editor, or startup
+need evidence from those suites: the ignored `terminal_pipeline_benchmark` in
+`src-app/src/terminal/perf_bench.rs` and `editor_pipeline_benchmark` in
+`src-app/src/app/diff_dock/code/perf_bench.rs` measure them GPU-free under
+the release profile through the shared `src-app/src/bench_harness.rs` and
+print the comparison table `bench/README.md` documents; the ignored
+`layout::render::tests::editor_scroll_frame_by_pane_count` measures one
+wheel notch on the editor with terminal panes in the frame; the ignored
+`startup_bench::startup_first_frame_benchmark` (#519) launches the release
+binary with `PANEFLOW_STARTUP_TRACE=<file>` set, which makes
+`src-app/src/startup_trace.rs` record a mark per launch stage, write the
+timeline once the measured frame is presented (the first frame, or the frame
+after the last #156 restore batch when a session was restored), and quit.
+Do not ship a perf number you did not measure, and do not publish a run that
+printed `PANEFLOW_BENCH_WARNING` (another workload was competing);
+`--set-baseline` refuses such a run for the editor and startup suites.
+
+`PANEFLOW_HOME=<absolute dir>` (#519, `paneflow_config::loader::HOME_ENV`)
+relocates every per-user directory the app owns: the config root becomes
+`<home>/config`, the data root `<home>/data`, and the cache root
+`<home>/cache`, each still joined with `APP_SUBDIR`, so a release binary
+reads `<home>/config/paneflow/paneflow.json` and `session.json` beside it.
+`runtime_paths::{config_dir, cache_dir, data_dir}` are the app-side
+resolvers; every `dirs::config_dir()` / `dirs::cache_dir()` site for
+app-owned state goes through them. The IPC socket does not follow it:
+`PANEFLOW_SOCKET_PATH` keeps its own precedence, and the startup bench sets
+both.
+
+Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
+holds the 18 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
+running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
+whoami` / `paneflow mcp install` work inside a pane without the user linking the
+bundle binary onto their login PATH. The link is re-pointed at launch when
+`current_exe()` moves.
+
+Debug builds namespace themselves as `paneflow-dev` (`runtime_paths.rs`):
+config, data, cache, and the default IPC socket (`paneflow-dev.sock`). A
+`cargo run` debug instance should not share those with
+`/Applications/PaneFlow.app`. A **release-profile** local binary
+(`cargo run --release`, `./target/release/paneflow`) uses the real
+`paneflow` namespace and **will** collide with the installed app's
+socket. (Issue #39 is **fixed**: `window_state.rs` resolves
+`window-state.json` under the same `APP_SUBDIR` as `paneflow.json`, so a
+debug build writes it to `paneflow-dev`. A regression test in that module pins it.)
+
+If the singleton guard refuses to start, the installed app is holding
+`paneflow.sock`. Override with both:
+
+```bash
+PANEFLOW_ALLOW_MULTIPLE=1 PANEFLOW_SOCKET_PATH=/tmp/paneflow-head-smoke.sock cargo run -p paneflow-app
+```
+
+`PANEFLOW_ALLOW_MULTIPLE` is **value-gated**: `allow_multiple_from`
+(`src-app/src/ipc.rs`) is `matches!(value, Some("1"))`, so only `=1`
+skips the guard and `=0` correctly keeps it. Issue #53 reported the
+opposite (presence-gating) and was fixed in `1cfee6c7`; do not
+re-transcribe the bug title as behaviour. `open -a PaneFlow` drops shell
+env; use `open --env VAR=1`.
+
+### Fork-pin maintenance (GPUI)
+
+The Zed git deps in `src-app/Cargo.toml` pin `zed-industries/zed@fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8` (`gpui` and `gpui_platform` in `[dependencies]` at lines 39-40, plus a test-support `gpui` in `[dev-dependencies]` at line 253). `gpui_platform` must carry the `font-kit` feature on macOS. To bump: choose and freeze a tested upstream revision, update every exact `rev`, run `cargo update`, then run the workspace test, Clippy, and format gates. Do not reintroduce an `arthjean/zed` pin.
+
+## Dependency sources
+
+GPUI and `gpui_platform` are **git dependencies** pinned to `zed-industries/zed`:
+
+```toml
+gpui = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8" }
+gpui_platform = { git = "...", rev = "fecc3273...", features = ["font-kit"] }   # font-kit is mandatory on macOS
+```
+
+Cargo fetches GPUI from git automatically. **There is no local checkout and no path dependency.** Two crates-io patches are required by GPUI:
+- `async-task` → `smol-rs/async-task` (specific git commit)
+- `calloop` → `zed-industries/calloop` fork
+
+Terminal emulation is `paneflow-terminal-ghostty` (workspace crate, `src-app/Cargo.toml`), the safe wrapper over `paneflow-libghostty-sys`, whose build script links `native/libghostty/prebuilt/aarch64-apple-darwin/lib/libghostty-vt.a` after verifying every hash in `native/libghostty/manifest.toml`. `portable-pty = "0.9"` opens the PTY and spawns the child; `image` (PNG only) decodes Kitty graphics. `cargo deny` cannot see the static archive: `native/libghostty/THIRD_PARTY_NOTICES.md` is its license inventory and ships in the bundle as `ThirdPartyLicenses/libghostty.txt`.
+
+
+## Styling conventions
+
+**`DESIGN.md` at the repo root is the design contract** and outranks this
+section on anything visual: the tokens, the geometry and radius tables, the
+motion rules, the per-component contracts, the accessibility floors, and the
+delivery gate a UI change has to clear. Read it before touching chrome, and
+update it in the same PR as any visual change. The notes below are the
+engineering summary, not the contract.
+
+- **All styling is inline** via GPUI's Tailwind-like builder API: `.bg(rgb(0x181825)).px_3().rounded_md()`
+- **Sidebar/titlebar colors are hardcoded** dark hex values unless the active theme supplies a `UiColors` block. Legacy themes derive chrome colors from light/dark defaults; the bundled custom themes opt into exact UI tokens so the theme affects the whole app, not just ANSI colors.
+- **Terminal colors** come from `TerminalTheme` (36 `Hsla` slots plus optional `ui: UiColors` and a `syntax: SyntaxPalette`, `theme/model.rs`) resolved via `active_theme()`. `selection_foreground` is computed at theme-load time so `apca_contrast(selection_foreground, selection) >= 45.0` holds at every observation point; if you construct a theme by hand, call `recompute_selection_foreground()`.
+- **Font**: defaults to the embedded `JetBrainsMono Nerd Font` at **13.0 pt** (`terminal/element/font.rs`, the related definition), range clamped to 8.0-32.0. The regular (non-Mono) Nerd Font variant is bundled since #420 (upstream `73e51a01`): its icons keep their designed size and the renderer constrains them instead (Ghostty's `Glyph.zig` `fit_cover1` / `center1`, `paint/text.rs::constrain_icon`): a Private Use Area glyph is laid out as a `SymbolGlyph { span }`, scaled to cover one cell, or left at its designed size over two cells when the cell after it is empty, it does not follow another icon, and it is not the last column; ink bounds come from the embedded face's `glyf` table (`face_tables.rs::embedded_glyph_ink`). The legacy names `JetBrainsMono Nerd Font Mono` and `JetBrainsMono NFM` (and `JetBrainsMono NF`) keep resolving to the bundled family with no warning. The cell grid is measured on the face (#418, upstream `7706b771`): `terminal/element/face_tables.rs` reads the embedded faces' `hhea` / `post` / `OS/2` tables through `ttf-parser`, `font.rs::cell_metrics_from_face` ports Ghostty's `Metrics.calc` (widest ASCII advance by the face's own line height, each rounded to whole **device** pixels, baseline on a pixel row), and `CellGeometry` carries the resulting `CellMetrics` so every paint pass computes edges as `floor(origin) + col * cell`. `line_height` / `cell_width` are multipliers of that measured cell and default to **`1.0`** (ranges 0.8-2.5 / 0.8-2.0); at 13 pt JetBrains Mono the cell is 10x23 px. Underlines and strikethroughs (`paint/decorations.rs`: single, double, dotted, dashed, curly, all from the font tables) and the bar / underline / hollow cursors (`paint/cursor.rs`, `CellMetrics::cursor_thickness`) are sized from those metrics too. The Pane Overview thumbnail measures the same way without a `Window` (`font.rs::cell_metrics_without_window`). Embedded families are always resolvable because `Assets::load_fonts` registers them with GPUI at boot. A configured `font_family` that is not an installed monospace family (checked against Core Text via `fonts.rs::load_mono_fonts`) logs a warning and falls back to the default.
