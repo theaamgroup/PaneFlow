@@ -240,9 +240,9 @@ gated scripting path.
 ## IPC and the MCP bridge
 
 A JSON-RPC 2.0 endpoint on a Unix socket exposes `system.*`, `workspace.*`,
-`surface.*`, `fleet.*`, `events.*`, and `ai.*` namespaces: enough to script
-workspace creation, read panes, send text behind the scripting gate, and
-subscribe to agent events. The `paneflow` CLI (`paneflow watch`, `paneflow wait`) is built on the same socket. The socket path
+`surface.*`, `fleet.*`, and `ai.*` namespaces: enough to script
+workspace creation, read panes, and send text behind the scripting gate.
+The `paneflow` CLI uses the same socket. The socket path
 is resolved by `src-app/src/runtime_paths.rs`, which on macOS lands under
 `$TMPDIR` and enforces the 104-byte `sun_path` ceiling.
 

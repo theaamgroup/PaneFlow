@@ -1,6 +1,6 @@
 # Scripting reference
 
-> CLI verbs, selectors, JSON-RPC methods, event frames, config keys, MCP tools, hooks, and exit codes for PaneFlow automation.
+> CLI verbs, selectors, JSON-RPC methods, config keys, MCP tools, hooks, and exit codes for PaneFlow automation.
 
 This is the compact reference for [Scripting and automation](../scripting.md).
 It names the public surface a human script or LLM can quote exactly.
@@ -24,8 +24,6 @@ launching the app.
 | `focus <target>`                           | `surface.focus`                    | No                         | Focus a terminal surface               |
 | `send <target> <text>`                     | `surface.send_text`                | Gated                      | Stage or submit text                   |
 | `key <target> <keystroke>`                 | `surface.send_keystroke`           | Gated                      | Send one non-submitting keystroke      |
-| `wait --match <sel>`                       | `surface.read`, `events.subscribe` | No                         | Block until pattern, idle, or both     |
-| `watch [--surface <sel>] [--type <event>]` | `events.subscribe`                 | No                         | Stream lifecycle and surface events    |
 
 Aliases accepted by the CLI: `list_panes` maps to `ls`,
 `read_pane` maps to `read`, and `search_pane` maps to `search`.
@@ -41,7 +39,7 @@ Aliases accepted by the CLI: `list_panes` maps to `ls`,
 
 A selector that matches nothing or several panes exits with code `3`,
 except commands that explicitly accept multiple matches such as
-`send --broadcast`, `wait --any`, and `wait --all`.
+`send --broadcast`.
 
 ## Exit codes
 
@@ -51,7 +49,6 @@ except commands that explicitly accept multiple matches such as
 | `1`  | Runtime failure: instance unreachable, pane closed, gate refused, or handler error |
 | `2`  | CLI usage error                                                                    |
 | `3`  | Target not found or ambiguous                                                      |
-| `4`  | `wait` timeout                                               |
 
 ## Write gates
 
@@ -135,7 +132,7 @@ tracked agent returns idle state, not an error.
 | Path limit       | The composed path is rejected if it would exceed the `sockaddr_un.sun_path` ceiling of 104 bytes, and IPC is disabled with a warning |
 | Permissions      | Mode `0600` after bind, plus a per-connection peer-UID check |
 | Framing          | Newline-delimited JSON-RPC 2.0                                                       |
-| Request model    | One request per connection, except `events.subscribe`                                |
+| Request model    | One request per connection                                |
 | Local trust      | Same user only; no network listener, no token, no TLS                                |
 | Backpressure     | Connection cap, GPUI queue timeout, and bounded event queues return structured errors or `dropped` frames |
 
@@ -164,7 +161,6 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `surface.send_keystroke`   | `surface_id`, `keystroke`                                                                       | Env-gated non-submitting keystroke                       |
 | `surface.split`            | `direction`, `surface_id?`, `cwd?`, `command?`, `prompt?`, `env?`, `name?`, `managed_worktree?` | Split a pane                                             |
 | `fleet.list`               | -                                                                                               | Read-only fleet snapshot                                 |
-| `events.subscribe`         | `surfaces?`, `types?` arrays                                                                    | Persistent newline-delimited event stream                |
 | `ai.session_start`         | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.prompt_submit`         | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.tool_use`              | hook payload                                                                                    | Agent lifecycle event                                   |
@@ -177,28 +173,6 @@ Structured failures use JSON-RPC `error` envelopes: `-32602` invalid
 params, `-32601` gated or unknown method, `-32001` permission,
 `-32002` dispatch timeout, and `-32000` backpressure or shutdown.
 Legacy handler errors are promoted into JSON-RPC `error` envelopes.
-
-## Events
-
-`paneflow watch` and raw `events.subscribe` emit newline-delimited JSON.
-The first frame acknowledges the subscription.
-
-| Event type         | Meaning                                |
-| ------------------ | -------------------------------------- |
-| `subscribed`       | Subscription acknowledged              |
-| `ai.session_start` | Agent session starts                   |
-| `ai.prompt_submit` | Prompt is submitted                    |
-| `ai.tool_use`      | Agent reports tool use                 |
-| `ai.notification`  | Agent asks for input or permission     |
-| `ai.stop`          | Agent turn stops                       |
-| `ai.exit`          | Agent process exits                    |
-| `ai.session_end`   | Agent session closes                   |
-| `surface_changed`  | Terminal surface `output_generation` advanced |
-| `heartbeat`        | Idle keepalive                         |
-| `dropped`          | Subscriber lagged and events were shed |
-
-After a `dropped` frame, resync with `paneflow ps --json` or
-`paneflow status <target> --json`.
 
 ## MCP bridge
 
@@ -218,8 +192,8 @@ Returned terminal output is fenced as untrusted data.
 
 `paneflow-ai-hook` reads event JSON on stdin, posts one JSON-RPC `ai.*`
 frame, and exits `0` so a stopped PaneFlow instance does not break the
-agent. The hook surface powers status, notifications, `ps`, `status`,
-and `watch`.
+agent. The hook surface powers sidebar status, notifications, `ps`,
+and `status`.
 
 Persistent `paneflow hooks setup` is Claude Code scoped. Codex uses
 per-launch shim hooks. Agents with no hook surface still run, but their

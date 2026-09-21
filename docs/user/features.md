@@ -138,7 +138,7 @@ scan did not classify is downgraded to a plain labeled port.
 
 Drive PaneFlow from outside the GUI: the `paneflow` binary is also a
 CLI over a local JSON-RPC IPC socket. Scripts can list panes, read and
-search scrollback, inspect agent state, stream lifecycle events,
+search scrollback, inspect agent state,
 split, focus, and stage prompts behind an explicit write gate. Use
 headless agents in separate git worktrees. A read-only MCP bridge exposes pane reads to
 agents, so an assistant can inspect another pane without copy-paste.

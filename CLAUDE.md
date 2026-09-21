@@ -293,7 +293,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
 │   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
-├── cli/                               ← `paneflow watch|wait|send|read` over the IPC socket
+├── cli/                               ← `paneflow send|read` over the IPC socket
 ├── window_chrome/
 │   ├── csd.rs                         ← client-side decorations, resize edges
 │   ├── macos_backdrop.rs              ← native material behind sidebar/title bar
@@ -359,7 +359,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
 ├── ai_types.rs                        ← AiToolState, AgentStateSource ranking, lifecycle reducer
 ├── claude_session_registry.rs         ← reads Claude Code's sessions/<pid>.json (state without hooks)
-├── ipc.rs / ipc_events.rs             ← JSON-RPC server over `interprocess`, event bus
+├── ipc.rs                            ← JSON-RPC server over `interprocess`
 ├── keys.rs                            ← key translation (mouse encoding lives in terminal/input.rs)
 ├── search.rs                          ← find-in-buffer UI glue
 ├── limits.rs                          ← centralized ingress/egress size caps
@@ -578,7 +578,6 @@ Unix socket JSON-RPC 2.0 at `<runtime_dir>/paneflow/paneflow.sock` (see the thre
 | `surface.send_text` / `send_keystroke` | GPUI | Write into a pane (scripting-gated) |
 | `surface.split` / `focus` | GPUI | Pane operations |
 | `fleet.list` | GPUI | Every surface across every workspace |
-| `events.subscribe` | Socket | Streaming event subscription |
 | `ai.session_start` / `prompt_submit` / `tool_use` / `notification` / `stop` / `exit` / `session_end` | GPUI | Agent lifecycle notifications from `paneflow-ai-hook` |
 
 Stateful methods dispatch to the GPUI main thread via a channel drained by `PaneFlowApp::process_automation_tick`, which runs on a **50 ms** poll loop (`app/bootstrap.rs`, `app/ipc_handler.rs`). That same tick drains IPC requests, then surface-change broadcasts, then config reloads, so its ordering is a contract, not an accident. There is no in-app update-check.

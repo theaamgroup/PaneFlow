@@ -81,7 +81,7 @@ impl PaneFlowApp {
         let title_bar = cx.new(title_bar::TitleBar::new);
         cx.subscribe(&title_bar, Self::handle_title_bar_event)
             .detach();
-        let (ipc_rx, ipc_status, event_bus) = ipc::start_server();
+        let (ipc_rx, ipc_status) = ipc::start_server();
         crate::startup_trace::mark("ipc_server_started");
 
         // US-006 - install the shared cursor-blink phase as a GPUI global
@@ -731,8 +731,6 @@ impl PaneFlowApp {
             cached_config,
             ipc_rx,
             ipc_status,
-            event_bus,
-            last_broadcast_gen: std::collections::HashMap::new(),
             title_bar,
             primary_sidebar_visible: restored_primary_sidebar_visible,
             primary_sidebar_animation: restored_primary_sidebar_animation,
