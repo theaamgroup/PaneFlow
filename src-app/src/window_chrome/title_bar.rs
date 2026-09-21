@@ -53,6 +53,7 @@ impl EventEmitter<TitleBarEvent> for TitleBar {}
 
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let supported = window.window_controls();
         let height = (1.75 * window.rem_size()).max(TITLE_BAR_MIN_HEIGHT);
         // The parent window shell owns the active/inactive tint. This child is
         // transparent so the native material is composed once.
