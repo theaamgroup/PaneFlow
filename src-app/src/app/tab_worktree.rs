@@ -118,7 +118,7 @@ impl WorktreeStates {
 /// bound to it would then spawn every pane into a missing directory. One the
 /// retirement journal already names is going now. A workspace's own managed
 /// checkouts are fine: their lifetime belongs to the same workspace.
-/// Prefix matches both ways, like the ownership check `surface.split` runs,
+/// Prefix matches both ways, like the LaunchPad ownership check,
 /// so a binding cannot sit under or over an owned path either.
 fn binding_refusal(
     path: &std::path::Path,

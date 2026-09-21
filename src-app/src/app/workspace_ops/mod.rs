@@ -988,7 +988,7 @@ impl PaneFlowApp {
     /// The renamed sidebar row is the ONLY element that tracks
     /// `sidebar_rename_focus`, and it stops tracking it the instant that state
     /// clears; clearing it from a caller with no `Window` (the title-bar
-    /// sidebar-collapse or the IPC/CLI `workspace.select` path)
+    /// sidebar-collapse)
     /// leaves the window with nothing focused at all. That is exactly the
     /// issue #108 state - the dispatch path collapses to the tree root and
     /// every global `context: None` binding matches but finds no handler - and

@@ -30,7 +30,7 @@ pub use tree::{LayoutTree, SplitDirection};
 
 /// Hard cap on leaf panes in a single workspace's layout tree (US-054: single
 /// source for the bound previously re-declared as a local `const` at every
-/// split/insert site - split handlers, IPC `surface.split`, layout presets).
+/// split/insert site - split handlers, layout presets).
 pub(crate) const MAX_PANES: usize = 32;
 
 /// Outer padding around the pane grid, matching the unpainted gap between two

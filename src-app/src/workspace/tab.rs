@@ -163,7 +163,7 @@ impl Tab {
     ///
     /// US-003 (prd-cli-tab-hierarchy): `MAX_PANES` bounds a *tab*, not a
     /// workspace. Every create site - keyboard split, drop-to-split, launch
-    /// pad, IPC `surface.split` - gates on this single predicate so the cap
+    /// pad - gates on this single predicate so the cap
     /// cannot drift between them.
     pub fn can_add_pane(&self) -> bool {
         self.pane_count() < crate::layout::MAX_PANES

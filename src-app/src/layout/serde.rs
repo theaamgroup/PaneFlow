@@ -190,12 +190,8 @@ impl LayoutTree {
         }
     }
 
-    /// A zero-leaf tree used as a stand-in until [`Self::from_layout_node`]
-    /// spawns every pane from a supplied layout.
-    ///
-    /// `workspace.create` with a layout must not pre-spawn a default terminal:
-    /// this function reuses existing leaves left-to-right, and a dummy leaf 0
-    /// would swallow that pane's cwd/env/tabs/`custom_name`.
+    /// A zero-leaf fixture for tab and layout boundary tests.
+    #[cfg(test)]
     pub(crate) fn empty() -> Self {
         LayoutTree::Container {
             direction: SplitDirection::Vertical,
@@ -213,7 +209,7 @@ impl LayoutTree {
     ///
     /// Reused leaves are returned as-is: `spawn` is not called, so cwd/env/tabs/
     /// `custom_name` on that node are ignored. Callers that need every leaf to
-    /// honor surface metadata (notably `workspace.create` with a layout) must
+    /// honor surface metadata must
     /// pass an empty deque.
     pub fn from_layout_node(
         node: &LayoutNode,

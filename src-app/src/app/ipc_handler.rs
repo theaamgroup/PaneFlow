@@ -2,14 +2,13 @@
 //!
 //! Runs on the GPUI main thread and owns two pull-based intakes:
 //! - `process_ipc_requests` - drains the Unix-socket IPC receiver and routes
-//!   each request through `handle_ipc` (dispatches over the `workspace.*`,
-//!   `surface.*`, and `ai.*` namespaces).
+//!   each request through `handle_ipc` (dispatches over the `surface.*`, `fleet.*`, `task.*`, and `ai.*` namespaces).
 //! - `process_config_changes` - picks up a hot-reloaded config deposited by
 //!   the `ConfigWatcher` background thread and reapplies keybindings + theme.
 //!
 //! Extracted from `main.rs` per US-024 of the src-app refactor PRD. The PRD's
 //! fallback spec — split by namespace — has been applied (issue #210):
-//! `handle_ipc` is a thin per-namespace router over `handle_workspace_method`,
+//! `handle_ipc` is a thin per-namespace router over `handle_agent_context_method`,
 //! `handle_surface_method`, `handle_fleet_method`, and
 //! `handle_ai_lifecycle_method`, each holding its family's match arms
 //! verbatim, with an identical method-not-found catch-all in every handler.
@@ -18,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, BackgroundExecutor, Context, Entity, Focusable};
-use paneflow_config::schema::{LayoutNode, PaneFlowConfig, TerminalSurfaceProfile};
+use gpui::{App, AppContext, BackgroundExecutor, Context, Entity};
+use paneflow_config::schema::{PaneFlowConfig, TerminalSurfaceProfile};
 use paneflow_ipc_client::ai_hook::{
     AiToolName, LifecycleEventSource, METHOD_EXIT, METHOD_NOTIFICATION, METHOD_PROMPT_SUBMIT,
     METHOD_SESSION_END, METHOD_SESSION_START, METHOD_STOP, METHOD_TOOL_USE, SessionPid, SurfaceId,
@@ -32,7 +31,7 @@ use crate::layout::LayoutTree;
 use crate::layout::SplitDirection;
 use crate::pane::Pane;
 use crate::terminal::TerminalView;
-use crate::workspace::{MAX_WORKSPACES, Workspace, next_workspace_id};
+use crate::workspace::Workspace;
 use crate::{PaneFlowApp, ai_types, keybindings};
 
 /// Prompt-prefill readiness window for workspace templates (US-010,
@@ -150,55 +149,6 @@ fn parse_terminal_profile(
     }
 }
 
-/// The directory a `surface.split` pane starts in, given the tab it lands in
-/// (issue #347).
-///
-/// An unbound tab takes the explicit `cwd`, or `default` without one. A tab
-/// bound to a worktree starts a pane with no `cwd` in that worktree, and an
-/// explicit `cwd` where it points - provided that is inside the worktree. A
-/// `cwd` outside it is refused with `-32602`: the alternative, moving the
-/// pane into the worktree without saying so, spawned a pane in one checkout
-/// while the `managed_worktree` record it carried registered another. The
-/// worktree side is also compared canonicalized, as ownership checks are, so
-/// a `/var` vs `/private/var` spelling cannot refuse a directory that is in
-/// fact inside.
-fn split_spawn_cwd(
-    tab: &crate::workspace::Tab,
-    explicit: Option<PathBuf>,
-    default: PathBuf,
-) -> Result<PathBuf, JsonRpcError> {
-    let Some(worktree) = tab.worktree.as_deref() else {
-        return Ok(explicit.unwrap_or(default));
-    };
-    let Some(cwd) = explicit else {
-        return Ok(worktree.to_path_buf());
-    };
-    let inside = cwd.starts_with(worktree)
-        || worktree
-            .canonicalize()
-            .is_ok_and(|resolved| cwd.starts_with(resolved));
-    if inside {
-        Ok(cwd)
-    } else {
-        Err(JsonRpcError::invalid_params(format!(
-            "cwd {} is outside the target tab's worktree {}",
-            cwd.display(),
-            worktree.display()
-        )))
-    }
-}
-
-fn surface_split_root(tab: &crate::workspace::Tab) -> Result<&LayoutTree, JsonRpcError> {
-    if tab.is_zoomed() {
-        return Err(JsonRpcError::invalid_params(
-            "Unzoom before splitting panes",
-        ));
-    }
-    tab.root
-        .as_ref()
-        .ok_or_else(|| JsonRpcError::invalid_params("Workspace has no root"))
-}
-
 pub(crate) fn parse_workspace_pane_plan(
     spec: &serde_json::Value,
 ) -> Result<PlannedPane, JsonRpcError> {
@@ -270,23 +220,6 @@ pub(crate) fn build_up_layout(
         "tiled" => LayoutTree::tiled(panes),
         _ => LayoutTree::from_panes_equal(SplitDirection::Vertical, panes),
     }
-}
-
-/// Keyboard focus needs a `&mut Window`, which IPC dispatch does not carry.
-/// Defer one tick and re-enter through the main window handle (locate it
-/// among `cx.windows()` by downcast). Deferring keeps the re-entrant
-/// `PaneFlowApp` update out of the in-flight one. Shared by `surface.focus`
-/// and workspace templates.
-fn defer_pane_focus(pane: Entity<Pane>, cx: &mut Context<PaneFlowApp>) {
-    cx.defer(move |cx| {
-        for handle in cx.windows() {
-            if let Some(main) = handle.downcast::<PaneFlowApp>() {
-                let _ = main.update(cx, |_, window, cx| {
-                    pane.read(cx).focus_handle(cx).focus(window, cx);
-                });
-            }
-        }
-    });
 }
 
 fn fire_turn_end_notification(
@@ -473,7 +406,7 @@ fn extract_last_result_capped(path: &std::path::Path, cap: u64) -> Option<String
 // EP-004 US-015 (agent-control-plane): structured context channel.
 //
 // A orchestrator passes a (possibly large) context blob to a spawned agent via the
-// `context` param of `surface.split`. Inlining it would hit the
+// `context` param of workspace templates. Inlining it would hit the
 // 64 KiB `send_text` cap and silently truncate; instead it is staged to a temp
 // file and the path is handed to the agent through `PANEFLOW_CONTEXT_FILE`. The
 // write finishes before that env var is inserted and before the IPC method
@@ -635,10 +568,6 @@ fn stage_context_file(
     stage_context_file_at(Some(content), env, next_context_file_path())
 }
 
-fn context_file_stage_rpc_error(err: std::io::Error) -> JsonRpcError {
-    JsonRpcError::internal_error(format!("failed to stage context file: {err}"))
-}
-
 pub(crate) fn stage_planned_pane_env(
     pane: &PlannedPane,
     cx: &mut gpui::Context<crate::PaneFlowApp>,
@@ -711,48 +640,8 @@ fn scripting_enabled_from(value: Option<&str>) -> bool {
     matches!(value, Some("1"))
 }
 
-fn ipc_orchestration_enabled() -> bool {
-    orchestration_enabled_from(
-        std::env::var("PANEFLOW_IPC_ORCHESTRATION").ok().as_deref(),
-        std::env::var("PANEFLOW_IPC_SCRIPTING").ok().as_deref(),
-    )
-}
-
-fn orchestration_enabled_from(orchestration: Option<&str>, scripting: Option<&str>) -> bool {
-    matches!(orchestration, Some("1")) || scripting_enabled_from(scripting)
-}
-
 fn normalized_shell_value(shell: Option<&str>) -> &str {
     shell.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("")
-}
-
-fn env_param_is_nonempty_object(value: Option<&serde_json::Value>) -> bool {
-    value
-        .and_then(|v| v.as_object())
-        .is_some_and(|obj| !obj.is_empty())
-}
-
-fn string_param_is_nonempty(value: Option<&serde_json::Value>) -> bool {
-    value
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
-}
-
-fn pane_spec_requires_orchestration(spec: &serde_json::Value) -> bool {
-    string_param_is_nonempty(spec.get("command"))
-        || string_param_is_nonempty(spec.get("prompt"))
-        || string_param_is_nonempty(spec.get("context"))
-        || env_param_is_nonempty_object(spec.get("env"))
-        || spec
-            .get("managed_worktree")
-            .is_some_and(|value| !value.is_null())
-}
-
-fn orchestration_disabled_error(method: &str) -> JsonRpcError {
-    JsonRpcError::method_not_enabled(format!(
-        "{method} orchestration disabled; set PANEFLOW_IPC_ORCHESTRATION=1 \
-         or PANEFLOW_IPC_SCRIPTING=1 to enable command, prompt, context, env, or managed worktree ownership"
-    ))
 }
 
 /// EP-003 US-010 (agent-control-plane): the `surface.send_text` write gate is
@@ -787,10 +676,7 @@ fn text_contains_submit_byte(text: &str) -> bool {
     text.contains('\r') || text.contains('\n')
 }
 
-/// Issue #236: a `surface.split` `prompt` is prefilled through
-/// a verbatim `send_text` and documented as "never submitted", so a CR or LF
-/// inside it would submit under the orchestration gate alone, without the
-/// scripting write gate `surface.send_text` enforces. Refuse it up front.
+/// Reject submit bytes before prefilling a workspace template prompt.
 fn validate_prefill_prompt(prompt: &str) -> Result<(), JsonRpcError> {
     if text_contains_submit_byte(prompt) {
         return Err(JsonRpcError::invalid_params(
@@ -973,23 +859,6 @@ fn find_terminal_in_tree(
     }
 }
 
-/// Parse the optional `managed_worktree` object a spawn-capable
-/// `surface.split` carries (EP-002/EP-003, orchestration-v2):
-/// the caller created a git worktree for this pane and hands the ownership
-/// record over so the workspace tears it down at close (US-009). `path` and
-/// `repo_root` are both required - anything else is ignored (no record, no
-/// teardown: fail toward "never touch what we can't prove we own").
-fn parse_managed_worktree(
-    value: Option<&serde_json::Value>,
-) -> Option<crate::workspace::worktree::ManagedWorktree> {
-    let mw = value.filter(|v| !v.is_null())?;
-    let path = mw.get("path").and_then(|p| p.as_str()).unwrap_or("");
-    let repo_root = mw.get("repo_root").and_then(|p| p.as_str()).unwrap_or("");
-    let branch = mw.get("branch").and_then(|b| b.as_str()).unwrap_or("");
-    let teardown = mw.get("teardown").and_then(|t| t.as_str()).unwrap_or("");
-    crate::workspace::worktree::managed_worktree_from_record(path, repo_root, branch, teardown)
-}
-
 /// Exclusive lifecycle ownership check over canonical worktree paths.
 /// `target_workspace` permits a split to reuse a record already owned by the
 /// workspace it extends, but every other live, undo, or retiring owner is a
@@ -1025,11 +894,6 @@ pub(crate) struct SurfaceLocation {
     pub pane: gpui::Entity<Pane>,
 }
 
-/// Locate the pane hosting a surface, across all workspaces and all their tabs.
-/// Unlike [`find_terminal_by_surface_id`] this yields the *container*, which is
-/// what `surface.focus` (focus + tab activation) and the targeted
-/// `surface.split` (split at that leaf) need (US-001/US-002,
-/// prd-orchestration-v2).
 /// The workspace an `ai.*` hook frame belongs to. The frame carries the
 /// `PANEFLOW_WORKSPACE_ID` its pane inherited at spawn, which a tab or pane
 /// drag leaves stale: the PTY and its environment survive the move. When the
@@ -1226,24 +1090,6 @@ fn requested_workspace_id(params: &serde_json::Value) -> Result<Option<u64>, Jso
     })
 }
 
-/// Extract an optional workspace `index` param, distinguishing ABSENT from
-/// MALFORMED.
-///
-/// `as_u64()` returns `None` for a string `"2"`, a float `2.0`, a negative, or
-/// `null`. Coercing all of those to a default silently retargeted the call at
-/// the active workspace *and still reported success*, so one quoting mistake in
-/// an orchestration script closed the wrong workspace - every pane, PTY and
-/// managed worktree it owned. Mirrors [`requested_workspace_id`].
-fn requested_index(params: &serde_json::Value) -> Result<Option<usize>, JsonRpcError> {
-    let Some(value) = params.get("index") else {
-        return Ok(None);
-    };
-    value
-        .as_u64()
-        .map(|index| Some(index as usize))
-        .ok_or_else(|| JsonRpcError::invalid_params("'index' must be a non-negative integer"))
-}
-
 /// Extract an optional bounded integer param, distinguishing ABSENT from
 /// MALFORMED or OUT OF RANGE.
 ///
@@ -1252,7 +1098,7 @@ fn requested_index(params: &serde_json::Value) -> Result<Option<usize>, JsonRpcE
 /// an orchestrator that sent a typo'd `lines` over JSON-RPC got a 200-line page
 /// and believed it was the requested window. The MCP bridge rejects the
 /// same inputs (`validate_limit` in `paneflow-mcp`); this mirrors it so the
-/// two contracts agree (issue #281). Mirrors [`requested_index`].
+/// two contracts agree (issue #281).
 fn requested_bounded(
     params: &serde_json::Value,
     key: &str,
@@ -1464,7 +1310,7 @@ pub(crate) fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
 /// name/label: trim, strip control characters, cap at 64 chars. Returns `None`
 /// for an empty/blank result (clears the custom name / no label). Shared by
 /// UI pane names and the atomic spawn label on
-/// `surface.split`/workspace templates.
+/// workspace templates/workspace templates.
 pub(crate) fn sanitize_pane_name(raw: &str) -> Option<String> {
     const MAX_NAME_LEN: usize = 64;
     let cleaned: String = raw
@@ -1721,7 +1567,7 @@ impl PaneFlowApp {
         for req in drain_ipc_requests_for_tick(&self.ipc_rx) {
             // Issue #38: CAS Queued→Started. If the socket timeout already
             // CAS'd Queued→Cancelled and returned -32002, skip so
-            // workspace.create / surface.split cannot still run.
+            // a cancelled mutation cannot still run.
             if !crate::ipc::try_start_dispatch(&req.dispatch) {
                 continue;
             }
@@ -2010,7 +1856,7 @@ impl PaneFlowApp {
     /// cli-agent-orchestration): FLOOR delay, then poll `output_generation`
     /// until idle (two equal reads) or MAX elapses; then write the prompt
     /// WITHOUT a carriage return - human-in-loop, the user submits. Shared by
-    /// workspace templates and the spawn-capable `surface.split` (EP-003).
+    /// workspace templates and the spawn-capable workspace templates (EP-003).
     /// The text a prompt prefill writes, given whether the surface has
     /// enabled bracketed paste (`ESC[?2004h`).
     ///
@@ -2561,8 +2407,6 @@ impl PaneFlowApp {
         // the same method-not-found envelope as the catch-all here.
         if method == "agent.whoami" || method.starts_with("task.") {
             self.handle_agent_context_method(method, params, cx)
-        } else if method.starts_with("workspace.") {
-            self.handle_workspace_method(method, params, cx)
         } else if method.starts_with("surface.") {
             self.handle_surface_method(method, params, caller_pid, responder, cx)
         } else if method.starts_with("fleet.") {
@@ -2571,138 +2415,6 @@ impl PaneFlowApp {
             self.handle_ai_lifecycle_method(method, params, cx)
         } else {
             JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value()
-        }
-    }
-
-    /// `workspace.*` dispatch: arms moved verbatim from `handle_ipc`
-    /// (issue #210); relative arm order is unchanged.
-    fn handle_workspace_method(
-        &mut self,
-        method: &str,
-        params: &serde_json::Value,
-        cx: &mut Context<Self>,
-    ) -> serde_json::Value {
-        match method {
-            "workspace.create" => {
-                if self.session_restore.is_some() {
-                    return serde_json::json!({"error": "Session restore in progress"});
-                }
-                // Cap workspace count to prevent unbounded growth from malicious
-                // or buggy IPC clients (CWE-400). Matches the keyboard-action cap
-                // in `workspace_ops::create_workspace`.
-                if self.workspaces.len() >= MAX_WORKSPACES {
-                    return JsonRpcError::invalid_params("Workspace limit reached").into_value();
-                }
-                // US-001: parse the optional `layout` param up-front so we can
-                // refuse a malformed payload with -32602 before mutating any
-                // workspace state.
-                let mut layout = match parse_layout_param(params) {
-                    Ok(l) => l,
-                    Err(e) => return e.into_value(),
-                };
-                let name = params
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("Terminal");
-                // US-014 (cli-hardening-followup-2026-Q3):
-                // canonicalize the `cwd` field before handing it to
-                // `TerminalView::with_cwd`. Validation lives in the
-                // free helper `canonicalize_workspace_cwd` so the
-                // contract is unit-testable in isolation (see the
-                // `workspace_create_rejects_nonexistent_cwd` test
-                // below).
-                let cwd = match params.get("cwd").and_then(|c| c.as_str()) {
-                    Some(raw) => match canonicalize_workspace_cwd(raw) {
-                        Ok(canonical) => Some(canonical),
-                        Err(err) => return err.into_value(),
-                    },
-                    None => None,
-                };
-                let effective_cwd = cwd
-                    .clone()
-                    .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
-                if self.pending_worktree_teardown_conflicts(&effective_cwd) {
-                    return JsonRpcError::invalid_params("cwd is inside a worktree being retired")
-                        .into_value();
-                }
-                let ws_id = next_workspace_id();
-                // Issue #44: do not pre-spawn a default terminal when a layout
-                // is present. `apply_layout_from_json` reuses existing leaves
-                // left-to-right, and `from_layout_node` would pop that pane for
-                // the first `LayoutNode::Pane` without calling `spawn`, dropping
-                // cwd/env/tabs/`custom_name` on leaf 0.
-                let ws = if layout.is_some() {
-                    let dir = cwd.unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
-                    Workspace::with_layout_and_id(ws_id, name, dir, LayoutTree::empty())
-                } else if let Some(dir) = cwd {
-                    let terminal =
-                        cx.new(|cx| TerminalView::with_cwd(ws_id, Some(dir.clone()), None, cx));
-                    let pane = self.create_pane(terminal, ws_id, cx);
-                    Workspace::with_cwd_and_id(ws_id, name, dir, pane)
-                } else {
-                    let terminal = cx.new(|cx| TerminalView::new(ws_id, cx));
-                    let pane = self.create_pane(terminal, ws_id, cx);
-                    Workspace::with_id(ws_id, name, pane)
-                };
-                self.watch_git_dir(&ws);
-                // US-013: deferred git-stats probe off the render thread.
-                Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
-                self.workspaces.push(ws);
-                let idx = self.workspaces.len() - 1;
-
-                // US-001: when a layout is provided, apply it to the freshly
-                // created workspace. `apply_layout_from_json` operates on the
-                // active workspace, so we have to switch focus first; we
-                // restore `previous_idx` if application fails so a malformed
-                // layout doesn't strand the caller on a half-initialised
-                // workspace they didn't ask to land on.
-                let panes = if let Some(ref mut layout) = layout {
-                    let previous_idx = self.active_idx;
-                    self.active_idx = idx;
-                    if let Err(e) = self.apply_layout_from_json(layout, cx) {
-                        // Roll back: drop the just-created workspace so the
-                        // caller sees a clean -32602 and no orphan workspace.
-                        if let Some(dir) = self.workspaces[idx].git_dir.clone() {
-                            self.unwatch_git_dir(&dir);
-                        }
-                        self.workspaces.remove(idx);
-                        self.active_idx = previous_idx.min(self.workspaces.len().saturating_sub(1));
-                        return JsonRpcError::invalid_params(format!(
-                            "layout could not be applied: {e}"
-                        ))
-                        .into_value();
-                    }
-                    self.active_workspace().map_or(1, |ws| ws.pane_count())
-                } else {
-                    1
-                };
-
-                self.save_session(cx);
-                cx.notify();
-                serde_json::json!({"index": idx, "title": name, "panes": panes})
-            }
-            "workspace.select" => {
-                if self.session_restore.is_some() {
-                    return serde_json::json!({"error": "Session restore in progress"});
-                }
-                // Deliberately a storage index: `workspace.list` exposes the
-                // same stable indices to automation, independent of how the
-                // sidebar is visually grouped or sorted.
-                let idx = match requested_index(params) {
-                    Ok(Some(index)) => index,
-                    Ok(None) => {
-                        return JsonRpcError::invalid_params("'index' is required").into_value();
-                    }
-                    Err(error) => return error.into_value(),
-                };
-                if idx < self.workspaces.len() {
-                    self.activate_workspace_without_window(idx, cx);
-                    serde_json::json!({"selected": idx})
-                } else {
-                    JsonRpcError::invalid_params("Index out of bounds").into_value()
-                }
-            }
-            _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
         }
     }
 
@@ -2948,41 +2660,6 @@ impl PaneFlowApp {
                 .detach();
                 ipc_deferred_response()
             }
-            "surface.focus" => {
-                // US-001 (orchestration-v2): give a targeted pane the focus.
-                // Navigation only (no PTY write), so - like `workspace.select`
-                // and unlike `surface.send_*` - it does NOT require the
-                // `PANEFLOW_IPC_SCRIPTING` gate.
-                let Some(sid) = params.get("surface_id").and_then(|s| s.as_u64()) else {
-                    return JsonRpcError::invalid_params("Missing 'surface_id' parameter")
-                        .into_value();
-                };
-                let Some(loc) = find_pane_by_surface_id(&self.workspaces, sid, cx) else {
-                    return JsonRpcError::invalid_params("Surface not found").into_value();
-                };
-                let ws_idx = loc.workspace_idx;
-                let pane = loc.pane;
-                // Switch workspace and make the owning workspace tab visible
-                // (US-003: the surface may live in a background tab) - all
-                // synchronously. EP-002 US-004: the pane holds exactly one
-                // surface, so there is no pane-level tab to activate.
-                self.activate_workspace_without_window(ws_idx, cx);
-                if let Some(ws) = self.workspaces.get_mut(ws_idx) {
-                    ws.set_active_tab(loc.tab_idx);
-                }
-                pane.update(cx, |_p, cx| cx.notify());
-                // Keyboard focus needs a `&mut Window`, which IPC dispatch
-                // doesn't carry. Defer through the main window.
-                defer_pane_focus(pane, cx);
-                self.save_session(cx);
-                cx.notify();
-                serde_json::json!({
-                    "focused": true,
-                    "surface_id": sid,
-                    "workspace": ws_idx,
-                    "scope": "workspace",
-                })
-            }
             "surface.send_text" => {
                 // US-012 (cli-hardening-followup-2026-Q3): same-UID RCE
                 // primitive gate. See ipc.rs module doc for the blast-radius
@@ -3178,226 +2855,6 @@ impl PaneFlowApp {
                     },
                     None => JsonRpcError::invalid_params("No active terminal").into_value(),
                 }
-            }
-            "surface.split" => {
-                let dir_str = params
-                    .get("direction")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("");
-                let direction = match dir_str {
-                    "horizontal" => SplitDirection::Horizontal,
-                    "vertical" => SplitDirection::Vertical,
-                    _ => {
-                        return JsonRpcError::invalid_params(
-                            "Missing or invalid 'direction' parameter (use \"horizontal\" or \"vertical\")",
-                        )
-                        .into_value();
-                    }
-                };
-                // EP-003 (orchestration-v2): `surface.split` can spawn a fully
-                // configured pane - optional `cwd` (canonicalized, -32602 when
-                // bad), `command` (launched like workspace templates panes), `env`,
-                // `name`, `prompt` (server-side prefill, never submitted) and
-                // `managed_worktree` (ownership registration, US-009). Same
-                // command/prompt/context/env are orchestration primitives and
-                // require the orchestration gate. All fields absent = legacy
-                // bare split.
-                if pane_spec_requires_orchestration(params) && !ipc_orchestration_enabled() {
-                    return orchestration_disabled_error("surface.split").into_value();
-                }
-                // Kept apart from the default it falls back to: whether the
-                // caller NAMED a directory decides below whether the target
-                // tab's worktree binding applies (issue #347).
-                let explicit_cwd = match params.get("cwd").and_then(|c| c.as_str()) {
-                    Some(raw) => match canonicalize_workspace_cwd(raw) {
-                        Ok(canonical) => Some(canonical),
-                        Err(err) => return err.into_value(),
-                    },
-                    None => None,
-                };
-                let default_cwd = explicit_cwd
-                    .clone()
-                    .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
-                if self.pending_worktree_teardown_conflicts(&default_cwd) {
-                    return JsonRpcError::invalid_params("cwd is inside a worktree being retired")
-                        .into_value();
-                }
-                let managed_value = params
-                    .get("managed_worktree")
-                    .filter(|value| !value.is_null());
-                let spawn_managed_worktree = match managed_value {
-                    Some(_) => match parse_managed_worktree(managed_value) {
-                        Some(worktree) => Some(worktree),
-                        None => {
-                            return JsonRpcError::invalid_params(
-                                "invalid managed_worktree ownership record",
-                            )
-                            .into_value();
-                        }
-                    },
-                    None => None,
-                };
-                if let Some(worktree) = &spawn_managed_worktree
-                    && default_cwd != worktree.path
-                {
-                    return JsonRpcError::invalid_params("managed_worktree path must match cwd")
-                        .into_value();
-                }
-                let spawn_command = params
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .filter(|c| !c.is_empty())
-                    .map(str::to_string);
-                // EP-004 US-012: accept `label` (the agent-control-plane term),
-                // falling back to `name`; sanitized like a `surface.rename`.
-                let spawn_name = params
-                    .get("label")
-                    .or_else(|| params.get("name"))
-                    .and_then(|n| n.as_str())
-                    .and_then(sanitize_pane_name);
-                let spawn_prompt = params
-                    .get("prompt")
-                    .and_then(|p| p.as_str())
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_string);
-                if let Some(prompt) = spawn_prompt.as_deref()
-                    && let Err(err) = validate_prefill_prompt(prompt)
-                {
-                    return err.into_value();
-                }
-                let spawn_profile = match parse_terminal_profile(params.get("profile")) {
-                    Ok(profile) => profile,
-                    Err(err) => return err.into_value(),
-                };
-                let spawn_env_overrides = match parse_env_object(params.get("env")) {
-                    Ok(env) => env,
-                    Err(err) => return err.into_value(),
-                };
-
-                // US-002 (orchestration-v2): an optional `surface_id` targets
-                // the leaf hosting that surface - in whatever workspace it
-                // lives - instead of the active workspace's first leaf. Absent
-                // = the legacy first-leaf behavior, so existing clients are
-                // untouched.
-                // US-003 (cli-tab-hierarchy): the lookup also yields the
-                // owning workspace tab, so the split lands in - and the pane
-                // cap counts - that tab, not whichever one happens to be
-                // visible.
-                let (ws_idx, tab_idx, target_pane) =
-                    if let Some(sid) = params.get("surface_id").and_then(|s| s.as_u64()) {
-                        let Some(loc) = find_pane_by_surface_id(&self.workspaces, sid, cx) else {
-                            return JsonRpcError::invalid_params("Surface not found").into_value();
-                        };
-                        (loc.workspace_idx, loc.tab_idx, Some(loc.pane))
-                    } else {
-                        (
-                            self.active_idx,
-                            self.active_workspace().map_or(0, |ws| ws.active_tab_idx()),
-                            None,
-                        )
-                    };
-                let Some(ws) = self.workspaces.get(ws_idx) else {
-                    return JsonRpcError::invalid_params("No active workspace").into_value();
-                };
-                if let Some(worktree) = &spawn_managed_worktree
-                    && self.managed_worktree_conflicts(&worktree.path, Some(ws_idx), cx)
-                {
-                    return JsonRpcError::invalid_params(
-                        "managed worktree is already owned by another workspace",
-                    )
-                    .into_value();
-                }
-                let ws_id = ws.id;
-                let Some(tab) = ws.tabs().get(tab_idx) else {
-                    return JsonRpcError::invalid_params("Workspace has no root").into_value();
-                };
-                let root = match surface_split_root(tab) {
-                    Ok(root) => root,
-                    Err(err) => return err.into_value(),
-                };
-                if !tab.can_add_pane() {
-                    return JsonRpcError::invalid_params("Maximum pane count reached").into_value();
-                }
-                if let Some(target) = &target_pane
-                    && !root.contains_leaf(target)
-                {
-                    return JsonRpcError::invalid_params("Surface not found").into_value();
-                }
-                // Issue #347: a split into a tab bound to a worktree starts in
-                // that worktree when no `cwd` was given. An explicit `cwd` is
-                // honoured as written - an orchestrator that names a directory
-                // means it - but only inside the bound worktree: one outside
-                // it (and the `managed_worktree` that has to match it) is
-                // refused rather than silently moved, so the pane and the
-                // ownership record it registers can never disagree.
-                let spawn_cwd = match split_spawn_cwd(tab, explicit_cwd, default_cwd) {
-                    Ok(cwd) => Some(cwd),
-                    Err(err) => return err.into_value(),
-                };
-                // EP-004 US-015: stage a (possibly large) `context` blob to a
-                // temp file and pass its path via PANEFLOW_CONTEXT_FILE. Write
-                // before spawn; a failure is a JSON-RPC error, not success.
-                let spawn_env = match stage_context_file(
-                    params.get("context").and_then(|c| c.as_str()),
-                    spawn_env_overrides,
-                    cx,
-                ) {
-                    Ok(env) => env,
-                    Err(err) => return context_file_stage_rpc_error(err).into_value(),
-                };
-                let new_terminal = cx.new(|cx| {
-                    TerminalView::with_cwd_env_and_profile(
-                        ws_id,
-                        spawn_cwd.clone(),
-                        None,
-                        spawn_env,
-                        spawn_profile,
-                        cx,
-                    )
-                });
-                if let Some(name) = spawn_name {
-                    new_terminal.update(cx, |view, _cx| {
-                        view.terminal.custom_name = Some(name);
-                    });
-                }
-                let surface_id = new_terminal.entity_id().as_u64();
-                let new_pane = self.create_pane(new_terminal.clone(), ws_id, cx);
-                let Some(root) = self.workspaces[ws_idx]
-                    .tab_mut(tab_idx)
-                    .and_then(|tab| tab.root.as_mut())
-                else {
-                    return JsonRpcError::invalid_params("Workspace has no root").into_value();
-                };
-                match target_pane {
-                    Some(target) => {
-                        if !root.split_at_pane(&target, direction, new_pane) {
-                            // The pane vanished between lookup and mutation (a
-                            // close raced this request); nothing was inserted.
-                            return JsonRpcError::invalid_params("Surface not found").into_value();
-                        }
-                    }
-                    None => root.split_first_leaf(direction, new_pane),
-                }
-                if let Some(worktree) = spawn_managed_worktree
-                    && !self.workspaces[ws_idx]
-                        .managed_worktrees
-                        .iter()
-                        .any(|owned| owned.path == worktree.path)
-                {
-                    self.workspaces[ws_idx].managed_worktrees.push(worktree);
-                }
-                if let Some(cmd) = spawn_command {
-                    Self::schedule_launch_command(&new_terminal, cmd, spawn_prompt, usize::MAX, cx);
-                } else if let Some(prompt) = spawn_prompt {
-                    Self::schedule_prompt_prefill(&new_terminal, prompt, usize::MAX, cx);
-                }
-                let panes = self.workspaces[ws_idx].pane_count();
-                self.save_session(cx);
-                cx.notify();
-                serde_json::json!({
-                    "split": true, "direction": dir_str, "panes": panes,
-                    "surface_id": surface_id
-                })
             }
             _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
         }
@@ -4329,8 +3786,6 @@ pub(crate) const JSONRPC_ERROR_KEY: &str = "_jsonrpc_error";
 impl JsonRpcError {
     /// JSON-RPC 2.0 reserved error code for invalid method parameters.
     pub(crate) const INVALID_PARAMS: i32 = -32602;
-    /// Paneflow uses JSON-RPC's method-disabled shape for gated local verbs.
-    pub(crate) const METHOD_NOT_ENABLED: i32 = -32601;
     /// JSON-RPC 2.0 reserved error code for unknown methods.
     pub(crate) const METHOD_NOT_FOUND: i32 = -32601;
     /// JSON-RPC 2.0 reserved error code for internal errors (I/O, staging).
@@ -4346,13 +3801,6 @@ impl JsonRpcError {
     pub(crate) fn internal_error(message: impl Into<String>) -> Self {
         Self {
             code: Self::INTERNAL_ERROR,
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn method_not_enabled(message: impl Into<String>) -> Self {
-        Self {
-            code: Self::METHOD_NOT_ENABLED,
             message: message.into(),
         }
     }
@@ -4419,7 +3867,7 @@ static STALLED_CWD_PATHS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new
 const STALLED_CWD_DELAY: Duration = Duration::from_secs(2);
 
 /// US-014 (cli-hardening-followup-2026-Q3): validate and canonicalize the
-/// `cwd` field of a `workspace.create` IPC request.
+/// `cwd` field of a workspace template.
 ///
 /// US-026: this is **not** a confinement jail. A same-UID client may
 /// legitimately open a workspace at any directory it can already reach, and
@@ -4500,7 +3948,7 @@ fn canonicalize_workspace_cwd_blocking(raw: &str) -> Result<std::path::PathBuf, 
         )));
     }
     let spawn_cwd = canonical;
-    log::info!("ipc::workspace.create: canonical cwd resolved {raw:?} -> {spawn_cwd:?}");
+    log::info!("workspace template: canonical cwd resolved {raw:?} -> {spawn_cwd:?}");
     Ok(spawn_cwd)
 }
 
@@ -4520,64 +3968,12 @@ fn expand_tilde_with_home(raw: &str, home: Option<&std::path::Path>) -> PathBuf 
     }
 }
 
-/// Parse the optional `layout` field from a `workspace.create` params object.
-///
-/// Returns `Ok(None)` if the field is absent or `null` (preserves the
-/// existing single-pane default). Returns `Err(JsonRpcError)` with code
-/// `-32602` if the field is present but not a valid `LayoutNode`.
-pub(crate) fn parse_layout_param(
-    params: &serde_json::Value,
-) -> Result<Option<LayoutNode>, JsonRpcError> {
-    let Some(raw) = params.get("layout") else {
-        return Ok(None);
-    };
-    if raw.is_null() {
-        return Ok(None);
-    }
-    serde_json::from_value::<LayoutNode>(raw.clone())
-        .map(Some)
-        .map_err(|e| JsonRpcError::invalid_params(format!("invalid layout: {e}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::MAX_PANES;
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
-
-    #[test]
-    fn requested_index_absent_is_none() {
-        assert_eq!(requested_index(&serde_json::json!({})).unwrap(), None);
-    }
-
-    #[test]
-    fn requested_index_accepts_a_non_negative_integer() {
-        assert_eq!(
-            requested_index(&serde_json::json!({"index": 2})).unwrap(),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn requested_index_rejects_malformed_instead_of_retargeting_the_active_workspace() {
-        // Each of these used to fall through `unwrap_or(self.active_idx)` and
-        // report success, so one quoting mistake in an orchestration script
-        // closed the WRONG workspace - every pane, PTY and managed worktree it
-        // owned. Absent must stay distinguishable from malformed.
-        for malformed in [
-            serde_json::json!({"index": "2"}),
-            serde_json::json!({"index": 2.5}),
-            serde_json::json!({"index": -1}),
-            serde_json::json!({"index": null}),
-            serde_json::json!({"index": []}),
-        ] {
-            assert!(
-                requested_index(&malformed).is_err(),
-                "{malformed} must be rejected, not coerced to a default"
-            );
-        }
-    }
 
     /// Issue #281: `surface.read` / `surface.search` pagination params follow
     /// the MCP `read_pane` / `search_pane` rules - absent is the default, a
@@ -4655,78 +4051,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_split_into_a_bound_tab_keeps_an_explicit_cwd_inside_it_and_refuses_one_outside() {
-        // Issue #347 review, finding 2: `surface.split` confined every cwd
-        // to the bound tab's worktree, so an orchestrator splitting a feat-a pane
-        // with `cwd` = feat-b (and a matching `managed_worktree`) got a pane in
-        // feat-a while the workspace recorded ownership of feat-b.
-        let sandbox = tempfile::tempdir().expect("tempdir");
-        let feat_a = sandbox.path().join("repo.worktrees").join("feat-a");
-        let feat_b = sandbox.path().join("repo.worktrees").join("feat-b");
-        std::fs::create_dir_all(feat_a.join("src")).expect("feat-a");
-        std::fs::create_dir_all(&feat_b).expect("feat-b");
-        let default = sandbox.path().join("elsewhere");
-        let bound = crate::workspace::Tab::restored("a", None, Some(feat_a.clone()));
-
-        // No cwd: the bound worktree, never the process default.
-        assert_eq!(
-            split_spawn_cwd(&bound, None, default.clone()).expect("bound default"),
-            feat_a
-        );
-        // A cwd inside the worktree is honoured as written.
-        assert_eq!(
-            split_spawn_cwd(&bound, Some(feat_a.join("src")), default.clone())
-                .expect("inside the worktree"),
-            feat_a.join("src")
-        );
-        // A cwd outside it is refused, not silently moved.
-        let refused = split_spawn_cwd(&bound, Some(feat_b.clone()), default.clone())
-            .expect_err("a sibling worktree is outside");
-        assert_eq!(refused.code, -32602, "{}", refused.message);
-        assert!(
-            refused
-                .message
-                .contains("outside the target tab's worktree"),
-            "{}",
-            refused.message
-        );
-        // A canonical spelling of a directory inside the worktree is inside.
-        let canonical_inside = feat_a.canonicalize().expect("canonical feat-a").join("src");
-        assert_eq!(
-            split_spawn_cwd(&bound, Some(canonical_inside.clone()), default.clone())
-                .expect("canonical spelling"),
-            canonical_inside
-        );
-
-        // An unbound tab keeps the pre-#347 contract: the explicit cwd, or
-        // the default without one.
-        let free = crate::workspace::Tab::new("free", None);
-        assert_eq!(
-            split_spawn_cwd(&free, Some(feat_b.clone()), default.clone()).expect("explicit"),
-            feat_b
-        );
-        assert_eq!(
-            split_spawn_cwd(&free, None, default.clone()).expect("default"),
-            default
-        );
-    }
-
-    #[test]
-    fn surface_split_routes_its_cwd_through_the_bound_tab_rule() {
-        let src = include_str!("ipc_handler.rs");
-        let split =
-            crate::source_probe::source_slice(src, "\"surface.split\" => {", "\"fleet.list\" => {");
-        assert!(
-            split.contains("split_spawn_cwd(tab, explicit_cwd, default_cwd)"),
-            "the split must tell the rule whether a cwd was named: {split}"
-        );
-        assert!(
-            !split.contains("confine_cwd("),
-            "the unconditional confinement rewrote an explicit cwd: {split}"
-        );
-    }
-
     fn test_ipc_request(method: &str, cancelled: bool) -> crate::ipc::IpcRequest {
         let (response_tx, _response_rx) = mpsc::channel();
         let state = if cancelled {
@@ -4742,55 +4066,6 @@ mod tests {
             dispatch: Arc::new(AtomicU8::new(state)),
             caller_pid: None,
         }
-    }
-
-    /// Issue #279: a client-caused refusal (cap hit, out-of-range index,
-    /// last-workspace close, malformed layout) must reach the wire as
-    /// `-32602` for client-caused refusals.
-    /// The legacy `{"error": <string>}` shape is promoted to `-32603` by
-    /// `promote_response`, which reads to automation as a server crash.
-    /// Only the transient "Session restore in progress" refusal keeps the
-    /// legacy shape.
-    #[test]
-    fn workspace_client_errors_are_invalid_params_not_internal() {
-        let src = include_str!("ipc_handler.rs");
-        let body = src
-            .split("fn handle_workspace_method(")
-            .nth(1)
-            .and_then(|rest| rest.split("fn handle_surface_method(").next())
-            .expect("handle_workspace_method body");
-        let create_arm = body
-            .split("\"workspace.create\"")
-            .nth(1)
-            .and_then(|rest| rest.split("\"workspace.select\"").next())
-            .expect("workspace.create arm");
-        assert!(
-            create_arm.contains("JsonRpcError::invalid_params(\"Workspace limit reached\")"),
-            "workspace.create at MAX_WORKSPACES must be -32602"
-        );
-        let select_arm = body
-            .split("\"workspace.select\"")
-            .nth(1)
-            .and_then(|rest| rest.split("            _ =>").next())
-            .expect("workspace.select arm");
-        assert!(
-            select_arm.contains("JsonRpcError::invalid_params(\"Index out of bounds\")"),
-            "workspace.select with an out-of-range index must be -32602"
-        );
-        let legacy: Vec<&str> = body
-            .lines()
-            .filter(|line| line.contains("json!({\"error\""))
-            .filter(|line| !line.contains("Session restore in progress"))
-            .collect();
-        assert!(
-            legacy.is_empty(),
-            "client-caused workspace refusals must not use the legacy -32603 shape: {legacy:?}"
-        );
-        assert_eq!(
-            JsonRpcError::invalid_params("Workspace limit reached").into_value()[JSONRPC_ERROR_KEY]
-                ["code"],
-            JsonRpcError::INVALID_PARAMS
-        );
     }
 
     /// Issue #210: `handle_ipc` was a ~1,295-line, 24-arm method. It is now a
@@ -4811,7 +4086,6 @@ mod tests {
             "handle_ipc must stay a thin per-namespace router (issue #210); got {lines} lines"
         );
         for handler in [
-            "fn handle_workspace_method(",
             "fn handle_surface_method(",
             "fn handle_fleet_method(",
             "fn handle_ai_lifecycle_method(",
@@ -4843,7 +4117,7 @@ mod tests {
     #[test]
     fn ipc_drain_skips_cancelled_without_spending_live_budget() {
         let (tx, rx) = mpsc::channel();
-        tx.send(test_ipc_request("surface.split", true))
+        tx.send(test_ipc_request("surface.send_text", true))
             .expect("queue cancelled request");
         for _ in 0..crate::ipc::IPC_DRAIN_MAX_PER_TICK {
             tx.send(test_ipc_request("surface.read", false))
@@ -4863,7 +4137,7 @@ mod tests {
     fn ipc_drain_caps_cancelled_dequeues_per_tick() {
         let (tx, rx) = mpsc::channel();
         for _ in 0..=crate::ipc::IPC_DRAIN_MAX_DEQUEUES_PER_TICK {
-            tx.send(test_ipc_request("surface.split", true))
+            tx.send(test_ipc_request("surface.send_text", true))
                 .expect("queue cancelled request");
         }
 
@@ -5081,101 +4355,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // US-001 - workspace.create `layout` param parsing + JSON-RPC error
+    // JSON-RPC error
     // envelope promotion
     // -----------------------------------------------------------------
-
-    #[test]
-    fn parse_layout_param_absent_returns_none() {
-        let params = serde_json::json!({"name": "ws"});
-        assert!(parse_layout_param(&params).expect("ok").is_none());
-    }
-
-    #[test]
-    fn parse_layout_param_null_returns_none() {
-        // null is treated like absent - caller still gets the
-        // single-pane default behavior.
-        let params = serde_json::json!({"layout": null});
-        assert!(parse_layout_param(&params).expect("ok").is_none());
-    }
-
-    #[test]
-    fn parse_layout_param_valid_pane_returns_some() {
-        let params = serde_json::json!({
-            "layout": { "type": "pane", "surfaces": [] }
-        });
-        let layout = parse_layout_param(&params).expect("ok").expect("some");
-        assert_eq!(layout.leaf_count(), 1);
-    }
-
-    #[test]
-    fn parse_layout_param_valid_split_returns_some() {
-        let params = serde_json::json!({
-            "layout": {
-                "type": "split",
-                "direction": "vertical",
-                "ratios": [0.5, 0.5],
-                "children": [
-                    { "type": "pane", "surfaces": [] },
-                    { "type": "pane", "surfaces": [] }
-                ]
-            }
-        });
-        let layout = parse_layout_param(&params).expect("ok").expect("some");
-        assert_eq!(layout.leaf_count(), 2);
-    }
-
-    #[test]
-    fn workspace_create_with_layout_does_not_pre_spawn_a_pane() {
-        // Issue #44: a default terminal handed to `from_layout_node` is reused
-        // as leaf 0 and never spawned from the node's surfaces.
-        let src = include_str!("ipc_handler.rs");
-        let arm = src
-            .split("\"workspace.create\"")
-            .nth(1)
-            .and_then(|rest| rest.split("\"workspace.select\"").next())
-            .expect("workspace.create arm");
-        let layout_branch = arm
-            .split("if layout.is_some()")
-            .nth(1)
-            .and_then(|rest| rest.split("} else if let Some(dir) = cwd {").next())
-            .expect("layout.is_some() branch");
-        assert!(
-            layout_branch.contains("LayoutTree::empty()"),
-            "layout create must start from a zero-leaf tree so spawn runs for leaf 0"
-        );
-        assert!(
-            layout_branch.contains("Workspace::with_layout_and_id"),
-            "layout create must not go through with_id / with_cwd_and_id"
-        );
-        assert!(
-            !layout_branch.contains("TerminalView::"),
-            "layout create must not spawn a default terminal"
-        );
-        assert!(
-            !layout_branch.contains("create_pane"),
-            "layout create must not wrap a default terminal in a pane"
-        );
-    }
-
-    #[test]
-    fn parse_layout_param_string_payload_returns_invalid_params() {
-        let params = serde_json::json!({"layout": "not an object"});
-        let err = parse_layout_param(&params).expect_err("err");
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-        assert!(
-            err.message.starts_with("invalid layout:"),
-            "got {:?}",
-            err.message
-        );
-    }
-
-    #[test]
-    fn parse_layout_param_unknown_tag_returns_invalid_params() {
-        let params = serde_json::json!({"layout": { "type": "unknown_kind" }});
-        let err = parse_layout_param(&params).expect_err("err");
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-    }
 
     #[test]
     fn promote_response_wraps_value_under_result_by_default() {
@@ -5280,50 +4462,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn orchestration_gate_accepts_specific_gate_or_scripting_superset() {
-        assert!(!super::orchestration_enabled_from(None, None));
-        assert!(!super::orchestration_enabled_from(Some("0"), Some("0")));
-        assert!(super::orchestration_enabled_from(Some("1"), None));
-        assert!(super::orchestration_enabled_from(None, Some("1")));
-    }
-
-    #[test]
-    fn pane_spec_requires_orchestration_for_spawn_primitives_only() {
-        assert!(!super::pane_spec_requires_orchestration(
-            &serde_json::json!({"cwd": "."})
-        ));
-        assert!(super::pane_spec_requires_orchestration(
-            &serde_json::json!({"command": "cargo test"})
-        ));
-        assert!(super::pane_spec_requires_orchestration(
-            &serde_json::json!({"prompt": "inspect this"})
-        ));
-        assert!(super::pane_spec_requires_orchestration(
-            &serde_json::json!({"context": "notes"})
-        ));
-        assert!(super::pane_spec_requires_orchestration(
-            &serde_json::json!({"env": {"PROMPT_COMMAND": "date"}})
-        ));
-        // A non-string env value is still an env request (it is rejected
-        // with -32602 at parse time rather than silently dropped), so it
-        // must not slip past the gate.
-        assert!(super::pane_spec_requires_orchestration(
-            &serde_json::json!({"env": {"NOT_A_STRING": 7}})
-        ));
-        assert!(!super::pane_spec_requires_orchestration(
-            &serde_json::json!({"env": {}})
-        ));
-        assert!(super::pane_spec_requires_orchestration(
-            &serde_json::json!({"managed_worktree": {
-                "path": "/tmp/repo.worktrees/feature",
-                "repo_root": "/tmp/repo",
-                "branch": "feature",
-                "teardown": "auto"
-            }})
-        ));
     }
 
     #[test]
@@ -5441,9 +4579,7 @@ mod tests {
 
     #[test]
     fn prefill_prompt_with_cr_or_lf_is_rejected_as_invalid_params() {
-        // Issue #236: `surface.split` prompts are prefilled
-        // "never submitted" through a verbatim `send_text`, so a CR/LF inside
-        // the prompt would auto-submit under the orchestration gate alone.
+        // Workspace template prompts must not contain submit bytes.
         // Refuse them with -32602 before anything is spawned.
         for prompt in ["fix the bug\nplease", "fix the bug\r", "fix\r\nthe bug"] {
             let spec = serde_json::json!({ "prompt": prompt });
@@ -5459,20 +4595,6 @@ mod tests {
                 .prompt
                 .as_deref(),
             Some("fix the bug")
-        );
-        // The same guard fronts the spawn-capable `surface.split` prompt.
-        assert!(validate_prefill_prompt("fix the bug").is_ok());
-        assert!(validate_prefill_prompt("fix\nthe bug").is_err());
-        assert!(validate_prefill_prompt("fix\rthe bug").is_err());
-        let src = include_str!("ipc_handler.rs");
-        let split_arm = src
-            .split("\"surface.split\" => {")
-            .nth(1)
-            .and_then(|rest| rest.split("schedule_prompt_prefill(&new_terminal").next())
-            .expect("surface.split arm");
-        assert!(
-            split_arm.contains("validate_prefill_prompt(prompt)"),
-            "surface.split must refuse a CR/LF prompt before spawning"
         );
     }
 
@@ -5556,7 +4678,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // US-014 (cli-hardening-followup-2026-Q3) - workspace.create cwd
+    // US-014 (cli-hardening-followup-2026-Q3) - workspace template cwd
     // canonicalization
     // -----------------------------------------------------------------
 
@@ -5565,7 +4687,7 @@ mod tests {
     /// the free helper `canonicalize_workspace_cwd` directly so the
     /// contract is verified in isolation from `PaneFlowApp`.
     #[test]
-    fn workspace_create_rejects_nonexistent_cwd() {
+    fn workspace_template_rejects_nonexistent_cwd() {
         let bogus = "/nonexistent/path/paneflow-us-014-fixture-xyz";
         assert!(
             !std::path::Path::new(bogus).exists(),
@@ -5583,7 +4705,7 @@ mod tests {
     /// AC #3: a `cwd` that resolves to a regular file (not a
     /// directory) must surface as `-32602 cwd is not a directory`.
     #[test]
-    fn workspace_create_rejects_file_cwd() {
+    fn workspace_template_rejects_file_cwd() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path().to_string_lossy().into_owned();
         let err =
@@ -5596,7 +4718,7 @@ mod tests {
         );
     }
 
-    /// Issue #358: `workspace.create` / `surface.split`
+    /// Issue #358: workspace templates
     /// resolve `cwd` on the GPUI automation tick. A cwd on a dead NFS/SMB
     /// mount can pin `stat` for the kernel mount timeout, so the probe must
     /// answer within a bounded window (`-32602` on timeout) like session
@@ -5630,7 +4752,7 @@ mod tests {
 
     /// Sanity: a real, existing directory must canonicalize successfully.
     #[test]
-    fn workspace_create_accepts_existing_directory() {
+    fn workspace_template_accepts_existing_directory() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let resolved = super::canonicalize_workspace_cwd(tmp.path().to_str().expect("utf-8 path"))
             .expect("real dir must canonicalize");
@@ -6897,21 +6019,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[test]
-    fn context_file_stage_failure_is_jsonrpc_internal_error() {
-        let err = super::context_file_stage_rpc_error(std::io::Error::other("disk full"));
-        assert_eq!(err.code, JsonRpcError::INTERNAL_ERROR);
-        assert!(
-            err.message.contains("failed to stage context file"),
-            "got: {}",
-            err.message
-        );
-        assert!(err.message.contains("disk full"), "got: {}", err.message);
-        let v = err.into_value();
-        assert_eq!(v[super::JSONRPC_ERROR_KEY]["code"], -32603);
-        assert!(v.get("result").is_none());
-    }
-
     // -----------------------------------------------------------------
     // US-013 (prd-pane-context-bridge) - surface.rename name parsing
     // -----------------------------------------------------------------
@@ -6922,7 +6029,7 @@ mod tests {
 
     #[test]
     fn prompt_prefill_writes_through_inject_text_and_never_submits() {
-        // Issue #334: the shared prefill (surface.split, Launch
+        // Issue #334: the shared prefill (Launch
         // Pad, and "Continue in") writes through `inject_text`, which wraps
         // the block in bracketed-paste markers when the surface has enabled
         // `ESC[?2004h` and otherwise writes it verbatim, never rewriting a
@@ -7389,46 +6496,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn surface_split_refuses_when_tab_is_zoomed(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
-
-        let cx = cx.add_empty_window();
-        let make_pane = |cx: &mut gpui::VisualTestContext| {
-            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
-            cx.new(|cx| Pane::new(terminal, 1, cx))
-        };
-        let left = make_pane(cx);
-        let right = make_pane(cx);
-        let full = crate::layout::LayoutTree::from_panes_equal(
-            SplitDirection::Vertical,
-            vec![left.clone(), right],
-        )
-        .expect("two panes make a layout");
-        let saved_leaf_count = full.leaf_count();
-        let mut tab =
-            crate::workspace::Tab::new("zoomed", Some(crate::layout::LayoutTree::Leaf(left)));
-        tab.saved_layout = Some(full);
-
-        let error = surface_split_root(&tab)
-            .err()
-            .expect("surface.split must refuse a zoomed tab");
-        assert_eq!(error.code, JsonRpcError::INVALID_PARAMS);
-        assert_eq!(error.message, "Unzoom before splitting panes");
-
-        cx.update(|_, cx| {
-            tab.exit_zoom(cx);
-        });
-        assert_eq!(
-            tab.root
-                .as_ref()
-                .expect("exit_zoom restores root")
-                .leaf_count(),
-            saved_leaf_count,
-            "a refused split leaves the saved tree intact"
-        );
-    }
-
     /// US-003: the pane cap bounds a *tab*. A tab already at `MAX_PANES` leaves
     /// refuses a split - with the unchanged message - and its tree is untouched,
     /// while a sibling tab under the cap still accepts one.
@@ -7467,7 +6534,7 @@ mod tests {
         let before = leaf_ids(&ws, 0);
 
         // `can_add_pane` is the shared guard every create site consults - the
-        // keyboard split, drop-to-split, the launch pad and `surface.split`.
+        // keyboard split, drop-to-split, the launch pad and workspace templates.
         assert!(!ws.tabs()[0].can_add_pane(), "the saturated tab refuses");
         let extra = new_pane(cx);
         if ws.tabs()[0].can_add_pane() {

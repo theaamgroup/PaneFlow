@@ -35,19 +35,6 @@
 //! below carry different blast radii once connected:
 //!
 //! - `system.*`: read-only health checks. Safe.
-//! - `workspace.list` / `workspace.current` / `workspace.select`: navigation
-//!   with visible UI side effects and no file/system mutation.
-//! - `workspace.close`: process/workspace lifecycle and possible managed-
-//!   worktree retirement. Gated behind the orchestration opt-in and still
-//!   routed through the visible close confirmation.
-//! - `workspace.create`: spawns a PTY at `cwd`. `cwd` is
-//!   canonicalised (US-014) and rejected if not a directory.
-//! - `surface.split`: layout mutation, bounded by `MAX_PANES` on the tab
-//!   owning the targeted surface (US-003, `prd-cli-tab-hierarchy`). Bare layout
-//!   splits are navigation-level; `command`, `prompt`, `context`, and
-//!   non-empty `env` and `managed_worktree` ownership are orchestration primitives gated behind
-//!   `PANEFLOW_IPC_ORCHESTRATION=1`. `PANEFLOW_IPC_SCRIPTING=1` also enables
-//!   them as a broader legacy opt-in.
 //! - **`surface.send_text` / `surface.send_keystroke`: same-UID RCE
 //!   primitive when enabled.** A connected client can inject
 //!   arbitrary bytes (including `\n`) into any visible PTY,
@@ -68,19 +55,6 @@
 //!
 //! - `system.ping` / `system.capabilities` / `system.identify` - stateless
 //!   health checks handled directly on the socket thread.
-//! - `workspace.list` / `workspace.current` / `workspace.select` - workspace
-//!   navigation; `workspace.close` is an orchestration-gated lifecycle action.
-//! - `workspace.create` - accepts `name` (string, default "Terminal"),
-//!   `cwd` (string path, optional) and `layout` (optional `LayoutNode`
-//!   JSON, US-001). When `layout` is present, the new workspace's pane
-//!   tree is built from the layout in a single round-trip; when absent,
-//!   behavior is unchanged (a single default pane). A malformed `layout`
-//!   payload returns the JSON-RPC `-32602 Invalid params` error envelope
-//!   and leaves no orphan workspace behind.
-//! - `workspace.restore_layout` - apply a `LayoutNode` to the active
-//!   workspace (used by session restore).
-//! - `surface.list` / `surface.send_text` / `surface.send_keystroke` /
-//!   `surface.split` - pane operations.
 //! - `ai.session_start` / `ai.prompt_submit` / `ai.tool_use` /
 //!   `ai.notification` / `ai.stop` / `ai.exit` / `ai.session_end` - AI
 //!   hook lifecycle (`ai.exit` carries the wrapped agent binary's real
@@ -122,8 +96,7 @@ pub struct IpcRequest {
     pub response_tx: mpsc::Sender<Value>,
     /// Single CAS lifecycle (issue #38): `IPC_DISPATCH_QUEUED` → `STARTED`
     /// (GPUI, just before `handle_ipc`) or `CANCELLED` (socket 5 s timeout).
-    /// Exactly one transition wins, so a timed-out `workspace.create` /
-    /// `surface.split` cannot still run after `-32002`.
+    /// Exactly one transition wins, so a timed-out mutation cannot still run after `-32002`.
     pub dispatch: Arc<AtomicU8>,
     /// EP-003 US-010 (agent-control-plane): the socket peer's PID, captured
     /// from `LOCAL_PEERCRED` once per connection (None when the kernel does
@@ -313,19 +286,11 @@ pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
     // PANEFLOW_IPC_SCRIPTING was inherited from a launcher script or
     // sourced .env file without their realising.
     let scripting_enabled = std::env::var("PANEFLOW_IPC_SCRIPTING").as_deref() == Ok("1");
-    let orchestration_enabled =
-        scripting_enabled || std::env::var("PANEFLOW_IPC_ORCHESTRATION").as_deref() == Ok("1");
     if scripting_enabled {
         tracing::warn!(
             "ipc.scripting_enabled is ON; any same-UID process can inject keystrokes into agent panes"
         );
     }
-    if orchestration_enabled {
-        tracing::warn!(
-            "ipc.orchestration_enabled is ON; any same-UID process can create panes with commands, prompts, context, or env"
-        );
-    }
-
     let (tx, rx) = mpsc::sync_channel(IPC_REQUEST_QUEUE_CAPACITY);
     let status = IpcStatus::online();
     let thread_status = status.clone();
@@ -990,10 +955,6 @@ fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
                                         std::env::var("PANEFLOW_IPC_SCRIPTING").ok().as_deref(),
                                         ai_unrestricted(),
                                     ),
-                                    "orchestration": std::env::var("PANEFLOW_IPC_ORCHESTRATION")
-                                        .is_ok_and(|v| v == "1")
-                                        || std::env::var("PANEFLOW_IPC_SCRIPTING")
-                                            .is_ok_and(|v| v == "1"),
                                     "methods": methods
                                 }, "id": response_id})
                             }
@@ -1782,15 +1743,11 @@ fn supported_methods() -> Vec<&'static str> {
         "system.ping",
         "system.capabilities",
         "system.identify",
-        "workspace.create",
-        "workspace.select",
         "surface.list",
         "surface.read",
         "surface.search",
         "surface.send_text",
         "surface.send_keystroke",
-        "surface.split",
-        "surface.focus",
         "surface.status",
         "fleet.list",
         "agent.whoami",
@@ -1810,6 +1767,10 @@ mod removed_method_tests {
     fn removed_methods_are_not_advertised_or_dispatched() {
         let (tx, rx) = mpsc::sync_channel(1);
         for (namespace, verb) in [
+            ("workspace", "create"),
+            ("workspace", "select"),
+            ("surface", "split"),
+            ("surface", "focus"),
             ("events", "subscribe"),
             ("workspace", "up"),
             ("workspace", "list"),
@@ -1831,8 +1792,6 @@ mod removed_method_tests {
             "surface.search",
             "agent.whoami",
             "task.get",
-            "workspace.create",
-            "surface.split",
         ] {
             assert!(supported_methods().contains(&retained));
         }

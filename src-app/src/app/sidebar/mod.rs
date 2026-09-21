@@ -4468,7 +4468,7 @@ mod tests {
         // Issue #79 review (C1): `dismiss_transient_surfaces` takes no
         // `Window`, and ~17 call sites rely on that - several of them (the
         // title-bar sidebar-collapse and menu toggles, the IPC/CLI
-        // `workspace.select` path) have no `Window` to give it. The rename
+        // workspace switching path) have no `Window` to give it. The rename
         // fields track focus: the renamed row is the only element that tracks
         // `sidebar_rename_focus`, and it stops the instant they clear. Clearing
         // them from a `Window`-less caller therefore leaves the window with

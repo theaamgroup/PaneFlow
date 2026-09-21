@@ -344,10 +344,9 @@ fn validated_owner_marker(
     Ok(contents)
 }
 
-/// Rehydrate a persisted or IPC-provided ownership record. The record is only
-/// accepted when it matches Paneflow's deterministic worktree directory and the
-/// on-disk worktree carries Paneflow's owner marker.
-pub fn managed_worktree_from_record(
+/// Test fixture for legacy persisted records without an explicit identity.
+#[cfg(test)]
+fn managed_worktree_from_record(
     path_raw: &str,
     repo_root_raw: &str,
     branch_raw: &str,
@@ -852,7 +851,7 @@ pub fn plan_branch_checkout(
 /// Nothing here removes it, workspace close never touches it, and the branch
 /// is untouched either way. Without the marker a later `managed_worktree`
 /// record naming this path cannot adopt it either
-/// (`managed_worktree_from_record` validates the marker), so the checkout
+/// (`managed_worktree_from_persisted_record` validates the marker), so the checkout
 /// cannot be torn down by accident later.
 pub fn prepare_branch_checkout(repo_root: &Path, branch: &str) -> Result<PathBuf, String> {
     // Configured defaults are arbitrary input, unlike the branch picker's list.
