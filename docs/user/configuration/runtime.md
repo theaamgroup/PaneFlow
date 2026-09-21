@@ -2,6 +2,13 @@
 
 Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resolved via `dirs::config_dir()` in `crates/paneflow-config/src/loader.rs`. Debug builds use the `paneflow-dev` subdir instead. There is **no** `~/.config/paneflow/` on macOS.
 
+For an isolated run, set `PANEFLOW_HOME` to an absolute directory. App-owned
+roots become `<home>/config`, `<home>/data`, and `<home>/cache`, each joined
+with the build's `paneflow` or `paneflow-dev` namespace. For example, a release
+build reads `<home>/config/paneflow/paneflow.json`. This does not move the IPC
+socket; use a separate absolute `PANEFLOW_SOCKET_PATH` when running alongside
+another instance.
+
 ```json
 {
   "default_shell": "/bin/zsh",
