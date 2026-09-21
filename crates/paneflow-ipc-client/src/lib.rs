@@ -205,11 +205,6 @@ pub(crate) fn parse_response(line: &str) -> Result<Value, String> {
         .ok_or_else(|| "paneflow response missing both `result` and `error`".to_string())
 }
 
-pub fn jsonrpc_error_message(line: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(line.trim()).ok()?;
-    jsonrpc_error_message_from_value(&value)
-}
-
 fn jsonrpc_error_message_from_value(value: &Value) -> Option<String> {
     let err = value.get("error")?;
     // JSON-RPC 2.0 requires `error` to be an object with an integer `code`
@@ -320,195 +315,6 @@ fn connect_stream_with_timeout(socket: &Path, timeout: Duration) -> io::Result<S
         .name(name)
         .wait_mode(ConnectWaitMode::Timeout(timeout))
         .connect_sync()
-}
-
-/// EP-002 (agent-control-plane): open a persistent `events.subscribe` stream.
-/// Writes the subscribe request, then invokes `on_line` for every newline-
-/// delimited event the server pushes, until the connection closes (server side)
-/// or `on_line` returns `false`. Unlike [`send_and_receive`], the read side is
-/// NOT deadline-bounded: an idle stream is normal (the server heartbeats every
-/// 30 s), so only a real disconnect (EOF / error) ends the loop.
-pub fn subscribe_stream(
-    socket: &Path,
-    params: Value,
-    mut on_line: impl FnMut(&str) -> bool,
-) -> io::Result<()> {
-    let mut stream = connect_stream_with_timeout(socket, IPC_TIMEOUT)?;
-    let request = build_request(1, "events.subscribe", params);
-    let mut payload =
-        serde_json::to_vec(&request).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    payload.push(b'\n');
-    stream.write_all(&payload)?;
-    stream.flush()?;
-
-    let mut reader = BufReader::new(stream);
-    let mut buf = Vec::new();
-    while let Some(line) = read_capped_event_line(&mut reader, &mut buf)? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if !on_line(&line) {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn read_capped_event_line<R>(reader: &mut R, buf: &mut Vec<u8>) -> io::Result<Option<String>>
-where
-    R: BufRead,
-{
-    buf.clear();
-    loop {
-        let remaining = MAX_RESPONSE_LEN.saturating_sub(buf.len() as u64);
-        if remaining == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "paneflow event line exceeded the size cap",
-            ));
-        }
-
-        let read = reader.by_ref().take(remaining).read_until(b'\n', buf)?;
-        if read == 0 {
-            if buf.is_empty() {
-                return Ok(None);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "paneflow event stream ended mid-line",
-            ));
-        }
-
-        if buf.last() == Some(&b'\n') {
-            if buf.ends_with(b"\r\n") {
-                buf.truncate(buf.len().saturating_sub(2));
-            } else {
-                buf.truncate(buf.len().saturating_sub(1));
-            }
-            let line = String::from_utf8(buf.clone())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            return Ok(Some(line));
-        }
-    }
-}
-
-/// What a single read slice of [`subscribe_stream_timed`] yielded.
-pub enum StreamEvent<'a> {
-    /// A complete, non-empty event line from the server (JSON).
-    Line(&'a str),
-    /// `slice` elapsed with no complete line: the caller's quiescence tick.
-    /// This is the signal a bare [`subscribe_stream`] cannot deliver.
-    Tick,
-    /// EOF or a mid-stream socket error: the server vanished.
-    Closed,
-}
-
-/// EP-003 US-007 (agent-control-plane-hardening): a [`subscribe_stream`] variant
-/// whose read side IS deadline-bounded by `slice`. Where `subscribe_stream`
-/// blocks forever between events, this wakes every `slice` with a
-/// [`StreamEvent::Tick`] so the caller can detect the ABSENCE of events (output
-/// quiescence) - the basis of `wait --idle`, with zero client-side polling of
-/// pane content. A complete line yields [`StreamEvent::Line`]; EOF or a
-/// mid-stream socket error yields [`StreamEvent::Closed`] then returns `Ok(())`
-/// (the caller maps it to a clean "server gone" exit). Only a failed connect /
-/// subscribe-write returns `Err` (no instance). `on_event` returns `false` to
-/// stop.
-///
-/// Unlike [`send_and_receive`], the recv deadline here is REQUIRED, not
-/// best-effort: the `Tick` contract is impossible without it, and a socket
-/// that cannot set a recv timeout (`Unsupported`) would block forever in
-/// `read_line` instead of ticking - a hang past the caller's overall
-/// deadline. So an `Unsupported` recv timeout is surfaced as `Err`; callers
-/// that still need quiescence can fall back to another deterministic clock.
-pub fn subscribe_stream_timed(
-    socket: &Path,
-    params: Value,
-    slice: Duration,
-    mut on_event: impl FnMut(StreamEvent<'_>) -> bool,
-) -> io::Result<()> {
-    let mut stream = connect_stream_with_timeout(socket, IPC_TIMEOUT)?;
-    // REQUIRED (see the doc note): without a recv deadline the read below would
-    // block forever between events, so refuse rather than hang.
-    stream.set_recv_timeout(Some(slice)).map_err(|e| {
-        if e.kind() == io::ErrorKind::Unsupported {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the event stream needs a recv-timeout-capable Unix socket",
-            )
-        } else {
-            e
-        }
-    })?;
-    let request = build_request(1, "events.subscribe", params);
-    let mut payload =
-        serde_json::to_vec(&request).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    payload.push(b'\n');
-    stream.write_all(&payload)?;
-    stream.flush()?;
-
-    let mut reader = BufReader::new(stream);
-    // BYTES, not a `String`: `read_line` validates UTF-8 on every read, so a
-    // multibyte codepoint bisected by a recv-slice boundary would surface as
-    // `InvalidData` and be mis-read as a disconnect. `read_until(b'\n')` defers
-    // validation to the complete line. Reused across slices so a split line is
-    // reassembled rather than fed in halves.
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
-        // Bound each line at the same 256 KiB cap as a request/response reply,
-        // so a same-UID server flooding one unterminated line can't grow `buf`
-        // without bound (parity with `send_and_receive`). `remaining` shrinks as
-        // the line accumulates across slices.
-        let remaining = MAX_RESPONSE_LEN.saturating_sub(buf.len() as u64);
-        if remaining == 0 {
-            // One line exceeded the cap without terminating: framing abuse - the
-            // server is not speaking our protocol, treat it as gone.
-            on_event(StreamEvent::Closed);
-            return Ok(());
-        }
-        match reader.by_ref().take(remaining).read_until(b'\n', &mut buf) {
-            // Clean EOF: the server closed the stream.
-            Ok(0) => {
-                on_event(StreamEvent::Closed);
-                return Ok(());
-            }
-            // A whole line landed (terminated by the newline).
-            Ok(_) if buf.last() == Some(&b'\n') => {
-                let keep = {
-                    let line = String::from_utf8_lossy(&buf);
-                    let line = line.trim();
-                    line.is_empty() || on_event(StreamEvent::Line(line))
-                };
-                buf.clear();
-                if !keep {
-                    return Ok(());
-                }
-            }
-            // `Ok(n>0)` with no trailing newline = EOF mid-line (or the cap was
-            // hit, handled by `remaining == 0` next pass): server gone.
-            Ok(_) => {
-                on_event(StreamEvent::Closed);
-                return Ok(());
-            }
-            // The recv slice elapsed with no (further) bytes: a quiescence tick.
-            // Any partial bytes already read stay in `buf` for the next slice.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                if !on_event(StreamEvent::Tick) {
-                    return Ok(());
-                }
-            }
-            // A mid-stream socket error means the peer vanished; surface it as
-            // Closed (a clean caller exit), not Err (which means "no instance").
-            Err(_) => {
-                on_event(StreamEvent::Closed);
-                return Ok(());
-            }
-        }
-    }
 }
 
 /// Resolve the Paneflow IPC socket path. `PANEFLOW_SOCKET_PATH` (inherited
@@ -663,15 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn jsonrpc_error_message_detects_stream_error_line() {
-        let line = r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"bad filter"},"id":null}"#;
-        let err = jsonrpc_error_message(line).expect("error");
-        assert!(err.contains("-32602"), "got: {err}");
-        assert!(err.contains("bad filter"), "got: {err}");
-        assert!(jsonrpc_error_message(r#"{"type":"subscribed"}"#).is_none());
-    }
-
-    #[test]
     fn parse_response_rejects_missing_result_and_error() {
         let line = r#"{"jsonrpc":"2.0","id":1}"#;
         assert!(parse_response(line).is_err());
@@ -711,8 +508,10 @@ mod tests {
                 "synthesized message for {line}: {err}"
             );
         }
-        assert!(jsonrpc_error_message(r#"{"error":{},"id":null}"#)
-            .is_some_and(|e| !e.contains("error 0:")));
+        assert!(
+            jsonrpc_error_message_from_value(&serde_json::json!({"error": {}, "id": null}))
+                .is_some_and(|e| !e.contains("error 0:"))
+        );
     }
 
     #[test]
@@ -722,25 +521,6 @@ mod tests {
         assert!(err.contains("-32001"), "got: {err}");
         assert!(err.contains("nope"), "got: {err}");
         assert!(err.contains("surface_id"), "error.data dropped: {err}");
-    }
-
-    #[test]
-    fn capped_event_line_rejects_oversized_unterminated_frame() {
-        let data = vec![b'x'; MAX_RESPONSE_LEN as usize];
-        let mut reader = BufReader::new(std::io::Cursor::new(data));
-        let mut buf = Vec::new();
-        let err = read_capped_event_line(&mut reader, &mut buf).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn capped_event_line_reads_one_frame() {
-        let mut reader = BufReader::new(std::io::Cursor::new(b"{\"type\":\"ai.stop\"}\nrest"));
-        let mut buf = Vec::new();
-        let line = read_capped_event_line(&mut reader, &mut buf)
-            .expect("read")
-            .expect("line");
-        assert_eq!(line, "{\"type\":\"ai.stop\"}");
     }
 
     #[test]

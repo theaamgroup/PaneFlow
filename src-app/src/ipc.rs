@@ -201,12 +201,6 @@ use crate::limits::MAX_REQUEST_LEN;
 /// peer opening connections in a loop fans out unbounded OS threads.
 const MAX_REQUEST_CONNECTIONS: usize = 16;
 
-/// Persistent `events.subscribe` streams keep a socket open by design. They
-/// get their own cap so watches cannot consume every short-request slot.
-const MAX_SUBSCRIPTION_CONNECTIONS: usize = 16;
-
-const MAX_CONCURRENT_CONNECTIONS: usize = MAX_REQUEST_CONNECTIONS + MAX_SUBSCRIPTION_CONNECTIONS;
-
 /// EP-004 US-010: bounded queue from the socket handler threads to the GPUI
 /// thread. Once 256 requests are pending, new GPUI-bound requests fail fast
 /// with an overload error instead of growing memory without a cap.
@@ -310,11 +304,7 @@ fn allow_multiple_from(value: Option<&str>) -> bool {
 /// re-binds when another instance (e.g. `cargo run`) clobbers it. Without
 /// this, the listener becomes orphaned (wrong inode) and all new connections
 /// get `ECONNREFUSED`, silently disabling AI hook integration.
-pub fn start_server() -> (
-    mpsc::Receiver<IpcRequest>,
-    IpcStatus,
-    Arc<crate::ipc_events::EventBus>,
-) {
+pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
     // US-012 (cli-hardening-followup-2026-Q3): one-time boot-time
     // warn-log when scripting is enabled. The per-call gate in
     // `surface.send_text` / `surface.send_keystroke` stays the
@@ -339,12 +329,6 @@ pub fn start_server() -> (
     let (tx, rx) = mpsc::sync_channel(IPC_REQUEST_QUEUE_CAPACITY);
     let status = IpcStatus::online();
     let thread_status = status.clone();
-
-    // EP-002 (agent-control-plane): the outbound event bus. One handle stays in
-    // start_server to be returned to the GPUI app (it broadcasts); a clone moves
-    // into the IPC thread so each accepted connection can register a subscriber.
-    let event_bus = crate::ipc_events::EventBus::new();
-    let thread_event_bus = Arc::clone(&event_bus);
 
     // Singleton guard: probe the socket BEFORE the IPC thread spawns and
     // before `bind_socket` reclaims any stale socket. If
@@ -434,7 +418,6 @@ pub fn start_server() -> (
             // Only this (single) accept thread increments; handler threads
             // decrement via the RAII guard below, so the load is exact.
             let active_connections = Arc::new(AtomicUsize::new(0));
-            let active_subscriptions = Arc::new(AtomicUsize::new(0));
 
             // Decrement the live-connection count on any handler exit path
             // (return, EOF, panic-unwind). Hoisted out of the spawn closure so
@@ -451,16 +434,13 @@ pub fn start_server() -> (
             loop {
                 match listener.accept() {
                     Ok(stream) => {
-                        if active_connections.load(Ordering::Acquire) >= MAX_CONCURRENT_CONNECTIONS
-                        {
+                        if active_connections.load(Ordering::Acquire) >= MAX_REQUEST_CONNECTIONS {
                             reject_overloaded(stream);
                             continue;
                         }
                         active_connections.fetch_add(1, Ordering::AcqRel);
                         let guard = ActiveGuard(Arc::clone(&active_connections));
                         let tx = tx.clone();
-                        let bus = Arc::clone(&thread_event_bus);
-                        let subscriptions = Arc::clone(&active_subscriptions);
                         // EP-001 US-005 parity: use the fallible `Builder::spawn`,
                         // never the panicking `thread::spawn`. Under
                         // RLIMIT_NPROC / EAGAIN the latter panics and unwinds
@@ -474,7 +454,7 @@ pub fn start_server() -> (
                             .name("paneflow-ipc-conn".into())
                             .spawn(move || {
                                 let _guard = guard;
-                                handle_connection(stream, tx, bus, subscriptions);
+                                handle_connection(stream, tx);
                             })
                         {
                             log::warn!(
@@ -544,7 +524,7 @@ pub fn start_server() -> (
         // the app runs normally, only external IPC clients can't reach it.
     }
 
-    (rx, status, event_bus)
+    (rx, status)
 }
 
 /// Bind a new listener at the given Unix socket path.
@@ -842,33 +822,6 @@ fn read_request_line(reader: &mut impl BufRead, line: &mut String) -> std::io::R
     read_capped_line(reader, line)
 }
 
-struct ActiveCountGuard {
-    counter: Arc<AtomicUsize>,
-}
-
-impl ActiveCountGuard {
-    fn try_acquire(counter: Arc<AtomicUsize>, limit: usize) -> Option<Self> {
-        loop {
-            let current = counter.load(Ordering::Acquire);
-            if current >= limit {
-                return None;
-            }
-            if counter
-                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return Some(Self { counter });
-            }
-        }
-    }
-}
-
-impl Drop for ActiveCountGuard {
-    fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 fn write_overloaded_error(writer: &mut Stream, message: &str) {
     let envelope = json!({
         "jsonrpc": "2.0",
@@ -903,12 +856,7 @@ fn peer_pid(stream: &Stream) -> Option<i64> {
         .map(|p| p as i64)
 }
 
-fn handle_connection(
-    stream: Stream,
-    request_tx: mpsc::SyncSender<IpcRequest>,
-    event_bus: Arc<crate::ipc_events::EventBus>,
-    active_subscriptions: Arc<AtomicUsize>,
-) {
+fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
     // `Stream::try_clone` is provided by `interprocess::TryClone`. One
     // handle reads, the other writes, so request/response flow does not
     // fight over a single mutable cursor.
@@ -1022,21 +970,6 @@ fn handle_connection(
                         let method = method.to_string();
                         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-                        if method == "events.subscribe" {
-                            let Some(_subscription_guard) = ActiveCountGuard::try_acquire(
-                                Arc::clone(&active_subscriptions),
-                                MAX_SUBSCRIPTION_CONNECTIONS,
-                            ) else {
-                                write_overloaded_error(
-                                    &mut writer,
-                                    "server busy: too many event subscriptions",
-                                );
-                                return;
-                            };
-                            serve_subscription(&mut writer, &params, &event_bus, &response_id);
-                            return;
-                        }
-
                         if method.starts_with("ai.") {
                             crate::ai_hooks::hook_diag(&format!(
                                 "ipc server received {method} (tool={:?} pid={:?} ws={:?})",
@@ -1099,97 +1032,9 @@ fn handle_connection(
     }
 }
 
-/// EP-002 / EP-006 (agent-control-plane): serve a persistent `events.subscribe`
-/// stream. Registers a subscriber, writes a `subscribed` ack, then writes each
-/// pushed event line until the client disconnects. A 30 s idle tick emits a
-/// heartbeat (US-007) so a dead client is detected even when no events flow, and
-/// any backlog shed under backpressure (US-004) is reported as a `dropped`
-/// marker. Returns when a push fails (client gone) or the bus shuts down; the
-/// `Subscription` drops here, unsubscribing (RAII).
-///
-/// Every push goes through [`push_frame`] / [`push_line`]. A write to a
-/// closed Unix socket returns `BrokenPipe`, so the `watch` client's
-/// disconnect is a clean RAII eviction of the `Subscription`.
-fn serve_subscription(
-    writer: &mut Stream,
-    params: &Value,
-    bus: &Arc<crate::ipc_events::EventBus>,
-    request_id: &Value,
-) {
-    use std::sync::mpsc::RecvTimeoutError;
-
-    const HEARTBEAT: Duration = Duration::from_secs(30);
-
-    let filter = match crate::ipc_events::EventFilter::from_params(params) {
-        Ok(f) => f,
-        Err(msg) => {
-            let err = json!({
-                "jsonrpc": "2.0",
-                "error": {"code": -32602, "message": msg},
-                "id": request_id,
-            });
-            // Guarded like every other push: the subscribe request's
-            // socket may already be closed by the time we reply.
-            push_frame(writer, &err);
-            return;
-        }
-    };
-    let sub = bus.subscribe(filter);
-    let ack = json!({"type": "subscribed", "id": sub.id});
-    if !push_frame(writer, &ack) {
-        return;
-    }
-
-    loop {
-        // Report any events shed under backpressure since the last write.
-        let dropped = sub.take_dropped();
-        if dropped > 0 {
-            let marker = json!({"type": "dropped", "count": dropped});
-            if !push_frame(writer, &marker) {
-                break;
-            }
-        }
-        match sub.rx.recv_timeout(HEARTBEAT) {
-            Ok(line) => {
-                // `line` already carries its trailing newline.
-                if !push_line(writer, line.as_bytes()) {
-                    break;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                let hb = json!({"type": "heartbeat"});
-                if !push_frame(writer, &hb) {
-                    break;
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
-}
-
-/// Write one JSON value as a newline-terminated frame to a subscription stream,
-/// guarded by [`subscriber_connected`]. Returns `false` when the peer is gone or
-/// the write fails - the caller breaks and the `Subscription` drops (RAII).
-fn push_frame(writer: &mut Stream, value: &Value) -> bool {
-    if !subscriber_connected(writer) {
-        return false;
-    }
-    write_envelope(writer, value)
-}
-
-/// Like [`push_frame`] but for bytes that ALREADY carry their trailing newline
-/// (a pushed event line, written verbatim). Same liveness guard.
-fn push_line(writer: &mut Stream, line: &[u8]) -> bool {
-    if !subscriber_connected(writer) {
-        return false;
-    }
-    push_bytes(writer, line)
-}
-
 /// Serialize a JSON-RPC value as a newline-terminated frame and send it
-/// abort-safely. `true` on success. Shared by the subscription push path and the
-/// request/response + rejection writes, so every server-side write to the
-/// socket goes through the same path.
+/// abort-safely. `true` on success. Request/response and rejection writes
+/// share this path.
 fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
     let mut frame = value.to_string();
     frame.push('\n');
@@ -1209,10 +1054,7 @@ fn socket_timeout_error_is_tolerable(err: &std::io::Error) -> bool {
 
 /// Send raw bytes to the peer, `true` on success.
 ///
-/// The `subscriber_connected` probe narrows but cannot close the disconnect
-/// window: the peer can still vanish between the probe and this write, and the
-/// rejection / reply writes have no probe at all. A write to a closed Unix
-/// socket returns `BrokenPipe` cleanly.
+/// A write to a closed Unix socket returns `BrokenPipe` cleanly.
 fn push_bytes(writer: &mut Stream, buf: &[u8]) -> bool {
     if let Err(e) = writer.set_send_timeout(Some(IPC_WRITE_TIMEOUT))
         && !socket_timeout_error_is_tolerable(&e)
@@ -1220,13 +1062,6 @@ fn push_bytes(writer: &mut Stream, buf: &[u8]) -> bool {
         return false;
     }
     writer.write_all(buf).is_ok() && writer.flush().is_ok()
-}
-
-/// EP-006 US-013: Unix path - a no-op `true`. A write to a closed Unix socket
-/// returns `Err(BrokenPipe)` cleanly (Rust ignores SIGPIPE), which the caller
-/// already handles, so no pre-probe is needed.
-fn subscriber_connected(_writer: &Stream) -> bool {
-    true
 }
 
 fn dispatch_to_gpui(
@@ -1507,40 +1342,6 @@ mod timeout_policy_tests {
         assert!(
             !src.contains(&discarded),
             "set_recv_timeout result is discarded in handle_connection"
-        );
-    }
-}
-
-#[cfg(test)]
-mod connection_limit_tests {
-    use super::{ActiveCountGuard, MAX_SUBSCRIPTION_CONNECTIONS};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    #[test]
-    fn subscription_slots_are_capped_and_released() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let mut guards = Vec::new();
-        for _ in 0..MAX_SUBSCRIPTION_CONNECTIONS {
-            guards.push(
-                ActiveCountGuard::try_acquire(Arc::clone(&counter), MAX_SUBSCRIPTION_CONNECTIONS)
-                    .expect("slot"),
-            );
-        }
-        assert!(
-            ActiveCountGuard::try_acquire(Arc::clone(&counter), MAX_SUBSCRIPTION_CONNECTIONS)
-                .is_none()
-        );
-        drop(guards.pop());
-        assert_eq!(
-            counter.load(Ordering::Acquire),
-            MAX_SUBSCRIPTION_CONNECTIONS - 1
-        );
-        assert!(
-            ActiveCountGuard::try_acquire(Arc::clone(&counter), MAX_SUBSCRIPTION_CONNECTIONS)
-                .is_some()
         );
     }
 }
@@ -1915,46 +1716,6 @@ mod allow_multiple_tests {
 }
 
 #[cfg(test)]
-mod subscription_error_id_tests {
-    use super::{GenericFilePath, ListenerOptions, Stream, serve_subscription};
-    use interprocess::local_socket::prelude::*;
-    use serde_json::{Value, json};
-    use std::io::{BufRead, BufReader};
-
-    /// Issue #284: an invalid `events.subscribe` request must be answered with
-    /// a JSON-RPC error carrying the request's own `id`, not `null`, so a
-    /// client that correlates replies by id can see the `-32602`.
-    #[test]
-    fn invalid_subscribe_error_echoes_request_id() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sub-err.sock");
-        let name = path.to_fs_name::<GenericFilePath>().expect("fs name");
-        let listener = ListenerOptions::new()
-            .name(name.clone())
-            .create_sync()
-            .expect("listener");
-        let client = Stream::connect(name).expect("connect");
-        let mut server = listener.accept().expect("accept");
-
-        let bus = crate::ipc_events::EventBus::new();
-        serve_subscription(&mut server, &json!({"types": ["bogus"]}), &bus, &json!(7));
-        drop(server);
-
-        let mut line = String::new();
-        BufReader::new(client)
-            .read_line(&mut line)
-            .expect("read error frame");
-        let reply: Value = serde_json::from_str(line.trim()).expect("json frame");
-        assert_eq!(reply["jsonrpc"], "2.0");
-        assert_eq!(reply["error"]["code"], -32602);
-        assert_eq!(
-            reply["id"], 7,
-            "error envelope must echo the request id; got {reply}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod capabilities_tests {
     /// Issue #283: `system.capabilities.scripting` must report the effective
     /// write gate, not just the env var. With `ai_unrestricted` on and the env
@@ -2036,7 +1797,6 @@ fn supported_methods() -> Vec<&'static str> {
         "task.get",
         "task.assign",
         "task.report",
-        "events.subscribe",
     ];
     methods.extend_from_slice(paneflow_ipc_client::ai_hook::METHODS);
     methods
@@ -2050,6 +1810,7 @@ mod removed_method_tests {
     fn removed_methods_are_not_advertised_or_dispatched() {
         let (tx, rx) = mpsc::sync_channel(1);
         for (namespace, verb) in [
+            ("events", "subscribe"),
             ("workspace", "up"),
             ("workspace", "list"),
             ("workspace", "current"),

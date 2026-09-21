@@ -1606,39 +1606,6 @@ fn surface_status_value(
     }
 }
 
-/// EP-002 US-006: the wire shape of an `ai.*` event pushed to subscribers. All
-/// fields but `ts` are caller-supplied, so the shape is unit-tested directly.
-#[allow(clippy::too_many_arguments)]
-fn session_event_value(
-    method: &str,
-    workspace_id: Option<u64>,
-    pid: Option<u32>,
-    tool: Option<&str>,
-    state: Option<&str>,
-    surface_id: Option<u64>,
-    message: Option<&str>,
-    active_tool: Option<&str>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "type": method,
-        "workspace_id": workspace_id,
-        "pid": pid,
-        "tool": tool,
-        "state": state,
-        "surface_id": surface_id,
-        "message": message,
-        "active_tool_name": active_tool,
-        "ts": crate::ipc_events::now_ms(),
-    })
-}
-
-fn resolved_event_surface_id(
-    session_surface_id: Option<u64>,
-    explicit_surface_id: Option<u64>,
-) -> Option<u64> {
-    session_surface_id.or(explicit_surface_id)
-}
-
 /// Key of the marker a handler returns when it has taken ownership of the
 /// JSON-RPC response and will send it itself (issue #363).
 const IPC_DEFERRED_KEY: &str = "_ipc_deferred";
@@ -1739,7 +1706,7 @@ pub(crate) fn take_watcher_config_for_apply(
 }
 
 impl PaneFlowApp {
-    /// One automation poll tick for IPC, surface events, and config reloads.
+    /// One automation poll tick for IPC and config reloads.
     /// Keeping this order in one method prevents the bootstrap closure from
     /// becoming the implicit event-loop contract.
     pub(crate) fn process_automation_tick(&mut self, cx: &mut Context<Self>) {
@@ -1747,7 +1714,6 @@ impl PaneFlowApp {
             self.show_toast(notice, cx);
         }
         self.process_ipc_requests(cx);
-        self.broadcast_surface_changes(cx);
         self.process_config_changes(cx);
     }
 
@@ -1773,102 +1739,8 @@ impl PaneFlowApp {
             if ipc_response_is_deferred(&result) {
                 continue;
             }
-            // EP-002 US-006: mirror a SUCCESSFUL ai.* lifecycle frame to event-
-            // bus subscribers. Broadcast after the handler so the looked-up
-            // session carries the just-applied state.
-            if req.method.starts_with("ai.")
-                && result.get("error").is_none()
-                && result.get("_jsonrpc_error").is_none()
-                && result.get("status").and_then(|v| v.as_str()) != Some("stale")
-            {
-                self.broadcast_ai_frame(&req.method, &req.params);
-            }
             let _ = req.response_tx.send(result);
         }
-    }
-
-    /// EP-002 US-006: push a successful `ai.*` lifecycle frame to event-bus
-    /// subscribers. The post-handler session (looked up by pid) carries the new
-    /// state and the resolved surface; when absent (e.g. `ai.session_end`) the
-    /// event still carries the method + pid + tool so an orchestrator can correlate.
-    fn broadcast_ai_frame(&self, method: &str, params: &serde_json::Value) {
-        if !self.event_bus.has_subscribers() {
-            return;
-        }
-        let workspace_id = params.get("workspace_id").and_then(|v| v.as_u64());
-        let pid = read_session_pid(params);
-        let explicit_surface_id = read_frame_surface_id(params);
-        let tool = read_tool(params);
-        let workspace = workspace_id.and_then(|wid| self.workspaces.iter().find(|w| w.id == wid));
-        let session = workspace
-            .and_then(|w| {
-                pid.and_then(|p| w.agent_sessions.get(&p)).or_else(|| {
-                    explicit_surface_id.and_then(|sid| {
-                        w.agent_sessions
-                            .values()
-                            .find(|s| s.surface_id == Some(sid))
-                    })
-                })
-            })
-            .or_else(|| {
-                explicit_surface_id.and_then(|sid| {
-                    self.workspaces
-                        .iter()
-                        .flat_map(|w| w.agent_sessions.values())
-                        .find(|s| s.surface_id == Some(sid))
-                })
-            });
-        let (state, session_surface_id, message, active_tool) = match session {
-            Some(s) => (
-                Some(s.state.wire_str()),
-                s.surface_id,
-                s.message.clone(),
-                s.active_tool_name.clone(),
-            ),
-            None => (None, None, None, None),
-        };
-        let surface_id = resolved_event_surface_id(session_surface_id, explicit_surface_id);
-        let event = session_event_value(
-            method,
-            workspace_id,
-            pid,
-            tool.map(|t| t.binary()),
-            state,
-            surface_id,
-            message.as_deref(),
-            active_tool.as_deref(),
-        );
-        self.event_bus.broadcast(method, surface_id, &event);
-    }
-
-    /// EP-002 US-006: emit a `surface_changed` event for every terminal surface
-    /// whose `output_generation` advanced since the last sweep. Runs on the
-    /// 50 ms IPC pump, which provides the debounce for free; skips all work when
-    /// nobody is subscribed.
-    pub(crate) fn broadcast_surface_changes(&mut self, cx: &mut Context<Self>) {
-        if !self.event_bus.has_subscribers() {
-            return;
-        }
-        // Snapshot (surface_id, output_generation) for every terminal surface
-        // first, so entity reads end before the cache is mutated.
-        let current = self.collect_surface_generations(cx);
-        let mut seen: HashSet<u64> = HashSet::with_capacity(current.len());
-        for (sid, generation) in &current {
-            seen.insert(*sid);
-            if self.last_broadcast_gen.get(sid).copied() != Some(*generation) {
-                self.last_broadcast_gen.insert(*sid, *generation);
-                let event = serde_json::json!({
-                    "type": "surface_changed",
-                    "surface_id": sid,
-                    "output_generation": generation,
-                    "ts": crate::ipc_events::now_ms(),
-                });
-                self.event_bus
-                    .broadcast("surface_changed", Some(*sid), &event);
-            }
-        }
-        // Forget closed surfaces so the cache can't grow without bound.
-        self.last_broadcast_gen.retain(|k, _| seen.contains(k));
     }
 
     /// Apply any pending config change deposited by the background `ConfigWatcher`.
@@ -2004,20 +1876,6 @@ impl PaneFlowApp {
 
     fn collect_surface_entries(&self, cx: &App) -> Vec<SurfaceEntry> {
         workspace_surface_entries(&self.workspaces, cx)
-    }
-
-    fn collect_surface_generations(&self, cx: &App) -> Vec<(u64, u64)> {
-        let mut current = Vec::new();
-        for ws in &self.workspaces {
-            for pane in ws.collect_panes() {
-                for terminal in pane.read(cx).terminals() {
-                    let sid = terminal.entity_id().as_u64();
-                    let generation = terminal.read(cx).terminal.output_generation;
-                    current.push((sid, generation));
-                }
-            }
-        }
-        current
     }
 
     fn find_surface_terminal_by_id(
@@ -6160,13 +6018,6 @@ mod tests {
     }
 
     #[test]
-    fn event_surface_id_falls_back_to_explicit_frame_surface() {
-        assert_eq!(super::resolved_event_surface_id(Some(7), Some(9)), Some(7));
-        assert_eq!(super::resolved_event_surface_id(None, Some(9)), Some(9));
-        assert_eq!(super::resolved_event_surface_id(None, None), None);
-    }
-
-    #[test]
     fn upsert_session_state_transitions_keys_and_stamps() {
         use crate::agent_launcher::TerminalAgent;
         use crate::ai_types::{
@@ -7237,36 +7088,6 @@ mod tests {
         assert_eq!(v["output_generation"], 12);
         // EP-002 US-006: a tracked session reports hooked:true.
         assert_eq!(v["hooked"], true);
-    }
-
-    // EP-002 US-006: the ai.* event wire shape (timestamp aside).
-    #[test]
-    fn session_event_value_carries_method_and_session_fields() {
-        let v = session_event_value(
-            "ai.stop",
-            Some(7),
-            Some(4321),
-            Some("claude"),
-            Some("finished"),
-            Some(42),
-            None,
-            None,
-        );
-        assert_eq!(v["type"], "ai.stop");
-        assert_eq!(v["workspace_id"], 7);
-        assert_eq!(v["pid"], 4321);
-        assert_eq!(v["tool"], "claude");
-        assert_eq!(v["state"], "finished");
-        assert_eq!(v["surface_id"], 42);
-        assert!(v.get("ts").is_some());
-    }
-
-    #[test]
-    fn session_event_value_nulls_missing_fields() {
-        let v = session_event_value("ai.session_end", None, None, None, None, None, None, None);
-        assert_eq!(v["type"], "ai.session_end");
-        assert_eq!(v["pid"], serde_json::Value::Null);
-        assert_eq!(v["surface_id"], serde_json::Value::Null);
     }
 
     #[test]

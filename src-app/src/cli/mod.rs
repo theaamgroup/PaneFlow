@@ -16,11 +16,8 @@ use serde_json::Value;
 mod context_cmds;
 mod control_cmds;
 mod read_cmds;
-mod scrollback;
 mod selector;
 mod send_cmd;
-mod wait_cmd;
-mod watch_cmd;
 
 /// Process exit codes. Kept distinct so scripts can branch on the failure
 /// kind. clap owns `2` for its own usage/parse errors (and `0` for
@@ -28,11 +25,6 @@ mod watch_cmd;
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_RUNTIME: i32 = 1;
 pub const EXIT_TARGET: i32 = 3;
-/// `wait` reached its deadline without the pattern appearing. Distinct from
-/// EXIT_TARGET (no/ambiguous match) and EXIT_RUNTIME (instance down / pane
-/// closed) so scripts can tell a timeout apart from a hard failure.
-pub const EXIT_TIMEOUT: i32 = 4;
-
 /// The verbs this CLI owns. `main.rs` gates the whole CLI dispatch (and the
 /// manual `--help`/`--version` scans) on membership here so the GUI launch
 /// path stays byte-for-byte unchanged for any other `argv[1]`.
@@ -54,8 +46,6 @@ pub(crate) const VERBS: &[&str] = &[
     "select",
     "split",
     "send",
-    "wait",
-    "watch",
     "focus",
     "key",
     "list_panes",
@@ -77,8 +67,6 @@ pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
     ("select", "Select a workspace by index"),
     ("split", "Split the active pane"),
     ("send", "Inject text into a pane"),
-    ("wait", "Block until idle or a pattern matches"),
-    ("watch", "Stream lifecycle events as JSONL"),
     ("focus", "Give a surface keyboard focus"),
     ("key", "Send a named keystroke to a pane"),
 ];
@@ -280,51 +268,6 @@ enum Commands {
         /// Dash-separated keystroke description ("escape", "ctrl-c", "alt-f").
         keystroke: String,
     },
-    /// Block until a pane goes idle, or a regex appears in its output (orchestration).
-    Wait {
-        /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
-        /// Note: `cmdline:` matches only the executable basename on macOS;
-        /// prefer `cwd:` or a name for a more stable selector.
-        #[arg(long = "match", value_name = "SELECTOR")]
-        selector: String,
-        /// Regex to wait for in the pane's recent scrollback. Required unless
-        /// `--idle` is set. With `--idle` it is an optional sentinel: it is
-        /// checked on each new output and EITHER signal (pattern match OR going
-        /// idle) returns first (EP-003 US-008).
-        #[arg(long, required_unless_present = "idle")]
-        pattern: Option<String>,
-        /// Wait until the pane's output goes quiet (no `output_generation`
-        /// change for `--for` ms) by subscribing to the push stream - zero
-        /// client-side polling (EP-003 US-007). Single-target.
-        #[arg(long)]
-        idle: bool,
-        /// With `--idle`: the quiescence window in milliseconds (default 1000).
-        /// The pane must produce no new output for this long to count as idle.
-        #[arg(long = "for", value_name = "MS")]
-        for_ms: Option<u64>,
-        /// Max seconds to wait before giving up (default 300).
-        #[arg(long)]
-        timeout: Option<u64>,
-        /// Succeed as soon as ANY matching pane matches (selector may hit
-        /// several). `--pattern` mode only; ignored with `--idle`.
-        #[arg(long, conflicts_with = "all")]
-        any: bool,
-        /// Require ALL matching panes to match the pattern. `--pattern` mode only.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Stream lifecycle events from the running instance as JSONL (EP-002).
-    Watch {
-        /// Only stream events for this pane (selector). Omit for all panes.
-        #[arg(long)]
-        surface: Option<String>,
-        /// Only stream these event types (repeatable). Omit for all types.
-        #[arg(long = "type", value_name = "TYPE")]
-        types: Vec<String>,
-        /// Hide subscription protocol frames and print user events only.
-        #[arg(long)]
-        events_only: bool,
-    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -469,43 +412,6 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
         ),
         Commands::Focus { target } => control_cmds::focus(client, &target),
         Commands::Key { target, keystroke } => send_cmd::key(client, &target, &keystroke),
-        Commands::Wait {
-            selector,
-            pattern,
-            idle,
-            for_ms,
-            timeout,
-            any,
-            all,
-        } => {
-            if idle {
-                // EP-003 US-007: push-based quiescence; optional sentinel (US-008).
-                wait_cmd::wait_idle(client, &selector, for_ms, timeout, pattern.as_deref())
-            } else {
-                // Pattern-only poll path (unchanged). clap's
-                // `required_unless_present="idle"` guarantees `Some` here; guard
-                // defensively so a future flag change can't smuggle an empty
-                // (match-everything) regex through.
-                let Some(pattern) = pattern else {
-                    return Err(CliError::runtime(
-                        "wait requires --pattern <regex> unless --idle is set",
-                    ));
-                };
-                let mode = if all {
-                    wait_cmd::MatchMode::All
-                } else if any {
-                    wait_cmd::MatchMode::Any
-                } else {
-                    wait_cmd::MatchMode::Single
-                };
-                wait_cmd::wait(client, &selector, &pattern, timeout, mode)
-            }
-        }
-        Commands::Watch {
-            surface,
-            types,
-            events_only,
-        } => watch_cmd::watch(client, surface.as_deref(), &types, events_only),
     }
 }
 
@@ -567,6 +473,35 @@ mod tests {
             !format_help_commands()
                 .lines()
                 .any(|line| line.trim_start().starts_with("up "))
+        );
+    }
+
+    #[test]
+    fn removed_watch_is_unknown_and_absent_from_help() {
+        assert!(!VERBS.contains(&"watch"));
+        assert!(!HELP_VERBS.iter().any(|(name, _)| *name == "watch"));
+        assert!(looks_like_unknown_verb(Some("watch")));
+        assert!(Cli::try_parse_from(["paneflow", "watch"]).is_err());
+        assert!(
+            !format_help_commands()
+                .lines()
+                .any(|line| line.trim_start().starts_with("watch "))
+        );
+    }
+
+    #[test]
+    fn removed_wait_is_unknown_and_absent_from_help() {
+        assert!(!VERBS.contains(&"wait"));
+        assert!(!HELP_VERBS.iter().any(|(name, _)| *name == "wait"));
+        assert!(looks_like_unknown_verb(Some("wait")));
+        assert!(
+            Cli::try_parse_from(["paneflow", "wait", "--match", "pane", "--pattern", "done"])
+                .is_err()
+        );
+        assert!(
+            !format_help_commands()
+                .lines()
+                .any(|line| line.trim_start().starts_with("wait "))
         );
     }
 
@@ -744,98 +679,6 @@ mod tests {
         assert_eq!(err.exit_code(), 2);
         let cli = Cli::try_parse_from(["paneflow", "key", "backend", "escape"]).expect("parse");
         assert!(matches!(cli.command, Some(Commands::Key { .. })));
-    }
-
-    #[test]
-    fn wait_idle_and_pattern_parsing() {
-        // EP-003 US-007: `--idle` parses WITHOUT `--pattern` (the sentinel is
-        // optional in idle mode); `--for` carries the quiescence window.
-        let cli = Cli::try_parse_from([
-            "paneflow", "wait", "--match", "agent", "--idle", "--for", "500",
-        ])
-        .expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Wait {
-                idle: true,
-                pattern: None,
-                for_ms: Some(500),
-                ..
-            })
-        ));
-        // US-008: `--idle` + `--pattern` coexist (OR semantics, first to fire).
-        let cli = Cli::try_parse_from([
-            "paneflow",
-            "wait",
-            "--match",
-            "a",
-            "--idle",
-            "--pattern",
-            "DONE",
-        ])
-        .expect("parse");
-        assert!(
-            matches!(cli.command, Some(Commands::Wait { idle: true, pattern: Some(p), .. }) if p == "DONE")
-        );
-        // `--pattern` alone (no `--idle`) still parses (the existing poll path).
-        let cli = Cli::try_parse_from(["paneflow", "wait", "--match", "a", "--pattern", "DONE"])
-            .expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Wait {
-                idle: false,
-                pattern: Some(_),
-                ..
-            })
-        ));
-        // Neither `--idle` nor `--pattern` -> clap usage error (exit 2), never a
-        // silent empty-regex that matches everything.
-        let err = Cli::try_parse_from(["paneflow", "wait", "--match", "a"]).expect_err("usage");
-        assert_eq!(err.exit_code(), 2);
-    }
-
-    #[test]
-    fn watch_parses_optional_surface_and_repeatable_types() {
-        let cli = Cli::try_parse_from(["paneflow", "watch"]).expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Watch { surface: None, .. })
-        ));
-        let cli = Cli::try_parse_from([
-            "paneflow",
-            "watch",
-            "--surface",
-            "backend",
-            "--type",
-            "ai.stop",
-            "--type",
-            "ai.notification",
-        ])
-        .expect("parse");
-        match cli.command {
-            Some(Commands::Watch {
-                surface,
-                types,
-                events_only,
-            }) => {
-                assert_eq!(surface.as_deref(), Some("backend"));
-                assert_eq!(types, vec!["ai.stop", "ai.notification"]);
-                assert!(!events_only);
-            }
-            other => panic!("expected Watch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn watch_parses_events_only() {
-        let cli = Cli::try_parse_from(["paneflow", "watch", "--events-only"]).expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Watch {
-                events_only: true,
-                ..
-            })
-        ));
     }
 
     #[test]

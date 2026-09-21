@@ -44,7 +44,6 @@ thiserror = "2"
 anyhow = "1"
 
 # Shared runtime utilities
-ctrlc = "3.4"
 dirs = "6"
 interprocess = "2.4"
 libc = "0.2"
