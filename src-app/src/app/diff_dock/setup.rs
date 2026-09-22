@@ -534,14 +534,11 @@ impl PaneFlowApp {
 mod tests {
     use super::*;
 
-    /// The inventory's openable cap stays aligned with the markdown viewer's
-    /// input ceiling. The dock no longer reads the file itself.
+    /// The inventory's own cap on a file a row may open. The dock no longer
+    /// reads the file itself.
     #[test]
-    fn the_artifact_size_cap_matches_the_shared_file_ceiling() {
-        assert_eq!(
-            paneflow_agent_setup::MAX_ARTIFACT_BYTES,
-            crate::markdown::MAX_INPUT_BYTES
-        );
+    fn the_artifact_size_cap_is_ten_megabytes() {
+        assert_eq!(paneflow_agent_setup::MAX_ARTIFACT_BYTES, 10 * 1024 * 1024);
     }
 
     /// Every launcher is either inspected or named as not inspected, so a

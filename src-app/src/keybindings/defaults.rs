@@ -314,43 +314,6 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "font_size_reset",
         context: Some("Terminal"),
     },
-    // US-022 - markdown pane navigation. Same chord vocabulary as the
-    // terminal pane so muscle memory transfers cleanly between pane types.
-    DefaultBinding {
-        key: "shift-pageup",
-        action_name: "markdown_scroll_page_up",
-        context: Some("Markdown"),
-    },
-    DefaultBinding {
-        key: "shift-pagedown",
-        action_name: "markdown_scroll_page_down",
-        context: Some("Markdown"),
-    },
-    DefaultBinding {
-        key: "ctrl-f",
-        action_name: "markdown_find_open",
-        context: Some("Markdown"),
-    },
-    DefaultBinding {
-        key: "ctrl-shift-c",
-        action_name: "markdown_copy",
-        context: Some("Markdown"),
-    },
-    DefaultBinding {
-        key: "enter",
-        action_name: "markdown_find_next",
-        context: Some("MarkdownSearch"),
-    },
-    DefaultBinding {
-        key: "shift-enter",
-        action_name: "markdown_find_prev",
-        context: Some("MarkdownSearch"),
-    },
-    DefaultBinding {
-        key: "escape",
-        action_name: "markdown_find_dismiss",
-        context: Some("MarkdownSearch"),
-    },
     // US-003 (prd-git-diff-mode-2026-Q3.md): `secondary-shift-g` is
     // Cmd+Shift+G. Toggles the dedicated Git Diff mode (AppMode::Diff).
     DefaultBinding {
@@ -378,7 +341,7 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
     },
     // US-003 (prd-ai-in-diff-2026-Q3.md): copy the hunk under the cursor as a
     // unified diff, only while the Git Diff view holds focus. Same chord as the
-    // terminal / markdown copies - disambiguated by the `DiffView` context.
+    // terminal copy - disambiguated by the `DiffView` context.
     DefaultBinding {
         key: "ctrl-shift-c",
         action_name: "copy_diff_hunk",

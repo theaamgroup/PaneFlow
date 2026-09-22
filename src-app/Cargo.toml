@@ -17,16 +17,10 @@ name = "paneflow"
 path = "src/main.rs"
 
 [dependencies]
-# GPUI framework pinned to a minimal Paneflow fork of Zed. The pinned commit
-# is based on zed-industries/zed@afc13dc8 and carries one additive performance
-# patch: `Markdown::append` accumulates streamed chunks in a private String
-# buffer while preserving Zed's `source() -> &SharedString` contract. The fork
-# also keeps the append-throughput Criterion benchmark.
-#
-# Switchover: when the append optimization lands in zed-industries/zed, point
-# the eight entries back to upstream and keep an exact tested revision. Until
-# then, create each bump from the chosen upstream revision, reapply the patch,
-# publish the fork commit, update every `rev` below, then run `cargo update`.
+# GPUI is not published on crates.io. Pin `zed-industries/zed` by exact rev;
+# `gpui`, `gpui_platform`, and the dev-dependency `gpui` stay on the same rev.
+# There is no Zed `markdown`, `telemetry`, or `telemetry_events` crate in this
+# graph. Never reintroduce an `arthjean/zed` pin.
 #
 # `gpui_platform` MUST carry the `font-kit` feature on macOS - without it,
 # `gpui_macos` compiles cleanly but the optional `zed-font-kit` dep + Core
@@ -109,10 +103,6 @@ smol = "2.0"
 libc = "0.2"
 regex = "1"
 open = "5"
-# Markdown viewer pane (US-020 - prd-cmux-port-2026-q2.md). CommonMark + tables
-# + strikethrough + footnotes via the event API (we walk events directly into
-# a GPUI element tree rather than rendering HTML).
-pulldown-cmark = { version = "0.13", default-features = false }
 # Multi-worktree diff engine (prd-multi-worktree-diff-2026-Q3.md, EP-002).
 # Histogram line-diff lifted from Zed's `buffer_diff::compute_hunks`; pinned to
 # the same 0.1.8 Zed uses so the ported algorithm matches the reference API.

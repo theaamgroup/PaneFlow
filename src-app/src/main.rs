@@ -45,7 +45,6 @@ mod launch_cwd;
 mod layout;
 mod limits;
 mod login_shell_env;
-mod markdown;
 mod opencode_sessions;
 mod pane;
 mod pane_drag;
@@ -65,6 +64,7 @@ mod startup_bench;
 mod startup_trace;
 mod system_info;
 mod terminal;
+mod text_sanitize;
 pub mod theme;
 mod ui_primitives;
 mod widgets;
@@ -275,9 +275,6 @@ pub(crate) enum ClosedSurfaceRecord {
         replay: Option<Vec<u8>>,
         custom_name: Option<String>,
         font_size: Option<f32>,
-    },
-    Markdown {
-        path: std::path::PathBuf,
     },
 }
 

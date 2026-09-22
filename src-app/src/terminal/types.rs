@@ -458,8 +458,8 @@ pub enum HyperlinkSource {
     Osc8,
     /// Regex pattern match on terminal output.
     Regex,
-    /// Markdown file path (`.md` / `.markdown`) - opens in the in-pane
-    /// markdown viewer via `TerminalEvent::OpenMarkdownPath`.
+    /// Markdown file path (`.md` / `.markdown`). Opens in the external editor
+    /// via `TerminalEvent::OpenMarkdownPath`, with no line or column.
     FilePath,
     /// Source-code file path (`.rs`, `.ts`, `.py`, ...) optionally followed
     /// by `:line[:col]`. Opens in the user's `$VISUAL`/`$EDITOR` (or a probed

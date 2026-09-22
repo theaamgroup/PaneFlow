@@ -63,7 +63,7 @@ load. `+` and `-` both parse as separators.
 
 ## Default binding reference
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 93 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 86 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -96,15 +96,14 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 93 ac
 | `Ctrl+Alt+Z` / `C` / `V` / `W` | Open workspace in Zed / Cursor / VS Code / Windsurf | Global |
 | `Cmd+C` / `Cmd+V` | Copy / paste (macOS layer) | Terminal |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste (cross-platform layer, still bound) | Terminal |
-| `Shift+PageUp` / `Shift+PageDown` | Scroll page | Terminal, Markdown |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll page | Terminal |
 | `Cmd+Shift+Up` / `Cmd+Shift+Down` | Jump to prev / next shell prompt mark | Terminal |
 | `Cmd+K` / `Cmd+Shift+K` | Clear scrollback (`clear_scroll_history`; `cmd-k` is the macOS layer, `secondary-shift-k` the alias) | Terminal |
 | `Cmd+Shift+R` | Reset terminal (`reset_terminal`, RIS) | Terminal |
 | `Ctrl+Shift+X` / `Ctrl+Shift+F` | Copy mode / find-in-buffer | Terminal |
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Font size up / down / reset | Terminal |
-| `Ctrl+F` / `Ctrl+Shift+C` | Find in buffer / copy selection | Markdown |
 | `Ctrl+Shift+C` | Copy diff hunk | DiffView |
-| `Enter` / `Shift+Enter` / `Esc` | Next / prev / dismiss | Search, MarkdownSearch |
+| `Enter` / `Shift+Enter` / `Esc` | Next / prev / dismiss | Search |
 | `Alt+R` | Toggle regex | Search |
 | `]` / `[` / `u` / `s` / `Esc` | Next hunk / prev hunk / toggle view / toggle sync / dismiss | DiffView |
 | `Cmd+Q` | Quit (macOS only) | Global |

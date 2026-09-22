@@ -950,7 +950,7 @@ impl PaneFlowApp {
     }
 
     /// Path a pane surface can advertise in its context menu: the terminal's
-    /// live CWD, the markdown file, or the diff's first column.
+    /// live CWD, or the diff's worktree.
     fn surface_context_path(surface: &PaneSurface, cx: &App) -> Option<PathBuf> {
         match surface {
             PaneSurface::Terminal(terminal) => terminal
@@ -960,7 +960,6 @@ impl PaneFlowApp {
                 .as_ref()
                 .filter(|cwd| !cwd.is_empty())
                 .map(PathBuf::from),
-            PaneSurface::Markdown(markdown) => Some(markdown.read(cx).path.clone()),
             PaneSurface::Diff(diff) => Some(diff.read(cx).worktree_path().clone()),
         }
     }

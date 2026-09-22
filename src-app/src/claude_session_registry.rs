@@ -181,7 +181,7 @@ const MAX_WAITING_REASON_CHARS: usize = 256;
 /// then a hard character bound. Pure, so both are testable.
 fn clamp_waiting_reason(raw: Option<String>) -> Option<String> {
     let bounded: String = raw?.trim().chars().take(MAX_WAITING_REASON_CHARS).collect();
-    let clean = crate::markdown::strip_bidi_zero_width(bounded);
+    let clean = crate::text_sanitize::strip_bidi_zero_width(bounded);
     (!clean.trim().is_empty()).then_some(clean)
 }
 

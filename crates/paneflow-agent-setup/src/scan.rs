@@ -21,10 +21,9 @@ pub const MAX_ROWS: usize = 200;
 /// tree cannot walk forever; the overflow counts toward `omitted`.
 pub const MAX_SKILLS_PER_DIR: usize = 100;
 
-/// Largest file a row may open. Pinned by a test in the app crate to the
-/// markdown viewer's input ceiling so the two ceilings cannot drift. A larger
-/// file is still listed, and a config file past the cap is still parsed for
-/// its hook / MCP rows.
+/// Largest file a row may open. 10 MB, this scan's own cap. A larger file is
+/// still listed, and a config file past the cap is still parsed for its hook
+/// / MCP rows.
 pub const MAX_ARTIFACT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Hard ceiling on a config file the scan parses whole. Far above anything

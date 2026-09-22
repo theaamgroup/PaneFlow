@@ -1321,10 +1321,10 @@ pub enum TerminalEvent {
     /// A mouse selection was auto-copied to the clipboard on mouse release.
     /// Consumed by `PaneFlowApp` to surface a "Copied" toast.
     SelectionCopied,
-    /// US-020 - Cmd/Ctrl-click on a `.md`/`.markdown` path detected by the
-    /// US-019 file-path scanner. The receiver (PaneFlowApp) splits the
-    /// containing pane vertically and inserts a markdown viewer in the
-    /// new half. The path is the canonical absolute path produced by
+    /// Cmd/Ctrl-click on a `.md`/`.markdown` path detected by the file-path
+    /// scanner. The receiver opens it in the external editor, same as any
+    /// other file path, with no line or column. The path is the canonical
+    /// absolute path produced by
     /// `terminal::element::detect_file_paths_on_line_mapped`.
     OpenMarkdownPath(std::path::PathBuf),
     /// Cmd/Ctrl-click on a source-code path with optional `:line[:col]`

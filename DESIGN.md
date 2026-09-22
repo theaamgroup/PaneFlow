@@ -981,8 +981,8 @@ scanning, and that spinner honors `reduce_motion`.
 
 Fork-only (issues #339, #353, #389); upstream has no equivalent. `Cmd+Shift+P`,
 Window ▸ Show All Panes, or the sidebar header button opens a cross-workspace
-grid of every **terminal** pane, grouped workspace then tab. Markdown and diff
-panes are omitted and the surface is gated to Agents mode.
+grid of every **terminal** pane, grouped workspace then tab. Diff panes
+are omitted and the surface is gated to Agents mode.
 
 The panel is top-anchored at `OVERVIEW_MARGIN` (24), inset 24 on each side,
 with radius 12, a 1 px border, and `shadow_lg` on a black 0.4 scrim.

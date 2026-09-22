@@ -276,7 +276,7 @@ fn read_last_result(params: &serde_json::Value) -> Option<String> {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
     })?;
-    Some(crate::markdown::strip_bidi_zero_width(
+    Some(crate::text_sanitize::strip_bidi_zero_width(
         raw.chars().take(2048).collect(),
     ))
 }
@@ -395,7 +395,7 @@ fn extract_last_result_capped(path: &std::path::Path, cap: u64) -> Option<String
         if text.trim().is_empty() {
             continue;
         }
-        return Some(crate::markdown::strip_bidi_zero_width(
+        return Some(crate::text_sanitize::strip_bidi_zero_width(
             text.chars().take(2048).collect(),
         ));
     }
@@ -1319,7 +1319,7 @@ pub(crate) fn sanitize_pane_name(raw: &str) -> Option<String> {
         .filter(|c| !c.is_control())
         .take(MAX_NAME_LEN)
         .collect();
-    let cleaned = crate::markdown::strip_bidi_zero_width(cleaned)
+    let cleaned = crate::text_sanitize::strip_bidi_zero_width(cleaned)
         .trim()
         .to_string();
     (!cleaned.is_empty()).then_some(cleaned)

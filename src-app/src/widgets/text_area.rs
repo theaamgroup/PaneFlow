@@ -1127,9 +1127,8 @@ impl Render for TextArea {
             line_height: px(20.),
             text_color: ui.text,
             muted_color: ui.muted,
-            // Match the markdown selection background (markdown_style.rs:70)
-            // - accent at 30% alpha keeps the glyphs readable beneath
-            // the selection rect.
+            // Accent at 30% alpha keeps the glyphs readable beneath the
+            // selection rect.
             selection_color: ui.accent.alpha(0.3),
             cursor_color: ui.accent,
             decorations: self.decorations.clone(),

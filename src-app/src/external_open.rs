@@ -74,7 +74,7 @@ pub(crate) fn open_http_url(url: &str) -> std::io::Result<()> {
 }
 
 pub(crate) fn require_http_url(url: &str) -> std::io::Result<String> {
-    crate::markdown::security::validate_link_url(url)
+    validate_link_url(url)
         .map(|v| v.as_str().to_string())
         .map_err(|err| {
             std::io::Error::new(
@@ -82,6 +82,85 @@ pub(crate) fn require_http_url(url: &str) -> std::io::Result<String> {
                 format!("refusing to open non-http(s) URL ({err:?})"),
             )
         })
+}
+
+/// A URL that [`validate_link_url`] accepted. The wrapped string is the
+/// caller's original text: no normalisation, so a UI can show it back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidatedUrl(String);
+
+impl ValidatedUrl {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why [`validate_link_url`] refused a URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UrlError {
+    DisallowedScheme(String),
+    MissingScheme,
+    TooLong,
+    Malformed,
+}
+
+/// Hard cap on a link handed to the OS handler.
+const MAX_LINK_URL_LEN: usize = 8 * 1024;
+
+const ALLOWED_LINK_SCHEMES: &[&str] = &["http", "https"];
+
+/// Accept only absolute `http://` and `https://` URLs.
+///
+/// `file://`, `javascript:`, `data:`, bare hosts, userinfo, whitespace, and
+/// backslashes are refused. The scheme match is case-insensitive; the
+/// returned string keeps the caller's original characters.
+fn validate_link_url(url: &str) -> Result<ValidatedUrl, UrlError> {
+    if url.len() > MAX_LINK_URL_LEN {
+        return Err(UrlError::TooLong);
+    }
+    if url
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return Err(UrlError::Malformed);
+    }
+    let scheme = match extract_scheme(url) {
+        Some(scheme) => scheme,
+        None => return Err(UrlError::MissingScheme),
+    };
+    let scheme_lower = scheme.to_ascii_lowercase();
+    if !ALLOWED_LINK_SCHEMES.contains(&scheme_lower.as_str()) {
+        return Err(UrlError::DisallowedScheme(scheme_lower));
+    }
+    let rest = url
+        .get(scheme.len()..)
+        .filter(|rest| rest.starts_with("://"))
+        .ok_or(UrlError::Malformed)?;
+    let authority = &rest[3..];
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+    if authority.is_empty() || authority.contains('@') {
+        return Err(UrlError::Malformed);
+    }
+    Ok(ValidatedUrl(url.to_string()))
+}
+
+/// RFC 3986 scheme prefix. Minimum length two so a Windows drive letter
+/// (`C:`) is not a scheme.
+fn extract_scheme(input: &str) -> Option<&str> {
+    let colon_idx = input.find(':')?;
+    let prefix = &input[..colon_idx];
+    if prefix.len() < 2 {
+        return None;
+    }
+    let mut chars = prefix.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+        return None;
+    }
+    Some(prefix)
 }
 
 fn open_url_impl(url: &str) -> std::io::Result<()> {
@@ -189,5 +268,86 @@ mod tests {
             require_http_url("HTTPS://github.com/x").unwrap(),
             "HTTPS://github.com/x"
         );
+    }
+
+    #[test]
+    fn link_url_https_is_accepted() {
+        let url = validate_link_url("https://example.com/path?q=1").expect("https accepted");
+        assert_eq!(url.as_str(), "https://example.com/path?q=1");
+    }
+
+    #[test]
+    fn link_url_http_is_accepted() {
+        let url = validate_link_url("http://localhost:3000/").expect("http accepted");
+        assert_eq!(url.as_str(), "http://localhost:3000/");
+    }
+
+    #[test]
+    fn link_url_file_is_rejected() {
+        let err = validate_link_url("file:///bin/sh").expect_err("file rejected");
+        assert!(matches!(err, UrlError::DisallowedScheme(scheme) if scheme == "file"));
+    }
+
+    #[test]
+    fn link_url_javascript_is_rejected() {
+        let err = validate_link_url("javascript:alert(1)").expect_err("js rejected");
+        assert!(matches!(err, UrlError::DisallowedScheme(scheme) if scheme == "javascript"));
+    }
+
+    #[test]
+    fn link_url_data_is_rejected() {
+        let err =
+            validate_link_url("data:text/html,<script>x</script>").expect_err("data rejected");
+        assert!(matches!(err, UrlError::DisallowedScheme(scheme) if scheme == "data"));
+    }
+
+    #[test]
+    fn link_url_vbscript_is_rejected() {
+        let err = validate_link_url("vbscript:msgbox").expect_err("vbscript rejected");
+        assert!(matches!(err, UrlError::DisallowedScheme(scheme) if scheme == "vbscript"));
+    }
+
+    #[test]
+    fn link_url_bare_string_is_rejected() {
+        let err = validate_link_url("example.com").expect_err("bare host rejected");
+        assert!(matches!(err, UrlError::MissingScheme));
+    }
+
+    #[test]
+    fn link_url_scheme_match_is_case_insensitive() {
+        let url = validate_link_url("HTTPS://example.com").expect("https accepted");
+        assert_eq!(url.as_str(), "HTTPS://example.com");
+    }
+
+    #[test]
+    fn link_url_allowed_scheme_must_be_absolute() {
+        let err = validate_link_url("https:example.com/path").expect_err("relative rejected");
+        assert!(matches!(err, UrlError::Malformed));
+        let err = validate_link_url("https:///path").expect_err("empty authority rejected");
+        assert!(matches!(err, UrlError::Malformed));
+    }
+
+    #[test]
+    fn link_url_rejects_confusing_payloads() {
+        let err = validate_link_url("https://example.com/\nfile:///bin/sh")
+            .expect_err("newline rejected");
+        assert!(matches!(err, UrlError::Malformed));
+        let err = validate_link_url("https:\\\\example.com").expect_err("backslash rejected");
+        assert!(matches!(err, UrlError::Malformed));
+        let err =
+            validate_link_url("https://user@example.com/path").expect_err("userinfo rejected");
+        assert!(matches!(err, UrlError::Malformed));
+    }
+
+    #[test]
+    fn link_url_too_long_is_rejected() {
+        let huge = format!("https://x.com/{}", "a".repeat(MAX_LINK_URL_LEN));
+        let err = validate_link_url(&huge).expect_err("oversized rejected");
+        assert!(matches!(err, UrlError::TooLong));
+    }
+
+    #[test]
+    fn allowlist_is_http_https_only() {
+        assert_eq!(ALLOWED_LINK_SCHEMES, &["http", "https"]);
     }
 }

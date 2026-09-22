@@ -24,7 +24,7 @@ dependency sources, and command examples. Use [keybindings](docs/user/keybinding
 and [configuration runtime behavior](docs/user/configuration/runtime.md) for their
 reference tables. Read [DESIGN.md](DESIGN.md) before UI changes and update it in the same PR.
 
-The registry currently declares **93 GPUI action types**, **93 actions total**.
+The registry currently declares **86 GPUI action types**, **86 actions total**.
 Update both counts when changing `app/actions.rs`; its drift test reads this file.
 
 ## Verify before claiming
@@ -147,7 +147,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 - **`actions!` macro** (`app/actions.rs`): generates zero-sized typed action structs in the `paneflow` namespace. Actions are dispatched through GPUI's focus chain.
 - **`Render` trait**: implement for high-level views (PaneFlowApp, TitleBar, TerminalView). Returns a div element tree.
 - **`Element` trait**: implement for low-level custom rendering (terminal and diff elements). Has 3 phases: `request_layout()` → `prepaint()` → `paint()`.
-- **Focus**: each `TerminalView` owns a `FocusHandle`. Key context `"Terminal"` scopes terminal-only keybindings; other contexts are `Search`, `Markdown`, `MarkdownSearch`, `DiffView`. There is no in-app code editor. Focus navigation is structural (layout-tree traversal), not spatial.
+- **Focus**: each `TerminalView` owns a `FocusHandle`. Key context `"Terminal"` scopes terminal-only keybindings; other contexts are `Search` and `DiffView`. There is no in-app code editor and no in-app Markdown viewer. A clicked file path, including `.md`, opens in the external editor. Focus navigation is structural (layout-tree traversal), not spatial.
 - **No `Arc`/`Mutex` for UI state**: use `Rc<Cell<f32>>` for single-threaded shared state (e.g. split ratios in render closures).
 
 ## GPUI scroll & wheel (gotchas)

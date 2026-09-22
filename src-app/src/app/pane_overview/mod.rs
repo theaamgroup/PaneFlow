@@ -949,10 +949,20 @@ mod tests {
         use gpui::AppContext;
         let cx = cx.add_empty_window();
         let dir = tempfile::tempdir().expect("fixture directory");
-        let path = dir.path().join("notes.md");
-        std::fs::write(&path, "# Notes").expect("markdown fixture");
-        let markdown = cx.new(|cx| crate::markdown::MarkdownView::build(path, cx));
-        let markdown = cx.new(|cx| Pane::new_with_surface(PaneSurface::Markdown(markdown), 1, cx));
+        let other = cx.new(|cx| {
+            crate::diff::DiffView::for_test(
+                crate::diff::ReviewSubject {
+                    repo_root: dir.path().to_path_buf(),
+                    worktree: crate::diff::DiffWorktree {
+                        path: dir.path().to_path_buf(),
+                        branch: "other".into(),
+                        workspace_id: None,
+                    },
+                },
+                cx,
+            )
+        });
+        let other = cx.new(|cx| Pane::new_with_surface(PaneSurface::Diff(other), 1, cx));
         let diff = cx.new(|cx| {
             crate::diff::DiffView::for_test(
                 crate::diff::ReviewSubject {
@@ -971,7 +981,7 @@ mod tests {
         let (second, second_sid) = terminal_pane(cx);
         let tree = LayoutTree::from_panes_equal(
             SplitDirection::Vertical,
-            vec![markdown.clone(), first, diff.clone(), second.clone()],
+            vec![other.clone(), first, diff.clone(), second.clone()],
         )
         .expect("mixed layout");
         let mut workspaces = vec![Workspace::with_layout_and_id(
@@ -988,13 +998,13 @@ mod tests {
         assert_eq!(labels, vec![(first_sid, 0, 2), (second_sid, 1, 2)]);
         workspaces[0].active_tab_mut().root = LayoutTree::from_panes_equal(
             SplitDirection::Vertical,
-            vec![markdown.clone(), diff.clone(), second],
+            vec![other.clone(), diff.clone(), second],
         );
         let cards = cx.update(|window, cx| collect_cards(&workspaces, 0, window, cx));
         assert_eq!(cards.len(), 1);
         assert_eq!((cards[0].tab_pane_index, cards[0].tab_pane_count), (0, 1));
         workspaces[0].active_tab_mut().root =
-            LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![markdown, diff]);
+            LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![other, diff]);
         assert!(
             cx.update(|window, cx| collect_cards(&workspaces, 0, window, cx))
                 .is_empty()

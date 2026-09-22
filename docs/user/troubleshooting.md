@@ -119,7 +119,7 @@ and `toggle_search`. Unknown action names are skipped with a warning.
 `+` and `-` separators both parse; `ctrl+shift+t` is the clearest form.
 
 If a binding only fails in one part of the UI, check its context:
-Terminal, Search, Markdown, and Diff bindings are scoped.
+Terminal, Search, and Diff bindings are scoped.
 
 See [keybindings.md](keybindings.md) for the action names.
 

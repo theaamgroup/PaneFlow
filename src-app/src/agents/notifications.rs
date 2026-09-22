@@ -191,11 +191,11 @@ pub(crate) fn should_fire_desktop_notification(gate: NotifyWhenAgentWaiting, see
 /// Bound + sanitize an agent question before it is stored on the session
 /// and mirrored to notifications.
 pub(crate) fn sanitize_notification_message(raw: &str) -> String {
-    crate::markdown::strip_bidi_zero_width(raw.chars().take(512).collect())
+    crate::text_sanitize::strip_bidi_zero_width(raw.chars().take(512).collect())
 }
 
 fn notification_detail(raw: &str) -> Option<String> {
-    let clean: String = crate::markdown::strip_bidi_zero_width(
+    let clean: String = crate::text_sanitize::strip_bidi_zero_width(
         raw.chars().take(NOTIFICATION_DETAIL_CAP_CHARS).collect(),
     )
     .trim()
