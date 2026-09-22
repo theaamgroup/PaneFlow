@@ -469,9 +469,6 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         match event {
-            title_bar::TitleBarEvent::CloseRequested => {
-                self.quit_after_session_save(cx);
-            }
             title_bar::TitleBarEvent::ToggleSidebar => {
                 // Issue #106: shared with the `TogglePrimarySidebar` chord, so
                 // the button and the keyboard settle the chrome identically.

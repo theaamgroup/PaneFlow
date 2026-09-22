@@ -107,7 +107,6 @@ mod tests {
             theme: Some("One Dark".to_string()),
             theme_mode: Some("dark".to_string()),
             commands: Vec::new(),
-            window_decorations: Some("client".to_string()),
             window_backdrop: Some("auto".to_string()),
             macos_chrome_material: Some(true),
             unfocused_pane_opacity: Some(0.7),

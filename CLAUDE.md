@@ -295,7 +295,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
 ├── cli/                               ← CLI commands over the IPC socket
 ├── window_chrome/
-│   ├── csd.rs                         ← client-side decorations, resize edges
+│   ├── shell.rs                       ← native macOS window content shell
 │   ├── macos_backdrop.rs              ← native material behind sidebar/title bar
 │   └── title_bar.rs                   ← window controls, drag-to-move
 ├── workspace/                         ← Vec<Workspace> state
@@ -543,7 +543,6 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 {
   "default_shell": "/bin/zsh",
   "theme": "PaneFlow Dark",
-  "window_decorations": "client",
   "font_family": "JetBrainsMono Nerd Font",
   "font_size": 13.0,
   "option_as_meta": false,
@@ -553,7 +552,6 @@ Location on macOS: `~/Library/Application Support/paneflow/paneflow.json`, resol
 ```
 
 - **Themes**: **8 bundled variants** (`theme/builtin.rs:9-18`): `PaneFlow Dark` (default identifier, `DEFAULT_THEME`), `PaneFlow Light`, `Vercel Dark` / `Vercel Light`, `Claude Dark` / `Claude Light`, `Cursor Dark` / `Cursor Light`. Legacy alias table (`LEGACY_THEME_ALIASES`) maps `One Dark` → `PaneFlow Dark` (plus the old single-name Vercel/Claude/Cursor entries onto their dark variants). The previous `Paneflow Dark` / `Paneflow Light` spelling still resolves (names are matched case-insensitively). Hot-reload is notify-driven with a 500 ms mtime-poll fallback (`theme/watcher.rs:37`).
-- **`window_decorations`**: read at startup only, requires restart. `"client"` = CSD (default), `"server"` = SSD. An invalid value logs a warning and falls back to `"client"`.
 - **`shortcuts`**: wired via `keybindings::apply_keybindings()` at startup. Users can override default keybindings here. The schema stays a free-form object; Settings → Keyboard Shortcuts only reads and writes it. That page groups every registry action under a `ShortcutGroup` (`keybindings/registry.rs`), filters by action name *or* chord (`ShortcutEntry::search_key` carries the ASCII spellings, `cmd+shift+j` / `cmd-shift-j`, of the glyph key), has a "Find by key" capture mode, and is virtualized with `gpui::list` because it is the one page long enough to lag when every row was rebuilt per frame. Rebinding records through `app/settings.rs::recorded_shortcut_key` (`Keystroke::unparse()`, never `to_string()`, or the saved chord is Apple glyphs no keypress can match) and reaches the page through `App::intercept_keystrokes` (`main.rs::mount_paneflow_app`) - the only hook that runs before GPUI dispatches a matching binding, so recording Cmd+Shift+D no longer splits the pane. "Reset to defaults" is a two-step inline confirm (`step_reset_confirm`, pure); only the second click calls `config_writer::reset_shortcuts_checked()`.
 - **`option_as_meta`**: **defaults to `false`**. `keys::default_option_as_meta()` returns the literal `false` (`keys.rs:69`); it used to compute `!cfg!(target_os = "macos")`, which was a runtime expression that is constant in a macOS-only fork. So out of the box Option+key composes a character (`é`, `∂`) instead of sending an Alt escape sequence, which is the macOS convention but surprises anyone expecting Alt keybindings in tmux, Emacs, or a readline prompt. Set it to `true` to get Meta behavior. The published JSON Schema and `docs/user/configuration/schema.md` both declare `false` too - they moved together in `6a7b14d` and a drift test reads the doc off disk.
 - **`macos_chrome_material`**: opts the sidebar and title bar into a native AppKit material (`window_chrome/macos_backdrop.rs`). `windows_terminal_material` and `windows_chrome_material` are **gone from the published schema** and the Rust struct. The loader still accepts those leftover keys (and a leftover `telemetry` block) as ignored no-ops so existing `paneflow.json` files keep loading.

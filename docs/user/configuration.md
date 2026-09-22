@@ -14,8 +14,8 @@ Debug builds namespace themselves separately (`APP_SUBDIR` in
 build does not read the release config. There is no environment variable
 that overrides the config location.
 
-Most keys hot-reload on save. `window_decorations` and `window_backdrop`
-are read once at startup and need a restart. Invalid JSON at startup logs
+Most keys hot-reload on save. `window_backdrop`
+is read once at startup and needs a restart. Invalid JSON at startup logs
 a warning and falls back to defaults; an invalid save during hot reload
 keeps the last valid config.
 

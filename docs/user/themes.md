@@ -123,8 +123,8 @@ your machine, the [troubleshooting page](troubleshooting.md#why-is-my-theme-not-
 walks through the common causes.
 
 > Theme and typography keys hot-reload from `paneflow.json`. The
-> `window_decorations` and `window_backdrop` keys are read once at
-> startup, so changing either still requires a restart.
+> `window_backdrop` key is read once at startup, so changing it requires
+> a restart.
 
 ## How do I create a custom theme?
 

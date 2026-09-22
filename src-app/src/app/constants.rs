@@ -15,9 +15,7 @@ use gpui::{Hsla, Pixels, WindowBackgroundAppearance, px};
 pub(crate) const SIDEBAR_WIDTH: f32 = 300.;
 /// Outer title-bar inset aligned with workspace rows and the sidebar footer.
 pub(crate) const TITLE_BAR_EDGE_INSET: Pixels = px(8.);
-/// Inter-button rhythm for compact title-bar controls.
-pub(crate) const TITLE_BAR_CONTROL_SPACING: Pixels = px(12.);
-/// Compact custom control size used by this fork's client-side decorations.
+/// Sidebar-toggle control size.
 pub(crate) const TITLE_BAR_CONTROL_SIZE: Pixels = px(20.);
 /// Minimum title-bar height preserving an 8px inset around compact controls.
 pub(crate) const TITLE_BAR_MIN_HEIGHT: Pixels = px(36.);
@@ -250,12 +248,8 @@ pub(crate) const MAX_CLOSED_PANES: usize = 5;
 /// back with its later panes' history intact rather than with none at all.
 pub(crate) const MAX_CLOSED_PANE_SCROLLBACK_BYTES: usize = 2 * 1024 * 1024;
 
-/// Width of the invisible border zone used for CSD edge/corner resize handles.
-pub(crate) const RESIZE_BORDER: Pixels = px(10.0);
-/// Radius of the visible application shell inside the transparent CSD shadow.
+/// Shared panel corner radius.
 pub(crate) const WINDOW_CORNER_RADIUS: Pixels = px(10.0);
-/// Hairline separating the themed shell from its native compositor shadow.
-pub(crate) const WINDOW_BORDER_SIZE: Pixels = px(1.0);
 
 #[cfg(test)]
 mod material_tests {

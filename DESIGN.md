@@ -153,8 +153,8 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 
 | Region | Role | Geometry | Source |
 | --- | --- | --- | --- |
-| Window | Client-side decorations by default; `window_decorations: "server"` opts out | Default 1200 by 800, minimum 800 by 500, corner radius 10, border 1, resize border 10, shadow black 0.4 blurred 5 when floating; a restored size is clamped to 3840 by 2160 when no display size is known | `window_state.rs:10-15`, `app/constants.rs:251-255`, `window_chrome/csd.rs:57,118-122`, `main.rs:3266-3274` |
-| Title bar | Drag region, sidebar toggle, caption controls. Nothing else. | Height `max(1.75 rem, 36 px)`; control size 20; edge inset 8; control spacing 12; 80 px of brand padding for the traffic lights, dropping to the 8 px edge inset in fullscreen | `app/constants.rs:17-23`, `window_chrome/title_bar.rs:75,154-160,190` |
+| Window | Native macOS decorations and traffic lights | Default 1200 by 800, minimum 800 by 500; no client inset, synthetic border, shadow, or resize handles. Restored size is clamped to 3840 by 2160 when no display size is known | `window_state.rs`, `window_chrome/shell.rs`, `main.rs` |
+| Title bar | Drag region, sidebar toggle, caption controls. Nothing else. | Height `max(1.75 rem, 36 px)`; control size 20; edge inset 8; 80 px of brand padding for the traffic lights, dropping to the 8 px edge inset in fullscreen | `app/constants.rs:17-23`, `window_chrome/title_bar.rs:75,154-160,190` |
 | Primary sidebar | Workspaces rail in Agents mode; the Workspaces and Changes rails side by side in Review; navigation in Settings | Width 300, **520 in Review** (220 + 300); slides in 280 ms | `app/constants.rs:15`, `app/review/mod.rs:22-23`, `app/review/mode.rs:90-92`, `main.rs:352`, `settings/chrome.rs:35` |
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 32, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
@@ -359,7 +359,7 @@ neutral `text` tints.
 
 | Element | Radius | Corner | Border |
 | --- | --- | --- | --- |
-| Window | 10 | round | 1 px `border` on free edges |
+| Window | Native macOS decorations and traffic lights | Default 1200 by 800, minimum 800 by 500; no client inset, synthetic border, shadow, or resize handles. Restored size is clamped to 3840 by 2160 when no display size is known | `window_state.rs`, `window_chrome/shell.rs`, `main.rs` |
 | Main panel | 10 | round, masked | none |
 | Pane card | 20 | squircle | 1 px `border`, or `vc_conflict` at 0.7 with attention |
 | Settings card, pane palette ground, diff dock card | 20 | squircle | none |
@@ -1363,7 +1363,7 @@ that way.
 | Material | `NSVisualEffectMaterial::Sidebar`, blending `BehindWindow`, state `FollowsWindowActiveState`, installed on the **whole NSWindow content view below GPUI's render view** — so every transparent shell region exposes it: the rail, the title bar, and the pane gutters |
 | Toggle | `macos_chrome_material` defaults **on** and hot-reloads. Toggling calls `setHidden:` rather than tearing the view down. Appearance follows theme lightness through `NSAppearanceNameVibrantLight` / `Dark`. If installation fails, the window falls back to `WindowBackgroundAppearance::Blurred` |
 | Fullscreen | The material is suppressed: `chrome_material_for_frame(enabled, is_fullscreen) = enabled && !is_fullscreen`. A source-probe test forbids reading the config getter bare |
-| Decorations | `window_decorations` is read once at startup. `client` (default) paints the CSD button group outside fullscreen; `server` opts out. An invalid value logs and falls back to `client` |
+| Decorations | macOS supplies native traffic lights and window resizing. Legacy decoration settings are accepted and ignored. |
 | Caption | The macOS traffic lights, given 80 px of brand padding that drops to the 8 px edge inset in fullscreen |
 
 Rules that follow:
@@ -1478,7 +1478,7 @@ behavior.
 
 - Custom user themes are not loaded. New palettes ship as presets in
   `theme/builtin.rs` with both variants, a `UiColors`, and a syntax palette.
-- `window_decorations` and `window_backdrop` are read once at startup.
+- `window_backdrop` is read once at startup.
 - `reduce_motion` reaches only four animations (4.8) and does not follow the
   macOS system setting.
 - The six accessibility gaps in 7.5, of which the missing focus ring is the
