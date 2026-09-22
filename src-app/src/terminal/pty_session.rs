@@ -310,15 +310,25 @@ impl TerminalSessionBackend {
         self.ghostty.release_selection(point);
     }
 
-    pub(crate) fn selection_text(&self) -> Option<String> {
+    pub(crate) fn selection_text(&self) -> Result<Option<String>, String> {
         self.ghostty.selection_text()
     }
 
+    /// Copy the selection and clear it.
+    ///
+    /// `Ok(None)` and an empty string are an empty selection: the highlight
+    /// goes away and `(true, copied)` is returned. Text over the engine's copy
+    /// cap is `Err`: nothing was copied, so the highlight stays and the pair
+    /// is `(false, None)` rather than an empty copy.
     pub(crate) fn finish_selection(&self) -> (bool, Option<String>) {
-        let copied = self.ghostty.selection_text();
-        let is_empty = copied.as_ref().is_none_or(String::is_empty);
-        self.ghostty.clear_selection();
-        (is_empty, copied)
+        match self.ghostty.selection_text() {
+            Ok(copied) => {
+                let is_empty = copied.as_ref().is_none_or(String::is_empty);
+                self.ghostty.clear_selection();
+                (is_empty, copied)
+            }
+            Err(_) => (false, None),
+        }
     }
 
     pub(crate) fn clear_selection(&self) {
@@ -2539,10 +2549,11 @@ impl ScrollbackReader {
 
     /// Search the scrollback for `pattern` (plain-text, case-insensitive) and
     /// return matching lines as `(grid_line, text)` pairs, deduped by line and
-    /// capped at `max_matches`. The bool is `true` when the cap (or the cell
-    /// budget) truncated an otherwise finished scan. Backs the
-    /// `surface.search` IPC method. The engine performs the search and the
-    /// matched-line extraction atomically on its runtime thread.
+    /// capped at `max_matches`. The bool is `true` when another match did not
+    /// fit the cap, or the cell budget truncated an otherwise finished scan.
+    /// An exact page is not truncated. Backs the `surface.search` IPC method.
+    /// Line text is the row captured while that line was scanned, not a later
+    /// re-read of the same line number.
     ///
     /// `Err` is a runtime that did not answer (mailbox full or closed, no
     /// reply within a second) or an engine that failed the scan. Issue #362:
@@ -3839,6 +3850,182 @@ mod tests {
                 .is_err(),
             "no answer must not read as an empty, capped scan"
         );
+    }
+
+    #[test]
+    fn search_scrollback_exact_cap_is_not_truncated() {
+        let state = TerminalState::new_display_only(5, 80);
+        state.write_output(b"first needle\nsecond needle\nthird needle\n");
+
+        let (exact, hit_cap) = state
+            .scrollback_reader()
+            .search_scrollback("needle", 3)
+            .expect("scan completed");
+        assert_eq!(exact.len(), 3);
+        assert!(
+            !hit_cap,
+            "a full page with nothing left over is not truncated"
+        );
+
+        let (limited, hit_cap) = state
+            .scrollback_reader()
+            .search_scrollback("needle", 2)
+            .expect("scan completed");
+        assert_eq!(limited.len(), 2);
+        assert!(hit_cap, "a match past the page is truncated");
+    }
+
+    /// Issue #653: line text is captured while the scan reads the row. Output
+    /// that lands after the scan must not replace those strings, even though
+    /// the same line numbers now hold different cells.
+    #[test]
+    fn search_scrollback_keeps_the_matched_line_text_when_the_grid_scrolls() {
+        let rows = 5;
+        let state = TerminalState::new_display_only(rows, 80);
+        state.write_output(b"keep needle\nsecond needle\n");
+
+        let writer = state.ghostty.clone();
+        state
+            .ghostty
+            .set_search_scrollback_hook_for_test(Some(std::sync::Arc::new(move || {
+                let mut bytes = Vec::with_capacity(rows * 6);
+                for _ in 0..rows {
+                    bytes.extend_from_slice(b"zzzz\r\n");
+                }
+                writer.write_output(&bytes);
+            })));
+
+        let (found, hit_cap) = state
+            .scrollback_reader()
+            .search_scrollback("needle", 8)
+            .expect("scan completed");
+        state.ghostty.set_search_scrollback_hook_for_test(None);
+
+        assert!(!hit_cap);
+        assert!(!found.is_empty(), "the scan must see the needle");
+        for (line, text) in &found {
+            assert!(
+                text.contains("needle"),
+                "captured text was replaced after the scan: {text:?}"
+            );
+            assert!(
+                !text.contains('z'),
+                "result re-read line {line} after the grid scrolled: {text:?}"
+            );
+            assert!(*line >= 0, "screen line so it can be read back, got {line}");
+            let current = state
+                .session_backend()
+                .line_text_at(Point::new(*line, 0))
+                .map(|line_text| line_text.text);
+            assert!(
+                current
+                    .as_deref()
+                    .is_some_and(|text| !text.contains("needle")),
+                "line {line} still holds the original row {current:?}; captured {text:?}"
+            );
+        }
+
+        let (again, _) = state
+            .scrollback_reader()
+            .search_scrollback("needle", 8)
+            .expect("second scan");
+        for (line, _) in &found {
+            assert!(
+                again
+                    .iter()
+                    .all(|(later_line, text)| *later_line != *line || !text.contains("needle")),
+                "line {line} still searches as the original row: {again:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_text_copies_a_normal_selection_and_finish_clears_it() {
+        let state = TerminalState::new_display_only(5, 80);
+        state.write_output(b"hello copy\n");
+        let backend = state.session_backend();
+        backend.select_all();
+
+        let text = backend
+            .selection_text()
+            .expect("runtime answered")
+            .expect("a normal selection has text");
+        assert!(text.contains("hello copy"), "{text}");
+        assert!(backend.selection_range().is_some());
+
+        let (is_empty, copied) = backend.finish_selection();
+        assert!(!is_empty);
+        let copied = copied.expect("a normal selection is copied");
+        assert!(copied.contains("hello copy"), "{copied}");
+        // `clear_selection` is queued ahead of this read.
+        assert!(
+            backend
+                .selection_text()
+                .expect("runtime answered")
+                .is_none()
+        );
+        assert!(backend.selection_range().is_none());
+    }
+
+    /// Issue #652: formatted text over the engine cap is an error, not an
+    /// empty selection, and neither the read nor finish-copy clears it.
+    #[test]
+    fn oversized_selection_is_kept_when_the_engine_refuses_the_copy() {
+        let rows = 401;
+        let cols = 1_000;
+        let state = TerminalState::new_display_only(rows, cols);
+        let mut bytes = Vec::with_capacity(rows * cols);
+        for _ in 0..rows {
+            bytes.extend(std::iter::repeat_n(b'a', cols - 1));
+            bytes.push(b'\n');
+        }
+        state.write_output(&bytes);
+
+        let backend = state.session_backend();
+        backend.select_all();
+        let error = selection_text_when_the_runtime_catches_up(&backend)
+            .expect_err("formatted selection over 400_000 bytes is refused");
+        assert!(
+            error.contains("selection text") && error.contains("400000"),
+            "expected the copy cap, got {error}"
+        );
+        assert!(
+            backend.selection_range().is_some(),
+            "refusing the copy must leave the selection installed"
+        );
+
+        let (is_empty, copied) = backend.finish_selection();
+        assert!(!is_empty, "a limit error is not an empty copy");
+        assert!(copied.is_none());
+        let error = selection_text_when_the_runtime_catches_up(&backend)
+            .expect_err("the selection must still be refused after finish");
+        assert!(
+            error.contains("selection text"),
+            "finish cleared or replaced the error: {error}"
+        );
+        assert!(
+            backend.selection_range().is_some(),
+            "finish_selection must not clear when the engine refuses the text"
+        );
+    }
+
+    /// `selection_text` gives the runtime one second. A large grid's snapshot
+    /// can still be in that queue, so an unanswered read is retried until the
+    /// engine actually answers. A real refusal is returned immediately.
+    fn selection_text_when_the_runtime_catches_up(
+        backend: &TerminalSessionBackend,
+    ) -> Result<Option<String>, String> {
+        let started = std::time::Instant::now();
+        loop {
+            match backend.selection_text() {
+                Err(error) if error.contains("did not answer") => {
+                    if started.elapsed() >= std::time::Duration::from_secs(45) {
+                        return Err(error);
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 
     // A display-only terminal (child_pid == 0, no real PTY) must resolve no CWD
