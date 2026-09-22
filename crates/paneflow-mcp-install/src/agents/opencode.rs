@@ -37,10 +37,18 @@ impl OpenCode {
     }
 
     fn path(&self) -> Result<&Path> {
+        // An existing file wins, and candidates list `opencode.jsonc` first so
+        // a config the user already has stays selected. A fresh install must
+        // create `opencode.json`: writing `opencode.jsonc` makes the shim
+        // refuse its status plugin (issue #699).
         self.config_paths
             .iter()
-            .find(|p| p.exists())
-            .or_else(|| self.config_paths.first())
+            .find(|path| path.exists())
+            .or_else(|| {
+                self.config_paths.iter().find(|path| {
+                    path.file_name().and_then(|name| name.to_str()) == Some("opencode.json")
+                })
+            })
             .map(PathBuf::as_path)
             .ok_or_else(|| anyhow!("cannot resolve opencode config path"))
     }
@@ -200,6 +208,28 @@ mod tests {
             w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
             StatusOutcome::NeedsRepair { .. }
         ));
+    }
+
+    /// Issue #699: with no config on disk, install creates `opencode.json`.
+    /// `opencode.jsonc` would make the shim skip its status plugin.
+    #[test]
+    fn fresh_opencode_install_creates_json_not_jsonc() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let jsonc = dir.path().join("opencode.jsonc");
+        let json = dir.path().join("opencode.json");
+        let writer = OpenCode {
+            config_paths: vec![jsonc.clone(), json.clone()],
+        };
+
+        assert_eq!(
+            writer.install(Path::new("/data/paneflow-mcp")).unwrap(),
+            InstallOutcome::Installed
+        );
+        assert!(json.is_file(), "fresh install must create opencode.json");
+        assert!(
+            !jsonc.exists(),
+            "fresh install must not create opencode.jsonc"
+        );
     }
 
     #[test]
