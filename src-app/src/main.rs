@@ -414,11 +414,12 @@ fn debug_durable_install_refusal(command: &str) -> Option<String> {
 /// username-bearing even with PII off.
 ///
 /// Issue #656: the home-folder segment includes spaces and runs to the next
-/// `/` or the end of the string. `/Users/Ada Lovelace/Projects/foo` becomes
-/// `/Users/<redacted>/Projects/foo`.
+/// `/`, line break, or the end of the string. `/Users/Ada Lovelace/Projects/foo`
+/// becomes `/Users/<redacted>/Projects/foo`. A newline is not part of the
+/// folder name, so the following line of crash text stays.
 fn redact_home_dir_paths(text: &str) -> String {
     static USERS_PATH: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"/Users/[^/]+").expect("static regex"));
+        std::sync::LazyLock::new(|| regex::Regex::new(r"/Users/[^/\r\n]+").expect("static regex"));
     USERS_PATH
         .replace_all(text, "/Users/<redacted>")
         .into_owned()
@@ -1110,6 +1111,21 @@ mod crash_reporting_tests {
         assert!(
             payload.contains("/Users/<redacted>/"),
             "sent event must keep the redaction marker: {payload}"
+        );
+
+        // A home folder ends at a line break. `[^/]+` would keep matching
+        // through the newline and delete the next line up to its first `/`.
+        let multiline = before_send(sentry::protocol::Event {
+            message: Some(
+                "open /Users/Ada Lovelace\r\nkept after crlf /Users/alice\nkept after lf"
+                    .to_string(),
+            ),
+            ..Default::default()
+        })
+        .expect("before_send must not drop a multiline event");
+        assert_eq!(
+            multiline.message.as_deref(),
+            Some("open /Users/<redacted>\r\nkept after crlf /Users/<redacted>\nkept after lf")
         );
     }
 
