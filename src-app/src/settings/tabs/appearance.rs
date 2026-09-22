@@ -298,48 +298,53 @@ impl PaneFlowApp {
         // Decide open/close from the render-time snapshot, not the live state:
         // the menu's `on_mouse_down_out` fires on this same press and may have
         // already cleared it, so a live toggle would re-open the menu.
-        let mut trigger = select_trigger("theme-preset-select", ui, is_open)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.theme_dropdown_open = !is_open;
-                    this.settings_focus.focus(window, cx);
-                    cx.notify();
-                }),
-            )
-            // Keyboard / assistive-tech activation (issue #361): the pointer
-            // opens on press above, so this arm takes only the
-            // `ClickEvent::Keyboard` GPUI synthesizes from Space / Enter on the
-            // focused trigger. Carrying a click listener is also what puts
-            // `accesskit::Action::Click` on the node for VoiceOver.
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if !matches!(event, ClickEvent::Keyboard(_)) {
-                    return;
-                }
+        let mut trigger = select_trigger(
+            "theme-preset-select",
+            ui,
+            is_open,
+            format!("Preset, {current_name}"),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
                 this.theme_dropdown_open = !is_open;
                 this.settings_focus.focus(window, cx);
                 cx.notify();
-            }))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .flex_1()
-                    .min_w_0()
-                    .child(theme_swatch(current.variant(is_light)))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_size(crate::ui_primitives::BODY)
-                            .text_color(ui.text)
-                            .truncate()
-                            .child(SharedString::from(current_name.to_string())),
-                    ),
-            )
-            .child(select_chevron(ui));
+            }),
+        )
+        // Keyboard / assistive-tech activation (issue #361): the pointer
+        // opens on press above, so this arm takes only the
+        // `ClickEvent::Keyboard` GPUI synthesizes from Space / Enter on the
+        // focused trigger. Carrying a click listener is also what puts
+        // `accesskit::Action::Click` on the node for VoiceOver.
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if !matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            this.theme_dropdown_open = !is_open;
+            this.settings_focus.focus(window, cx);
+            cx.notify();
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .flex_1()
+                .min_w_0()
+                .child(theme_swatch(current.variant(is_light)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(crate::ui_primitives::BODY)
+                        .text_color(ui.text)
+                        .truncate()
+                        .child(SharedString::from(current_name.to_string())),
+                ),
+        )
+        .child(select_chevron(ui));
 
         if is_open {
             let mut menu = select_listbox("theme-preset-list", ui).on_mouse_down_out(cx.listener(

@@ -268,12 +268,16 @@ pub fn setting_text(
 /// Filled secondary button (agents cancel-button style): `ui.subtle` bg,
 /// no border, whisper-soft text wash on hover. Used for "Reset to defaults"
 /// and similar inline actions inside section headers.
+///
+/// The element this returns is a `Role::Button` whose accessible name is
+/// `label` (issue #659). The role lives on that element, not on a child the
+/// skin paints underneath the label.
 pub fn secondary_button(
     id: &'static str,
     label: &'static str,
     ui: crate::theme::UiColors,
     on_click: impl Fn(&ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let hover_bg = lerp_color(ui.subtle, ui.text, 0.06);
 
     // Same silhouette as a menu row and a CLI pane card: `ROW_RADIUS` traced as
@@ -294,6 +298,8 @@ pub fn secondary_button(
         Some(ui.subtle),
         Some(hover_bg),
     )
+    .role(Role::Button)
+    .aria_label(label)
     .child(label)
     .on_click(on_click)
 }
@@ -312,7 +318,8 @@ pub fn destructive_color() -> Hsla {
 /// warning by itself.
 ///
 /// Returns the element unclicked so the caller attaches its own listener; a
-/// destructive action is never generic enough to bake in here.
+/// destructive action is never generic enough to bake in here. The element is
+/// a `Role::Button` whose accessible name is `label` (issue #659).
 pub fn destructive_button(id: &'static str, label: &'static str) -> Stateful<Div> {
     let resting = destructive_color();
     let hovered = Hsla {
@@ -334,6 +341,8 @@ pub fn destructive_button(id: &'static str, label: &'static str) -> Stateful<Div
         Some(resting),
         Some(hovered),
     )
+    .role(Role::Button)
+    .aria_label(label)
     .child(label)
 }
 
@@ -379,27 +388,36 @@ pub fn select_chevron(ui: crate::theme::UiColors) -> impl IntoElement {
 /// so a deferred menu can anchor to it; the caller adds the value cluster,
 /// [`select_chevron`], the open/close listeners, and (when open) the menu.
 /// `expanded` is the menu's open state, which the trigger reports as its
-/// `aria-expanded` (issue #361).
+/// `aria-expanded` (issue #361). `label` is the visible value, reported
+/// unchanged as the combobox accessible name (issue #659).
 pub fn select_trigger(
     id: impl Into<ElementId>,
     ui: crate::theme::UiColors,
     expanded: bool,
+    label: impl Into<SharedString>,
 ) -> AnimatedHover {
     // Same hover as `secondary_button`: a tint of `ui.text` over `ui.subtle`,
     // not a fixed lightness cut. The cut darkened in both themes, so a light
     // theme's trigger and its neighbouring Reset button reacted in opposite
     // directions; the lerp lifts on dark and deepens on light, one recipe for
     // every subtle-gray control on the settings pages.
-    select_trigger_with_hover(id, ui, lerp_color(ui.subtle, ui.text, 0.06), expanded)
+    select_trigger_with_hover(
+        id,
+        ui,
+        lerp_color(ui.subtle, ui.text, 0.06),
+        expanded,
+        label,
+    )
 }
 
 /// The accessibility contract of a Settings select lives here (issue #361).
 ///
-/// Beyond the `Role::ComboBox` the trigger always had: it reports the menu's
-/// open state as `aria-expanded`, and it is a focusable tab stop. Focusability
-/// is what makes GPUI synthesize `ClickEvent::Keyboard` from an unmodified
-/// Space / Enter KeyUp on the trigger (`paint_mouse_listeners` in `div.rs`) and
-/// what puts `accesskit::Action::Focus` on the node. The matching
+/// Beyond the `Role::ComboBox` the trigger always had: it reports `label`
+/// unchanged as its accessible name (issue #659), the menu's open state as
+/// `aria-expanded`, and it is a focusable tab stop. Focusability is what makes
+/// GPUI synthesize `ClickEvent::Keyboard` from an unmodified Space / Enter
+/// KeyUp on the trigger (`paint_mouse_listeners` in `div.rs`) and what puts
+/// `accesskit::Action::Focus` on the node. The matching
 /// `accesskit::Action::Click` - the one VoiceOver's "Click" sends - is only
 /// advertised when the element carries a click listener, so every caller
 /// chains an `.on_click()` open/close arm next to its `.on_mouse_down()` one;
@@ -412,10 +430,12 @@ pub fn select_trigger_with_hover(
     ui: crate::theme::UiColors,
     hover_bg: Hsla,
     expanded: bool,
+    label: impl Into<SharedString>,
 ) -> AnimatedHover {
     div()
         .id(id.into())
         .role(Role::ComboBox)
+        .aria_label(label)
         .aria_expanded(expanded)
         .tab_index(0)
         .relative()
@@ -832,23 +852,24 @@ mod tests {
         for (signature, needles) in [
             (
                 "pub fn select_trigger_with_hover(",
-                [
+                &[
                     ".role(Role::ComboBox)",
+                    ".aria_label(label)",
                     ".aria_expanded(expanded)",
                     ".tab_index(0)",
-                ],
+                ][..],
             ),
             (
                 "pub fn select_listbox(",
-                [".role(Role::ListBox)", "select_menu(id, ui)", "SelectMenu"],
+                &[".role(Role::ListBox)", "select_menu(id, ui)", "SelectMenu"][..],
             ),
             (
                 "pub fn select_option(",
-                [
+                &[
                     ".role(Role::ListBoxOption)",
                     ".aria_selected(selected)",
                     "select_item(id, selected, ui)",
-                ],
+                ][..],
             ),
         ] {
             let body = body_of(signature);
@@ -908,6 +929,65 @@ mod tests {
             violations.is_empty(),
             "settings selects must go through the accessible primitives:\n{}",
             violations.join("\n")
+        );
+    }
+
+    /// Issue #659: the filled settings buttons painted `label` and took clicks,
+    /// but the element `squircle_skin` returns had no role and no accessible
+    /// name. Both helpers now put `Role::Button` and that name on the element
+    /// the caller receives.
+    #[test]
+    fn filled_buttons_expose_button_name() {
+        let ui = crate::theme::ui_colors();
+        let secondary = secondary_button("a11y-secondary", "Reset to defaults", ui, |_, _, _| {});
+        assert_filled_button_a11y(&secondary, "Reset to defaults");
+
+        let destructive = destructive_button("a11y-destructive", "Reset");
+        assert_filled_button_a11y(&destructive, "Reset");
+    }
+
+    fn assert_filled_button_a11y(button: &impl gpui::Element, expected_label: &str) {
+        assert_eq!(
+            gpui::Element::a11y_role(button),
+            Some(gpui::accesskit::Role::Button),
+            "filled button did not expose Role::Button"
+        );
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        gpui::Element::write_a11y_info(button, &mut node);
+        assert_eq!(
+            node.label(),
+            Some(expected_label),
+            "filled button did not expose its accessible name"
+        );
+    }
+
+    /// Issue #659: a Settings combobox used to expose `Role::ComboBox` with no
+    /// accessible name. The visible value is an id-less text child, so the
+    /// name has to be the string the caller passes in, unchanged.
+    #[test]
+    fn settings_selects_expose_visible_labels() {
+        let ui = crate::theme::ui_colors();
+        let visible = "Berkeley Mono";
+
+        let trigger = select_trigger("a11y-select", ui, false, visible);
+        assert_combobox_label(&trigger, visible);
+
+        let hovered = select_trigger_with_hover("a11y-select-hover", ui, ui.subtle, true, visible);
+        assert_combobox_label(&hovered, visible);
+    }
+
+    fn assert_combobox_label(trigger: &impl gpui::Element, visible: &str) {
+        assert_eq!(
+            gpui::Element::a11y_role(trigger),
+            Some(gpui::accesskit::Role::ComboBox),
+            "select trigger did not stay a Role::ComboBox"
+        );
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        gpui::Element::write_a11y_info(trigger, &mut node);
+        assert_eq!(
+            node.label(),
+            Some(visible),
+            "select trigger did not expose the visible value as its accessible name"
         );
     }
 }
