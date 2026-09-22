@@ -115,8 +115,13 @@ jobs:
         with:
           filters: |
             rust:
-              - 'src-app/**/*.rs'
-              - 'crates/**/*.rs'
+              # Every file under the crates, not only `.rs`. Queries, fixtures,
+              # golden images, embedded assets, and include_str! inputs are
+              # compiled or read by cargo test (issue #700).
+              - 'src-app/**'
+              - 'crates/**'
+              - 'CLAUDE.md'
+              - 'docs/fork/STATE.md'
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
